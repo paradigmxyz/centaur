@@ -11,6 +11,64 @@ afterEach(() => {
 })
 
 describe('Slack event HTTP dedupe', () => {
+  it('creates Linear issues from configured feedback slash commands', async () => {
+    process.env.SLACK_SIGNING_SECRET = 'test-signing-secret'
+    process.env.LINEAR_API_KEY = 'lin-test-key'
+    process.env.SLACK_FEEDBACK_LINEAR_TEAM_ID = 'team-feedback'
+    process.env.SLACK_FEEDBACK_LINEAR_PROJECT_ID = 'project-feedback'
+
+    const originalFetch = globalThis.fetch
+    const fetchMock = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        variables: { input: { title: string; teamId: string; projectId: string } }
+      }
+      expect(body.variables.input).toMatchObject({
+        title: 'Button copy is confusing',
+        teamId: 'team-feedback',
+        projectId: 'project-feedback'
+      })
+      return new Response(
+        JSON.stringify({
+          data: {
+            issueCreate: {
+              issue: {
+                identifier: 'DSGN-123',
+                url: 'https://linear.app/paradigmxyz/issue/DSGN-123'
+              }
+            }
+          }
+        }),
+        { status: 200 }
+      )
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    try {
+      const { app } = await import('./index')
+      const body = new URLSearchParams({
+        command: '/feedback',
+        text: 'Button copy is confusing\nThe submit button should mention Linear.',
+        user_id: 'U123',
+        channel_id: 'C123',
+        channel_name: 'design-feedback'
+      }).toString()
+
+      const response = await app.request(
+        '/api/slack/commands',
+        signedFormRequest(body, process.env.SLACK_SIGNING_SECRET)
+      )
+
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({
+        response_type: 'ephemeral',
+        text: 'Created DSGN-123: https://linear.app/paradigmxyz/issue/DSGN-123'
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('acks duplicate Slack envelopes without scheduling duplicate processing', async () => {
     process.env.SLACK_SIGNING_SECRET = 'test-signing-secret'
     process.env.SLACK_EVENT_DEDUP_TTL_MS = '600000'
@@ -47,13 +105,13 @@ describe('Slack event HTTP dedupe', () => {
         '/api/webhooks/slack',
         signedJsonRequest(body, process.env.SLACK_SIGNING_SECRET),
         {},
-        executionCtx
+        executionCtx as any
       )
       const second = await app.request(
         '/api/webhooks/slack',
         signedJsonRequest(body, process.env.SLACK_SIGNING_SECRET),
         {},
-        executionCtx
+        executionCtx as any
       )
 
       expect(first.status).toBe(200)
@@ -68,6 +126,22 @@ describe('Slack event HTTP dedupe', () => {
     }
   })
 })
+
+function signedFormRequest(body: string, signingSecret: string): RequestInit {
+  const timestamp = Math.floor(Date.now() / 1000).toString()
+  const signature = `v0=${createHmac('sha256', signingSecret)
+    .update(`v0:${timestamp}:${body}`)
+    .digest('hex')}`
+  return {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      'x-slack-request-timestamp': timestamp,
+      'x-slack-signature': signature
+    },
+    body
+  }
+}
 
 function signedJsonRequest(body: string, signingSecret: string): RequestInit {
   const timestamp = Math.floor(Date.now() / 1000).toString()

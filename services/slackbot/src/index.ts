@@ -118,7 +118,7 @@ app.post(config.CENTAUR_SLACK_EVENTS_PATH, slackSignatureMiddleware, slackHandle
 app.post('/api/slack/events', slackSignatureMiddleware, slackHandler)
 app.post('/api/slack/actions', slackSignatureMiddleware, slackHandler)
 app.post('/api/slack/options', slackSignatureMiddleware, slackHandler)
-app.post('/api/slack/commands', slackSignatureMiddleware, slackHandler)
+app.post('/api/slack/commands', slackSignatureMiddleware, slackCommandHandler)
 app.post('/api/webhooks/slack', slackSignatureMiddleware, slackHandler)
 
 app.post('/api/slack/messages', apiKeyMiddleware, async c => {
@@ -436,6 +436,119 @@ function slackApiErrorResponse(c: Context, error: unknown) {
   )
 }
 
+type SlackCommandPayload = {
+  command?: string
+  text?: string
+  user_id?: string
+  user_name?: string
+  channel_id?: string
+  channel_name?: string
+  team_id?: string
+}
+
+async function slackCommandHandler(c: Context<{ Variables: Variables }>) {
+  const payload = parseSlackCommandBody(c.get('slackRawBody'))
+  if (!payload?.command) return c.json({ ok: false, error: 'invalid_slack_command' }, 400)
+  if (!config.SLACK_FEEDBACK_COMMANDS.includes(payload.command)) {
+    return c.json({ response_type: 'ephemeral', text: `Unsupported command: ${payload.command}` })
+  }
+  if (
+    config.SLACK_FEEDBACK_ALLOWED_CHANNELS.length &&
+    payload.channel_id &&
+    !config.SLACK_FEEDBACK_ALLOWED_CHANNELS.includes(payload.channel_id)
+  ) {
+    return c.json({
+      response_type: 'ephemeral',
+      text: 'This feedback command is not enabled in this channel.'
+    })
+  }
+  if (!config.LINEAR_API_KEY) {
+    return c.json({
+      response_type: 'ephemeral',
+      text: 'Linear feedback is not configured: missing LINEAR_API_KEY.'
+    })
+  }
+
+  const text = (payload.text ?? '').trim()
+  if (!text) {
+    return c.json({
+      response_type: 'ephemeral',
+      text: `Usage: ${payload.command} <feedback or bug report>`
+    })
+  }
+
+  try {
+    const issue = await createLinearFeedbackIssue(payload, text)
+    return c.json({
+      response_type: 'ephemeral',
+      text: `Created ${issue.identifier}: ${issue.url}`
+    })
+  } catch (error) {
+    logError('linear_feedback_issue_create_failed', error)
+    return c.json(
+      {
+        response_type: 'ephemeral',
+        text: 'Could not create the Linear issue. The error was logged for follow-up.'
+      },
+      200
+    )
+  }
+}
+
+async function createLinearFeedbackIssue(
+  payload: SlackCommandPayload,
+  text: string
+): Promise<{ identifier: string; url: string }> {
+  const title = firstLineTitle(text)
+  const description = [
+    text,
+    '',
+    `Slack channel: ${payload.channel_name ? `#${payload.channel_name}` : payload.channel_id}`,
+    `Submitted by: ${payload.user_id ? `<@${payload.user_id}>` : (payload.user_name ?? 'unknown')}`
+  ].join('\n')
+
+  const response = await fetch('https://api.linear.app/graphql', {
+    method: 'POST',
+    headers: {
+      Authorization: config.LINEAR_API_KEY ?? '',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      query: `
+        mutation IssueCreate($input: IssueCreateInput!) {
+          issueCreate(input: $input) {
+            success
+            issue { identifier url }
+          }
+        }
+      `,
+      variables: {
+        input: {
+          title,
+          description,
+          teamId: config.SLACK_FEEDBACK_LINEAR_TEAM_ID,
+          projectId: config.SLACK_FEEDBACK_LINEAR_PROJECT_ID
+        }
+      }
+    })
+  })
+
+  if (!response.ok) throw new Error(`Linear API returned ${response.status}`)
+  const body = (await response.json()) as {
+    errors?: { message?: string }[]
+    data?: { issueCreate?: { issue?: { identifier?: string; url?: string } } }
+  }
+  if (body.errors?.length) throw new Error(body.errors[0]?.message ?? 'Linear API error')
+  const issue = body.data?.issueCreate?.issue
+  if (!issue?.identifier || !issue.url) throw new Error('Linear issueCreate returned no issue')
+  return { identifier: issue.identifier, url: issue.url }
+}
+
+function firstLineTitle(text: string): string {
+  const line = text.split(/\r?\n/, 1)[0]?.trim() || 'Slack feedback'
+  return line.length <= 120 ? line : `${line.slice(0, 117)}...`
+}
+
 function runInBackground(c: Context, promise: Promise<void>): void {
   const guarded = promise.catch((error: unknown) => {
     logError('slack_event_processing_failed', error)
@@ -465,6 +578,14 @@ function parseSlackBody(rawBody: string, contentType: string | undefined): Slack
       return Object.fromEntries(form) as SlackEnvelope
     }
     return JSON.parse(rawBody) as SlackEnvelope
+  } catch {
+    return null
+  }
+}
+
+function parseSlackCommandBody(rawBody: string): SlackCommandPayload | null {
+  try {
+    return Object.fromEntries(new URLSearchParams(rawBody)) as SlackCommandPayload
   } catch {
     return null
   }

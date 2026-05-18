@@ -19,6 +19,27 @@ const EnvSchema = z.object({
     .int()
     .positive()
     .default(60 * 5),
+  LINEAR_API_KEY: z.string().optional(),
+  SLACK_FEEDBACK_COMMANDS: z
+    .string()
+    .default('/feedback,/linear-feedback')
+    .transform(value =>
+      value
+        .split(/[\s,]+/)
+        .map(part => part.trim())
+        .filter(Boolean)
+    ),
+  SLACK_FEEDBACK_LINEAR_TEAM_ID: z.string().default('caf113f0-703b-454e-87fd-5772dfea62a5'),
+  SLACK_FEEDBACK_LINEAR_PROJECT_ID: z.string().default('34e30cef-da96-4905-9814-1f8674e7f2ae'),
+  SLACK_FEEDBACK_ALLOWED_CHANNELS: z
+    .string()
+    .default('')
+    .transform(value =>
+      value
+        .split(/[\s,]+/)
+        .map(part => part.trim())
+        .filter(Boolean)
+    ),
   SLACKBOT_EXTERNAL_ORG_ALLOWLIST: z
     .string()
     .default('')
