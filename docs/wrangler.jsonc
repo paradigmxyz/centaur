@@ -4,7 +4,7 @@
   "compatibility_date": "2026-05-05",
   "routes": [
     {
-      "pattern": "centaur.run",
+      "pattern": "docs.centaur.run",
       "custom_domain": true
     }
   ],
