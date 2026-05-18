@@ -1,11 +1,19 @@
 import { defineConfig } from 'vocs'
+import { createElement } from 'react'
 
 import { sidebar } from './sidebar.js'
 
 const basePath = process.env.VOCS_BASE_PATH || undefined
+const siteUrl = 'https://centaur.run'
+
+function canonicalHref(path: string) {
+  if (path === '/') return `${siteUrl}/`
+  return `${siteUrl}${path.replace(/\/+$/, '')}/`
+}
 
 export default defineConfig({
   rootDir: '.',
+  baseUrl: siteUrl,
   title: 'Centaur',
   titleTemplate: '%s - Centaur',
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
@@ -15,6 +23,9 @@ export default defineConfig({
   editLink: {
     pattern: 'https://github.com/paradigmxyz/centaur/edit/main/docs/pages/:path',
     text: 'Edit this page',
+  },
+  head({ path }) {
+    return createElement('link', { rel: 'canonical', href: canonicalHref(path) })
   },
   llms: {
     generateMarkdown: true,

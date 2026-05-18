@@ -104,7 +104,7 @@ swaps placeholder names for real keys on outbound requests.
 
 Prompts, transcripts, sandbox files, and logs can contain secret names without
 containing the raw credential. The proxy injects the real value for allowlisted
-hosts and can redact leaked values from responses.
+hosts.
 
 ## Failure model
 

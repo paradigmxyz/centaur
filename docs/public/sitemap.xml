@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://centaur.run/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/what-is-centaur/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/quickstart/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/deploying-in-production/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/architecture/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/extend/overlay/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/extend/tools/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/extend/workflows/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/extend/skills/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/secrets/onepassword/</loc>
+  </url>
+  <url>
+    <loc>https://centaur.run/secrets/environment/</loc>
+  </url>
+</urlset>

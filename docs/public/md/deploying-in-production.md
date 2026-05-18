@@ -69,7 +69,6 @@ Minimum keys:
 | Secret | Required for | Notes |
 |--------|--------------|-------|
 | `DATABASE_URL` | API | Postgres connection string. |
-| `FIREWALL_CONTROL_TOKEN` | API and [iron-proxy](https://iron.sh) control path | Generate with `openssl rand -hex 32`. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://iron.sh) management API | Generate with `openssl rand -hex 32`. |
 | `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `SLACK_BOT_TOKEN` | Slackbot | Bot User OAuth Token from the Slack app. |

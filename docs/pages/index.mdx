@@ -10,7 +10,7 @@ content:
   width: "100%"
 ---
 
-import ThreadPanel from './components/ThreadPanel'
+import ThreadPanel from '../components/ThreadPanel'
 
 <main className="centaur-home">
   <section className="home-hero" aria-labelledby="home-title">

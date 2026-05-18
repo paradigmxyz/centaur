@@ -34,7 +34,6 @@ kubectl create secret generic centaur-infra-env \
   --from-literal=SLACK_BOT_TOKEN='xoxb-...' \
   --from-literal=SLACK_SIGNING_SECRET='...' \
   --from-literal=SANDBOX_SIGNING_KEY="$(openssl rand -hex 32)" \
-  --from-literal=FIREWALL_CONTROL_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=IRON_MANAGEMENT_API_KEY="$(openssl rand -hex 32)" \
   --from-literal=OPENAI_API_KEY='...' \
   --from-literal=AMP_API_KEY='...' \
