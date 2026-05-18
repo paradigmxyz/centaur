@@ -82,18 +82,26 @@ function sessionTitle(payload: any): string {
 }
 
 function extractText(payload: any): string {
-  return (
-    (
-      payload?.result_text ??
-      payload?.result ??
-      payload?.text ??
-      payload?.final_text ??
-      payload?.message ??
-      JSON.stringify(payload)
-    )
-      .toString()
-      .trim() || 'Done.'
+  const value = firstNonEmpty(
+    payload?.result_text,
+    payload?.result,
+    payload?.text,
+    payload?.final_text,
+    payload?.message
   )
+  if (value) return value
+
+  const executionId = String(payload?.execution_id ?? '').trim()
+  const suffix = executionId ? ` Execution: \`${executionId}\`.` : ''
+  return `Execution completed, but no final text was captured.${suffix}`
+}
+
+function firstNonEmpty(...values: unknown[]): string {
+  for (const value of values) {
+    const text = value === undefined || value === null ? '' : String(value).trim()
+    if (text) return text
+  }
+  return ''
 }
 
 function deliveryFooter(payload: any): string | undefined {

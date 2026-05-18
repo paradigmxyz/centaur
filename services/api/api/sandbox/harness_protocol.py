@@ -71,6 +71,9 @@ def extract_result(engine: str, event: dict) -> str | None:
             result = event.get("result")
             if isinstance(result, str) and result:
                 return result
+            text = event.get("text")
+            if isinstance(text, str) and text:
+                return text
             return _extract_error_message(event)
         if t == "assistant":
             msg = event.get("message", {})

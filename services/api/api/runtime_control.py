@@ -45,7 +45,7 @@ from api.vm_metrics import (
     record_usage_observation,
 )
 from api.sandbox.normalize import normalize_harness_event
-from api.sandbox.harness_protocol import is_turn_done
+from api.sandbox.harness_protocol import extract_result
 from api.sandbox.registry import get_backend
 from api.laminar_tracing import set_trace_context, start_span
 from api.trace_context import get_or_create_thread_trace_id
@@ -2387,13 +2387,27 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             record_oneshot(harness, status == "completed")
         if user_id:
             record_execution_by_user(user_id, harness, status)
-        nonlocal slackbot_text_sent, slackbot_done
+        nonlocal slackbot_session_id, slackbot_text_sent, slackbot_done
         if slackbot_session_id and not slackbot_done:
-            if result_text.strip() and not slackbot_text_sent:
-                await slackbot_client.session_text(slackbot_session_id, result_text)
-                slackbot_text_sent = True
-            await slackbot_client.session_done(slackbot_session_id, harness_thread_id or None)
-            slackbot_done = True
+            try:
+                if result_text.strip() and not slackbot_text_sent:
+                    await slackbot_client.session_text(slackbot_session_id, result_text)
+                    slackbot_text_sent = True
+                await slackbot_client.session_done(slackbot_session_id, harness_thread_id or None)
+                slackbot_done = True
+            except Exception:
+                log.warning(
+                    "slackbot_live_delivery_finalize_failed",
+                    execution_id=execution_id,
+                    thread_key=thread_key,
+                    exc_info=True,
+                )
+                await _mark_slackbot_live_delivery_failed(
+                    pool,
+                    execution_id,
+                    "finalize_failed",
+                )
+                slackbot_session_id = ""
         await _mark_execution_terminal(
             pool,
             execution_id=execution_id,
@@ -2431,6 +2445,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     await _touch_execution_progress(pool, execution_id)
 
     turn_done_event: dict[str, Any] | None = None
+    latest_terminal_result_text = ""
     pending_event: asyncio.Task | None = None
     stream = _stream_stdout(
         session,
@@ -2512,6 +2527,12 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             if payload.get("session_id"):
                 harness_thread_id = str(payload.get("session_id") or "")
             canonical_events = normalize_harness_event(engine, payload)
+            for canonical_event in canonical_events:
+                if canonical_event.get("type") != "result":
+                    continue
+                extracted = extract_result(engine, canonical_event)
+                if extracted:
+                    latest_terminal_result_text = extracted
             if slackbot_session_id:
                 slack_events = canonical_events or [payload]
                 for slack_event in slack_events:
@@ -2652,7 +2673,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 )
                 return
 
-            if payload.get("type") == "turn.done" or is_turn_done(engine, payload):
+            if payload.get("type") == "turn.done":
                 turn_done_event = payload
                 break
     except Exception as exc:
@@ -2759,7 +2780,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         )
         return
 
-    result_text = str(turn_done_event.get("result") or "")
+    result_text = extract_result(engine, turn_done_event) or latest_terminal_result_text
     repo_context = _extract_repo_context(turn_done_event)
     if repo_context:
         await _merge_execution_repo_context(pool, execution_id, repo_context)

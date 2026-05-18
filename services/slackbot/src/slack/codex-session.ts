@@ -500,7 +500,7 @@ function elementToMarkdown(element: StreamRichTextElement): string {
 
 function titleFor(tool: any): string {
   if (tool.name === 'Bash') {
-    const command = stringInput(tool.input, 'cmd')
+    const command = bashCommand(tool.input)
     return command ? `Run command: ${oneLine(command, 220)}` : 'Run command'
   }
   if (tool.name === 'create_file') return 'Create file'
@@ -509,7 +509,7 @@ function titleFor(tool: any): string {
 }
 
 function detailElementsForTool(tool: any): StreamRichTextElement[] {
-  if (tool.name === 'Bash') return [pre(stringInput(tool.input, 'cmd'), 'bash')]
+  if (tool.name === 'Bash') return [pre(bashCommand(tool.input), 'bash')]
   if (tool.name === 'create_file') {
     const path = stringInput(tool.input, 'path', 'file')
     return [
@@ -574,6 +574,10 @@ function stripFence(value: string): string {
     .trim()
     .replace(/^```[a-zA-Z0-9_-]*\n?/, '')
     .replace(/\n?```$/, '')
+}
+
+function bashCommand(input: any): string {
+  return stringInput(input, 'command', stringInput(input, 'cmd'))
 }
 
 function stringInput(input: any, key: string, fallback = ''): string {

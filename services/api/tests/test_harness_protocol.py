@@ -103,6 +103,11 @@ class TestExtractResult:
     def test_amp_result_event(self):
         assert extract_result("amp", {"type": "result", "result": "hello"}) == "hello"
 
+    def test_claude_code_result_event_with_text_field(self):
+        event = {"type": "result", "text": "final synthesis"}
+
+        assert extract_result("claude-code", event) == "final synthesis"
+
     def test_amp_error_result_uses_error_message(self):
         event = {
             "type": "result",

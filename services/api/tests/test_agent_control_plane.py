@@ -1606,6 +1606,14 @@ async def test_worker_records_projected_observations_and_execution_summary(db_po
                 }
             )
         }
+        # Claude Code/amp canonical terminal result events may arrive before
+        # the synthesized turn.done. The durable worker must not finalize until
+        # turn.done, or result_text can be lost.
+        yield {
+            "data": json.dumps(
+                {"type": "result", "text": "Here is the synthesis."}
+            )
+        }
         yield {
             "data": json.dumps(
                 {"type": "turn.done", "result": "Here is the synthesis."}
@@ -1641,8 +1649,15 @@ async def test_worker_records_projected_observations_and_execution_summary(db_po
     assert "assistant_tool_use_observed" in event_kinds
     assert "tool_result_observed" in event_kinds
     assert "assistant_text_observed" in event_kinds
+    assert "result_observed" in event_kinds
     assert event_kinds.count("usage_observed") == 2
     assert "execution_summary" in event_kinds
+
+    execution_row = await db_pool.fetchrow(
+        "SELECT result_text FROM agent_execution_requests WHERE execution_id = $1",
+        execution_id,
+    )
+    assert execution_row["result_text"] == "Here is the synthesis."
 
     summary_row = await db_pool.fetchrow(
         "SELECT event_json FROM agent_execution_events WHERE execution_id = $1 AND event_kind = 'execution_summary'",
