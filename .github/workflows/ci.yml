@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   python-runtime:
-    name: Python runtime checks
+    name: API workflow and control-plane tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -54,7 +54,7 @@ jobs:
             tests/test_agent_control_plane.py::test_worker_maps_amp_user_cancelled_error_to_cancelled
 
   slackbot-targeted-tests:
-    name: Slackbot targeted tests
+    name: Slackbot interface and delivery tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
