@@ -20,6 +20,8 @@ concurrency:
 permissions:
   contents: read
   deployments: write
+  issues: write
+  pull-requests: write
 
 jobs:
   build-and-deploy:
@@ -88,3 +90,13 @@ jobs:
             echo
             echo "$DEPLOYMENT_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preview URL
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: deploy-${{ matrix.worker.name }}
+          message: |
+            | Worker | Preview |
+            |--------|---------|
+            | ${{ matrix.worker.name }} | ${{ steps.preview.outputs.deployment-url }} |

@@ -2,6 +2,8 @@ import { defineConfig } from 'vocs'
 
 import { sidebar } from './sidebar.js'
 
+const basePath = process.env.VOCS_BASE_PATH || undefined
+
 export default defineConfig({
   rootDir: '.',
   title: 'Centaur',
@@ -9,6 +11,7 @@ export default defineConfig({
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
   iconUrl: '/centaur.png',
   logoUrl: '/centaur.png',
+  ...(basePath ? { basePath } : {}),
   editLink: {
     pattern: 'https://github.com/paradigmxyz/centaur/edit/main/docs/pages/:path',
     text: 'Edit this page',
