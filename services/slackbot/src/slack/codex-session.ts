@@ -17,10 +17,12 @@ type CodexSessionState = {
   planText: string
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
+  activityLineByTaskId: Map<string, string>
   done: boolean
 }
 
 const states = new Map<string, CodexSessionState>()
+const ACTIVITY_TASK_ID = 'codex-activity'
 
 export class CodexSessionRenderer {
   private readonly renderer: AgentSessionRenderer
@@ -36,13 +38,13 @@ export class CodexSessionRenderer {
 
     const structuredPlan = structuredPlanUpdate(event)
     if (structuredPlan) {
-      await this.publishStructuredPlan(agentSessionId, structuredPlan)
+      await this.publishStructuredPlan(agentSessionId, state, structuredPlan)
     }
 
     const planText = planTextUpdate(event)
     if (planText) {
       state.planText = event?.type === 'item.plan.delta' ? state.planText + planText : planText
-      await this.publishPlanText(agentSessionId, state.planText)
+      await this.publishPlanText(agentSessionId, state, state.planText)
     }
 
     const command = commandExecution(event)
@@ -54,11 +56,7 @@ export class CodexSessionRenderer {
       const task = commandTask(command, event?.type, existing, state.commandOutputById.get(id))
       const merged = mergeTask(existing, task)
       state.taskByUseId.set(merged.id, merged)
-      await this.publishTask(agentSessionId, {
-        ...merged,
-        details: task.details,
-        output: task.output
-      })
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     const fileChange = fileChangeEvent(event)
@@ -67,7 +65,7 @@ export class CodexSessionRenderer {
       const task = fileChangeTask(fileChange, event?.type, existing)
       const merged = mergeTask(existing, task)
       state.taskByUseId.set(merged.id, merged)
-      await this.publishTask(agentSessionId, merged)
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     const outputDelta = commandOutputDelta(event)
@@ -87,7 +85,7 @@ export class CodexSessionRenderer {
         output: commandOutputElements(output)
       }
       state.taskByUseId.set(outputDelta.id, updated)
-      await this.publishTask(agentSessionId, { ...updated, details: [], output: updated.output })
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     for (const tool of toolUses(event)) {
@@ -99,7 +97,7 @@ export class CodexSessionRenderer {
         output: []
       }
       state.taskByUseId.set(String(tool.id), task)
-      await this.publishTask(agentSessionId, task)
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     for (const result of toolResults(event)) {
@@ -114,7 +112,7 @@ export class CodexSessionRenderer {
       state.taskByUseId.set(toolUseId || task.id, task)
       task.status = result.is_error ? 'error' : 'complete'
       task.output = outputElementsForResult(result)
-      await this.publishTask(agentSessionId, { ...task, details: [], output: task.output })
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     const assistantMessage = assistantText(event)
@@ -135,10 +133,11 @@ export class CodexSessionRenderer {
         details: [section([text(reasoningMessage)])],
         output: []
       }
-      await this.publishTask(agentSessionId, task)
+      state.taskByUseId.set(task.id, task)
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
-    if (event?.type === 'result' || event?.type === 'turn.done') {
+    if (isTerminalTurnEvent(event)) {
       if (typeof event.result === 'string' && !state.messageText.trim()) {
         const resultText = event.result.trim()
         if (resultText) {
@@ -155,6 +154,9 @@ export class CodexSessionRenderer {
   async done(agentSessionId: string): Promise<void> {
     const state = getState(agentSessionId)
     if (state.done) return
+    state.done = true
+    completeOpenTasks(state)
+    await this.publishActivitySummary(agentSessionId, state, { final: true })
     await this.renderer.done(
       agentSessionId,
       state.threadId ? codexFooter(state.threadId) : undefined
@@ -163,37 +165,46 @@ export class CodexSessionRenderer {
     states.delete(agentSessionId)
   }
 
-  private async publishTask(agentSessionId: string, task: HarnessTask): Promise<void> {
+  private async publishActivitySummary(
+    agentSessionId: string,
+    state: CodexSessionState,
+    opts: { final?: boolean } = {}
+  ): Promise<void> {
+    const tasks = Array.from(state.taskByUseId.values())
+    if (!tasks.length) return
+    const status = aggregateStatus(tasks)
+    const output = opts.final ? '' : changedActivityOutput(state, tasks)
     await this.renderer.step(agentSessionId, {
-      id: task.id,
-      title: task.title,
-      status: task.status,
-      details: elementsToMarkdown(task.details),
-      output: elementsToMarkdown(task.output)
+      id: ACTIVITY_TASK_ID,
+      title: activityTitle(tasks),
+      status,
+      details: undefined,
+      output: opts.final ? '' : output || undefined
     })
   }
 
   private async publishStructuredPlan(
     agentSessionId: string,
+    state: CodexSessionState,
     plan: Array<{ step: string; status?: string }>
   ): Promise<void> {
     for (const [index, item] of plan.entries()) {
-      await publishPlanTask(
-        this.renderer,
-        agentSessionId,
-        index,
-        String(item.step ?? ''),
-        planStatus(item.status)
-      )
+      setPlanTask(state, index, String(item.step ?? ''), planStatus(item.status))
     }
+    await this.publishActivitySummary(agentSessionId, state)
   }
 
-  private async publishPlanText(agentSessionId: string, value: string): Promise<void> {
+  private async publishPlanText(
+    agentSessionId: string,
+    state: CodexSessionState,
+    value: string
+  ): Promise<void> {
     const steps = parsePlanText(value)
     if (!steps.length) return
     for (const [index, item] of steps.entries()) {
-      await publishPlanTask(this.renderer, agentSessionId, index, item.step, item.status)
+      setPlanTask(state, index, item.step, item.status)
     }
+    await this.publishActivitySummary(agentSessionId, state)
   }
 }
 
@@ -211,6 +222,7 @@ function getState(agentSessionId: string): CodexSessionState {
       planText: '',
       taskByUseId: new Map(),
       commandOutputById: new Map(),
+      activityLineByTaskId: new Map(),
       done: false
     }
     states.set(agentSessionId, state)
@@ -253,6 +265,10 @@ function messageDelta(current: string, incoming: string): string {
 function reasoningText(event: any): string {
   if (event?.type !== 'reasoning') return ''
   return String(event.text ?? event.thinking ?? '')
+}
+
+function isTerminalTurnEvent(event: any): boolean {
+  return event?.type === 'result' || event?.type === 'turn.done' || event?.type === 'turn.completed'
 }
 
 function toolUses(event: any): any[] {
@@ -337,20 +353,72 @@ function stripPlanMarker(value: string): string {
     .trim()
 }
 
-async function publishPlanTask(
-  renderer: AgentSessionRenderer,
-  agentSessionId: string,
+function setPlanTask(
+  state: CodexSessionState,
   index: number,
   step: string,
   status: HarnessTask['status']
-): Promise<void> {
+): void {
   const title = oneLine(stripPlanMarker(step), 256)
   if (!title) return
-  await renderer.step(agentSessionId, {
+  state.taskByUseId.set(`plan-${index + 1}`, {
     id: `plan-${index + 1}`,
     title,
-    status
+    status,
+    details: [],
+    output: []
   })
+}
+
+function aggregateStatus(tasks: HarnessTask[]): HarnessTask['status'] {
+  if (tasks.some(task => task.status === 'error')) return 'error'
+  if (tasks.some(task => task.status === 'in_progress')) return 'in_progress'
+  if (tasks.some(task => task.status === 'pending')) return 'pending'
+  return 'complete'
+}
+
+function completeOpenTasks(state: CodexSessionState): void {
+  for (const [id, task] of state.taskByUseId) {
+    if (task.status !== 'in_progress' && task.status !== 'pending') continue
+    state.taskByUseId.set(id, { ...task, status: 'complete' })
+  }
+}
+
+function activityTitle(tasks: HarnessTask[]): string {
+  const count = tasks.length
+  const running = tasks.filter(task => task.status === 'in_progress').length
+  if (running) return `Execution timeline (${running}/${count} running)`
+  return count === 1 ? 'Execution timeline' : `Execution timeline (${count} steps)`
+}
+
+function changedActivityOutput(state: CodexSessionState, tasks: HarnessTask[]): string {
+  const changedLines: string[] = []
+  for (const task of tasks) {
+    const line = taskSummaryLine(task)
+    if (!line || state.activityLineByTaskId.get(task.id) === line) continue
+    state.activityLineByTaskId.set(task.id, line)
+    changedLines.push(line)
+  }
+  return changedLines.length ? fencedActivityLines(changedLines) : ''
+}
+
+function fencedActivityLines(lines: string): string
+function fencedActivityLines(lines: string[]): string
+function fencedActivityLines(lines: string | string[]): string {
+  const body = Array.isArray(lines) ? lines.join('\n') : lines
+  return `\`\`\`text\n${body}\n\`\`\``
+}
+
+function taskSummaryLine(task: HarnessTask): string {
+  const marker =
+    task.status === 'complete'
+      ? '[done]'
+      : task.status === 'error'
+        ? '[error]'
+        : task.status === 'pending'
+          ? '[todo]'
+          : '[run]'
+  return `${marker} ${task.title}`
 }
 
 function commandOutputDelta(event: any): { id: string; delta: string } | null {

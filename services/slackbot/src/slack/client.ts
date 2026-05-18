@@ -78,7 +78,7 @@ export class SlackEdgeClient {
     chunks?: AnyChunk[]
     recipientTeamId?: string
     recipientUserId?: string
-    taskDisplayMode?: 'plan' | 'timeline'
+    taskDisplayMode?: 'plan' | 'timeline' | 'dense'
   }): Promise<ChatStartStreamResponse> {
     const response = await this.client.chat.startStream({
       channel: opts.channel,

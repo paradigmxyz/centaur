@@ -127,19 +127,16 @@ export class AgentSessionRenderer {
     state.footer = footer
     let closed = false
 
-    try {
-      for (const segment of state.segments) {
-        balancePendingMarkdown(segment)
-        await this.flushText(state, segment, { force: true })
-        const finalTaskUpdates = finalizeOpenTasks(segment)
-        for (const task of finalTaskUpdates) await this.flushTask(state, segment, task)
-        await this.closeTextStream(state, segment)
-      }
-      closed = true
-    } finally {
-      await this.setStatus(sessionId, '')
-      if (closed) sessions.delete(sessionId)
+    for (const segment of state.segments) {
+      balancePendingMarkdown(segment)
+      await this.flushText(state, segment, { force: true })
+      const finalTaskUpdates = finalizeOpenTasks(segment)
+      for (const task of finalTaskUpdates) await this.flushTask(state, segment, task)
+      await this.closeTextStream(state, segment, finalTaskSnapshot(segment))
     }
+
+    await this.setStatus(sessionId, '')
+    sessions.delete(sessionId)
   }
 
   private async setStatus(sessionId: string, status: string): Promise<void> {
@@ -153,12 +150,16 @@ export class AgentSessionRenderer {
     if (!response.ok) throw new Error(response.error ?? 'assistant.threads.setStatus failed')
   }
 
-  private async closeTextStream(state: AgentSessionState, segment: Segment): Promise<void> {
+  private async closeTextStream(
+    state: AgentSessionState,
+    segment: Segment,
+    finalTaskUpdates: StreamTask[] = []
+  ): Promise<void> {
     raiseStreamError(segment)
     if (segment.closed) return
     if (!segment.streamTs && !segment.textParts.length && !segment.tasks.size) return
     const footer = state.footer?.trim()
-    const chunks: AnyChunk[] = []
+    const chunks: AnyChunk[] = finalTaskUpdates.map(taskUpdateChunk)
     await this.ensureStream(state, segment, chunks)
     if (!segment.streamTs) return
     const response = await this.client.chat.stopStream({
@@ -281,7 +282,7 @@ export class AgentSessionRenderer {
       thread_ts: state.parentTs,
       recipient_team_id: state.recipientTeamId,
       recipient_user_id: state.recipientUserId,
-      task_display_mode: 'plan',
+      task_display_mode: 'dense',
       chunks: initialChunks.length ? initialChunks : [markdownChunk(' ')]
     })
     if (!response.ok || !response.ts) throw new Error(response.error ?? 'chat.startStream failed')
@@ -321,6 +322,10 @@ function finalizeOpenTasks(segment: Segment): StreamTask[] {
     updates.push(update)
   }
   return updates
+}
+
+function finalTaskSnapshot(segment: Segment): StreamTask[] {
+  return Array.from(segment.tasks.values())
 }
 
 function currentSegment(state: AgentSessionState): Segment {

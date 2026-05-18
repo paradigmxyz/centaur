@@ -49,7 +49,7 @@ describe('AgentSessionRenderer', () => {
     await renderer.done(sessionId)
 
     const start = calls.find(call => call.method === 'chat.startStream')
-    expect(start?.params.task_display_mode).toBe('plan')
+    expect(start?.params.task_display_mode).toBe('dense')
     expect(start?.params.chunks).toEqual([
       { type: 'plan_update', title: 'Centaur execution' },
       {
@@ -134,7 +134,7 @@ describe('AgentSessionRenderer', () => {
     })
 
     const start = calls.find(call => call.method === 'chat.startStream')
-    expect(start?.params.task_display_mode).toBe('plan')
+    expect(start?.params.task_display_mode).toBe('dense')
     expect(start?.params.chunks?.[0]).toEqual({
       type: 'plan_update',
       title: 'Centaur execution'
