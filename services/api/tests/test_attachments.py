@@ -432,6 +432,15 @@ async def test_download_attachment_enforces_sandbox_thread_scope():
     resp = await download_attachment(_request(None), "att-x")
     assert resp.status_code == 200
 
+    # Explicit thread_key must match the attachment's thread, regardless of
+    # token type (used by privileged callers acting for an agent).
+    with pytest.raises(HTTPException) as excinfo:
+        await download_attachment(_request(None), "att-x", thread_key="test:other-thread")
+    assert excinfo.value.status_code == 403
+
+    resp = await download_attachment(_request(None), "att-x", thread_key="test:owner-thread")
+    assert resp.status_code == 200
+
 
 # ── Integration: upload endpoint roundtrip ─────────────────────────────────
 

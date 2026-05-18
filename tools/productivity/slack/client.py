@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -1595,13 +1595,37 @@ class SlackClient:
             preview["file_type"] = "video"
         return preview
 
+    @staticmethod
+    def _require_thread_key() -> str:
+        """Return the thread_key the tool is running in, or raise.
+
+        Attachment reads and writes are scoped to this so an agent can only
+        touch its own conversation's files.
+        """
+        try:
+            thread_key = get_tool_context().thread_key
+        except LookupError:
+            thread_key = None
+        if not thread_key:
+            raise RuntimeError(
+                "this operation must run inside a Slack thread: no thread_key "
+                "in the tool context to scope the attachment to."
+            )
+        return thread_key
+
     def _download_attachment_bytes(
         self,
         *,
         attachment_id: str | None = None,
         attachment_url: str | None = None,
     ) -> bytes:
-        """Fetch artifact bytes from Centaur's existing attachment API."""
+        """Fetch artifact bytes from Centaur's attachment API.
+
+        The fetch is constrained to the tool's own thread: the request carries
+        the caller's thread_key and the API rejects an attachment that belongs
+        to a different thread, so an agent cannot read another conversation's
+        files by guessing or replaying an attachment id.
+        """
         path = attachment_url
         if attachment_id:
             path = f"/agent/attachments/{attachment_id}/download"
@@ -1618,13 +1642,24 @@ class SlackClient:
             if not path.startswith("/agent/attachments/"):
                 raise ValueError("attachment_url must be a Centaur attachment download path")
             url = urljoin(f"{base_url}/", path.lstrip("/"))
+
+        # Scope the read to this tool's thread.
+        thread_key = self._require_thread_key()
+        sep = "&" if urlparse(url).query else "?"
+        url = f"{url}{sep}thread_key={quote(thread_key, safe='')}"
+
         headers: dict[str, str] = {}
         api_key = secret("CENTAUR_API_KEY", "").strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read()
+            body = response.read(self._MAX_DOWNLOAD_BYTES + 1)
+        if len(body) > self._MAX_DOWNLOAD_BYTES:
+            raise ValueError(
+                f"Attachment exceeds the {self._MAX_DOWNLOAD_BYTES}-byte limit"
+            )
+        return body
 
     def upload_file(
         self,
@@ -1878,15 +1913,7 @@ class SlackClient:
         The attachment is scoped to the thread the tool is running in, read
         from the tool context.
         """
-        try:
-            thread_key = get_tool_context().thread_key
-        except LookupError:
-            thread_key = None
-        if not thread_key:
-            raise RuntimeError(
-                "download_file must run inside a Slack thread: no thread_key in "
-                "the tool context to scope the attachment to."
-            )
+        thread_key = self._require_thread_key()
 
         base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
         payload = json.dumps(

@@ -547,6 +547,46 @@ def test_download_file_requires_thread_context(monkeypatch: pytest.MonkeyPatch) 
         client.download_file("https://files.slack.com/files-pri/T1-F1/report.pdf")
 
 
+def test_download_attachment_bytes_scopes_request_to_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attachment fetch carries the tool's thread_key so the API can reject
+    a cross-thread read."""
+    import urllib.request
+
+    client, _ = _make_client()
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api:8000")
+    captured: dict = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        captured["url"] = req.full_url
+        return _FakeHTTPResponse(b"file-bytes", "application/octet-stream")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    token = set_tool_context(ToolContext(name="slack", thread_key="slack:C1:1.2"))
+    try:
+        body = client._download_attachment_bytes(attachment_id="att-xyz")
+    finally:
+        reset_tool_context(token)
+
+    assert body == b"file-bytes"
+    assert captured["url"] == (
+        "http://api:8000/agent/attachments/att-xyz/download"
+        "?thread_key=slack%3AC1%3A1.2"
+    )
+
+
+def test_download_attachment_bytes_requires_thread_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _make_client()
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api:8000")
+
+    with pytest.raises(RuntimeError, match="thread"):
+        client._download_attachment_bytes(attachment_id="att-xyz")
+
+
 def test_native_search_uses_dedicated_search_client() -> None:
     client, fake_bot_client = _make_client()
     fake_search_client = _FakeWebClient()
