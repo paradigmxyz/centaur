@@ -431,6 +431,62 @@ class TestResolveHarnessProfile:
             "centaur-overlay",
         )
 
+    def test_engine_resolution_precedence_matrix(self, monkeypatch):
+        """Exhaustive precedence matrix for the engine-resolution model.
+
+        Both `harness` and `engine` are functionally one concept (the
+        LLM-wrapping CLI binary). The resolver collapses them with this
+        precedence (highest wins):
+
+            1. engine_override
+            2. harness (when DIFFERENT from persona's declared engine)
+            3. persona.engine
+            4. system default ("codex")
+
+        Regression-locked: the previous resolver hardcoded engine="codex"
+        for harness=="amp" regardless of persona, silently dropping the
+        invest persona's declared engine="amp" — that exact failure mode
+        is asserted below.
+        """
+        import sys
+        from types import ModuleType, SimpleNamespace
+
+        from api.agent import _resolve_harness_profile as resolve
+
+        personas = {
+            "invest": SimpleNamespace(name="invest", engine="amp", default_repo=None),
+            "eng": SimpleNamespace(name="eng", engine="codex", default_repo=None),
+        }
+        app_module = ModuleType("api.app")
+        app_module.get_tool_manager = lambda: SimpleNamespace(
+            get_persona=lambda name: personas.get(name)
+        )
+        monkeypatch.setitem(sys.modules, "api.app", app_module)
+
+        # Rule 1: engine_override always wins.
+        assert resolve("amp", persona="invest", engine_override="codex")[0] == "codex"
+        assert resolve(None, persona="invest", engine_override="claude-code")[0] == "claude-code"
+        assert resolve("codex", persona=None, engine_override="amp")[0] == "amp"
+
+        # Rule 2: explicit harness arg DIFFERENT from persona's engine wins
+        # (this is how --invest --claude-code routes invest to a non-amp engine).
+        assert resolve("claude-code", persona="invest")[0] == "claude-code"
+        assert resolve("amp", persona="eng")[0] == "amp"
+
+        # Rule 3: harness arg matching persona.engine (or no harness arg) →
+        # persona's declared engine. This is the regression path: the workflow
+        # forwards `effective_harness = persona.engine`, which used to silently
+        # become "codex" for any persona whose engine == "amp".
+        assert resolve("amp", persona="invest")[0] == "amp"
+        assert resolve(None, persona="invest")[0] == "amp"
+        assert resolve("codex", persona="eng")[0] == "codex"
+        assert resolve(None, persona="eng")[0] == "codex"
+
+        # Rule 4: no override, no persona → harness if given, else system default.
+        assert resolve("amp", persona=None)[0] == "amp"
+        assert resolve("claude-code", persona=None)[0] == "claude-code"
+        assert resolve(None, persona=None)[0] == "codex"
+
     def test_unknown_harness_or_persona_is_rejected(self, monkeypatch):
         import sys
         from types import ModuleType, SimpleNamespace

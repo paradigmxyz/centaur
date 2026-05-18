@@ -30,7 +30,17 @@ request() {
   local http_method="$1"
   local url="$2"
   local data="${3:-}"
-  local timeout_s="${CALL_TIMEOUT_SECONDS:-30}"
+  # Watchdog ceiling for the curl -> API hop, NOT a quality budget. Tool
+  # plugins can legitimately run for many minutes (deep research crawls,
+  # recursive people pulls, internal-priors aggregation, paradigm-pulse, etc.)
+  # and Anthropic / OpenAI deep_research calls under the hood routinely take
+  # 5-15 minutes. The previous 30s default made the helper report "failed"
+  # while the upstream tool was still working, which trained agents to retry
+  # the same call 3x in a row and waste compute — and to assume long-running
+  # primitives are "broken" and pick a shallower alternative. 1800s is a
+  # large-but-finite watchdog; for known-fast methods, set CALL_TIMEOUT_SECONDS
+  # in the calling environment to bound more aggressively.
+  local timeout_s="${CALL_TIMEOUT_SECONDS:-1800}"
 
   local curl_args=(
     -sS

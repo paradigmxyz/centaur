@@ -11,12 +11,29 @@ def test_assemble_prompt_without_persona_or_overlay() -> None:
     assert prompt.startswith("[Active deployment]\n|Persona: none - base centaur identity")
     assert "|Overlay loaded: no" in prompt
     assert "base prompt" in prompt
+    # No persona => no persona-precedence note injected.
+    assert "Persona overlay loaded" not in prompt
     # The agent must always see the env vars and runtime command it is supposed
     # to use to introspect itself; lock that into the assembled prompt so a
     # future edit to prompt_assembly cannot drop them silently.
     assert '$AGENT_PERSONA' in prompt
     assert '$CENTAUR_OVERLAY_DIR' in prompt
     assert "call agent runtime '?key='\"$CENTAUR_THREAD_KEY\"" in prompt
+
+
+def test_assemble_prompt_with_persona_announces_persona_precedence() -> None:
+    """Generic mechanism: any persona override gets a deployment-block note
+    declaring that the persona overlay wins on routing/tool/voice conflicts.
+    The note is persona-agnostic — no specific persona name or tool name
+    appears so this works for every current and future persona."""
+    persona = SimpleNamespace(engine="amp", prompt_content="persona body")
+    prompt = assemble_prompt("anything", base_prompt="base", persona_info=persona)
+
+    assert "Persona overlay loaded" in prompt
+    # Sanity: the note must NOT name any particular persona or tool — it's a
+    # generic mechanism that future personas inherit automatically.
+    assert "invest" not in prompt.split("---")[0].lower()
+    assert "invest_research" not in prompt.split("---")[0]
 
 
 def test_assemble_prompt_handles_non_utf8_overlay_file(tmp_path) -> None:

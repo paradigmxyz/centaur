@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -417,6 +418,32 @@ else:
         if _plugin_dirs
         else [Path(os.environ.get("PLUGINS_DIR", _app_root / "tools"))]
     )
+
+# Make all TOOL_DIRS entries visible through the `tools.*` namespace with
+# overlay-last priority. Some overlay tools subclass or extend base tools;
+# without refreshing both sys.path and the already-imported namespace path,
+# Python can silently import the base module and drop overlay-only methods.
+for _tools_dir in reversed(_tools_dirs):
+    _parent = str(_tools_dir.resolve().parent)
+    if _parent and _parent not in sys.path:
+        sys.path.insert(0, _parent)
+try:
+    import tools as _tools_pkg
+
+    _seen: set[str] = set()
+    _new_path: list[str] = []
+    for _tools_dir in reversed(_tools_dirs):
+        s = str(_tools_dir.resolve())
+        if s and s not in _seen and os.path.isdir(s):
+            _seen.add(s)
+            _new_path.append(s)
+    for _existing in getattr(_tools_pkg, "__path__", []):
+        if _existing not in _seen:
+            _seen.add(_existing)
+            _new_path.append(_existing)
+    _tools_pkg.__path__ = _new_path  # type: ignore[assignment]
+except ImportError:
+    pass
 
 tool_manager = ToolManager(_tools_dirs)
 tool_manager.discover()

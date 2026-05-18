@@ -943,6 +943,25 @@ def _assignment_display_engine(active: dict[str, Any]) -> str | None:
     return _nonempty(active.get("harness"))
 
 
+def _display_harness_label(harness: str | None, persona: str | None) -> str | None:
+    """Best human-readable name for the runtime that ran.
+
+    Prefers an explicit ``harness`` override; falls back to the persona's
+    declared engine; finally returns ``None`` if nothing is known. Useful
+    for user-facing error messages where we don't want to hard-code a
+    specific engine name (e.g. ``"Failed to start the Codex runtime"`` is
+    wrong when the active engine is amp/claude-code/pi-mono).
+    """
+    label = _nonempty(harness)
+    if label:
+        return label
+    if persona:
+        engine = _persona_default_engine(persona)
+        if engine:
+            return engine
+    return None
+
+
 def _persona_default_engine(persona_id: str) -> str | None:
     try:
         from api.app import get_tool_manager
@@ -1131,9 +1150,16 @@ async def do_agent_turn(
             )
         except Exception as exc:
             if slackbot_session_id:
+                # Surface the actual harness/engine name in the error instead of
+                # the hard-coded "Codex" — every harness path lands here, not
+                # just codex. Falls back to "agent" when no display name is
+                # available so the message stays readable.
+                runtime_label = (
+                    _display_harness_label(harness, persona) or "agent"
+                )
                 await slackbot_client.session_text(
                     slackbot_session_id,
-                    f"Failed to start the Codex runtime: {exc}",
+                    f"Failed to start the {runtime_label} runtime: {exc}",
                 )
                 await slackbot_client.session_done(slackbot_session_id)
             raise

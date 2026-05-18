@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from api.tool_manager import (  # noqa: E402
     _LIFECYCLE_METHODS,
+    _describe_method_docstring,
     _friendly_type_name,
     _normalize_for_serialization,
     _tool_arg_validation_error,
@@ -21,6 +22,57 @@ from api.tool_manager import (  # noqa: E402
     ToolManager,
     ToolMethod,
 )
+
+
+class TestDescribeMethodDocstring:
+    """Generic agent-facing description extraction (no persona-specific cases).
+
+    Tools across personas all flow through describe_tool, which exposes
+    methods to the agent via `call discover <tool>`. Keeping the human-prose
+    portion of the docstring (not just the first line) gives the agent
+    enough signal to pick the right method without reading the source.
+    """
+
+    def test_empty_or_none_returns_empty_string(self):
+        assert _describe_method_docstring(None) == ""
+        assert _describe_method_docstring("") == ""
+        assert _describe_method_docstring("   \n  \n") == ""
+
+    def test_single_line_docstring_returned_verbatim(self):
+        assert _describe_method_docstring("Search Slack for messages.") == "Search Slack for messages."
+
+    def test_multi_paragraph_description_preserved(self):
+        doc = """Hybrid research engine.
+
+        This is the default entry point for any research-shaped turn. It
+        does not write the final reply. Instead it returns the working set.
+        """
+        out = _describe_method_docstring(doc)
+        assert "Hybrid research engine." in out
+        assert "default entry point" in out
+
+    def test_google_section_marker_truncates(self):
+        doc = """Search the database.
+
+        Returns ranked results matching the query.
+
+        Args:
+            query: Free-form search text.
+            limit: Max results.
+        """
+        out = _describe_method_docstring(doc)
+        assert "Search the database." in out
+        assert "Returns ranked results" in out
+        # Args block excluded — parameter info ships separately on the schema.
+        assert "Args:" not in out
+        assert "query:" not in out
+
+    def test_truncation_respects_max_chars(self):
+        long_para = "x " * 2000
+        doc = f"Summary.\n\n{long_para}"
+        out = _describe_method_docstring(doc)
+        assert len(out) <= 1200
+        assert out.endswith("\u2026")
 
 
 # ---------------------------------------------------------------------------

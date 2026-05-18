@@ -665,6 +665,63 @@ _BUILTIN_TYPE_NAMES: dict[type, str] = {
 }
 
 
+_METHOD_DESCRIPTION_MAX_CHARS = 1200
+_DOCSTRING_BOUNDARY_MARKERS = (
+    "Args:",
+    "Arguments:",
+    "Returns:",
+    "Return:",
+    "Yields:",
+    "Raises:",
+    "Example:",
+    "Examples:",
+    "Note:",
+    "Notes:",
+    "Warning:",
+    "See Also:",
+    "See also:",
+)
+
+
+def _describe_method_docstring(doc: str | None) -> str:
+    """Return the agent-facing description for a tool method's docstring.
+
+    The base implementation used only the docstring's FIRST LINE, which
+    silently stripped the rest of any multi-paragraph explanation. For tools
+    whose first line is a noun phrase (e.g. ``"Hybrid research engine."``)
+    and whose follow-on paragraph explains when to use the method, the agent
+    never sees the load-bearing guidance.
+
+    The replacement keeps the full prose summary up to the first Google-style
+    section marker (``Args:`` / ``Returns:`` / ``Raises:`` / ``Example:`` /
+    ``Note:`` / etc.) or a ``_METHOD_DESCRIPTION_MAX_CHARS`` budget, whichever
+    comes first. Parameter docs continue to be exposed structurally on the
+    ``parameters`` field, so excluding them from ``description`` is
+    intentional — agents should pick methods from the prose and pass args
+    from the schema.
+    """
+    if not doc:
+        return ""
+    # ``inspect.cleandoc`` is the canonical normalizer for Python docstrings:
+    # it strips the common leading whitespace from continuation lines so any
+    # subsequent markers match at column 0.
+    text = inspect.cleandoc(doc)
+    if not text:
+        return ""
+    boundary = len(text)
+    for marker in _DOCSTRING_BOUNDARY_MARKERS:
+        # Markers must appear at start-of-line (column 0) to count.
+        idx = text.find("\n" + marker)
+        if idx == -1 and text.startswith(marker):
+            idx = 0
+        if 0 <= idx < boundary:
+            boundary = idx
+    summary = text[:boundary].rstrip()
+    if len(summary) > _METHOD_DESCRIPTION_MAX_CHARS:
+        summary = summary[: _METHOD_DESCRIPTION_MAX_CHARS - 1].rstrip() + "\u2026"
+    return summary
+
+
 def _friendly_type_name(annotation: Any) -> str:
     """Convert a Python type annotation to a clean, human-readable string.
 
@@ -1133,13 +1190,14 @@ class ToolManager:
             }
         method_schemas: list[dict[str, Any]] = []
         for method in sorted(lt.methods, key=lambda m: m.method_name):
+            description = _describe_method_docstring(method.fn.__doc__)
             try:
                 sig = inspect.signature(method.fn)
             except (TypeError, ValueError) as exc:
                 method_schemas.append(
                     {
                         "name": method.method_name,
-                        "description": (method.fn.__doc__ or "").strip().split("\n")[0],
+                        "description": description,
                         "parameters": {},
                         "signature_error": str(exc),
                     }
@@ -1161,7 +1219,7 @@ class ToolManager:
             method_schemas.append(
                 {
                     "name": method.method_name,
-                    "description": (method.fn.__doc__ or "").strip().split("\n")[0],
+                    "description": description,
                     "parameters": params,
                 }
             )

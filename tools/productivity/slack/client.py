@@ -437,7 +437,16 @@ class SlackClient:
         return user_cache
 
     def list_bot_channels(self, limit: int = 500, force_refresh: bool = False) -> list[dict]:
-        """List public channels the bot is a member of.
+        """List channels (public AND private) the bot is a member of.
+
+        Bot membership is the relevant scope here, not just public visibility
+        — Centaur is intentionally added to private investing / sourcing /
+        legal channels and search/history calls only work on channels the bot
+        actually belongs to. Filtering to ``types="public_channel"`` silently
+        drops every private channel from this list and from every caller
+        that depends on it (e.g. ``_search_messages_local`` scans this list
+        as the fallback when native search lacks ``search:read``, and
+        ``gather_context``'s Slack grab walks the bot's member channels).
 
         Args:
             limit: Maximum channels to return
@@ -460,7 +469,7 @@ class SlackClient:
             try:
                 response = self._retry_on_ratelimit(
                     self._client.conversations_list,
-                    types="public_channel",
+                    types="public_channel,private_channel",
                     limit=min(limit - len(channels), 200),
                     cursor=cursor,
                     exclude_archived=True,
@@ -1222,14 +1231,20 @@ class SlackClient:
         }
 
     def list_channels(self, limit: int = 200) -> list[dict]:
-        """List public Slack channels (not just bot member channels)."""
+        """List Slack channels visible to the bot (public and private).
+
+        Bot-visible channels include any private channel the bot has been
+        added to; restricting to ``types="public_channel"`` silently drops
+        them. This is the broader-than-membership variant of
+        ``list_bot_channels`` and shares the same fix.
+        """
         channels = []
         cursor = None
 
         while True:
             try:
                 response = self._client.conversations_list(
-                    types="public_channel",
+                    types="public_channel,private_channel",
                     limit=min(limit - len(channels), 200),
                     cursor=cursor,
                     exclude_archived=True,

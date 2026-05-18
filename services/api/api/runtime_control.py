@@ -2522,6 +2522,16 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                         }:
                             slackbot_text_sent = True
             observations.raw_event_count += 1
+            # ``amp_raw_event`` is a HISTORICAL label preserved for API and
+            # dashboard back-compat. Despite the name, this row stores the
+            # raw stream payload from WHICHEVER harness produced the event
+            # (amp, codex, claude-code, pi-mono). To filter by actual engine
+            # use the projected observation events emitted below, or join
+            # this row's thread_key against ``agent_runtime_assignments``.
+            # If you rename this label, update at least:
+            #   - packages/api-client/test/client.test.ts (asserts "amp_raw_event")
+            #   - _VALID_STDOUT_EVENT_TYPES in services/api/api/agent.py
+            #   - any Grafana / VictoriaLogs dashboards keyed on it.
             await append_execution_event(
                 pool,
                 thread_key=thread_key,

@@ -49,6 +49,13 @@ def _active_deployment_block(
         lines.append(f"|Overlay mount (sandbox): {sandbox_overlay_dir}")
     else:
         lines.append("|Overlay mount (sandbox): none")
+    if persona:
+        lines.append(
+            "|Persona overlay loaded: its instructions override generic "
+            "base-prompt guidance on routing, tool choice, voice, and "
+            "output shape. Read the overlay before acting on any base "
+            "default."
+        )
     lines.extend(
         [
             "|To verify at runtime, run any of:",

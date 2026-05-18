@@ -557,9 +557,10 @@ def _resolve_harness_profile(
 ) -> tuple[str, str | None, str | None]:
     """Return ``(engine, persona_name, default_repo)`` for a spawn.
 
-    ``harness`` must be ``amp``/``claude-code``/``codex``/``pi-mono`` (or
-    ``None``). ``persona`` is any registered persona name. An explicit
-    ``harness`` overrides the persona's declared engine.
+    ``harness`` is the legacy caller-facing name for what is now treated as
+    the sandbox engine. Precedence is:
+    explicit ``engine_override`` > explicit differing ``harness`` >
+    persona-declared engine > ``codex`` default.
     """
     from api.app import get_tool_manager
 
@@ -580,14 +581,26 @@ def _resolve_harness_profile(
     if persona and persona_info is None:
         raise ValueError(f"Unknown persona: {persona}")
 
-    if normalized_harness == "amp":
-        engine = normalized_engine_override or "codex"
+    persona_engine = (
+        (getattr(persona_info, "engine", None) or "").strip() or None
+        if persona_info
+        else None
+    )
+
+    if normalized_engine_override:
+        engine = normalized_engine_override
+    elif persona_engine:
+        # Persona declares an engine. Use it unless the caller passed a
+        # *different* harness arg, in which case the explicit harness arg is
+        # treated as a user-driven engine override (e.g. `--invest --claude`).
+        if normalized_harness and normalized_harness != persona_engine:
+            engine = normalized_harness
+        else:
+            engine = persona_engine
     elif normalized_harness:
-        engine = normalized_engine_override or normalized_harness
-    elif persona_info:
-        engine = normalized_engine_override or persona_info.engine
+        engine = normalized_harness
     else:
-        engine = normalized_engine_override or "codex"
+        engine = "codex"
 
     if persona_info:
         return engine, persona_info.name, persona_info.default_repo
