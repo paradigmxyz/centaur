@@ -1838,7 +1838,7 @@ class SlackClient:
 
     # A tool result is held in memory and base64-encoded into the response, so
     # cap what download_file will return regardless of Slack's own file size.
-    _MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+    _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 
     def download_file(self, url: str) -> dict:
         """Download a Slack file and return its content as base64.
