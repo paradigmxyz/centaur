@@ -2074,8 +2074,12 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
                     "SET status = CASE WHEN er.status IN ('queued', 'retry_wait') THEN 'running' ELSE er.status END, "
                     "claimed_at = NOW(), "
                     "started_at = COALESCE(er.started_at, NOW()), "
-                    "last_progress_at = COALESCE(er.last_progress_at, NOW()), "
-                    "silence_deadline_at = COALESCE(er.silence_deadline_at, NOW() + make_interval(secs => $1::double precision)), "
+                    "last_progress_at = NOW(), "
+                    "silence_deadline_at = NOW() + make_interval(secs => $1::double precision), "
+                    "hard_deadline_at = CASE "
+                    "  WHEN er.status = 'queued' THEN NOW() + make_interval(secs => $5::double precision) "
+                    "  ELSE er.hard_deadline_at "
+                    "END, "
                     "worker_id = $2, "
                     "worker_lease_expires_at = NOW() + make_interval(secs => $3::double precision), "
                     "updated_at = NOW() "
@@ -2087,6 +2091,7 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
                     WORKER_INSTANCE_ID,
                     float(EXECUTION_WORKER_LEASE_S),
                     candidate["execution_id"],
+                    float(EXECUTION_HARD_TIMEOUT_S),
                 )
                 if row:
                     return dict(row)

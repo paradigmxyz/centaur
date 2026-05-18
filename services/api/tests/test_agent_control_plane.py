@@ -1739,6 +1739,54 @@ async def test_claim_next_execution_runs_different_threads_concurrently_but_seri
 
 
 @pytest.mark.asyncio
+async def test_claim_next_execution_resets_queued_silence_deadline(db_pool):
+    from api.runtime_control import (
+        EXECUTION_HARD_TIMEOUT_S,
+        EXECUTION_SILENCE_TIMEOUT_S,
+        _claim_next_execution,
+    )
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:stale-queued"
+    execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, created_at, last_progress_at, silence_deadline_at, hard_deadline_at"
+        ") VALUES ("
+        "$1, $2, 1, 'exec-stale-queued', 'hash-stale-queued', 'queued', "
+        "'{}'::jsonb, '{}'::jsonb, NOW() - INTERVAL '20 minutes', "
+        "NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '10 minutes', "
+        "NOW() - INTERVAL '5 minutes')",
+        execution_id,
+        thread_key,
+    )
+
+    before_claim = dt.datetime.now(dt.timezone.utc)
+    claimed = await _claim_next_execution(db_pool)
+
+    assert claimed is not None
+    assert claimed["execution_id"] == execution_id
+    assert claimed["status"] == "running"
+    assert claimed["silence_deadline_at"] > before_claim + dt.timedelta(
+        seconds=EXECUTION_SILENCE_TIMEOUT_S - 5
+    )
+    assert claimed["hard_deadline_at"] > before_claim + dt.timedelta(
+        seconds=EXECUTION_HARD_TIMEOUT_S - 5
+    )
+
+    row = await db_pool.fetchrow(
+        "SELECT last_progress_at, silence_deadline_at, hard_deadline_at "
+        "FROM agent_execution_requests "
+        "WHERE execution_id = $1",
+        execution_id,
+    )
+    assert row["last_progress_at"] >= before_claim
+    assert row["silence_deadline_at"] == claimed["silence_deadline_at"]
+    assert row["hard_deadline_at"] == claimed["hard_deadline_at"]
+
+
+@pytest.mark.asyncio
 async def test_claim_next_execution_reclaims_expired_cancel_requested(db_pool):
     from api.runtime_control import _claim_next_execution, _recover_stale_running
 
