@@ -48,6 +48,11 @@ export default defineConfig({
       link: '/architecture',
       match: (path) => path === '/architecture',
     },
+    {
+      text: 'Security',
+      link: '/security',
+      match: (path) => path === '/security',
+    },
   ],
   socials: [{ icon: 'github', link: 'https://github.com/paradigmxyz/centaur' }],
   search: {
@@ -56,6 +61,7 @@ export default defineConfig({
       if (documentId.includes('quickstart')) return 4
       if (documentId.includes('extend/')) return 3.8
       if (documentId.includes('secrets/')) return 3.8
+      if (documentId.includes('security')) return 3.6
       if (documentId.includes('deploying-in-production')) return 3.5
       if (documentId.includes('architecture')) return 3
       return 1

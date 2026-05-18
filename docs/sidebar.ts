@@ -8,6 +8,7 @@ export const sidebar = [
       { text: 'Quickstart', link: '/quickstart' },
       { text: 'Deploying in Production', link: '/deploying-in-production' },
       { text: 'Architecture', link: '/architecture' },
+      { text: 'Security', link: '/security' },
     ],
   },
   {

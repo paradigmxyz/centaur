@@ -93,7 +93,7 @@ The main directories are:
 - [`services/api`](services/api/) — control plane for agents, tools, workflows, auth, and durable state
 - [`services/slackbot`](services/slackbot/) — Slack event handling and Slack delivery
 - [`services/sandbox`](services/sandbox/) — agent container image and harness adapter
-- [iron-proxy](https://iron.sh) ([service](services/iron-proxy/)) — controlled outbound access and credential injection
+- [iron-proxy](https://docs.iron.sh) ([service](services/iron-proxy/)) — controlled outbound access and credential injection
 - [`tools`](tools/) — tool plugins
 - [`workflows`](workflows/) — workflow plugins
 
@@ -134,7 +134,7 @@ for `SLACK_SIGNING_SECRET`.
 
 What they are for:
 
-- `OP_SERVICE_ACCOUNT_TOKEN`: lets [iron-proxy](https://iron.sh) resolve 1Password-backed runtime secrets
+- `OP_SERVICE_ACCOUNT_TOKEN`: lets [iron-proxy](https://docs.iron.sh) resolve 1Password-backed runtime secrets
 - `OP_VAULT`: the 1Password vault name or id to read from
 - `SLACK_BOT_TOKEN`: Slack bot token for the local Slackbot service
 - `SLACK_SIGNING_SECRET`: verifies incoming Slack requests
@@ -187,14 +187,13 @@ Use workflows when a task should run longer than one request, wait for something
 
 Centaur is designed around practical isolation and auditability:
 
-- each conversation runs in a Kubernetes sandbox
-- sandboxes call tools through the Centaur API
-- sandbox network access is restricted
-- real credentials are injected only at the controlled network boundary
+- each conversation runs in a Kubernetes sandbox with a default-deny NetworkPolicy
+- sandboxes call tools through the Centaur API and reach the outside world only through a per-sandbox [iron-proxy](https://docs.iron.sh)
+- sandboxes only ever see placeholder strings for upstream credentials; real values are swapped in by iron-proxy only on outbound requests to the specific hosts and headers a secret is bound to
 - messages, executions, events, and delivery state are persisted
 - outbound activity can be audited
 
-This gives agents useful power without treating them like trusted production services.
+See [Security](docs/pages/security.mdx) for the full threat model and the mechanisms behind each of these points, including known limitations like the shared credential vault.
 
 ## Documentation
 
