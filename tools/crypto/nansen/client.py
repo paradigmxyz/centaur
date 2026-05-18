@@ -76,7 +76,7 @@ class NansenClient:
         url = f"{self.base_url}{endpoint}"
         headers = {
             "Content-Type": "application/json",
-            "apikey": api_key,
+            "apiKey": api_key,
         }
 
         try:
