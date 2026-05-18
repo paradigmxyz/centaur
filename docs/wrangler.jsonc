@@ -5,6 +5,7 @@
   "routes": [
     {
       "pattern": "docs.centaur.run",
+      "zone_name": "centaur.run",
       "custom_domain": true
     }
   ],
