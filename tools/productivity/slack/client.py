@@ -1842,12 +1842,30 @@ class SlackClient:
 
         return files
 
-    def download_file(self, url: str, output_path: str) -> str:
-        """Download a Slack file to local path."""
+    def _download_file(self, url: str, output_path: str) -> str:
+        """Download a Slack file to a local path (CLI helper, not a tool method).
+
+        Underscore-prefixed so it is NOT discovered as a remote tool method.
+        Tool methods run in-process on the API server, so attaching the bot
+        token to a caller-controlled URL is a credential-exfiltration
+        primitive: pointing it at e.g. ``slack.com/api/api.test`` makes Slack
+        echo the bot token straight back in the response body.
+
+        The URL is restricted to ``files.slack.com`` so the bot token only
+        ever rides on genuine file downloads (``url_private``), never on Slack
+        API endpoints.
+        """
         import urllib.request
 
         if not self.token:
             raise RuntimeError("SLACK_BOT_TOKEN not set")
+
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() != "files.slack.com":
+            raise ValueError(
+                "download_file only accepts https://files.slack.com/ URLs; "
+                f"refusing {url!r}"
+            )
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
@@ -2146,8 +2164,8 @@ def get_message_files(*args, **kwargs):
     return _client().get_message_files(*args, **kwargs)
 
 
-def download_file(*args, **kwargs):
-    return _client().download_file(*args, **kwargs)
+def _download_file(*args, **kwargs):
+    return _client()._download_file(*args, **kwargs)
 
 
 def dump_channel_with_threads(*args, **kwargs):

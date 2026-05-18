@@ -751,7 +751,7 @@ def files(
     import re
     from pathlib import Path
 
-    from .client import download_file, get_message_files
+    from .client import _download_file, get_message_files
 
     if permalink.startswith("https://"):
         match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)
@@ -784,7 +784,7 @@ def files(
 
             out_path = output_dir / f["name"]
             try:
-                download_file(f["url_private"], str(out_path))
+                _download_file(f["url_private"], str(out_path))
                 console.print(f"[green]✓ Downloaded {f['name']}[/] ({f['size']} bytes)")
                 console.print(f"[dim]{out_path.absolute()}[/]")
             except Exception as e:
