@@ -22,7 +22,7 @@ const EnvSchema = z.object({
   LINEAR_API_KEY: z.string().optional(),
   SLACK_FEEDBACK_COMMANDS: z
     .string()
-    .default('/feedback,/linear-feedback')
+    .default('/website-feedback')
     .transform(value =>
       value
         .split(/[\s,]+/)

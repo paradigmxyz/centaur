@@ -46,7 +46,7 @@ describe('Slack event HTTP dedupe', () => {
     try {
       const { app } = await import('./index')
       const body = new URLSearchParams({
-        command: '/feedback',
+        command: '/website-feedback',
         text: 'Button copy is confusing\nThe submit button should mention Linear.',
         user_id: 'U123',
         channel_id: 'C123',
