@@ -457,6 +457,7 @@ def upload(
         slack upload eng-ai file1.png file2.jpg -c "Here are the screenshots"
         slack upload eng-ai report.pdf --thread 1234567890.123456
     """
+    import base64
     from pathlib import Path
 
     from .client import upload_file
@@ -468,9 +469,12 @@ def upload(
             raise typer.Exit(1)
 
         try:
+            # Read the file locally and hand the bytes to the tool: upload_file
+            # takes no local path (it runs server-side; see client.py).
             result = upload_file(
-                channel,
-                str(path.absolute()),
+                channel=channel,
+                content_base64=base64.b64encode(path.read_bytes()).decode(),
+                filename=path.name,
                 title=path.name,
                 comment=comment if file_path == files[0] else None,  # Only comment on first file
                 thread_ts=thread,
@@ -748,10 +752,11 @@ def files(
         slack files "https://..." --download
         slack files "https://..." -d -o /tmp/slack-files
     """
+    import base64
     import re
     from pathlib import Path
 
-    from .client import _download_file, get_message_files
+    from .client import download_file, get_message_files
 
     if permalink.startswith("https://"):
         match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)
@@ -784,8 +789,9 @@ def files(
 
             out_path = output_dir / f["name"]
             try:
-                _download_file(f["url_private"], str(out_path))
-                console.print(f"[green]✓ Downloaded {f['name']}[/] ({f['size']} bytes)")
+                result = download_file(f["url_private"])
+                out_path.write_bytes(base64.b64decode(result["content_base64"]))
+                console.print(f"[green]✓ Downloaded {f['name']}[/] ({result['size_bytes']} bytes)")
                 console.print(f"[dim]{out_path.absolute()}[/]")
             except Exception as e:
                 console.print(f"[red]Error downloading {f['name']}: {e}[/]")

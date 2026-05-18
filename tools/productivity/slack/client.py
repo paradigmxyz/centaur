@@ -1630,7 +1630,6 @@ class SlackClient:
         self,
         channel: str | None = None,
         channel_id: str | None = None,
-        file_path: str | None = None,
         title: str | None = None,
         comment: str | None = None,
         thread_ts: str | None = None,
@@ -1642,7 +1641,12 @@ class SlackClient:
     ) -> dict:
         """Upload a file to Slack.
 
-        Accepts one of: file_path, content_base64, attachment_id, or attachment_url.
+        Accepts one of: content_base64, attachment_id, or attachment_url.
+        There is deliberately no local-path option: this tool runs in-process
+        on the API server, so a caller-supplied path would read the API host's
+        filesystem (secrets, configs) and exfiltrate it to Slack. Sandboxes
+        pass bytes via content_base64 or a Centaur attachment handle instead.
+
         If channel/thread_ts are omitted and the tool runs in an active Slack
         thread, the destination is inferred from tool context.
 
@@ -1668,16 +1672,6 @@ class SlackClient:
             if content_base64:
                 upload_bytes = base64.b64decode(content_base64)
                 effective_filename = filename or "upload.png"
-            elif file_path:
-                path = Path(file_path)
-                if not path.exists():
-                    raise FileNotFoundError(
-                        "File not found: "
-                        f"{file_path}. If this file was generated in another sandbox, "
-                        "upload via content_base64 or a Centaur attachment_id instead."
-                    )
-                effective_filename = filename or path.name
-                upload_bytes = path.read_bytes()
             elif attachment_id or attachment_url:
                 upload_bytes = self._download_attachment_bytes(
                     attachment_id=attachment_id,
@@ -1686,7 +1680,7 @@ class SlackClient:
                 effective_filename = filename or f"{attachment_id or 'attachment'}.bin"
             else:
                 raise ValueError(
-                    "One of file_path, content_base64, attachment_id, or attachment_url is required"
+                    "One of content_base64, attachment_id, or attachment_url is required"
                 )
             kwargs["content"] = upload_bytes
             kwargs["filename"] = effective_filename
@@ -1842,18 +1836,22 @@ class SlackClient:
 
         return files
 
-    def _download_file(self, url: str, output_path: str) -> str:
-        """Download a Slack file to a local path (CLI helper, not a tool method).
+    # A tool result is held in memory and base64-encoded into the response, so
+    # cap what download_file will return regardless of Slack's own file size.
+    _MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
-        Underscore-prefixed so it is NOT discovered as a remote tool method.
-        Tool methods run in-process on the API server, so attaching the bot
-        token to a caller-controlled URL is a credential-exfiltration
-        primitive: pointing it at e.g. ``slack.com/api/api.test`` makes Slack
-        echo the bot token straight back in the response body.
+    def download_file(self, url: str) -> dict:
+        """Download a Slack file and return its content as base64.
 
-        The URL is restricted to ``files.slack.com`` so the bot token only
-        ever rides on genuine file downloads (``url_private``), never on Slack
-        API endpoints.
+        ``url`` must be an ``https://files.slack.com/`` URL — i.e. a file's
+        ``url_private`` from get_message_files. The bot token is sent only to
+        that host, so it can never be aimed at a Slack API endpoint that would
+        echo the credential back in its response. Nothing is written to disk:
+        the bytes are returned to the caller, which can re-upload or inspect
+        them.
+
+        Returns a dict with ``filename``, ``mime_type``, ``size_bytes`` and
+        ``content_base64``.
         """
         import urllib.request
 
@@ -1867,12 +1865,23 @@ class SlackClient:
                 f"refusing {url!r}"
             )
 
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
-        with urllib.request.urlopen(req) as response, open(output_path, "wb") as f:
-            f.write(response.read())
+        with urllib.request.urlopen(req) as response:
+            # Read one byte past the cap so an oversized file is detected
+            # without ever buffering the whole thing.
+            body = response.read(self._MAX_DOWNLOAD_BYTES + 1)
+            mime_type = response.headers.get_content_type()
+        if len(body) > self._MAX_DOWNLOAD_BYTES:
+            raise ValueError(
+                f"Slack file exceeds the {self._MAX_DOWNLOAD_BYTES}-byte download limit"
+            )
 
-        return output_path
+        return {
+            "filename": Path(parsed.path).name or "slack-file",
+            "mime_type": mime_type,
+            "size_bytes": len(body),
+            "content_base64": base64.b64encode(body).decode(),
+        }
 
     def search_files(
         self,
@@ -2164,8 +2173,8 @@ def get_message_files(*args, **kwargs):
     return _client().get_message_files(*args, **kwargs)
 
 
-def _download_file(*args, **kwargs):
-    return _client()._download_file(*args, **kwargs)
+def download_file(*args, **kwargs):
+    return _client().download_file(*args, **kwargs)
 
 
 def dump_channel_with_threads(*args, **kwargs):
