@@ -82,6 +82,55 @@ describe('CodexSessionRenderer', () => {
     })
   })
 
+  it('keeps terminal events retryable when stream close fails', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    let stopAttempts = 0
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async (params: any) => {
+            calls.push({ method: 'assistant.threads.setStatus', params })
+            return { ok: true }
+          }
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          stopAttempts += 1
+          if (stopAttempts === 2) return { ok: true }
+          return { ok: false, error: 'stream_already_closed' }
+        }
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+    const terminalEvent = { type: 'result', result: 'Finished reply' }
+
+    await expect(renderer.event(sessionId, terminalEvent)).rejects.toThrow(
+      'stream_already_closed'
+    )
+    await expect(renderer.event(sessionId, terminalEvent)).resolves.toMatchObject({
+      done: true
+    })
+    expect(stopAttempts).toBe(2)
+  })
+
   it('does not mark completed commands as errors just because their exit code is non-zero', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {

@@ -155,11 +155,11 @@ export class CodexSessionRenderer {
   async done(agentSessionId: string): Promise<void> {
     const state = getState(agentSessionId)
     if (state.done) return
-    state.done = true
     await this.renderer.done(
       agentSessionId,
       state.threadId ? codexFooter(state.threadId) : undefined
     )
+    state.done = true
     states.delete(agentSessionId)
   }
 

@@ -125,6 +125,7 @@ export class AgentSessionRenderer {
     const state = requireSession(sessionId)
     state.done = true
     state.footer = footer
+    let closed = false
 
     try {
       for (const segment of state.segments) {
@@ -134,9 +135,10 @@ export class AgentSessionRenderer {
         for (const task of finalTaskUpdates) await this.flushTask(state, segment, task)
         await this.closeTextStream(state, segment)
       }
+      closed = true
     } finally {
       await this.setStatus(sessionId, '')
-      sessions.delete(sessionId)
+      if (closed) sessions.delete(sessionId)
     }
   }
 

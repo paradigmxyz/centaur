@@ -157,6 +157,7 @@ describe('AgentSessionRenderer', () => {
 
   it('clears assistant status even when closing the stream fails', async () => {
     const calls: Array<{ method: string; params: any }> = []
+    let stopAttempts = 0
     const client = {
       assistant: {
         threads: {
@@ -177,6 +178,8 @@ describe('AgentSessionRenderer', () => {
         },
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
+          stopAttempts += 1
+          if (stopAttempts === 2) return { ok: true }
           return { ok: false, error: 'stream_already_closed' }
         }
       }
@@ -202,5 +205,8 @@ describe('AgentSessionRenderer', () => {
         status: ''
       }
     })
+
+    await expect(renderer.done(sessionId)).resolves.toBeUndefined()
+    expect(stopAttempts).toBe(2)
   })
 })
