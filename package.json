@@ -3,8 +3,6 @@
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "scripts": {
-    "slackbot:delivery-regression": "pnpm --filter slackbot test",
-    "e2e:live": "pnpm --filter @centaur/e2e test",
-    "e2e:test": "pnpm run slackbot:delivery-regression && pnpm run e2e:live"
+    "slackbot:delivery-regression": "pnpm --filter slackbot test"
   }
 }

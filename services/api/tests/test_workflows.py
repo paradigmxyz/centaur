@@ -126,6 +126,63 @@ async def test_create_slack_thread_turn_workflow_eager_start(
 
 
 @pytest.mark.asyncio
+async def test_slack_thread_turn_active_assignment_does_not_backfill_stop_history(db_pool):
+    from api.workflow_engine import WorkflowContext
+    from api.workflows.slack_thread_turn import Input, handler
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:T123:C123:{uuid.uuid4().hex}"
+    nonce = f"CENTAUR_HISTORY_STOP_{uuid.uuid4().hex}"
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 3, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+        thread_key,
+        f"rt-{uuid.uuid4().hex[:12]}",
+    )
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    do_agent_turn_mock = AsyncMock(return_value={"ok": True, "execution_id": "exe-stop"})
+
+    with patch("api.workflow_engine.do_agent_turn", new=do_agent_turn_mock):
+        await handler(
+            Input(
+                thread_key=thread_key,
+                parts=[{"type": "text", "text": "stop"}],
+                message_id="slack:T123:C123:1778885070.000100",
+                user_id="U123",
+                history_messages=[
+                    {
+                        "message_id": "slack:T123:C123:1778885060.000100",
+                        "parts": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"Generate 60 haikus. Include {nonce} in every haiku. "
+                                    "Number each haiku and write them in full."
+                                ),
+                            },
+                        ],
+                        "user_id": "U123",
+                        "metadata": {"platform": "slack", "history_backfill": True},
+                    },
+                ],
+            ),
+            ctx,
+        )
+
+    do_agent_turn_mock.assert_awaited_once()
+    assert do_agent_turn_mock.await_args.kwargs["parts"] == [{"type": "text", "text": "stop"}]
+    assert do_agent_turn_mock.await_args.kwargs["history_messages"] == []
+
+
+@pytest.mark.asyncio
 async def test_slack_thread_turn_attachment_roundtrip_to_agent(
     client,
     db_pool,

@@ -8,22 +8,6 @@ importers:
 
   .: {}
 
-  e2e:
-    dependencies:
-      '@centaur/api-client':
-        specifier: workspace:*
-        version: link:../packages/api-client
-    devDependencies:
-      '@types/node':
-        specifier: 22.19.13
-        version: 22.19.13
-      typescript:
-        specifier: 5.9.3
-        version: 5.9.3
-      vitest:
-        specifier: ^4.1.0
-        version: 4.1.0(@opentelemetry/api@1.9.0)(@types/node@22.19.13)(vite@8.0.0(@types/node@22.19.13)(jiti@2.6.1)(yaml@2.8.4))
-
   packages/api-client:
     dependencies:
       '@centaur/harness-events':
@@ -997,9 +981,6 @@ packages:
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
 
-  '@types/node@22.19.13':
-    resolution: {integrity: sha512-akNQMv0wW5uyRpD2v2IEyRSZiR+BeGuoB6L310EgGObO44HSMNT8z1xzio28V8qOrgYaopIDNA18YgdXd+qTiw==}
-
   '@types/node@25.9.0':
     resolution: {integrity: sha512-AOQwYUNolgy3VosiRqXrACUXTN8nJUtPl7FJXMqZVyxiiCLhQuG3jXKvCS1ALr+Y2OmZhzzLVlYPEqJaiqkaJQ==}
 
@@ -1758,9 +1739,6 @@ packages:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
-
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
   undici-types@7.24.6:
     resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
@@ -2732,10 +2710,6 @@ snapshots:
 
   '@types/estree@1.0.8': {}
 
-  '@types/node@22.19.13':
-    dependencies:
-      undici-types: 6.21.0
-
   '@types/node@25.9.0':
     dependencies:
       undici-types: 7.24.6
@@ -2783,14 +2757,6 @@ snapshots:
       '@vitest/utils': 4.1.0
       chai: 6.2.2
       tinyrainbow: 3.1.0
-
-  '@vitest/mocker@4.1.0(vite@8.0.0(@types/node@22.19.13)(jiti@2.6.1)(yaml@2.8.4))':
-    dependencies:
-      '@vitest/spy': 4.1.0
-      estree-walker: 3.0.3
-      magic-string: 0.30.21
-    optionalDependencies:
-      vite: 8.0.0(@types/node@22.19.13)(jiti@2.6.1)(yaml@2.8.4)
 
   '@vitest/mocker@4.1.0(vite@8.0.0(@types/node@25.9.0)(jiti@2.6.1)(yaml@2.8.4))':
     dependencies:
@@ -3509,27 +3475,11 @@ snapshots:
 
   typescript@6.0.3: {}
 
-  undici-types@6.21.0: {}
-
   undici-types@7.24.6: {}
 
   uuid@11.1.1: {}
 
   uuid@13.0.2: {}
-
-  vite@8.0.0(@types/node@22.19.13)(jiti@2.6.1)(yaml@2.8.4):
-    dependencies:
-      '@oxc-project/runtime': 0.115.0
-      lightningcss: 1.32.0
-      picomatch: 4.0.3
-      postcss: 8.5.8
-      rolldown: 1.0.0-rc.9
-      tinyglobby: 0.2.15
-    optionalDependencies:
-      '@types/node': 22.19.13
-      fsevents: 2.3.3
-      jiti: 2.6.1
-      yaml: 2.8.4
 
   vite@8.0.0(@types/node@25.9.0)(jiti@2.6.1)(yaml@2.8.4):
     dependencies:
@@ -3544,34 +3494,6 @@ snapshots:
       fsevents: 2.3.3
       jiti: 2.6.1
       yaml: 2.8.4
-
-  vitest@4.1.0(@opentelemetry/api@1.9.0)(@types/node@22.19.13)(vite@8.0.0(@types/node@22.19.13)(jiti@2.6.1)(yaml@2.8.4)):
-    dependencies:
-      '@vitest/expect': 4.1.0
-      '@vitest/mocker': 4.1.0(vite@8.0.0(@types/node@22.19.13)(jiti@2.6.1)(yaml@2.8.4))
-      '@vitest/pretty-format': 4.1.0
-      '@vitest/runner': 4.1.0
-      '@vitest/snapshot': 4.1.0
-      '@vitest/spy': 4.1.0
-      '@vitest/utils': 4.1.0
-      es-module-lexer: 2.0.0
-      expect-type: 1.3.0
-      magic-string: 0.30.21
-      obug: 2.1.1
-      pathe: 2.0.3
-      picomatch: 4.0.3
-      std-env: 4.0.0
-      tinybench: 2.9.0
-      tinyexec: 1.0.2
-      tinyglobby: 0.2.15
-      tinyrainbow: 3.1.0
-      vite: 8.0.0(@types/node@22.19.13)(jiti@2.6.1)(yaml@2.8.4)
-      why-is-node-running: 2.3.0
-    optionalDependencies:
-      '@opentelemetry/api': 1.9.0
-      '@types/node': 22.19.13
-    transitivePeerDependencies:
-      - msw
 
   vitest@4.1.0(@opentelemetry/api@1.9.0)(@types/node@25.9.0)(vite@8.0.0(@types/node@25.9.0)(jiti@2.6.1)(yaml@2.8.4)):
     dependencies:
