@@ -1,3 +1,4 @@
+import base64
 import json
 
 import pytest
@@ -491,29 +492,59 @@ def test_download_file_rejects_non_files_host() -> None:
         client.download_file("http://files.slack.com/files-pri/T1-F1/report.pdf")
 
 
-def test_download_file_returns_base64(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_download_file_stores_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
     import urllib.request
 
     client, _ = _make_client()
     client.token = "SLACK_BOT_TOKEN"
-    captured: dict = {}
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api:8000")
+    posted: dict = {}
 
     def fake_urlopen(req, *args, **kwargs):
-        captured["url"] = req.full_url
-        captured["auth"] = req.get_header("Authorization")
-        return _FakeHTTPResponse(b"%PDF-1.4 report", "application/pdf")
+        if "files.slack.com" in req.full_url:
+            assert req.get_header("Authorization") == "Bearer SLACK_BOT_TOKEN"
+            return _FakeHTTPResponse(b"%PDF-1.4 report", "application/pdf")
+        if req.full_url.endswith("/agent/attachments/upload"):
+            posted["body"] = json.loads(req.data)
+            return _FakeHTTPResponse(
+                json.dumps({"id": "att-abc123", "name": "report.pdf"}).encode(),
+                "application/json",
+            )
+        raise AssertionError(f"unexpected url {req.full_url}")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    result = client.download_file("https://files.slack.com/files-pri/T1-F1/report.pdf")
+    token = set_tool_context(ToolContext(name="slack", thread_key="slack:C1:1.2"))
+    try:
+        result = client.download_file("https://files.slack.com/files-pri/T1-F1/report.pdf")
+    finally:
+        reset_tool_context(token)
 
-    assert captured["auth"] == "Bearer SLACK_BOT_TOKEN"
     assert result == {
+        "attachment_id": "att-abc123",
         "filename": "report.pdf",
         "mime_type": "application/pdf",
         "size_bytes": 15,
-        "content_base64": "JVBERi0xLjQgcmVwb3J0",
     }
+    assert posted["body"]["thread_key"] == "slack:C1:1.2"
+    assert posted["body"]["name"] == "report.pdf"
+    assert posted["body"]["mime_type"] == "application/pdf"
+    assert base64.b64decode(posted["body"]["data"]) == b"%PDF-1.4 report"
+
+
+def test_download_file_requires_thread_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+
+    client, _ = _make_client()
+    client.token = "SLACK_BOT_TOKEN"
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda req, *a, **k: _FakeHTTPResponse(b"data", "application/octet-stream"),
+    )
+
+    with pytest.raises(RuntimeError, match="thread"):
+        client.download_file("https://files.slack.com/files-pri/T1-F1/report.pdf")
 
 
 def test_native_search_uses_dedicated_search_client() -> None:

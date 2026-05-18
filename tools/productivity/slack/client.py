@@ -1836,32 +1836,24 @@ class SlackClient:
 
         return files
 
-    # A tool result is held in memory and base64-encoded into the response, so
-    # cap what download_file will return regardless of Slack's own file size.
+    # download_file buffers the file in memory before storing it, so cap the
+    # size regardless of Slack's own (much larger) per-file limit.
     _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 
-    def download_file(self, url: str) -> dict:
-        """Download a Slack file and return its content as base64.
+    def _fetch_slack_file(self, url: str) -> tuple[str, str, bytes]:
+        """Download a Slack file's bytes: returns ``(filename, mime_type, body)``.
 
-        ``url`` must be an ``https://files.slack.com/`` URL — i.e. a file's
-        ``url_private`` from get_message_files. The bot token is sent only to
-        that host, so it can never be aimed at a Slack API endpoint that would
-        echo the credential back in its response. Nothing is written to disk:
-        the bytes are returned to the caller, which can re-upload or inspect
-        them.
-
-        Returns a dict with ``filename``, ``mime_type``, ``size_bytes`` and
-        ``content_base64``.
+        ``url`` must be an ``https://files.slack.com/`` URL. The bot token is
+        sent only to that host, so it can never be aimed at a Slack API
+        endpoint (e.g. api.test) that would echo the credential back.
         """
-        import urllib.request
-
         if not self.token:
             raise RuntimeError("SLACK_BOT_TOKEN not set")
 
         parsed = urlparse(url)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() != "files.slack.com":
             raise ValueError(
-                "download_file only accepts https://files.slack.com/ URLs; "
+                "Slack file downloads only accept https://files.slack.com/ URLs; "
                 f"refusing {url!r}"
             )
 
@@ -1876,11 +1868,76 @@ class SlackClient:
                 f"Slack file exceeds the {self._MAX_DOWNLOAD_BYTES}-byte download limit"
             )
 
+        return Path(parsed.path).name or "slack-file", mime_type, body
+
+    def _store_attachment(
+        self, *, name: str, mime_type: str, data: bytes, source_url: str
+    ) -> str:
+        """Persist bytes as a Centaur attachment; returns the attachment id.
+
+        The attachment is scoped to the thread the tool is running in, read
+        from the tool context.
+        """
+        try:
+            thread_key = get_tool_context().thread_key
+        except LookupError:
+            thread_key = None
+        if not thread_key:
+            raise RuntimeError(
+                "download_file must run inside a Slack thread: no thread_key in "
+                "the tool context to scope the attachment to."
+            )
+
+        base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
+        payload = json.dumps(
+            {
+                "thread_key": thread_key,
+                "name": name,
+                "mime_type": mime_type,
+                "data": base64.b64encode(data).decode(),
+                "source_url": source_url,
+            }
+        ).encode()
+        headers = {"Content-Type": "application/json"}
+        api_key = secret("CENTAUR_API_KEY", "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        request = urllib.request.Request(
+            f"{base_url}/agent/attachments/upload",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read())
+        attachment_id = result.get("id")
+        if not attachment_id:
+            raise RuntimeError(f"attachment upload returned no id: {result!r}")
+        return attachment_id
+
+    def download_file(self, url: str) -> dict:
+        """Download a Slack file into a Centaur attachment.
+
+        ``url`` must be a file's ``url_private`` from get_message_files (an
+        ``https://files.slack.com/`` URL).
+
+        The file is stored as a Centaur attachment instead of being returned
+        inline, so it never enters the agent's context. Pass the returned
+        ``attachment_id`` to upload_file to re-share the file in Slack, or read
+        it back through the attachments API.
+
+        Returns a dict with ``attachment_id``, ``filename``, ``mime_type`` and
+        ``size_bytes``.
+        """
+        filename, mime_type, body = self._fetch_slack_file(url)
+        attachment_id = self._store_attachment(
+            name=filename, mime_type=mime_type, data=body, source_url=url
+        )
         return {
-            "filename": Path(parsed.path).name or "slack-file",
+            "attachment_id": attachment_id,
+            "filename": filename,
             "mime_type": mime_type,
             "size_bytes": len(body),
-            "content_base64": base64.b64encode(body).decode(),
         }
 
     def search_files(
@@ -2175,6 +2232,10 @@ def get_message_files(*args, **kwargs):
 
 def download_file(*args, **kwargs):
     return _client().download_file(*args, **kwargs)
+
+
+def _fetch_slack_file(*args, **kwargs):
+    return _client()._fetch_slack_file(*args, **kwargs)
 
 
 def dump_channel_with_threads(*args, **kwargs):

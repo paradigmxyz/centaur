@@ -752,11 +752,10 @@ def files(
         slack files "https://..." --download
         slack files "https://..." -d -o /tmp/slack-files
     """
-    import base64
     import re
     from pathlib import Path
 
-    from .client import download_file, get_message_files
+    from .client import _fetch_slack_file, get_message_files
 
     if permalink.startswith("https://"):
         match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)
@@ -789,9 +788,9 @@ def files(
 
             out_path = output_dir / f["name"]
             try:
-                result = download_file(f["url_private"])
-                out_path.write_bytes(base64.b64decode(result["content_base64"]))
-                console.print(f"[green]✓ Downloaded {f['name']}[/] ({result['size_bytes']} bytes)")
+                _filename, _mime_type, body = _fetch_slack_file(f["url_private"])
+                out_path.write_bytes(body)
+                console.print(f"[green]✓ Downloaded {f['name']}[/] ({len(body)} bytes)")
                 console.print(f"[dim]{out_path.absolute()}[/]")
             except Exception as e:
                 console.print(f"[red]Error downloading {f['name']}: {e}[/]")
