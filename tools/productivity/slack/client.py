@@ -1867,8 +1867,8 @@ class SlackClient:
 
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
         with urllib.request.urlopen(req) as response:
-            # Read one byte past the cap so an oversized file is detected
-            # without ever buffering the whole thing.
+            # Read one byte past the cap so an oversized file is rejected
+            # without buffering an unbounded response.
             body = response.read(self._MAX_DOWNLOAD_BYTES + 1)
             mime_type = response.headers.get_content_type()
         if len(body) > self._MAX_DOWNLOAD_BYTES:
