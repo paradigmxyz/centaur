@@ -66,6 +66,15 @@ def is_turn_done(engine: str, event: dict) -> bool:
 def extract_result(engine: str, event: dict) -> str | None:
     """Return the assistant result text from *event*, or ``None``."""
     t = event.get("type", "")
+    if t == "turn.done":
+        result = event.get("result")
+        if isinstance(result, str) and result:
+            return result
+        if isinstance(result, dict):
+            text = result.get("text")
+            if isinstance(text, str) and text:
+                return text
+        return _extract_error_message(event) or None
     if engine in ("amp", "claude-code"):
         if t == "result":
             result = event.get("result")

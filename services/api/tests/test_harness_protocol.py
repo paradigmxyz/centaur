@@ -100,6 +100,15 @@ class TestIsTurnDone:
 class TestExtractResult:
     # amp / claude-code ---------------------------------------------------
 
+    def test_turn_done_result_event(self):
+        assert extract_result("amp", {"type": "turn.done", "result": "hello"}) == "hello"
+
+    def test_turn_done_dict_result_event(self):
+        assert (
+            extract_result("claude-code", {"type": "turn.done", "result": {"text": "hello"}})
+            == "hello"
+        )
+
     def test_amp_result_event(self):
         assert extract_result("amp", {"type": "result", "result": "hello"}) == "hello"
 
