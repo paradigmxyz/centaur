@@ -253,7 +253,7 @@ export class AgentSessionRenderer {
     if (!markdown) return
     segment.pendingText = ''
     segment.streamedText += markdown
-    await this.streamChunks(state, segment, [markdownChunk(markdown)])
+    await this.streamChunks(state, segment, [...this.planPrefix(state, segment), markdownChunk(markdown)])
   }
 
   private async flushTask(

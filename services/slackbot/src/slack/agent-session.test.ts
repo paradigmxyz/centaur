@@ -51,6 +51,7 @@ describe('AgentSessionRenderer', () => {
     const start = calls.find(call => call.method === 'chat.startStream')
     expect(start?.params.task_display_mode).toBe('plan')
     expect(start?.params.chunks).toEqual([
+      { type: 'plan_update', title: 'Centaur execution' },
       {
         type: 'markdown_text',
         text: '```python\nprint("Hello, world!")\n```\n\nTiny keys wake up\n'
@@ -68,7 +69,6 @@ describe('AgentSessionRenderer', () => {
 
     const appends = calls.filter(call => call.method === 'chat.appendStream')
     expect(appends[0]?.params.chunks).toEqual([
-      { type: 'plan_update', title: 'Centaur execution' },
       {
         type: 'task_update',
         id: 'sleep-1',

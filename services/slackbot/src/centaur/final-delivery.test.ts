@@ -43,7 +43,10 @@ describe('final delivery polling', () => {
                       recipient_team_id: 'T123',
                       recipient_user_id: 'U123'
                     },
-                    final_payload: { result_text: 'done once' }
+                    final_payload: {
+                      session_title: 'Centaur · codex',
+                      result_text: 'done once'
+                    }
                   }
                 ]
               : []
@@ -95,6 +98,9 @@ describe('final delivery polling', () => {
         fetchCalls.filter(call => call.path === '/agent/final-deliveries/exe-duplicate-guard/delivered')
       ).toHaveLength(1)
       expect(slackCalls.filter(call => call.method === 'chat.startStream')).toHaveLength(1)
+      expect(
+        (slackCalls.find(call => call.method === 'chat.startStream')?.params as any).chunks[0]
+      ).toEqual({ type: 'plan_update', title: 'Centaur · codex' })
       expect(slackCalls.filter(call => call.method === 'chat.stopStream')).toHaveLength(1)
     } finally {
       globalThis.fetch = originalFetch

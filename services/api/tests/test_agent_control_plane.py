@@ -14,6 +14,16 @@ import pytest
 from api.sandbox.base import SandboxSession
 
 
+def test_agent_session_title_formats_base_and_persona_runs():
+    from api.runtime_control import _agent_session_title
+
+    assert _agent_session_title(persona_id=None, engine=None, harness="codex") == "Centaur · codex"
+    assert (
+        _agent_session_title(persona_id="invest", engine="amp", harness="invest")
+        == "Centaur · invest · amp"
+    )
+
+
 def _auth(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"}
 
@@ -1388,6 +1398,7 @@ async def test_worker_sanitizes_raw_harness_auth_failure_after_retry(db_pool):
         "Please retry in a moment."
     )
     assert final_payload["error_text"] == "Unauthorized Check your access token."
+    assert final_payload["session_title"] == "Centaur · amp"
     stop_session_mock.assert_awaited_once_with(thread_key)
 
 

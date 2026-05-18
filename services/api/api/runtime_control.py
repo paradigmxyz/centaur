@@ -183,6 +183,17 @@ def prompt_identity(
     return prompt_ref, sha
 
 
+def _agent_session_title(*, persona_id: str | None, engine: str | None, harness: str | None) -> str:
+    parts = ["Centaur"]
+    persona = (persona_id or "").strip()
+    runtime = (engine or harness or "codex").strip()
+    if persona:
+        parts.append(persona)
+    if runtime and runtime != persona:
+        parts.append(runtime)
+    return " · ".join(parts)
+
+
 def flatten_event_parts(event: dict[str, Any]) -> list[dict[str, Any]]:
     message = event.get("message") if isinstance(event, dict) else None
     if not isinstance(message, dict):
@@ -1796,6 +1807,11 @@ async def _mark_execution_terminal(
                 "thread_key": thread_key,
                 "status": status,
                 "terminal_reason": terminal_reason,
+                "session_title": _agent_session_title(
+                    persona_id=persona_id,
+                    engine=engine,
+                    harness=harness,
+                ),
                 "result_text": result_text,
                 **({"error_text": error_text} if error_text else {}),
                 **({"agent_thread_id": agent_thread_id} if agent_thread_id else {}),
@@ -1817,6 +1833,11 @@ async def _mark_execution_terminal(
             "thread_key": thread_key,
             "status": status,
             "terminal_reason": terminal_reason,
+            "session_title": _agent_session_title(
+                persona_id=persona_id,
+                engine=engine,
+                harness=harness,
+            ),
             "result_text": result_text,
             **({"error_text": error_text} if error_text else {}),
             **({"repo_context": repo_context} if repo_context else {}),

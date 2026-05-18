@@ -70,10 +70,15 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
     parentTs: threadTs,
     recipientTeamId: String(meta.team_id ?? delivery.team_id ?? target.teamId ?? ''),
     recipientUserId: String(meta.recipient_user_id ?? meta.user_id ?? delivery.user_id ?? ''),
-    title: 'Execution steps'
+    title: sessionTitle(payload)
   })
   await renderer.text(sessionId, extractText(payload))
   await renderer.done(sessionId, deliveryFooter(payload))
+}
+
+function sessionTitle(payload: any): string {
+  const title = String(payload?.session_title ?? payload?.title ?? '').trim()
+  return title || 'Execution steps'
 }
 
 function extractText(payload: any): string {
