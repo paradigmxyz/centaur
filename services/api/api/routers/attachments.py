@@ -116,11 +116,13 @@ async def download_attachment(request: Request, attachment_id: str):
     """Download attachment raw bytes."""
     pool = request.app.state.db_pool
     row = await pool.fetchrow(
-        "SELECT data, mime_type, name FROM attachments WHERE id = $1",
+        "SELECT data, mime_type, name, thread_key FROM attachments WHERE id = $1",
         attachment_id,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Attachment not found")
+    # Reject a sandbox token reading an attachment from another thread.
+    _enforce_sandbox_thread_scope(request, row["thread_key"])
     return Response(
         content=row["data"],
         media_type=row["mime_type"],
