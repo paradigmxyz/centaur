@@ -37,46 +37,34 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Skip live stack when AMP_API_KEY is unavailable
-        if: ${{ env.AMP_API_KEY == '' }}
-        run: echo "AMP_API_KEY is not configured; skipping live stack E2E. Slackbot Delivery Regression covers Slack delivery logic without deploying the full stack."
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        if: ${{ env.AMP_API_KEY != '' }}
         with:
           node-version: "24"
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        if: ${{ env.AMP_API_KEY != '' }}
         with:
           version: 10.28.1
           run_install: false
 
       - name: Install Node dependencies
-        if: ${{ env.AMP_API_KEY != '' }}
         run: pnpm install --frozen-lockfile
 
       - name: Install just
-        if: ${{ env.AMP_API_KEY != '' }}
         uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
 
       - name: Set up Helm
-        if: ${{ env.AMP_API_KEY != '' }}
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
 
       - name: Set up kind
-        if: ${{ env.AMP_API_KEY != '' }}
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: centaur-e2e
           wait: 60s
 
       - name: Build images
-        if: ${{ env.AMP_API_KEY != '' }}
         run: just build
 
       - name: Load images into kind
-        if: ${{ env.AMP_API_KEY != '' }}
         run: |
           for image in \
             centaur-api \
@@ -86,11 +74,9 @@ jobs:
           done
 
       - name: Create E2E secrets
-        if: ${{ env.AMP_API_KEY != '' }}
         run: e2e/deploy/create-ci-secrets.sh
 
       - name: Deploy Centaur
-        if: ${{ env.AMP_API_KEY != '' }}
         run: |
           helm upgrade --install "$CENTAUR_RELEASE" contrib/chart \
             -n "$CENTAUR_NAMESPACE" --create-namespace \
@@ -98,7 +84,6 @@ jobs:
           kubectl rollout status -n "$CENTAUR_NAMESPACE" "deploy/${CENTAUR_RELEASE}-centaur-api" --timeout=5m
 
       - name: Port-forward API
-        if: ${{ env.AMP_API_KEY != '' }}
         run: |
           kubectl port-forward -n "$CENTAUR_NAMESPACE" "deploy/${CENTAUR_RELEASE}-centaur-api" 8000:8000 \
             >/tmp/centaur-e2e-api-port-forward.log 2>&1 &
@@ -106,10 +91,9 @@ jobs:
           sleep 2
 
       - name: Run E2E tests
-        if: ${{ env.AMP_API_KEY != '' }}
         env:
           CENTAUR_API_URL: http://localhost:8000
-        run: pnpm run e2e:live
+        run: pnpm run e2e:test
 
       - name: Dump diagnostics on failure
         if: failure()

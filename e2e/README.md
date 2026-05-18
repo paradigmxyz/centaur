@@ -38,7 +38,7 @@ kubectl port-forward -n centaur deploy/centaur-centaur-api 8000:8000
 The easiest local end-to-end path is to let the helper create or reuse a kind
 cluster, deploy Centaur when needed, warm one sandbox, then run the tests. The
 helper automatically loads environment variables from the repo-root `.env`
-file, so a local `.env` containing `AMP_API_KEY=...` is enough:
+file, including optional local secrets:
 
 ```bash
 e2e/deploy/run-kind.sh
@@ -71,5 +71,4 @@ CENTAUR_E2E_KIND_CLUSTER=my-centaur-e2e e2e/deploy/run-kind.sh
 
 ## CI
 
-`.github/workflows/e2e.yml` runs the same tests in kind. It requires the
-GitHub Actions secret `AMP_API_KEY`.
+`.github/workflows/e2e.yml` runs the same tests in kind.
