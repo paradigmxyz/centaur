@@ -156,7 +156,7 @@
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-sans);
+  font-family: var(--centaur-serif);
 }
 
 .centaur-home,
@@ -166,7 +166,7 @@ body,
 
 .vocs_Content {
   color: #dfdfd8;
-  font-family: var(--centaur-sans);
+  font-family: var(--centaur-serif);
   font-size: 1rem;
   line-height: 1.5;
 }
@@ -1458,9 +1458,21 @@ body,
     text-align: center;
   }
 
+  /* Demo container at <=760px (mobile + tall-portrait): no `order`
+   * is set here so the demo follows the source order — home-copy
+   * (mark + h1 + lede + actions + BUILT BY) renders first, demo
+   * sits below. Give the demo a generous 32px top margin so it
+   * doesn't slam into the "BUILT BY Paradigm Tempo" row. Width
+   * pinned to 100% with a 640px cap so the panel can never overflow
+   * the viewport, and overflow: hidden clips any rogue inner content
+   * so any scrolling happens inside the panel's own scroll region,
+   * not horizontally on the page. */
   .home-thread-demo {
-    margin: 0 auto 24px;
+    margin: 32px auto 24px;
     max-width: min(640px, 100%);
+    min-width: 0;
+    overflow: hidden;
+    width: 100%;
   }
 
   .home-mark {
@@ -1490,13 +1502,18 @@ body,
    * (`grid-template-columns` flips to `1fr` at max-width: 680px below,
    * where we drop aspect-ratio back to a fixed height — see that
    * rule). Above 680px and below 760px the panel keeps both columns,
-   * so the aspect-ratio works well. */
+   * so the aspect-ratio works well. Width pinned to the parent
+   * container so the panel can't blow past the viewport on small
+   * screens. */
   .thread-panel {
     aspect-ratio: 5 / 4;
     flex-shrink: 0;
     height: auto !important;
     max-height: none !important;
+    max-width: 100%;
     min-height: 0 !important;
+    min-width: 0;
+    width: 100%;
   }
 }
 
@@ -1505,14 +1522,19 @@ body,
    * above the detail pane). Drop the aspect-ratio cascaded from the
    * wider rules and pin to a fixed height since the inner grid no
    * longer has two columns — aspect-ratio at this width would either
-   * shrink the panel uselessly or stretch it past the viewport. */
+   * shrink the panel uselessly or stretch it past the viewport. Width
+   * stays at 100% with min-width: 0 so the panel collapses cleanly to
+   * narrow phone viewports without overflowing horizontally. */
   .thread-panel {
     aspect-ratio: auto;
     flex-shrink: 0;
     grid-template-columns: 1fr;
     height: 560px !important;
     max-height: 560px !important;
+    max-width: 100%;
     min-height: 0 !important;
+    min-width: 0;
+    width: 100%;
   }
 
   .thread-list {
