@@ -312,6 +312,21 @@ def _parse_str_list(
     return tuple(raw)
 
 
+def _parse_match_headers(entry: dict, *, name: str) -> tuple[str, ...]:
+    """Validate ``match_headers``; empty/missing yields ``()`` so other scan locations can stand alone."""
+    raw = entry.get("match_headers")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(
+        isinstance(item, str) and item for item in raw
+    ):
+        raise ValueError(
+            f"HTTP secret {name!r} has invalid 'match_headers' "
+            f"(expected an array of header names): {raw!r}"
+        )
+    return tuple(raw)
+
+
 def _parse_bool(entry: dict, key: str, *, name: str) -> bool:
     value = entry.get(key, False)
     if not isinstance(value, bool):
@@ -337,9 +352,7 @@ def _parse_replace_secret(
 ) -> HttpSecret:
     """Parse a replace-mode HTTP secret: a placeholder plus scan locations."""
     _reject_foreign_keys(entry, _INJECT_ONLY_KEYS, name=name, mode="replace")
-    match_headers = (
-        _parse_str_list(entry, "match_headers", name=name, noun="header names") or ()
-    )
+    match_headers = _parse_match_headers(entry, name=name)
     match_path = _parse_bool(entry, "match_path", name=name)
     match_query = _parse_bool(entry, "match_query", name=name)
     if not match_headers and not match_path and not match_query:

@@ -82,9 +82,23 @@ def test_parser_replace_secret_requires_a_scan_location() -> None:
         _parse_secret({"type": "header", "name": "API_KEY"})
 
 
-def test_parser_typed_header_rejects_empty_match_headers() -> None:
+def test_parser_typed_header_rejects_non_string_match_headers() -> None:
     with pytest.raises(ValueError, match="invalid 'match_headers'"):
-        _parse_secret({"type": "header", "name": "API_KEY", "match_headers": []})
+        _parse_secret({"type": "header", "name": "API_KEY", "match_headers": [1]})
+
+
+def test_parser_typed_header_allows_empty_match_headers_with_match_query() -> None:
+    secret = _parse_secret(
+        {
+            "type": "header",
+            "name": "API_KEY",
+            "match_headers": [],
+            "match_query": True,
+        }
+    )
+    assert isinstance(secret, HttpSecret)
+    assert secret.match_headers == ()
+    assert secret.match_query is True
 
 
 def test_parser_replace_mode_rejects_inject_keys() -> None:
