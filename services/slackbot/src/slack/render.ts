@@ -1,15 +1,43 @@
-import type { AnyBlock, AnyChunk, MarkdownBlock, RichTextBlock } from '@slack/types'
+import type { AnyBlock, AnyChunk, ContextBlock, MarkdownBlock, RichTextBlock } from '@slack/types'
 import { slackReplyLimits } from '../constants'
 
-const MAX_BLOCKS = 50
+const MAX_BLOCKS = slackReplyLimits.message.maxBlocks
 const MAX_MARKDOWN_CHARS = slackReplyLimits.stream.markdownChunkChars
-const MAX_FALLBACK_CHARS = slackReplyLimits.text.maxUntruncatedChars
+const MAX_FALLBACK_CHARS = slackReplyLimits.text.maxFallbackChars
 const MAX_STREAM_CHUNK_CHARS = 4_000
 
 export type StatusMetadata = {
   title?: string
   status?: string
   fields?: Record<string, string | number | boolean | null | undefined>
+}
+
+export function blockquoteMarkdown(text: string): string {
+  return text
+    .split('\n')
+    .map(line => `> ${line}`)
+    .join('\n')
+}
+
+export function composedAssistantStreamMarkdown(commentary: string, answer: string): string {
+  const parts: string[] = []
+  const trimmedCommentary = commentary.trim()
+  const trimmedAnswer = answer.trim()
+  if (trimmedCommentary) parts.push(blockquoteMarkdown(trimmedCommentary))
+  if (trimmedAnswer) parts.push(trimmedAnswer)
+  return parts.join('\n\n')
+}
+
+export function thinkingContextBlock(commentary: string): ContextBlock | null {
+  const trimmed = commentary.trim()
+  if (!trimmed) return null
+  const maxChars = slackReplyLimits.message.thinkingContextChars
+  const body =
+    trimmed.length > maxChars ? `${trimmed.slice(0, maxChars - 13)}\n// truncated` : trimmed
+  return {
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: `*Thinking*\n${body}` }]
+  }
 }
 
 export function renderMarkdownBlocks(markdown: string): MarkdownBlock[] {

@@ -19,10 +19,12 @@ api:
   executionWorkerEnabled: true
   egressDiscovery:
     enabled: false
+  extraEnv:
+    EXECUTION_WORKER_CONCURRENCY: "4"
+    EXECUTION_RESERVED_USER_SLOTS: "2"
 
 laminar:
   enabled: true
 
 ironProxy:
-  manager:
-    secretSource: onepassword
+  secretSource: env

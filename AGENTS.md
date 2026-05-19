@@ -655,3 +655,21 @@ kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST "http://lo
 kubectl get pods -n centaur -l centaur-agent=true
 kubectl exec -n centaur <sandbox-pod> curl -s http://api:8000/health
 ```
+
+## Learned User Preferences
+
+- Add learned bullets to `AGENTS.md` only for critical, recurring repo behavior—not one-off task context or speculative observations.
+- For PR descriptions and similar writeups: concise prose by default; skip `## Summary`, `## Test plan`, and similar scaffolding unless explicitly requested.
+- Do not run Python scripts to verify changes unless explicitly asked; consult before installing dependencies when executing something.
+- Prefer `uv run` / `uv run python` over bare `python3`; use uv’s direct Git/dependency install paths instead of `uv pip install` when adding packages.
+- Answer questions and pushback directly—avoid defensive framing (e.g. “honest answer”).
+- On `/review`: report findings by severity; do not change code, run commands, or execute tests unless explicitly asked.
+- Avoid adding new source files that only hold a couple of small helpers—extend an existing module unless separation is clearly warranted.
+
+## Learned Workspace Facts
+
+- In API, secrets, and firewall containers, `centaur_sdk` is imported from the copied source tree under `/app`, not from an installed wheel—standalone `uv run` scripts are where packaging gaps show up.
+- Slackbot direction: stateless Slack decode/render/send layer (Bolt `Assistant` for streaming and plan UI); durable agent/control-plane logic stays in `services/api`. Do not treat legacy slackbot v1/v2 or Centaur handoff logic in slackbot as reference designs.
+- Slack Block Kit output should use `markdown` / `rich_text` blocks, not `mrkdwn`; reuse types from `@slack/types` instead of redeclaring Slack event shapes.
+- When agent/tool SSE test fixtures embed shell commands (e.g. `python3` / `uv run`), update fixture command strings when invocation style changes repo-wide.
+- Debug a Slack agent thread locally with `just slack-thread-logs <slack-message-url> [since]` (VictoriaLogs; default `since` is `24h`).

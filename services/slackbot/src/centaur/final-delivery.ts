@@ -122,12 +122,7 @@ function targetFromDelivery(delivery: any): {
   return {}
 }
 
-async function centaur(
-  config: AppConfig,
-  path: string,
-  body: unknown,
-  trace?: any
-): Promise<any> {
+async function centaur(config: AppConfig, path: string, body: unknown, trace?: any): Promise<any> {
   const apiKey = centaurApiKey(config)
   const traceHeaders = centaurTraceHeaders(trace)
   const response = await fetch(new URL(path, config.CENTAUR_API_URL), {

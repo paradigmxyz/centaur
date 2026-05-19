@@ -100,9 +100,7 @@ describe('normalizeSlackEnvelope', () => {
       expect(capturedInit?.headers).toEqual({ Authorization: 'Bearer xoxb-test-token' })
       const filePart = normalized?.parts[1]
       if (!filePart || filePart.type === 'text') throw new Error('expected binary part')
-      expect(filePart.source.data).toBe(
-        Buffer.from(new Uint8Array([1, 2, 3])).toString('base64')
-      )
+      expect(filePart.source.data).toBe(Buffer.from(new Uint8Array([1, 2, 3])).toString('base64'))
     } finally {
       globalThis.fetch = originalFetch
     }

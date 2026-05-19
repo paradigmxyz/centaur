@@ -185,6 +185,14 @@ function taskBodyToPlain(
   )
 }
 
+export function clipLines(value: string, maxLines: number): string {
+  if (maxLines <= 0) return ''
+  const lines = value.split('\n')
+  if (lines.length <= maxLines) return value
+  if (maxLines === 1) return '// truncated'
+  return [...lines.slice(0, maxLines - 1), '// truncated'].join('\n')
+}
+
 function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value
 }

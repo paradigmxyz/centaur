@@ -2335,6 +2335,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     started_at = claimed_at or row.get("created_at")
     first_token_at: dt.datetime | None = None
     slackbot_session_id = str(execution_metadata.get("slackbot_agent_session_id") or "")
+    slackbot_forward_live = True
     slackbot_text_sent = False
     slackbot_done = False
     harness_thread_id = ""
@@ -2398,12 +2399,15 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         if user_id:
             record_execution_by_user(user_id, harness, status)
         nonlocal slackbot_session_id, slackbot_text_sent, slackbot_done
-        if slackbot_session_id and not slackbot_done:
+        finalize_session_id = slackbot_session_id or str(
+            execution_metadata.get("slackbot_agent_session_id") or ""
+        )
+        if finalize_session_id and not slackbot_done:
             try:
                 if result_text.strip() and not slackbot_text_sent:
-                    await slackbot_client.session_text(slackbot_session_id, result_text)
+                    await slackbot_client.session_text(finalize_session_id, result_text)
                     slackbot_text_sent = True
-                await slackbot_client.session_done(slackbot_session_id, harness_thread_id or None)
+                await slackbot_client.session_done(finalize_session_id, harness_thread_id or None)
                 slackbot_done = True
             except Exception:
                 log.warning(
@@ -2543,7 +2547,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 extracted = extract_result(engine, canonical_event)
                 if extracted:
                     latest_terminal_result_text = extracted
-            if slackbot_session_id:
+            if slackbot_session_id and slackbot_forward_live:
                 slack_events = canonical_events or [payload]
                 for slack_event in slack_events:
                     if harness_thread_id and isinstance(slack_event, dict):
@@ -2561,7 +2565,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                             execution_id,
                             "harness_event_failed",
                         )
-                        slackbot_session_id = ""
+                        slackbot_forward_live = False
                         break
                     if isinstance(harness_result, dict):
                         harness_thread_id = str(harness_result.get("threadId") or harness_thread_id)

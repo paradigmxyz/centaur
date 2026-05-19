@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { Laminar } from '@lmnr-ai/lmnr'
-import type { LaminarSpanContext } from '@lmnr-ai/lmnr'
+import { Laminar, type LaminarSpanContext } from '@lmnr-ai/lmnr'
 
 let initialized = false
 let unavailable = false
@@ -62,10 +61,7 @@ function initializeLaminar(): boolean {
       metadata: {
         service: 'slackbot',
         environment:
-          process.env.CENTAUR_ENVIRONMENT ||
-          process.env.DEPLOY_ENV ||
-          process.env.NODE_ENV ||
-          'dev'
+          process.env.CENTAUR_ENVIRONMENT || process.env.DEPLOY_ENV || process.env.NODE_ENV || 'dev'
       },
       instrumentModules: {}
     })
@@ -87,9 +83,7 @@ function optionalPort(name: string): number | undefined {
 
 function normalizeUuid(value: unknown): string | undefined {
   const raw = String(value ?? '').trim()
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    raw
-  )
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw)
     ? raw.toLowerCase()
     : undefined
 }

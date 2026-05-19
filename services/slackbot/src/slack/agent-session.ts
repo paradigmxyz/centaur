@@ -13,7 +13,9 @@ import {
   type StreamTask,
   type StreamTaskStatus
 } from './streaming'
-import { renderMarkdownBlocks } from './render'
+import { buildFinalFallbackText, sanitizeFinalMessagePayload } from './final-message'
+import { renderMarkdownBlocks, thinkingContextBlock } from './render'
+import { clipLines } from './streaming'
 
 type Segment = {
   id: string
@@ -37,6 +39,8 @@ type AgentSessionState = {
   recipientUserId: string
   title: string
   footer?: string
+  finalCommentaryMarkdown?: string
+  finalAnswerMarkdown?: string
   done: boolean
   statusCleared: boolean
   segments: Segment[]
@@ -64,10 +68,14 @@ export type StepOptions = {
 
 export type TextOptions = {
   flush?: boolean
+  /** When true, stream pending assistant text immediately instead of waiting for heuristics. */
+  force?: boolean
 }
 
 export type DoneOptions = {
   streamFinalUpdates?: boolean
+  commentaryMarkdown?: string
+  answerMarkdown?: string
 }
 
 const sessions = new Map<string, AgentSessionState>()
@@ -110,11 +118,7 @@ export class AgentSessionRenderer {
     await this.queueText(state, segment, markdown)
   }
 
-  async textDelta(
-    sessionId: string,
-    markdownDelta: string,
-    opts: TextOptions = {}
-  ): Promise<void> {
+  async textDelta(sessionId: string, markdownDelta: string, opts: TextOptions = {}): Promise<void> {
     if (!markdownDelta) return
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
@@ -129,7 +133,7 @@ export class AgentSessionRenderer {
       )
       return
     }
-    await this.queueText(state, segment, markdownDelta)
+    await this.queueText(state, segment, markdownDelta, { force: opts.force })
   }
 
   async step(sessionId: string, input: StepInput, opts: StepOptions = {}): Promise<void> {
@@ -161,6 +165,8 @@ export class AgentSessionRenderer {
     const state = requireSession(sessionId)
     state.done = true
     state.footer = footer
+    state.finalCommentaryMarkdown = opts.commentaryMarkdown
+    state.finalAnswerMarkdown = opts.answerMarkdown
     const streamFinalUpdates = opts.streamFinalUpdates ?? true
     let closed = false
 
@@ -207,12 +213,19 @@ export class AgentSessionRenderer {
     if (!segment.streamTs) return
     const originalTasks = finalTaskSnapshot(segment)
     const tasks = compactFinalTasks(originalTasks)
-    const streamedText = finalMarkdownForBlocks(segment.streamedText, tasks)
-    const blocks = [
-      ...(tasks.length ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)] : []),
-      ...(streamedText ? renderMarkdownBlocks(streamedText) : []),
+    const commentaryMarkdown = state.finalCommentaryMarkdown?.trim() ?? ''
+    const answerSource =
+      state.finalAnswerMarkdown?.trim() || segment.streamedText.trim() || segment.textParts.join('')
+    const answerMarkdown = finalMarkdownForBlocks(answerSource, tasks)
+    const thinkingBlock = thinkingContextBlock(commentaryMarkdown)
+    const blocks = sanitizeFinalMessagePayload([
+      ...(tasks.length
+        ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
+        : []),
+      ...(thinkingBlock ? [thinkingBlock] : []),
+      ...(answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : []),
       ...(footer ? footerBlocks(footer) : [])
-    ] as AnyBlock[]
+    ] as AnyBlock[])
     const stopResponse = await this.client.chat.stopStream({
       channel: state.channel,
       ts: segment.streamTs
@@ -222,7 +235,12 @@ export class AgentSessionRenderer {
       const updateResponse = await this.client.chat.update({
         channel: state.channel,
         ts: segment.streamTs,
-        text: fallbackTextForBlocks(state.title, segment.streamedText, footer),
+        text: buildFinalFallbackText({
+          title: state.title,
+          commentaryMarkdown,
+          answerMarkdown,
+          footer
+        }),
         blocks
       })
       if (!updateResponse.ok) throw new Error(updateResponse.error ?? 'chat.update failed')
@@ -253,14 +271,15 @@ export class AgentSessionRenderer {
   private async queueText(
     state: AgentSessionState,
     segment: Segment,
-    markdown: string
+    markdown: string,
+    opts: { force?: boolean } = {}
   ): Promise<void> {
     raiseStreamError(segment)
     segment.pendingText += normalizeDeltaBoundary(
       segment.streamedText + segment.pendingText,
       markdown
     )
-    if (segment.pendingText.length >= TEXT_FLUSH_CHARS) {
+    if (opts.force || segment.pendingText.length >= TEXT_FLUSH_CHARS) {
       await this.flushText(state, segment, { force: true })
       return
     }
@@ -329,7 +348,10 @@ export class AgentSessionRenderer {
     if (!markdown) return
     segment.pendingText = ''
     segment.streamedText += markdown
-    await this.streamChunks(state, segment, [...this.planPrefix(state, segment), markdownChunk(markdown)])
+    await this.streamChunks(state, segment, [
+      ...this.planPrefix(state, segment),
+      markdownChunk(markdown)
+    ])
   }
 
   private async flushTask(
@@ -407,10 +429,11 @@ function shouldStreamTaskUpdate(segment: Segment, taskId: string): boolean {
 function planTitle(title: string, tasks: StreamTask[]): string {
   if (!tasks.length) return title
   const total = tasks.length
-  const complete = tasks.filter(task => task.status === 'complete').length
-  const failed = tasks.filter(task => task.status === 'error').length
-  if (complete + failed === total) return `${title} (${total}/${total})`
-  return `${title} (${complete + failed}/${total})`
+  const finished = tasks.filter(
+    task => task.status === 'complete' || task.status === 'error'
+  ).length
+  if (finished === total) return `${title} (${total}/${total})`
+  return `${title} (${finished}/${total})`
 }
 
 function compactFinalTasks(tasks: StreamTask[]): StreamTask[] {
@@ -424,11 +447,11 @@ function compactFinalTasks(tasks: StreamTask[]): StreamTask[] {
   if (omitted <= 0) return visible
   visible.push({
     id: 'codex-execution-timeline-omitted',
-    title: `${omitted} additional command${omitted === 1 ? '' : 's'} omitted from Slack preview`,
+    title: `${omitted} more command${omitted === 1 ? '' : 's'} not shown in preview (${visible.length} of ${tasks.length})`,
     status: 'complete',
     details: richText([
       preformatted(
-        'Additional command details were omitted to keep the Slack plan under message size limits.',
+        `This reply ran ${tasks.length} commands. The Slack plan preview shows the first ${visible.length}; raise slackReplyLimits.finalPlan.maxTasks if you need more visible rows.`,
         'text'
       )
     ])
@@ -443,7 +466,13 @@ function compactTaskBody(body: StreamTask['details'], maxLines: number): StreamT
     .map(element =>
       element.elements
         .map(inline =>
-          'text' in inline ? inline.text : 'url' in inline ? inline.url : 'user_id' in inline ? `<@${inline.user_id}>` : ''
+          'text' in inline
+            ? inline.text
+            : 'url' in inline
+              ? inline.url
+              : 'user_id' in inline
+                ? `<@${inline.user_id}>`
+                : ''
         )
         .join('')
     )
@@ -466,7 +495,12 @@ function finalMarkdownForBlocks(markdown: string, tasks: StreamTask[]): string {
 
 function taskVisibleChars(tasks: StreamTask[]): number {
   return tasks.reduce((total, task) => {
-    return total + task.title.length + taskBodyVisibleChars(task.details) + taskBodyVisibleChars(task.output)
+    return (
+      total +
+      task.title.length +
+      taskBodyVisibleChars(task.details) +
+      taskBodyVisibleChars(task.output)
+    )
   }, 0)
 }
 
@@ -490,23 +524,6 @@ function clipText(value: string, maxChars: number): string {
   if (maxChars <= 0) return ''
   if (maxChars <= 13) return value.length > maxChars ? value.slice(0, maxChars) : value
   return value.length > maxChars ? `${value.slice(0, maxChars - 13)}\n// truncated` : value
-}
-
-function clipLines(value: string, maxLines: number): string {
-  if (maxLines <= 0) return ''
-  const lines = value.split('\n')
-  if (lines.length <= maxLines) return value
-  if (maxLines === 1) return '// truncated'
-  return [...lines.slice(0, maxLines - 1), '// truncated'].join('\n')
-}
-
-function fallbackTextForBlocks(title: string, text: string, footer?: string): string {
-  return (
-    [title, text, footer]
-      .filter(Boolean)
-      .join('\n')
-      .slice(0, slackReplyLimits.text.maxUntruncatedChars) || title
-  )
 }
 
 function currentSegment(state: AgentSessionState): Segment {

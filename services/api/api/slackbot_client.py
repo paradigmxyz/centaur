@@ -21,13 +21,19 @@ def enabled() -> bool:
     return bool(_base_url() and _api_key())
 
 
-async def post(path: str, body: dict[str, Any]) -> dict[str, Any] | None:
+async def post(
+    path: str,
+    body: dict[str, Any],
+    *,
+    timeout: httpx.Timeout | None = None,
+) -> dict[str, Any] | None:
     base_url = _base_url()
     api_key = _api_key()
     if not base_url or not api_key:
         return None
+    request_timeout = timeout or httpx.Timeout(8.0, connect=2.0)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=2.0)) as client:
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.post(
                 f"{base_url}{path}",
                 headers={
@@ -152,7 +158,11 @@ async def session_done(session_id: str | None, thread_id: str | None = None) -> 
 async def harness_event(session_id: str | None, event: dict[str, Any]) -> dict[str, Any] | None:
     if not session_id:
         return None
-    return await post(f"/api/slack/agent-sessions/{session_id}/harness-event", {"event": event})
+    return await post(
+        f"/api/slack/agent-sessions/{session_id}/harness-event",
+        {"event": event},
+        timeout=httpx.Timeout(60.0, connect=2.0),
+    )
 
 
 async def set_status(delivery: dict[str, Any], status: str) -> None:
