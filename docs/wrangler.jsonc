@@ -2,6 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "centaur-docs",
   "compatibility_date": "2026-05-05",
+  "preview_urls": true,
   "routes": [
     {
       "pattern": "centaur.run",

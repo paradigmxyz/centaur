@@ -74,12 +74,19 @@ jobs:
       - name: Preview
         id: preview
         if: ${{ github.event_name == 'pull_request' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
-        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: ${{ matrix.worker.directory }}
-          command: versions upload
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PREVIEW_ALIAS: pr-${{ github.event.pull_request.number }}
+        run: |
+          set -o pipefail
+          npx wrangler versions upload --preview-alias "$PREVIEW_ALIAS" 2>&1 | tee "$RUNNER_TEMP/wrangler-preview.log"
+          deployment_url="$(grep -Eo 'https://[^[:space:]]+workers.dev[^[:space:]]*' "$RUNNER_TEMP/wrangler-preview.log" | tail -n 1)"
+          if [ -z "$deployment_url" ]; then
+            echo "No Cloudflare preview URL found in Wrangler output." >&2
+            exit 1
+          fi
+          echo "deployment-url=$deployment_url" >> "$GITHUB_OUTPUT"
 
       - name: Publish preview summary
         if: ${{ github.event_name == 'pull_request' && steps.preview.outputs.deployment-url != '' }}
