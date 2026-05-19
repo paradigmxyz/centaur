@@ -380,10 +380,34 @@ body,
   }
 }
 
-.vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logoWrapper,
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo,
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logoWrapper {
+/*
+ * Hide ONLY the desktop topNav logo on landing — the hero already carries
+ * a large centaur mark above the headline, so the small lockup in the
+ * desktop topNav reads as a redundant duplicate.
+ *
+ * The mobile topNav, however, has no other branding affordance in view
+ * (the hero centaur sits below the fold once the compressed nav is
+ * stacked), so we keep its logo visible. We just need to push the
+ * hamburger menu trigger to the right edge so logo-left + menu-right
+ * reads as a normal mobile header.
+ */
+.vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logoWrapper {
   display: none !important;
+}
+
+/*
+ * Right-align the hamburger on the mobile landing nav. Vocs lays the
+ * mobile topNav out as a flex row: [logo group] [nav group] [search].
+ * On landing we hid the search button, so the menu trigger sits to the
+ * right of the logo — bump it to the far edge with margin-left: auto.
+ */
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav .vocs_MobileTopNav_menuTrigger {
+  margin-left: auto;
+}
+
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav {
+  align-items: center;
+  justify-content: space-between;
 }
 
 /*
