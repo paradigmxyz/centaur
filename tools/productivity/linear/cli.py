@@ -184,6 +184,7 @@ def create(
     team: str = typer.Option(..., "--team", "-t", help="Team key (e.g., ENG)"),
     description: str = typer.Option(None, "--description", "-d", help="Issue description"),
     assignee: str = typer.Option(None, "--assignee", "-a", help="Assignee name"),
+    due_date: str = typer.Option(None, "--due-date", help="Due date as YYYY-MM-DD"),
     priority: int = typer.Option(
         None, "--priority", "-p", help="Priority (0=none, 1=urgent, 2=high, 3=medium, 4=low)"
     ),
@@ -233,6 +234,7 @@ def create(
         team_id=team_match["id"],
         description=description,
         assignee_id=assignee_id,
+        due_date=due_date,
         priority=priority,
         parent_id=parent_id,
     )
@@ -247,6 +249,7 @@ def update(
     title: str = typer.Option(None, "--title", help="New title"),
     state: str = typer.Option(None, "--state", "-s", help="New state name"),
     assignee: str = typer.Option(None, "--assignee", "-a", help="Assignee name (or 'me')"),
+    due_date: str = typer.Option(None, "--due-date", help="Due date as YYYY-MM-DD"),
     priority: int = typer.Option(None, "--priority", "-p", help="Priority (0-4)"),
     project: str = typer.Option(None, "--project", help="Project name to add issue to"),
 ):
@@ -310,6 +313,7 @@ def update(
         title=title,
         state_id=state_id,
         assignee_id=assignee_id,
+        due_date=due_date,
         priority=priority,
         project_id=project_id,
     )

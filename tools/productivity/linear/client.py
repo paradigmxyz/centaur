@@ -103,6 +103,7 @@ class LinearClient:
                     project {{ id name }}
                     cycle {{ id name number }}
                     labels {{ nodes {{ id name color }} }}
+                    dueDate
                     createdAt
                     updatedAt
                     url
@@ -136,6 +137,7 @@ class LinearClient:
                 comments { nodes { id body user { name } createdAt } }
                 parent { id identifier title }
                 children { nodes { id identifier title state { name } } }
+                dueDate
                 createdAt
                 updatedAt
                 url
@@ -156,13 +158,18 @@ class LinearClient:
         project_id: str | None = None,
         cycle_id: str | None = None,
         parent_id: str | None = None,
+        due_date: str | None = None,
     ) -> dict[str, Any]:
-        """Create a new issue."""
+        """Create a new issue.
+
+        Args:
+            due_date: Due date as YYYY-MM-DD.
+        """
         mutation = """
         mutation IssueCreate($input: IssueCreateInput!) {
             issueCreate(input: $input) {
                 success
-                issue { id identifier title url }
+                issue { id identifier title dueDate url }
             }
         }
         """
@@ -183,6 +190,8 @@ class LinearClient:
             input_data["cycleId"] = cycle_id
         if parent_id:
             input_data["parentId"] = parent_id
+        if due_date:
+            input_data["dueDate"] = due_date
 
         result = self._query(mutation, {"input": input_data})
         return result.get("issueCreate", {}).get("issue", {})
@@ -196,13 +205,18 @@ class LinearClient:
         assignee_id: str | None = None,
         priority: int | None = None,
         project_id: str | None = None,
+        due_date: str | None = None,
     ) -> dict[str, Any]:
-        """Update an existing issue."""
+        """Update an existing issue.
+
+        Args:
+            due_date: Due date as YYYY-MM-DD.
+        """
         mutation = """
         mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
             issueUpdate(id: $id, input: $input) {
                 success
-                issue { id identifier title state { name } project { id name } url }
+                issue { id identifier title dueDate state { name } project { id name } url }
             }
         }
         """
@@ -219,6 +233,8 @@ class LinearClient:
             input_data["priority"] = priority
         if project_id:
             input_data["projectId"] = project_id
+        if due_date:
+            input_data["dueDate"] = due_date
 
         result = self._query(mutation, {"id": issue_id, "input": input_data})
         return result.get("issueUpdate", {}).get("issue", {})
@@ -368,6 +384,7 @@ class LinearClient:
                     state { name }
                     assignee { name }
                     team { key }
+                    dueDate
                     url
                 }
             }
