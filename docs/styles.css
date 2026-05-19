@@ -1,5 +1,5 @@
 :root {
-  --centaur-accent: #00e100;
+  --centaur-accent: #00E100;
   --centaur-accent-hover: #35f335;
   --centaur-accent-soft: rgba(0, 225, 0, 0.14);
   --centaur-bg: light-dark(#ffffff, #101012);
@@ -403,7 +403,7 @@ body,
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  font-family: var(--centaur-sans);
+  font-family: var(--centaur-serif);
   gap: 12px;
   justify-content: center;
   letter-spacing: 0;
@@ -417,9 +417,9 @@ body,
   background: rgba(255, 255, 255, 0.035);
   color: #f7f7f2;
   display: inline-flex;
-  font-family: var(--centaur-sans);
-  font-size: 1rem;
-  font-weight: 700;
+  font-family: var(--centaur-serif);
+  font-size: 0.875rem;
+  font-weight: 400;
   justify-content: center;
   line-height: 1;
   min-height: 48px;
@@ -452,9 +452,9 @@ body,
   border-radius: 8px;
   color: #f7f7f2;
   display: inline-flex;
-  font-family: var(--centaur-sans);
-  font-size: 1rem;
-  font-weight: 700;
+  font-family: var(--centaur-serif);
+  font-size: 0.875rem;
+  font-weight: 400;
   gap: 7px;
   line-height: 1;
   min-height: 48px;
@@ -463,7 +463,7 @@ body,
 
 .home-license strong {
   color: #ffffff;
-  font-weight: 750;
+  font-weight: 400;
 }
 
 /* Single-row "Built with love by <Paradigm> <Tempo>" — keeps the three

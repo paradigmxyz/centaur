@@ -108,8 +108,8 @@ export default defineConfig({
   sidebar,
   theme: {
     accentColor: {
-      light: '#00e100',
-      dark: '#00e100',
+      light: '#00E100',
+      dark: '#00E100',
     },
     colorScheme: 'dark',
     variables: {
