@@ -30,9 +30,10 @@ export default defineConfig({
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',
   },
-  // Body copy uses Amp's Sagittaire Text via the styles.css override. Code
-  // blocks stay on Geist Mono.
+  // Body copy uses Instrument Sans. Headings use Amp's Sagittaire Display via
+  // the styles.css override. Code blocks stay on Geist Mono.
   font: {
+    default: { google: 'Instrument Sans' },
     mono: { google: 'Geist Mono' },
   },
   ...(basePath ? { basePath } : {}),

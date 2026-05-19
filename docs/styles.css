@@ -8,6 +8,7 @@
   --centaur-muted: light-dark(#727278, #9b9ba1);
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
+  --centaur-sans: 'Instrument Sans', system-ui, sans-serif;
   --centaur-serif: 'Sagittaire Text', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Sagittaire Display', var(--centaur-serif);
 }
@@ -63,11 +64,11 @@
 }
 
 /*
- * Use the same serif family across docs copy and headings.
+ * Keep body/UI copy readable, and reserve Amp's serif treatment for headings.
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-serif);
+  font-family: var(--centaur-sans);
 }
 
 .vocs_Content h1,
