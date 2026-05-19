@@ -599,42 +599,20 @@ a.home-lockup-link {
 }
 
 .home-media-section {
-  margin-top: clamp(32px, 4dvh, 44px);
-}
-
-.home-media-grid {
-  display: grid;
-  gap: clamp(48px, 6dvh, 84px);
-  grid-template-columns: 1fr;
   margin: clamp(48px, 6dvh, 84px) auto 0;
   max-width: 1280px;
-  width: 100%;
+  text-align: center;
 }
 
-.home-media-grid .home-media-section {
-  margin: 0;
-  max-width: none;
-}
-
-.home-media-grid .home-overview-heading {
+.home-media-section .home-overview-heading {
   grid-template-columns: 1fr;
+  text-align: center;
 }
 
 .home-media-link {
-  align-items: center;
   color: inherit;
-  display: grid;
-  gap: clamp(36px, 5vw, 80px);
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  display: block;
   text-decoration: none;
-}
-
-.home-media-grid .home-media-section:nth-child(even) .home-media-link {
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
-}
-
-.home-media-grid .home-media-section:nth-child(even) .home-architecture-diagram {
-  order: -1;
 }
 
 .home-media-link:focus-visible {
@@ -646,9 +624,10 @@ a.home-lockup-link {
   border-color: rgba(255, 255, 255, 0.28);
 }
 
-.home-media-section .home-architecture-diagram {
-  margin: 0;
-  max-width: 100%;
+.home-media-section .home-architecture-diagram,
+.home-overview-visual .home-architecture-diagram {
+  margin-left: auto;
+  margin-right: auto;
   padding-top: 0;
 }
 
@@ -1463,25 +1442,13 @@ a.home-lockup-link {
     max-width: 980px;
   }
 
-  .home-media-grid {
-    gap: 28px;
+  .home-media-section {
     max-width: 720px;
-    text-align: center;
   }
 
-  .home-media-link {
-    gap: 28px;
-    grid-template-columns: 1fr;
-  }
-
-  .home-media-grid .home-media-section:nth-child(even) .home-architecture-diagram {
-    order: 0;
-  }
-
-  .home-media-section .home-architecture-diagram {
-    margin-inline: auto;
+  .home-media-section .home-architecture-diagram,
+  .home-overview-visual .home-architecture-diagram {
     max-width: 65vw;
-    width: 100%;
   }
 
   .home-overview-heading {

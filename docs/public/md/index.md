@@ -77,31 +77,23 @@ import ThreadPanel from '../components/ThreadPanel'
       </li>
     </ul>
 
+    <a className="home-media-link home-overview-visual" href="/extend/overlay" aria-label="Using an overlay">
+      <figure className="home-architecture-diagram">
+        <img src="/brand/containers.svg" alt="Centaur deployment layout: the open-source kernel wrapped by an organization overlay and a per-app repository." />
+      </figure>
+    </a>
+
   </section>
 
-  <div className="home-media-grid">
-    <section className="home-overview home-media-section" aria-labelledby="home-extensible-title">
-      <a className="home-media-link" href="/extend/overlay" aria-labelledby="home-extensible-title">
-        <div className="home-overview-heading">
-          <h2 id="home-extensible-title">Extensible by default</h2>
-        </div>
+  <section className="home-overview home-media-section" aria-labelledby="home-architecture-title">
+    <a className="home-media-link" href="/architecture" aria-labelledby="home-architecture-title">
+      <div className="home-overview-heading">
+        <h2 id="home-architecture-title">Modular Architecture</h2>
+      </div>
 
-        <figure className="home-architecture-diagram">
-          <img src="/brand/containers.svg" alt="Centaur deployment layout: the open-source kernel wrapped by an organization overlay and a per-app repository." />
-        </figure>
-      </a>
-    </section>
-
-    <section className="home-overview home-media-section" aria-labelledby="home-architecture-title">
-      <a className="home-media-link" href="/architecture" aria-labelledby="home-architecture-title">
-        <div className="home-overview-heading">
-          <h2 id="home-architecture-title">Modular Architecture</h2>
-        </div>
-
-        <figure className="home-architecture-diagram">
-          <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
-        </figure>
-      </a>
-    </section>
-  </div>
+      <figure className="home-architecture-diagram">
+        <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
+      </figure>
+    </a>
+  </section>
 </main>
