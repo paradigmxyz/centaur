@@ -166,7 +166,7 @@ body,
 
 .vocs_Content {
   color: #dfdfd8;
-  font-family: var(--centaur-sans);
+  font-family: var(--centaur-serif);
   font-size: 1rem;
   line-height: 1.5;
 }
