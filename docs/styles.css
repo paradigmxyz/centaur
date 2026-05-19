@@ -214,6 +214,38 @@
     padding-right: 0;
     width: auto;
   }
+
+  /*
+   * Landing topNav: swap the full lockup for the standalone centaur mark.
+   * Vocs's logoUrl is shared across every layout, so we hide the rendered
+   * `<img>` and paint the mark on the anchor's background instead. Docs
+   * routes keep the lockup img untouched.
+   */
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo > a {
+    background-image: url('/brand/mark-white.svg');
+    background-position: left center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: 32px;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo .vocs_NavLogo_logoImage {
+    display: none;
+  }
+}
+
+@media (max-width: 1080px) {
+  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo > a {
+    background-image: url('/brand/mark-white.svg');
+    background-position: left center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: 28px;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo .vocs_NavLogo_logoImage {
+    display: none;
+  }
 }
 
 /*
@@ -448,9 +480,9 @@ body,
   display: block;
   height: auto;
   margin-bottom: 24px;
-  opacity: 0.7;
+  opacity: 0.6;
   transition: opacity 140ms ease;
-  width: min(312px, 64vw);
+  width: min(250px, 51vw);
 }
 
 /* The .home-lockup img is wrapped in an anchor pointing at the GitHub
@@ -688,7 +720,8 @@ a.home-lockup-link:focus-visible .home-lockup {
 }
 
 .home-architecture-diagram {
-  margin: clamp(44px, 6dvh, 72px) 0 0;
+  margin: clamp(44px, 6dvh, 72px) auto 0;
+  max-width: min(60vw, 960px);
   padding-top: clamp(28px, 4dvh, 44px);
 }
 
@@ -701,6 +734,15 @@ a.home-lockup-link:focus-visible .home-lockup {
   height: auto;
   object-fit: contain;
   width: 100%;
+}
+
+/* On tablet / mobile the figure should fill the column instead of being
+ * capped at 60vw (which would leave a sliver of empty space on either
+ * side at narrow widths). */
+@media (max-width: 1080px) {
+  .home-architecture-diagram {
+    max-width: 100%;
+  }
 }
 
 .thread-panel {
@@ -1283,7 +1325,7 @@ a.home-lockup-link:focus-visible .home-lockup {
 
   .home-lockup {
     margin-bottom: 18px;
-    width: min(240px, 58vw);
+    width: min(192px, 46vw);
   }
 
   .home-hero h1 {
@@ -1351,7 +1393,7 @@ a.home-lockup-link:focus-visible .home-lockup {
   .home-lockup {
     margin-left: auto;
     margin-right: auto;
-    width: min(208px, 60vw);
+    width: min(166px, 48vw);
   }
 
   .home-hero h1 {
