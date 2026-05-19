@@ -21,8 +21,13 @@ export default defineConfig({
   title: 'Centaur',
   titleTemplate: '%s - Centaur',
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
-  // Browser-tab favicon: standalone mark only. The per-page head below
-  // selects black/white variants based on the browser color scheme.
+  // Browser-tab favicon: standalone centaur mark only (no background frame).
+  // Vocs emits a per-scheme <link rel="icon"> pair so the tab shows the
+  // black silhouette on light chrome and the white silhouette on dark.
+  iconUrl: {
+    light: '/brand/mark-black.svg',
+    dark: '/brand/mark-white.svg',
+  },
   // Top-left site logo: black-ink wordmark on light theme, white on dark.
   logoUrl: {
     light: '/brand/lockup-black.svg',
@@ -62,18 +67,6 @@ export default defineConfig({
   head({ path }) {
     return createElement(Fragment, null,
       createElement('link', { rel: 'canonical', href: canonicalHref(path) }),
-      createElement('link', {
-        rel: 'icon',
-        href: '/brand/mark-black.svg',
-        media: '(prefers-color-scheme: light)',
-        type: 'image/svg+xml',
-      }),
-      createElement('link', {
-        rel: 'icon',
-        href: '/brand/mark-white.svg',
-        media: '(prefers-color-scheme: dark)',
-        type: 'image/svg+xml',
-      }),
       createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
     )
   },
