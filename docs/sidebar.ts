@@ -25,6 +25,8 @@ export const sidebar = [
     items: [
       { text: 'Use 1Password', link: '/secrets/onepassword' },
       { text: 'Use Environment Variables', link: '/secrets/environment' },
+      { text: '🚧 Using with AWS KMS', link: '/secrets/aws-kms' },
+      { text: '🚧 Using with GCP Secret Manager', link: '/secrets/gcp-secret-manager' },
     ],
   },
   {
