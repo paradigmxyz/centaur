@@ -15,5 +15,5 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"

@@ -14,7 +14,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"
 hosts = ["news.google.com"]
 secrets = []

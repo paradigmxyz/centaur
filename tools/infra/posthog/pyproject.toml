@@ -18,7 +18,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"
 secrets = [
     {type = "http", name = "POSTHOG_API_KEY", match_headers = ["Authorization"], hosts = ["us.posthog.com"]},

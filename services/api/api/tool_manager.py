@@ -1116,7 +1116,7 @@ class ToolManager:
                     pyproject = tomllib.load(f)
 
                 project = pyproject.get("project", {})
-                tool_conf = pyproject.get("tool", {}).get("ai-v2", {})
+                tool_conf = pyproject.get("tool", {}).get("centaur", {})
 
                 name = tool_dir.name
                 # Tool-level ``hosts`` is the legacy fallback for secret entries
@@ -1212,7 +1212,7 @@ class ToolManager:
                     with open(tool_dir / "pyproject.toml", "rb") as f:
                         pyproject = tomllib.load(f)
                     project = pyproject.get("project", {})
-                    tool_conf = pyproject.get("tool", {}).get("ai-v2", {})
+                    tool_conf = pyproject.get("tool", {}).get("centaur", {})
                     if tool_conf.get("type") != "persona":
                         continue
                     personas.append((tool_dir, project, tool_conf))

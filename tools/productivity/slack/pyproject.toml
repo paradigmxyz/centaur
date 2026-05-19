@@ -22,7 +22,7 @@ build-backend = "hatchling.build"
 packages = ["."]
 
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"
 secrets = [
     {type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]},
