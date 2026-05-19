@@ -21,12 +21,10 @@ export default defineConfig({
   title: 'Centaur',
   titleTemplate: '%s - Centaur',
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
-  // Browser-tab favicon swaps with system theme via prefers-color-scheme so
-  // the icon stays readable on either browser chrome.
-  iconUrl: {
-    light: '/brand/mark-black.svg',
-    dark: '/brand/mark-white.svg',
-  },
+  // Browser-tab favicon: rounded-square centaur on a dark grey gradient,
+  // self-contained so it reads on both light and dark browser chrome at
+  // every favicon size (no separate light/dark variant required).
+  iconUrl: '/brand/slack-icon.svg',
   // Top-left site logo: black-ink wordmark on light theme, white on dark.
   logoUrl: {
     light: '/brand/lockup-black.svg',
