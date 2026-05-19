@@ -11,12 +11,14 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
-    "vocs": "https://pkg.pr.new/vocs@main",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "vocs": "https://pkg.pr.new/vocs@main"
   },
   "devDependencies": {
+    "@resvg/resvg-wasm": "^2.6.2",
     "fontverter": "^2.0.0",
+    "gray-matter": "^4.0.3",
     "wrangler": "^4.14.0"
   }
 }

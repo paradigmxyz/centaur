@@ -9,13 +9,8 @@
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
   --centaur-sans: 'PolySans Var', system-ui, sans-serif;
-  /* Perfectly Nineties is THE landing serif. Every selector that resolves
-   * through these vars now picks Perfectly Nineties (with humanist
-   * fallbacks). The older @font-face definitions below are still loaded
-   * so concurrent sibling work that references them by name doesn't
-   * break, but no selector here points at them anymore. */
-  --centaur-serif: 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
-  --centaur-display: 'Perfectly Nineties', var(--centaur-serif);
+  --centaur-serif: 'Sagittaire Text', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+  --centaur-display: 'Sagittaire Display', var(--centaur-serif);
   --centaur-manual-display: 'Perfectly Nineties', var(--centaur-serif);
 }
 
@@ -131,32 +126,41 @@
   font-display: swap;
 }
 
-/*
- * Header lockup: Vocs sizes the NavLogo image at 50% of the 56px anchor on
- * docs layouts (= 28px) and forces 32px on the landing layout, which makes
- * the lockup visibly shrink when you click from "/" into "/architecture".
- * Pin every layout to a single height so the wordmark stays the same on
- * both, and keep it short enough that it doesn't crowd the topNav's
- * bottom rule on tablet-width viewports.
- */
 .vocs_NavLogo_logoImage {
-  height: 26px !important;
+  height: 32px;
+}
+
+@media (min-width: 1081px) {
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTop {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_withLogo {
+    padding-left: 80px;
+    padding-right: 48px;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logoWrapper {
+    justify-content: flex-start;
+    left: 24px;
+    width: auto;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo {
+    padding-left: 0;
+    padding-right: 0;
+    width: auto;
+  }
 }
 
 /*
- * Type system split:
- *   - Body copy (docs paragraphs, lists, tables, captions, landing lede,
- *     buttons) → PolySans Var (--centaur-sans). Perfectly Nineties at
- *     body size and tight line-height was hard to read; humans skim the
- *     prose, the serif belongs to display copy only.
- *   - Display copy (hero h1, docs h1-h6, nav links) → Perfectly Nineties
- *     (--centaur-serif / --centaur-manual-display). Nav links stay on
- *     the serif by explicit override since body's default is now sans.
- *   - Code → mono (explicit per-selector).
+ * Mirror Amp manual typography: serif docs body copy, Perfectly Nineties
+ * headings, and explicit mono code.
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-sans);
+  font-family: var(--centaur-serif);
 }
 
 .centaur-home,
@@ -165,7 +169,7 @@ body,
 }
 
 .vocs_Content {
-  color: #dfdfd8;
+  color: #e8e8e1;
   font-family: var(--centaur-serif);
   font-size: 1rem;
   line-height: 1.5;
@@ -329,279 +333,12 @@ body,
   --shiki-dark: var(--centaur-accent) !important;
 }
 
-.vocs_DesktopTopNav,
-.vocs_MobileTopNav {
-  background: rgba(5, 5, 6, 0.88);
-  color: #f7f7f2;
-}
-
-.vocs_DesktopTopNav_curtain,
-.vocs_MobileTopNav_curtain {
-  background: #050506;
-}
-
-/*
- * Top-nav layout — landing only.
- *
- * The landing hero already carries a large centaur mark above the title,
- * so the topNav lockup is redundant on `/`. Hide it (desktop + mobile)
- * and right-align the remaining nav items via flex-end. Docs routes keep
- * Vocs's sidebar-driven default — the sidebar shows the lockup, the
- * topNav doesn't — so the landing-only `display: none` doesn't affect
- * them. The safety-net rule below also hides any rogue topNav logo on
- * non-landing layouts in case Vocs's defaults shift in a future release.
- *
- * Vocs's _withLogo padding offsets the topNav contents by half the page
- * gutter so they line up with the content_width column; on landing we
- * drop that gutter padding so the nav items hug the right page edge
- * instead of sitting indented.
- */
-/*
- * Vocs hides .vocs_DesktopTopNav at ≤1080px and shows .vocs_MobileTopNav
- * instead. Our flex override must sit inside the same desktop range,
- * otherwise the !important display: flex resurrects the desktop nav
- * underneath the mobile nav at narrower widths and the landing page
- * shows two stacked nav bars.
- */
-@media (min-width: 1081px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav {
-    display: flex !important;
-    align-items: center !important;
-    gap: 24px;
-    justify-content: flex-end !important;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav.vocs_DesktopTopNav_withLogo {
-    padding-left: var(--vocs-topNav_horizontalPadding);
-    padding-right: var(--vocs-topNav_horizontalPadding);
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_section:last-child {
-    align-items: center;
-    display: flex;
-    margin-left: auto;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_section:empty {
-    display: none;
-  }
-}
-
-/*
- * Narrow-desktop range (1081-1280px): Vocs defaults the nav-item gap to
- * `var(--vocs-space_20)` (~20px) and the four text labels + GH icon
- * read fine at >=1281px, but between 1081-1280 the right-aligned group
- * starts to clip on the right edge if the topNav's outer gutter padding
- * eats the last few pixels. Tighten the inter-item gap so all five
- * fit without truncation. Same effect could be had by shrinking the
- * font-size, but the labels are already small enough that a gap nudge
- * preserves type weight.
- */
-@media (min-width: 1081px) and (max-width: 1280px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav {
-    gap: 14px;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_NavigationMenu_list {
-    gap: 14px;
-  }
-}
-
-/*
- * Hide ONLY the desktop topNav logo on landing — the hero already carries
- * a large centaur mark above the headline, so the small lockup in the
- * desktop topNav reads as a redundant duplicate.
- *
- * The mobile topNav, however, has no other branding affordance in view
- * (the hero centaur sits below the fold once the compressed nav is
- * stacked), so we keep its logo visible. We just need to push the
- * hamburger menu trigger to the right edge so logo-left + menu-right
- * reads as a normal mobile header.
- */
-.vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logoWrapper {
-  display: none !important;
-}
-
-/*
- * Mobile / tablet landing nav layout.
- *
- * Actual Vocs DOM looks like this:
- *   .vocs_MobileTopNav (flex root)
- *   ├ .vocs_MobileTopNav_section            ← main row (logo + nav)
- *   │   ├ .vocs_MobileTopNav_group          ← logo wrapper
- *   │   └ .vocs_MobileTopNav_group          ← nav wrapper
- *   │       ├ .vocs_MobileTopNav_navigation         ← inline links (tablet)
- *   │       └ .vocs_MobileTopNav_navigation_compact ← hamburger (mobile)
- *   └ .vocs_MobileTopNav_section            ← search-button section
- *       └ .vocs_MobileTopNav_group / search button
- *
- * The second section (search) eats the right 50% of the topNav even when
- * the search button itself is hidden on landing, because we only hide
- * the button, not its wrapper section. That stranded empty section is
- * what was pushing the hamburger / inline links into the visual middle
- * of the row instead of the right edge. Hide the whole second section
- * on landing so the first section spans full width, then space-between
- * cleanly distributes its two groups as logo-left / nav-right. Pin the
- * last child group with `margin-left: auto` as a belt-and-braces guard
- * in case the section ever picks up a non-space-between layout.
- */
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_section {
-  align-items: center;
-  display: flex;
-  flex: 1;
-  gap: 16px;
-  justify-content: space-between;
-  width: 100%;
-}
-
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_section + .vocs_MobileTopNav_section {
-  display: none;
-}
-
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_section > .vocs_MobileTopNav_group:last-child {
-  margin-left: auto;
-}
-
-/*
- * Three-tier landing nav: Vocs ships a single 1080px switch (desktop
- * topNav ↔ mobile topNav with hamburger), but the landing layout wants
- * a middle tablet tier that still shows inline links — the viewport
- * has plenty of room for About / Quickstart / Deploying / Architecture
- * + GH between ~640px and 1080px, and burying them behind a hamburger
- * just adds a tap for no reason. Below 640px the row really is too
- * narrow for the inline links, so we keep the hamburger and hide the
- * inline group there.
- *
- * Rules below scope to the mobile topNav (the only one rendered at
- * <=1080px). On the landing layout:
- *   - 640..1080px: show the inline link group (`vocs_MobileTopNav_navigation`
- *     without the `_compact` suffix), hide the hamburger group
- *     (`vocs_MobileTopNav_navigation_compact`).
- *   - <640px: hide the inline link group, show the hamburger.
- *
- * The parent `.vocs_MobileTopNav_section` keeps space-between, so the
- * visible group ends up pinned to the right opposite the logo. The
- * hamburger wrapper also has `margin-left: auto` (above) which double-
- * insures its right alignment when the inline links are hidden.
- */
-@media (min-width: 640px) and (max-width: 1080px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation:not(.vocs_MobileTopNav_navigation_compact) {
-    display: flex;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation_compact {
-    display: none;
-  }
-}
-
-@media (max-width: 639.98px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation:not(.vocs_MobileTopNav_navigation_compact) {
-    display: none;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation_compact {
-    display: flex;
-  }
-}
-
-/*
- * Safety net: hide the topNav logo wrapper on every non-landing layout.
- * The lockup already lives in the sidebar there, and any rogue topNav
- * copy (e.g. if Vocs reflows on a future release) would render as a
- * duplicate Centaur lockup in the header on docs pages.
- */
-.vocs_DocsLayout:not([data-layout="landing"]) .vocs_DesktopTopNav_logoWrapper {
-  display: none !important;
-}
-
-.vocs_NavigationMenu_list {
-  align-items: center;
-}
-
-/*
- * Body defaults to sans (--centaur-sans / PolySans Var), but the nav
- * text labels stay on Perfectly Nineties (--centaur-serif) for the
- * editorial voice. Covers both the desktop topNav items (which carry
- * BOTH .vocs_DesktopTopNav_item and .vocs_NavigationMenu_link) and the
- * mobile topNav inline links (.vocs_NavigationMenu_link alone) plus
- * the hamburger drawer items (.vocs_MobileTopNav_navigationItem).
- */
-.vocs_DesktopTopNav_item,
-.vocs_NavigationMenu_link,
-.vocs_MobileTopNav_navigationItem {
-  font-family: var(--centaur-serif);
-}
-
-/*
- * Dim inactive nav items so the active route reads as the focal item.
- * The topNav has no "active" state for the GitHub icon, so it picks up
- * the same 0.7 baseline (see .topnav-github below) and lifts to 1 on
- * hover/focus.
- */
-.vocs_DesktopTopNav_item:not([data-active="true"]),
-.vocs_NavigationMenu_link:not([data-active="true"]) {
-  opacity: 0.7;
-  transition: opacity 120ms ease;
-}
-
-.vocs_DesktopTopNav_item:not([data-active="true"]):hover,
-.vocs_DesktopTopNav_item:not([data-active="true"]):focus-visible,
-.vocs_NavigationMenu_link:not([data-active="true"]):hover,
-.vocs_NavigationMenu_link:not([data-active="true"]):focus-visible {
-  opacity: 1;
-}
-
-/*
- * Inline GitHub icon at the end of the topNav. Matches sibling
- * .vocs_NavigationMenu_link items (height: 100%; align-items: center)
- * so it shares the row's vertical centerline. The 1px nudge accounts
- * for the GitHub mark's optical center sitting slightly above the SVG
- * box's geometric center, which otherwise reads a touch high next to
- * the text baseline.
- */
-.topnav-github {
-  align-items: center;
-  color: currentColor;
-  display: inline-flex;
-  height: 100%;
-  justify-content: center;
-  line-height: 1;
-  opacity: 0.7;
-  padding: 0;
-  position: relative;
-  text-decoration: none;
-  top: 1px;
-  transition: opacity 120ms ease;
-}
-
-.topnav-github:hover,
-.topnav-github:focus-visible {
-  opacity: 1;
-  outline: none;
-}
-
-.topnav-github svg {
-  display: block;
-  height: 18px;
-  width: 18px;
-}
-
-.vocs_DocsLayout[data-layout="landing"] .vocs_DesktopSearch_search,
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileSearch_searchButton {
-  display: none;
-}
-
 .vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_content {
   min-height: calc(100dvh - var(--vocs-topNav_height));
 }
 
-.vocs_DocsLayout[data-layout="landing"] .vocs_Footer {
-  bottom: 22px;
-  left: 0;
-  padding: 0;
-  position: fixed;
-  right: 0;
-  z-index: 2;
+.vocs_Footer {
+  display: none;
 }
 
 .centaur-home {
@@ -611,10 +348,10 @@ body,
   color: #f7f7f2;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   min-height: calc(100dvh - var(--vocs-topNav_height));
   overflow: hidden;
-  padding: clamp(40px, 5dvh, 80px) 24px clamp(48px, 7dvh, 96px);
+  padding: clamp(72px, 9dvh, 120px) 24px clamp(56px, 8dvh, 104px);
   position: relative;
 }
 
@@ -624,111 +361,109 @@ body,
 
 .home-hero {
   align-items: center;
-  display: grid;
-  gap: clamp(56px, 6vw, 104px);
-  grid-template-columns: minmax(500px, 0.9fr) minmax(520px, 1.05fr);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(54px, 6.5dvh, 84px);
   margin: 0 auto;
-  max-width: 1380px;
-  min-height: calc(100dvh - var(--vocs-topNav_height) - clamp(96px, 12dvh, 176px));
+  max-width: 1320px;
+  min-height: auto;
   position: relative;
-  text-align: left;
+  text-align: center;
   width: 100%;
   z-index: 1;
 }
 
 .home-copy {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  margin: 0 auto;
+  max-width: 1160px;
   min-width: 0;
 }
 
-/* Hero lockup sits above the title as a quiet stamp, not the primary
- * visual — half-opacity at modest size so it grounds the composition
- * without competing with the headline. The inline lockup only renders
- * on the desktop landing layout: at ≤1080px the Vocs MobileTopNav
- * already shows its own lockup, so showing this inline lockup AND
- * the topnav lockup would produce a duplicate. Hide this one below
- * 1081px (the same breakpoint where Vocs swaps DesktopTopNav for
- * MobileTopNav) so the topnav lockup is the only branding above
- * the hero copy on tablet / mobile. */
-.home-mark {
+.home-lockup {
   display: block;
   height: auto;
-  margin-bottom: clamp(24px, 3dvh, 42px);
-  opacity: 0.5;
-  width: clamp(168px, 12vw, 232px);
-}
-
-@media (max-width: 1080px) {
-  .home-mark {
-    display: none;
-  }
+  margin-bottom: 24px;
+  width: min(390px, 80vw);
 }
 
 .home-hero h1 {
   color: #f7f7f2;
-  /* Hero title + body copy share one editorial voice (Perfectly Nineties).
-   * Vocs's reset CSS applies `text-wrap: balance` globally to h1-h6, which
-   * shuffles the line breaks unevenly with display-serif metrics; reset to
-   * `wrap` so the hero falls naturally and gaps between lines stay even. */
-  font-family: var(--centaur-manual-display);
-  font-size: clamp(3.7rem, 4.5vw, 6.1rem);
+  font-size: 4.25rem;
   font-weight: 400;
   letter-spacing: 0.012em;
-  line-height: 0.95;
+  line-height: 1.02;
   margin: 0;
-  max-width: 790px;
-  text-wrap: wrap;
-}
-
-.home-lede {
-  color: #b8b8b0;
-  /* Body-sized lede uses PolySans (sans) — Perfectly Nineties at this
-   * size with this much copy was hard to skim. The hero h1 above keeps
-   * the serif for display impact. */
-  font-family: var(--centaur-serif);
-  font-size: clamp(1.3rem, 1.4vw, 1.48rem);
-  font-weight: 400;
-  letter-spacing: 0.01em;
-  line-height: 1.58;
-  margin: clamp(24px, 3dvh, 36px) 0 0;
-  max-width: 680px;
+  max-width: 980px;
 }
 
 .home-actions {
+  align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  justify-content: flex-start;
-  margin-top: 30px;
+  font-family: var(--centaur-sans);
+  gap: 12px;
+  justify-content: center;
+  letter-spacing: 0;
+  margin-top: 34px;
 }
 
-.home-button {
+.centaur-home .home-button {
   align-items: center;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
   color: #f7f7f2;
   display: inline-flex;
-  font-size: 0.95rem;
-  font-weight: 550;
-  min-height: 42px;
-  padding: 0 15px;
+  font-family: var(--centaur-sans);
+  font-size: 1rem;
+  font-weight: 700;
+  justify-content: center;
+  line-height: 1;
+  min-height: 48px;
+  padding: 0 20px;
   text-decoration: none;
   transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease;
 }
 
-.home-button:hover {
+.centaur-home .home-button:hover {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.28);
 }
 
-.home-button-primary {
+.centaur-home .home-button-primary {
   background: var(--centaur-accent);
   border-color: var(--centaur-accent);
-  color: #ffffff;
+  color: #050506;
 }
 
-.home-button-primary:hover {
+.centaur-home .home-button-primary:hover {
   background: var(--centaur-accent-hover);
   border-color: var(--centaur-accent-hover);
+  color: #050506;
+}
+
+.home-license {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  color: #f7f7f2;
+  display: inline-flex;
+  font-family: var(--centaur-sans);
+  font-size: 1rem;
+  font-weight: 700;
+  gap: 7px;
+  line-height: 1;
+  min-height: 48px;
+  padding: 0 16px;
+}
+
+.home-license strong {
+  color: #ffffff;
+  font-weight: 750;
 }
 
 /* Single-row "Built with love by <Paradigm> <Tempo>" — keeps the three
@@ -739,19 +474,14 @@ body,
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
-  margin-top: 46px;
+  justify-content: center;
+  margin-top: 52px;
 }
 
-/* Eyebrow label: small-caps mono so it reads as a tag, not a sentence.
- * Geist Mono is the project's mono face (configured via vocs `font.mono`)
- * and is exposed through --vocs-fontFamily_mono with system fallbacks. */
 .home-built-with > span {
   color: #8f8f88;
-  font-family: var(--vocs-fontFamily_mono);
-  font-size: 0.78rem;
-  font-weight: 400;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 0.96rem;
+  font-weight: 650;
 }
 
 .home-logo-row {
@@ -759,7 +489,7 @@ body,
   display: inline-flex;
   flex-wrap: wrap;
   gap: 18px;
-  justify-content: flex-start;
+  justify-content: center;
 }
 
 .home-brand {
@@ -772,21 +502,101 @@ body,
 .home-brand img {
   display: block;
   filter: invert(1);
-  height: 44px;
-  max-width: min(38vw, 220px);
+  height: 50px;
+  max-width: min(38vw, 244px);
   object-fit: contain;
 }
 
 /* Tempo's wordmark sits taller per em than Paradigm's — pull it down so the
  * two read at the same optical weight. */
 .home-brand-tempo img {
-  height: 28px;
-  max-width: min(30vw, 160px);
+  height: 32px;
+  max-width: min(30vw, 180px);
 }
 
 .home-thread-demo {
+  margin: 0 auto;
+  max-width: 1280px;
   min-width: 0;
   width: 100%;
+}
+
+.home-overview {
+  margin: clamp(76px, 9dvh, 128px) auto 0;
+  max-width: 1280px;
+  text-align: left;
+  width: 100%;
+}
+
+.home-overview-heading {
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(220px, 0.38fr) minmax(0, 1fr);
+  padding-top: 34px;
+}
+
+.home-overview h2 {
+  color: #f7f7f2;
+  font-family: var(--centaur-display);
+  font-size: 3rem;
+  font-weight: 400;
+  line-height: 1;
+  margin: 0;
+}
+
+.home-overview-heading p {
+  color: #edede7;
+  font-size: 1.22rem;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 780px;
+}
+
+.home-overview-list {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  list-style: none;
+  margin: 38px 0 0;
+  padding: 0;
+}
+
+.home-overview-list li {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  display: grid;
+  gap: 8px;
+  padding: 22px 28px 24px 24px;
+  position: relative;
+}
+
+.home-overview-list li:nth-child(odd) {
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.home-overview-list li::before {
+  background: var(--centaur-accent);
+  border-radius: 50%;
+  content: "";
+  height: 7px;
+  left: 0;
+  position: absolute;
+  top: 30px;
+  width: 7px;
+}
+
+.home-overview-list strong {
+  color: #ffffff;
+  font-size: 1.06rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.home-overview-list span {
+  color: #e0e0d8;
+  font-size: 1rem;
+  line-height: 1.5;
 }
 
 .thread-panel {
@@ -808,7 +618,7 @@ body,
   display: grid;
   font-family: Slack-Lato, Slack-Fractions, appleLogo, Lato, Arial, sans-serif;
   grid-template-columns: minmax(136px, 168px) minmax(0, 1fr);
-  height: min(760px, calc(100dvh - 160px));
+  height: min(760px, 74dvh);
   min-height: 640px;
   overflow: hidden;
   text-align: left;
@@ -847,6 +657,7 @@ body,
   background: transparent;
   border: 0;
   border-bottom: 1px solid var(--thread-border);
+  border-left: 2px solid transparent;
   color: inherit;
   cursor: pointer;
   display: block;
@@ -861,18 +672,9 @@ body,
   background: var(--thread-hover);
 }
 
-/* Active row's green accent sits on the RIGHT edge of the row in the
- * two-column desktop layout, reading as a vertical rail that lines up
- * with the thread-list column's own right border. Padding-right drops
- * by 2px to absorb the new 2px accent border so row contents stay
- * aligned with inactive rows. The inactive 1px gray border-bottom is
- * left intact (we no longer override it green) so the inter-row
- * separator carries across the whole list. The stacked layout at
- * max-width: 680px flips this back to a bottom rail (see below). */
 .thread-list-item-active {
   background: var(--thread-panel);
-  border-right: 2px solid var(--thread-accent);
-  padding-right: 8px;
+  border-left-color: var(--thread-accent);
 }
 
 .thread-list-channel-row {
@@ -1350,63 +1152,34 @@ body,
 }
 
 @media (min-width: 761px) and (max-aspect-ratio: 4 / 3) {
-  /* Tablet / tall portrait: hero collapses to a single column. Grow the
-   * bottom padding so the built-with row sits well above the viewport
-   * floor with real scroll room beneath it, and let the hero grow past
-   * the fold rather than locking to exactly one viewport height. */
   .centaur-home {
-    justify-content: flex-start;
-    padding: clamp(32px, 4dvh, 56px) 28px clamp(120px, 14vh, 160px);
+    justify-content: center;
+    padding: clamp(32px, 4dvh, 56px) 28px;
   }
 
-  /* Zero the parent gap and let the demo's own bottom margin (24px)
-   * carry the spacing between the demo and the headline. Otherwise
-   * the parent gap + demo margin-bottom stack into a huge dead band
-   * between the demo and the hero copy. */
   .home-hero {
     display: flex;
     flex-direction: column;
-    gap: 0;
+    gap: clamp(28px, 4dvh, 44px);
     max-width: 980px;
-    min-height: auto;
+    min-height: calc(100dvh - var(--vocs-topNav_height) - clamp(64px, 8dvh, 112px));
     text-align: center;
-  }
-
-  .home-copy {
-    padding-bottom: clamp(80px, 12vh, 160px);
-  }
-
-  /* Demo container: cap width so the panel doesn't blow out edge-to-edge
-   * on tablet, center it, and give it a single 24px bottom margin so the
-   * headline sits ~24px below the demo (the parent gap is zeroed above
-   * so this margin is the only spacing). */
-  .home-thread-demo {
-    margin: 0 auto 24px;
-    max-width: min(640px, 100%);
-    order: 1;
   }
 
   .home-copy {
     align-items: center;
     display: flex;
     flex-direction: column;
-    order: 2;
   }
 
-  .home-mark {
+  .home-lockup {
     margin-bottom: 18px;
-    width: clamp(102px, 10.5vw, 138px);
+    width: min(300px, 72vw);
   }
 
   .home-hero h1 {
-    font-size: clamp(3.35rem, 7.2vw, 5rem);
+    font-size: 3rem;
     max-width: 780px;
-  }
-
-  .home-lede {
-    font-size: clamp(1.02rem, 1.8vw, 1.18rem);
-    margin-top: 22px;
-    max-width: 720px;
   }
 
   .home-actions {
@@ -1423,72 +1196,50 @@ body,
     justify-content: center;
   }
 
-  /* Square-ish 5:4 aspect-ratio so the panel reads as a contained
-   * preview tile rather than a stretched landscape strip. Drop the
-   * fixed height + max-height so aspect-ratio drives sizing (capped
-   * by the parent container's max-width: 640px above). The internal
-   * two-column thread-list / thread-detail grid keeps its desktop
-   * proportions at this width since we're still well above the
-   * single-column 680px breakpoint. */
   .thread-panel {
-    aspect-ratio: 5 / 4;
-    flex-shrink: 0;
     grid-template-columns: minmax(138px, 180px) minmax(0, 1fr);
-    height: auto !important;
-    max-height: none;
-    min-height: 0 !important;
+    height: clamp(360px, 40dvh, 480px);
+    min-height: 0;
+  }
+
+  .home-overview {
+    max-width: 980px;
+  }
+
+  .home-overview-heading {
+    gap: 18px;
+    grid-template-columns: 1fr;
+    text-align: center;
+  }
+
+  .home-overview-heading p {
+    margin-left: auto;
+    margin-right: auto;
   }
 }
 
 @media (max-width: 760px) {
   .centaur-home {
     min-height: calc(100dvh - 64px);
+    padding: 54px 20px 40px;
   }
 
-  /* Same flow as the tablet branch above — zero the parent gap and
-   * let the demo's own 24px bottom margin carry the spacing to the
-   * headline. The demo also stays vertically ordered above the copy
-   * via its `order: 1` defined in the wider tablet rule (still in
-   * effect here since both rules apply at <760px portrait). */
   .home-hero {
     display: flex;
     flex-direction: column;
-    gap: 0;
+    gap: 36px;
     min-height: auto;
     text-align: center;
   }
 
-  /* Demo container at <=760px (mobile + tall-portrait): no `order`
-   * is set here so the demo follows the source order — home-copy
-   * (mark + h1 + lede + actions + BUILT BY) renders first, demo
-   * sits below. Give the demo a generous 32px top margin so it
-   * doesn't slam into the "BUILT BY Paradigm Tempo" row. Width
-   * pinned to 100% with a 640px cap so the panel can never overflow
-   * the viewport, and overflow: hidden clips any rogue inner content
-   * so any scrolling happens inside the panel's own scroll region,
-   * not horizontally on the page. */
-  .home-thread-demo {
-    margin: 32px auto 24px;
-    max-width: min(640px, 100%);
-    min-width: 0;
-    overflow: hidden;
-    width: 100%;
-  }
-
-  .home-mark {
+  .home-lockup {
     margin-left: auto;
     margin-right: auto;
-    width: 114px;
+    width: min(260px, 76vw);
   }
 
   .home-hero h1 {
-    font-size: 3.4rem;
-  }
-
-  .home-lede {
-    font-size: 1.05rem;
-    margin-left: auto;
-    margin-right: auto;
+    font-size: 2.55rem;
   }
 
   .home-actions,
@@ -1498,43 +1249,46 @@ body,
     justify-content: center;
   }
 
-  /* Square-ish 5:4 panel while the inner grid still has both columns
-   * (`grid-template-columns` flips to `1fr` at max-width: 680px below,
-   * where we drop aspect-ratio back to a fixed height — see that
-   * rule). Above 680px and below 760px the panel keeps both columns,
-   * so the aspect-ratio works well. Width pinned to the parent
-   * container so the panel can't blow past the viewport on small
-   * screens. */
   .thread-panel {
-    aspect-ratio: 5 / 4;
-    flex-shrink: 0;
-    height: auto !important;
-    max-height: none !important;
-    max-width: 100%;
-    min-height: 0 !important;
-    min-width: 0;
-    width: 100%;
+    height: 560px;
+    min-height: 520px;
+  }
+
+  .home-overview {
+    margin-top: 60px;
+  }
+
+  .home-overview-heading {
+    gap: 16px;
+    grid-template-columns: 1fr;
+    padding-top: 28px;
+    text-align: center;
+  }
+
+  .home-overview h2 {
+    font-size: 2.35rem;
+  }
+
+  .home-overview-heading p {
+    font-size: 1.05rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .home-overview-list {
+    grid-template-columns: 1fr;
+    margin-top: 30px;
+  }
+
+  .home-overview-list li:nth-child(odd) {
+    border-right: 0;
   }
 }
 
 @media (max-width: 680px) {
-  /* Single-column stacked panel (thread list as a horizontal tab strip
-   * above the detail pane). Drop the aspect-ratio cascaded from the
-   * wider rules and pin to a fixed height since the inner grid no
-   * longer has two columns — aspect-ratio at this width would either
-   * shrink the panel uselessly or stretch it past the viewport. Width
-   * stays at 100% with min-width: 0 so the panel collapses cleanly to
-   * narrow phone viewports without overflowing horizontally. */
   .thread-panel {
-    aspect-ratio: auto;
-    flex-shrink: 0;
     grid-template-columns: 1fr;
-    height: 560px !important;
-    max-height: 560px !important;
-    max-width: 100%;
-    min-height: 0 !important;
-    min-width: 0;
-    width: 100%;
+    height: 640px;
   }
 
   .thread-list {
@@ -1550,31 +1304,22 @@ body,
   }
 
   .thread-list-item {
-    border-bottom: 3px solid transparent;
+    border-bottom: 0;
     border-left: 0;
     border-right: 1px solid var(--thread-border);
-    border-top: 0;
+    border-top: 3px solid transparent;
     flex: 0 0 230px;
-    padding: 10px 12px 7px;
+    padding: 10px 12px;
   }
 
-  /* Stacked layout: green rail flips back to the BOTTOM EDGE of the
-   * active tab since the panel collapses to a single column here
-   * (thread list above, thread detail below). Reset the desktop
-   * right-rail to the inactive 1px gray separator so the horizontal
-   * tab strip reads uniformly, then color the 3px transparent bottom
-   * border green for the selected tab. Padding matches inactive items
-   * so the row stays the same height. */
   .thread-list-item-active {
-    border-bottom: 3px solid var(--thread-accent);
-    border-right: 1px solid var(--thread-border);
-    padding: 10px 12px 7px;
+    border-top-color: var(--thread-accent);
   }
 }
 
 @media (max-width: 560px) {
   .home-hero h1 {
-    font-size: 2.72rem;
+    font-size: 2.25rem;
   }
 
   .home-actions {
@@ -1587,8 +1332,12 @@ body,
     width: 100%;
   }
 
+  .home-license {
+    justify-content: center;
+    width: 100%;
+  }
+
   .thread-panel {
-    aspect-ratio: auto;
     height: 540px;
     min-height: 500px;
   }
@@ -1596,6 +1345,10 @@ body,
   .thread-panel-scroll {
     padding-left: 12px;
     padding-right: 12px;
+  }
+
+  .home-overview-list li {
+    padding-right: 0;
   }
 }
 
@@ -1764,27 +1517,4 @@ body,
 .centaur-brand-menu a:focus-visible {
   background: var(--centaur-accent-soft);
   outline: none;
-}
-
-/*
- * Primary landing CTA — bulletproof contrast.
- *
- * The "Deploy in production" button needs dark ink on the green accent
- * pill. Previous attempts kept regressing to white-on-green or green-
- * on-green when layered rules from sibling work redefined the accent
- * color or the .home-button base. Pinning the colors explicitly (with
- * !important and a literal hex so it can't be re-themed) at the very
- * end of the file guarantees this stays legible regardless of what
- * cascade reaches the selector first. The :hover variant deliberately
- * matches the resting state — the green is already attention-grabbing
- * enough that brightening it makes the contrast worse, not better.
- */
-.home-button-primary,
-a.home-button-primary,
-.home-button-primary:hover,
-.home-button-primary:focus-visible,
-.home-button-primary:visited {
-  background: #00e100 !important;
-  border-color: #00e100 !important;
-  color: #050505 !important;
 }
