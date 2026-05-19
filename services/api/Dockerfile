@@ -53,4 +53,9 @@ RUN chmod +x /entrypoint.sh
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/app/.venv/bin/uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# --forwarded-allow-ips defaults to the loopback address so X-Forwarded-For is
+# only honored from a co-located trusted proxy. Override FORWARDED_ALLOW_IPS
+# with the real proxy IP(s) when fronted by a load balancer. Never set it to
+# "*": that lets any peer spoof X-Forwarded-For: 127.0.0.1 and impersonate the
+# localhost auth bypass in deps.verify_api_key.
+CMD ["/app/.venv/bin/uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
