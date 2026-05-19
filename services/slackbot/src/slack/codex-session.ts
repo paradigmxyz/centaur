@@ -1,7 +1,7 @@
 import type { WebClient } from '@slack/web-api'
 import { slackReplyLimits } from '../constants'
-import { composedAssistantStreamMarkdown } from './render'
 import { AgentSessionRenderer } from './agent-session'
+import { thinkingContextBlock } from './render'
 import {
   clipLines,
   preformatted as pre,
@@ -31,7 +31,10 @@ type CodexSessionState = {
   nextCommandIndex: number
   commentaryText: string
   answerText: string
-  streamedDisplayText: string
+  firstBufferedTextAt: number | null
+  streamedCommentaryText: string
+  streamedAnswerText: string
+  thinkingPublished: boolean
   agentMessagePhase: AgentMessagePhase | null
   planText: string
   taskByUseId: Map<string, HarnessTask>
@@ -42,6 +45,7 @@ type CodexSessionState = {
 }
 
 const states = new Map<string, CodexSessionState>()
+const PRE_STREAM_GRACE_MS = 500
 
 export class CodexSessionRenderer {
   private readonly renderer: AgentSessionRenderer
@@ -183,10 +187,7 @@ export class CodexSessionRenderer {
         const resultText = event.result.trim()
         if (resultText) {
           state.answerText += resultText
-          await this.publishPendingAssistantText(agentSessionId, state, {
-            force: true,
-            flush: false
-          })
+          await this.publishPendingAssistantText(agentSessionId, state, { force: true })
         }
       }
       await this.done(agentSessionId)
@@ -202,7 +203,7 @@ export class CodexSessionRenderer {
     state.done = true
     completeOpenTasks(state)
     await this.publishActivitySummary(agentSessionId, state, { final: true })
-    await this.publishPendingAssistantText(agentSessionId, state, { force: true, flush: false })
+    await this.publishPendingAssistantText(agentSessionId, state, { force: true })
     await this.renderer.done(
       agentSessionId,
       state.threadId ? codexFooter(state.threadId) : undefined,
@@ -233,27 +234,48 @@ export class CodexSessionRenderer {
           details: update.details,
           output: update.output
         },
-        { flush: !opts.final }
+        { flush: true }
       )
     }
-    if (!opts.final) await this.publishPendingAssistantText(agentSessionId, state)
+    await this.publishPendingAssistantText(agentSessionId, state)
   }
 
   private async publishPendingAssistantText(
     agentSessionId: string,
     state: CodexSessionState,
-    opts: { force?: boolean; flush?: boolean } = {}
+    opts: { force?: boolean } = {}
   ): Promise<void> {
-    const hasText = Boolean(state.commentaryText.trim() || state.answerText.trim())
-    if (!opts.force && !state.taskByUseId.size && !hasText) return
-    const display = composedAssistantStreamMarkdown(state.commentaryText, state.answerText)
-    if (display.length <= state.streamedDisplayText.length) return
-    const delta = display.slice(state.streamedDisplayText.length)
+    if (
+      state.firstBufferedTextAt === null &&
+      (state.commentaryText.trim() || state.answerText.trim())
+    ) {
+      state.firstBufferedTextAt = Date.now()
+    }
+    const hasPlan = state.taskByUseId.size > 0
+    const graceExpired =
+      state.firstBufferedTextAt !== null &&
+      Date.now() - state.firstBufferedTextAt >= PRE_STREAM_GRACE_MS
+    const canStream = hasPlan || opts.force || graceExpired
+    if (!canStream) return
+
+    const pendingCommentary = state.commentaryText.slice(state.streamedCommentaryText.length)
+    if (pendingCommentary && shouldFlushThinking(pendingCommentary, opts.force)) {
+      const delta = state.commentaryText.slice(state.streamedCommentaryText.length)
+      const thinkingBlock = thinkingContextBlock(delta, { heading: !state.thinkingPublished })
+      if (thinkingBlock) {
+        await this.renderer.blocks(agentSessionId, [thinkingBlock], { planPrefix: hasPlan })
+      }
+      state.streamedCommentaryText = state.commentaryText
+      state.thinkingPublished = true
+    }
+    if (state.commentaryText.length > state.streamedCommentaryText.length) return
+    if (state.answerText.length <= state.streamedAnswerText.length) return
+    const delta = state.answerText.slice(state.streamedAnswerText.length)
     if (!delta) return
-    state.streamedDisplayText = display
+    state.streamedAnswerText = state.answerText
     await this.renderer.textDelta(agentSessionId, delta, {
-      flush: opts.flush === false ? false : true,
-      force: true
+      force: opts.force ?? false,
+      planPrefix: hasPlan
     })
   }
 
@@ -300,7 +322,10 @@ function getState(agentSessionId: string): CodexSessionState {
       nextCommandIndex: 0,
       commentaryText: '',
       answerText: '',
-      streamedDisplayText: '',
+      firstBufferedTextAt: null,
+      streamedCommentaryText: '',
+      streamedAnswerText: '',
+      thinkingPublished: false,
       agentMessagePhase: null,
       planText: '',
       taskByUseId: new Map(),
@@ -379,6 +404,11 @@ function messageDelta(current: string, incoming: string): string {
 function reasoningText(event: any): string {
   if (event?.type !== 'reasoning') return ''
   return String(event.text ?? event.thinking ?? '')
+}
+
+function shouldFlushThinking(delta: string, force = false): boolean {
+  if (force) return true
+  return /(?:[.!?]\s*|\n\n)$/.test(delta)
 }
 
 function isTerminalTurnEvent(event: any): boolean {
@@ -513,8 +543,14 @@ function changedActivityTaskUpdates(
     let details: StreamRichText | undefined
     let output: StreamRichText | undefined
     if (opts.final) {
-      details = activityRunBlock(task)
-      output = activityOutputBlock(task)
+      if (!state.emittedActivityRunByTaskId.has(task.id)) {
+        state.emittedActivityRunByTaskId.add(task.id)
+        details = activityRunBlock(task)
+      }
+      if (!state.emittedActivityOutputByTaskId.has(task.id)) {
+        state.emittedActivityOutputByTaskId.add(task.id)
+        output = activityOutputBlock(task)
+      }
     } else if (!state.emittedActivityRunByTaskId.has(task.id)) {
       state.emittedActivityRunByTaskId.add(task.id)
       details = activityRunBlock(task)

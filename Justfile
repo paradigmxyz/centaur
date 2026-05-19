@@ -90,29 +90,10 @@ logs component:
     kubectl logs -n {{namespace}} deploy/{{release}}-centaur-{{component}} --tail=200 -f
 
 slack-thread-logs slack_link since="24h":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    link="{{slack_link}}"
-    since="{{since}}"
-    if [[ "$link" =~ /archives/([^/]+)/p([0-9]+) ]]; then
-      channel="${BASH_REMATCH[1]}"
-      raw_ts="${BASH_REMATCH[2]}"
-    else
-      echo "expected Slack archive URL like https://.../archives/C123/p1779183098488629" >&2
-      exit 2
-    fi
-    channel_lc="$(printf '%s' "$channel" | tr '[:upper:]' '[:lower:]')"
-    ts_prefix="${raw_ts:0:10}"
-    ts_exact="${raw_ts:0:10}.${raw_ts:10}"
+    CENTAUR_NAMESPACE={{namespace}} CENTAUR_RELEASE={{release}} bash services/slackbot/scripts/slack-thread-logs.sh "{{slack_link}}" "{{since}}"
 
-    echo "Searching {{namespace}} logs for channel=${channel} ts=${ts_exact} since=${since}" >&2
-    {
-      kubectl -n {{namespace}} logs deploy/{{release}}-centaur-api --since="$since" --prefix=true || true
-      kubectl -n {{namespace}} logs deploy/{{release}}-centaur-slackbot --since="$since" --prefix=true || true
-      while IFS= read -r pod; do
-        kubectl -n {{namespace}} logs "$pod" --since="$since" --prefix=true || true
-      done < <(kubectl -n {{namespace}} get pod -o name | rg "sandbox-slack.*${channel_lc}" || true)
-    } | rg "${channel}|${channel_lc}|${ts_exact}|${ts_prefix}" || true
+slack-thread-report slack_link:
+    CENTAUR_NAMESPACE={{namespace}} CENTAUR_RELEASE={{release}} bash services/slackbot/scripts/slack-thread-report.sh "{{slack_link}}"
 
 cleanup-orphan-proxy-services mode="dry-run":
     #!/usr/bin/env bash

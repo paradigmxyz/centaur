@@ -172,13 +172,22 @@ function taskBodyToPlain(
   if (typeof body === 'string') return clip(body, maxChars)
   return clip(
     body.elements
-      .map(element =>
-        element.elements
+      .map(element => {
+        const text = element.elements
           .map(inline =>
             'text' in inline ? inline.text : 'user_id' in inline ? `<@${inline.user_id}>` : ''
           )
           .join('')
-      )
+        if (element.type !== 'rich_text_preformatted') return text
+        if (text.trim().startsWith('```')) return text
+        const language =
+          'language' in element && typeof element.language === 'string' ? element.language : ''
+        const fencePrefix = `\`\`\`${language}\n`
+        const fenceSuffix = '\n```'
+        const bodyBudget = maxChars - fencePrefix.length - fenceSuffix.length
+        if (bodyBudget <= 8) return text
+        return `${fencePrefix}${clip(text, bodyBudget)}${fenceSuffix}`
+      })
       .filter(Boolean)
       .join('\n'),
     maxChars

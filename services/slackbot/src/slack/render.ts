@@ -19,16 +19,21 @@ export function blockquoteMarkdown(text: string): string {
     .join('\n')
 }
 
-export function composedAssistantStreamMarkdown(commentary: string, answer: string): string {
-  const parts: string[] = []
+/** Skip Thinking when Codex repeated the same prose in commentary and final_answer. */
+export function shouldShowThinkingBlock(commentary: string, answer: string): boolean {
   const trimmedCommentary = commentary.trim()
   const trimmedAnswer = answer.trim()
-  if (trimmedCommentary) parts.push(blockquoteMarkdown(trimmedCommentary))
-  if (trimmedAnswer) parts.push(trimmedAnswer)
-  return parts.join('\n\n')
+  if (!trimmedCommentary) return false
+  if (!trimmedAnswer) return true
+  if (trimmedCommentary === trimmedAnswer) return false
+  if (trimmedAnswer.includes(trimmedCommentary)) return false
+  return true
 }
 
-export function thinkingContextBlock(commentary: string): ContextBlock | null {
+export function thinkingContextBlock(
+  commentary: string,
+  opts: { heading?: boolean } = {}
+): ContextBlock | null {
   const trimmed = commentary.trim()
   if (!trimmed) return null
   const maxChars = slackReplyLimits.message.thinkingContextChars
@@ -36,7 +41,7 @@ export function thinkingContextBlock(commentary: string): ContextBlock | null {
     trimmed.length > maxChars ? `${trimmed.slice(0, maxChars - 13)}\n// truncated` : trimmed
   return {
     type: 'context',
-    elements: [{ type: 'mrkdwn', text: `*Thinking*\n${body}` }]
+    elements: [{ type: 'mrkdwn', text: opts.heading === false ? body : `*Thinking*\n${body}` }]
   }
 }
 

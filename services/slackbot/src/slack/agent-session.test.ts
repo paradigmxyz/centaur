@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AgentSessionRenderer } from './agent-session'
+import { AgentSessionRenderer, withAgentSessionLock } from './agent-session'
 
 describe('AgentSessionRenderer', () => {
   it('streams pending text before appending inline task updates', async () => {
@@ -84,9 +84,12 @@ describe('AgentSessionRenderer', () => {
     expect(appends[1]?.params.chunks).toEqual([
       { type: 'markdown_text', text: '\n```js\nconsole.log("Hello, world!")\n```' }
     ])
-    const update = calls.find(call => call.method === 'chat.update')
-    expect(update?.params.blocks?.[0]?.type).toBe('plan')
-    expect(update?.params.blocks?.[0]?.tasks?.[0]?.status).toBe('complete')
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
+    const taskUpdates = calls
+      .flatMap(call => call.params.chunks ?? [])
+      .filter((chunk: any) => chunk.type === 'task_update')
+    expect(taskUpdates.at(-1)).toMatchObject({ id: 'sleep-1', status: 'complete' })
   })
 
   it('streams task updates with accumulated details and output', async () => {
@@ -162,6 +165,86 @@ describe('AgentSessionRenderer', () => {
     })
   })
 
+  it('single-flights concurrent first stream updates', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    let resolveStart: ((value: { ok: true; ts: string }) => void) | undefined
+    const startPromise = new Promise<{ ok: true; ts: string }>(resolve => {
+      resolveStart = resolve
+    })
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return startPromise
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    const first = renderer.step(sessionId, {
+      id: 'cmd-1',
+      title: '1. Command execution',
+      status: 'in_progress'
+    })
+    const second = renderer.step(sessionId, {
+      id: 'cmd-2',
+      title: '2. Command execution',
+      status: 'in_progress'
+    })
+
+    expect(calls.filter(call => call.method === 'chat.startStream')).toHaveLength(1)
+    resolveStart?.({ ok: true, ts: '1778866940.295499' })
+    await Promise.all([first, second])
+
+    expect(calls.filter(call => call.method === 'chat.startStream')).toHaveLength(1)
+    expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
+  })
+
+  it('serializes work for the same agent session', async () => {
+    const events: string[] = []
+    let releaseFirst: (() => void) | undefined
+
+    const first = withAgentSessionLock('session-1', async () => {
+      events.push('first:start')
+      await new Promise<void>(resolve => {
+        releaseFirst = resolve
+      })
+      events.push('first:end')
+    })
+    const second = withAgentSessionLock('session-1', async () => {
+      events.push('second:start')
+    })
+
+    await waitUntil(() => events.includes('first:start'))
+    expect(events).toEqual(['first:start'])
+    releaseFirst?.()
+    await Promise.all([first, second])
+
+    expect(events).toEqual(['first:start', 'first:end', 'second:start'])
+  })
+
   it('keeps final task code blocks to four lines and preserves visible body text', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
@@ -202,45 +285,104 @@ describe('AgentSessionRenderer', () => {
       title: 'Centaur execution'
     })
 
-    await renderer.text(sessionId, 'Final answer stays visible.')
-    await renderer.step(sessionId, {
-      id: 'cmd-1',
-      title: 'Run command: call workflow list',
-      status: 'complete',
-      details: {
-        type: 'rich_text',
-        elements: [
-          {
-            type: 'rich_text_preformatted',
-            language: 'sh',
-            elements: [{ type: 'text', text: 'call workflow list' }]
-          }
-        ]
-      } as any,
-      output: {
-        type: 'rich_text',
-        elements: [
-          {
-            type: 'rich_text_preformatted',
-            language: 'json',
-            elements: [{ type: 'text', text: '{\n  "items": [\n    1,\n    2,\n    3\n  ]\n}' }]
-          }
-        ]
-      } as any
+    await renderer.step(
+      sessionId,
+      {
+        id: 'cmd-1',
+        title: 'Run command: call workflow list',
+        status: 'complete',
+        details: {
+          type: 'rich_text',
+          elements: [
+            {
+              type: 'rich_text_preformatted',
+              language: 'sh',
+              elements: [{ type: 'text', text: 'call workflow list' }]
+            }
+          ]
+        } as any,
+        output: {
+          type: 'rich_text',
+          elements: [
+            {
+              type: 'rich_text_preformatted',
+              language: 'json',
+              elements: [{ type: 'text', text: '{\n  "items": [\n    1,\n    2,\n    3\n  ]\n}' }]
+            }
+          ]
+        } as any
+      },
+      { flush: false }
+    )
+    await renderer.done(sessionId, undefined, {
+      answerMarkdown: 'Final answer stays visible.'
     })
-    await renderer.done(sessionId)
 
-    const update = calls.find(call => call.method === 'chat.update')
-    const plan = update?.params.blocks?.find((block: any) => block.type === 'plan')
-    const body = update?.params.blocks?.find((block: any) => block.type === 'markdown')
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const plan = stop?.params.blocks?.find((block: any) => block.type === 'plan')
+    const body = stop?.params.blocks?.find((block: any) => block.type === 'markdown')
     const outputText = plan?.tasks?.[0]?.output?.elements?.[0]?.elements?.[0]?.text ?? ''
 
     expect(outputText.split('\n')).toHaveLength(4)
     expect(outputText.endsWith('// truncated')).toBe(true)
     expect(body).toBeTruthy()
-    expect(update?.params.text).toContain('Final answer stays visible.')
-    expect((update?.params.text ?? '').length).toBeLessThanOrEqual(4_000)
-    expect(update?.params.blocks?.length ?? 0).toBeLessThanOrEqual(50)
+    expect(String(body?.text ?? '')).toContain('Final answer stays visible.')
+    expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
+    expect(stop?.params.blocks?.length ?? 0).toBeLessThanOrEqual(50)
+  })
+
+  it('does not duplicate live plan or streamed answer markdown on finalize', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    await renderer.step(sessionId, {
+      id: 'cmd-1',
+      title: '1. Command execution',
+      status: 'in_progress'
+    })
+    await renderer.text(sessionId, 'Live answer body.')
+    await renderer.done(sessionId, 'Codex thread `T-1`', {
+      commentaryMarkdown: 'Planning the tool calls.',
+      answerMarkdown: 'Live answer body.'
+    })
+
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const blocks = stop?.params.blocks ?? []
+    expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
+    expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
+    expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
+    expect(blocks.some((block: any) => block.type === 'context')).toBe(true)
+    expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
   it('renders thinking in a context block and the answer in markdown on finalize', async () => {
@@ -260,7 +402,10 @@ describe('AgentSessionRenderer', () => {
           calls.push({ method: 'chat.appendStream', params })
           return { ok: true }
         },
-        stopStream: async () => ({ ok: true }),
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
         update: async (params: any) => {
           calls.push({ method: 'chat.update', params })
           return { ok: true }
@@ -277,14 +422,13 @@ describe('AgentSessionRenderer', () => {
       title: 'Centaur execution'
     })
 
-    await renderer.text(sessionId, '> streamed thinking')
     await renderer.done(sessionId, 'Codex thread `T-1`', {
       commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Done: five tools called.'
     })
 
-    const update = calls.find(call => call.method === 'chat.update')
-    const blocks = update?.params.blocks ?? []
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const blocks = stop?.params.blocks ?? []
     expect(
       blocks.some(
         (block: any) =>
@@ -351,16 +495,15 @@ describe('AgentSessionRenderer', () => {
     await renderer.text(sessionId, longAnswer)
     await renderer.done(sessionId, 'Codex thread `T-1`')
 
-    const update = calls.find(call => call.method === 'chat.update')
-    const markdownBlocks = (update?.params.blocks ?? []).filter(
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const markdownBlocks = (stop?.params.blocks ?? []).filter(
       (block: any) => block.type === 'markdown'
     )
     const displayedAnswer = markdownBlocks.map((block: any) => block.text).join('\n')
 
-    expect((update?.params.text ?? '').length).toBeLessThanOrEqual(4_000)
-    expect(update?.params.text).not.toBe(longAnswer)
+    expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
     if (displayedAnswer) {
-      expect(update?.params.text).toContain(displayedAnswer.slice(0, 200))
+      expect(displayedAnswer.length).toBeLessThan(longAnswer.length)
     }
   })
 
@@ -423,3 +566,17 @@ describe('AgentSessionRenderer', () => {
     expect(stopAttempts).toBe(2)
   })
 })
+
+function stopStreamFallbackText(params: any): string {
+  return (params?.chunks ?? [])
+    .filter((chunk: any) => chunk?.type === 'markdown_text')
+    .map((chunk: any) => String(chunk.text ?? ''))
+    .join('')
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let index = 0; index < 10; index += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+}
