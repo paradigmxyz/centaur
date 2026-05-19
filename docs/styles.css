@@ -831,7 +831,7 @@ body,
  * size and pump the ink a notch brighter so the repo paths read in-line. */
 .architecture-figure figcaption code {
   color: light-dark(rgba(0, 0, 0, 0.82), rgba(255, 255, 255, 0.82));
-  font-size: 0.82em;
+  font-size: 0.86em;
 }
 
 @media (max-width: 760px) {
