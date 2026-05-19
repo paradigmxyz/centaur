@@ -100,6 +100,7 @@ async def open_agent_session(
     metadata: dict[str, Any],
     thread_key: str,
     title: str = "Centaur execution",
+    header: str | None = None,
 ) -> str | None:
     if not enabled() or not is_slack_delivery(delivery):
         return None
@@ -107,16 +108,17 @@ async def open_agent_session(
     parent_ts = thread_ts(delivery)
     if not channel or not parent_ts:
         return None
-    result = await post(
-        "/api/slack/agent-sessions",
-        {
-            "channel": channel,
-            "parent_ts": parent_ts,
-            "recipient_team_id": recipient_team_id(delivery, thread_key),
-            "recipient_user_id": recipient_user_id(delivery, metadata),
-            "title": title,
-        },
-    )
+    body: dict[str, Any] = {
+        "channel": channel,
+        "parent_ts": parent_ts,
+        "recipient_team_id": recipient_team_id(delivery, thread_key),
+        "recipient_user_id": recipient_user_id(delivery, metadata),
+        "title": title,
+    }
+    header_text = (header or "").strip()
+    if header_text:
+        body["header"] = header_text
+    result = await post("/api/slack/agent-sessions", body)
     session_id = str((result or {}).get("session_id") or "").strip()
     return session_id or None
 

@@ -2,7 +2,6 @@ import type { WebClient } from '@slack/web-api'
 import { centaurApiKey, type AppConfig } from '../config'
 import { logError } from '../logging'
 import { AgentSessionRenderer } from '../slack/agent-session'
-import { codexFooter } from '../slack/codex-session'
 import { withLaminarSpan } from './laminar'
 
 const CONSUMER_ID = `slackbot-${process.pid}`
@@ -70,10 +69,11 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
     parentTs: threadTs,
     recipientTeamId: String(meta.team_id ?? delivery.team_id ?? target.teamId ?? ''),
     recipientUserId: String(meta.recipient_user_id ?? meta.user_id ?? delivery.user_id ?? ''),
-    title: sessionTitle(payload)
+    title: sessionTitle(payload),
+    header: sessionHeader(payload)
   })
   await renderer.text(sessionId, extractText(payload))
-  await renderer.done(sessionId, deliveryFooter(payload))
+  await renderer.done(sessionId)
 }
 
 function sessionTitle(payload: any): string {
@@ -104,9 +104,9 @@ function firstNonEmpty(...values: unknown[]): string {
   return ''
 }
 
-function deliveryFooter(payload: any): string | undefined {
-  const threadId = String(payload?.agent_thread_id ?? '').trim()
-  return threadId ? codexFooter(threadId) : undefined
+function sessionHeader(payload: any): string | undefined {
+  const value = String(payload?.session_header ?? payload?.header ?? '').trim()
+  return value || undefined
 }
 
 function targetFromDelivery(delivery: any): {

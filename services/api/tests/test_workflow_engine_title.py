@@ -132,3 +132,86 @@ async def test_title_handles_non_dict_active_assignment(monkeypatch):
         pool=object(), thread_key="slack:T:C:1.0", selector=selector,
     )
     assert title == "Centaur · amp"
+
+
+# ── Per-message header (rendered italic above every assistant message) ─────
+
+@pytest.mark.asyncio
+async def test_header_uses_base_when_no_persona_paradigm_claude(monkeypatch):
+    """Paradigm + no persona + claude-code → ``base · claude-opus-4-7``."""
+    get_active = AsyncMock(return_value={"persona_id": None, "harness": "claude-code", "engine": "claude-code"})
+    monkeypatch.setattr(workflow_engine, "get_active_assignment", get_active)
+    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    selector: dict[str, Any] = {"persona_id": None, "harness": None}
+    header = await workflow_engine._compute_agent_session_header(
+        pool=object(), thread_key="slack:T:C:1.0", selector=selector,
+    )
+    assert header == "base · claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_header_uses_persona_segment_paradigm_legal_codex(monkeypatch):
+    """Paradigm + legal persona + codex → ``legal · codex-gpt-5``."""
+    get_active = AsyncMock(return_value={"persona_id": "legal", "harness": "legal", "engine": "codex"})
+    monkeypatch.setattr(workflow_engine, "get_active_assignment", get_active)
+    monkeypatch.setenv("CODEX_MODEL", "gpt-5")
+    selector: dict[str, Any] = {"persona_id": "legal", "harness": "codex"}
+    header = await workflow_engine._compute_agent_session_header(
+        pool=object(), thread_key="slack:T:C:1.0", selector=selector,
+    )
+    assert header == "legal · codex-gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_header_uses_claude_sonnet_alias_for_tempo(monkeypatch):
+    """Tempo + no persona + claude-code with sonnet alias → ``base · claude-sonnet-4-6``."""
+    get_active = AsyncMock(return_value={"persona_id": None, "harness": "claude-code", "engine": "claude-code"})
+    monkeypatch.setattr(workflow_engine, "get_active_assignment", get_active)
+    monkeypatch.setenv("CLAUDE_MODEL", "sonnet")
+    selector: dict[str, Any] = {"persona_id": None, "harness": "claude-code"}
+    header = await workflow_engine._compute_agent_session_header(
+        pool=object(), thread_key="slack:T:C:1.0", selector=selector,
+    )
+    assert header == "base · claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_header_uses_persona_default_engine_when_active_assignment_empty(monkeypatch):
+    """Fresh persona switch: no active assignment yet. Falls back to the persona's
+    declared default engine so the header is never ``base`` for a known persona."""
+    get_active = AsyncMock(return_value=None)
+    monkeypatch.setattr(workflow_engine, "get_active_assignment", get_active)
+    monkeypatch.setattr(workflow_engine, "_persona_default_engine", lambda persona_id: "codex")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-5")
+    selector: dict[str, Any] = {"persona_id": "invest", "harness": None}
+    header = await workflow_engine._compute_agent_session_header(
+        pool=object(), thread_key="slack:T:C:1.0", selector=selector,
+    )
+    assert header == "invest · codex-gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_header_passes_through_explicit_claude_model_id(monkeypatch):
+    """When CLAUDE_MODEL is already a full id like ``claude-haiku-4-5``,
+    pass it through verbatim instead of re-prefixing."""
+    get_active = AsyncMock(return_value={"persona_id": None, "harness": "claude-code", "engine": "claude-code"})
+    monkeypatch.setattr(workflow_engine, "get_active_assignment", get_active)
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-haiku-4-5")
+    selector: dict[str, Any] = {"persona_id": None, "harness": "claude-code"}
+    header = await workflow_engine._compute_agent_session_header(
+        pool=object(), thread_key="slack:T:C:1.0", selector=selector,
+    )
+    assert header == "base · claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
+async def test_header_falls_back_to_engine_name_for_unknown_engine(monkeypatch):
+    """Unknown engines render with the engine name verbatim — no surprise output."""
+    get_active = AsyncMock(return_value=None)
+    monkeypatch.setattr(workflow_engine, "get_active_assignment", get_active)
+    selector: dict[str, Any] = {"persona_id": "experimental", "harness": "wasm-runner"}
+    header = await workflow_engine._compute_agent_session_header(
+        pool=object(), thread_key="slack:T:C:1.0", selector=selector,
+    )
+    assert header == "experimental · wasm-runner"

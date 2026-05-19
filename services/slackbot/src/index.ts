@@ -10,7 +10,7 @@ import { loadConfig } from './config'
 import { logError, logWarn, sanitizeLogValue } from './logging'
 import { AgentSessionRenderer, withAgentSessionLock } from './slack/agent-session'
 import { authorizeSlackOrg } from './slack/authorization'
-import { CodexSessionRenderer, codexFooter, hasActiveCodexSession } from './slack/codex-session'
+import { CodexSessionRenderer, hasActiveCodexSession } from './slack/codex-session'
 import { EventDeduper, slackDedupKey } from './slack/dedup'
 import { duplicateSlackAlertText, type DuplicateSlackEventDetails } from './slack/duplicate-alert'
 import { EnvSlackInstallationStore, SlackClientResolver } from './slack/installations'
@@ -292,6 +292,7 @@ app.post('/api/slack/agent-sessions', apiKeyMiddleware, async c => {
     recipient_team_id: string
     recipient_user_id: string
     title?: string
+    header?: string
   }>()
   const { client } = await resolver.resolve({})
   try {
@@ -300,7 +301,8 @@ app.post('/api/slack/agent-sessions', apiKeyMiddleware, async c => {
       parentTs: body.parent_ts,
       recipientTeamId: body.recipient_team_id,
       recipientUserId: body.recipient_user_id,
-      title: body.title
+      title: body.title,
+      header: body.header
     })
     return c.json({ ok: true, session_id: result.sessionId })
   } catch (error) {
@@ -343,16 +345,15 @@ app.post('/api/slack/agent-sessions/:session_id/step', apiKeyMiddleware, async c
 })
 
 app.post('/api/slack/agent-sessions/:session_id/done', apiKeyMiddleware, async c => {
-  const body = await c.req.json<{ footer?: string; thread_id?: string }>()
+  const body = await c.req.json<{ thread_id?: string }>()
   const { client } = await resolver.resolve({})
   try {
     const sessionId = c.req.param('session_id')
     await withAgentSessionLock(sessionId, async () => {
-      const footer = body.footer ?? (body.thread_id ? codexFooter(body.thread_id) : undefined)
       if (hasActiveCodexSession(sessionId)) {
         await new CodexSessionRenderer(client).done(sessionId, body.thread_id)
       } else {
-        await new AgentSessionRenderer(client).done(sessionId, footer)
+        await new AgentSessionRenderer(client).done(sessionId)
       }
     })
     return c.json({ ok: true })

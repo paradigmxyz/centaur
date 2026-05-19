@@ -194,6 +194,73 @@ def _agent_session_title(*, persona_id: str | None, engine: str | None, harness:
     return " · ".join(parts)
 
 
+# ── Per-message header (rendered italic at the top of every assistant message) ──
+
+_CLAUDE_MODEL_ALIASES: dict[str, str] = {
+    "opus": "claude-opus-4-7",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5",
+}
+
+
+def _resolve_claude_model_label(model: str | None) -> str:
+    raw = (model or os.getenv("CLAUDE_MODEL") or "opus").strip().lower()
+    if raw.startswith("claude-"):
+        return raw
+    return _CLAUDE_MODEL_ALIASES.get(raw, raw or "claude-opus-4-7")
+
+
+def _resolve_codex_model_label(model: str | None) -> str:
+    raw = (model or os.getenv("CODEX_MODEL") or "").strip().lower()
+    if not raw:
+        return "codex"
+    if raw.startswith("codex-"):
+        return raw
+    return f"codex-{raw}"
+
+
+def _engine_model_label(
+    *,
+    engine: str | None,
+    harness: str | None,
+    model: str | None = None,
+) -> str:
+    """Return the `engine-model` segment for the per-message header.
+
+    Falls back to the engine identifier when no model is known, so the
+    header always renders something deterministic per (engine, persona) pair.
+    """
+    engine_name = (engine or harness or "").strip().lower()
+    explicit = (model or "").strip().lower()
+    if engine_name == "claude-code":
+        return _resolve_claude_model_label(explicit or None)
+    if engine_name == "codex":
+        return _resolve_codex_model_label(explicit or None)
+    if engine_name == "amp":
+        return f"amp-{explicit}" if explicit else "amp"
+    if explicit:
+        return explicit
+    return engine_name or "centaur"
+
+
+def _agent_session_header(
+    *,
+    persona_id: str | None,
+    engine: str | None,
+    harness: str | None,
+    model: str | None = None,
+) -> str:
+    """Return ``"<persona> · <engine-model>"`` for the per-message header line.
+
+    Persona is normalized to the literal ``"base"`` when no persona is
+    active so the header is always two segments. The slackbot wraps this
+    in italics; we do not add markdown styling here.
+    """
+    persona = (persona_id or "").strip() or "base"
+    engine_label = _engine_model_label(engine=engine, harness=harness, model=model)
+    return f"{persona} · {engine_label}"
+
+
 def flatten_event_parts(event: dict[str, Any]) -> list[dict[str, Any]]:
     message = event.get("message") if isinstance(event, dict) else None
     if not isinstance(message, dict):
@@ -1802,6 +1869,11 @@ async def _mark_execution_terminal(
         thread_key,
         canonical_json(decode_jsonb(row["delivery"], {}) if row else {}),
     )
+    session_header = _agent_session_header(
+        persona_id=persona_id,
+        engine=engine,
+        harness=harness,
+    )
     await pool.execute(
         "UPDATE agent_final_delivery_outbox SET state = 'pending', final_payload = $1::jsonb, "
         "next_attempt_at = $2, lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW() "
@@ -1817,6 +1889,7 @@ async def _mark_execution_terminal(
                     engine=engine,
                     harness=harness,
                 ),
+                "session_header": session_header,
                 "result_text": result_text,
                 **({"error_text": error_text} if error_text else {}),
                 **({"agent_thread_id": agent_thread_id} if agent_thread_id else {}),
@@ -1843,6 +1916,7 @@ async def _mark_execution_terminal(
                 engine=engine,
                 harness=harness,
             ),
+            "session_header": session_header,
             "result_text": result_text,
             **({"error_text": error_text} if error_text else {}),
             **({"repo_context": repo_context} if repo_context else {}),

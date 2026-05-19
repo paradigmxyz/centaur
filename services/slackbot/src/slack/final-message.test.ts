@@ -13,8 +13,7 @@ describe('buildFinalFallbackText', () => {
     const answer = 'x'.repeat(10_000)
     const text = buildFinalFallbackText({
       title: 'Centaur execution',
-      answerMarkdown: answer,
-      footer: 'Codex thread `T-1`'
+      answerMarkdown: answer
     })
     expect(text.length).toBeLessThanOrEqual(slackReplyLimits.text.maxFallbackChars)
     expect(text.startsWith('Centaur execution')).toBe(true)
@@ -25,8 +24,7 @@ describe('buildFinalFallbackText', () => {
   it('includes title and clipped answer without requiring a separate summary field', () => {
     const text = buildFinalFallbackText({
       title: 'Run',
-      answerMarkdown: 'Done.',
-      footer: undefined
+      answerMarkdown: 'Done.'
     })
     expect(text).toBe('Run\nDone.')
   })
@@ -54,7 +52,7 @@ describe('sanitizeFinalMessagePayload', () => {
     expect(total).toBeLessThanOrEqual(slackReplyLimits.stream.markdownChunkChars)
   })
 
-  it('shrinks oversized plan + markdown + footer compositions toward the byte budget', () => {
+  it('shrinks oversized plan + markdown + context compositions toward the byte budget', () => {
     const tasks = Array.from({ length: 12 }, (_, index) => ({
       id: `cmd-${index}`,
       title: `Run command ${index}`,
@@ -89,7 +87,7 @@ describe('sanitizeFinalMessagePayload', () => {
       { type: 'markdown', text: 'Final answer ' + 'w'.repeat(8_000) },
       {
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: 'Codex thread `T-1`' }]
+        elements: [{ type: 'mrkdwn', text: 'Streamed thinking summary.' }]
       }
     ])
     expect(estimatePayloadBytes(blocks)).toBeLessThanOrEqual(

@@ -50,7 +50,8 @@ const opened = await slackbot('POST', '/api/slack/agent-sessions', {
   parent_ts: parent.ts,
   recipient_team_id: recipientTeamId,
   recipient_user_id: recipientUserId,
-  title: 'Amp execution steps'
+  title: 'Amp execution steps',
+  header: 'base · amp'
 })
 agentSessionId = opened.session_id
 
@@ -199,7 +200,7 @@ async function streamAssistant(markdown) {
 
 async function stopAssistantStream() {
   await slackbot('POST', `/api/slack/agent-sessions/${agentSessionId}/done`, {
-    footer: `amp threads continue ${sessionId}`
+    thread_id: sessionId
   })
 }
 

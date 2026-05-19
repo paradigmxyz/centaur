@@ -314,7 +314,7 @@ describe('AgentSessionRenderer', () => {
       },
       { flush: false }
     )
-    await renderer.done(sessionId, undefined, {
+    await renderer.done(sessionId, {
       answerMarkdown: 'Final answer stays visible.'
     })
 
@@ -371,7 +371,7 @@ describe('AgentSessionRenderer', () => {
       status: 'in_progress'
     })
     await renderer.text(sessionId, 'Live answer body.')
-    await renderer.done(sessionId, 'Codex thread `T-1`', {
+    await renderer.done(sessionId, {
       commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Live answer body.'
     })
@@ -380,8 +380,8 @@ describe('AgentSessionRenderer', () => {
     const blocks = stop?.params.blocks ?? []
     expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
     expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
+    expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
-    expect(blocks.some((block: any) => block.type === 'context')).toBe(true)
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
@@ -422,7 +422,7 @@ describe('AgentSessionRenderer', () => {
       title: 'Centaur execution'
     })
 
-    await renderer.done(sessionId, 'Codex thread `T-1`', {
+    await renderer.done(sessionId, {
       commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Done: five tools called.'
     })
@@ -493,7 +493,7 @@ describe('AgentSessionRenderer', () => {
 
     const longAnswer = 'A'.repeat(8_000)
     await renderer.text(sessionId, longAnswer)
-    await renderer.done(sessionId, 'Codex thread `T-1`')
+    await renderer.done(sessionId)
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const markdownBlocks = (stop?.params.blocks ?? []).filter(
@@ -564,6 +564,152 @@ describe('AgentSessionRenderer', () => {
 
     expect(renderer.done(sessionId)).resolves.toBeUndefined()
     expect(stopAttempts).toBe(2)
+  })
+
+  it('prepends the persona/engine header as the first streamed chunk and final block', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: { threads: { setStatus: async () => ({ ok: true }) } },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution',
+      header: 'legal · codex-gpt-5'
+    })
+
+    await renderer.text(sessionId, 'Hello world.')
+    await renderer.done(sessionId, { answerMarkdown: 'Hello world.' })
+
+    const start = calls.find(call => call.method === 'chat.startStream')
+    const firstChunk = start?.params.chunks?.[0]
+    expect(firstChunk?.type).toBe('markdown_text')
+    expect(String(firstChunk?.text ?? '')).toBe('_legal · codex-gpt-5_\n')
+
+    const allStreamedChunks = calls
+      .filter(call =>
+        call.method === 'chat.startStream' || call.method === 'chat.appendStream'
+      )
+      .flatMap(call => call.params.chunks ?? [])
+      .filter((chunk: any) => chunk?.type === 'markdown_text')
+      .map((chunk: any) => String(chunk.text ?? ''))
+    const headerOccurrences = allStreamedChunks.filter(text =>
+      text.includes('_legal · codex-gpt-5_')
+    ).length
+    expect(headerOccurrences).toBe(1)
+
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const blocks = stop?.params.blocks ?? []
+    expect(blocks[0]).toEqual({ type: 'markdown', text: '_legal · codex-gpt-5_' })
+  })
+
+  it('omits the header block entirely when no header was supplied', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: { threads: { setStatus: async () => ({ ok: true }) } },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    await renderer.text(sessionId, 'Hello world.')
+    await renderer.done(sessionId, { answerMarkdown: 'Hello world.' })
+
+    const start = calls.find(call => call.method === 'chat.startStream')
+    expect(start?.params.chunks?.[0]?.type).not.toBe('markdown_text')
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const blocks = stop?.params.blocks ?? []
+    expect(blocks.some((block: any) => block.type === 'markdown' && /^_.*_$/.test(block.text)))
+      .toBe(false)
+  })
+
+  it('renders the header above streamed tasks when both are present', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: { threads: { setStatus: async () => ({ ok: true }) } },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution',
+      header: 'base · claude-opus-4-7'
+    })
+
+    await renderer.step(sessionId, {
+      id: 'cmd-1',
+      title: 'Run command',
+      status: 'in_progress',
+      details: '```bash\nls\n```'
+    })
+    await renderer.done(sessionId)
+
+    const start = calls.find(call => call.method === 'chat.startStream')
+    const chunks = start?.params.chunks ?? []
+    expect(chunks[0]).toEqual({
+      type: 'markdown_text',
+      text: '_base · claude-opus-4-7_\n'
+    })
+    const planUpdateIdx = chunks.findIndex((chunk: any) => chunk.type === 'plan_update')
+    expect(planUpdateIdx).toBeGreaterThan(0)
   })
 })
 

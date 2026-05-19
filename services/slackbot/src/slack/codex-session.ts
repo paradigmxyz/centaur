@@ -204,15 +204,11 @@ export class CodexSessionRenderer {
     completeOpenTasks(state)
     await this.publishActivitySummary(agentSessionId, state, { final: true })
     await this.publishPendingAssistantText(agentSessionId, state, { force: true })
-    await this.renderer.done(
-      agentSessionId,
-      state.threadId ? codexFooter(state.threadId) : undefined,
-      {
-        streamFinalUpdates: false,
-        commentaryMarkdown: state.commentaryText,
-        answerMarkdown: state.answerText
-      }
-    )
+    await this.renderer.done(agentSessionId, {
+      streamFinalUpdates: false,
+      commentaryMarkdown: state.commentaryText,
+      answerMarkdown: state.answerText
+    })
     state.done = true
     states.delete(agentSessionId)
   }
@@ -302,10 +298,6 @@ export class CodexSessionRenderer {
     }
     await this.publishActivitySummary(agentSessionId, state)
   }
-}
-
-export function codexFooter(threadId: string): string {
-  return `Codex thread \`${threadId}\``
 }
 
 export function hasActiveCodexSession(agentSessionId: string): boolean {
