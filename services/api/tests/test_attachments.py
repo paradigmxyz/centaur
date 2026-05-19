@@ -28,13 +28,20 @@ from api.sandbox.harness_protocol import messages_to_content_blocks
 
 class TestAttachmentRefConversion:
     def test_attachment_ref_produces_curl_instruction(self):
-        messages = [{
-            "role": "user",
-            "parts": [
-                {"type": "text", "text": "analyze this"},
-                {"type": "attachment_ref", "id": "att-abc123", "name": "report.pdf", "mime_type": "application/pdf"},
-            ],
-        }]
+        messages = [
+            {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "analyze this"},
+                    {
+                        "type": "attachment_ref",
+                        "id": "att-abc123",
+                        "name": "report.pdf",
+                        "mime_type": "application/pdf",
+                    },
+                ],
+            }
+        ]
         blocks = messages_to_content_blocks(messages)
         assert len(blocks) == 2
         assert blocks[0] == {"type": "text", "text": "analyze this"}
@@ -44,14 +51,21 @@ class TestAttachmentRefConversion:
         assert "/agent/attachments/att-abc123/download" in blocks[1]["text"]
 
     def test_attachment_ref_with_user_attribution(self):
-        messages = [{
-            "role": "user",
-            "user_id": "U123",
-            "parts": [
-                {"type": "text", "text": "check this file"},
-                {"type": "attachment_ref", "id": "att-xyz", "name": "data.csv", "mime_type": "text/csv"},
-            ],
-        }]
+        messages = [
+            {
+                "role": "user",
+                "user_id": "U123",
+                "parts": [
+                    {"type": "text", "text": "check this file"},
+                    {
+                        "type": "attachment_ref",
+                        "id": "att-xyz",
+                        "name": "data.csv",
+                        "mime_type": "text/csv",
+                    },
+                ],
+            }
+        ]
         blocks = messages_to_content_blocks(messages)
         assert blocks[0]["text"].startswith("<@U123>:")
         assert "att-xyz" in blocks[1]["text"]
@@ -79,20 +93,22 @@ class TestAttachmentExtractionPipeline:
         This proves that without the extraction step, the sandbox would
         receive a non-text block and reject it.
         """
-        messages = [{
-            "role": "user",
-            "parts": [
-                {"type": "text", "text": "summarize this"},
-                {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": "JVBER...",
+        messages = [
+            {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "summarize this"},
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": "JVBER...",
+                        },
                     },
-                },
-            ],
-        }]
+                ],
+            }
+        ]
         blocks = messages_to_content_blocks(messages)
         assert len(blocks) == 2
         assert blocks[0] == {"type": "text", "text": "summarize this"}
@@ -156,23 +172,25 @@ class TestAttachmentExtractionPipeline:
 
     def test_extracted_attachment_ref_becomes_download_instruction(self):
         """After extraction, attachment_ref parts become text with curl."""
-        messages = [{
-            "role": "user",
-            "parts": [
-                {
-                    "type": "attachment_ref",
-                    "id": "att-deadbeef1234",
-                    "name": "slides.pdf",
-                    "mime_type": "application/pdf",
-                },
-                {
-                    "type": "attachment_ref",
-                    "id": "att-cafebabe5678",
-                    "name": "screenshot.png",
-                    "mime_type": "image/png",
-                },
-            ],
-        }]
+        messages = [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "attachment_ref",
+                        "id": "att-deadbeef1234",
+                        "name": "slides.pdf",
+                        "mime_type": "application/pdf",
+                    },
+                    {
+                        "type": "attachment_ref",
+                        "id": "att-cafebabe5678",
+                        "name": "screenshot.png",
+                        "mime_type": "image/png",
+                    },
+                ],
+            }
+        ]
         blocks = messages_to_content_blocks(messages)
         assert len(blocks) == 2
         for block in blocks:
@@ -189,18 +207,20 @@ class TestAttachmentExtractionPipeline:
         """End-to-end: text + document → after extraction, all blocks are text."""
         # Simulate the state AFTER _extract_attachments has run:
         # the original document part has been replaced with attachment_ref.
-        messages = [{
-            "role": "user",
-            "parts": [
-                {"type": "text", "text": "please review this contract"},
-                {
-                    "type": "attachment_ref",
-                    "id": "att-contract99",
-                    "name": "contract.pdf",
-                    "mime_type": "application/pdf",
-                },
-            ],
-        }]
+        messages = [
+            {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "please review this contract"},
+                    {
+                        "type": "attachment_ref",
+                        "id": "att-contract99",
+                        "name": "contract.pdf",
+                        "mime_type": "application/pdf",
+                    },
+                ],
+            }
+        ]
         blocks = messages_to_content_blocks(messages)
         assert len(blocks) == 2
         # Text block preserved
@@ -211,11 +231,80 @@ class TestAttachmentExtractionPipeline:
         assert "/agent/attachments/att-contract99/download" in blocks[1]["text"]
         assert "curl" in blocks[1]["text"]
 
+    @pytest.mark.asyncio
+    async def test_large_file_block_extracts_to_attachment_ref(self):
+        """Multi-MB generic file blocks are extracted before sandbox delivery."""
+        large_zip = b"PK\x03\x04" + (b"x" * (2 * 1024 * 1024))
+        parts = [
+            {"type": "text", "text": "inspect this larger archive"},
+            {
+                "type": "file",
+                "source_path": "file:///tmp/large-archive.zip",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/zip",
+                    "data": base64.b64encode(large_zip).decode(),
+                },
+            },
+        ]
+        pool = RecordingAttachmentPool()
+
+        transformed, attachment_ids = await extract_inline_attachments(
+            pool,
+            thread_key="test:att-file-large-unit",
+            chat_message_id="msg-large-file",
+            parts=parts,
+        )
+
+        assert len(attachment_ids) == 1
+        assert transformed == [
+            {"type": "text", "text": "inspect this larger archive"},
+            {
+                "type": "attachment_ref",
+                "attachment_id": attachment_ids[0],
+                "media_type": "application/zip",
+                "name": "large-archive.zip",
+                "source_path": "file:///tmp/large-archive.zip",
+            },
+        ]
+        assert len(pool.inserts) == 1
+        insert = pool.inserts[0]
+        assert insert["name"] == "large-archive.zip"
+        assert insert["mime_type"] == "application/zip"
+        assert insert["data"] == large_zip
+
+
+class RecordingAttachmentPool:
+    def __init__(self):
+        self.inserts: list[dict[str, object]] = []
+
+    async def execute(
+        self,
+        _sql: str,
+        attachment_id: str,
+        thread_key: str,
+        message_id: str,
+        name: str,
+        mime_type: str,
+        data: bytes,
+    ) -> None:
+        self.inserts.append(
+            {
+                "id": attachment_id,
+                "thread_key": thread_key,
+                "message_id": message_id,
+                "name": name,
+                "mime_type": mime_type,
+                "data": data,
+            }
+        )
+
 
 # ── Integration: full roundtrip through the API ────────────────────────────
 
 SAMPLE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # fake PNG bytes
 SAMPLE_PDF = b"%PDF-1.4 fake content for testing"
+SAMPLE_ZIP = b"PK\x03\x04 fake zip content for testing"
 
 
 async def _seed_assignment(db_pool, thread_key: str, generation: int = 1) -> None:
@@ -243,21 +332,23 @@ async def test_attachment_roundtrip(client, db_pool, api_key):
         json={
             "thread_key": thread_key,
             "assignment_generation": 1,
-            "messages": [{
-                "role": "user",
-                "parts": [
-                    {"type": "text", "text": "what is in this image?"},
-                    {
-                        "type": "image",
-                        "source_path": "file:///tmp/image.png",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": b64_png,
+            "messages": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "text": "what is in this image?"},
+                        {
+                            "type": "image",
+                            "source_path": "file:///tmp/image.png",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": b64_png,
+                            },
                         },
-                    },
-                ],
-            }],
+                    ],
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {api_key}"},
     )
@@ -316,21 +407,23 @@ async def test_document_attachment(client, db_pool, api_key):
         json={
             "thread_key": thread_key,
             "assignment_generation": 1,
-            "messages": [{
-                "role": "user",
-                "parts": [
-                    {"type": "text", "text": "summarize this PDF"},
-                    {
-                        "type": "document",
-                        "source_path": "file:///tmp/document.pdf",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": b64_pdf,
+            "messages": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "text": "summarize this PDF"},
+                        {
+                            "type": "document",
+                            "source_path": "file:///tmp/document.pdf",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": b64_pdf,
+                            },
                         },
-                    },
-                ],
-            }],
+                    ],
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {api_key}"},
     )
@@ -352,6 +445,117 @@ async def test_document_attachment(client, db_pool, api_key):
 
 
 @pytest.mark.asyncio
+async def test_generic_file_attachment(client, db_pool, api_key):
+    """POST message with base64 file part → stored and downloadable."""
+    thread_key = "test:att-file"
+    await _seed_assignment(db_pool, thread_key)
+    b64_zip = base64.b64encode(SAMPLE_ZIP).decode()
+
+    resp = await client.post(
+        "/agent/messages",
+        json={
+            "thread_key": thread_key,
+            "assignment_generation": 1,
+            "messages": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "text": "inspect this archive"},
+                        {
+                            "type": "file",
+                            "source_path": "file:///tmp/archive.zip",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/zip",
+                                "data": b64_zip,
+                            },
+                        },
+                    ],
+                }
+            ],
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        f"/agent/attachments?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    attachments = resp.json()
+    assert len(attachments) == 1
+    assert attachments[0]["name"] == "archive.zip"
+    assert attachments[0]["mime_type"] == "application/zip"
+
+    resp = await client.get(
+        f"/agent/attachments/{attachments[0]['id']}/download",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.content == SAMPLE_ZIP
+
+    resp = await client.get(
+        f"/agent/messages?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    parts = resp.json()["messages"][0]["parts"]
+    assert parts[0]["type"] == "text"
+    assert parts[1]["type"] == "attachment_ref"
+    assert parts[1]["name"] == "archive.zip"
+    assert parts[1]["mime_type"] == "application/zip"
+
+
+@pytest.mark.asyncio
+async def test_large_generic_file_attachment(client, db_pool, api_key):
+    """POST message with multi-MB file part → stored and downloadable."""
+    thread_key = "test:att-file-large"
+    await _seed_assignment(db_pool, thread_key)
+    large_zip = b"PK\x03\x04" + (b"x" * (2 * 1024 * 1024))
+    b64_zip = base64.b64encode(large_zip).decode()
+
+    resp = await client.post(
+        "/agent/messages",
+        json={
+            "thread_key": thread_key,
+            "assignment_generation": 1,
+            "messages": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "text": "inspect this larger archive"},
+                        {
+                            "type": "file",
+                            "source_path": "file:///tmp/large-archive.zip",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/zip",
+                                "data": b64_zip,
+                            },
+                        },
+                    ],
+                }
+            ],
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        f"/agent/attachments?thread_key={thread_key}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    attachments = resp.json()
+    assert len(attachments) == 1
+    assert attachments[0]["name"] == "large-archive.zip"
+    assert attachments[0]["mime_type"] == "application/zip"
+
+    resp = await client.get(
+        f"/agent/attachments/{attachments[0]['id']}/download",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.content == large_zip
+
+
+@pytest.mark.asyncio
 async def test_text_only_message_no_attachments(client, db_pool, api_key):
     """Text-only messages pass through without creating attachments."""
     thread_key = "test:att-textonly"
@@ -362,10 +566,12 @@ async def test_text_only_message_no_attachments(client, db_pool, api_key):
         json={
             "thread_key": thread_key,
             "assignment_generation": 1,
-            "messages": [{
-                "role": "user",
-                "parts": [{"type": "text", "text": "just plain text"}],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "parts": [{"type": "text", "text": "just plain text"}],
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {api_key}"},
     )
@@ -391,22 +597,32 @@ async def test_mixed_attachments_and_text(client, db_pool, api_key):
         json={
             "thread_key": thread_key,
             "assignment_generation": 1,
-            "messages": [{
-                "role": "user",
-                "parts": [
-                    {"type": "text", "text": "review both files"},
-                    {
-                        "type": "image",
-                        "source_path": "file:///tmp/image.png",
-                        "source": {"type": "base64", "media_type": "image/png", "data": b64_png},
-                    },
-                    {
-                        "type": "document",
-                        "source_path": "file:///tmp/document.pdf",
-                        "source": {"type": "base64", "media_type": "application/pdf", "data": b64_pdf},
-                    },
-                ],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "text": "review both files"},
+                        {
+                            "type": "image",
+                            "source_path": "file:///tmp/image.png",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": b64_png,
+                            },
+                        },
+                        {
+                            "type": "document",
+                            "source_path": "file:///tmp/document.pdf",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": b64_pdf,
+                            },
+                        },
+                    ],
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {api_key}"},
     )
@@ -475,11 +691,15 @@ async def test_download_attachment_enforces_sandbox_thread_scope():
 
     # Sandbox token scoped to a different thread → 403
     with pytest.raises(HTTPException) as excinfo:
-        await download_attachment(_request({"thread_key": "test:other-thread"}), "att-x")
+        await download_attachment(
+            _request({"thread_key": "test:other-thread"}), "att-x"
+        )
     assert excinfo.value.status_code == 403
 
     # Sandbox token scoped to the owning thread → serves the bytes
-    resp = await download_attachment(_request({"thread_key": "test:owner-thread"}), "att-x")
+    resp = await download_attachment(
+        _request({"thread_key": "test:owner-thread"}), "att-x"
+    )
     assert resp.status_code == 200
     assert resp.body == SAMPLE_PNG
 
@@ -490,10 +710,14 @@ async def test_download_attachment_enforces_sandbox_thread_scope():
     # Explicit thread_key must match the attachment's thread, regardless of
     # token type (used by privileged callers acting for an agent).
     with pytest.raises(HTTPException) as excinfo:
-        await download_attachment(_request(None), "att-x", thread_key="test:other-thread")
+        await download_attachment(
+            _request(None), "att-x", thread_key="test:other-thread"
+        )
     assert excinfo.value.status_code == 403
 
-    resp = await download_attachment(_request(None), "att-x", thread_key="test:owner-thread")
+    resp = await download_attachment(
+        _request(None), "att-x", thread_key="test:owner-thread"
+    )
     assert resp.status_code == 200
 
 

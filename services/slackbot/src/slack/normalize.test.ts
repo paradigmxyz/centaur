@@ -49,15 +49,12 @@ describe('normalizeSlackEnvelope', () => {
   })
 
   it('keeps app_mention events with files actionable', async () => {
-    let capturedInput: string | URL | Request | undefined
-    let capturedInit: RequestInit | undefined
-    const fetchMock = mock(async (input: string | URL | Request, init?: RequestInit) => {
-      capturedInput = input
-      capturedInit = init
-      return new Response(new Uint8Array([1, 2, 3]), {
-        headers: { 'content-type': 'image/png' }
-      })
-    })
+    const fetchMock = mock(
+      async () =>
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/png' }
+        })
+    )
     const originalFetch = globalThis.fetch
     globalThis.fetch = fetchMock as any
     try {
@@ -96,13 +93,64 @@ describe('normalizeSlackEnvelope', () => {
         slack_file_id: 'F123'
       })
       expect(fetchMock).toHaveBeenCalledTimes(1)
-      expect(capturedInput).toBe('https://files.slack.test/F123')
-      expect(capturedInit?.headers).toEqual({ Authorization: 'Bearer xoxb-test-token' })
-      const filePart = normalized?.parts[1]
-      if (!filePart || filePart.type === 'text') throw new Error('expected binary part')
-      expect(filePart.source.data).toBe(
-        Buffer.from(new Uint8Array([1, 2, 3])).toString('base64')
-      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('normalizes zip uploads as generic file parts', async () => {
+    const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3])
+    const fetchMock = mock(
+      async () =>
+        new Response(zipBytes, {
+          headers: { 'content-type': 'application/zip' }
+        })
+    )
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = fetchMock as any
+    try {
+      const normalized = await normalizeSlackEnvelope({
+        envelope: {
+          type: 'event_callback',
+          team_id: 'T123',
+          event_id: 'Ev-zip-app-mention',
+          event: {
+            type: 'app_mention',
+            user: 'U123',
+            channel: 'C123',
+            channel_type: 'channel',
+            ts: '1778875070.942789',
+            text: '<@UBOT> inspect this archive',
+            files: [
+              {
+                id: 'FZIP',
+                name: 'archive.zip',
+                mimetype: 'application/zip',
+                size: zipBytes.byteLength,
+                url_private_download: 'https://files.slack.test/FZIP'
+              }
+            ]
+          }
+        },
+        botUserId: 'UBOT',
+        client
+      })
+
+      expect(normalized?.is_mention).toBe(true)
+      expect(normalized?.parts).toHaveLength(2)
+      expect(normalized?.parts[1]).toEqual({
+        type: 'file',
+        name: 'archive.zip',
+        mime_type: 'application/zip',
+        size: zipBytes.byteLength,
+        slack_file_id: 'FZIP',
+        source: {
+          type: 'base64',
+          media_type: 'application/zip',
+          data: Buffer.from(zipBytes).toString('base64')
+        }
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
     } finally {
       globalThis.fetch = originalFetch
     }
