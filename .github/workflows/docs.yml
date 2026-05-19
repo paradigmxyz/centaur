@@ -20,6 +20,7 @@ concurrency:
 permissions:
   contents: read
   deployments: write
+  issues: write
 
 jobs:
   build-and-deploy:
@@ -98,3 +99,27 @@ jobs:
             echo
             echo "$DEPLOYMENT_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish preview comment
+        if: ${{ github.event_name == 'pull_request' && steps.preview.outputs.deployment-url != '' }}
+        env:
+          DEPLOYMENT_URL: ${{ steps.preview.outputs.deployment-url }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker="<!-- centaur-docs-preview-url -->"
+          body="$(cat <<EOF
+          $marker
+          ### Cloudflare Workers docs preview
+
+          $DEPLOYMENT_URL
+          EOF
+          )"
+          comment_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" \
+            | tail -n 1)"
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -f body="$body"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$body"
+          fi
