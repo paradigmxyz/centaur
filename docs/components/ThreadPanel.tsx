@@ -644,7 +644,7 @@ function ThreadDetail({
     const element = scrollRef.current
     if (!element) return
     if (!stickToBottomRef.current) return
-    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+    element.scrollTop = element.scrollHeight
   }, [phase, replyIdx, thread.id])
 
   const visible: Array<Reply & { i: number; isTyping: boolean; isStreaming: boolean }> = []

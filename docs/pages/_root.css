@@ -20,7 +20,7 @@
   src: url('/fonts/PolySans-variable.woff2') format('woff2-variations');
   font-style: normal;
   font-weight: 300 800;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -28,7 +28,7 @@
   src: url('/fonts/PolySansItalic-variable.woff2') format('woff2-variations');
   font-style: italic;
   font-weight: 300 800;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -36,7 +36,7 @@
   src: url('/fonts/SagittaireDisplay-Regular.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -44,7 +44,7 @@
   src: url('/fonts/SagittaireDisplay-Extralight.woff2') format('woff2');
   font-style: normal;
   font-weight: 200;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -76,7 +76,7 @@
   src: url('/fonts/PerfectlyNineties-Regular.woff') format('woff');
   font-style: normal;
   font-weight: 500;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -84,7 +84,7 @@
   src: url('/fonts/PerfectlyNineties-Italic.woff') format('woff');
   font-style: italic;
   font-weight: 400;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -92,7 +92,7 @@
   src: url('/fonts/PerfectlyNineties-Semibold.woff') format('woff');
   font-style: normal;
   font-weight: 600;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -100,7 +100,7 @@
   src: url('/fonts/PerfectlyNineties-Bold.woff') format('woff');
   font-style: normal;
   font-weight: 700;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -108,7 +108,7 @@
   src: url('/fonts/slack/lato-latin-400-normal.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -116,7 +116,7 @@
   src: url('/fonts/slack/lato-latin-700-normal.woff2') format('woff2');
   font-style: normal;
   font-weight: 700;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -124,7 +124,7 @@
   src: url('/fonts/slack/lato-latin-900-normal.woff2') format('woff2');
   font-style: normal;
   font-weight: 900;
-  font-display: swap;
+  font-display: block;
 }
 
 /*

@@ -77,6 +77,27 @@ export default defineConfig({
   head({ path }) {
     return createElement(Fragment, null,
       createElement('link', { rel: 'canonical', href: canonicalHref(path) }),
+      createElement('link', {
+        rel: 'preload',
+        href: '/fonts/PerfectlyNineties-Regular.woff',
+        as: 'font',
+        type: 'font/woff',
+        crossOrigin: '',
+      }),
+      createElement('link', {
+        rel: 'preload',
+        href: '/fonts/PolySans-variable.woff2',
+        as: 'font',
+        type: 'font/woff2',
+        crossOrigin: '',
+      }),
+      createElement('link', {
+        rel: 'preload',
+        href: '/fonts/slack/lato-latin-400-normal.woff2',
+        as: 'font',
+        type: 'font/woff2',
+        crossOrigin: '',
+      }),
       createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
     )
   },
