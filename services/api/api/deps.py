@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import ipaddress
 import json
 import os
 import secrets
@@ -19,20 +18,10 @@ from api.api_keys import APIKeyInfo, check_scope, lookup_key
 
 log = structlog.get_logger()
 
-# Only localhost is trusted without an API key (e.g. health checks).
-# All other callers — including sandbox containers on agent_net — must
-# present a valid API key.  The previous "all private IPs" bypass was
-# too broad and allowed sandboxes to hit admin/secrets endpoints.
-_TRUSTED_PREFIXES = ("127.",)
-
-
-def _is_loopback_ip(client_ip: str) -> bool:
-    if not client_ip:
-        return False
-    try:
-        return ipaddress.ip_address(client_ip).is_loopback
-    except ValueError:
-        return client_ip.startswith(_TRUSTED_PREFIXES)
+# Every caller must present a valid API key. There is no IP-based trust:
+# the previous loopback bypass was spoofable via X-Forwarded-For and gave
+# any peer that could reach the API full unauthenticated admin access.
+# Unauthenticated health/readiness probes use the no-auth /health* routes.
 
 
 def _get_sandbox_signing_key() -> str:
@@ -115,17 +104,6 @@ async def verify_api_key(
     x_api_key: Annotated[str | None, Header()] = None,
 ) -> str:
     client_ip = request.client.host if request.client else ""
-    if _is_loopback_ip(client_ip):
-        request.state.api_key_info = APIKeyInfo(
-            id="localhost",
-            name="localhost",
-            key_prefix="",
-            scopes=["*"],
-            created_by="system",
-            source="localhost",
-        )
-        return "localhost-bypass"
-
     token = x_api_key
     if not token:
         auth = request.headers.get("authorization", "")
@@ -176,11 +154,13 @@ def get_key_info(request: Request) -> APIKeyInfo:
     """Retrieve the APIKeyInfo attached during verify_api_key."""
     info = getattr(request.state, "api_key_info", None)
     if info is None:
+        # No key was resolved (verify_api_key did not run, or ran without a
+        # valid key). Fail closed — grant no scopes.
         return APIKeyInfo(
             id="unknown",
             name="unknown",
             key_prefix="",
-            scopes=["*"],
+            scopes=[],
             created_by="system",
             source="unknown",
         )
@@ -227,6 +207,6 @@ async def verify_operator_api_key(
 ) -> str:
     token = await verify_api_key(request, x_api_key)
     key_info = get_key_info(request)
-    if key_info.source == "localhost" or check_scope(key_info, "admin"):
+    if check_scope(key_info, "admin"):
         return token
     raise HTTPException(status_code=403, detail="Operator route requires admin scope")

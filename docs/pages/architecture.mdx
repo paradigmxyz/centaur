@@ -22,7 +22,7 @@ an event trail clients can replay.
 | Control | Persist requests and coordinate runtime state. | FastAPI, Postgres, execution worker. |
 | Execution | Run one assigned agent session per thread. | Kubernetes sandbox pods. |
 | Capabilities | Give agents approved actions. | Tool plugins, workflow engine, overlays. |
-| Secrets and egress | Let agents call third-party APIs without receiving raw keys. | Kubernetes Secret, [iron-proxy](https://docs.iron.sh), per-sandbox proxy config. |
+| Secrets and egress | Let agents call third-party APIs without receiving raw keys. | Kubernetes Secret, [iron-proxy](https://docs.iron.sh), per-sandbox proxy token mapping. |
 
 ## Durable API lifecycle
 
@@ -98,13 +98,14 @@ sleep for minutes or days, and parent/child workflow trees.
 ## Secrets and outbound requests
 
 Agents and tools refer to credentials by name, such as `OPENAI_API_KEY` or
-`secret("CRM_API_TOKEN")`. The API renders an [iron-proxy](https://docs.iron.sh) config from the tool
-secret declarations and the configured secret source. In production, [iron-proxy](https://docs.iron.sh)
-swaps placeholder names for real keys on outbound requests.
+`secret("CRM_API_TOKEN")`. The sandbox container only ever holds those
+placeholder names; the real values live on a per-sandbox
+[iron-proxy](https://docs.iron.sh) pod, bound to specific upstream hosts
+and request locations, and substituted on the wire when an outbound
+request matches.
 
-Prompts, transcripts, sandbox files, and logs can contain secret names without
-containing the raw credential. The proxy injects the real value for allowlisted
-hosts.
+See [Security](/security) for the full threat model and what it does
+and does not protect against.
 
 ## Failure model
 

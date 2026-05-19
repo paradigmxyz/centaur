@@ -8,5 +8,5 @@ dependencies = [
     "centaur_sdk",
 ]
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"

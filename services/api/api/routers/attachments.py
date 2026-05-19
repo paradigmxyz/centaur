@@ -71,7 +71,7 @@ async def upload_attachment(request: Request):
     mime_type = body.get("mime_type")
     data_b64 = body.get("data")
 
-    if not all([thread_key, name, mime_type, data_b64]):
+    if not thread_key or not name or not mime_type or data_b64 is None:
         raise HTTPException(
             status_code=422,
             detail="thread_key, name, mime_type, and data are required",
@@ -112,15 +112,31 @@ async def upload_attachment(request: Request):
 
 
 @router.get("/{attachment_id}/download")
-async def download_attachment(request: Request, attachment_id: str):
-    """Download attachment raw bytes."""
+async def download_attachment(
+    request: Request, attachment_id: str, thread_key: str | None = None
+):
+    """Download attachment raw bytes.
+
+    When ``thread_key`` is supplied, the attachment must belong to it. This
+    lets a privileged caller (e.g. the slack tool acting for an agent, which
+    authenticates with a service key rather than a sandbox token) constrain
+    the read to the agent's own thread.
+    """
     pool = request.app.state.db_pool
     row = await pool.fetchrow(
-        "SELECT data, mime_type, name FROM attachments WHERE id = $1",
+        "SELECT data, mime_type, name, thread_key FROM attachments WHERE id = $1",
         attachment_id,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Attachment not found")
+    # Reject a sandbox token reading an attachment from another thread.
+    _enforce_sandbox_thread_scope(request, row["thread_key"])
+    # An explicit thread_key constrains the read to that thread, for callers
+    # whose key is not a sandbox token (so the check above does not apply).
+    if thread_key is not None and row["thread_key"] != thread_key:
+        raise HTTPException(
+            status_code=403, detail="Attachment does not belong to the requested thread"
+        )
     return Response(
         content=row["data"],
         media_type=row["mime_type"],

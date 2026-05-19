@@ -1,3 +1,4 @@
+import base64
 import json
 
 import pytest
@@ -408,13 +409,20 @@ def test_upload_file_infers_slack_thread_from_tool_context() -> None:
     assert fake_web_client.last_kwargs["initial_comment"] == "Uploaded `chart.png`."
 
 
-def test_upload_file_missing_path_points_to_artifact_handle() -> None:
+def test_upload_file_rejects_local_path_argument() -> None:
+    """upload_file must not accept a local path: it runs server-side, so a
+    caller path would read the API host's filesystem."""
     client, _ = _make_client()
 
-    with pytest.raises(FileNotFoundError) as excinfo:
+    with pytest.raises(TypeError):
         client.upload_file("paradigm-pulse", file_path="/tmp/missing-chart.png")
 
-    assert "Centaur attachment_id" in str(excinfo.value)
+
+def test_upload_file_requires_a_content_source() -> None:
+    client, _ = _make_client()
+
+    with pytest.raises(ValueError, match="content_base64, attachment_id, or attachment_url"):
+        client.upload_file("paradigm-pulse")
 
 
 def test_attachment_url_must_use_centaur_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -446,6 +454,137 @@ def test_upload_file_can_infer_destination_without_channel_arg() -> None:
     assert fake_web_client.last_kwargs is not None
     assert fake_web_client.last_kwargs["channel"] == "C123"
     assert fake_web_client.last_kwargs["thread_ts"] == "1777910337.403889"
+
+
+class _FakeHTTPResponse:
+    """Minimal stand-in for urllib's HTTPResponse context manager."""
+
+    def __init__(self, body: bytes, content_type: str) -> None:
+        self._body = body
+        self._content_type = content_type
+
+    def __enter__(self) -> "_FakeHTTPResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def read(self, _amt: int = -1) -> bytes:
+        return self._body
+
+    @property
+    def headers(self) -> "email.message.Message":
+        import email.message
+
+        msg = email.message.Message()
+        msg["Content-Type"] = self._content_type
+        return msg
+
+
+def test_download_file_rejects_non_files_host() -> None:
+    client, _ = _make_client()
+    client.token = "SLACK_BOT_TOKEN"
+
+    with pytest.raises(ValueError, match="files.slack.com"):
+        client.download_file("https://slack.com/api/api.test?x=SLACK_BOT_TOKEN")
+
+    with pytest.raises(ValueError, match="files.slack.com"):
+        client.download_file("http://files.slack.com/files-pri/T1-F1/report.pdf")
+
+
+def test_download_file_stores_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+
+    client, _ = _make_client()
+    client.token = "SLACK_BOT_TOKEN"
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api:8000")
+    posted: dict = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        if "files.slack.com" in req.full_url:
+            assert req.get_header("Authorization") == "Bearer SLACK_BOT_TOKEN"
+            return _FakeHTTPResponse(b"%PDF-1.4 report", "application/pdf")
+        if req.full_url.endswith("/agent/attachments/upload"):
+            posted["body"] = json.loads(req.data)
+            return _FakeHTTPResponse(
+                json.dumps({"id": "att-abc123", "name": "report.pdf"}).encode(),
+                "application/json",
+            )
+        raise AssertionError(f"unexpected url {req.full_url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    token = set_tool_context(ToolContext(name="slack", thread_key="slack:C1:1.2"))
+    try:
+        result = client.download_file("https://files.slack.com/files-pri/T1-F1/report.pdf")
+    finally:
+        reset_tool_context(token)
+
+    assert result == {
+        "attachment_id": "att-abc123",
+        "filename": "report.pdf",
+        "mime_type": "application/pdf",
+        "size_bytes": 15,
+    }
+    assert posted["body"]["thread_key"] == "slack:C1:1.2"
+    assert posted["body"]["name"] == "report.pdf"
+    assert posted["body"]["mime_type"] == "application/pdf"
+    assert base64.b64decode(posted["body"]["data"]) == b"%PDF-1.4 report"
+
+
+def test_download_file_requires_thread_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+
+    client, _ = _make_client()
+    client.token = "SLACK_BOT_TOKEN"
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda req, *a, **k: _FakeHTTPResponse(b"data", "application/octet-stream"),
+    )
+
+    with pytest.raises(RuntimeError, match="thread"):
+        client.download_file("https://files.slack.com/files-pri/T1-F1/report.pdf")
+
+
+def test_download_attachment_bytes_scopes_request_to_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attachment fetch carries the tool's thread_key so the API can reject
+    a cross-thread read."""
+    import urllib.request
+
+    client, _ = _make_client()
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api:8000")
+    captured: dict = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        captured["url"] = req.full_url
+        return _FakeHTTPResponse(b"file-bytes", "application/octet-stream")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    token = set_tool_context(ToolContext(name="slack", thread_key="slack:C1:1.2"))
+    try:
+        body = client._download_attachment_bytes(attachment_id="att-xyz")
+    finally:
+        reset_tool_context(token)
+
+    assert body == b"file-bytes"
+    assert captured["url"] == (
+        "http://api:8000/agent/attachments/att-xyz/download"
+        "?thread_key=slack%3AC1%3A1.2"
+    )
+
+
+def test_download_attachment_bytes_requires_thread_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _make_client()
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api:8000")
+
+    with pytest.raises(RuntimeError, match="thread"):
+        client._download_attachment_bytes(attachment_id="att-xyz")
 
 
 def test_native_search_uses_dedicated_search_client() -> None:

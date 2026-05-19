@@ -14,7 +14,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"
 hosts = ["api.legistorm.com"]
 secrets = [{type = "http", name = "LEGISTORM_API_KEY", match_headers = ["X-Api-Key"], hosts = ["api.legistorm.com"]}]

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import importlib
-import json
 import sys
-import tempfile
 import types
 import unittest
 from dataclasses import dataclass
@@ -97,25 +95,30 @@ class DocsendFallbackTest(unittest.TestCase):
                     "_run_standalone_docsend_fallback",
                     return_value=fallback_payload,
                 ):
-                    client = client_module.ArchiverClient()
-                    with tempfile.TemporaryDirectory() as tmpdir:
+                    def fake_attach(path, **kwargs):
+                        return {
+                            "attachment_id": f"att-{Path(path).name}",
+                            "filename": kwargs.get("name") or Path(path).name,
+                            "mime_type": kwargs.get("mime_type") or "application/octet-stream",
+                            "size_bytes": Path(path).stat().st_size,
+                        }
+
+                    with patch.object(client_module, "save_attachment_from_path", side_effect=fake_attach):
+                        client = client_module.ArchiverClient()
                         result = client.extract_source(
                             source_url="https://docsend.com/view/example",
-                            output_dir=tmpdir,
                             company="Example",
                         )
-
-                        manifest_path = Path(result["manifest_path"])
-                        self.assertTrue(manifest_path.exists())
-                        manifest = json.loads(manifest_path.read_text())
 
                 self.assertEqual(result["status"], "error")
                 self.assertIn("password-protected", result["error"])
                 self.assertNotEqual(result["error"], "Download stage failed")
                 self.assertEqual(result["download"]["blocker"]["kind"], "passcode_required")
                 self.assertEqual(result["download"]["blocker"]["required_input"], "password")
-                self.assertEqual(manifest["blocker"]["kind"], "passcode_required")
-                self.assertEqual(manifest["details"]["status"], "passcode_required")
+                self.assertEqual(
+                    result["download"]["manifest_attachment"]["attachment_id"],
+                    "att-manifest.json",
+                )
         finally:
             sys.path = [entry for entry in sys.path if entry != str(REPO_ROOT)]
             _clear_archiver_modules()

@@ -74,14 +74,14 @@ EXECUTION_STALE_RECOVERY_INTERVAL_S = float(
     os.getenv("EXECUTION_STALE_RECOVERY_INTERVAL_S", "5.0")
 )
 EXECUTION_WORKER_CONCURRENCY = max(
-    int(os.getenv("EXECUTION_WORKER_CONCURRENCY", "4")),
+    int(os.getenv("EXECUTION_WORKER_CONCURRENCY", "128")),
     1,
 )
 # Number of execution worker slots reserved for non-workflow (user-facing)
 # requests.  Workflow-spawned executions cannot consume more than
 # EXECUTION_WORKER_CONCURRENCY - EXECUTION_RESERVED_USER_SLOTS slots.
 EXECUTION_RESERVED_USER_SLOTS = max(
-    int(os.getenv("EXECUTION_RESERVED_USER_SLOTS", "2")),
+    int(os.getenv("EXECUTION_RESERVED_USER_SLOTS", "16")),
     0,
 )
 _MAX_SLACKBOT_TEXT_CHARS = 12_000
@@ -874,15 +874,13 @@ async def _mark_slackbot_live_delivery_failed(pool, execution_id: str, reason: s
     await pool.execute(
         "UPDATE agent_execution_requests "
         "SET metadata = jsonb_set("
-        "  metadata - $2::text - $3::text, "
+        "  metadata, "
         "  '{slackbot_live_delivery_failed}', "
-        "  to_jsonb($4::text), "
+        "  to_jsonb($2::text), "
         "  true"
         "), updated_at = NOW() "
         "WHERE execution_id = $1",
         execution_id,
-        _SLACKBOT_LIVE_DELIVERY_METADATA_KEY,
-        _LEGACY_SLACKBOT_LIVE_DELIVERY_METADATA_KEY,
         reason,
     )
 

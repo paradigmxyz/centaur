@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import json
 import logging
+import mimetypes
+import urllib.request
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -69,3 +74,79 @@ def secret(key: str, default: str | None = None) -> str:
     with contextlib.suppress(LookupError):
         ctx_name = f" for tool '{_tool_ctx.get().name}'"
     raise KeyError(f"Missing secret '{key}'{ctx_name}")
+
+
+def current_thread_key() -> str:
+    """Return the active thread key for a tool call."""
+    try:
+        thread_key = _tool_ctx.get().thread_key
+    except LookupError:
+        thread_key = None
+    if not thread_key:
+        raise RuntimeError(
+            "this operation must run inside a scoped thread: no thread_key "
+            "in the tool context."
+        )
+    return thread_key
+
+
+def save_attachment(
+    *,
+    name: str,
+    data: bytes,
+    mime_type: str | None = None,
+    source_url: str | None = None,
+) -> dict[str, Any]:
+    """Persist bytes as a Centaur attachment scoped to the current tool thread."""
+    thread_key = current_thread_key()
+    safe_name = Path(name).name or "attachment"
+    resolved_mime = mime_type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
+    payload = json.dumps(
+        {
+            "thread_key": thread_key,
+            "name": safe_name,
+            "mime_type": resolved_mime,
+            "data": base64.b64encode(data).decode("ascii"),
+            "source_url": source_url,
+        }
+    ).encode()
+    headers = {"Content-Type": "application/json"}
+    api_key = secret("CENTAUR_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(
+        f"{base_url}/agent/attachments/upload",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.loads(response.read())
+    attachment_id = result.get("id")
+    if not attachment_id:
+        raise RuntimeError(f"attachment upload returned no id: {result!r}")
+    return {
+        "attachment_id": attachment_id,
+        "filename": result.get("name") or safe_name,
+        "mime_type": result.get("mime_type") or resolved_mime,
+        "download_url": result.get("download_url"),
+        "size_bytes": len(data),
+    }
+
+
+def save_attachment_from_path(
+    path: str | Path,
+    *,
+    name: str | None = None,
+    mime_type: str | None = None,
+    source_url: str | None = None,
+) -> dict[str, Any]:
+    """Persist a local file as a thread-scoped Centaur attachment."""
+    p = Path(path)
+    return save_attachment(
+        name=name or p.name,
+        data=p.read_bytes(),
+        mime_type=mime_type,
+        source_url=source_url,
+    )

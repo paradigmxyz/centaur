@@ -222,6 +222,10 @@ def _setup_env(pg, run_migrations):
     """Set env vars before any app code is imported."""
     os.environ["DATABASE_URL"] = pg
     os.environ["API_SECRET_KEY"] = "test-secret-key"
+    # Seed a real admin key. bootstrap_service_api_keys() turns LOCAL_DEV_API_KEY
+    # into a DB-backed key with admin scope on app startup, so tests authenticate
+    # the same way production callers do (there is no localhost auth bypass).
+    os.environ["LOCAL_DEV_API_KEY"] = "aiv2_test_local_dev_admin_key"
     os.environ["EXECUTION_WORKER_ENABLED"] = "0"
     os.environ["WORKFLOW_WORKER_ENABLED"] = "0"
     os.environ["WARM_POOL_ENABLED"] = "0"
@@ -246,16 +250,25 @@ async def managed_app(app):
 
 @pytest_asyncio.fixture
 async def client(managed_app):
-    """Async httpx client against the lifespan-managed app."""
+    """Async httpx client against the lifespan-managed app.
+
+    Authenticated as the seeded admin key by default so tests exercise real
+    callers. Tests covering auth failures pass their own Authorization header,
+    which overrides this default.
+    """
     transport = httpx.ASGITransport(app=managed_app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {os.environ['LOCAL_DEV_API_KEY']}"},
+    ) as c:
         yield c
 
 
 @pytest.fixture
 def api_key():
-    """Return the test API key."""
-    return os.environ["API_SECRET_KEY"]
+    """Return the seeded admin API key."""
+    return os.environ["LOCAL_DEV_API_KEY"]
 
 
 @pytest_asyncio.fixture

@@ -271,6 +271,24 @@ class TestToolArgValidation:
             is None
         )
 
+    def test_forbidden_path_argument_is_rejected(self):
+        def fn(output_path: str):
+            return output_path
+
+        error = _tool_arg_validation_error(
+            ToolMethod("drive_download", fn),
+            {"output_path": "/app/tools/productivity/gsuite/client.py"},
+        )
+
+        assert error == {
+            "error": "tool_argument_validation_failed",
+            "message": (
+                "Forbidden argument(s): output_path. Tools may not write API-process "
+                "files to caller-supplied paths; return Centaur attachments instead."
+            ),
+            "forbidden_args": ["output_path"],
+        }
+
 
 # ---------------------------------------------------------------------------
 # _to_toon
@@ -363,7 +381,7 @@ def _write_tool(
                 'version = "0.1.0"',
                 f'description = "{description}"',
                 "",
-                "[tool.ai-v2]",
+                "[tool.centaur]",
                 'module = "client.py"',
                 'hosts = ["api.example.com"]',
                 f"secrets = {secrets or []!r}",
@@ -388,7 +406,7 @@ def _write_persona(tools_dir: Path, name: str) -> Path:
                 'version = "0.1.0"',
                 'description = "A fake persona"',
                 "",
-                "[tool.ai-v2]",
+                "[tool.centaur]",
                 'type = "persona"',
                 'engine = "codex"',
                 'default_repo = "/workspace/repo"',

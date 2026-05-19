@@ -1,8 +1,8 @@
 """CLI for GSuite operations - Gmail, Calendar, Drive."""
 
 import typer
-from rich.console import Console
 from centaur_sdk import Table
+from rich.console import Console
 
 app = typer.Typer(name="gsuite", help="GSuite CLI for AI agents - Gmail, Calendar, Drive")
 console = Console()
@@ -507,7 +507,7 @@ def drive_download(
     """
     from pathlib import Path
 
-    from .client import drive_download as download, drive_get
+    from .client import _drive_download_bytes, drive_get
 
     try:
         file_info = drive_get(file_id)
@@ -516,7 +516,8 @@ def drive_download(
         if output_path.is_dir():
             output_path = output_path / file_info["name"]
 
-        download(file_id, str(output_path))
+        _metadata, data = _drive_download_bytes(file_id)
+        output_path.write_bytes(data)
         console.print(f"[green]✓ Downloaded {file_info['name']}[/]")
         console.print(f"[dim]{output_path.absolute()}[/]")
     except Exception as e:
@@ -856,7 +857,7 @@ def drive_export(
         gsuite drive export "1abc123" -f txt -o doc.txt  # Export as text file
         gsuite drive export "1abc123" -f csv             # Export Sheet as CSV
     """
-    from .client import drive_export as export_file, drive_get, docs_get_text
+    from .client import _drive_export_bytes, drive_get, docs_get_text
 
     try:
         file_info = drive_get(file_id)
@@ -874,16 +875,17 @@ def drive_export(
             return
 
         # For other formats, use Drive export
-        result = export_file(file_id, format, output)
+        metadata, _mime_type, data = _drive_export_bytes(file_id, format)
         if output:
-            console.print(f"[green]✓ Exported {file_info['name']} to {result}[/]")
+            with open(output, "wb") as f:
+                f.write(data)
+            console.print(f"[green]✓ Exported {file_info['name']} to {output}[/]")
         else:
             # If no output specified, print the content for text formats
             if format in ("txt", "csv", "html"):
-                with open(result, "r") as f:
-                    console.print(f.read())
+                console.print(data.decode("utf-8", errors="replace"))
             else:
-                console.print(f"[green]✓ Exported to {result}[/]")
+                console.print(f"[green]✓ Exported {metadata.get('name') or file_id}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)

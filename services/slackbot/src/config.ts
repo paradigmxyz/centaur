@@ -9,6 +9,7 @@ const EnvSchema = z.object({
   CENTAUR_API_URL: z.string().url().default('http://localhost:8000'),
   CENTAUR_API_KEY: z.string().optional(),
   CENTAUR_SLACK_EVENTS_PATH: z.string().default('/api/webhooks/slack'),
+  RUNTIME_ERROR_ALERT_CHANNEL: z.string().default(''),
   SLACK_EVENT_DEDUP_TTL_MS: z.coerce
     .number()
     .int()

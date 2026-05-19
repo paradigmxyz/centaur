@@ -17,7 +17,7 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"
 secrets = [
     {type = "http", name = "REDUCTO_API_KEY", match_headers = ["Authorization"], hosts = ["platform.reducto.ai"]},

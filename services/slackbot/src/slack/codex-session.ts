@@ -1,6 +1,13 @@
 import type { WebClient } from '@slack/web-api'
 import { AgentSessionRenderer } from './agent-session'
-import { preformatted as pre, section, text, type StreamRichTextElement } from './streaming'
+import {
+  preformatted as pre,
+  richText,
+  section,
+  text,
+  type StreamRichText,
+  type StreamRichTextElement
+} from './streaming'
 
 type HarnessTask = {
   id: string
@@ -14,9 +21,12 @@ type CodexSessionState = {
   threadId: string
   stepCounter: number
   messageText: string
+  streamedMessageText: string
   planText: string
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
+  emittedActivityRunByTaskId: Set<string>
+  emittedActivityOutputByTaskId: Set<string>
   done: boolean
 }
 
@@ -36,13 +46,13 @@ export class CodexSessionRenderer {
 
     const structuredPlan = structuredPlanUpdate(event)
     if (structuredPlan) {
-      await this.publishStructuredPlan(agentSessionId, structuredPlan)
+      await this.publishStructuredPlan(agentSessionId, state, structuredPlan)
     }
 
     const planText = planTextUpdate(event)
     if (planText) {
       state.planText = event?.type === 'item.plan.delta' ? state.planText + planText : planText
-      await this.publishPlanText(agentSessionId, state.planText)
+      await this.publishPlanText(agentSessionId, state, state.planText)
     }
 
     const command = commandExecution(event)
@@ -54,11 +64,7 @@ export class CodexSessionRenderer {
       const task = commandTask(command, event?.type, existing, state.commandOutputById.get(id))
       const merged = mergeTask(existing, task)
       state.taskByUseId.set(merged.id, merged)
-      await this.publishTask(agentSessionId, {
-        ...merged,
-        details: task.details,
-        output: task.output
-      })
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     const fileChange = fileChangeEvent(event)
@@ -67,7 +73,7 @@ export class CodexSessionRenderer {
       const task = fileChangeTask(fileChange, event?.type, existing)
       const merged = mergeTask(existing, task)
       state.taskByUseId.set(merged.id, merged)
-      await this.publishTask(agentSessionId, merged)
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     const outputDelta = commandOutputDelta(event)
@@ -87,7 +93,7 @@ export class CodexSessionRenderer {
         output: commandOutputElements(output)
       }
       state.taskByUseId.set(outputDelta.id, updated)
-      await this.publishTask(agentSessionId, { ...updated, details: [], output: updated.output })
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     for (const tool of toolUses(event)) {
@@ -99,7 +105,7 @@ export class CodexSessionRenderer {
         output: []
       }
       state.taskByUseId.set(String(tool.id), task)
-      await this.publishTask(agentSessionId, task)
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     for (const result of toolResults(event)) {
@@ -114,7 +120,7 @@ export class CodexSessionRenderer {
       state.taskByUseId.set(toolUseId || task.id, task)
       task.status = result.is_error ? 'error' : 'complete'
       task.output = outputElementsForResult(result)
-      await this.publishTask(agentSessionId, { ...task, details: [], output: task.output })
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
     const assistantMessage = assistantText(event)
@@ -122,7 +128,7 @@ export class CodexSessionRenderer {
       const delta = messageDelta(state.messageText, assistantMessage)
       if (delta) {
         state.messageText += delta
-        await this.renderer.textDelta(agentSessionId, delta)
+        await this.publishPendingAssistantText(agentSessionId, state)
       }
     }
 
@@ -135,15 +141,19 @@ export class CodexSessionRenderer {
         details: [section([text(reasoningMessage)])],
         output: []
       }
-      await this.publishTask(agentSessionId, task)
+      state.taskByUseId.set(task.id, task)
+      await this.publishActivitySummary(agentSessionId, state)
     }
 
-    if (event?.type === 'result' || event?.type === 'turn.done') {
+    if (isTerminalTurnEvent(event)) {
       if (typeof event.result === 'string' && !state.messageText.trim()) {
         const resultText = event.result.trim()
         if (resultText) {
           state.messageText += resultText
-          await this.renderer.text(agentSessionId, resultText)
+          await this.publishPendingAssistantText(agentSessionId, state, {
+            force: true,
+            flush: false
+          })
         }
       }
       await this.done(agentSessionId)
@@ -155,45 +165,76 @@ export class CodexSessionRenderer {
   async done(agentSessionId: string): Promise<void> {
     const state = getState(agentSessionId)
     if (state.done) return
+    state.done = true
+    completeOpenTasks(state)
+    await this.publishActivitySummary(agentSessionId, state, { final: true })
+    await this.publishPendingAssistantText(agentSessionId, state, { force: true, flush: false })
     await this.renderer.done(
       agentSessionId,
-      state.threadId ? codexFooter(state.threadId) : undefined
+      state.threadId ? codexFooter(state.threadId) : undefined,
+      { streamFinalUpdates: false }
     )
     state.done = true
     states.delete(agentSessionId)
   }
 
-  private async publishTask(agentSessionId: string, task: HarnessTask): Promise<void> {
-    await this.renderer.step(agentSessionId, {
-      id: task.id,
-      title: task.title,
-      status: task.status,
-      details: elementsToMarkdown(task.details),
-      output: elementsToMarkdown(task.output)
-    })
+  private async publishActivitySummary(
+    agentSessionId: string,
+    state: CodexSessionState,
+    opts: { final?: boolean } = {}
+  ): Promise<void> {
+    const tasks = Array.from(state.taskByUseId.values())
+    if (!tasks.length) return
+    for (const update of changedActivityTaskUpdates(state, tasks, opts)) {
+      await this.renderer.step(
+        agentSessionId,
+        {
+          id: update.id,
+          title: update.title,
+          status: update.status,
+          details: update.details,
+          output: update.output
+        },
+        { flush: !opts.final }
+      )
+    }
+    if (!opts.final) await this.publishPendingAssistantText(agentSessionId, state)
+  }
+
+  private async publishPendingAssistantText(
+    agentSessionId: string,
+    state: CodexSessionState,
+    opts: { force?: boolean; flush?: boolean } = {}
+  ): Promise<void> {
+    if (!opts.force && !state.taskByUseId.size) return
+    if (state.messageText.length <= state.streamedMessageText.length) return
+    const delta = state.messageText.slice(state.streamedMessageText.length)
+    state.streamedMessageText = state.messageText
+    await this.renderer.textDelta(agentSessionId, delta, { flush: opts.flush })
   }
 
   private async publishStructuredPlan(
     agentSessionId: string,
+    state: CodexSessionState,
     plan: Array<{ step: string; status?: string }>
   ): Promise<void> {
     for (const [index, item] of plan.entries()) {
-      await publishPlanTask(
-        this.renderer,
-        agentSessionId,
-        index,
-        String(item.step ?? ''),
-        planStatus(item.status)
-      )
+      setPlanTask(state, index, String(item.step ?? ''), planStatus(item.status))
     }
+    await this.publishActivitySummary(agentSessionId, state)
   }
 
-  private async publishPlanText(agentSessionId: string, value: string): Promise<void> {
+  private async publishPlanText(
+    agentSessionId: string,
+    state: CodexSessionState,
+    value: string
+  ): Promise<void> {
     const steps = parsePlanText(value)
     if (!steps.length) return
     for (const [index, item] of steps.entries()) {
-      await publishPlanTask(this.renderer, agentSessionId, index, item.step, item.status)
+      setPlanTask(state, index, item.step, item.status)
     }
+    await this.publishActivitySummary(agentSessionId, state)
   }
 }
 
@@ -208,9 +249,12 @@ function getState(agentSessionId: string): CodexSessionState {
       threadId: '',
       stepCounter: 0,
       messageText: '',
+      streamedMessageText: '',
       planText: '',
       taskByUseId: new Map(),
       commandOutputById: new Map(),
+      emittedActivityRunByTaskId: new Set(),
+      emittedActivityOutputByTaskId: new Set(),
       done: false
     }
     states.set(agentSessionId, state)
@@ -253,6 +297,10 @@ function messageDelta(current: string, incoming: string): string {
 function reasoningText(event: any): string {
   if (event?.type !== 'reasoning') return ''
   return String(event.text ?? event.thinking ?? '')
+}
+
+function isTerminalTurnEvent(event: any): boolean {
+  return event?.type === 'result' || event?.type === 'turn.done' || event?.type === 'turn.completed'
 }
 
 function toolUses(event: any): any[] {
@@ -337,20 +385,111 @@ function stripPlanMarker(value: string): string {
     .trim()
 }
 
-async function publishPlanTask(
-  renderer: AgentSessionRenderer,
-  agentSessionId: string,
+function setPlanTask(
+  state: CodexSessionState,
   index: number,
   step: string,
   status: HarnessTask['status']
-): Promise<void> {
+): void {
   const title = oneLine(stripPlanMarker(step), 256)
   if (!title) return
-  await renderer.step(agentSessionId, {
+  state.taskByUseId.set(`plan-${index + 1}`, {
     id: `plan-${index + 1}`,
     title,
-    status
+    status,
+    details: [],
+    output: []
   })
+}
+
+function completeOpenTasks(state: CodexSessionState): void {
+  for (const [id, task] of state.taskByUseId) {
+    if (task.status !== 'in_progress' && task.status !== 'pending') continue
+    state.taskByUseId.set(id, { ...task, status: 'complete' })
+  }
+}
+
+function changedActivityTaskUpdates(
+  state: CodexSessionState,
+  tasks: HarnessTask[],
+  opts: { final?: boolean } = {}
+): Array<{
+  id: string
+  title: string
+  status: HarnessTask['status']
+  details?: StreamRichText
+  output?: StreamRichText
+}> {
+  const updates: Array<{
+    id: string
+    title: string
+    status: HarnessTask['status']
+    details?: StreamRichText
+    output?: StreamRichText
+  }> = []
+  for (const task of tasks) {
+    let details: StreamRichText | undefined
+    let output: StreamRichText | undefined
+    if (opts.final) {
+      details = activityRunBlock(task)
+      output = activityOutputBlock(task)
+    } else if (!state.emittedActivityRunByTaskId.has(task.id)) {
+      state.emittedActivityRunByTaskId.add(task.id)
+      details = activityRunBlock(task)
+    }
+    if (
+      !opts.final &&
+      (task.status === 'complete' || task.status === 'error') &&
+      !state.emittedActivityOutputByTaskId.has(task.id)
+    ) {
+      state.emittedActivityOutputByTaskId.add(task.id)
+      output = activityOutputBlock(task)
+    }
+    if (!details && !output && !opts.final) continue
+    updates.push({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      details,
+      output
+    })
+  }
+  return updates
+}
+
+function activityRunBlock(task: HarnessTask): StreamRichText {
+  const command = firstPreformattedBody(task.details)
+  if (command) {
+    return richText([pre(command, shellLanguage(firstPreformattedLanguage(task.details)))])
+  }
+  const body = task.details.length ? elementsToPlainText(task.details) : task.title
+  return richText([pre(body, 'text')])
+}
+
+function activityOutputBlock(task: HarnessTask): StreamRichText {
+  if (!task.output.length) {
+    return richText([pre(task.status === 'error' ? 'Failed' : 'Done', 'text')])
+  }
+  return richText([
+    pre(elementsToPlainText(task.output), firstPreformattedLanguage(task.output) ?? 'text')
+  ])
+}
+
+function firstPreformattedBody(elements: StreamRichTextElement[]): string {
+  return (
+    elements
+      .find(element => element.type === 'rich_text_preformatted')
+      ?.elements.map(inline => inline.text ?? '')
+      .join('') ?? ''
+  )
+}
+
+function firstPreformattedLanguage(elements: StreamRichTextElement[]): string | undefined {
+  return elements.find(element => element.type === 'rich_text_preformatted')?.language
+}
+
+function shellLanguage(language: string | undefined): string {
+  return language === 'bash' || !language ? 'sh' : language
 }
 
 function commandOutputDelta(event: any): { id: string; delta: string } | null {
@@ -380,7 +519,7 @@ function commandTask(
   const exitCode = item.exitCode ?? item.exit_code
   const isCompletionUpdate =
     eventType === 'item.completed' || status === 'complete' || status === 'error'
-  const output = commandOutputElements(accumulatedOutput ?? '', exitCode)
+  const output = commandOutputElements(accumulatedOutput ?? '')
   return {
     id,
     title: command === 'Command' ? 'Run command' : `Run command: ${oneLine(command, 220)}`,
@@ -398,17 +537,11 @@ function commandAggregatedOutput(item: any): string {
   return ''
 }
 
-function commandOutputElements(
-  output: string,
-  exitCode?: number | string | null
-): StreamRichTextElement[] {
+function commandOutputElements(output: string): StreamRichTextElement[] {
   const elements: StreamRichTextElement[] = []
   if (output) {
     const formatted = formatCommandOutput(output)
     elements.push(pre(formatted.body, formatted.language))
-  }
-  if (exitCode !== null && exitCode !== undefined) {
-    elements.push(section([text(`exit code ${exitCode}`)]))
   }
   return elements
 }
@@ -471,27 +604,26 @@ function itemStatus(item: any, eventType: string, exitCode?: number | null): Har
   const status = String(item.status ?? '').toLowerCase()
   if (status === 'failed' || status === 'declined') return 'error'
   if (status === 'completed' || eventType === 'item.completed') {
-    return 'complete'
+    return exitCode === 0 || exitCode === null || exitCode === undefined ? 'complete' : 'error'
   }
   return 'in_progress'
 }
 
-function elementsToMarkdown(elements: StreamRichTextElement[]): string {
-  return elements.map(elementToMarkdown).filter(Boolean).join('\n\n')
+function elementsToPlainText(elements: StreamRichTextElement[]): string {
+  return elements.map(elementToPlainText).filter(Boolean).join('\n')
 }
 
-function elementToMarkdown(element: StreamRichTextElement): string {
+function elementToPlainText(element: StreamRichTextElement): string {
   if (element.type === 'rich_text_preformatted') {
     const body = element.elements?.map(inline => inline.text ?? '').join('') ?? ''
-    return `\`\`\`${element.language ?? ''}\n${body}\n\`\`\``
+    return body
   }
   if (element.type === 'rich_text_section') {
     return (element.elements ?? [])
       .map(inline => {
-        if ('url' in inline) return inline.text ? `[${inline.text}](${inline.url})` : inline.url
+        if ('url' in inline) return inline.text ?? inline.url
         if ('user_id' in inline) return `<@${inline.user_id}>`
-        const value = inline.text ?? ''
-        return inline.style?.code ? `\`${value}\`` : value
+        return inline.text ?? ''
       })
       .join('')
   }

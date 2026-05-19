@@ -29,9 +29,7 @@ This creates a narrow and auditable boundary for agent capabilities. Teams decid
 
 ## Credential-Safe Automation
 
-Sandbox pods receive stub keys and scoped Centaur API tokens. Real upstream credentials stay out of the sandbox and are injected at the network boundary by the firewall/proxy path only for approved destinations.
-
-The result is a practical security model for agents that need to call high-value systems: agents can use GitHub, model providers, data tools, or internal services without raw long-lived secrets sitting in their workspace.
+Sandboxes only ever see placeholder strings for upstream credentials. Real values live on [iron-proxy](https://docs.iron.sh), bound to specific hosts and headers, and are swapped in on the fly when a request matches. Agents can call GitHub, model providers, data tools, or internal services without raw long-lived secrets sitting in their workspace.
 
 ## Durable Workflows
 

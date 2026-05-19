@@ -92,6 +92,11 @@ export default defineConfig({
       text: 'GitHub',
       link: 'https://github.com/paradigmxyz/centaur',
     },
+    {
+      text: 'Security',
+      link: '/security',
+      match: (path) => path === '/security',
+    },
   ],
   search: {
     boostDocument(documentId) {
@@ -99,6 +104,7 @@ export default defineConfig({
       if (documentId.includes('quickstart')) return 4
       if (documentId.includes('extend/')) return 3.8
       if (documentId.includes('secrets/')) return 3.8
+      if (documentId.includes('security')) return 3.6
       if (documentId.includes('deploying-in-production')) return 3.5
       if (documentId.includes('architecture')) return 3
       return 1

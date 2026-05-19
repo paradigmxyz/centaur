@@ -14,6 +14,6 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"
 secrets = [{type = "http", name = "DEBANK_API_KEY", match_headers = ["AccessKey"], hosts = ["pro-openapi.debank.com"]}]

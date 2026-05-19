@@ -867,6 +867,7 @@ async def execution_status(request: Request, execution_id: str):
     result = await get_execution(pool, execution_id)
     if not result:
         raise HTTPException(status_code=404, detail="execution not found")
+    _enforce_sandbox_thread_scope(request, result["thread_key"])
     return result
 
 
@@ -980,6 +981,12 @@ async def release_thread(request: Request, thread_key: str, body: ReleaseRequest
 @router.post("/executions/{execution_id}/cancel", dependencies=[Depends(require_scope("agent:execute"))])
 async def execution_cancel(request: Request, execution_id: str):
     pool = request.app.state.db_pool
+    # Resolve the execution's thread first so a sandbox token cannot cancel an
+    # execution belonging to a different thread.
+    existing = await get_execution(pool, execution_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="execution not found")
+    _enforce_sandbox_thread_scope(request, existing["thread_key"])
     result = await cancel_execution(pool, execution_id)
     if not result:
         raise HTTPException(status_code=404, detail="execution not found")
@@ -1001,6 +1008,12 @@ async def steer_execution_endpoint(execution_id: str, request: Request):
     Falls back to cancellation if steering fails.
     """
     pool = request.app.state.db_pool
+    # Resolve the execution's thread first so a sandbox token cannot steer (and
+    # thereby inject a user message into) an execution on a different thread.
+    existing = await get_execution(pool, execution_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    _enforce_sandbox_thread_scope(request, existing["thread_key"])
     raw_bytes = await request.body()
     raw_body = _json.loads(raw_bytes) if raw_bytes else {}
     body = SteerExecutionRequest.model_validate(raw_body)
