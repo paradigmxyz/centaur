@@ -8,7 +8,48 @@
   --centaur-muted: light-dark(#727278, #9b9ba1);
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
-  --centaur-display: 'Instrument Serif', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+  --centaur-serif: 'Sagittaire Text', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+  --centaur-display: 'Sagittaire Display', var(--centaur-serif);
+}
+
+@font-face {
+  font-family: 'Sagittaire Display';
+  src: url('https://ampcode.com/fonts/SagittaireDisplay-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Sagittaire Display';
+  src: url('https://ampcode.com/fonts/SagittaireDisplay-Extralight.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 200;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Sagittaire Text';
+  src: url('https://ampcode.com/fonts/SagittaireText-Light.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Sagittaire Text';
+  src: url('https://ampcode.com/fonts/SagittaireText-Medium.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Sagittaire Text';
+  src: url('https://ampcode.com/fonts/SagittaireText-MediumItalic.woff2') format('woff2');
+  font-style: italic;
+  font-weight: 500;
+  font-display: swap;
 }
 
 /*
@@ -26,7 +67,7 @@
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-display);
+  font-family: var(--centaur-serif);
 }
 
 .vocs_Content h1,
@@ -36,6 +77,7 @@ body,
 .vocs_Content h5,
 .vocs_Content h6,
 .centaur-home h1 {
+  font-family: var(--centaur-display);
   font-weight: 400;
   letter-spacing: 0.012em;
 }
