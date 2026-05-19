@@ -129,43 +129,24 @@ body,
   box-sizing: border-box;
 }
 
-/* Background tapestry: clipped centaur outlines bleeding off all four edges
- * of the landing hero. Same visual treatment as the README git-header banner —
- * faint, monochrome strokes, rotated and oversized so only fragments enter
- * the visible viewport. Pointer-events are disabled so the marks never
- * intercept clicks intended for the hero copy or the thread demo. */
+/* Single centaur outline anchored to the left margin of the hero. 1px
+ * stroke, large but fully visible — never clipped by the top nav or the
+ * viewport edges. Pointer-events are disabled so the mark never intercepts
+ * clicks intended for the hero copy. */
 .home-bg {
-  color: #f7f7f2;
   inset: 0;
   pointer-events: none;
   position: absolute;
 }
 
 .home-bg-mark {
-  height: 130vh;
-  max-height: 1200px;
-  min-height: 720px;
-  opacity: 0.08;
+  height: clamp(420px, 78vh, 920px);
+  left: clamp(-160px, 2vw, 40px);
+  opacity: 0.09;
   position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
   width: auto;
-}
-
-.home-bg-mark-1 {
-  left: -22vw;
-  top: -38vh;
-  transform: rotate(-12deg);
-}
-
-.home-bg-mark-2 {
-  right: -28vw;
-  top: -12vh;
-  transform: rotate(18deg);
-}
-
-.home-bg-mark-3 {
-  bottom: -42vh;
-  left: 22vw;
-  transform: rotate(-4deg);
 }
 
 .home-hero {
