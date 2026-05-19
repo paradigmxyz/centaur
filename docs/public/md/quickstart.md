@@ -53,7 +53,7 @@ Create the Slackbot app at [api.slack.com/apps](https://api.slack.com/apps).
 Use the app's Bot User OAuth Token for `SLACK_BOT_TOKEN` and its Signing Secret
 for `SLACK_SIGNING_SECRET`.
 
-`OP_SERVICE_ACCOUNT_TOKEN` and `OP_VAULT` let [iron-proxy](https://iron.sh)
+`OP_SERVICE_ACCOUNT_TOKEN` and `OP_VAULT` let [iron-proxy](https://docs.iron.sh)
 resolve model and tool credentials through 1Password. `SLACK_SIGNING_SECRET`
 and `SLACKBOT_API_KEY` are API boot requirements in the current chart.
 `SLACK_BOT_TOKEN` is required by the default local bootstrap because Slackbot is
@@ -64,8 +64,8 @@ Postgres on startup, so it must exist before `just up`.
 
 Application-level model and tool secrets, such as `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `AMP_API_KEY`, and `GITHUB_TOKEN`, should live in
-1Password or the configured [iron-proxy](https://iron.sh) secret source. Sandboxes receive
-placeholder values and [iron-proxy](https://iron.sh) injects the real credentials only on approved
+1Password or the configured [iron-proxy](https://docs.iron.sh) secret source. Sandboxes receive
+placeholder values and [iron-proxy](https://docs.iron.sh) injects the real credentials only on approved
 outbound requests.
 
 The default harness is `codex`, so `OPENAI_API_KEY` must exist in the configured

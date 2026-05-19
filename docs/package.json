@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vocs dev",
-    "prebuild": "bash scripts/build-md.sh",
+    "prebuild": "bash scripts/build-md.sh && bash scripts/build-brand-zip.sh",
     "build": "vocs build",
     "preview": "vocs preview",
     "cf:dev": "npm run build && wrangler dev",

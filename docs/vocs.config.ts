@@ -1,3 +1,4 @@
+import { createElement, Fragment } from 'react'
 import { defineConfig } from 'vocs'
 
 import { sidebar } from './sidebar.js'
@@ -6,11 +7,40 @@ const basePath = process.env.VOCS_BASE_PATH || undefined
 
 export default defineConfig({
   rootDir: '.',
+  // The dead-link checker doesn't know about static assets shipped via
+  // public/ (like our zip and brand SVGs), so downgrade to a warning rather
+  // than failing the build.
+  checkDeadlinks: 'warn',
   title: 'Centaur',
   titleTemplate: '%s - Centaur',
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
-  iconUrl: '/centaur.png',
-  logoUrl: '/centaur.png',
+  // Browser-tab favicon swaps with system theme via prefers-color-scheme so
+  // the icon stays readable on either browser chrome.
+  iconUrl: {
+    light: '/brand/mark-black.svg',
+    dark: '/brand/mark-white.svg',
+  },
+  // Top-left site logo: black-ink wordmark on light theme, white on dark.
+  logoUrl: {
+    light: '/brand/lockup-black.svg',
+    dark: '/brand/lockup-white.svg',
+  },
+  // Body copy: Instrument Sans. Code blocks: Geist Mono. Headings use
+  // Instrument Serif via a styles.css override since Vocs only natively
+  // configures body + mono.
+  font: {
+    default: { google: 'Instrument Sans' },
+    mono: { google: 'Geist Mono' },
+  },
+  head: createElement(Fragment, null,
+    createElement('link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }),
+    createElement('link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: '' }),
+    createElement('link', {
+      rel: 'stylesheet',
+      href: 'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap',
+    }),
+    createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
+  ),
   ...(basePath ? { basePath } : {}),
   editLink: {
     pattern: 'https://github.com/paradigmxyz/centaur/edit/main/docs/pages/:path',
@@ -29,7 +59,7 @@ export default defineConfig({
   },
   topNav: [
     {
-      text: 'What is Centaur?',
+      text: 'About',
       link: '/what-is-centaur',
       match: (path) => path === '/what-is-centaur',
     },
@@ -39,7 +69,7 @@ export default defineConfig({
       match: (path) => path === '/quickstart',
     },
     {
-      text: 'Deploying in Production',
+      text: 'Deploying',
       link: '/deploying-in-production',
       match: (path) => path === '/deploying-in-production',
     },

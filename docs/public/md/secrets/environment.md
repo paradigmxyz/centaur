@@ -5,7 +5,7 @@ description: Configure Centaur to resolve tool and harness credentials from Kube
 
 # Use Environment Variables
 
-Environment-backed secrets are the simplest secret source. [iron-proxy](https://iron.sh) reads real
+Environment-backed secrets are the simplest secret source. [iron-proxy](https://docs.iron.sh) reads real
 credential values from environment variables on the proxy container.
 
 Use this for local development, CI, or simple private deployments. For
@@ -34,7 +34,6 @@ kubectl create secret generic centaur-infra-env \
   --from-literal=SLACK_BOT_TOKEN='xoxb-...' \
   --from-literal=SLACK_SIGNING_SECRET='...' \
   --from-literal=SANDBOX_SIGNING_KEY="$(openssl rand -hex 32)" \
-  --from-literal=FIREWALL_CONTROL_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=IRON_MANAGEMENT_API_KEY="$(openssl rand -hex 32)" \
   --from-literal=OPENAI_API_KEY='...' \
   --from-literal=AMP_API_KEY='...' \
@@ -59,7 +58,7 @@ Centaur uses:
 - secret reference: `WAREHOUSE_API_KEY`
 - placeholder value seen by the tool: `WAREHOUSE_API_KEY`
 
-In `env` mode, [iron-proxy](https://iron.sh) reads the real value from the environment variable
+In `env` mode, [iron-proxy](https://docs.iron.sh) reads the real value from the environment variable
 named by the secret reference.
 
 ## Advanced secret entries
@@ -80,7 +79,7 @@ secret_ref = "WAREHOUSE_POSTGRES_DSN"
 database = "analytics"
 ```
 
-Use `gcp_auth` when [iron-proxy](https://iron.sh) should mint Google OAuth tokens for Google APIs.
+Use `gcp_auth` when [iron-proxy](https://docs.iron.sh) should mint Google OAuth tokens for Google APIs.
 Use `pg_dsn` when a sandbox needs a proxied Postgres DSN instead of a raw
 database URL.
 

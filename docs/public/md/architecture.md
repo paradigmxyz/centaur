@@ -10,8 +10,8 @@ runtime, exposes approved tools, injects credentials through a proxy, and keeps
 an event trail clients can replay.
 
 <figure className="architecture-figure">
-  <img src="/architecture-2.0.svg" alt="Centaur architecture 2.0 diagram" />
-  <figcaption>Architecture 2.0: ingress, durable control plane, isolated execution, tools, workflows, and controlled egress.</figcaption>
+  <img src="/brand/workflow.svg" alt="Centaur workflow diagram — Centaur API to Kubernetes backend to sandbox pod, with iron-proxy handling outbound credentials" />
+  <figcaption>A single Centaur agent turn: API persists the message, hands off to the Kubernetes backend, attaches a sandbox pod, and routes the pod's outbound HTTP through iron-proxy.</figcaption>
 </figure>
 
 ## Planes
@@ -22,7 +22,7 @@ an event trail clients can replay.
 | Control | Persist requests and coordinate runtime state. | FastAPI, Postgres, execution worker. |
 | Execution | Run one assigned agent session per thread. | Kubernetes sandbox pods. |
 | Capabilities | Give agents approved actions. | Tool plugins, workflow engine, overlays. |
-| Secrets and egress | Let agents call third-party APIs without receiving raw keys. | Kubernetes Secret, [iron-proxy](https://iron.sh), per-sandbox proxy config. |
+| Secrets and egress | Let agents call third-party APIs without receiving raw keys. | Kubernetes Secret, [iron-proxy](https://docs.iron.sh), per-sandbox proxy config. |
 
 ## Durable API lifecycle
 
@@ -98,13 +98,13 @@ sleep for minutes or days, and parent/child workflow trees.
 ## Secrets and outbound requests
 
 Agents and tools refer to credentials by name, such as `OPENAI_API_KEY` or
-`secret("CRM_API_TOKEN")`. The API renders an [iron-proxy](https://iron.sh) config from the tool
-secret declarations and the configured secret source. In production, [iron-proxy](https://iron.sh)
+`secret("CRM_API_TOKEN")`. The API renders an [iron-proxy](https://docs.iron.sh) config from the tool
+secret declarations and the configured secret source. In production, [iron-proxy](https://docs.iron.sh)
 swaps placeholder names for real keys on outbound requests.
 
 Prompts, transcripts, sandbox files, and logs can contain secret names without
 containing the raw credential. The proxy injects the real value for allowlisted
-hosts and can redact leaked values from responses.
+hosts.
 
 ## Failure model
 

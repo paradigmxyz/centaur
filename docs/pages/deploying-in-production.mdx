@@ -16,19 +16,10 @@ The API saves threads, runs, and events in Postgres. The Kubernetes backend
 creates sandbox pods for agent work. [iron-proxy](https://docs.iron.sh) handles outbound requests that
 need credentials:
 
-```diagram
-+-------------+       +--------------------+       +--------------------+
-| Centaur API | ----> | Kubernetes backend | ----> | Sandbox Pod        |
-| Postgres    |       | create/attach/exec |       | agent CLI          |
-+-------------+       +--------------------+       +---------+----------+
-                                                            |
-                                                            | outbound HTTP
-                                                            v
-                                                   +--------------------+
-                                                   | iron-proxy         |
-                                                   | secret references  |
-                                                   +--------------------+
-```
+<figure className="architecture-figure">
+  <img src="/brand/architecture.svg" alt="Centaur production architecture — ingress, control plane, sandbox runtime, tools/workflows, secrets, and egress" />
+  <figcaption>Slackbot and API ingress → Centaur API (Postgres-backed) → Kubernetes sandbox runtime → outbound traffic through iron-proxy.</figcaption>
+</figure>
 
 Each pod receives the prompt files, environment, proxy CA, proxy settings, and
 command it needs for one assigned thread. It should not receive raw model keys

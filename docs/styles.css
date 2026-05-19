@@ -7,6 +7,25 @@
   --centaur-muted: light-dark(#727278, #9b9ba1);
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
+  --centaur-serif: 'Instrument Serif', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+}
+
+/*
+ * Heading typography: Vocs loads Instrument Sans (body) + Geist Mono (code)
+ * via `font` in vocs.config.ts. Instrument Serif is preloaded via the head
+ * <link> so we can apply it to every heading without an @import flash.
+ */
+.vocs_Content h1,
+.vocs_Content h2,
+.vocs_Content h3,
+.vocs_Content h4,
+.vocs_Content h5,
+.vocs_Content h6,
+.centaur-home h1,
+.centaur-home h2 {
+  font-family: var(--centaur-serif);
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 
 :root,
@@ -114,6 +133,13 @@ body,
   min-width: 0;
 }
 
+.home-mark {
+  display: block;
+  width: 88px;
+  height: auto;
+  margin-bottom: 28px;
+}
+
 .home-hero h1 {
   color: #f7f7f2;
   font-size: 4.9rem;
@@ -208,6 +234,13 @@ body,
   object-fit: contain;
 }
 
+/* Tempo's wordmark is much wider per em than Paradigm's — scale it down so
+ * the two read at the same optical weight. */
+.home-brand-tempo img {
+  height: 28px;
+  max-width: min(28vw, 120px);
+}
+
 .home-thread-demo {
   min-width: 0;
   width: 100%;
@@ -245,14 +278,15 @@ body,
   min-width: 0;
 }
 
+/* Slack-style threads sidebar: compact pill rows, channel + preview + meta */
 .thread-list-head {
   border-bottom: 1px solid var(--thread-border);
-  padding: 12px 10px 10px;
+  padding: 10px 12px;
 }
 
 .thread-list-title {
   color: var(--thread-ink);
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -269,13 +303,13 @@ body,
   background: transparent;
   border: 0;
   border-bottom: 1px solid var(--thread-border);
-  border-left: 3px solid transparent;
+  border-left: 2px solid transparent;
   color: inherit;
   cursor: pointer;
   display: block;
   font: inherit;
   min-width: 0;
-  padding: 10px 10px 10px 7px;
+  padding: 8px 10px 8px 10px;
   text-align: left;
   width: 100%;
 }
@@ -292,41 +326,51 @@ body,
 .thread-list-channel-row {
   align-items: center;
   display: flex;
-  gap: 7px;
-  margin-bottom: 5px;
+  gap: 6px;
+  margin-bottom: 3px;
 }
 
 .thread-list-channel {
   color: var(--thread-ink-3);
-  font-size: 10.5px;
+  font-size: 9.5px;
   font-weight: 650;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
 .thread-list-live-dot {
   background: var(--thread-accent);
   border-radius: 50%;
-  box-shadow: 0 0 0 4px color-mix(in oklch, var(--thread-accent) 22%, transparent);
-  height: 7px;
-  width: 7px;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--thread-accent) 22%, transparent);
+  height: 6px;
+  width: 6px;
 }
 
 .thread-list-name {
   color: var(--thread-ink);
-  font-size: 12.5px;
-  font-weight: 700;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.35;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .thread-list-meta {
   color: var(--thread-ink-3);
   display: flex;
-  font-size: 10.5px;
+  font-size: 9.5px;
+  gap: 6px;
   justify-content: space-between;
-  margin-top: 8px;
+  margin-top: 4px;
+}
+
+.thread-list-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thread-panel-detail {
@@ -342,18 +386,20 @@ body,
   border-bottom: 1px solid var(--thread-border);
   display: flex;
   gap: 12px;
-  padding: 13px 20px;
+  padding: 10px 12px;
+  min-height: 41px;
+  box-sizing: border-box;
 }
 
 .thread-panel-title {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0;
 }
 
 .thread-panel-sub {
   color: var(--thread-ink-3);
-  font-size: 12px;
+  font-size: 11px;
   margin-top: 1px;
 }
 
@@ -362,9 +408,17 @@ body,
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 18px 22px 10px;
+  padding: 18px 22px 80px;
   scrollbar-color: var(--thread-border-strong) transparent;
   scrollbar-width: thin;
+}
+
+/* Sentinel at the end of the scroll container — the auto-scroller targets
+ * this rather than scrollHeight so newly typed text has space below it
+ * before we measure scroll position. */
+.thread-panel-tail {
+  height: 12px;
+  width: 100%;
 }
 
 .thread-panel-scroll::-webkit-scrollbar {
@@ -401,7 +455,16 @@ body,
 }
 
 .thread-panel-avatar-bot {
-  background: linear-gradient(135deg, var(--thread-accent), #7a3a00);
+  background: #050505;
+  overflow: hidden;
+  padding: 0;
+}
+
+.thread-panel-avatar-bot img {
+  display: block;
+  height: 100%;
+  width: 100%;
+  object-fit: cover;
 }
 
 .thread-panel-avatar-user {
@@ -474,14 +537,14 @@ body,
 
 .thread-panel-badge {
   background: rgba(255, 255, 255, 0.14);
-  border-radius: 3px;
+  border-radius: 4px;
   color: #f7f7f2;
   display: inline-block;
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  line-height: 1;
-  padding: 1px 5px;
+  line-height: 1.4;
+  padding: 4px 7px;
   text-transform: uppercase;
 }
 
@@ -801,4 +864,159 @@ body,
   .thread-panel-typing span {
     animation: none;
   }
+}
+
+/* ── Brand page ────────────────────────────────────────────────────────── */
+
+.brand-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  margin: 28px 0 40px;
+}
+
+.brand-tile {
+  border: 1px solid var(--centaur-line);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  overflow: hidden;
+}
+
+.brand-tile-art {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  padding: 56px 40px;
+}
+
+.brand-tile-art img {
+  display: block;
+  height: auto;
+  max-width: 260px;
+  width: 100%;
+}
+
+.brand-tile-art .brand-mark {
+  max-width: 124px;
+}
+
+.brand-tile-meta {
+  border-top: 1px solid currentColor;
+  border-top-color: rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 22px 20px;
+  text-align: left;
+}
+
+.brand-tile-dark .brand-tile-meta {
+  border-top-color: rgba(255, 255, 255, 0.12);
+}
+
+.brand-tile-meta strong {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.brand-tile-meta > span {
+  font-size: 0.85rem;
+  opacity: 0.65;
+}
+
+.brand-download-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.brand-btn {
+  align-items: center;
+  background: var(--centaur-accent);
+  border: 1px solid var(--centaur-accent);
+  border-radius: 8px;
+  color: #0a0a0a !important;
+  display: inline-flex;
+  font-size: 0.82rem;
+  font-weight: 600;
+  gap: 6px;
+  padding: 7px 12px;
+  text-decoration: none !important;
+  transition: filter 0.12s ease;
+}
+
+.brand-btn:hover {
+  filter: brightness(1.05);
+}
+
+.brand-btn-secondary {
+  background: transparent;
+  border-color: currentColor;
+  color: inherit !important;
+}
+
+.brand-tile-dark .brand-btn-secondary {
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.brand-tile-light .brand-btn-secondary {
+  border-color: rgba(0, 0, 0, 0.32);
+}
+
+.brand-tile-light {
+  background: #ffffff;
+  color: #050505;
+}
+
+.brand-tile-dark {
+  background: #050505;
+  color: #f7f7f2;
+}
+
+@media (max-width: 720px) {
+  .brand-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .brand-tile-art {
+    padding: 40px 28px;
+  }
+}
+
+/* ── Right-click brand menu (centaur-brand-menu.js) ────────────────────── */
+
+.centaur-brand-menu {
+  background: light-dark(#ffffff, #18181b);
+  border: 1px solid var(--centaur-line);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+  color: var(--centaur-text);
+  font-size: 13px;
+  min-width: 220px;
+  padding: 4px;
+  position: fixed;
+  z-index: 9999;
+}
+
+.centaur-brand-menu[hidden] {
+  display: none;
+}
+
+.centaur-brand-menu a {
+  border-radius: 5px;
+  color: inherit;
+  cursor: pointer;
+  display: block;
+  font-weight: 500;
+  padding: 8px 10px;
+  text-decoration: none;
+}
+
+.centaur-brand-menu a:hover,
+.centaur-brand-menu a:focus-visible {
+  background: var(--centaur-accent-soft);
+  outline: none;
 }

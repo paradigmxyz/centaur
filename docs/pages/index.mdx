@@ -15,6 +15,10 @@ import ThreadPanel from './components/ThreadPanel'
 <main className="centaur-home">
   <section className="home-hero" aria-labelledby="home-title">
     <div className="home-copy">
+      <picture>
+        <source srcSet="/brand/mark-white.png" media="(prefers-color-scheme: dark)" />
+        <img className="home-mark" src="/brand/mark-black.png" alt="Centaur" />
+      </picture>
       <h1 id="home-title">Run shared agents on infrastructure you control.</h1>
       <div className="home-lede">{'Centaur stores every turn, assigns isolated sandboxes, exposes approved tools, runs durable workflows, and injects credentials at the network boundary.'}</div>
 
@@ -29,7 +33,7 @@ import ThreadPanel from './components/ThreadPanel'
           <a className="home-brand" href="https://paradigm.xyz" aria-label="Paradigm">
             <img src="/paradigm-logo.svg" alt="Paradigm" />
           </a>
-          <a className="home-brand" href="https://tempo.xyz" aria-label="Tempo">
+          <a className="home-brand home-brand-tempo" href="https://tempo.xyz" aria-label="Tempo">
             <img src="/tempo-logo.svg" alt="Tempo" />
           </a>
         </div>

@@ -6,7 +6,7 @@ description: Configure Centaur to resolve tool and harness credentials from 1Pas
 # Use 1Password
 
 Use 1Password when you want tool and harness credentials to stay out of sandbox
-pods and out of the API process. Sandboxes receive placeholders. [iron-proxy](https://iron.sh)
+pods and out of the API process. Sandboxes receive placeholders. [iron-proxy](https://docs.iron.sh)
 resolves the real credential and injects it only for allowed upstream hosts.
 
 ## Configure the chart
@@ -36,7 +36,6 @@ SLACKBOT_API_KEY
 SLACK_BOT_TOKEN
 SLACK_SIGNING_SECRET
 SANDBOX_SIGNING_KEY
-FIREWALL_CONTROL_TOKEN
 IRON_MANAGEMENT_API_KEY
 ```
 
@@ -53,14 +52,14 @@ secrets = ["WAREHOUSE_API_KEY"]
 ```
 
 Create a 1Password item named `WAREHOUSE_API_KEY` in `OP_VAULT`, with the value
-stored in the `credential` field. [iron-proxy](https://iron.sh) resolves:
+stored in the `credential` field. [iron-proxy](https://docs.iron.sh) resolves:
 
 ```text
 op://$OP_VAULT/WAREHOUSE_API_KEY/credential
 ```
 
 The tool sees `WAREHOUSE_API_KEY` as a placeholder. For requests to
-`warehouse.internal.example.com`, [iron-proxy](https://iron.sh) replaces that placeholder with the
+`warehouse.internal.example.com`, [iron-proxy](https://docs.iron.sh) replaces that placeholder with the
 real 1Password value.
 
 ## Harness credentials
@@ -105,7 +104,7 @@ infra Secret must also include `OP_CONNECT_TOKEN`.
 
 ## Verify
 
-Check that the API and [iron-proxy](https://iron.sh) received the expected source mode:
+Check that the API and [iron-proxy](https://docs.iron.sh) received the expected source mode:
 
 ```bash
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- env | \

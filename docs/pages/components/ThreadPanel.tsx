@@ -375,13 +375,15 @@ const threadData: ThreadData[] = [
   },
 ]
 
-function BotAvatar({ glyph, accent }: { glyph: string; accent: string }) {
+function BotAvatar({ accent }: { glyph?: string; accent: string }) {
+  // Centaur bot avatar — uses the rounded-square Slack icon mark instead of
+  // a colored letter so it reads as the real product mark inside the demo.
   return (
     <div
       className="thread-panel-avatar thread-panel-avatar-bot"
       style={{ '--thread-accent': accent } as CSSProperties}
     >
-      {glyph}
+      <img src="/brand/slack-icon.svg" alt="Centaur" />
     </div>
   )
 }
@@ -617,11 +619,22 @@ function ThreadDetail({
     stickToBottomRef.current = distanceFromBottom < 48
   }, [])
 
+  // Auto-scroll to the bottom sentinel after the typed content has actually
+  // rendered. Without the rAF wrap we measured scrollHeight before the new
+  // text reached the DOM, so the last reply visibly hugged the bottom edge.
   useEffect(() => {
     const element = scrollRef.current
     if (!element) return
     if (!stickToBottomRef.current) return
-    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+    const raf = requestAnimationFrame(() => {
+      const tail = element.querySelector<HTMLDivElement>('.thread-panel-tail')
+      if (tail) {
+        tail.scrollIntoView({ behavior: 'smooth', block: 'end' })
+      } else {
+        element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+      }
+    })
+    return () => cancelAnimationFrame(raf)
   }, [phase, replyIdx, thread.id])
 
   const visible: Array<Reply & { i: number; isTyping: boolean; isStreaming: boolean }> = []
@@ -734,6 +747,7 @@ function ThreadDetail({
             </div>
           </div>
         ))}
+        <div className="thread-panel-tail" aria-hidden="true" />
       </div>
 
     </section>
@@ -776,9 +790,9 @@ export default function ThreadPanel({
                   <span className="thread-list-channel"># {thread.channel}</span>
                   {isActive && <span className="thread-list-live-dot" />}
                 </div>
-                <div className="thread-list-name">{thread.parent.who}</div>
+                <div className="thread-list-name">{thread.parent.body.trim()}</div>
                 <div className="thread-list-meta">
-                  <span>{thread.replies.length} replies</span>
+                  <span>{thread.parent.who} · {thread.replies.length} replies</span>
                   <span>{thread.replies.at(-1)?.time}</span>
                 </div>
               </button>

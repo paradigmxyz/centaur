@@ -26,4 +26,10 @@ export const sidebar = [
       { text: 'Use Environment Variables', link: '/secrets/environment' },
     ],
   },
+  {
+    text: 'Resources',
+    items: [
+      { text: 'Brand', link: '/brand' },
+    ],
+  },
 ] satisfies Config['sidebar']
