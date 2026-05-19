@@ -21,6 +21,7 @@ permissions:
   contents: read
   deployments: write
   issues: write
+  pull-requests: write
 
 jobs:
   build-and-deploy:
@@ -117,7 +118,7 @@ jobs:
           )"
           comment_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
             --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" \
-            | tail -n 1)"
+            2>/dev/null | tail -n 1 || true)"
           if [ -n "$comment_id" ]; then
             gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -f body="$body"
           else
