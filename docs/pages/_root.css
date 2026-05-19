@@ -620,6 +620,21 @@ a.home-lockup-link {
   grid-template-columns: 1fr;
 }
 
+.home-media-link {
+  color: inherit;
+  display: block;
+  text-decoration: none;
+}
+
+.home-media-link:focus-visible {
+  outline: 2px solid var(--centaur-accent);
+  outline-offset: 6px;
+}
+
+.home-media-link:hover .home-architecture-diagram img {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
 .home-overview-heading {
   display: grid;
   gap: 24px;
@@ -652,25 +667,8 @@ a.home-lockup-link {
   padding: 0;
 }
 
-.home-overview-list li {
-  position: relative;
-}
-
 .home-overview-list li:nth-child(odd) {
   border-right: 0;
-}
-
-.home-overview-list li::before {
-  background: var(--centaur-accent);
-  border-radius: 50%;
-  content: "";
-  height: 7px;
-  left: 16px;
-  pointer-events: none;
-  position: absolute;
-  top: 32px;
-  width: 7px;
-  z-index: 1;
 }
 
 .home-overview-list a {
@@ -678,7 +676,7 @@ a.home-lockup-link {
   display: grid;
   gap: 8px;
   min-height: 100%;
-  padding: 22px 28px 24px 40px;
+  padding: 22px 28px 24px 0;
   text-decoration: none;
   transition: background 140ms ease;
 }
@@ -726,6 +724,7 @@ a.home-lockup-link {
   display: block;
   height: auto;
   object-fit: contain;
+  transition: border-color 140ms ease;
   width: 100%;
 }
 
