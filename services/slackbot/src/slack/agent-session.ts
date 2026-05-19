@@ -2,6 +2,7 @@ import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
 import { ulid } from '@std/ulid'
 import { slackReplyLimits } from '../constants'
+import { logWarn } from '../logging'
 import {
   markdownChunk,
   planBlock,
@@ -215,20 +216,31 @@ export class AgentSessionRenderer {
       }
       closed = true
     } finally {
-      await this.setStatus(sessionId, '')
+      if (!state.statusCleared) {
+        state.statusCleared = await this.setStatus(sessionId, '')
+      }
       if (closed) sessions.delete(sessionId)
     }
   }
 
-  private async setStatus(sessionId: string, status: string): Promise<void> {
+  private async setStatus(sessionId: string, status: string): Promise<boolean> {
     const state = requireSession(sessionId)
-    const response = await this.client.assistant.threads.setStatus({
-      channel_id: state.channel,
-      thread_ts: state.parentTs,
-      status,
-      ...(status ? { loading_messages: [status] } : {})
-    })
-    if (!response.ok) throw new Error(response.error ?? 'assistant.threads.setStatus failed')
+    try {
+      const response = await this.client.assistant.threads.setStatus({
+        channel_id: state.channel,
+        thread_ts: state.parentTs,
+        status,
+        ...(status ? { loading_messages: [status] } : {})
+      })
+      if (!response.ok) {
+        logStatusFailure(state, status, response.error ?? 'unknown_error')
+        return false
+      }
+      return true
+    } catch (error) {
+      logStatusFailure(state, status, error instanceof Error ? error.message : String(error))
+      return false
+    }
   }
 
   private async closeTextStream(state: AgentSessionState, segment: Segment): Promise<void> {
@@ -442,8 +454,7 @@ export class AgentSessionRenderer {
     chunks: AnyChunk[]
   ): Promise<void> {
     if (state.statusCleared || !hasVisibleStreamChunks(chunks)) return
-    await this.setStatus(state.id, '')
-    state.statusCleared = true
+    state.statusCleared = await this.setStatus(state.id, '')
   }
 
   private planPrefix(state: AgentSessionState, segment: Segment): AnyChunk[] {
@@ -454,6 +465,15 @@ export class AgentSessionRenderer {
     }
     return chunks
   }
+}
+
+function logStatusFailure(state: AgentSessionState, status: string, error: string): void {
+  logWarn('slack_assistant_status_failed', {
+    channel_id: state.channel,
+    thread_ts: state.parentTs,
+    status: status ? 'set' : 'clear',
+    error
+  })
 }
 
 function finalizeOpenTasks(segment: Segment): StreamTask[] {
