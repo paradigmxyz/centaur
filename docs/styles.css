@@ -319,9 +319,10 @@ body,
   color: #f7f7f2;
   display: flex;
   flex-direction: column;
+  justify-content: center;
   min-height: calc(100dvh - var(--vocs-topNav_height));
   overflow: hidden;
-  padding: 58px 24px 52px;
+  padding: clamp(40px, 5dvh, 80px) 24px clamp(48px, 7dvh, 96px);
   position: relative;
 }
 
@@ -332,11 +333,11 @@ body,
 .home-hero {
   align-items: center;
   display: grid;
-  gap: 56px;
-  grid-template-columns: minmax(0, 0.92fr) minmax(420px, 1fr);
+  gap: clamp(56px, 6vw, 104px);
+  grid-template-columns: minmax(500px, 0.9fr) minmax(520px, 1.05fr);
   margin: 0 auto;
-  max-width: 1180px;
-  min-height: min(620px, calc(100dvh - 180px));
+  max-width: 1380px;
+  min-height: calc(100dvh - var(--vocs-topNav_height) - clamp(96px, 12dvh, 176px));
   position: relative;
   text-align: left;
   width: 100%;
@@ -347,23 +348,16 @@ body,
   min-width: 0;
 }
 
-.home-title-lockup {
-  align-items: flex-start;
-  display: grid;
-  gap: 22px;
-  grid-template-columns: 90px minmax(0, 1fr);
-}
-
 .home-mark {
   display: block;
-  margin-top: 8px;
-  width: 86px;
+  width: clamp(88px, 6.4vw, 124px);
   height: auto;
+  margin-bottom: clamp(24px, 3dvh, 42px);
 }
 
 .home-hero h1 {
   color: #f7f7f2;
-  font-size: 4rem;
+  font-size: clamp(4.2rem, 5vw, 6.6rem);
   font-weight: 400;
   letter-spacing: 0.012em;
   line-height: 0.92;
@@ -373,9 +367,9 @@ body,
 
 .home-lede {
   color: #b8b8b0;
-  font-size: 1.17rem;
+  font-size: clamp(1.17rem, 1.25vw, 1.35rem);
   line-height: 1.58;
-  margin: 24px 0 0;
+  margin: clamp(24px, 3dvh, 36px) 0 0;
   max-width: 680px;
 }
 
@@ -487,8 +481,8 @@ body,
   color: var(--thread-ink);
   display: grid;
   grid-template-columns: minmax(136px, 168px) minmax(0, 1fr);
-  height: min(650px, calc(100dvh - 150px));
-  min-height: 560px;
+  height: min(760px, calc(100dvh - 160px));
+  min-height: 640px;
   overflow: hidden;
   text-align: left;
 }
@@ -1034,16 +1028,10 @@ body,
     text-align: center;
   }
 
-  .home-title-lockup {
-    align-items: center;
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-  }
-
   .home-mark {
-    margin-top: 0;
     width: 76px;
+    margin-left: auto;
+    margin-right: auto;
   }
 
   .home-hero h1 {
