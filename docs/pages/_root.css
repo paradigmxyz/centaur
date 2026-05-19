@@ -17,7 +17,7 @@
 
 :root[style*='color-scheme:dark'],
 :root[style*='color-scheme: dark'] {
-  --centaur-bg: #101012;
+  --centaur-bg: #050506;
   --centaur-code: #0b0b0d;
   --centaur-line: rgba(255, 255, 255, 0.12);
   --centaur-muted: #9b9ba1;
@@ -336,12 +336,12 @@ body,
 :root[style*='color-scheme:dark'],
 :root[style*='color-scheme: dark'] {
   --vocs-color_background: #050506;
-  --vocs-color_background2: #0b0b0d;
+  --vocs-color_background2: #050506;
   --vocs-color_background3: #111114;
   --vocs-color_background4: #19191d;
   --vocs-color_background5: #202024;
   --vocs-color_backgroundDark: #050506;
-  --vocs-color_backgroundDarkTint: #111114;
+  --vocs-color_backgroundDarkTint: #050506;
   --vocs-color_codeBlockBackground: #0b0b0d;
   --vocs-color_codeInlineBackground: #111114;
   --vocs-color_codeInlineBorder: rgba(255, 255, 255, 0.12);
@@ -362,11 +362,31 @@ body,
   --vocs-color_textAccentHover: var(--centaur-accent-hover);
   --vocs-color_textHover: #ffffff;
   --vocs-color_title: #f7f7f2;
+  --vocs-background-color-primary: #050506;
+  --vocs-background-color-surface: #111114;
+  --vocs-background-color-surfaceMuted: #050506;
 }
 
+html,
 body,
 .vocs_DocsLayout {
   background: var(--vocs-color_background);
+}
+
+@media (min-width: 1080px) {
+  [data-v-topnav] [data-v-gutter-top] {
+    width: calc(100vw - var(--vocs-spacing-gutter));
+  }
+
+  [data-v-topnav] [data-v-gutter-top-left] {
+    flex: 1;
+    justify-content: flex-end;
+  }
+
+  [data-v-topnav] [data-v-logo-link],
+  [data-v-topnav] [data-v-logo-link] + div {
+    display: none;
+  }
 }
 
 .vocs_CodeBlock {

@@ -22,8 +22,7 @@ import ThreadPanel from '../components/ThreadPanel'
       <h1 id="home-title">Multiplayer, self-hosted, secure agents for Slack.</h1>
 
       <div className="home-actions" aria-label="Primary documentation links">
-        <a className="home-button home-button-primary" href="/quickstart">Get Started</a>
-        <a className="home-button" href="/what-is-centaur">Why Centaur</a>
+        <a className="home-button home-button-primary" href="/what-is-centaur">Get Started</a>
         <a className="home-button" href="https://github.com/paradigmxyz/centaur">GitHub</a>
       </div>
 

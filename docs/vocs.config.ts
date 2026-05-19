@@ -116,11 +116,6 @@ export default defineConfig({
   },
   topNav: [
     {
-      text: 'Docs',
-      link: '/what-is-centaur',
-      match: '/what-is-centaur',
-    },
-    {
       text: 'GitHub',
       link: 'https://github.com/paradigmxyz/centaur',
     },
