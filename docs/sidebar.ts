@@ -15,6 +15,7 @@ export const sidebar = [
     text: 'Extend Centaur',
     items: [
       { text: 'Using an overlay', link: '/extend/overlay' },
+      { text: '🚧 Creating Apps', link: '/extend/apps' },
       { text: 'Creating Tools', link: '/extend/tools' },
       { text: 'Creating Workflows', link: '/extend/workflows' },
       { text: 'Creating Skills', link: '/extend/skills' },
