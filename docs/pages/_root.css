@@ -2,17 +2,26 @@
   --centaur-accent: #00E100;
   --centaur-accent-hover: #35f335;
   --centaur-accent-soft: rgba(0, 225, 0, 0.14);
-  --centaur-bg: light-dark(#ffffff, #101012);
-  --centaur-code: light-dark(#f6f6f7, #0b0b0d);
-  --centaur-line: light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
-  --centaur-muted: light-dark(#727278, #9b9ba1);
-  --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
-  --centaur-text: light-dark(#101012, #ffffff);
+  --centaur-bg: #ffffff;
+  --centaur-code: #f6f6f7;
+  --centaur-line: rgba(0, 0, 0, 0.12);
+  --centaur-muted: #727278;
+  --centaur-soft: rgba(0, 0, 0, 0.035);
+  --centaur-text: #101012;
   --centaur-sans: 'PolySans Var', system-ui, sans-serif;
   --centaur-serif: 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Sagittaire Display', var(--centaur-serif);
   --centaur-manual-display: 'Perfectly Nineties', var(--centaur-serif);
   --vocs-spacing-content: 920px;
+}
+
+:root.dark {
+  --centaur-bg: #101012;
+  --centaur-code: #0b0b0d;
+  --centaur-line: rgba(255, 255, 255, 0.12);
+  --centaur-muted: #9b9ba1;
+  --centaur-soft: rgba(255, 255, 255, 0.055);
+  --centaur-text: #ffffff;
 }
 
 @font-face {
@@ -186,7 +195,7 @@ body,
 }
 
 .vocs_Content {
-  color: #e8e8e1;
+  color: var(--vocs-color_text2);
   font-family: var(--centaur-serif);
   font-size: 1rem;
   line-height: 1.5;
@@ -204,14 +213,14 @@ body,
 }
 
 .vocs_Content h1 {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-size: clamp(2.35rem, 3.8vw, 3.35rem);
   line-height: 1;
   margin-bottom: 1.2rem;
 }
 
 .vocs_Content h2 {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-size: 2rem;
   line-height: 1.125;
   margin-bottom: 1rem;
@@ -219,7 +228,7 @@ body,
 }
 
 .vocs_Content h3 {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-size: 1.5rem;
   line-height: 1.25;
   margin-bottom: 0.75rem;
@@ -244,7 +253,7 @@ body,
 }
 
 .vocs_Content strong {
-  color: #f7f7f2;
+  color: var(--vocs-color_text);
   font-weight: 600;
 }
 
@@ -255,18 +264,18 @@ body,
 }
 
 .vocs_Content code:not(pre code) {
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--vocs-color_codeInlineBackground);
+  border: 1px solid var(--vocs-color_codeInlineBorder);
   border-radius: 4px;
-  color: #f7f7f2;
+  color: var(--vocs-color_codeInlineText);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 0.88em;
   padding: 0.08em 0.28em;
 }
 
 .vocs_Content pre {
-  background: #0b0b0d !important;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: var(--vocs-color_codeBlockBackground) !important;
+  border: 1px solid var(--vocs-color_border);
   border-radius: 8px;
 }
 
@@ -283,7 +292,7 @@ body,
 }
 
 .vocs_Content th {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-weight: 600;
 }
 
@@ -293,7 +302,36 @@ body,
   letter-spacing: 0;
 }
 
-:root,
+:root {
+  --vocs-color_background: #ffffff;
+  --vocs-color_background2: #f7f7f4;
+  --vocs-color_background3: #eeeeea;
+  --vocs-color_background4: #e5e5df;
+  --vocs-color_background5: #ddddda;
+  --vocs-color_backgroundDark: #050506;
+  --vocs-color_backgroundDarkTint: #111114;
+  --vocs-color_codeBlockBackground: #f6f6f7;
+  --vocs-color_codeInlineBackground: #f3f3ef;
+  --vocs-color_codeInlineBorder: rgba(0, 0, 0, 0.12);
+  --vocs-color_codeInlineText: var(--centaur-accent);
+  --vocs-color_border: rgba(0, 0, 0, 0.12);
+  --vocs-color_border2: rgba(0, 0, 0, 0.2);
+  --vocs-color_heading: #050505;
+  --vocs-color_hr: rgba(0, 0, 0, 0.12);
+  --vocs-color_link: var(--centaur-accent);
+  --vocs-color_linkHover: var(--centaur-accent-hover);
+  --vocs-color_shadow: rgba(0, 0, 0, 0.18);
+  --vocs-color_shadow2: rgba(0, 0, 0, 0.12);
+  --vocs-color_text: #050505;
+  --vocs-color_text2: #30302d;
+  --vocs-color_text3: #66665f;
+  --vocs-color_text4: #8a8a82;
+  --vocs-color_textAccent: var(--centaur-accent);
+  --vocs-color_textAccentHover: var(--centaur-accent-hover);
+  --vocs-color_textHover: #000000;
+  --vocs-color_title: #050505;
+}
+
 :root.dark {
   --vocs-color_background: #050506;
   --vocs-color_background2: #0b0b0d;
@@ -326,12 +364,12 @@ body,
 
 body,
 .vocs_DocsLayout {
-  background: #050506;
+  background: var(--vocs-color_background);
 }
 
-:root.dark .vocs_CodeBlock {
-  background: #0b0b0d;
-  border-color: rgba(255, 255, 255, 0.14);
+.vocs_CodeBlock {
+  background: var(--vocs-color_codeBlockBackground);
+  border-color: var(--vocs-color_border);
 }
 
 .vocs_CodeBlock span[style*="#FFA657"],
