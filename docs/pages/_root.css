@@ -396,7 +396,7 @@ body,
   justify-content: flex-start;
   min-height: 100dvh;
   overflow: hidden;
-  padding: clamp(72px, 9dvh, 120px) 24px clamp(56px, 8dvh, 104px);
+  padding: clamp(176px, 24dvh, 420px) 24px clamp(56px, 8dvh, 104px);
   position: relative;
 }
 
