@@ -143,9 +143,9 @@ body,
 .home-hero h1 {
   color: #f7f7f2;
   font-size: 4rem;
-  font-weight: 600;
+  font-weight: medium;
   letter-spacing: 0;
-  line-height: 0.9;
+  line-height: 0.94;
   margin: 0;
   max-width: 790px;
 }
@@ -231,16 +231,16 @@ body,
 .home-brand img {
   display: block;
   filter: invert(1);
-  height: 22px;
-  max-width: min(28vw, 120px);
+  height: 32px;
+  max-width: min(34vw, 160px);
   object-fit: contain;
 }
 
-/* Tempo's wordmark is shorter per em than Paradigm's — bump it a touch so
- * the two read at the same optical weight. */
+/* Tempo's wordmark sits taller per em than Paradigm's — pull it down so the
+ * two read at the same optical weight. */
 .home-brand-tempo img {
-  height: 16px;
-  max-width: min(22vw, 96px);
+  height: 22px;
+  max-width: min(26vw, 128px);
 }
 
 .home-thread-demo {
