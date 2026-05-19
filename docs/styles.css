@@ -1014,6 +1014,69 @@ body,
   font-size: 0.86em;
 }
 
+@media (min-width: 761px) and (max-aspect-ratio: 4 / 3) {
+  .centaur-home {
+    justify-content: center;
+    padding: clamp(32px, 4dvh, 56px) 28px;
+  }
+
+  .home-hero {
+    display: flex;
+    flex-direction: column;
+    gap: clamp(28px, 4dvh, 44px);
+    max-width: 980px;
+    min-height: calc(100dvh - var(--vocs-topNav_height) - clamp(64px, 8dvh, 112px));
+    text-align: center;
+  }
+
+  .home-thread-demo {
+    order: 1;
+  }
+
+  .home-copy {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    order: 2;
+  }
+
+  .home-mark {
+    width: clamp(68px, 7vw, 92px);
+    margin-bottom: 18px;
+  }
+
+  .home-hero h1 {
+    font-size: clamp(3.35rem, 7.2vw, 5rem);
+    max-width: 780px;
+  }
+
+  .home-lede {
+    font-size: clamp(1.02rem, 1.8vw, 1.18rem);
+    margin-top: 22px;
+    max-width: 720px;
+  }
+
+  .home-actions {
+    justify-content: center;
+    margin-top: 24px;
+  }
+
+  .home-built-with {
+    justify-content: center;
+    margin-top: 30px;
+  }
+
+  .home-logo-row {
+    justify-content: center;
+  }
+
+  .thread-panel {
+    grid-template-columns: minmax(138px, 180px) minmax(0, 1fr);
+    height: clamp(360px, 40dvh, 480px);
+    min-height: 0;
+  }
+}
+
 @media (max-width: 760px) {
   .centaur-home {
     min-height: calc(100dvh - 64px);
