@@ -10,7 +10,8 @@ export const slackReplyLimits = {
     planTitleChars: 256,
     taskCount: 24,
     taskTitleChars: 128,
-    taskDetailsChars: 128,
+    /** Slack caps task_update chunk text at 256 chars; keep 10% headroom. */
+    taskDetailsChars: 230,
     taskOutputChars: 48
   },
   finalPlan: {

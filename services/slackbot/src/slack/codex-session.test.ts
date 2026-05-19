@@ -587,10 +587,9 @@ describe('CodexSessionRenderer', () => {
       chunk => chunk.type === 'markdown_text' && String(chunk.text).includes('Done.')
     )
     expect(firstTaskIndex).toBeGreaterThanOrEqual(0)
-    expect(thinkingIndex).toBeGreaterThan(firstTaskIndex)
+    expect(thinkingIndex).toBe(-1)
     expect(firstTextIndex).toBeGreaterThan(firstTaskIndex)
-    expect(firstTextIndex).toBeGreaterThan(thinkingIndex)
-    expect(thinkingBlockText(calls)).toContain('abcdefghijklmnop.')
+    expect(thinkingBlockText(calls)).toBe('')
 
     await renderer.event(sessionId, { type: 'turn.completed', result: 'Done.' })
 
@@ -600,7 +599,7 @@ describe('CodexSessionRenderer', () => {
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
   })
 
-  it('streams no-plan Thinking after the grace window when no task appears', async () => {
+  it('hides no-plan Thinking after the grace window when no task appears', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -653,10 +652,10 @@ describe('CodexSessionRenderer', () => {
     const chunks = calls.flatMap(call => call.params.chunks ?? [])
     expect(chunks.some(chunk => chunk.type === 'plan_update')).toBe(false)
     expect(chunks.some(chunk => chunk.type === 'task_update')).toBe(false)
-    expect(thinkingBlockText(calls)).toContain('Thinking before any task. More thinking.')
+    expect(thinkingBlockText(calls)).toBe('')
   })
 
-  it('does not split Thinking in the middle of a hyphenated phrase', async () => {
+  it('does not stream hidden Thinking for hyphenated commentary', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -711,9 +710,7 @@ describe('CodexSessionRenderer', () => {
       delta: '-parameter reasons.'
     })
 
-    const thinking = thinkingBlockText(calls)
-    expect(thinking).toContain('required-parameter reasons.')
-    expect(thinking).not.toContain('required\n-parameter')
+    expect(thinkingBlockText(calls)).toBe('')
   })
 
   it('inserts a blank line between consecutive commentary agent messages', async () => {
@@ -791,8 +788,7 @@ describe('CodexSessionRenderer', () => {
       .join('')
 
     expect(streamed).toContain('Done.')
-    expect(thinkingBlockText(calls)).toContain('First commentary paragraph.')
-    expect(thinkingBlockText(calls)).toContain('Second commentary paragraph.')
+    expect(thinkingBlockText(calls)).toBe('')
   })
 
   it('streams fenced task details in live task updates', async () => {
@@ -964,7 +960,7 @@ describe('CodexSessionRenderer', () => {
       .map(chunk => String(chunk.text))
       .join('')
     expect(streamed).toContain('Done: five tools called.')
-    expect(thinkingBlockText(calls)).toContain('Planning the tool calls.')
+    expect(thinkingBlockText(calls)).toBe('')
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []

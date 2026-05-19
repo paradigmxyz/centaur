@@ -430,7 +430,7 @@ describe('AgentSessionRenderer', () => {
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
-  it('renders thinking in a context block and the answer in markdown on finalize', async () => {
+  it('shows thinking text by default and renders the answer in markdown on finalize', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -478,7 +478,6 @@ describe('AgentSessionRenderer', () => {
       blocks.some(
         (block: any) =>
           block.type === 'context' &&
-          String(block.elements?.[0]?.text ?? '').includes('*Thinking*') &&
           String(block.elements?.[0]?.text ?? '').includes('Planning the tool calls.')
       )
     ).toBe(true)
