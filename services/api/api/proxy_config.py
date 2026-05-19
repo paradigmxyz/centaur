@@ -10,6 +10,8 @@ tool_manager (injection map). The API server owns iron-proxy's full config:
   ``oauth_token``; kept until tools migrate off the ``gcp_auth`` secret type.
 - ``oauth_token`` transform — one ``tokens`` entry per ``OAuthTokenSecret``,
   minting OAuth2 access tokens for the declared grant.
+- ``hmac_sign`` transforms — one per unique ``HmacSignSecret`` signing scheme,
+  HMAC-signing each request and injecting the configured headers.
 - top-level ``postgres:`` — one listener per ``PgDsnSecret`` on sequential ports
   starting at 5432, ordered by name.
 """
@@ -25,6 +27,7 @@ import yaml
 
 from api.tool_manager import (
     GcpAuthSecret,
+    HmacSignSecret,
     HttpSecret,
     OAuthFieldSource,
     OAuthTokenSecret,
@@ -48,7 +51,7 @@ GCP_AUTH_HOSTS: tuple[str, ...] = ("*.googleapis.com",)
 PG_LISTEN_PORT_BASE = 5432
 
 _MANAGED_TRANSFORMS: frozenset[str] = frozenset(
-    {"secrets", "gcp_auth", "oauth_token"}
+    {"secrets", "gcp_auth", "oauth_token", "hmac_sign"}
 )
 
 # Iron-proxy ``source`` schema for resolving secret values. ``env`` reads the
@@ -255,6 +258,77 @@ def _build_oauth_token_transform(
     return {"name": "oauth_token", "config": {"tokens": tokens}}
 
 
+def _build_hmac_sign_transforms(
+    secrets: list[SecretDef],
+) -> list[dict[str, Any]]:
+    """``hmac_sign`` transforms: one per unique signing config.
+
+    Each signing scheme (algorithm, encodings, message, timestamp format,
+    credentials, header layout) becomes its own transform. Two ``HmacSignSecret``
+    entries that differ only in ``hosts`` are merged — their host rules are
+    unioned so the same scheme covers every upstream that opted in.
+    """
+    by_scheme: dict[
+        tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            bool,
+            tuple[tuple[str, OAuthFieldSource], ...],
+            tuple[tuple[str, str], ...],
+        ],
+        set[str],
+    ] = {}
+    for secret in secrets:
+        if not isinstance(secret, HmacSignSecret):
+            continue
+        key = (
+            secret.algorithm,
+            secret.key_encoding,
+            secret.output_encoding,
+            secret.message,
+            secret.timestamp_format,
+            secret.allow_chunked_body,
+            secret.credentials,
+            tuple((h.name, h.value) for h in secret.headers),
+        )
+        by_scheme.setdefault(key, set()).update(secret.hosts)
+
+    transforms: list[dict[str, Any]] = []
+    for key in sorted(by_scheme, key=lambda k: (k[0], k[3], tuple(n for n, _ in k[6]))):
+        (
+            algorithm,
+            key_encoding,
+            output_encoding,
+            message,
+            timestamp_format,
+            allow_chunked_body,
+            credentials,
+            headers,
+        ) = key
+        hosts = sorted(by_scheme[key])
+        config: dict[str, Any] = {
+            "timestamp": {"format": timestamp_format},
+            "signature": {
+                "algorithm": algorithm,
+                "key_encoding": key_encoding,
+                "output_encoding": output_encoding,
+                "message": message,
+            },
+            "credentials": {
+                name: _build_field_source(source) for name, source in credentials
+            },
+            "headers": [{"name": n, "value": v} for n, v in headers],
+            "rules": [{"host": h} for h in hosts],
+        }
+        if allow_chunked_body:
+            config["allow_chunked_body"] = True
+        transforms.append({"name": "hmac_sign", "config": config})
+    return transforms
+
+
 def _build_postgres_listeners(
     secrets: list[SecretDef],
     pg_listen_ports: dict[str, int],
@@ -318,6 +392,7 @@ def render_proxy_yaml(
     oauth_token = _build_oauth_token_transform(secrets)
     if oauth_token is not None:
         new_transforms.append(oauth_token)
+    new_transforms.extend(_build_hmac_sign_transforms(secrets))
     if new_transforms:
         for index, transform in enumerate(transforms):
             if (transform or {}).get("name") == "header_allowlist":
