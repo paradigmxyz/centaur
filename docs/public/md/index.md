@@ -15,11 +15,13 @@ import ThreadPanel from '../components/ThreadPanel'
 <main className="centaur-home">
   <section className="home-hero" aria-labelledby="home-title">
     <div className="home-copy">
-      <picture>
-        <source srcSet="/brand/mark-white.png" media="(prefers-color-scheme: dark)" />
-        <img className="home-mark" src="/brand/mark-black.png" alt="Centaur" />
-      </picture>
-      <h1 id="home-title">Run shared agents on infrastructure you control.</h1>
+      <div className="home-title-lockup">
+        <picture>
+          <source srcSet="/brand/mark-white.png" media="(prefers-color-scheme: dark)" />
+          <img className="home-mark" src="/brand/mark-black.png" alt="Centaur" />
+        </picture>
+        <h1 id="home-title">Run shared agents on infrastructure you control.</h1>
+      </div>
       <div className="home-lede">{'Centaur stores every turn, assigns isolated sandboxes, exposes approved tools, runs durable workflows, and injects credentials at the network boundary.'}</div>
 
       <div className="home-actions" aria-label="Primary documentation links">

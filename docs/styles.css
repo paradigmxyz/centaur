@@ -347,11 +347,18 @@ body,
   min-width: 0;
 }
 
+.home-title-lockup {
+  align-items: flex-start;
+  display: grid;
+  gap: 22px;
+  grid-template-columns: 90px minmax(0, 1fr);
+}
+
 .home-mark {
   display: block;
-  width: 88px;
+  margin-top: 8px;
+  width: 86px;
   height: auto;
-  margin-bottom: 28px;
 }
 
 .home-hero h1 {
@@ -1025,6 +1032,18 @@ body,
     gap: 36px;
     min-height: auto;
     text-align: center;
+  }
+
+  .home-title-lockup {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .home-mark {
+    margin-top: 0;
+    width: 76px;
   }
 
   .home-hero h1 {
