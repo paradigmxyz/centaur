@@ -23,10 +23,10 @@ export const sidebar = [
   {
     text: 'Secrets',
     items: [
-      { text: 'Use 1Password', link: '/secrets/onepassword' },
-      { text: 'Use Environment Variables', link: '/secrets/environment' },
-      { text: '🚧 Using with AWS KMS', link: '/secrets/aws-kms' },
-      { text: '🚧 Using with GCP Secret Manager', link: '/secrets/gcp-secret-manager' },
+      { text: '1Password', link: '/secrets/onepassword' },
+      { text: 'Environment Variables', link: '/secrets/environment' },
+      { text: '🚧 AWS KMS', disabled: true },
+      { text: '🚧 GCP Secret Manager', disabled: true },
     ],
   },
   {
