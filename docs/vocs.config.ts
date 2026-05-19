@@ -30,8 +30,9 @@ export default defineConfig({
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',
   },
-  // Body copy uses Amp's PolySans via the styles.css override. Headings use
-  // Amp's Sagittaire Display. Code blocks stay on Geist Mono.
+  // Body copy uses Amp's PolySans via the styles.css override. Docs headings
+  // use Perfectly Nineties, while the landing hero uses Sagittaire Display.
+  // Code blocks stay on Geist Mono.
   font: {
     mono: { google: 'Geist Mono' },
   },

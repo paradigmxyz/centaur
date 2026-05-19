@@ -11,6 +11,7 @@
   --centaur-sans: 'PolySans Var', system-ui, sans-serif;
   --centaur-serif: 'Sagittaire Text', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Sagittaire Display', var(--centaur-serif);
+  --centaur-manual-display: 'Perfectly Nineties', var(--centaur-serif);
 }
 
 @font-face {
@@ -69,6 +70,38 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: 'Perfectly Nineties';
+  src: url('/fonts/PerfectlyNineties-Regular.woff') format('woff');
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Perfectly Nineties';
+  src: url('/fonts/PerfectlyNineties-Italic.woff') format('woff');
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Perfectly Nineties';
+  src: url('/fonts/PerfectlyNineties-Semibold.woff') format('woff');
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Perfectly Nineties';
+  src: url('/fonts/PerfectlyNineties-Bold.woff') format('woff');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
 /*
  * Header lockup: Vocs sizes the NavLogo image at 50% of the 56px anchor on
  * docs layouts (= 28px) and forces 32px on the landing layout, which makes
@@ -97,7 +130,12 @@ body,
 .vocs_Content h3,
 .vocs_Content h4,
 .vocs_Content h5,
-.vocs_Content h6,
+.vocs_Content h6 {
+  font-family: var(--centaur-manual-display);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
 .centaur-home h1 {
   font-family: var(--centaur-display);
   font-weight: 400;
