@@ -14,7 +14,7 @@
    * fallbacks). The older @font-face definitions below are still loaded
    * so concurrent sibling work that references them by name doesn't
    * break, but no selector here points at them anymore. */
-  --centaur-serif: 'Perfectly Nineties', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+  --centaur-serif: 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Perfectly Nineties', var(--centaur-serif);
   --centaur-manual-display: 'Perfectly Nineties', var(--centaur-serif);
 }
@@ -684,7 +684,7 @@ body,
   /* Body-sized lede uses PolySans (sans) — Perfectly Nineties at this
    * size with this much copy was hard to skim. The hero h1 above keeps
    * the serif for display impact. */
-  font-family: var(--centaur-sans);
+  font-family: var(--centaur-serif);
   font-size: clamp(1.3rem, 1.4vw, 1.48rem);
   font-weight: 400;
   letter-spacing: 0.01em;
