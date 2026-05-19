@@ -421,6 +421,48 @@ body,
 }
 
 /*
+ * Three-tier landing nav: Vocs ships a single 1080px switch (desktop
+ * topNav ↔ mobile topNav with hamburger), but the landing layout wants
+ * a middle tablet tier that still shows inline links — the viewport
+ * has plenty of room for About / Quickstart / Deploying / Architecture
+ * + GH between ~640px and 1080px, and burying them behind a hamburger
+ * just adds a tap for no reason. Below 640px the row really is too
+ * narrow for the inline links, so we keep the hamburger and hide the
+ * inline group there.
+ *
+ * Rules below scope to the mobile topNav (the only one rendered at
+ * <=1080px). On the landing layout:
+ *   - 640..1080px: show the inline link group (`vocs_MobileTopNav_navigation`
+ *     without the `_compact` suffix), hide the hamburger group
+ *     (`vocs_MobileTopNav_navigation_compact`).
+ *   - <640px: hide the inline link group, show the hamburger.
+ *
+ * The parent `.vocs_MobileTopNav_section` keeps space-between, so the
+ * visible group ends up pinned to the right opposite the logo. The
+ * hamburger wrapper also has `margin-left: auto` (above) which double-
+ * insures its right alignment when the inline links are hidden.
+ */
+@media (min-width: 640px) and (max-width: 1080px) {
+  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation:not(.vocs_MobileTopNav_navigation_compact) {
+    display: flex;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation_compact {
+    display: none;
+  }
+}
+
+@media (max-width: 639.98px) {
+  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation:not(.vocs_MobileTopNav_navigation_compact) {
+    display: none;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation_compact {
+    display: flex;
+  }
+}
+
+/*
  * Safety net: hide the topNav logo wrapper on every non-landing layout.
  * The lockup already lives in the sidebar there, and any rogue topNav
  * copy (e.g. if Vocs reflows on a future release) would render as a
@@ -542,15 +584,27 @@ body,
   min-width: 0;
 }
 
-/* Hero centaur mark sits above the title as a quiet stamp, not the primary
- * visual — half-opacity at ~1.5× the previous size so it grounds the
- * composition without competing with the headline. */
+/* Hero lockup sits above the title as a quiet stamp, not the primary
+ * visual — half-opacity at modest size so it grounds the composition
+ * without competing with the headline. The inline lockup only renders
+ * on the desktop landing layout: at ≤1080px the Vocs MobileTopNav
+ * already shows its own lockup, so showing this inline lockup AND
+ * the topnav lockup would produce a duplicate. Hide this one below
+ * 1081px (the same breakpoint where Vocs swaps DesktopTopNav for
+ * MobileTopNav) so the topnav lockup is the only branding above
+ * the hero copy on tablet / mobile. */
 .home-mark {
   display: block;
   height: auto;
   margin-bottom: clamp(24px, 3dvh, 42px);
   opacity: 0.5;
   width: clamp(132px, 9.6vw, 186px);
+}
+
+@media (max-width: 1080px) {
+  .home-mark {
+    display: none;
+  }
 }
 
 .home-hero h1 {
@@ -748,14 +802,18 @@ body,
   background: var(--thread-hover);
 }
 
-/* Active row's green accent sits on the BOTTOM edge of the row so it
- * reads as an underline under the selected thread. Padding-bottom drops
- * by 1px to absorb the extra pixel the 2px accent border adds vs the
- * 1px separator border on inactive rows — keeps row heights identical. */
+/* Active row's green accent sits on the RIGHT edge of the row in the
+ * two-column desktop layout, reading as a vertical rail that lines up
+ * with the thread-list column's own right border. Padding-right drops
+ * by 2px to absorb the new 2px accent border so row contents stay
+ * aligned with inactive rows. The inactive 1px gray border-bottom is
+ * left intact (we no longer override it green) so the inter-row
+ * separator carries across the whole list. The stacked layout at
+ * max-width: 680px flips this back to a bottom rail (see below). */
 .thread-list-item-active {
   background: var(--thread-panel);
-  border-bottom: 2px solid var(--thread-accent);
-  padding-bottom: 7px;
+  border-right: 2px solid var(--thread-accent);
+  padding-right: 8px;
 }
 
 .thread-list-channel-row {
@@ -1242,10 +1300,14 @@ body,
     padding: clamp(32px, 4dvh, 56px) 28px clamp(120px, 14vh, 160px);
   }
 
+  /* Zero the parent gap and let the demo's own bottom margin (24px)
+   * carry the spacing between the demo and the headline. Otherwise
+   * the parent gap + demo margin-bottom stack into a huge dead band
+   * between the demo and the hero copy. */
   .home-hero {
     display: flex;
     flex-direction: column;
-    gap: clamp(28px, 4dvh, 44px);
+    gap: 0;
     max-width: 980px;
     min-height: auto;
     text-align: center;
@@ -1255,7 +1317,13 @@ body,
     padding-bottom: clamp(80px, 12vh, 160px);
   }
 
+  /* Demo container: cap width so the panel doesn't blow out edge-to-edge
+   * on tablet, center it, and give it a single 24px bottom margin so the
+   * headline sits ~24px below the demo (the parent gap is zeroed above
+   * so this margin is the only spacing). */
   .home-thread-demo {
+    margin: 0 auto 24px;
+    max-width: min(640px, 100%);
     order: 1;
   }
 
@@ -1296,13 +1364,19 @@ body,
     justify-content: center;
   }
 
-  /* Lock the demo's height so streaming text scrolls inside the inner
-   * .thread-panel-scroll without resizing the surrounding hero. */
+  /* Square-ish 5:4 aspect-ratio so the panel reads as a contained
+   * preview tile rather than a stretched landscape strip. Drop the
+   * fixed height + max-height so aspect-ratio drives sizing (capped
+   * by the parent container's max-width: 640px above). The internal
+   * two-column thread-list / thread-detail grid keeps its desktop
+   * proportions at this width since we're still well above the
+   * single-column 680px breakpoint. */
   .thread-panel {
+    aspect-ratio: 5 / 4;
     flex-shrink: 0;
     grid-template-columns: minmax(138px, 180px) minmax(0, 1fr);
-    height: clamp(360px, 40dvh, 480px) !important;
-    max-height: clamp(360px, 40dvh, 480px);
+    height: auto !important;
+    max-height: none;
     min-height: 0 !important;
   }
 }
@@ -1313,12 +1387,22 @@ body,
     padding: 54px 20px 40px;
   }
 
+  /* Same flow as the tablet branch above — zero the parent gap and
+   * let the demo's own 24px bottom margin carry the spacing to the
+   * headline. The demo also stays vertically ordered above the copy
+   * via its `order: 1` defined in the wider tablet rule (still in
+   * effect here since both rules apply at <760px portrait). */
   .home-hero {
     display: flex;
     flex-direction: column;
-    gap: 36px;
+    gap: 0;
     min-height: auto;
     text-align: center;
+  }
+
+  .home-thread-demo {
+    margin: 0 auto 24px;
+    max-width: min(640px, 100%);
   }
 
   .home-mark {
@@ -1344,18 +1428,28 @@ body,
     justify-content: center;
   }
 
-  /* Mobile/tablet: hard-lock to a single height so the streaming animation
-   * scrolls inside the panel without pushing the page taller. */
+  /* Square-ish 5:4 panel while the inner grid still has both columns
+   * (`grid-template-columns` flips to `1fr` at max-width: 680px below,
+   * where we drop aspect-ratio back to a fixed height — see that
+   * rule). Above 680px and below 760px the panel keeps both columns,
+   * so the aspect-ratio works well. */
   .thread-panel {
+    aspect-ratio: 5 / 4;
     flex-shrink: 0;
-    height: 560px !important;
-    max-height: 560px !important;
+    height: auto !important;
+    max-height: none !important;
     min-height: 0 !important;
   }
 }
 
 @media (max-width: 680px) {
+  /* Single-column stacked panel (thread list as a horizontal tab strip
+   * above the detail pane). Drop the aspect-ratio cascaded from the
+   * wider rules and pin to a fixed height since the inner grid no
+   * longer has two columns — aspect-ratio at this width would either
+   * shrink the panel uselessly or stretch it past the viewport. */
   .thread-panel {
+    aspect-ratio: auto;
     flex-shrink: 0;
     grid-template-columns: 1fr;
     height: 560px !important;
@@ -1384,11 +1478,17 @@ body,
     padding: 10px 12px 7px;
   }
 
-  /* Mirror the desktop pattern at the horizontal mobile layout: green
-   * accent sits on the bottom edge of the selected thread tab. */
+  /* Stacked layout: green rail flips back to the BOTTOM EDGE of the
+   * active tab since the panel collapses to a single column here
+   * (thread list above, thread detail below). Reset the desktop
+   * right-rail to the inactive 1px gray separator so the horizontal
+   * tab strip reads uniformly, then color the 3px transparent bottom
+   * border green for the selected tab. Padding matches inactive items
+   * so the row stays the same height. */
   .thread-list-item-active {
-    border-bottom-color: var(--thread-accent);
-    padding-bottom: 7px;
+    border-bottom: 3px solid var(--thread-accent);
+    border-right: 1px solid var(--thread-border);
+    padding: 10px 12px 7px;
   }
 }
 
@@ -1408,6 +1508,7 @@ body,
   }
 
   .thread-panel {
+    aspect-ratio: auto;
     height: 540px;
     min-height: 500px;
   }
