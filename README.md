@@ -1,6 +1,9 @@
-<h1 align="center">
-<img src="./docs/public/brand/git-header.svg" alt="Centaur" width="100%" align="center">
-</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://centaur.run/brand/git-header.svg">
+    <img alt="Centaur" src="https://centaur.run/brand/git-header.svg" width="1500">
+  </picture>
+</p>
 
 <h4 align="center">
     Shared AI agents for teams.
