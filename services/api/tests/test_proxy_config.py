@@ -11,6 +11,8 @@ from api.proxy_config import (
 from api.tool_manager import (
     DEFAULT_MATCH_HEADERS,
     GcpAuthSecret,
+    HmacHeader,
+    HmacSignSecret,
     HttpSecret,
     OAuthFieldSource,
     OAuthTokenSecret,
@@ -82,9 +84,23 @@ def test_parser_replace_secret_requires_a_scan_location() -> None:
         _parse_secret({"type": "header", "name": "API_KEY"})
 
 
-def test_parser_typed_header_rejects_empty_match_headers() -> None:
+def test_parser_typed_header_rejects_non_string_match_headers() -> None:
     with pytest.raises(ValueError, match="invalid 'match_headers'"):
-        _parse_secret({"type": "header", "name": "API_KEY", "match_headers": []})
+        _parse_secret({"type": "header", "name": "API_KEY", "match_headers": [1]})
+
+
+def test_parser_typed_header_allows_empty_match_headers_with_match_query() -> None:
+    secret = _parse_secret(
+        {
+            "type": "header",
+            "name": "API_KEY",
+            "match_headers": [],
+            "match_query": True,
+        }
+    )
+    assert isinstance(secret, HttpSecret)
+    assert secret.match_headers == ()
+    assert secret.match_query is True
 
 
 def test_parser_replace_mode_rejects_inject_keys() -> None:
@@ -406,6 +422,114 @@ def test_parser_oauth_token_rejects_field_invalid_for_grant() -> None:
         )
 
 
+def _hmac_entry(**overrides: object) -> dict:
+    """Minimum valid ``hmac_sign`` entry, overridable per-test."""
+    entry: dict = {
+        "type": "hmac_sign",
+        "name": "FALCONX",
+        "hosts": ["api.falconx.io"],
+        "algorithm": "sha256",
+        "key_encoding": "base64",
+        "output_encoding": "base64",
+        "timestamp_format": "unix_seconds",
+        "message": "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}",
+        "credentials": {
+            "key": "FALCONX_API_KEY",
+            "secret": "FALCONX_SECRET",
+            "passphrase": "FALCONX_PASSPHRASE",
+        },
+        "headers": [
+            {"name": "FX-ACCESS-KEY", "value": "{{.Credentials.key}}"},
+            {"name": "FX-ACCESS-SIGN", "value": "{{.Signature}}"},
+            {"name": "FX-ACCESS-TIMESTAMP", "value": "{{.Timestamp}}"},
+            {
+                "name": "FX-ACCESS-PASSPHRASE",
+                "value": "{{.Credentials.passphrase}}",
+            },
+        ],
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_parser_typed_hmac_sign_full_example() -> None:
+    secret = _parse_secret(_hmac_entry())
+    assert isinstance(secret, HmacSignSecret)
+    assert secret.hosts == ("api.falconx.io",)
+    assert secret.algorithm == "sha256"
+    assert secret.key_encoding == "base64"
+    assert secret.output_encoding == "base64"
+    assert secret.timestamp_format == "unix_seconds"
+    # credentials sort by name so the rendered config is deterministic
+    assert [name for name, _ in secret.credentials] == ["key", "passphrase", "secret"]
+    assert secret.headers[0] == HmacHeader(
+        "FX-ACCESS-KEY", "{{.Credentials.key}}"
+    )
+    assert secret.allow_chunked_body is False
+
+
+def test_parser_hmac_sign_requires_secret_credential() -> None:
+    with pytest.raises(ValueError, match="must include 'secret'"):
+        _parse_secret(_hmac_entry(credentials={"key": "FALCONX_API_KEY"}))
+
+
+def test_parser_hmac_sign_credential_supports_json_key() -> None:
+    secret = _parse_secret(
+        _hmac_entry(
+            credentials={
+                "secret": {"secret_ref": "FALCONX_BUNDLE", "json_key": "hmac_key"},
+            }
+        )
+    )
+    assert isinstance(secret, HmacSignSecret)
+    creds = dict(secret.credentials)
+    assert creds["secret"] == OAuthFieldSource("FALCONX_BUNDLE", "hmac_key")
+
+
+def test_parser_hmac_sign_rejects_unknown_algorithm() -> None:
+    with pytest.raises(ValueError, match="'algorithm' must be one of"):
+        _parse_secret(_hmac_entry(algorithm="md5"))
+
+
+def test_parser_hmac_sign_rejects_unknown_timestamp_format() -> None:
+    with pytest.raises(ValueError, match="'timestamp_format' must be one of"):
+        _parse_secret(_hmac_entry(timestamp_format="iso8601"))
+
+
+def test_parser_hmac_sign_rejects_unknown_key_encoding() -> None:
+    with pytest.raises(ValueError, match="'key_encoding' must be one of"):
+        _parse_secret(_hmac_entry(key_encoding="utf8"))
+
+
+def test_parser_hmac_sign_rejects_empty_headers() -> None:
+    with pytest.raises(ValueError, match="'headers' must be a non-empty list"):
+        _parse_secret(_hmac_entry(headers=[]))
+
+
+def test_parser_hmac_sign_requires_hosts() -> None:
+    entry = _hmac_entry()
+    entry.pop("hosts")
+    with pytest.raises(ValueError, match="'hosts' must be a non-empty array"):
+        _parse_secret(entry)
+
+
+def test_parser_hmac_sign_requires_message() -> None:
+    with pytest.raises(ValueError, match="'message' must be a non-empty"):
+        _parse_secret(_hmac_entry(message=""))
+
+
+def test_parser_hmac_sign_allow_chunked_body_must_be_bool() -> None:
+    with pytest.raises(ValueError, match="'allow_chunked_body' must be a boolean"):
+        _parse_secret(_hmac_entry(allow_chunked_body="yes"))
+
+
+def test_parser_hmac_sign_header_requires_name_and_value() -> None:
+    with pytest.raises(ValueError, match="header\\[0\\] requires a non-empty 'value'"):
+        _parse_secret(
+            _hmac_entry(headers=[{"name": "X-Sig", "value": ""}])
+        )
+
+
 # ── port allocation ─────────────────────────────────────────────────────────
 
 
@@ -720,6 +844,126 @@ def test_render_oauth_token_emits_token_endpoint_when_set() -> None:
         t for t in cfg["transforms"] if t["name"] == "oauth_token"
     )["config"]["tokens"]
     assert tokens[0]["token_endpoint"] == "https://login.example.com/oauth2/token"
+
+
+_RENDER_HMAC_CREDS: tuple[tuple[str, OAuthFieldSource], ...] = (
+    ("key", OAuthFieldSource("FALCONX_API_KEY")),
+    ("passphrase", OAuthFieldSource("FALCONX_PASSPHRASE")),
+    ("secret", OAuthFieldSource("FALCONX_SECRET")),
+)
+
+_RENDER_HMAC_HEADERS: tuple[HmacHeader, ...] = (
+    HmacHeader("FX-ACCESS-KEY", "{{.Credentials.key}}"),
+    HmacHeader("FX-ACCESS-SIGN", "{{.Signature}}"),
+    HmacHeader("FX-ACCESS-TIMESTAMP", "{{.Timestamp}}"),
+    HmacHeader("FX-ACCESS-PASSPHRASE", "{{.Credentials.passphrase}}"),
+)
+
+
+def _falconx_secret(
+    *, hosts: tuple[str, ...] = ("api.falconx.io",), **overrides: object
+) -> HmacSignSecret:
+    fields: dict[str, object] = {
+        "name": "FALCONX",
+        "hosts": hosts,
+        "credentials": _RENDER_HMAC_CREDS,
+        "headers": _RENDER_HMAC_HEADERS,
+        "algorithm": "sha256",
+        "key_encoding": "base64",
+        "output_encoding": "base64",
+        "message": "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}",
+        "timestamp_format": "unix_seconds",
+    }
+    fields.update(overrides)
+    return HmacSignSecret(**fields)  # type: ignore[arg-type]
+
+
+def test_render_hmac_sign_matches_iron_proxy_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    cfg = yaml.safe_load(render_proxy_yaml([_falconx_secret()]))
+    assert [t["name"] for t in cfg["transforms"]] == [
+        "allowlist",
+        "hmac_sign",
+        "header_allowlist",
+    ]
+    hmac = next(t for t in cfg["transforms"] if t["name"] == "hmac_sign")["config"]
+    assert hmac["timestamp"] == {"format": "unix_seconds"}
+    assert hmac["signature"] == {
+        "algorithm": "sha256",
+        "key_encoding": "base64",
+        "output_encoding": "base64",
+        "message": "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}",
+    }
+    assert hmac["credentials"] == {
+        "key": {"type": "env", "var": "FALCONX_API_KEY"},
+        "passphrase": {"type": "env", "var": "FALCONX_PASSPHRASE"},
+        "secret": {"type": "env", "var": "FALCONX_SECRET"},
+    }
+    # header order is preserved on the wire
+    assert hmac["headers"] == [
+        {"name": "FX-ACCESS-KEY", "value": "{{.Credentials.key}}"},
+        {"name": "FX-ACCESS-SIGN", "value": "{{.Signature}}"},
+        {"name": "FX-ACCESS-TIMESTAMP", "value": "{{.Timestamp}}"},
+        {"name": "FX-ACCESS-PASSPHRASE", "value": "{{.Credentials.passphrase}}"},
+    ]
+    assert hmac["rules"] == [{"host": "api.falconx.io"}]
+    # opt-in field is omitted at the safe default
+    assert "allow_chunked_body" not in hmac
+
+
+def test_render_hmac_sign_emits_allow_chunked_body_when_opted_in() -> None:
+    cfg = yaml.safe_load(
+        render_proxy_yaml([_falconx_secret(allow_chunked_body=True)])
+    )
+    hmac = next(t for t in cfg["transforms"] if t["name"] == "hmac_sign")["config"]
+    assert hmac["allow_chunked_body"] is True
+
+
+def test_render_hmac_sign_credential_supports_json_key() -> None:
+    secrets = [
+        _falconx_secret(
+            credentials=(
+                ("secret", OAuthFieldSource("FALCONX_BUNDLE", "hmac_key")),
+            )
+        )
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    hmac = next(t for t in cfg["transforms"] if t["name"] == "hmac_sign")["config"]
+    assert hmac["credentials"]["secret"] == {
+        "type": "env",
+        "var": "FALCONX_BUNDLE",
+        "json_key": "hmac_key",
+    }
+
+
+def test_render_hmac_sign_merges_entries_with_same_scheme_unioning_hosts() -> None:
+    secrets = [
+        _falconx_secret(hosts=("a.falconx.io",)),
+        _falconx_secret(hosts=("b.falconx.io",)),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    transforms = [t for t in cfg["transforms"] if t["name"] == "hmac_sign"]
+    assert len(transforms) == 1
+    assert transforms[0]["config"]["rules"] == [
+        {"host": "a.falconx.io"},
+        {"host": "b.falconx.io"},
+    ]
+
+
+def test_render_hmac_sign_separate_transforms_for_distinct_schemes() -> None:
+    secrets = [
+        _falconx_secret(),
+        _falconx_secret(algorithm="sha512", hosts=("v2.falconx.io",)),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    transforms = [t for t in cfg["transforms"] if t["name"] == "hmac_sign"]
+    assert len(transforms) == 2
+    assert {t["config"]["signature"]["algorithm"] for t in transforms} == {
+        "sha256",
+        "sha512",
+    }
 
 
 def test_render_omits_managed_transforms_when_no_matching_secrets() -> None:

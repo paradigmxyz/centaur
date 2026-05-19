@@ -89,6 +89,48 @@ status:
 logs component:
     kubectl logs -n {{namespace}} deploy/{{release}}-centaur-{{component}} --tail=200 -f
 
+slack-thread-logs slack_link since="24h":
+    CENTAUR_NAMESPACE={{namespace}} CENTAUR_RELEASE={{release}} bash services/slackbot/scripts/slack-thread-logs.sh "{{slack_link}}" "{{since}}"
+
+slack-thread-report slack_link:
+    CENTAUR_NAMESPACE={{namespace}} CENTAUR_RELEASE={{release}} bash services/slackbot/scripts/slack-thread-report.sh "{{slack_link}}"
+
+cleanup-orphan-proxy-services mode="dry-run":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{mode}}" in
+      dry-run|delete) ;;
+      *) echo "mode must be dry-run or delete" >&2; exit 2 ;;
+    esac
+
+    live_sandboxes="$(mktemp)"
+    trap 'rm -f "$live_sandboxes"' EXIT
+    kubectl -n {{namespace}} get pod -l centaur.ai/managed=true \
+      -o jsonpath='{range .items[*]}{.metadata.labels.centaur\.ai/sandbox-id}{"\n"}{end}' \
+      | sort -u > "$live_sandboxes"
+
+    found=0
+    while IFS=$'\t' read -r service sandbox_id; do
+      [[ -n "$service" && -n "$sandbox_id" ]] || continue
+      [[ "$sandbox_id" != "api" ]] || continue
+      if grep -qx "$sandbox_id" "$live_sandboxes"; then
+        continue
+      fi
+      found=1
+      if [[ "{{mode}}" == "delete" ]]; then
+        kubectl -n {{namespace}} delete svc "$service"
+      else
+        printf 'orphan proxy service: %s sandbox_id=%s\n' "$service" "$sandbox_id"
+      fi
+    done < <(
+      kubectl -n {{namespace}} get svc -l centaur.ai/iron-proxy=true \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.centaur\.ai/sandbox-id}{"\n"}{end}'
+    )
+
+    if [[ "$found" -eq 0 ]]; then
+      echo "No orphan proxy services found."
+    fi
+
 shell component:
     kubectl exec -it -n {{namespace}} deploy/{{release}}-centaur-{{component}} -- sh
 

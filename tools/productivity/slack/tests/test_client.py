@@ -1,11 +1,12 @@
 import base64
+import email.message
 import json
 
 import pytest
+from slack.client import SlackAuthError, SlackClient
 from slack_sdk.errors import SlackApiError
 
 from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
-from slack.client import SlackAuthError, SlackClient
 
 
 class _FakeSlackResponse(dict):
@@ -249,6 +250,45 @@ def test_list_etl_channels_uses_user_token_client() -> None:
     ]
 
 
+def test_get_etl_channel_history_page_uses_user_token_client_and_window() -> None:
+    client, bot_client = _make_client()
+    etl_client = _FakeWebClient()
+    client._etl_client = etl_client
+    client._get_etl_user_cache = lambda: {"U1": "alice", "U2": "bob"}  # type: ignore[method-assign]
+    etl_client.history_pages = [
+        {
+            "messages": [
+                {"user": "U1", "text": "first <@U2>", "ts": "200.000000"},
+            ],
+            "response_metadata": {"next_cursor": "cursor-2"},
+        }
+    ]
+
+    result = client._get_etl_channel_history_page(
+        "paradigm-pulse",
+        limit=1,
+        cursor="cursor-1",
+        oldest="2026-01-01",
+        latest="2026-01-02",
+        inclusive=True,
+    )
+
+    assert bot_client.history_calls == []
+    assert etl_client.history_calls == [
+        {
+            "channel": "C123",
+            "limit": 1,
+            "cursor": "cursor-1",
+            "oldest": client._normalize_ts("2026-01-01"),
+            "latest": client._normalize_ts("2026-01-02"),
+            "inclusive": True,
+        }
+    ]
+    assert result["has_more"] is True
+    assert result["next_cursor"] == "cursor-2"
+    assert result["messages"][0]["text"] == "first @bob"
+
+
 def test_get_channel_history_page_preserves_non_auth_error_shape() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {}  # type: ignore[method-assign]
@@ -474,8 +514,6 @@ class _FakeHTTPResponse:
 
     @property
     def headers(self) -> "email.message.Message":
-        import email.message
-
         msg = email.message.Message()
         msg["Content-Type"] = self._content_type
         return msg
@@ -485,10 +523,10 @@ def test_download_file_rejects_non_files_host() -> None:
     client, _ = _make_client()
     client.token = "SLACK_BOT_TOKEN"
 
-    with pytest.raises(ValueError, match="files.slack.com"):
+    with pytest.raises(ValueError, match=r"files\.slack\.com"):
         client.download_file("https://slack.com/api/api.test?x=SLACK_BOT_TOKEN")
 
-    with pytest.raises(ValueError, match="files.slack.com"):
+    with pytest.raises(ValueError, match=r"files\.slack\.com"):
         client.download_file("http://files.slack.com/files-pri/T1-F1/report.pdf")
 
 
@@ -572,8 +610,7 @@ def test_download_attachment_bytes_scopes_request_to_thread(
 
     assert body == b"file-bytes"
     assert captured["url"] == (
-        "http://api:8000/agent/attachments/att-xyz/download"
-        "?thread_key=slack%3AC1%3A1.2"
+        "http://api:8000/agent/attachments/att-xyz/download?thread_key=slack%3AC1%3A1.2"
     )
 
 

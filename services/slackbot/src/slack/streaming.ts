@@ -1,4 +1,5 @@
 import type { AnyChunk, RichTextBlock } from '@slack/types'
+import { slackReplyLimits } from '../constants'
 
 export type StreamTaskStatus = 'pending' | 'in_progress' | 'complete' | 'error'
 
@@ -41,12 +42,12 @@ export type StreamTask = {
 
 export type StreamChunk = AnyChunk
 
-export const SLACK_STREAM_MARKDOWN_TEXT_LIMIT = 12_000
-export const SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT = 256
-export const SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT = 256
-const SLACK_STREAM_TASK_UPDATE_TITLE_LIMIT = 64
-const SLACK_STREAM_TASK_UPDATE_DETAILS_LIMIT = 48
-const SLACK_STREAM_TASK_UPDATE_OUTPUT_LIMIT = 48
+export const SLACK_STREAM_MARKDOWN_TEXT_LIMIT = slackReplyLimits.stream.markdownChunkChars
+export const SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT = slackReplyLimits.stream.taskDetailsChars
+export const SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT = slackReplyLimits.stream.planTitleChars
+const SLACK_STREAM_TASK_UPDATE_TITLE_LIMIT = slackReplyLimits.stream.taskTitleChars
+const SLACK_STREAM_TASK_UPDATE_DETAILS_LIMIT = slackReplyLimits.stream.taskDetailsChars
+const SLACK_STREAM_TASK_UPDATE_OUTPUT_LIMIT = slackReplyLimits.stream.taskOutputChars
 
 export function planUpdateChunk(title: string): StreamChunk {
   return { type: 'plan_update', title: clip(title, SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT) }
@@ -165,23 +166,40 @@ function parseInlineMarkdown(value: string): StreamInline[] {
 
 function taskBodyToPlain(
   body: StreamRichText | string | undefined,
-  maxChars = SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT
+  maxChars: number = SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT
 ): string | undefined {
   if (!body) return undefined
   if (typeof body === 'string') return clip(body, maxChars)
   return clip(
     body.elements
-      .map(element =>
-        element.elements
+      .map(element => {
+        const text = element.elements
           .map(inline =>
             'text' in inline ? inline.text : 'user_id' in inline ? `<@${inline.user_id}>` : ''
           )
           .join('')
-      )
+        if (element.type !== 'rich_text_preformatted') return text
+        if (text.trim().startsWith('```')) return text
+        const language =
+          'language' in element && typeof element.language === 'string' ? element.language : ''
+        const fencePrefix = `\`\`\`${language}\n`
+        const fenceSuffix = '\n```'
+        const bodyBudget = maxChars - fencePrefix.length - fenceSuffix.length
+        if (bodyBudget <= 8) return text
+        return `${fencePrefix}${clip(text, bodyBudget)}${fenceSuffix}`
+      })
       .filter(Boolean)
       .join('\n'),
     maxChars
   )
+}
+
+export function clipLines(value: string, maxLines: number): string {
+  if (maxLines <= 0) return ''
+  const lines = value.split('\n')
+  if (lines.length <= maxLines) return value
+  if (maxLines === 1) return '// truncated'
+  return [...lines.slice(0, maxLines - 1), '// truncated'].join('\n')
 }
 
 function clip(value: string, max: number): string {

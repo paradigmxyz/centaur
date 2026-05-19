@@ -20,6 +20,11 @@ router = APIRouter(
 )
 
 
+def _ascii_filename(name: str) -> str:
+    """Strip non-ASCII chars and `"` so the name is safe in a latin-1 header."""
+    return name.encode("ascii", "ignore").decode("ascii").replace('"', "")
+
+
 def _enforce_sandbox_thread_scope(request: Request, thread_key: str) -> None:
     """Reject if a sandbox token is trying to access a different thread."""
     claims = get_sandbox_claims(request)
@@ -140,5 +145,5 @@ async def download_attachment(
     return Response(
         content=row["data"],
         media_type=row["mime_type"],
-        headers={"Content-Disposition": f'attachment; filename="{row["name"]}"'},
+        headers={"Content-Disposition": f'attachment; filename="{_ascii_filename(row["name"])}"'},
     )

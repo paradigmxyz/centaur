@@ -202,7 +202,54 @@ class OAuthTokenSecret:
     token_endpoint: str | None = None
 
 
-SecretDef = HttpSecret | GcpAuthSecret | PgDsnSecret | OAuthTokenSecret
+@dataclass(frozen=True)
+class HmacHeader:
+    """One header injected by iron-proxy's ``hmac_sign`` transform.
+
+    ``value`` is a Go template evaluated against the request's signing context;
+    the iron-proxy schema exposes ``.Timestamp``, ``.Signature``, and
+    ``.Credentials.<name>`` (where ``<name>`` is a key from the secret's
+    ``credentials`` map).
+    """
+
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class HmacSignSecret:
+    """Per-request HMAC signature minted by iron-proxy's ``hmac_sign`` transform.
+
+    iron-proxy resolves each entry in ``credentials`` from its own source,
+    composes the canonical ``message`` template, HMACs it with the credential
+    named ``secret`` (decoded per ``key_encoding``), encodes the digest per
+    ``output_encoding``, and writes ``headers`` onto the upstream request.
+    The credentials and signing key never reach the sandbox.
+
+    ``credentials`` is a map of name → source; the entry named ``secret`` is the
+    HMAC key and is required. Other keys are user-named and referenced from
+    ``headers[].value`` as ``{{.Credentials.<name>}}``.
+
+    ``allow_chunked_body`` opts in to signing requests with no Content-Length
+    (chunked bodies); iron-proxy refuses by default since the body cannot be
+    deterministically hashed in flight.
+    """
+
+    name: str
+    hosts: tuple[str, ...]
+    credentials: tuple[tuple[str, OAuthFieldSource], ...]
+    headers: tuple[HmacHeader, ...]
+    algorithm: str
+    key_encoding: str
+    output_encoding: str
+    message: str
+    timestamp_format: str
+    allow_chunked_body: bool = False
+
+
+SecretDef = (
+    HttpSecret | GcpAuthSecret | PgDsnSecret | OAuthTokenSecret | HmacSignSecret
+)
 
 # Per-grant credential fields: grant -> (required, optional). Field names are
 # the keys iron-proxy expects in each ``oauth_token`` token entry.
@@ -218,6 +265,19 @@ _OAUTH_GRANT_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 }
 
 _OAUTH_GRANTS: frozenset[str] = frozenset(_OAUTH_GRANT_FIELDS)
+
+# Enums iron-proxy's ``hmac_sign`` transform accepts. Mirrors the upstream
+# schema; centralized here so parser errors list the same options the proxy
+# would.
+_HMAC_ALGORITHMS: frozenset[str] = frozenset({"sha256", "sha512", "sha1"})
+_HMAC_KEY_ENCODINGS: frozenset[str] = frozenset({"raw", "base64", "hex"})
+_HMAC_OUTPUT_ENCODINGS: frozenset[str] = frozenset({"base64", "hex"})
+_HMAC_TIMESTAMP_FORMATS: frozenset[str] = frozenset(
+    {"unix_seconds", "unix_millis", "unix_nanos", "rfc3339"}
+)
+# The HMAC key. Other ``credentials`` keys are user-named and only referenced
+# from ``headers[].value`` templates.
+_HMAC_REQUIRED_CREDENTIAL = "secret"
 
 
 def _parse_oauth_field_source(
@@ -280,6 +340,109 @@ def _parse_oauth_fields(
     return tuple(sorted(parsed.items()))
 
 
+def _parse_hmac_credential_source(
+    secret_name: str, field_name: str, raw: Any
+) -> OAuthFieldSource:
+    """Parse one ``credentials`` entry for an ``hmac_sign`` secret.
+
+    Accepts a bare ``secret_ref`` string or a table with ``secret_ref`` and
+    optional ``json_key`` (for pulling a single key out of a JSON-encoded
+    secret). Mirrors ``_parse_oauth_field_source`` so the two typed secrets
+    that resolve named credential fields validate the same shape.
+    """
+    if isinstance(raw, str):
+        if not raw:
+            raise ValueError(
+                f"hmac_sign entry {secret_name!r} credential {field_name!r} "
+                f"'secret_ref' must be a non-empty string"
+            )
+        return OAuthFieldSource(secret_ref=raw)
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"hmac_sign entry {secret_name!r} credential {field_name!r} must be "
+            f"a string or table"
+        )
+    ref = raw.get("secret_ref")
+    if not isinstance(ref, str) or not ref:
+        raise ValueError(
+            f"hmac_sign entry {secret_name!r} credential {field_name!r} requires "
+            f"a non-empty 'secret_ref'"
+        )
+    json_key = raw.get("json_key")
+    if json_key is not None and (not isinstance(json_key, str) or not json_key):
+        raise ValueError(
+            f"hmac_sign entry {secret_name!r} credential {field_name!r} "
+            f"'json_key' must be a non-empty string"
+        )
+    return OAuthFieldSource(secret_ref=ref, json_key=json_key)
+
+
+def _parse_hmac_credentials(
+    secret_name: str, raw: Any
+) -> tuple[tuple[str, OAuthFieldSource], ...]:
+    """Parse ``credentials`` for an ``hmac_sign`` entry; require ``secret``."""
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(
+            f"hmac_sign entry {secret_name!r} 'credentials' must be a non-empty "
+            f"table"
+        )
+    parsed: dict[str, OAuthFieldSource] = {}
+    for field_name, value in raw.items():
+        if not isinstance(field_name, str) or not field_name:
+            raise ValueError(
+                f"hmac_sign entry {secret_name!r} credential names must be "
+                f"non-empty strings"
+            )
+        parsed[field_name] = _parse_hmac_credential_source(
+            secret_name, field_name, value
+        )
+    if _HMAC_REQUIRED_CREDENTIAL not in parsed:
+        raise ValueError(
+            f"hmac_sign entry {secret_name!r} 'credentials' must include "
+            f"{_HMAC_REQUIRED_CREDENTIAL!r} (the HMAC key)"
+        )
+    return tuple(sorted(parsed.items()))
+
+
+def _parse_hmac_headers(secret_name: str, raw: Any) -> tuple[HmacHeader, ...]:
+    """Parse the ordered ``headers`` list iron-proxy writes onto the request."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(
+            f"hmac_sign entry {secret_name!r} 'headers' must be a non-empty list"
+        )
+    headers: list[HmacHeader] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"hmac_sign entry {secret_name!r} header[{index}] must be a table"
+            )
+        name = entry.get("name")
+        value = entry.get("value")
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"hmac_sign entry {secret_name!r} header[{index}] requires a "
+                f"non-empty 'name'"
+            )
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"hmac_sign entry {secret_name!r} header[{index}] requires a "
+                f"non-empty 'value' template"
+            )
+        headers.append(HmacHeader(name=name, value=value))
+    return tuple(headers)
+
+
+def _parse_hmac_enum(
+    secret_name: str, key: str, value: Any, allowed: frozenset[str]
+) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(
+            f"hmac_sign entry {secret_name!r} {key!r} must be one of "
+            f"{sorted(allowed)}, got {value!r}"
+        )
+    return value
+
+
 _INJECT_ONLY_KEYS: tuple[str, ...] = (
     "inject_header",
     "inject_formatter",
@@ -312,6 +475,21 @@ def _parse_str_list(
     return tuple(raw)
 
 
+def _parse_match_headers(entry: dict, *, name: str) -> tuple[str, ...]:
+    """Validate ``match_headers``; empty/missing yields ``()`` so other scan locations can stand alone."""
+    raw = entry.get("match_headers")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(
+        isinstance(item, str) and item for item in raw
+    ):
+        raise ValueError(
+            f"HTTP secret {name!r} has invalid 'match_headers' "
+            f"(expected an array of header names): {raw!r}"
+        )
+    return tuple(raw)
+
+
 def _parse_bool(entry: dict, key: str, *, name: str) -> bool:
     value = entry.get(key, False)
     if not isinstance(value, bool):
@@ -337,9 +515,7 @@ def _parse_replace_secret(
 ) -> HttpSecret:
     """Parse a replace-mode HTTP secret: a placeholder plus scan locations."""
     _reject_foreign_keys(entry, _INJECT_ONLY_KEYS, name=name, mode="replace")
-    match_headers = (
-        _parse_str_list(entry, "match_headers", name=name, noun="header names") or ()
-    )
+    match_headers = _parse_match_headers(entry, name=name)
     match_path = _parse_bool(entry, "match_path", name=name)
     match_query = _parse_bool(entry, "match_query", name=name)
     if not match_headers and not match_path and not match_query:
@@ -522,6 +698,60 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
                 f"pg_dsn entry {name!r} requires a non-empty 'database' field"
             )
         return PgDsnSecret(name=name, secret_ref=secret_ref, database=database)
+    if secret_type == "hmac_sign":
+        hosts = entry.get("hosts", [])
+        if (
+            not isinstance(hosts, list)
+            or not hosts
+            or not all(isinstance(h, str) and h for h in hosts)
+        ):
+            raise ValueError(
+                f"hmac_sign entry {name!r} 'hosts' must be a non-empty array "
+                f"of non-empty strings"
+            )
+        credentials = _parse_hmac_credentials(name, entry.get("credentials"))
+        headers = _parse_hmac_headers(name, entry.get("headers"))
+        algorithm = _parse_hmac_enum(
+            name, "algorithm", entry.get("algorithm"), _HMAC_ALGORITHMS
+        )
+        key_encoding = _parse_hmac_enum(
+            name, "key_encoding", entry.get("key_encoding"), _HMAC_KEY_ENCODINGS
+        )
+        output_encoding = _parse_hmac_enum(
+            name,
+            "output_encoding",
+            entry.get("output_encoding"),
+            _HMAC_OUTPUT_ENCODINGS,
+        )
+        timestamp_format = _parse_hmac_enum(
+            name,
+            "timestamp_format",
+            entry.get("timestamp_format"),
+            _HMAC_TIMESTAMP_FORMATS,
+        )
+        message = entry.get("message")
+        if not isinstance(message, str) or not message:
+            raise ValueError(
+                f"hmac_sign entry {name!r} 'message' must be a non-empty "
+                f"Go-template string"
+            )
+        allow_chunked_body = entry.get("allow_chunked_body", False)
+        if not isinstance(allow_chunked_body, bool):
+            raise ValueError(
+                f"hmac_sign entry {name!r} 'allow_chunked_body' must be a boolean"
+            )
+        return HmacSignSecret(
+            name=name,
+            hosts=tuple(hosts),
+            credentials=credentials,
+            headers=headers,
+            algorithm=algorithm,
+            key_encoding=key_encoding,
+            output_encoding=output_encoding,
+            message=message,
+            timestamp_format=timestamp_format,
+            allow_chunked_body=allow_chunked_body,
+        )
     raise ValueError(f"unknown secret type {secret_type!r}")
 
 

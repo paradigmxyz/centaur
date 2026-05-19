@@ -2,12 +2,12 @@
   --centaur-accent: #00E100;
   --centaur-accent-hover: #35f335;
   --centaur-accent-soft: rgba(0, 225, 0, 0.14);
-  --centaur-bg: light-dark(#ffffff, #101012);
-  --centaur-code: light-dark(#f6f6f7, #0b0b0d);
-  --centaur-line: light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
-  --centaur-muted: light-dark(#727278, #9b9ba1);
-  --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
-  --centaur-text: light-dark(#101012, #ffffff);
+  --centaur-bg: #ffffff;
+  --centaur-code: #f6f6f7;
+  --centaur-line: rgba(0, 0, 0, 0.12);
+  --centaur-muted: #727278;
+  --centaur-soft: rgba(0, 0, 0, 0.035);
+  --centaur-text: #101012;
   --centaur-sans: 'PolySans Var', system-ui, sans-serif;
   --centaur-serif: 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Sagittaire Display', var(--centaur-serif);
@@ -15,12 +15,21 @@
   --vocs-spacing-content: 920px;
 }
 
+:root.dark {
+  --centaur-bg: #101012;
+  --centaur-code: #0b0b0d;
+  --centaur-line: rgba(255, 255, 255, 0.12);
+  --centaur-muted: #9b9ba1;
+  --centaur-soft: rgba(255, 255, 255, 0.055);
+  --centaur-text: #ffffff;
+}
+
 @font-face {
   font-family: 'PolySans Var';
   src: url('/fonts/PolySans-variable.woff2') format('woff2-variations');
   font-style: normal;
   font-weight: 300 800;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -28,7 +37,7 @@
   src: url('/fonts/PolySansItalic-variable.woff2') format('woff2-variations');
   font-style: italic;
   font-weight: 300 800;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -36,7 +45,7 @@
   src: url('/fonts/SagittaireDisplay-Regular.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -44,7 +53,7 @@
   src: url('/fonts/SagittaireDisplay-Extralight.woff2') format('woff2');
   font-style: normal;
   font-weight: 200;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -76,7 +85,7 @@
   src: url('/fonts/PerfectlyNineties-Regular.woff') format('woff');
   font-style: normal;
   font-weight: 500;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -84,7 +93,7 @@
   src: url('/fonts/PerfectlyNineties-Italic.woff') format('woff');
   font-style: italic;
   font-weight: 400;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -92,7 +101,7 @@
   src: url('/fonts/PerfectlyNineties-Semibold.woff') format('woff');
   font-style: normal;
   font-weight: 600;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -100,7 +109,7 @@
   src: url('/fonts/PerfectlyNineties-Bold.woff') format('woff');
   font-style: normal;
   font-weight: 700;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -108,7 +117,7 @@
   src: url('/fonts/slack/lato-latin-400-normal.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -116,7 +125,7 @@
   src: url('/fonts/slack/lato-latin-700-normal.woff2') format('woff2');
   font-style: normal;
   font-weight: 700;
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
@@ -124,13 +133,7 @@
   src: url('/fonts/slack/lato-latin-900-normal.woff2') format('woff2');
   font-style: normal;
   font-weight: 900;
-  font-display: swap;
-}
-
-/* Lockup is wider per em than the standalone mark — keep the topNav
- * tidy by dropping the rendered height a touch. */
-.vocs_NavLogo_logoImage {
-  height: 26px;
+  font-display: block;
 }
 
 /*
@@ -169,84 +172,12 @@
   opacity: 1;
 }
 
-/*
- * Header nav: replace Vocs's solid color-mix background with a fade so
- * content scrolls under the top bar instead of getting hard-clipped.
- * The gradient goes from fully opaque page-bg at the top of the bar to
- * fully transparent at its bottom edge. A backdrop-filter blur keeps
- * any text peeking through legible.
- */
-.vocs_DocsLayout_gutterTop {
-  background-color: transparent;
-  background-image: linear-gradient(
-    to bottom,
-    rgba(5, 5, 6, 1) 0%,
-    rgba(5, 5, 6, 0.85) 60%,
-    rgba(5, 5, 6, 0) 100%
-  );
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-
-/* Strip the curtain's solid background so the gradient is what shows. */
-.vocs_DocsLayout_gutterTopCurtain {
-  background: transparent;
-}
-
-@media (min-width: 1081px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTop {
-    padding-left: 0;
-    padding-right: 0;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_withLogo {
-    padding-left: 80px;
-    padding-right: 48px;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logoWrapper {
-    justify-content: flex-start;
-    left: 24px;
-    width: auto;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo {
-    padding-left: 0;
-    padding-right: 0;
-    width: auto;
-  }
-
-  /*
-   * Landing topNav: swap the full lockup for the standalone centaur mark.
-   * Vocs's logoUrl is shared across every layout, so we hide the rendered
-   * `<img>` and paint the mark on the anchor's background instead. Docs
-   * routes keep the lockup img untouched.
-   */
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo > a {
-    background-image: url('/brand/mark-white.svg');
-    background-position: left center;
-    background-repeat: no-repeat;
-    background-size: contain;
-    width: 32px;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo .vocs_NavLogo_logoImage {
-    display: none;
-  }
-}
-
-@media (max-width: 1080px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo > a {
-    background-image: url('/brand/mark-white.svg');
-    background-position: left center;
-    background-repeat: no-repeat;
-    background-size: contain;
-    width: 28px;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo .vocs_NavLogo_logoImage {
-    display: none;
-  }
+/* Hide Vocs's global nav header only on the homepage. */
+.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTop,
+.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTopCurtain,
+.vocs_DocsLayout[data-layout="landing"] [class*="vocs:fixed"][class*="vocs:h-topNav"],
+[data-layout="landing"][data-v-topnav] [class*="vocs:fixed"][class*="vocs:h-topNav"] {
+  display: none;
 }
 
 /*
@@ -264,7 +195,7 @@ body,
 }
 
 .vocs_Content {
-  color: #e8e8e1;
+  color: var(--vocs-color_text2);
   font-family: var(--centaur-serif);
   font-size: 1rem;
   line-height: 1.5;
@@ -282,14 +213,14 @@ body,
 }
 
 .vocs_Content h1 {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-size: clamp(2.35rem, 3.8vw, 3.35rem);
   line-height: 1;
   margin-bottom: 1.2rem;
 }
 
 .vocs_Content h2 {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-size: 2rem;
   line-height: 1.125;
   margin-bottom: 1rem;
@@ -297,7 +228,7 @@ body,
 }
 
 .vocs_Content h3 {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-size: 1.5rem;
   line-height: 1.25;
   margin-bottom: 0.75rem;
@@ -322,7 +253,7 @@ body,
 }
 
 .vocs_Content strong {
-  color: #f7f7f2;
+  color: var(--vocs-color_text);
   font-weight: 600;
 }
 
@@ -333,18 +264,18 @@ body,
 }
 
 .vocs_Content code:not(pre code) {
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--vocs-color_codeInlineBackground);
+  border: 1px solid var(--vocs-color_codeInlineBorder);
   border-radius: 4px;
-  color: #f7f7f2;
+  color: var(--vocs-color_codeInlineText);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 0.88em;
   padding: 0.08em 0.28em;
 }
 
 .vocs_Content pre {
-  background: #0b0b0d !important;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: var(--vocs-color_codeBlockBackground) !important;
+  border: 1px solid var(--vocs-color_border);
   border-radius: 8px;
 }
 
@@ -361,17 +292,46 @@ body,
 }
 
 .vocs_Content th {
-  color: #f7f7f2;
+  color: var(--vocs-color_heading);
   font-weight: 600;
 }
 
 .centaur-home h1 {
-  font-family: var(--centaur-display);
-  font-weight: 400;
-  letter-spacing: 0.012em;
+  font-family: var(--centaur-manual-display);
+  font-weight: 500;
+  letter-spacing: 0;
 }
 
-:root,
+:root {
+  --vocs-color_background: #ffffff;
+  --vocs-color_background2: #f7f7f4;
+  --vocs-color_background3: #eeeeea;
+  --vocs-color_background4: #e5e5df;
+  --vocs-color_background5: #ddddda;
+  --vocs-color_backgroundDark: #050506;
+  --vocs-color_backgroundDarkTint: #111114;
+  --vocs-color_codeBlockBackground: #f6f6f7;
+  --vocs-color_codeInlineBackground: #f3f3ef;
+  --vocs-color_codeInlineBorder: rgba(0, 0, 0, 0.12);
+  --vocs-color_codeInlineText: var(--centaur-accent);
+  --vocs-color_border: rgba(0, 0, 0, 0.12);
+  --vocs-color_border2: rgba(0, 0, 0, 0.2);
+  --vocs-color_heading: #050505;
+  --vocs-color_hr: rgba(0, 0, 0, 0.12);
+  --vocs-color_link: var(--centaur-accent);
+  --vocs-color_linkHover: var(--centaur-accent-hover);
+  --vocs-color_shadow: rgba(0, 0, 0, 0.18);
+  --vocs-color_shadow2: rgba(0, 0, 0, 0.12);
+  --vocs-color_text: #050505;
+  --vocs-color_text2: #30302d;
+  --vocs-color_text3: #66665f;
+  --vocs-color_text4: #8a8a82;
+  --vocs-color_textAccent: var(--centaur-accent);
+  --vocs-color_textAccentHover: var(--centaur-accent-hover);
+  --vocs-color_textHover: #000000;
+  --vocs-color_title: #050505;
+}
+
 :root.dark {
   --vocs-color_background: #050506;
   --vocs-color_background2: #0b0b0d;
@@ -404,12 +364,12 @@ body,
 
 body,
 .vocs_DocsLayout {
-  background: #050506;
+  background: var(--vocs-color_background);
 }
 
-:root.dark .vocs_CodeBlock {
-  background: #0b0b0d;
-  border-color: rgba(255, 255, 255, 0.14);
+.vocs_CodeBlock {
+  background: var(--vocs-color_codeBlockBackground);
+  border-color: var(--vocs-color_border);
 }
 
 .vocs_CodeBlock span[style*="#FFA657"],
@@ -436,7 +396,7 @@ body,
 
 .vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_content,
 [data-layout="landing"] [data-v-main] {
-  min-height: calc(100dvh - var(--vocs-topNav_height));
+  min-height: 100dvh;
 }
 
 .vocs_DocsLayout[data-layout="landing"] [data-v-main],
@@ -471,10 +431,12 @@ body,
   color: #f7f7f2;
   display: flex;
   flex-direction: column;
+  font-family: var(--centaur-manual-display);
   justify-content: flex-start;
-  min-height: calc(100dvh - var(--vocs-topNav_height));
+  letter-spacing: 0;
+  min-height: 100dvh;
   overflow: hidden;
-  padding: clamp(72px, 9dvh, 120px) 24px clamp(56px, 8dvh, 104px);
+  padding: clamp(86px, 12dvh, 156px) 24px clamp(56px, 8dvh, 104px);
   position: relative;
 }
 
@@ -484,24 +446,24 @@ body,
 
 .home-hero {
   align-items: center;
-  display: flex;
-  flex-direction: column;
-  gap: clamp(54px, 6.5dvh, 84px);
+  display: grid;
+  gap: clamp(34px, 4vw, 72px);
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   margin: 0 auto;
-  max-width: 1320px;
+  max-width: 1440px;
   min-height: auto;
   position: relative;
-  text-align: center;
+  text-align: left;
   width: 100%;
   z-index: 1;
 }
 
 .home-copy {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
   flex-direction: column;
-  margin: 0 auto;
-  max-width: 1160px;
+  margin: 0;
+  max-width: 600px;
   min-width: 0;
 }
 
@@ -525,21 +487,21 @@ a.home-lockup-link {
 
 .home-hero h1 {
   color: #f7f7f2;
-  font-size: 4.25rem;
+  font-size: 4rem;
   font-weight: 400;
-  letter-spacing: 0.012em;
+  letter-spacing: 0;
   line-height: 1.02;
   margin: 0;
-  max-width: 980px;
+  max-width: 600px;
+  text-wrap: balance;
 }
 
 .home-actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  font-family: var(--centaur-serif);
   gap: 12px;
-  justify-content: center;
+  justify-content: flex-start;
   letter-spacing: 0;
   margin-top: 34px;
 }
@@ -587,7 +549,7 @@ a.home-lockup-link {
   border-radius: 8px;
   color: #f7f7f2;
   display: inline-flex;
-  font-family: var(--centaur-serif);
+  font-family: inherit;
   font-size: 0.875rem;
   font-weight: 400;
   gap: 7px;
@@ -616,7 +578,7 @@ a.home-lockup-link {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
-  justify-content: center;
+  justify-content: flex-start;
   margin-top: 52px;
 }
 
@@ -634,7 +596,7 @@ a.home-lockup-link {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 18px;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .home-brand {
@@ -653,43 +615,129 @@ a.home-lockup-link {
 }
 
 /* Tempo's wordmark sits taller per em than Paradigm's — pull it down so the
- * two read at the same optical weight. */
+ * two read at the same optical weight, then trim another 7% so it
+ * doesn't visually outweigh the Paradigm lockup on the same row. */
 .home-brand-tempo img {
-  height: 32px;
-  max-width: min(30vw, 180px);
+  height: 30px;
+  max-width: min(28vw, 168px);
 }
 
 .home-thread-demo {
-  margin: 0 auto;
-  max-width: 1280px;
+  justify-self: stretch;
+  margin: 0;
+  max-width: none;
   min-width: 0;
   width: 100%;
 }
 
 .home-overview {
   margin: clamp(36px, 4.5dvh, 56px) auto 0;
-  max-width: 1280px;
+  max-width: 1440px;
   text-align: left;
   width: 100%;
 }
 
-.home-media-section {
-  margin-top: clamp(32px, 4dvh, 44px);
+/* "Below the fold" feature sections: a stacked pair of two-column splits
+ * (copy + image) that alternate left/right across the page. Section 1
+ * leads with copy on the left; section 2 leads with copy on the right
+ * so the eye zig-zags down the page instead of marching in one column. */
+.home-feature {
+  align-items: center;
+  display: grid;
+  gap: clamp(36px, 5vw, 80px);
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  margin: clamp(48px, 6dvh, 84px) auto 0;
+  max-width: 1280px;
+  width: 100%;
+}
+
+/* Visual sits in the second column for the copy-left variant and in the
+ * first column for the copy-right variant. Source order already matches
+ * (copy first vs visual first) so we don't need `order:` overrides on
+ * desktop — the grid auto-flow handles it. */
+
+.home-feature-copy {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.home-feature-copy h2 {
+  color: #f7f7f2;
+  font-family: var(--centaur-manual-display);
+  font-size: clamp(2rem, 3.4vw, 3rem);
+  font-weight: 500;
+  line-height: 1;
+  margin: 0;
+}
+
+.home-feature-copy p {
+  color: #d0d0c8;
+  font-size: 1.1rem;
+  letter-spacing: -0.01em;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 460px;
+}
+
+.home-feature-cta {
+  color: var(--centaur-accent);
+  font-family: var(--centaur-sans);
+  font-size: 0.95rem;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  margin-top: 4px;
+  text-decoration: none;
+}
+
+.home-feature-cta:hover {
+  color: var(--centaur-accent-hover);
+}
+
+.home-feature-visual {
+  color: inherit;
+  display: block;
+  text-decoration: none;
+}
+
+.home-feature-visual:focus-visible {
+  outline: 2px solid var(--centaur-accent);
+  outline-offset: 6px;
+}
+
+.home-feature-visual:hover .home-architecture-diagram img {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.home-feature-visual .home-architecture-diagram {
+  margin: 0;
+  max-width: 100%;
+  padding-top: 0;
 }
 
 .home-overview-heading {
-  border-top: 1px solid rgba(255, 255, 255, 0.14);
   display: grid;
   gap: 24px;
   grid-template-columns: minmax(220px, 0.38fr) minmax(0, 1fr);
-  padding-top: 34px;
+}
+
+/* The Overview section's list items already render a bottom-border between
+ * the list and the next section. Stacking another border-top on the
+ * media-section heading produced a visible double divider above
+ * "Extensible by default" (and a redundant rule above "Architecture").
+ * Drop the heading's border-top inside media sections so the list's own
+ * trailing rule is the single divider. */
+.home-media-section .home-overview-heading {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .home-overview h2 {
   color: #f7f7f2;
-  font-family: var(--centaur-display);
+  font-family: var(--centaur-manual-display);
   font-size: 3rem;
-  font-weight: 400;
+  font-weight: 500;
   line-height: 1;
   margin: 0;
 }
@@ -697,66 +745,61 @@ a.home-lockup-link {
 .home-overview-heading p {
   color: #edede7;
   font-size: 1.22rem;
+  letter-spacing: -0.01em;
   line-height: 1.5;
   margin: 0;
   max-width: 780px;
 }
 
 .home-overview-list {
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
   display: grid;
-  gap: 0;
+  gap: 24px 40px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   list-style: none;
   margin: 38px 0 0;
   padding: 0;
 }
 
-.home-overview-list li {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+.home-overview-list li:nth-child(odd) {
+  border-right: 0;
+}
+
+.home-overview-list a {
+  color: inherit;
   display: grid;
   gap: 8px;
-  padding: 22px 28px 24px 40px;
-  position: relative;
+  min-height: 100%;
+  padding: 22px 28px 24px 0;
+  text-decoration: none;
+  transition: background 140ms ease;
 }
 
-.home-overview-list li:nth-child(odd) {
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
+.home-overview-list a:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
-.home-overview-list li::before {
-  background: var(--centaur-accent);
-  border-radius: 50%;
-  content: "";
-  height: 7px;
-  left: 16px;
-  position: absolute;
-  top: 32px;
-  width: 7px;
+.home-overview-list a:focus-visible {
+  outline: 2px solid var(--centaur-accent);
+  outline-offset: -2px;
 }
 
 .home-overview-list strong {
   color: #ffffff;
-  font-size: 1.06rem;
+  font-size: 1.28rem;
   font-weight: 650;
-  line-height: 1.25;
+  line-height: 1.18;
 }
 
 .home-overview-list span {
   color: #e0e0d8;
-  font-size: 1rem;
-  line-height: 1.5;
+  font-size: 1.14rem;
+  line-height: 1.42;
 }
 
 .home-architecture-diagram {
   margin: clamp(44px, 6dvh, 72px) auto 0;
-  max-width: 100%;
+  max-width: 75%;
   padding-top: clamp(28px, 4dvh, 44px);
-}
-
-.home-media-section .home-architecture-diagram {
-  margin-top: 30px;
-  padding-top: 0;
 }
 
 .home-architecture-diagram img {
@@ -767,6 +810,7 @@ a.home-lockup-link {
   display: block;
   height: auto;
   object-fit: contain;
+  transition: border-color 140ms ease;
   width: 100%;
 }
 
@@ -776,6 +820,41 @@ a.home-lockup-link {
 @media (max-width: 1080px) {
   .home-architecture-diagram {
     max-width: 100%;
+  }
+}
+
+@media (max-width: 1120px) {
+  .centaur-home {
+    padding-top: clamp(54px, 8dvh, 96px);
+  }
+
+  .home-hero {
+    display: flex;
+    flex-direction: column;
+    gap: clamp(36px, 5dvh, 56px);
+    max-width: 980px;
+    text-align: center;
+  }
+
+  .home-copy {
+    align-items: center;
+    margin: 0 auto;
+    max-width: 980px;
+  }
+
+  .home-hero h1 {
+    max-width: 780px;
+  }
+
+  .home-actions,
+  .home-built-with,
+  .home-logo-row {
+    justify-content: center;
+  }
+
+  .home-thread-demo {
+    margin: 0 auto;
+    max-width: 980px;
   }
 }
 
@@ -798,10 +877,17 @@ a.home-lockup-link {
   display: grid;
   font-family: Slack-Lato, Slack-Fractions, appleLogo, Lato, Arial, sans-serif;
   grid-template-columns: minmax(136px, 168px) minmax(0, 1fr);
-  height: min(760px, 74dvh);
-  min-height: 640px;
+  height: min(680px, 68dvh);
+  min-height: 560px;
   overflow: hidden;
   text-align: left;
+}
+
+@media (max-width: 1120px) {
+  .thread-panel {
+    height: clamp(480px, 64dvh, 620px);
+    min-height: 480px;
+  }
 }
 
 .thread-list {
@@ -971,6 +1057,23 @@ a.home-lockup-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.thread-panel-head::after {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='178' height='32' viewBox='0 0 178 32'%3E%3Cg fill='%23ffffff' fill-opacity='.04' stroke='%23ffffff' stroke-opacity='.12'%3E%3Crect x='0.5' y='2.5' width='42' height='27' rx='6'/%3E%3Crect x='50.5' y='2.5' width='38' height='27' rx='6'/%3E%3Crect x='96.5' y='2.5' width='28' height='27' rx='6'/%3E%3Crect x='132.5' y='2.5' width='28' height='27' rx='6'/%3E%3C/g%3E%3Cg fill='none' stroke='%23d8d8d1' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.4'%3E%3Ccircle cx='14' cy='13' r='2.6'/%3E%3Cpath d='M10 22c.5-2 2.2-3.2 4-3.2s3.5 1.2 4 3.2'/%3E%3Ccircle cx='19.5' cy='12.5' r='1.8'/%3E%3Cpath d='M19 16.6c1.6 0 2.7 1 3 2.4'/%3E%3Cpath d='M61 18.5V16a5 5 0 0 1 10 0v2.5'/%3E%3Crect x='60' y='18' width='3' height='4' rx='1'/%3E%3Crect x='69' y='18' width='3' height='4' rx='1'/%3E%3Cpath d='M77 15l3 3 3-3'/%3E%3Cpath d='M105 19v-3.5a4 4 0 0 1 8 0V19l1.2 1.5h-10.4z'/%3E%3Cpath d='M107.5 22.5a1.5 1.5 0 0 0 3 0'/%3E%3C/g%3E%3Cg fill='%23d8d8d1'%3E%3Ctext x='27' y='20' font-family='Arial,sans-serif' font-size='12' font-weight='700'%3E21%3C/text%3E%3Ccircle cx='141.2' cy='16' r='1.3'/%3E%3Ccircle cx='146' cy='16' r='1.3'/%3E%3Ccircle cx='150.8' cy='16' r='1.3'/%3E%3C/g%3E%3Ccircle cx='116' cy='7' r='4' fill='%23f15a4a'/%3E%3C/svg%3E") center / contain no-repeat;
+  content: "";
+  flex: 0 0 auto;
+  height: 32px;
+  margin-left: auto;
+  pointer-events: none;
+  width: 178px;
+}
+
+@media (max-width: 760px) {
+  .thread-panel-head::after {
+    background-position: right center;
+    width: 32px;
+  }
 }
 
 .thread-panel-scroll {
@@ -1347,7 +1450,7 @@ a.home-lockup-link {
     flex-direction: column;
     gap: clamp(28px, 4dvh, 44px);
     max-width: 980px;
-    min-height: calc(100dvh - var(--vocs-topNav_height) - clamp(64px, 8dvh, 112px));
+    min-height: auto;
     text-align: center;
   }
 
@@ -1398,6 +1501,36 @@ a.home-lockup-link {
     max-width: 980px;
   }
 
+  /* Below tablet width, the alternating split collapses into a centered
+   * single column. Copy stacks above visual on both sections so the
+   * reading order stays predictable; the visual is capped at 65vw so it
+   * doesn't dominate the column on tall portrait viewports. */
+  .home-feature {
+    gap: 28px;
+    grid-template-columns: 1fr;
+    margin-inline: auto;
+    max-width: 720px;
+    text-align: center;
+  }
+
+  .home-feature-copy {
+    align-items: center;
+  }
+
+  .home-feature-copy p {
+    margin-inline: auto;
+  }
+
+  .home-feature-copy-right .home-feature-copy {
+    order: -1;
+  }
+
+  .home-feature-visual {
+    margin-inline: auto;
+    max-width: 65vw;
+    width: 100%;
+  }
+
   .home-overview-heading {
     gap: 18px;
     grid-template-columns: 1fr;
@@ -1412,7 +1545,7 @@ a.home-lockup-link {
 
 @media (max-width: 760px) {
   .centaur-home {
-    min-height: calc(100dvh - 64px);
+    min-height: 100dvh;
     padding: 54px 20px 40px;
   }
 
@@ -1453,7 +1586,6 @@ a.home-lockup-link {
   .home-overview-heading {
     gap: 16px;
     grid-template-columns: 1fr;
-    padding-top: 28px;
     text-align: center;
   }
 
@@ -1552,7 +1684,7 @@ a.home-lockup-link {
     padding-right: 12px;
   }
 
-  .home-overview-list li {
+  .home-overview-list a {
     padding-right: 0;
   }
 }

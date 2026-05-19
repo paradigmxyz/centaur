@@ -72,6 +72,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: ${{ matrix.worker.directory }}
+          command: deploy --config wrangler.ci.jsonc
 
       - name: Preview
         id: preview

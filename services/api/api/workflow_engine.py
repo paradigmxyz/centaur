@@ -939,6 +939,39 @@ async def _compute_agent_session_title(
     return " · ".join(parts)
 
 
+async def _compute_agent_session_header(
+    pool,
+    thread_key: str,
+    selector: dict[str, str | None],
+) -> str:
+    """Build the per-message italic header (``"persona · engine-model"``).
+
+    Mirrors ``_compute_agent_session_title`` for the resolution path but emits
+    the persona/engine pair the slackbot renders italic at the top of every
+    assistant message. Persona defaults to the literal ``"base"`` when no
+    persona is active. The engine segment is upgraded to a concrete model
+    identifier (e.g. ``claude-opus-4-7``, ``codex-gpt-5``) when known.
+    """
+    from api.runtime_control import _agent_session_header  # local to avoid cycle
+
+    persona = selector.get("persona_id")
+    harness = selector.get("harness")
+    engine: str | None = None
+    if not persona or not harness:
+        active = await get_active_assignment(pool, thread_key)
+        if isinstance(active, dict):
+            persona = persona or _nonempty(active.get("persona_id"))
+            harness = harness or _nonempty(active.get("harness"))
+            engine = _nonempty(active.get("engine"))
+    if persona and not engine:
+        engine = _persona_default_engine(persona)
+    return _agent_session_header(
+        persona_id=persona,
+        engine=engine,
+        harness=harness,
+    )
+
+
 def _assignment_display_engine(active: dict[str, Any]) -> str | None:
     engine = _nonempty(active.get("engine"))
     if engine:
@@ -1131,11 +1164,15 @@ async def do_agent_turn(
         session_title = await _compute_agent_session_title(
             ctx._pool, effective_thread_key, selector,
         )
+        session_header = await _compute_agent_session_header(
+            ctx._pool, effective_thread_key, selector,
+        )
         slackbot_session_id = await slackbot_client.open_agent_session(
             delivery=effective_delivery,
             metadata=effective_metadata,
             thread_key=effective_thread_key,
             title=session_title,
+            header=session_header,
         )
         if slackbot_session_id:
             effective_metadata["slackbot_agent_session_id"] = slackbot_session_id

@@ -8,9 +8,9 @@ import { startFinalDeliveryPoller } from './centaur/final-delivery'
 import { CentaurHandoff } from './centaur/handoff'
 import { loadConfig } from './config'
 import { logError, logWarn, sanitizeLogValue } from './logging'
-import { AgentSessionRenderer } from './slack/agent-session'
+import { AgentSessionRenderer, withAgentSessionLock } from './slack/agent-session'
 import { authorizeSlackOrg } from './slack/authorization'
-import { CodexSessionRenderer, codexFooter } from './slack/codex-session'
+import { CodexSessionRenderer, hasActiveCodexSession } from './slack/codex-session'
 import { EventDeduper, slackDedupKey } from './slack/dedup'
 import { duplicateSlackAlertText, type DuplicateSlackEventDetails } from './slack/duplicate-alert'
 import { EnvSlackInstallationStore, SlackClientResolver } from './slack/installations'
@@ -292,6 +292,7 @@ app.post('/api/slack/agent-sessions', apiKeyMiddleware, async c => {
     recipient_team_id: string
     recipient_user_id: string
     title?: string
+    header?: string
   }>()
   const { client } = await resolver.resolve({})
   try {
@@ -300,7 +301,8 @@ app.post('/api/slack/agent-sessions', apiKeyMiddleware, async c => {
       parentTs: body.parent_ts,
       recipientTeamId: body.recipient_team_id,
       recipientUserId: body.recipient_user_id,
-      title: body.title
+      title: body.title,
+      header: body.header
     })
     return c.json({ ok: true, session_id: result.sessionId })
   } catch (error) {
@@ -312,7 +314,10 @@ app.post('/api/slack/agent-sessions/:session_id/text', apiKeyMiddleware, async c
   const body = await c.req.json<{ markdown: string }>()
   const { client } = await resolver.resolve({})
   try {
-    await new AgentSessionRenderer(client).text(c.req.param('session_id'), body.markdown)
+    const sessionId = c.req.param('session_id')
+    await withAgentSessionLock(sessionId, () =>
+      new AgentSessionRenderer(client).text(sessionId, body.markdown)
+    )
     return c.json({ ok: true })
   } catch (error) {
     return slackApiErrorResponse(c, error)
@@ -329,7 +334,10 @@ app.post('/api/slack/agent-sessions/:session_id/step', apiKeyMiddleware, async c
   }>()
   const { client } = await resolver.resolve({})
   try {
-    await new AgentSessionRenderer(client).step(c.req.param('session_id'), body)
+    const sessionId = c.req.param('session_id')
+    await withAgentSessionLock(sessionId, () =>
+      new AgentSessionRenderer(client).step(sessionId, body)
+    )
     return c.json({ ok: true })
   } catch (error) {
     return slackApiErrorResponse(c, error)
@@ -337,11 +345,17 @@ app.post('/api/slack/agent-sessions/:session_id/step', apiKeyMiddleware, async c
 })
 
 app.post('/api/slack/agent-sessions/:session_id/done', apiKeyMiddleware, async c => {
-  const body = await c.req.json<{ footer?: string; thread_id?: string }>()
+  const body = await c.req.json<{ thread_id?: string }>()
   const { client } = await resolver.resolve({})
   try {
-    const footer = body.footer ?? (body.thread_id ? codexFooter(body.thread_id) : undefined)
-    await new AgentSessionRenderer(client).done(c.req.param('session_id'), footer)
+    const sessionId = c.req.param('session_id')
+    await withAgentSessionLock(sessionId, async () => {
+      if (hasActiveCodexSession(sessionId)) {
+        await new CodexSessionRenderer(client).done(sessionId, body.thread_id)
+      } else {
+        await new AgentSessionRenderer(client).done(sessionId)
+      }
+    })
     return c.json({ ok: true })
   } catch (error) {
     return slackApiErrorResponse(c, error)
@@ -352,9 +366,9 @@ app.post('/api/slack/agent-sessions/:session_id/harness-event', apiKeyMiddleware
   const body = await c.req.json<{ event: unknown }>()
   const { client } = await resolver.resolve({})
   try {
-    const result = await new CodexSessionRenderer(client).event(
-      c.req.param('session_id'),
-      body.event
+    const sessionId = c.req.param('session_id')
+    const result = await withAgentSessionLock(sessionId, () =>
+      new CodexSessionRenderer(client).event(sessionId, body.event)
     )
     return c.json({ ok: true, ...result })
   } catch (error) {
@@ -444,7 +458,9 @@ async function notifyDuplicateSlackAlert(details: DuplicateSlackEventDetails): P
   }
 }
 
-function codexThreadIdFromSlackEvent(event: Record<string, unknown> | undefined): string | undefined {
+function codexThreadIdFromSlackEvent(
+  event: Record<string, unknown> | undefined
+): string | undefined {
   if (!event) return undefined
   for (const key of ['codex_thread_id', 'agent_thread_id', 'thread_id', 'session_id']) {
     const value = event[key]
@@ -512,10 +528,7 @@ function slackApiErrorResponse(c: Context, error: unknown) {
   return c.json(
     {
       ok: false,
-      error:
-        error instanceof Error
-          ? String(sanitizeLogValue(error.message))
-          : 'slack_api_error'
+      error: error instanceof Error ? String(sanitizeLogValue(error.message)) : 'slack_api_error'
     },
     502
   )

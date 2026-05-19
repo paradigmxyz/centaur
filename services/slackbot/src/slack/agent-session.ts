@@ -1,6 +1,8 @@
 import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
 import { ulid } from '@std/ulid'
+import { slackReplyLimits } from '../constants'
+import { logWarn } from '../logging'
 import {
   markdownChunk,
   planBlock,
@@ -12,15 +14,25 @@ import {
   type StreamTask,
   type StreamTaskStatus
 } from './streaming'
-import { renderMarkdownBlocks } from './render'
+import { buildFinalFallbackText, sanitizeFinalMessagePayload } from './final-message'
+import {
+  markdownToStreamChunks,
+  renderMarkdownBlocks,
+  shouldShowThinkingBlock,
+  thinkingContextBlock
+} from './render'
+import { clipLines } from './streaming'
 
 type Segment = {
   id: string
   textParts: string[]
   tasks: Map<string, StreamTask>
   streamTs?: string
+  streamStartPromise?: Promise<void>
   planStarted: boolean
+  headerEmitted: boolean
   pendingText: string
+  pendingTextPlanPrefix: boolean
   streamedText: string
   pendingTextTimer?: ReturnType<typeof setTimeout>
   pendingTextFlush?: Promise<void>
@@ -35,7 +47,9 @@ type AgentSessionState = {
   recipientTeamId: string
   recipientUserId: string
   title: string
-  footer?: string
+  header?: string
+  finalCommentaryMarkdown?: string
+  finalAnswerMarkdown?: string
   done: boolean
   statusCleared: boolean
   segments: Segment[]
@@ -47,6 +61,9 @@ export type OpenAgentSessionInput = {
   recipientTeamId: string
   recipientUserId: string
   title?: string
+  /** Italic one-line identifier rendered at the top of every assistant message
+   *  (e.g. "base · claude-opus-4-7", "legal · codex-gpt-5"). */
+  header?: string
 }
 
 export type StepInput = {
@@ -63,28 +80,45 @@ export type StepOptions = {
 
 export type TextOptions = {
   flush?: boolean
+  /** When true, stream pending assistant text immediately instead of waiting for heuristics. */
+  force?: boolean
+  /** When false, stream this text without creating the plan/task surface first. */
+  planPrefix?: boolean
 }
 
 export type DoneOptions = {
   streamFinalUpdates?: boolean
+  commentaryMarkdown?: string
+  answerMarkdown?: string
+}
+
+function headerMarkdown(header: string): string {
+  return `_${header.trim()}_`
+}
+
+function headerBlock(header: string): AnyBlock {
+  return { type: 'markdown', text: headerMarkdown(header) }
 }
 
 const sessions = new Map<string, AgentSessionState>()
+const sessionQueues = new Map<string, Promise<void>>()
 const THINKING_STATUS = 'Thinking...'
 const TEXT_FLUSH_INTERVAL_MS = 250
 const TEXT_FLUSH_CHARS = 1000
 const FIRST_TEXT_FLUSH_CHARS = 1
 const EXECUTION_PLAN_ID = 'codex-execution-timeline'
-const FINAL_PLAN_MAX_TASKS = 12
-const FINAL_PLAN_TITLE_CHARS = 140
-const FINAL_PLAN_DETAILS_CHARS = 192
-const FINAL_PLAN_OUTPUT_CHARS = 256
+const LIVE_PLAN_MAX_TASKS = slackReplyLimits.stream.taskCount
+const FINAL_PLAN_MAX_TASKS = slackReplyLimits.finalPlan.maxTasks
+const FINAL_PLAN_TITLE_CHARS = slackReplyLimits.finalPlan.taskTitleChars
+const FINAL_PLAN_DETAILS_LINES = slackReplyLimits.finalPlan.taskDetailsCodeBlockLines
+const FINAL_PLAN_OUTPUT_LINES = slackReplyLimits.finalPlan.taskOutputCodeBlockLines
 
 export class AgentSessionRenderer {
   constructor(private readonly client: WebClient) {}
 
   async open(input: OpenAgentSessionInput): Promise<{ sessionId: string }> {
     const id = ulid()
+    const header = input.header?.trim() || undefined
     sessions.set(id, {
       id,
       channel: input.channel,
@@ -92,6 +126,7 @@ export class AgentSessionRenderer {
       recipientTeamId: input.recipientTeamId,
       recipientUserId: input.recipientUserId,
       title: input.title ?? 'Execution steps',
+      header,
       segments: [newSegment()],
       done: false,
       statusCleared: false
@@ -108,11 +143,7 @@ export class AgentSessionRenderer {
     await this.queueText(state, segment, markdown)
   }
 
-  async textDelta(
-    sessionId: string,
-    markdownDelta: string,
-    opts: TextOptions = {}
-  ): Promise<void> {
+  async textDelta(sessionId: string, markdownDelta: string, opts: TextOptions = {}): Promise<void> {
     if (!markdownDelta) return
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
@@ -127,7 +158,24 @@ export class AgentSessionRenderer {
       )
       return
     }
-    await this.queueText(state, segment, markdownDelta)
+    await this.queueText(state, segment, markdownDelta, {
+      force: opts.force,
+      planPrefix: opts.planPrefix
+    })
+  }
+
+  async blocks(
+    sessionId: string,
+    blocks: AnyBlock[],
+    opts: { planPrefix?: boolean } = {}
+  ): Promise<void> {
+    if (!blocks.length) return
+    const state = requireSession(sessionId)
+    const segment = currentSegment(state)
+    await this.streamChunks(state, segment, [
+      ...(opts.planPrefix === false ? [] : this.planPrefix(state, segment)),
+      { type: 'blocks', blocks }
+    ])
   }
 
   async step(sessionId: string, input: StepInput, opts: StepOptions = {}): Promise<void> {
@@ -155,10 +203,11 @@ export class AgentSessionRenderer {
     await this.flushText(state, segment, { force: true })
   }
 
-  async done(sessionId: string, footer?: string, opts: DoneOptions = {}): Promise<void> {
+  async done(sessionId: string, opts: DoneOptions = {}): Promise<void> {
     const state = requireSession(sessionId)
     state.done = true
-    state.footer = footer
+    state.finalCommentaryMarkdown = opts.commentaryMarkdown
+    state.finalAnswerMarkdown = opts.answerMarkdown
     const streamFinalUpdates = opts.streamFinalUpdates ?? true
     let closed = false
 
@@ -180,50 +229,78 @@ export class AgentSessionRenderer {
       }
       closed = true
     } finally {
-      await this.setStatus(sessionId, '')
+      if (!state.statusCleared) {
+        state.statusCleared = await this.setStatus(sessionId, '')
+      }
       if (closed) sessions.delete(sessionId)
     }
   }
 
-  private async setStatus(sessionId: string, status: string): Promise<void> {
+  private async setStatus(sessionId: string, status: string): Promise<boolean> {
     const state = requireSession(sessionId)
-    const response = await this.client.assistant.threads.setStatus({
-      channel_id: state.channel,
-      thread_ts: state.parentTs,
-      status,
-      ...(status ? { loading_messages: [status] } : {})
-    })
-    if (!response.ok) throw new Error(response.error ?? 'assistant.threads.setStatus failed')
+    try {
+      const response = await this.client.assistant.threads.setStatus({
+        channel_id: state.channel,
+        thread_ts: state.parentTs,
+        status,
+        ...(status ? { loading_messages: [status] } : {})
+      })
+      if (!response.ok) {
+        logStatusFailure(state, status, response.error ?? 'unknown_error')
+        return false
+      }
+      return true
+    } catch (error) {
+      logStatusFailure(state, status, error instanceof Error ? error.message : String(error))
+      return false
+    }
   }
 
   private async closeTextStream(state: AgentSessionState, segment: Segment): Promise<void> {
     raiseStreamError(segment)
     if (segment.closed) return
-    if (!segment.streamTs && !segment.textParts.length && !segment.tasks.size) return
-    const footer = state.footer?.trim()
+    const hasFinalText = Boolean(
+      state.finalCommentaryMarkdown?.trim() || state.finalAnswerMarkdown?.trim()
+    )
+    if (!segment.streamTs && !segment.textParts.length && !segment.tasks.size && !hasFinalText) {
+      return
+    }
     await this.ensureStream(state, segment, [])
     if (!segment.streamTs) return
     const originalTasks = finalTaskSnapshot(segment)
     const tasks = compactFinalTasks(originalTasks)
-    const blocks = [
-      ...(tasks.length ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)] : []),
-      ...renderMarkdownBlocks(segment.streamedText),
-      ...(footer ? footerBlocks(footer) : [])
-    ] as AnyBlock[]
+    const commentaryMarkdown = state.finalCommentaryMarkdown?.trim() ?? ''
+    const answerSource =
+      state.finalAnswerMarkdown?.trim() || segment.streamedText.trim() || segment.textParts.join('')
+    const answerMarkdown = finalMarkdownForBlocks(answerSource, tasks)
+    const streamedTextLive = Boolean(segment.streamedText.trim())
+    const showThinking =
+      !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
+    const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
+    const header = state.header?.trim()
+    // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
+    // Only add blocks for content that was not streamed live; live task_update chunks carry
+    // fenced details/output, so adding a final plan block would render a second plan step.
+    const blocks = sanitizeFinalMessagePayload([
+      ...(header ? [headerBlock(header)] : []),
+      ...(tasks.length && !segment.planStarted
+        ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
+        : []),
+      ...(thinkingBlock ? [thinkingBlock] : []),
+      ...(!streamedTextLive && answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
+    ] as AnyBlock[])
+    const fallbackText = buildFinalFallbackText({
+      title: state.title,
+      commentaryMarkdown: showThinking ? commentaryMarkdown : '',
+      answerMarkdown
+    })
     const stopResponse = await this.client.chat.stopStream({
       channel: state.channel,
-      ts: segment.streamTs
+      ts: segment.streamTs,
+      chunks: markdownToStreamChunks(blocks.length || streamedTextLive ? ' ' : fallbackText),
+      ...(blocks.length ? { blocks } : {})
     })
     if (!stopResponse.ok) throw new Error(stopResponse.error ?? 'chat.stopStream failed')
-    if (blocks.length) {
-      const updateResponse = await this.client.chat.update({
-        channel: state.channel,
-        ts: segment.streamTs,
-        text: fallbackTextForBlocks(state.title, segment.streamedText, footer),
-        blocks
-      })
-      if (!updateResponse.ok) throw new Error(updateResponse.error ?? 'chat.update failed')
-    }
     segment.closed = true
   }
 
@@ -234,30 +311,38 @@ export class AgentSessionRenderer {
   ): Promise<void> {
     raiseStreamError(segment)
     if (!chunks.length || segment.closed) return
+    const effectiveChunks = this.withHeaderPrefix(state, segment, chunks)
     if (!segment.streamTs) {
-      await this.ensureStream(state, segment, chunks)
-      return
+      const initialChunksUsed = await this.ensureStream(state, segment, effectiveChunks)
+      if (initialChunksUsed) return
     }
+    if (!segment.streamTs) throw new Error('chat.startStream did not return a stream ts')
     const response = await this.client.chat.appendStream({
       channel: state.channel,
       ts: segment.streamTs,
-      chunks
+      chunks: effectiveChunks
     })
     if (!response.ok) throw new Error(response.error ?? 'chat.appendStream failed')
-    await this.clearStatusAfterVisibleOutput(state, chunks)
+    await this.clearStatusAfterVisibleOutput(state, effectiveChunks)
   }
 
   private async queueText(
     state: AgentSessionState,
     segment: Segment,
-    markdown: string
+    markdown: string,
+    opts: { force?: boolean; planPrefix?: boolean } = {}
   ): Promise<void> {
     raiseStreamError(segment)
+    const planPrefix = opts.planPrefix !== false
+    if (segment.pendingText && segment.pendingTextPlanPrefix !== planPrefix) {
+      await this.flushText(state, segment, { force: true })
+    }
+    segment.pendingTextPlanPrefix = planPrefix
     segment.pendingText += normalizeDeltaBoundary(
       segment.streamedText + segment.pendingText,
       markdown
     )
-    if (segment.pendingText.length >= TEXT_FLUSH_CHARS) {
+    if (opts.force || segment.pendingText.length >= TEXT_FLUSH_CHARS) {
       await this.flushText(state, segment, { force: true })
       return
     }
@@ -326,7 +411,10 @@ export class AgentSessionRenderer {
     if (!markdown) return
     segment.pendingText = ''
     segment.streamedText += markdown
-    await this.streamChunks(state, segment, [...this.planPrefix(state, segment), markdownChunk(markdown)])
+    await this.streamChunks(state, segment, [
+      ...(segment.pendingTextPlanPrefix ? this.planPrefix(state, segment) : []),
+      markdownChunk(markdown)
+    ])
   }
 
   private async flushTask(
@@ -334,6 +422,7 @@ export class AgentSessionRenderer {
     segment: Segment,
     task: StreamTask
   ): Promise<void> {
+    if (!shouldStreamTaskUpdate(segment, task.id)) return
     const taskChunk = taskUpdateChunk(task)
     const chunks = [...this.planPrefix(state, segment), taskChunk]
     await this.streamChunks(state, segment, chunks)
@@ -343,19 +432,34 @@ export class AgentSessionRenderer {
     state: AgentSessionState,
     segment: Segment,
     initialChunks: AnyChunk[]
-  ): Promise<void> {
-    if (segment.streamTs) return
-    const response = await this.client.chat.startStream({
-      channel: state.channel,
-      thread_ts: state.parentTs,
-      recipient_team_id: state.recipientTeamId,
-      recipient_user_id: state.recipientUserId,
-      task_display_mode: 'plan',
-      chunks: initialChunks.length ? initialChunks : [markdownChunk(' ')]
-    })
-    if (!response.ok || !response.ts) throw new Error(response.error ?? 'chat.startStream failed')
-    segment.streamTs = response.ts
-    await this.clearStatusAfterVisibleOutput(state, initialChunks)
+  ): Promise<boolean> {
+    if (segment.streamTs) return false
+    if (segment.streamStartPromise) {
+      await segment.streamStartPromise
+      return false
+    }
+
+    const chunks = initialChunks.length ? initialChunks : [markdownChunk(' ')]
+    segment.streamStartPromise = (async () => {
+      const response = await this.client.chat.startStream({
+        channel: state.channel,
+        thread_ts: state.parentTs,
+        recipient_team_id: state.recipientTeamId,
+        recipient_user_id: state.recipientUserId,
+        task_display_mode: 'plan',
+        chunks
+      })
+      if (!response.ok || !response.ts) throw new Error(response.error ?? 'chat.startStream failed')
+      segment.streamTs = response.ts
+      await this.clearStatusAfterVisibleOutput(state, chunks)
+    })()
+
+    try {
+      await segment.streamStartPromise
+      return initialChunks.length > 0
+    } finally {
+      segment.streamStartPromise = undefined
+    }
   }
 
   private async clearStatusAfterVisibleOutput(
@@ -363,8 +467,7 @@ export class AgentSessionRenderer {
     chunks: AnyChunk[]
   ): Promise<void> {
     if (state.statusCleared || !hasVisibleStreamChunks(chunks)) return
-    await this.setStatus(state.id, '')
-    state.statusCleared = true
+    state.statusCleared = await this.setStatus(state.id, '')
   }
 
   private planPrefix(state: AgentSessionState, segment: Segment): AnyChunk[] {
@@ -375,6 +478,26 @@ export class AgentSessionRenderer {
     }
     return chunks
   }
+
+  private withHeaderPrefix(
+    state: AgentSessionState,
+    segment: Segment,
+    chunks: AnyChunk[]
+  ): AnyChunk[] {
+    const header = state.header?.trim()
+    if (!header || segment.headerEmitted) return chunks
+    segment.headerEmitted = true
+    return [markdownChunk(`${headerMarkdown(header)}\n`), ...chunks]
+  }
+}
+
+function logStatusFailure(state: AgentSessionState, status: string, error: string): void {
+  logWarn('slack_assistant_status_failed', {
+    channel_id: state.channel,
+    thread_ts: state.parentTs,
+    status: status ? 'set' : 'clear',
+    error
+  })
 }
 
 function finalizeOpenTasks(segment: Segment): StreamTask[] {
@@ -396,31 +519,36 @@ function finalTaskSnapshot(segment: Segment): StreamTask[] {
   return Array.from(segment.tasks.values())
 }
 
+function shouldStreamTaskUpdate(segment: Segment, taskId: string): boolean {
+  return Array.from(segment.tasks.keys()).indexOf(taskId) < LIVE_PLAN_MAX_TASKS
+}
+
 function planTitle(title: string, tasks: StreamTask[]): string {
   if (!tasks.length) return title
   const total = tasks.length
-  const complete = tasks.filter(task => task.status === 'complete').length
-  const failed = tasks.filter(task => task.status === 'error').length
-  if (complete + failed === total) return `${title} (${total}/${total})`
-  return `${title} (${complete + failed}/${total})`
+  const finished = tasks.filter(
+    task => task.status === 'complete' || task.status === 'error'
+  ).length
+  if (finished === total) return `${title} (${total}/${total})`
+  return `${title} (${finished}/${total})`
 }
 
 function compactFinalTasks(tasks: StreamTask[]): StreamTask[] {
   const visible: StreamTask[] = tasks.slice(0, FINAL_PLAN_MAX_TASKS).map(task => ({
     ...task,
     title: clipText(task.title, FINAL_PLAN_TITLE_CHARS),
-    details: compactTaskBody(task.details, FINAL_PLAN_DETAILS_CHARS),
-    output: compactTaskBody(task.output, FINAL_PLAN_OUTPUT_CHARS)
+    details: compactTaskBody(task.details, FINAL_PLAN_DETAILS_LINES),
+    output: compactTaskBody(task.output, FINAL_PLAN_OUTPUT_LINES)
   }))
   const omitted = tasks.length - visible.length
   if (omitted <= 0) return visible
   visible.push({
     id: 'codex-execution-timeline-omitted',
-    title: `${omitted} additional command${omitted === 1 ? '' : 's'} omitted from Slack preview`,
+    title: `${omitted} more command${omitted === 1 ? '' : 's'} not shown in preview (${visible.length} of ${tasks.length})`,
     status: 'complete',
     details: richText([
       preformatted(
-        'Additional command details were omitted to keep the Slack plan under message size limits.',
+        `This reply ran ${tasks.length} commands. The Slack plan preview shows the first ${visible.length}; raise slackReplyLimits.finalPlan.maxTasks if you need more visible rows.`,
         'text'
       )
     ])
@@ -428,14 +556,20 @@ function compactFinalTasks(tasks: StreamTask[]): StreamTask[] {
   return visible
 }
 
-function compactTaskBody(body: StreamTask['details'], maxChars: number): StreamTask['details'] {
+function compactTaskBody(body: StreamTask['details'], maxLines: number): StreamTask['details'] {
   if (!body) return undefined
-  if (typeof body === 'string') return clipText(body, maxChars)
+  if (typeof body === 'string') return clipLines(body, maxLines)
   const text = body.elements
     .map(element =>
       element.elements
         .map(inline =>
-          'text' in inline ? inline.text : 'url' in inline ? inline.url : 'user_id' in inline ? `<@${inline.user_id}>` : ''
+          'text' in inline
+            ? inline.text
+            : 'url' in inline
+              ? inline.url
+              : 'user_id' in inline
+                ? `<@${inline.user_id}>`
+                : ''
         )
         .join('')
     )
@@ -446,15 +580,47 @@ function compactTaskBody(body: StreamTask['details'], maxChars: number): StreamT
     firstPre?.type === 'rich_text_preformatted' && 'language' in firstPre
       ? String(firstPre.language)
       : 'text'
-  return richText([preformatted(clipText(text, maxChars), language)])
+  return richText([preformatted(clipLines(text, maxLines), language)])
+}
+
+function finalMarkdownForBlocks(markdown: string, tasks: StreamTask[]): string {
+  if (!tasks.length) return markdown
+  const remainingChars = slackReplyLimits.mixedBodyAndPlan.maxVisibleChars - taskVisibleChars(tasks)
+  if (remainingChars <= 0) return ''
+  return clipText(markdown, remainingChars)
+}
+
+function taskVisibleChars(tasks: StreamTask[]): number {
+  return tasks.reduce((total, task) => {
+    return (
+      total +
+      task.title.length +
+      taskBodyVisibleChars(task.details) +
+      taskBodyVisibleChars(task.output)
+    )
+  }, 0)
+}
+
+function taskBodyVisibleChars(body: StreamTask['details']): number {
+  if (!body) return 0
+  if (typeof body === 'string') return body.length
+  return body.elements.reduce((total, element) => {
+    return (
+      total +
+      element.elements.reduce((innerTotal, inline) => {
+        if ('text' in inline) return innerTotal + (inline.text ?? '').length
+        if ('url' in inline) return innerTotal + (inline.url ?? '').length
+        if ('user_id' in inline) return innerTotal + inline.user_id.length + 3
+        return innerTotal
+      }, 0)
+    )
+  }, 0)
 }
 
 function clipText(value: string, maxChars: number): string {
+  if (maxChars <= 0) return ''
+  if (maxChars <= 13) return value.length > maxChars ? value.slice(0, maxChars) : value
   return value.length > maxChars ? `${value.slice(0, maxChars - 13)}\n// truncated` : value
-}
-
-function fallbackTextForBlocks(title: string, text: string, footer?: string): string {
-  return [title, text, footer].filter(Boolean).join('\n').slice(0, 3900) || title
 }
 
 function currentSegment(state: AgentSessionState): Segment {
@@ -467,7 +633,9 @@ function newSegment(): Segment {
     textParts: [],
     tasks: new Map(),
     planStarted: false,
+    headerEmitted: false,
     pendingText: '',
+    pendingTextPlanPrefix: true,
     streamedText: '',
     closed: false
   }
@@ -588,6 +756,16 @@ function normalizeDeltaBoundary(previous: string, delta: string): string {
   return delta
 }
 
-function footerBlocks(footer: string): AnyBlock[] {
-  return [{ type: 'context', elements: [{ type: 'mrkdwn', text: footer }] }]
+export async function withAgentSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = sessionQueues.get(sessionId) ?? Promise.resolve()
+  const run = previous.catch(() => undefined).then(fn)
+  const cleanup = run.then(
+    () => undefined,
+    () => undefined
+  )
+  sessionQueues.set(sessionId, cleanup)
+  void cleanup.finally(() => {
+    if (sessionQueues.get(sessionId) === cleanup) sessionQueues.delete(sessionId)
+  })
+  return run
 }

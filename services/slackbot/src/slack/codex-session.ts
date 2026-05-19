@@ -1,6 +1,9 @@
 import type { WebClient } from '@slack/web-api'
+import { slackReplyLimits } from '../constants'
 import { AgentSessionRenderer } from './agent-session'
+import { thinkingContextBlock } from './render'
 import {
+  clipLines,
   preformatted as pre,
   richText,
   section,
@@ -9,19 +12,30 @@ import {
   type StreamRichTextElement
 } from './streaming'
 
+const COMMAND_EXECUTION_TITLE = 'Command execution'
+
+type AgentMessagePhase = 'commentary' | 'final_answer'
+
 type HarnessTask = {
   id: string
   title: string
   status: 'pending' | 'in_progress' | 'complete' | 'error'
   details: StreamRichTextElement[]
   output: StreamRichTextElement[]
+  commandIndex?: number
 }
 
 type CodexSessionState = {
   threadId: string
   stepCounter: number
-  messageText: string
-  streamedMessageText: string
+  nextCommandIndex: number
+  commentaryText: string
+  answerText: string
+  firstBufferedTextAt: number | null
+  streamedCommentaryText: string
+  streamedAnswerText: string
+  thinkingPublished: boolean
+  agentMessagePhase: AgentMessagePhase | null
   planText: string
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
@@ -31,6 +45,7 @@ type CodexSessionState = {
 }
 
 const states = new Map<string, CodexSessionState>()
+const PRE_STREAM_GRACE_MS = 500
 
 export class CodexSessionRenderer {
   private readonly renderer: AgentSessionRenderer
@@ -43,6 +58,9 @@ export class CodexSessionRenderer {
     const state = getState(agentSessionId)
     if (event?.session_id) state.threadId = String(event.session_id)
     if (event?.thread_id) state.threadId = String(event.thread_id)
+
+    trackAgentMessageLifecycle(event, state)
+    ensureCommentarySegmentBreak(event, state)
 
     const structuredPlan = structuredPlanUpdate(event)
     if (structuredPlan) {
@@ -61,7 +79,14 @@ export class CodexSessionRenderer {
       const aggregatedOutput = commandAggregatedOutput(command)
       if (aggregatedOutput) state.commandOutputById.set(id, aggregatedOutput)
       const existing = state.taskByUseId.get(id)
-      const task = commandTask(command, event?.type, existing, state.commandOutputById.get(id))
+      const commandIndex = commandNumber(state, existing)
+      const task = commandTask(
+        command,
+        event?.type,
+        existing,
+        state.commandOutputById.get(id),
+        commandIndex
+      )
       const merged = mergeTask(existing, task)
       state.taskByUseId.set(merged.id, merged)
       await this.publishActivitySummary(agentSessionId, state)
@@ -81,15 +106,22 @@ export class CodexSessionRenderer {
       const current = state.commandOutputById.get(outputDelta.id) ?? ''
       const output = current + outputDelta.delta
       state.commandOutputById.set(outputDelta.id, output)
-      const task = state.taskByUseId.get(outputDelta.id) ?? {
-        id: outputDelta.id,
-        title: 'Run command',
-        status: 'in_progress',
-        details: [],
-        output: []
-      }
+      const existing = state.taskByUseId.get(outputDelta.id)
+      const commandIndex = commandNumber(state, existing)
+      const task =
+        existing ??
+        ({
+          id: outputDelta.id,
+          title: commandExecutionTitle(commandIndex),
+          status: 'in_progress',
+          details: [],
+          output: [],
+          commandIndex
+        } satisfies HarnessTask)
       const updated = {
         ...task,
+        title: commandExecutionTitle(commandIndex),
+        commandIndex,
         output: commandOutputElements(output)
       }
       state.taskByUseId.set(outputDelta.id, updated)
@@ -97,12 +129,14 @@ export class CodexSessionRenderer {
     }
 
     for (const tool of toolUses(event)) {
+      const commandIndex = tool.name === 'Bash' ? commandNumber(state) : undefined
       const task: HarnessTask = {
         id: `task-${++state.stepCounter}`,
-        title: titleFor(tool),
+        title: tool.name === 'Bash' ? commandExecutionTitle(commandIndex) : titleFor(tool),
         status: 'in_progress',
         details: detailElementsForTool(tool),
-        output: []
+        output: [],
+        ...(commandIndex !== undefined ? { commandIndex } : {})
       }
       state.taskByUseId.set(String(tool.id), task)
       await this.publishActivitySummary(agentSessionId, state)
@@ -118,16 +152,19 @@ export class CodexSessionRenderer {
         output: []
       }
       state.taskByUseId.set(toolUseId || task.id, task)
-      task.status = result.is_error ? 'error' : 'complete'
+      task.status = 'complete'
       task.output = outputElementsForResult(result)
       await this.publishActivitySummary(agentSessionId, state)
     }
 
     const assistantMessage = assistantText(event)
     if (assistantMessage) {
-      const delta = messageDelta(state.messageText, assistantMessage)
+      const buffer = activeAssistantBuffer(state, event)
+      const current = buffer === 'answer' ? state.answerText : state.commentaryText
+      const delta = messageDelta(current, assistantMessage)
       if (delta) {
-        state.messageText += delta
+        if (buffer === 'answer') state.answerText += delta
+        else state.commentaryText += delta
         await this.publishPendingAssistantText(agentSessionId, state)
       }
     }
@@ -146,14 +183,11 @@ export class CodexSessionRenderer {
     }
 
     if (isTerminalTurnEvent(event)) {
-      if (typeof event.result === 'string' && !state.messageText.trim()) {
+      if (typeof event.result === 'string' && !state.answerText.trim()) {
         const resultText = event.result.trim()
         if (resultText) {
-          state.messageText += resultText
-          await this.publishPendingAssistantText(agentSessionId, state, {
-            force: true,
-            flush: false
-          })
+          state.answerText += resultText
+          await this.publishPendingAssistantText(agentSessionId, state, { force: true })
         }
       }
       await this.done(agentSessionId)
@@ -162,18 +196,19 @@ export class CodexSessionRenderer {
     return { threadId: state.threadId || undefined, done: state.done }
   }
 
-  async done(agentSessionId: string): Promise<void> {
+  async done(agentSessionId: string, threadId?: string): Promise<void> {
     const state = getState(agentSessionId)
     if (state.done) return
+    if (threadId) state.threadId = threadId
     state.done = true
     completeOpenTasks(state)
     await this.publishActivitySummary(agentSessionId, state, { final: true })
-    await this.publishPendingAssistantText(agentSessionId, state, { force: true, flush: false })
-    await this.renderer.done(
-      agentSessionId,
-      state.threadId ? codexFooter(state.threadId) : undefined,
-      { streamFinalUpdates: false }
-    )
+    await this.publishPendingAssistantText(agentSessionId, state, { force: true })
+    await this.renderer.done(agentSessionId, {
+      streamFinalUpdates: false,
+      commentaryMarkdown: state.commentaryText,
+      answerMarkdown: state.answerText
+    })
     state.done = true
     states.delete(agentSessionId)
   }
@@ -195,22 +230,49 @@ export class CodexSessionRenderer {
           details: update.details,
           output: update.output
         },
-        { flush: !opts.final }
+        { flush: true }
       )
     }
-    if (!opts.final) await this.publishPendingAssistantText(agentSessionId, state)
+    await this.publishPendingAssistantText(agentSessionId, state)
   }
 
   private async publishPendingAssistantText(
     agentSessionId: string,
     state: CodexSessionState,
-    opts: { force?: boolean; flush?: boolean } = {}
+    opts: { force?: boolean } = {}
   ): Promise<void> {
-    if (!opts.force && !state.taskByUseId.size) return
-    if (state.messageText.length <= state.streamedMessageText.length) return
-    const delta = state.messageText.slice(state.streamedMessageText.length)
-    state.streamedMessageText = state.messageText
-    await this.renderer.textDelta(agentSessionId, delta, { flush: opts.flush })
+    if (
+      state.firstBufferedTextAt === null &&
+      (state.commentaryText.trim() || state.answerText.trim())
+    ) {
+      state.firstBufferedTextAt = Date.now()
+    }
+    const hasPlan = state.taskByUseId.size > 0
+    const graceExpired =
+      state.firstBufferedTextAt !== null &&
+      Date.now() - state.firstBufferedTextAt >= PRE_STREAM_GRACE_MS
+    const canStream = hasPlan || opts.force || graceExpired
+    if (!canStream) return
+
+    const pendingCommentary = state.commentaryText.slice(state.streamedCommentaryText.length)
+    if (pendingCommentary && shouldFlushThinking(pendingCommentary, opts.force)) {
+      const delta = state.commentaryText.slice(state.streamedCommentaryText.length)
+      const thinkingBlock = thinkingContextBlock(delta, { heading: !state.thinkingPublished })
+      if (thinkingBlock) {
+        await this.renderer.blocks(agentSessionId, [thinkingBlock], { planPrefix: hasPlan })
+      }
+      state.streamedCommentaryText = state.commentaryText
+      state.thinkingPublished = true
+    }
+    if (state.commentaryText.length > state.streamedCommentaryText.length) return
+    if (state.answerText.length <= state.streamedAnswerText.length) return
+    const delta = state.answerText.slice(state.streamedAnswerText.length)
+    if (!delta) return
+    state.streamedAnswerText = state.answerText
+    await this.renderer.textDelta(agentSessionId, delta, {
+      force: opts.force ?? false,
+      planPrefix: hasPlan
+    })
   }
 
   private async publishStructuredPlan(
@@ -238,8 +300,9 @@ export class CodexSessionRenderer {
   }
 }
 
-export function codexFooter(threadId: string): string {
-  return `Codex thread \`${threadId}\``
+export function hasActiveCodexSession(agentSessionId: string): boolean {
+  const state = states.get(agentSessionId)
+  return Boolean(state && !state.done)
 }
 
 function getState(agentSessionId: string): CodexSessionState {
@@ -248,8 +311,14 @@ function getState(agentSessionId: string): CodexSessionState {
     state = {
       threadId: '',
       stepCounter: 0,
-      messageText: '',
-      streamedMessageText: '',
+      nextCommandIndex: 0,
+      commentaryText: '',
+      answerText: '',
+      firstBufferedTextAt: null,
+      streamedCommentaryText: '',
+      streamedAnswerText: '',
+      thinkingPublished: false,
+      agentMessagePhase: null,
       planText: '',
       taskByUseId: new Map(),
       commandOutputById: new Map(),
@@ -264,6 +333,36 @@ function getState(agentSessionId: string): CodexSessionState {
 
 function content(event: any): any[] {
   return Array.isArray(event?.message?.content) ? event.message.content : []
+}
+
+function agentMessageItemPhase(item: any): AgentMessagePhase | null {
+  const phase = String(item?.phase ?? '').toLowerCase()
+  if (phase === 'commentary') return 'commentary'
+  if (phase === 'final_answer' || phase === 'finalanswer') return 'final_answer'
+  return null
+}
+
+function trackAgentMessageLifecycle(event: any, state: CodexSessionState): void {
+  if (event?.type !== 'item.started' && event?.type !== 'item.completed') return
+  const phase = agentMessageItemPhase(event?.item)
+  if (!phase) return
+  state.agentMessagePhase = phase
+}
+
+/** Codex may emit several commentary agentMessages in one turn; keep a blank line between them. */
+function ensureCommentarySegmentBreak(event: any, state: CodexSessionState): void {
+  if (event?.type !== 'item.started') return
+  if (agentMessageItemPhase(event?.item) !== 'commentary') return
+  const current = state.commentaryText
+  if (!current.trim() || current.endsWith('\n\n')) return
+  state.commentaryText = current.endsWith('\n') ? `${current}\n` : `${current}\n\n`
+}
+
+function activeAssistantBuffer(state: CodexSessionState, event: any): 'commentary' | 'answer' {
+  if (event?.type === 'item.agentMessage.delta' || event?.type === 'item.completed') {
+    return state.agentMessagePhase === 'final_answer' ? 'answer' : 'commentary'
+  }
+  return 'answer'
 }
 
 function assistantText(event: any): string {
@@ -297,6 +396,11 @@ function messageDelta(current: string, incoming: string): string {
 function reasoningText(event: any): string {
   if (event?.type !== 'reasoning') return ''
   return String(event.text ?? event.thinking ?? '')
+}
+
+function shouldFlushThinking(delta: string, force = false): boolean {
+  if (force) return true
+  return /(?:[.!?]\s*|\n\n)$/.test(delta)
 }
 
 function isTerminalTurnEvent(event: any): boolean {
@@ -374,7 +478,7 @@ function planStatus(value: string | undefined): HarnessTask['status'] {
   if (status === 'inprogress' || status === 'in_progress' || status === 'running')
     return 'in_progress'
   if (status === 'completed' || status === 'complete' || status === 'done') return 'complete'
-  if (status === 'failed' || status === 'error') return 'error'
+  if (status === 'failed' || status === 'error') return 'complete'
   return 'pending'
 }
 
@@ -391,7 +495,7 @@ function setPlanTask(
   step: string,
   status: HarnessTask['status']
 ): void {
-  const title = oneLine(stripPlanMarker(step), 256)
+  const title = oneLine(stripPlanMarker(step), slackReplyLimits.stream.planTitleChars)
   if (!title) return
   state.taskByUseId.set(`plan-${index + 1}`, {
     id: `plan-${index + 1}`,
@@ -431,15 +535,21 @@ function changedActivityTaskUpdates(
     let details: StreamRichText | undefined
     let output: StreamRichText | undefined
     if (opts.final) {
-      details = activityRunBlock(task)
-      output = activityOutputBlock(task)
+      if (!state.emittedActivityRunByTaskId.has(task.id)) {
+        state.emittedActivityRunByTaskId.add(task.id)
+        details = activityRunBlock(task)
+      }
+      if (!state.emittedActivityOutputByTaskId.has(task.id)) {
+        state.emittedActivityOutputByTaskId.add(task.id)
+        output = activityOutputBlock(task)
+      }
     } else if (!state.emittedActivityRunByTaskId.has(task.id)) {
       state.emittedActivityRunByTaskId.add(task.id)
       details = activityRunBlock(task)
     }
     if (
       !opts.final &&
-      (task.status === 'complete' || task.status === 'error') &&
+      task.status === 'complete' &&
       !state.emittedActivityOutputByTaskId.has(task.id)
     ) {
       state.emittedActivityOutputByTaskId.add(task.id)
@@ -468,7 +578,7 @@ function activityRunBlock(task: HarnessTask): StreamRichText {
 
 function activityOutputBlock(task: HarnessTask): StreamRichText {
   if (!task.output.length) {
-    return richText([pre(task.status === 'error' ? 'Failed' : 'Done', 'text')])
+    return richText([pre('Done', 'text')])
   }
   return richText([
     pre(elementsToPlainText(task.output), firstPreformattedLanguage(task.output) ?? 'text')
@@ -492,6 +602,11 @@ function shellLanguage(language: string | undefined): string {
   return language === 'bash' || !language ? 'sh' : language
 }
 
+function shellLanguageForCommand(command: string): string {
+  if (command.startsWith('call ')) return 'sh'
+  return languageFromContent(command)
+}
+
 function commandOutputDelta(event: any): { id: string; delta: string } | null {
   if (event?.type !== 'item.commandExecution.outputDelta') return null
   const id = String(event.itemId ?? event.item_id ?? '')
@@ -507,24 +622,38 @@ function fileChangeId(item: any): string {
   return String(item.id ?? item.itemId ?? item.path ?? 'file-change')
 }
 
+function commandNumber(state: CodexSessionState, existing?: HarnessTask): number {
+  if (existing?.commandIndex !== undefined) return existing.commandIndex
+  state.nextCommandIndex += 1
+  return state.nextCommandIndex
+}
+
 function commandTask(
   item: any,
   eventType: string,
   existing?: HarnessTask,
-  accumulatedOutput?: string
+  accumulatedOutput?: string,
+  commandIndex?: number
 ): HarnessTask {
   const id = commandId(item)
-  const command = String(item.command ?? 'Command')
+  const rawCommand = String(item.command ?? 'Command')
+  const displayCommand =
+    rawCommand === 'Command' ? rawCommand : oneLine(unwrapShellCommand(rawCommand), 220)
   const status = commandStatus(item, eventType)
   const exitCode = item.exitCode ?? item.exit_code
+  const failed = isCommandFailure(item, eventType)
   const isCompletionUpdate =
     eventType === 'item.completed' || status === 'complete' || status === 'error'
-  const output = commandOutputElements(accumulatedOutput ?? '')
+  const output = commandOutputElements(accumulatedOutput ?? '', exitCode)
   return {
     id,
-    title: command === 'Command' ? 'Run command' : `Run command: ${oneLine(command, 220)}`,
+    title: commandExecutionTitle(commandIndex),
     status,
-    details: isCompletionUpdate && existing ? [] : [pre(command, 'bash')],
+    ...(commandIndex !== undefined ? { commandIndex } : {}),
+    details:
+      isCompletionUpdate && existing && !failed
+        ? []
+        : [pre(displayCommand, shellLanguageForCommand(displayCommand))],
     output
   }
 }
@@ -537,10 +666,14 @@ function commandAggregatedOutput(item: any): string {
   return ''
 }
 
-function commandOutputElements(output: string): StreamRichTextElement[] {
+function commandOutputElements(output: string, exitCode?: number | null): StreamRichTextElement[] {
   const elements: StreamRichTextElement[] = []
-  if (output) {
-    const formatted = formatCommandOutput(output)
+  const normalizedOutput =
+    exitCode !== null && exitCode !== undefined && exitCode !== 0
+      ? `exit code ${exitCode}${output ? `\n${output}` : ''}`
+      : output
+  if (normalizedOutput) {
+    const formatted = formatCommandOutput(normalizedOutput)
     elements.push(pre(formatted.body, formatted.language))
   }
   return elements
@@ -550,17 +683,17 @@ function formatCommandOutput(output: string): { body: string; language: string }
   const trimmed = output.trim()
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
+      const pretty = JSON.stringify(JSON.parse(trimmed), null, 2)
       return {
-        body: clipJsonPreview(JSON.stringify(JSON.parse(trimmed), null, 2)),
+        body: clipLines(pretty, slackReplyLimits.finalPlan.taskOutputCodeBlockLines),
         language: 'json'
       }
     } catch {}
   }
-  return { body: clip(output), language: languageFromContent(output) }
-}
-
-function clipJsonPreview(value: string, max = 420): string {
-  return value.length > max ? `${value.slice(0, max).trimEnd()}\n// truncated` : value
+  return {
+    body: clipLines(output, slackReplyLimits.finalPlan.taskOutputCodeBlockLines),
+    language: languageFromContent(output)
+  }
 }
 
 function fileChangeTask(item: any, eventType: string, existing?: HarnessTask): HarnessTask {
@@ -597,14 +730,31 @@ function mergeTask(existing: HarnessTask | undefined, update: HarnessTask): Harn
 }
 
 function commandStatus(item: any, eventType: string): HarnessTask['status'] {
+  if (isCommandFailure(item, eventType)) return 'complete'
   return itemStatus(item, eventType, item.exitCode ?? item.exit_code)
 }
 
-function itemStatus(item: any, eventType: string, exitCode?: number | null): HarnessTask['status'] {
+function isCommandFailure(item: any, eventType: string): boolean {
   const status = String(item.status ?? '').toLowerCase()
-  if (status === 'failed' || status === 'declined') return 'error'
+  const exitCode = item.exitCode ?? item.exit_code
+  return (
+    status === 'failed' ||
+    (eventType === 'item.completed' &&
+      exitCode !== 0 &&
+      exitCode !== null &&
+      exitCode !== undefined)
+  )
+}
+
+function itemStatus(
+  item: any,
+  eventType: string,
+  _exitCode?: number | null
+): HarnessTask['status'] {
+  const status = String(item.status ?? '').toLowerCase()
+  if (status === 'failed' || status === 'declined') return 'complete'
   if (status === 'completed' || eventType === 'item.completed') {
-    return exitCode === 0 || exitCode === null || exitCode === undefined ? 'complete' : 'error'
+    return 'complete'
   }
   return 'in_progress'
 }
@@ -631,17 +781,16 @@ function elementToPlainText(element: StreamRichTextElement): string {
 }
 
 function titleFor(tool: any): string {
-  if (tool.name === 'Bash') {
-    const command = bashCommand(tool.input)
-    return command ? `Run command: ${oneLine(command, 220)}` : 'Run command'
-  }
   if (tool.name === 'create_file') return 'Create file'
   if (tool.name === 'edit_file') return 'Edit file'
   return `Use ${tool.name ?? 'tool'}`
 }
 
 function detailElementsForTool(tool: any): StreamRichTextElement[] {
-  if (tool.name === 'Bash') return [pre(bashCommand(tool.input), 'bash')]
+  if (tool.name === 'Bash') {
+    const command = oneLine(unwrapShellCommand(bashCommand(tool.input)), 220)
+    return [pre(command, shellLanguageForCommand(command))]
+  }
   if (tool.name === 'create_file') {
     const path = stringInput(tool.input, 'path', 'file')
     return [
@@ -697,8 +846,11 @@ function outputElementsForResult(result: any): StreamRichTextElement[] {
           ? parsed.output
           : `exitCode ${parsed.exitCode}`
   } catch {}
-  if (raw.includes('\n')) return [pre(clip(raw), languageFromContent(raw))]
-  return [section([text(oneLine(raw || (result.is_error ? 'Tool failed' : 'Done')))])]
+  const formatted = formatCommandOutput(raw)
+  if (formatted.body.includes('\n') || result.is_error) {
+    return [pre(formatted.body, formatted.language)]
+  }
+  return [section([text(oneLine(raw || 'Done'))])]
 }
 
 function stripFence(value: string): string {
@@ -735,11 +887,33 @@ function languageFromContent(value: string): string {
   return 'text'
 }
 
-function clip(value: string, max = 2200): string {
+function clip(value: string, max: number = slackReplyLimits.finalPlan.outputPreviewChars): string {
   return value.length > max ? `${value.slice(0, max)}\n/* truncated */` : value
 }
 
-function oneLine(value: string, max = 900): string {
+function oneLine(value: string, max: number = slackReplyLimits.finalPlan.taskTitleChars): string {
   const normalized = value.replace(/\s+/g, ' ').trim()
   return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized
+}
+
+/** Strip harness wrappers like `/bin/bash -lc 'call tools'`. */
+function unwrapShellCommand(command: string): string {
+  const trimmed = command.trim()
+  if (!trimmed) return trimmed
+
+  const bashLc = /^\/bin\/bash\s+-lc\s+([\s\S]+)$/i.exec(trimmed)
+  if (!bashLc?.[1]) return trimmed
+
+  let inner = bashLc[1].trim()
+  if (
+    (inner.startsWith("'") && inner.endsWith("'")) ||
+    (inner.startsWith('"') && inner.endsWith('"'))
+  ) {
+    inner = inner.slice(1, -1)
+  }
+  return inner.trim() || trimmed
+}
+
+function commandExecutionTitle(index?: number): string {
+  return index !== undefined ? `${index}. ${COMMAND_EXECUTION_TITLE}` : COMMAND_EXECUTION_TITLE
 }

@@ -7,8 +7,9 @@ const basePath = process.env.VOCS_BASE_PATH || undefined
 const siteUrl = 'https://centaur.run'
 
 function canonicalHref(path: string) {
-  if (path === '/') return `${siteUrl}/`
-  return `${siteUrl}${path.replace(/\/+$/, '')}/`
+  const root = 'https://centaur.run'
+  if (path === '/') return `${root}/`
+  return `${root}${path.replace(/\/+$/, '')}/`
 }
 
 export default defineConfig({
@@ -31,9 +32,8 @@ export default defineConfig({
     dark: '/brand/mark-white.svg',
   },
   // Top-left site logo: full lockup on docs routes (the sidebar / topNav
-  // gets enough space to carry the wordmark). Landing already hides the
-  // topNav logo via .vocs_DesktopTopNav_logoWrapper { display: none } so
-  // the lockup is only visible on docs pages.
+  // gets enough space to carry the wordmark). The landing page hides Vocs's
+  // topNav entirely and renders its own lockup in the hero.
   logoUrl: {
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',
@@ -54,28 +54,19 @@ export default defineConfig({
   font: {
     mono: { google: 'Geist Mono' },
   },
-  // Open Graph cards are pre-rendered at build time by scripts/build-og.ts
-  // (ported from tempoxyz/mpp's /api/og handler) using the vendored brand
-  // fonts. Map each known route to its card; new routes fall back to
-  // _default.png until the next build picks them up.
-  ogImageUrl: {
-    '/': '/og/index.png',
-    '/what-is-centaur': '/og/what-is-centaur.png',
-    '/quickstart': '/og/quickstart.png',
-    '/deploying-in-production': '/og/deploying-in-production.png',
-    '/architecture': '/og/architecture.png',
-    '/brand': '/og/brand.png',
-    '/extend/overlay': '/og/extend_overlay.png',
-    '/extend/apps': '/og/extend_apps.png',
-    '/extend/tools': '/og/extend_tools.png',
-    '/extend/workflows': '/og/extend_workflows.png',
-    '/extend/skills': '/og/extend_skills.png',
-    '/security': '/og/security.png',
-    '/secrets/onepassword': '/og/secrets_onepassword.png',
-    '/secrets/environment': '/og/secrets_environment.png',
-    '/secrets/aws-kms': '/og/secrets_aws-kms.png',
-    '/secrets/gcp-secret-manager': '/og/secrets_gcp-secret-manager.png',
-    '/secrets/advanced-permissioning': '/og/secrets_advanced-permissioning.png',
+  // Open Graph cards are pre-rendered at build time by scripts/build-og.ts.
+  // Resolve them via a function so the slug logic stays in lockstep with
+  // the build script: route /a/b -> /og/a_b.png, / -> /og/index.png. The
+  // absolute URL form (baseUrl prefix) is required for Slack/Twitter/
+  // Discord previews to resolve the image — relative paths fail in
+  // every major unfurl previewer. New routes added under pages/ (e.g.
+  // operate/slack-etl) get picked up automatically the next time the
+  // prebuild script runs — no manual map maintenance required.
+  ogImageUrl: (path: string, { baseUrl }: { baseUrl: string }) => {
+    const key = path.replace(/\/$/, '') || '/'
+    const slug = key === '/' ? 'index' : key.replace(/^\//, '').replace(/\//g, '_')
+    const root = baseUrl ?? 'https://centaur.run'
+    return `${root.replace(/\/$/, '')}/og/${slug}.png`
   },
   ...(basePath ? { basePath } : {}),
   editLink: {
@@ -87,6 +78,27 @@ export default defineConfig({
   head({ path }) {
     return createElement(Fragment, null,
       createElement('link', { rel: 'canonical', href: canonicalHref(path) }),
+      createElement('link', {
+        rel: 'preload',
+        href: '/fonts/PerfectlyNineties-Regular.woff',
+        as: 'font',
+        type: 'font/woff',
+        crossOrigin: '',
+      }),
+      createElement('link', {
+        rel: 'preload',
+        href: '/fonts/PolySans-variable.woff2',
+        as: 'font',
+        type: 'font/woff2',
+        crossOrigin: '',
+      }),
+      createElement('link', {
+        rel: 'preload',
+        href: '/fonts/slack/lato-latin-400-normal.woff2',
+        as: 'font',
+        type: 'font/woff2',
+        crossOrigin: '',
+      }),
       createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
     )
   },
@@ -116,6 +128,7 @@ export default defineConfig({
     boostDocument(documentId) {
       if (documentId.includes('what-is-centaur')) return 4.5
       if (documentId.includes('quickstart')) return 4
+      if (documentId.includes('operate/')) return 3.8
       if (documentId.includes('extend/')) return 3.8
       if (documentId.includes('secrets/')) return 3.8
       if (documentId.includes('security')) return 3.6

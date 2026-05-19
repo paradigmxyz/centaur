@@ -49,12 +49,15 @@ describe('normalizeSlackEnvelope', () => {
   })
 
   it('keeps app_mention events with files actionable', async () => {
-    const fetchMock = mock(
-      async () =>
-        new Response(new Uint8Array([1, 2, 3]), {
-          headers: { 'content-type': 'image/png' }
-        })
-    )
+    let capturedInput: string | URL | Request | undefined
+    let capturedInit: RequestInit | undefined
+    const fetchMock = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      capturedInput = input
+      capturedInit = init
+      return new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'content-type': 'image/png' }
+      })
+    })
     const originalFetch = globalThis.fetch
     globalThis.fetch = fetchMock as any
     try {
@@ -93,6 +96,11 @@ describe('normalizeSlackEnvelope', () => {
         slack_file_id: 'F123'
       })
       expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(capturedInput).toBe('https://files.slack.test/F123')
+      expect(capturedInit?.headers).toEqual({ Authorization: 'Bearer xoxb-test-token' })
+      const filePart = normalized?.parts[1]
+      if (!filePart || filePart.type === 'text') throw new Error('expected binary part')
+      expect(filePart.source.data).toBe(Buffer.from(new Uint8Array([1, 2, 3])).toString('base64'))
     } finally {
       globalThis.fetch = originalFetch
     }

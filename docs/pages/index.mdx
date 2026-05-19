@@ -17,10 +17,7 @@ import ThreadPanel from '../components/ThreadPanel'
   <section className="home-hero" aria-labelledby="home-title">
     <div className="home-copy">
       <a className="home-lockup-link" href="https://github.com/paradigmxyz/centaur" target="_blank" rel="noopener noreferrer" aria-label="Centaur on GitHub">
-        <picture>
-          <source srcSet="/brand/lockup-white.svg" media="(prefers-color-scheme: dark)" />
-          <img className="home-lockup" src="/brand/lockup-black.svg" alt="Centaur" />
-        </picture>
+        <img className="home-lockup" src="/brand/lockup-white.svg" alt="Centaur" />
       </a>
       <h1 id="home-title">Multiplayer, self-hosted, secure agents for teams.</h1>
 
@@ -51,65 +48,60 @@ import ThreadPanel from '../components/ThreadPanel'
   <section className="home-overview" aria-labelledby="home-overview-title">
     <div className="home-overview-heading">
       <h2 id="home-overview-title">Overview</h2>
-      <p>Centaur is the shared control plane for agents that need real tools, durable state, and production-grade boundaries.</p>
     </div>
 
     <ul className="home-overview-list">
       <li>
-        <strong>Open source foundation.</strong>
-        <span>Built from open infrastructure and MIT-licensed project packages so teams can inspect, run, and extend the platform themselves.</span>
+        <a href="/architecture#tool-and-workflow-layer">
+          <strong>Shared tools, integrations, and workflows.</strong>
+          <span>Expose internal services as typed Python tools, run durable workflows, and collaborate natively through Slack threads.</span>
+        </a>
       </li>
       <li>
-        <strong>Self-hosted by design.</strong>
-        <span>Run Centaur in your own Kubernetes stack, connect enterprise systems, and keep repos, workflows, logs, and secrets inside your boundary.</span>
+        <a href="/security#credentials">
+          <strong>Zero-trust credentials.</strong>
+          <span>Agents never receive raw long-lived keys. They get placeholders, and credentials only get injected at the network edge.</span>
+        </a>
       </li>
       <li>
-        <strong>Zero-trust credentials.</strong>
-        <span>Agents never receive raw long-lived keys. Sandboxes get placeholders, and iron-proxy injects approved credentials only at the network edge.</span>
+        <a href="/architecture#execution-path">
+          <strong>Harness agnostic.</strong>
+          <span>Use Amp, Codex, Claude Code, pi-mono, or your own CLI harness with the same durable execution model.</span>
+        </a>
       </li>
       <li>
-        <strong>Harness agnostic.</strong>
-        <span>Use Amp, Codex, Claude Code, pi-mono, or your own CLI harness inside the same sandbox and durable execution model.</span>
-      </li>
-      <li>
-        <strong>Shared tools and integrations.</strong>
-        <span>Expose internal services, GitHub, Slack, databases, market data, calendars, or deployment APIs once as typed Python tools for every agent.</span>
-      </li>
-      <li>
-        <strong>Durable workflows.</strong>
-        <span>Run jobs that sleep, resume, branch, retry, wait for events, spawn child agents, and survive API or worker restarts.</span>
-      </li>
-      <li>
-        <strong>Personas and overlays.</strong>
-        <span>Layer organization-specific personas, skills, prompts, tools, workflows, and sandbox files without forking the base Centaur repo.</span>
-      </li>
-      <li>
-        <strong>Replayable team state.</strong>
-        <span>Messages, executions, streamed events, and final delivery state are stored so Slack and API clients can reconnect without losing the result.</span>
+        <a href="/deploying-in-production#production-shape">
+          <strong>Self-hosted and open source.</strong>
+          <span>Run Centaur in your own infrastructure to keep repos, workflows, logs, and secrets inside your boundary. Use our Kubernetes template or your own. MIT licensed.</span>
+        </a>
       </li>
     </ul>
 
   </section>
 
-  <section className="home-overview home-media-section" aria-labelledby="home-extensible-title">
-    <div className="home-overview-heading">
+  <section className="home-feature home-feature-copy-left" aria-labelledby="home-extensible-title">
+    <div className="home-feature-copy">
       <h2 id="home-extensible-title">Extensible by default</h2>
-      <p>Layer team-specific skills, tools, workflows, personas, and app code over the open-source Centaur kernel without carrying a long-lived fork.</p>
+      <p>Compose your own tools, workflows, skills, and prompts on top of the open-source kernel. Overlays let teams extend agents without forking the core.</p>
+      <a className="home-feature-cta" href="/extend/overlay">Read the overlay guide →</a>
     </div>
-
-    <figure className="home-architecture-diagram">
-      <img src="/brand/containers.svg" alt="Centaur deployment layout: the open-source kernel wrapped by an organization overlay and a per-app repository." />
-    </figure>
+    <a className="home-feature-visual" href="/extend/overlay" aria-labelledby="home-extensible-title">
+      <figure className="home-architecture-diagram">
+        <img src="/brand/containers.svg" alt="Centaur deployment layout: the open-source kernel wrapped by an organization overlay and a per-app repository." />
+      </figure>
+    </a>
   </section>
 
-  <section className="home-overview home-media-section" aria-labelledby="home-architecture-title">
-    <div className="home-overview-heading">
-      <h2 id="home-architecture-title">Architecture</h2>
-      <p>Self-host the control plane, isolate each harness in sandbox pods, persist every turn, and inject secrets only through controlled egress.</p>
+  <section className="home-feature home-feature-copy-right" aria-labelledby="home-architecture-title">
+    <a className="home-feature-visual" href="/architecture" aria-labelledby="home-architecture-title">
+      <figure className="home-architecture-diagram">
+        <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
+      </figure>
+    </a>
+    <div className="home-feature-copy">
+      <h2 id="home-architecture-title">Modular Architecture</h2>
+      <p>Durable control plane, isolated execution, and credential-safe egress. Each layer is independently observable, replaceable, and self-hosted inside your boundary.</p>
+      <a className="home-feature-cta" href="/architecture">Walk the architecture →</a>
     </div>
-
-    <figure className="home-architecture-diagram">
-      <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
-    </figure>
   </section>
 </main>

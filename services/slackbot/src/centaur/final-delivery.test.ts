@@ -100,11 +100,13 @@ describe('final delivery polling', () => {
       await pollFinalDeliveriesOnce(config, client as any)
       await pollFinalDeliveriesOnce(config, client as any)
 
+      expect(fetchCalls.filter(call => call.path === '/agent/final-deliveries/claim')).toHaveLength(
+        2
+      )
       expect(
-        fetchCalls.filter(call => call.path === '/agent/final-deliveries/claim')
-      ).toHaveLength(2)
-      expect(
-        fetchCalls.filter(call => call.path === '/agent/final-deliveries/exe-duplicate-guard/delivered')
+        fetchCalls.filter(
+          call => call.path === '/agent/final-deliveries/exe-duplicate-guard/delivered'
+        )
       ).toHaveLength(1)
       expect(slackCalls.filter(call => call.method === 'chat.startStream')).toHaveLength(1)
       const startStream = slackCalls.find(call => call.method === 'chat.startStream')
