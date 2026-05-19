@@ -2,7 +2,8 @@
 title: Centaur
 description: Centaur is a production control plane for shared AI agents that run in isolated sandboxes and call approved tools.
 layout: landing
-showOutline: false
+outline: false
+showAskAi: false
 showSidebar: false
 content:
   horizontalPadding: 0px

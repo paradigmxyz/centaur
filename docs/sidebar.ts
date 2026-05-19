@@ -8,26 +8,27 @@ export const sidebar = [
       { text: 'Quickstart', link: '/quickstart' },
       { text: 'Deploying in Production', link: '/deploying-in-production' },
       { text: 'Architecture', link: '/architecture' },
-      { text: 'Security', link: '/security' },
     ],
   },
   {
     text: 'Extend Centaur',
     items: [
       { text: 'Using an overlay', link: '/extend/overlay' },
-      { text: '🚧 Creating Apps', link: '/extend/apps' },
+      { text: 'Creating Skills', link: '/extend/skills' },
       { text: 'Creating Tools', link: '/extend/tools' },
       { text: 'Creating Workflows', link: '/extend/workflows' },
-      { text: 'Creating Skills', link: '/extend/skills' },
+      { text: '🚧 Creating Apps', link: '/extend/apps' },
     ],
   },
   {
     text: 'Secrets',
     items: [
+      { text: 'How is Centaur securing my secrets?', link: '/security' },
       { text: '1Password', link: '/secrets/onepassword' },
       { text: 'Environment Variables', link: '/secrets/environment' },
       { text: '🚧 AWS KMS', disabled: true },
       { text: '🚧 GCP Secret Manager', disabled: true },
+      { text: '🚧 Advanced Permissioning', link: '/secrets/advanced-permissioning' },
     ],
   },
   {

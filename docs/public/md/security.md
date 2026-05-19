@@ -1,9 +1,9 @@
 ---
-title: Security
+title: How is Centaur securing my secrets?
 description: "Centaur's threat model and the mechanisms that defend against it: sandbox isolation, NetworkPolicy egress restriction, and iron-proxy secret binding."
 ---
 
-# Security
+# How is Centaur securing my secrets?
 
 Centaur runs untrusted code on behalf of users: agent harnesses execute
 model-generated commands, tools fetch and act on external data, and

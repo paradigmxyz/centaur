@@ -12,6 +12,7 @@
   --centaur-serif: 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Sagittaire Display', var(--centaur-serif);
   --centaur-manual-display: 'Perfectly Nineties', var(--centaur-serif);
+  --vocs-spacing-content: 920px;
 }
 
 @font-face {
@@ -419,16 +420,44 @@ body,
 .vocs_CodeBlock span[style*="#d29922"],
 .vocs_CodeBlock span[style*="#F0883E"],
 .vocs_CodeBlock span[style*="#f0883e"],
+.vocs_CodeBlock span[style*="#F69D50"],
+.vocs_CodeBlock span[style*="#f69d50"],
 .vocs_CodeBlock span[style*="#DB6D28"],
 .vocs_CodeBlock span[style*="#db6d28"],
 .vocs_CodeBlock span[style*="#E3B341"],
-.vocs_CodeBlock span[style*="#e3b341"] {
+.vocs_CodeBlock span[style*="#e3b341"],
+.vocs_Content pre span[style*="#F69D50"],
+.vocs_Content pre span[style*="#f69d50"],
+[data-v-code-container] span[style*="#F69D50"],
+[data-v-code-container] span[style*="#f69d50"] {
   color: var(--centaur-accent) !important;
   --shiki-dark: var(--centaur-accent) !important;
 }
 
-.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_content {
+.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_content,
+[data-layout="landing"] [data-v-main] {
   min-height: calc(100dvh - var(--vocs-topNav_height));
+}
+
+.vocs_DocsLayout[data-layout="landing"] [data-v-main],
+[data-layout="landing"] [data-v-main] {
+  padding-bottom: 0 !important;
+  padding-top: 0 !important;
+}
+
+.vocs_DocsLayout[data-layout="landing"] [data-v-content],
+[data-layout="landing"] [data-v-content] {
+  max-width: none !important;
+  padding: 0 !important;
+}
+
+.vocs_DocsLayout[data-layout="landing"] [data-v-outline],
+.vocs_DocsLayout[data-layout="landing"] [data-v-copy-for-ai],
+.vocs_DocsLayout[data-layout="landing"] [data-v-ask-ai-container],
+[data-layout="landing"] [data-v-outline],
+[data-layout="landing"] [data-v-copy-for-ai],
+[data-layout="landing"] [data-v-ask-ai-container] {
+  display: none !important;
 }
 
 .vocs_Footer:not([data-layout="docs"]) {
@@ -721,7 +750,7 @@ a.home-lockup-link:focus-visible .home-lockup {
 
 .home-architecture-diagram {
   margin: clamp(44px, 6dvh, 72px) auto 0;
-  max-width: min(60vw, 960px);
+  max-width: 100%;
   padding-top: clamp(28px, 4dvh, 44px);
 }
 

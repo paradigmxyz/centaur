@@ -1,5 +1,5 @@
 import { createElement, Fragment } from 'react'
-import { defineConfig } from 'vocs'
+import { defineConfig, McpSource } from 'vocs/config'
 
 import { sidebar } from './sidebar.js'
 
@@ -13,6 +13,7 @@ function canonicalHref(path: string) {
 
 export default defineConfig({
   rootDir: '.',
+  srcDir: '.',
   // The dead-link checker doesn't know about static assets shipped via
   // public/ (like our zip and brand SVGs), so downgrade to a warning rather
   // than failing the build.
@@ -36,7 +37,17 @@ export default defineConfig({
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',
   },
-  // Body copy uses Amp's PolySans via the styles.css override. Docs headings
+  mcp: {
+    enabled: true,
+    sources: [
+      McpSource.github({
+        name: 'centaur',
+        repo: 'paradigmxyz/centaur',
+        paths: ['docs', 'services', 'centaur_sdk', 'packages', 'tools', 'workflows'],
+      }),
+    ],
+  },
+  // Body copy uses Amp's PolySans via the pages/_root.css override. Docs headings
   // use Perfectly Nineties, while the landing hero uses Sagittaire Display.
   // Code blocks stay on Geist Mono.
   font: {
@@ -54,11 +65,16 @@ export default defineConfig({
     '/architecture': '/og/architecture.png',
     '/brand': '/og/brand.png',
     '/extend/overlay': '/og/extend_overlay.png',
+    '/extend/apps': '/og/extend_apps.png',
     '/extend/tools': '/og/extend_tools.png',
     '/extend/workflows': '/og/extend_workflows.png',
     '/extend/skills': '/og/extend_skills.png',
+    '/security': '/og/security.png',
     '/secrets/onepassword': '/og/secrets_onepassword.png',
     '/secrets/environment': '/og/secrets_environment.png',
+    '/secrets/aws-kms': '/og/secrets_aws-kms.png',
+    '/secrets/gcp-secret-manager': '/og/secrets_gcp-secret-manager.png',
+    '/secrets/advanced-permissioning': '/og/secrets_advanced-permissioning.png',
   },
   ...(basePath ? { basePath } : {}),
   editLink: {

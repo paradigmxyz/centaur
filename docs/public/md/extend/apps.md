@@ -6,16 +6,23 @@ description: Work-in-progress design for deploying app-plane capabilities on Cen
 # 🚧 Creating Apps
 
 :::warning[🚧 Not implemented in production]
-This is a design sketch based on
-[paradigmxyz/centaur-old#759](https://github.com/paradigmxyz/centaur-old/pull/759).
-The API names, manifest fields, rollout behavior, and security model may change
-before this lands in the current Centaur repo.
+Creating Apps is a work-in-progress design for using Centaur as your own
+internal PaaS. The API names, manifest fields, rollout behavior, and security
+model may change before this lands in production.
 :::
 
-Apps are the proposed PaaS layer for Centaur. A team would ship a small repo or
-container image, declare what it exposes, and let Centaur deploy it next to the
-agent control plane. The app can contribute tools, skills, workflows, personas,
-and a web surface without forking the base Centaur repo.
+Apps are Centaur's proposed PaaS layer for internal agent-adjacent software. A
+team ships a small repo or container image, declares what it exposes, and lets
+Centaur deploy it next to the agent control plane. The app can contribute tools,
+skills, workflows, personas, and a web surface without forking the base Centaur
+repo.
+
+The point is to let teams deploy privileged internal applications without
+threading Cloudflare, Vercel, or another external hosting path into systems that
+should stay behind the company boundary. Apps also give employees a way to
+publish useful internal surfaces that are versioned independently from the main
+Centaur repo and the organization overlay repo, so teams can scale their own
+deployment cadence without turning every change into platform work.
 
 The useful split is:
 
@@ -68,10 +75,10 @@ name = "researcher"
 description = "Research-oriented agent defaults"
 ```
 
-If an app ships source instead of an image, the draft reconciler can clone the
-repo and run a configured `build_cmd` and `start_cmd`. The old design also
-included simple auto-detection for Node, Next.js, and Python projects, with an
-explicit `start_cmd` required when no supported entrypoint is found.
+If an app ships source instead of an image, the app reconciler can clone the repo
+and run a configured `build_cmd` and `start_cmd`. The design includes simple
+auto-detection for Node, Next.js, and Python projects, with an explicit
+`start_cmd` required when no supported entrypoint is found.
 
 ## Lifecycle
 
@@ -87,9 +94,9 @@ The proposed app lifecycle is:
 6. Operators can list apps, inspect logs, restart, roll forward, or delete the
    app through lifecycle endpoints.
 
-In the old design, app state lived in `apps`, `app_releases`,
-`app_capabilities`, and `app_deployments`. Releases could move through pending,
-deploying, active, failed, deleting, and deleted states.
+App state would live in `apps`, `app_releases`, `app_capabilities`, and
+`app_deployments`. Releases can move through pending, deploying, active, failed,
+deleting, and deleted states.
 
 ## Routing model
 
@@ -112,7 +119,7 @@ app release.
 
 ## Security shape
 
-The old PR kept the app runtime narrow:
+The app runtime should stay narrow:
 
 - App pods run without Kubernetes service account tokens.
 - Containers run with `allowPrivilegeEscalation: false`, dropped Linux
@@ -131,7 +138,8 @@ or scoped runtime credentials, not long-lived organization secrets by default.
 ## Why this matters
 
 This is where Centaur starts to feel like a PaaS for agent infrastructure.
-Instead of asking teams to fork Centaur for every custom surface, they can ship
+Instead of asking teams to fork Centaur, wire up external hosting, or ask the
+platform team to version every internal surface in the overlay, they can ship
 small app repos that plug into the shared control plane:
 
 - A department dashboard can expose a web UI and typed tools.
