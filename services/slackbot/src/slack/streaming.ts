@@ -41,34 +41,39 @@ export type StreamTask = {
 
 export type StreamChunk = AnyChunk
 
-const MAX_TASK_FIELD_CHARS = 12_000
-const MAX_PLAN_TITLE_CHARS = 256
+export const SLACK_STREAM_MARKDOWN_TEXT_LIMIT = 12_000
+export const SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT = 256
+export const SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT = 256
+const SLACK_STREAM_TASK_UPDATE_TITLE_LIMIT = 64
+const SLACK_STREAM_TASK_UPDATE_DETAILS_LIMIT = 48
+const SLACK_STREAM_TASK_UPDATE_OUTPUT_LIMIT = 48
 
 export function planUpdateChunk(title: string): StreamChunk {
-  return { type: 'plan_update', title: clip(title, MAX_PLAN_TITLE_CHARS) }
+  return { type: 'plan_update', title: clip(title, SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT) }
 }
 
 export function markdownChunk(text: string): StreamChunk {
-  return { type: 'markdown_text', text: text || ' ' }
+  return { type: 'markdown_text', text: clip(text || ' ', SLACK_STREAM_MARKDOWN_TEXT_LIMIT) }
 }
 
 export function taskUpdateChunk(task: StreamTask): StreamChunk {
+  const details = taskBodyToPlain(task.details, SLACK_STREAM_TASK_UPDATE_DETAILS_LIMIT)
+  const output = taskBodyToPlain(task.output, SLACK_STREAM_TASK_UPDATE_OUTPUT_LIMIT)
   return {
     type: 'task_update',
     id: task.id,
-    title: clip(task.title, MAX_PLAN_TITLE_CHARS),
+    title: clip(task.title, SLACK_STREAM_TASK_UPDATE_TITLE_LIMIT),
     status: task.status,
-    details: taskBodyToPlain(task.details),
-    output: taskBodyToPlain(task.output),
-    sources: task.sources
+    ...(details ? { details } : {}),
+    ...(output ? { output } : {})
   }
 }
 
-export function planBlock(title: string, tasks: StreamTask[], blockId?: string): object {
+export function planBlock(title: string, tasks: StreamTask[], planId?: string): object {
   return {
     type: 'plan',
+    ...(planId ? { plan_id: planId } : {}),
     title,
-    ...(blockId ? { block_id: blockId } : {}),
     tasks: tasks.map(task => ({
       task_id: task.id,
       title: task.title,
@@ -104,7 +109,7 @@ export function preformatted(text: string, language?: string): StreamRichTextEle
   return {
     type: 'rich_text_preformatted',
     ...(language ? { language } : {}),
-    elements: [{ type: 'text', text: clip(text, MAX_TASK_FIELD_CHARS) }]
+    elements: [{ type: 'text', text: clip(text, SLACK_STREAM_MARKDOWN_TEXT_LIMIT) }]
   }
 }
 
@@ -158,9 +163,12 @@ function parseInlineMarkdown(value: string): StreamInline[] {
   return out.length ? out : [text(value)]
 }
 
-function taskBodyToPlain(body: StreamRichText | string | undefined): string | undefined {
+function taskBodyToPlain(
+  body: StreamRichText | string | undefined,
+  maxChars = SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT
+): string | undefined {
   if (!body) return undefined
-  if (typeof body === 'string') return clip(body, MAX_TASK_FIELD_CHARS)
+  if (typeof body === 'string') return clip(body, maxChars)
   return clip(
     body.elements
       .map(element =>
@@ -172,7 +180,7 @@ function taskBodyToPlain(body: StreamRichText | string | undefined): string | un
       )
       .filter(Boolean)
       .join('\n'),
-    MAX_TASK_FIELD_CHARS
+    maxChars
   )
 }
 

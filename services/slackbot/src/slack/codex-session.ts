@@ -1,6 +1,13 @@
 import type { WebClient } from '@slack/web-api'
 import { AgentSessionRenderer } from './agent-session'
-import { preformatted as pre, section, text, type StreamRichTextElement } from './streaming'
+import {
+  preformatted as pre,
+  richText,
+  section,
+  text,
+  type StreamRichText,
+  type StreamRichTextElement
+} from './streaming'
 
 type HarnessTask = {
   id: string
@@ -14,15 +21,16 @@ type CodexSessionState = {
   threadId: string
   stepCounter: number
   messageText: string
+  streamedMessageText: string
   planText: string
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
-  activityLineByTaskId: Map<string, string>
+  emittedActivityRunByTaskId: Set<string>
+  emittedActivityOutputByTaskId: Set<string>
   done: boolean
 }
 
 const states = new Map<string, CodexSessionState>()
-const ACTIVITY_TASK_ID = 'codex-activity'
 
 export class CodexSessionRenderer {
   private readonly renderer: AgentSessionRenderer
@@ -120,7 +128,7 @@ export class CodexSessionRenderer {
       const delta = messageDelta(state.messageText, assistantMessage)
       if (delta) {
         state.messageText += delta
-        await this.renderer.textDelta(agentSessionId, delta)
+        await this.publishPendingAssistantText(agentSessionId, state)
       }
     }
 
@@ -142,7 +150,7 @@ export class CodexSessionRenderer {
         const resultText = event.result.trim()
         if (resultText) {
           state.messageText += resultText
-          await this.renderer.text(agentSessionId, resultText)
+          await this.publishPendingAssistantText(agentSessionId, state, { force: true })
         }
       }
       await this.done(agentSessionId)
@@ -157,6 +165,7 @@ export class CodexSessionRenderer {
     state.done = true
     completeOpenTasks(state)
     await this.publishActivitySummary(agentSessionId, state, { final: true })
+    await this.publishPendingAssistantText(agentSessionId, state, { force: true })
     await this.renderer.done(
       agentSessionId,
       state.threadId ? codexFooter(state.threadId) : undefined
@@ -172,15 +181,32 @@ export class CodexSessionRenderer {
   ): Promise<void> {
     const tasks = Array.from(state.taskByUseId.values())
     if (!tasks.length) return
-    const status = aggregateStatus(tasks)
-    const output = opts.final ? '' : changedActivityOutput(state, tasks)
-    await this.renderer.step(agentSessionId, {
-      id: ACTIVITY_TASK_ID,
-      title: activityTitle(tasks),
-      status,
-      details: undefined,
-      output: opts.final ? '' : output || undefined
-    })
+    for (const update of changedActivityTaskUpdates(state, tasks, opts)) {
+      await this.renderer.step(
+        agentSessionId,
+        {
+          id: update.id,
+          title: update.title,
+          status: update.status,
+          details: update.details,
+          output: update.output
+        },
+        { flush: !opts.final }
+      )
+    }
+    if (!opts.final) await this.publishPendingAssistantText(agentSessionId, state)
+  }
+
+  private async publishPendingAssistantText(
+    agentSessionId: string,
+    state: CodexSessionState,
+    opts: { force?: boolean } = {}
+  ): Promise<void> {
+    if (!opts.force && !state.taskByUseId.size) return
+    if (state.messageText.length <= state.streamedMessageText.length) return
+    const delta = state.messageText.slice(state.streamedMessageText.length)
+    state.streamedMessageText = state.messageText
+    await this.renderer.textDelta(agentSessionId, delta)
   }
 
   private async publishStructuredPlan(
@@ -219,10 +245,12 @@ function getState(agentSessionId: string): CodexSessionState {
       threadId: '',
       stepCounter: 0,
       messageText: '',
+      streamedMessageText: '',
       planText: '',
       taskByUseId: new Map(),
       commandOutputById: new Map(),
-      activityLineByTaskId: new Map(),
+      emittedActivityRunByTaskId: new Set(),
+      emittedActivityOutputByTaskId: new Set(),
       done: false
     }
     states.set(agentSessionId, state)
@@ -370,13 +398,6 @@ function setPlanTask(
   })
 }
 
-function aggregateStatus(tasks: HarnessTask[]): HarnessTask['status'] {
-  if (tasks.some(task => task.status === 'error')) return 'error'
-  if (tasks.some(task => task.status === 'in_progress')) return 'in_progress'
-  if (tasks.some(task => task.status === 'pending')) return 'pending'
-  return 'complete'
-}
-
 function completeOpenTasks(state: CodexSessionState): void {
   for (const [id, task] of state.taskByUseId) {
     if (task.status !== 'in_progress' && task.status !== 'pending') continue
@@ -384,41 +405,87 @@ function completeOpenTasks(state: CodexSessionState): void {
   }
 }
 
-function activityTitle(tasks: HarnessTask[]): string {
-  const count = tasks.length
-  const running = tasks.filter(task => task.status === 'in_progress').length
-  if (running) return `Execution timeline (${running}/${count} running)`
-  return count === 1 ? 'Execution timeline' : `Execution timeline (${count} steps)`
-}
-
-function changedActivityOutput(state: CodexSessionState, tasks: HarnessTask[]): string {
-  const changedLines: string[] = []
+function changedActivityTaskUpdates(
+  state: CodexSessionState,
+  tasks: HarnessTask[],
+  opts: { final?: boolean } = {}
+): Array<{
+  id: string
+  title: string
+  status: HarnessTask['status']
+  details?: StreamRichText
+  output?: StreamRichText
+}> {
+  const updates: Array<{
+    id: string
+    title: string
+    status: HarnessTask['status']
+    details?: StreamRichText
+    output?: StreamRichText
+  }> = []
   for (const task of tasks) {
-    const line = taskSummaryLine(task)
-    if (!line || state.activityLineByTaskId.get(task.id) === line) continue
-    state.activityLineByTaskId.set(task.id, line)
-    changedLines.push(line)
+    let details: StreamRichText | undefined
+    let output: StreamRichText | undefined
+    if (opts.final) {
+      details = activityRunBlock(task)
+      output = activityOutputBlock(task)
+    } else if (!state.emittedActivityRunByTaskId.has(task.id)) {
+      state.emittedActivityRunByTaskId.add(task.id)
+      details = activityRunBlock(task)
+    }
+    if (
+      !opts.final &&
+      (task.status === 'complete' || task.status === 'error') &&
+      !state.emittedActivityOutputByTaskId.has(task.id)
+    ) {
+      state.emittedActivityOutputByTaskId.add(task.id)
+      output = activityOutputBlock(task)
+    }
+    if (!details && !output && !opts.final) continue
+    updates.push({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      details,
+      output
+    })
   }
-  return changedLines.length ? fencedActivityLines(changedLines) : ''
+  return updates
 }
 
-function fencedActivityLines(lines: string): string
-function fencedActivityLines(lines: string[]): string
-function fencedActivityLines(lines: string | string[]): string {
-  const body = Array.isArray(lines) ? lines.join('\n') : lines
-  return `\`\`\`text\n${body}\n\`\`\``
+function activityRunBlock(task: HarnessTask): StreamRichText {
+  const command = firstPreformattedBody(task.details)
+  if (command) {
+    return richText([pre(command, shellLanguage(firstPreformattedLanguage(task.details)))])
+  }
+  const body = task.details.length ? elementsToPlainText(task.details) : task.title
+  return richText([pre(body, 'text')])
 }
 
-function taskSummaryLine(task: HarnessTask): string {
-  const marker =
-    task.status === 'complete'
-      ? '[done]'
-      : task.status === 'error'
-        ? '[error]'
-        : task.status === 'pending'
-          ? '[todo]'
-          : '[run]'
-  return `${marker} ${task.title}`
+function activityOutputBlock(task: HarnessTask): StreamRichText {
+  if (!task.output.length) {
+    return richText([pre(task.status === 'error' ? 'Failed' : 'Done', 'text')])
+  }
+  return richText([
+    pre(elementsToPlainText(task.output), firstPreformattedLanguage(task.output) ?? 'text')
+  ])
+}
+
+function firstPreformattedBody(elements: StreamRichTextElement[]): string {
+  return (
+    elements
+      .find(element => element.type === 'rich_text_preformatted')
+      ?.elements.map(inline => inline.text ?? '')
+      .join('') ?? ''
+  )
+}
+
+function firstPreformattedLanguage(elements: StreamRichTextElement[]): string | undefined {
+  return elements.find(element => element.type === 'rich_text_preformatted')?.language
+}
+
+function shellLanguage(language: string | undefined): string {
+  return language === 'bash' || !language ? 'sh' : language
 }
 
 function commandOutputDelta(event: any): { id: string; delta: string } | null {
@@ -448,7 +515,7 @@ function commandTask(
   const exitCode = item.exitCode ?? item.exit_code
   const isCompletionUpdate =
     eventType === 'item.completed' || status === 'complete' || status === 'error'
-  const output = commandOutputElements(accumulatedOutput ?? '', exitCode)
+  const output = commandOutputElements(accumulatedOutput ?? '')
   return {
     id,
     title: command === 'Command' ? 'Run command' : `Run command: ${oneLine(command, 220)}`,
@@ -466,17 +533,11 @@ function commandAggregatedOutput(item: any): string {
   return ''
 }
 
-function commandOutputElements(
-  output: string,
-  exitCode?: number | string | null
-): StreamRichTextElement[] {
+function commandOutputElements(output: string): StreamRichTextElement[] {
   const elements: StreamRichTextElement[] = []
   if (output) {
     const formatted = formatCommandOutput(output)
     elements.push(pre(formatted.body, formatted.language))
-  }
-  if (exitCode !== null && exitCode !== undefined) {
-    elements.push(section([text(`exit code ${exitCode}`)]))
   }
   return elements
 }
@@ -544,22 +605,21 @@ function itemStatus(item: any, eventType: string, exitCode?: number | null): Har
   return 'in_progress'
 }
 
-function elementsToMarkdown(elements: StreamRichTextElement[]): string {
-  return elements.map(elementToMarkdown).filter(Boolean).join('\n\n')
+function elementsToPlainText(elements: StreamRichTextElement[]): string {
+  return elements.map(elementToPlainText).filter(Boolean).join('\n')
 }
 
-function elementToMarkdown(element: StreamRichTextElement): string {
+function elementToPlainText(element: StreamRichTextElement): string {
   if (element.type === 'rich_text_preformatted') {
     const body = element.elements?.map(inline => inline.text ?? '').join('') ?? ''
-    return `\`\`\`${element.language ?? ''}\n${body}\n\`\`\``
+    return body
   }
   if (element.type === 'rich_text_section') {
     return (element.elements ?? [])
       .map(inline => {
-        if ('url' in inline) return inline.text ? `[${inline.text}](${inline.url})` : inline.url
+        if ('url' in inline) return inline.text ?? inline.url
         if ('user_id' in inline) return `<@${inline.user_id}>`
-        const value = inline.text ?? ''
-        return inline.style?.code ? `\`${value}\`` : value
+        return inline.text ?? ''
       })
       .join('')
   }

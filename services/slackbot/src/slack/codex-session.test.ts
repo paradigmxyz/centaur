@@ -77,7 +77,8 @@ describe('CodexSessionRenderer', () => {
       title: 'Execution timeline',
       status: 'complete',
       details: undefined,
-      output: '```text\n[done] Run command: pnpm --filter slackbot test\n```',
+      output:
+        '[run]\n```sh\npnpm --filter slackbot test\n```\n\n[output]\n```text\none\ntwo\n```\nexit code 0',
       sources: undefined
     })
   })
@@ -126,6 +127,19 @@ describe('CodexSessionRenderer', () => {
       type: 'item.started',
       item: { id: 'cmd-2', type: 'commandExecution', command: 'call grafana health' }
     })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'call demo ping', exitCode: 0 }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'cmd-2',
+        type: 'commandExecution',
+        command: 'call grafana health',
+        exitCode: 1
+      }
+    })
 
     const taskUpdates = calls
       .flatMap(call => call.params.chunks ?? [])
@@ -133,9 +147,13 @@ describe('CodexSessionRenderer', () => {
 
     expect(new Set(taskUpdates.map(chunk => chunk.id))).toEqual(new Set(['codex-activity']))
     expect(taskUpdates.at(-1)?.details).toBeUndefined()
-    expect(taskUpdates.some(chunk => String(chunk.output).includes('call demo ping'))).toBe(true)
-    expect(taskUpdates.at(-1)?.output).toContain('call grafana health')
-    expect(taskUpdates.at(-1)?.output).toMatch(/^```text\n/)
+    expect(taskUpdates.some(chunk => richTextPlain(chunk.output).includes('call demo ping'))).toBe(
+      true
+    )
+    expect(richTextPlain(taskUpdates.at(-1)?.output)).toContain('call grafana health')
+    expect(richTextPlain(taskUpdates.at(-1)?.output)).toContain('[run]')
+    expect(taskUpdates.at(-1)?.output).toContain('```sh\ncall grafana health\n```')
+    expect(taskUpdates.at(-1)?.output).toContain('[error]')
   })
 
   it('marks the aggregate activity task complete on terminal turn events', async () => {
@@ -249,14 +267,25 @@ describe('CodexSessionRenderer', () => {
         }))
       })
     })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'cmd-1',
+        type: 'commandExecution',
+        command: 'call discover grafana',
+        exitCode: 0
+      }
+    })
 
     const taskUpdates = calls
       .flatMap(call => call.params.chunks ?? [])
       .filter(chunk => chunk.type === 'task_update')
 
-    const output = taskUpdates.map(chunk => chunk.output ?? '').join('\n')
-    expect(output).toContain('```text\n[run] Run command: call discover grafana')
-    expect(output).not.toContain('```json')
+    const output = taskUpdates.map(chunk => richTextPlain(chunk.output)).join('\n')
+    expect(output).toContain('[run]')
+    expect(output).toContain('call discover grafana')
+    expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).not.toContain('```text')
+    expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).toContain('```json')
     expect(output).not.toContain('"method-11"')
   })
 
@@ -318,14 +347,37 @@ describe('CodexSessionRenderer', () => {
         }
       })
     })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'cmd-1',
+        type: 'commandExecution',
+        command: 'call tools',
+        exitCode: 0
+      }
+    })
 
     const taskUpdates = calls
       .flatMap(call => call.params.chunks ?? [])
       .filter(chunk => chunk.type === 'task_update')
 
-    const output = taskUpdates.map(chunk => chunk.output ?? '').join('\n')
-    expect(output).toContain('```text\n[run] Run command: call tools')
-    expect(output).not.toContain('```json')
+    const output = taskUpdates.map(chunk => richTextPlain(chunk.output)).join('\n')
+    expect(output).toContain('[run]')
+    expect(output).toContain('call tools')
+    expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).not.toContain('```text')
+    expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).toContain('```json')
     expect(output).not.toContain('"grafana"')
   })
 })
+
+function richTextPlain(value: any): string {
+  if (!value) return ''
+  if (typeof value === 'string') return value
+  return (value.elements ?? [])
+    .map((element: any) =>
+      (element.elements ?? [])
+        .map((inline: any) => inline.text ?? inline.url ?? inline.user_id ?? '')
+        .join('')
+    )
+    .join('\n')
+}
