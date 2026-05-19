@@ -611,7 +611,7 @@ describe('AgentSessionRenderer', () => {
     expect(stopAttempts).toBe(2)
   })
 
-  it('prepends the persona/engine header as the first streamed chunk and final block', async () => {
+  it('prepends the persona/engine header as the first streamed chunk only', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: { threads: { setStatus: async () => ({ ok: true }) } },
@@ -651,9 +651,7 @@ describe('AgentSessionRenderer', () => {
     expect(String(firstChunk?.text ?? '')).toBe('_legal · codex-gpt-5_\n')
 
     const allStreamedChunks = calls
-      .filter(call =>
-        call.method === 'chat.startStream' || call.method === 'chat.appendStream'
-      )
+      .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
       .flatMap(call => call.params.chunks ?? [])
       .filter((chunk: any) => chunk?.type === 'markdown_text')
       .map((chunk: any) => String(chunk.text ?? ''))
@@ -664,7 +662,11 @@ describe('AgentSessionRenderer', () => {
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []
-    expect(blocks[0]).toEqual({ type: 'markdown', text: '_legal · codex-gpt-5_' })
+    expect(
+      blocks.some(
+        (block: any) => block.type === 'markdown' && block.text === '_legal · codex-gpt-5_'
+      )
+    ).toBe(false)
   })
 
   it('omits the header block entirely when no header was supplied', async () => {
@@ -704,8 +706,9 @@ describe('AgentSessionRenderer', () => {
     expect(start?.params.chunks?.[0]?.type).not.toBe('markdown_text')
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []
-    expect(blocks.some((block: any) => block.type === 'markdown' && /^_.*_$/.test(block.text)))
-      .toBe(false)
+    expect(
+      blocks.some((block: any) => block.type === 'markdown' && /^_.*_$/.test(block.text))
+    ).toBe(false)
   })
 
   it('renders the header above streamed tasks when both are present', async () => {

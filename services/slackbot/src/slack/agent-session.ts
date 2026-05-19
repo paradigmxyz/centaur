@@ -61,8 +61,10 @@ export type OpenAgentSessionInput = {
   recipientTeamId: string
   recipientUserId: string
   title?: string
-  /** Italic one-line identifier rendered at the top of every assistant message
-   *  (e.g. "base · claude-opus-4-7", "legal · codex-gpt-5"). */
+  /**
+   * Italic one-line identifier rendered at the top of every assistant message (e.g. "base ·
+   * claude-opus-4-7", "legal · codex-gpt-5").
+   */
   header?: string
 }
 
@@ -277,12 +279,10 @@ export class AgentSessionRenderer {
     const showThinking =
       !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
     const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
-    const header = state.header?.trim()
     // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
     // Only add blocks for content that was not streamed live; live task_update chunks carry
-    // fenced details/output, so adding a final plan block would render a second plan step.
+    // fenced details/output, and the header has already been streamed as the first chunk.
     const blocks = sanitizeFinalMessagePayload([
-      ...(header ? [headerBlock(header)] : []),
       ...(tasks.length && !segment.planStarted
         ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
         : []),
