@@ -31,9 +31,8 @@ export default defineConfig({
     dark: '/brand/mark-white.svg',
   },
   // Top-left site logo: full lockup on docs routes (the sidebar / topNav
-  // gets enough space to carry the wordmark). Landing already hides the
-  // topNav logo via .vocs_DesktopTopNav_logoWrapper { display: none } so
-  // the lockup is only visible on docs pages.
+  // gets enough space to carry the wordmark). The landing page hides Vocs's
+  // topNav entirely and renders its own lockup in the hero.
   logoUrl: {
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',

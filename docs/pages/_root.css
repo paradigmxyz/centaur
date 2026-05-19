@@ -193,60 +193,13 @@
   background: transparent;
 }
 
-@media (min-width: 1081px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTop {
-    padding-left: 0;
-    padding-right: 0;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_withLogo {
-    padding-left: 80px;
-    padding-right: 48px;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logoWrapper {
-    justify-content: flex-start;
-    left: 24px;
-    width: auto;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo {
-    padding-left: 0;
-    padding-right: 0;
-    width: auto;
-  }
-
-  /*
-   * Landing topNav: swap the full lockup for the standalone centaur mark.
-   * Vocs's logoUrl is shared across every layout, so we hide the rendered
-   * `<img>` and paint the mark on the anchor's background instead. Docs
-   * routes keep the lockup img untouched.
-   */
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo > a {
-    background-image: url('/brand/mark-white.svg');
-    background-position: left center;
-    background-repeat: no-repeat;
-    background-size: contain;
-    width: 32px;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logo .vocs_NavLogo_logoImage {
-    display: none;
-  }
-}
-
-@media (max-width: 1080px) {
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo > a {
-    background-image: url('/brand/mark-white.svg');
-    background-position: left center;
-    background-repeat: no-repeat;
-    background-size: contain;
-    width: 28px;
-  }
-
-  .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo .vocs_NavLogo_logoImage {
-    display: none;
-  }
+/*
+ * Landing owns its own links in the hero. Hide Vocs's desktop and mobile
+ * top navigation there so docs routes keep the normal navigation chrome.
+ */
+.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTop,
+[data-layout="landing"] > div[class*="vocs:fixed"][class*="vocs:h-topNav"] {
+  display: none;
 }
 
 /*
@@ -436,7 +389,7 @@ body,
 
 .vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_content,
 [data-layout="landing"] [data-v-main] {
-  min-height: calc(100dvh - var(--vocs-topNav_height));
+  min-height: 100dvh;
 }
 
 .vocs_DocsLayout[data-layout="landing"] [data-v-main],
@@ -472,7 +425,7 @@ body,
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  min-height: calc(100dvh - var(--vocs-topNav_height));
+  min-height: 100dvh;
   overflow: hidden;
   padding: clamp(72px, 9dvh, 120px) 24px clamp(56px, 8dvh, 104px);
   position: relative;
@@ -1347,7 +1300,7 @@ a.home-lockup-link {
     flex-direction: column;
     gap: clamp(28px, 4dvh, 44px);
     max-width: 980px;
-    min-height: calc(100dvh - var(--vocs-topNav_height) - clamp(64px, 8dvh, 112px));
+    min-height: auto;
     text-align: center;
   }
 
@@ -1412,7 +1365,7 @@ a.home-lockup-link {
 
 @media (max-width: 760px) {
   .centaur-home {
-    min-height: calc(100dvh - 64px);
+    min-height: 100dvh;
     padding: 54px 20px 40px;
   }
 
