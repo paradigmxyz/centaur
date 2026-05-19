@@ -497,6 +497,41 @@ async def test_download_attachment_enforces_sandbox_thread_scope():
     assert resp.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_download_attachment_handles_non_ascii_filename():
+    """A filename with non-ASCII or quote characters must not 500 the response.
+
+    Starlette encodes headers as latin-1, so the handler needs to emit an RFC
+    5987 Content-Disposition rather than dropping the raw name into the header.
+    """
+    import types
+
+    from api.routers.attachments import download_attachment
+
+    class _Pool:
+        def __init__(self, name: str):
+            self._name = name
+
+        async def fetchrow(self, _sql, _attachment_id):
+            return {
+                "data": SAMPLE_PNG,
+                "mime_type": "image/png",
+                "name": self._name,
+                "thread_key": "test:owner-thread",
+            }
+
+    for tricky_name in ["截图.png", 'has"quote.png', "résumé.pdf"]:
+        request = types.SimpleNamespace(
+            app=types.SimpleNamespace(state=types.SimpleNamespace(db_pool=_Pool(tricky_name))),
+            state=types.SimpleNamespace(sandbox_claims=None),
+        )
+        resp = await download_attachment(request, "att-x")
+        assert resp.status_code == 200
+        # Confirm the response can actually be serialized to the wire.
+        for _, value in resp.raw_headers:
+            assert isinstance(value, bytes)
+
+
 # ── Integration: upload endpoint roundtrip ─────────────────────────────────
 
 
