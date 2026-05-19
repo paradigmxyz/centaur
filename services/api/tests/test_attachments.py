@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from api.runtime_control import extract_inline_attachments, event_to_chat_parts
 from api.sandbox.harness_protocol import messages_to_content_blocks
 
 
@@ -98,6 +99,60 @@ class TestAttachmentExtractionPipeline:
         # The document block passes through as-is — NOT a text block
         assert blocks[1]["type"] == "document"
         assert "source" in blocks[1]
+
+    @pytest.mark.asyncio
+    async def test_video_file_block_is_extracted_to_attachment_ref(self):
+        video_bytes = b"\x00\x00\x00\x18ftypmp42" + (b"video" * 16)
+        inserted: list[tuple] = []
+
+        class FakePool:
+            async def execute(self, query, *args):
+                inserted.append(args)
+
+        transformed, attachment_ids = await extract_inline_attachments(
+            FakePool(),
+            thread_key="slack:T:C:1.000000",
+            chat_message_id="msg-video",
+            parts=[
+                {"type": "text", "text": "what happens here?"},
+                {
+                    "type": "file",
+                    "name": "CleanShot demo.mp4",
+                    "mime_type": "video/mp4",
+                    "size": len(video_bytes),
+                    "slack_file_id": "FVID123",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "video/mp4",
+                        "data": base64.b64encode(video_bytes).decode(),
+                    },
+                },
+            ],
+        )
+
+        assert len(attachment_ids) == 1
+        assert transformed == [
+            {"type": "text", "text": "what happens here?"},
+            {
+                "type": "attachment_ref",
+                "attachment_id": attachment_ids[0],
+                "media_type": "video/mp4",
+                "name": "CleanShot demo.mp4",
+            },
+        ]
+        assert inserted[0][1] == "slack:T:C:1.000000"
+        assert inserted[0][2] == "msg-video"
+        assert inserted[0][3] == "CleanShot demo.mp4"
+        assert inserted[0][4] == "video/mp4"
+        assert inserted[0][5] == video_bytes
+
+        chat_parts = event_to_chat_parts(transformed)
+        assert chat_parts[1] == {
+            "type": "attachment_ref",
+            "id": attachment_ids[0],
+            "name": "CleanShot demo.mp4",
+            "mime_type": "video/mp4",
+        }
 
     def test_extracted_attachment_ref_becomes_download_instruction(self):
         """After extraction, attachment_ref parts become text with curl."""

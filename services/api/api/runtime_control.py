@@ -578,11 +578,9 @@ async def extract_inline_attachments(
     attachment_ids: list[str] = []
 
     for part in parts:
-        part_type = part.get("type")
         source = part.get("source") if isinstance(part, dict) else None
         if (
-            part_type in {"image", "document"}
-            and isinstance(source, dict)
+            isinstance(source, dict)
             and source.get("type") == "base64"
             and isinstance(source.get("data"), str)
         ):
@@ -601,7 +599,11 @@ async def extract_inline_attachments(
                 if isinstance(part.get("source_path"), str)
                 else None
             )
-            name = _attachment_name_from_source_path(source_path, attachment_id)
+            name = (
+                str(part.get("name"))
+                if isinstance(part.get("name"), str) and part.get("name")
+                else _attachment_name_from_source_path(source_path, attachment_id)
+            )
             await pool.execute(
                 "INSERT INTO attachments (id, thread_key, message_id, name, mime_type, data) "
                 "VALUES ($1, $2, $3, $4, $5, $6)",
@@ -617,6 +619,7 @@ async def extract_inline_attachments(
                     "type": "attachment_ref",
                     "attachment_id": attachment_id,
                     "media_type": media_type,
+                    "name": name,
                     **({"source_path": source_path} if source_path else {}),
                 }
             )
@@ -642,7 +645,11 @@ def event_to_chat_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if isinstance(part.get("source_path"), str)
                 else None
             )
-            name = _attachment_name_from_source_path(source_path, attachment_id)
+            name = (
+                str(part.get("name"))
+                if isinstance(part.get("name"), str) and part.get("name")
+                else _attachment_name_from_source_path(source_path, attachment_id)
+            )
             chat_parts.append(
                 {
                     "type": "attachment_ref",

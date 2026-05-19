@@ -516,6 +516,89 @@ async def test_message_stores_attachment_refs(client, db_pool, api_key: str):
 
 
 @pytest.mark.asyncio
+async def test_message_extracts_video_file_attachment(client, db_pool, api_key: str):
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    await _insert_assignment(db_pool, thread_key, generation=3)
+    video_bytes = b"\x00\x00\x00\x18ftypmp42" + (b"video" * 128)
+
+    payload = {
+        "thread_key": thread_key,
+        "assignment_generation": 3,
+        "message_id": "msg-video",
+        "event": {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what happens in this video?"},
+                    {
+                        "type": "file",
+                        "name": "CleanShot demo.mp4",
+                        "mime_type": "video/mp4",
+                        "size": len(video_bytes),
+                        "slack_file_id": "FVID123",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "video/mp4",
+                            "data": base64.b64encode(video_bytes).decode("utf-8"),
+                        },
+                    },
+                ],
+            },
+        },
+    }
+
+    res = await client.post("/agent/message", headers=_auth(api_key), json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert len(data["attachment_ids"]) == 1
+
+    request_row = await db_pool.fetchrow(
+        "SELECT event_json FROM agent_message_requests WHERE thread_key = $1 AND message_id = $2",
+        thread_key,
+        "msg-video",
+    )
+    assert request_row is not None
+    event_json = request_row["event_json"]
+    if isinstance(event_json, str):
+        event_json = json.loads(event_json)
+    content = event_json["message"]["content"]
+    assert content[1] == {
+        "type": "attachment_ref",
+        "attachment_id": data["attachment_ids"][0],
+        "media_type": "video/mp4",
+        "name": "CleanShot demo.mp4",
+    }
+
+    chat_row = await db_pool.fetchrow(
+        "SELECT parts FROM chat_messages WHERE thread_key = $1 AND id LIKE $2",
+        thread_key,
+        "%msg-video",
+    )
+    assert chat_row is not None
+    chat_parts = chat_row["parts"]
+    if isinstance(chat_parts, str):
+        chat_parts = json.loads(chat_parts)
+    assert chat_parts[1] == {
+        "type": "attachment_ref",
+        "id": data["attachment_ids"][0],
+        "name": "CleanShot demo.mp4",
+        "mime_type": "video/mp4",
+    }
+    assert "source" not in chat_parts[1]
+
+    attachment_row = await db_pool.fetchrow(
+        "SELECT name, mime_type, data FROM attachments WHERE id = $1",
+        data["attachment_ids"][0],
+    )
+    assert attachment_row is not None
+    assert attachment_row["name"] == "CleanShot demo.mp4"
+    assert attachment_row["mime_type"] == "video/mp4"
+    assert bytes(attachment_row["data"]) == video_bytes
+
+
+@pytest.mark.asyncio
 async def test_execute_rejects_stale_generation(client, db_pool, api_key: str):
     thread_key = f"slack:C-test:{uuid.uuid4().hex}"
     await _insert_assignment(db_pool, thread_key, generation=5)
