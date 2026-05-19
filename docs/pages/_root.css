@@ -169,28 +169,12 @@
   opacity: 1;
 }
 
-/*
- * Header nav: replace Vocs's solid color-mix background with a fade so
- * content scrolls under the top bar instead of getting hard-clipped.
- * The gradient goes from fully opaque page-bg at the top of the bar to
- * fully transparent at its bottom edge. A backdrop-filter blur keeps
- * any text peeking through legible.
- */
-.vocs_DocsLayout_gutterTop {
-  background-color: transparent;
-  background-image: linear-gradient(
-    to bottom,
-    rgba(5, 5, 6, 1) 0%,
-    rgba(5, 5, 6, 0.85) 60%,
-    rgba(5, 5, 6, 0) 100%
-  );
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-
-/* Strip the curtain's solid background so the gradient is what shows. */
-.vocs_DocsLayout_gutterTopCurtain {
-  background: transparent;
+/* Hide Vocs's global nav header only on the homepage. */
+.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTop,
+.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTopCurtain,
+.vocs_DocsLayout[data-layout="landing"] [class*="vocs:fixed"][class*="vocs:h-topNav"],
+[data-layout="landing"][data-v-topnav] [class*="vocs:fixed"][class*="vocs:h-topNav"] {
+  display: none;
 }
 
 @media (min-width: 1081px) {

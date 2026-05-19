@@ -13,6 +13,7 @@ export const sidebar = [
   {
     text: 'Extend Centaur',
     items: [
+      { text: 'ACME example', link: '/extend/acme-example' },
       { text: 'Using an overlay', link: '/extend/overlay' },
       { text: 'Creating Skills', link: '/extend/skills' },
       { text: 'Creating Tools', link: '/extend/tools' },
