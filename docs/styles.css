@@ -23,12 +23,24 @@
 }
 
 /*
- * Keep docs and UI sans-serif, and reserve the display face for the landing
- * hero headline.
+ * Keep docs and UI sans-serif, and use the landing hero display face for
+ * content headings.
  */
 body,
 .vocs_DocsLayout {
   font-family: var(--centaur-sans);
+}
+
+.vocs_Content h1,
+.vocs_Content h2,
+.vocs_Content h3,
+.vocs_Content h4,
+.vocs_Content h5,
+.vocs_Content h6,
+.centaur-home h1 {
+  font-family: var(--centaur-display);
+  font-weight: 400;
+  letter-spacing: 0.012em;
 }
 
 :root,
