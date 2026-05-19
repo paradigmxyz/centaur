@@ -422,17 +422,9 @@ body,
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 18px 22px 80px;
+  padding: 18px 22px 10px;
   scrollbar-color: var(--thread-border-strong) transparent;
   scrollbar-width: thin;
-}
-
-/* Sentinel at the end of the scroll container — the auto-scroller targets
- * this rather than scrollHeight so newly typed text has space below it
- * before we measure scroll position. */
-.thread-panel-tail {
-  height: 12px;
-  width: 100%;
 }
 
 .thread-panel-scroll::-webkit-scrollbar {

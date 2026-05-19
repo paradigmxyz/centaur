@@ -626,22 +626,11 @@ function ThreadDetail({
     stickToBottomRef.current = distanceFromBottom < 48
   }, [])
 
-  // Auto-scroll to the bottom sentinel after the typed content has actually
-  // rendered. Without the rAF wrap we measured scrollHeight before the new
-  // text reached the DOM, so the last reply visibly hugged the bottom edge.
   useEffect(() => {
     const element = scrollRef.current
     if (!element) return
     if (!stickToBottomRef.current) return
-    const raf = requestAnimationFrame(() => {
-      const tail = element.querySelector<HTMLDivElement>('.thread-panel-tail')
-      if (tail) {
-        tail.scrollIntoView({ behavior: 'smooth', block: 'end' })
-      } else {
-        element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
-      }
-    })
-    return () => cancelAnimationFrame(raf)
+    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
   }, [phase, replyIdx, thread.id])
 
   const visible: Array<Reply & { i: number; isTyping: boolean; isStreaming: boolean }> = []
@@ -754,7 +743,6 @@ function ThreadDetail({
             </div>
           </div>
         ))}
-        <div className="thread-panel-tail" aria-hidden="true" />
       </div>
 
     </section>
