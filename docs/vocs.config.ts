@@ -21,10 +21,8 @@ export default defineConfig({
   title: 'Centaur',
   titleTemplate: '%s - Centaur',
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
-  // Browser-tab favicon: rounded-square centaur on a dark grey gradient,
-  // self-contained so it reads on both light and dark browser chrome at
-  // every favicon size (no separate light/dark variant required).
-  iconUrl: '/brand/slack-icon.svg',
+  // Browser-tab favicon: standalone mark only. The per-page head below
+  // selects black/white variants based on the browser color scheme.
   // Top-left site logo: black-ink wordmark on light theme, white on dark.
   logoUrl: {
     light: '/brand/lockup-black.svg',
@@ -46,6 +44,18 @@ export default defineConfig({
   head({ path }) {
     return createElement(Fragment, null,
       createElement('link', { rel: 'canonical', href: canonicalHref(path) }),
+      createElement('link', {
+        rel: 'icon',
+        href: '/brand/mark-black.svg',
+        media: '(prefers-color-scheme: light)',
+        type: 'image/svg+xml',
+      }),
+      createElement('link', {
+        rel: 'icon',
+        href: '/brand/mark-white.svg',
+        media: '(prefers-color-scheme: dark)',
+        type: 'image/svg+xml',
+      }),
       createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
     )
   },
