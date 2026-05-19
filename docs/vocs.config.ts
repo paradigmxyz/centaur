@@ -7,9 +7,8 @@ const basePath = process.env.VOCS_BASE_PATH || undefined
 const siteUrl = 'https://centaur.run'
 
 function canonicalHref(path: string) {
-  const root = 'https://centaur.run'
-  if (path === '/') return `${root}/`
-  return `${root}${path.replace(/\/+$/, '')}/`
+  if (path === '/') return `${siteUrl}/`
+  return `${siteUrl}${path.replace(/\/+$/, '')}/`
 }
 
 export default defineConfig({
@@ -20,7 +19,6 @@ export default defineConfig({
   // public/ (like our zip and brand SVGs), so downgrade to a warning rather
   // than failing the build.
   checkDeadlinks: 'warn',
-  baseUrl: siteUrl,
   title: 'Centaur',
   titleTemplate: '%s - Centaur',
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
