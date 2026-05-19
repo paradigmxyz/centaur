@@ -79,23 +79,25 @@ import ThreadPanel from '../components/ThreadPanel'
 
   </section>
 
-  <section className="home-overview home-media-section" aria-labelledby="home-extensible-title">
-    <div className="home-overview-heading">
-      <h2 id="home-extensible-title">Extensible by default</h2>
-    </div>
+  <div className="home-media-grid">
+    <section className="home-overview home-media-section" aria-labelledby="home-extensible-title">
+      <div className="home-overview-heading">
+        <h2 id="home-extensible-title">Extensible by default</h2>
+      </div>
 
-    <figure className="home-architecture-diagram">
-      <img src="/brand/containers.svg" alt="Centaur deployment layout: the open-source kernel wrapped by an organization overlay and a per-app repository." />
-    </figure>
-  </section>
+      <figure className="home-architecture-diagram">
+        <img src="/brand/containers.svg" alt="Centaur deployment layout: the open-source kernel wrapped by an organization overlay and a per-app repository." />
+      </figure>
+    </section>
 
-  <section className="home-overview home-media-section" aria-labelledby="home-architecture-title">
-    <div className="home-overview-heading">
-      <h2 id="home-architecture-title">Architecture</h2>
-    </div>
+    <section className="home-overview home-media-section" aria-labelledby="home-architecture-title">
+      <div className="home-overview-heading">
+        <h2 id="home-architecture-title">Architecture</h2>
+      </div>
 
-    <figure className="home-architecture-diagram">
-      <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
-    </figure>
-  </section>
+      <figure className="home-architecture-diagram">
+        <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
+      </figure>
+    </section>
+  </div>
 </main>

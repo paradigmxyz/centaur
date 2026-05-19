@@ -602,6 +602,24 @@ a.home-lockup-link {
   margin-top: clamp(32px, 4dvh, 44px);
 }
 
+.home-media-grid {
+  display: grid;
+  gap: clamp(28px, 4vw, 56px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: clamp(32px, 4dvh, 44px) auto 0;
+  max-width: 1440px;
+  width: 100%;
+}
+
+.home-media-grid .home-media-section {
+  margin: 0;
+  max-width: none;
+}
+
+.home-media-grid .home-overview-heading {
+  grid-template-columns: 1fr;
+}
+
 .home-overview-heading {
   display: grid;
   gap: 24px;
@@ -694,6 +712,8 @@ a.home-lockup-link {
 }
 
 .home-media-section .home-architecture-diagram {
+  margin-left: 0;
+  margin-right: auto;
   margin-top: 30px;
   padding-top: 0;
 }
@@ -1376,6 +1396,11 @@ a.home-lockup-link {
   }
 
   .home-overview {
+    max-width: 980px;
+  }
+
+  .home-media-grid {
+    grid-template-columns: 1fr;
     max-width: 980px;
   }
 
