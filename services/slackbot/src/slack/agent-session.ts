@@ -1,7 +1,7 @@
 import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
 import { ulid } from '@std/ulid'
-import { slackReplyLimits } from '../constants'
+import { SHOW_THINKING_TEXT, slackReplyLimits } from '../constants'
 import {
   markdownChunk,
   planBlock,
@@ -251,7 +251,9 @@ export class AgentSessionRenderer {
     const answerMarkdown = finalMarkdownForBlocks(answerSource, tasks)
     const streamedTextLive = Boolean(segment.streamedText.trim())
     const showThinking =
-      !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
+      SHOW_THINKING_TEXT &&
+      !streamedTextLive &&
+      shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
     const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
     // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
     // Only add blocks for content that was not streamed live; live task_update chunks carry

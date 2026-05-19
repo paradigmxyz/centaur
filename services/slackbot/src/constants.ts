@@ -1,3 +1,5 @@
+export const SHOW_THINKING_TEXT = process.env.SHOW_THINKING_TEXT === 'true'
+
 export const slackReplyLimits = {
   text: {
     /** Slack-recommended fallback size when posting with blocks. */

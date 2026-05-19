@@ -381,11 +381,17 @@ describe('AgentSessionRenderer', () => {
     expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
     expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
-    expect(blocks.some((block: any) => block.type === 'context')).toBe(true)
+    expect(
+      blocks.some(
+        (block: any) =>
+          block.type === 'context' &&
+          String(block.elements?.[0]?.text ?? '').includes('Planning the tool calls.')
+      )
+    ).toBe(false)
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
-  it('renders thinking in a context block and the answer in markdown on finalize', async () => {
+  it('hides thinking text and renders the answer in markdown on finalize', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -433,10 +439,9 @@ describe('AgentSessionRenderer', () => {
       blocks.some(
         (block: any) =>
           block.type === 'context' &&
-          String(block.elements?.[0]?.text ?? '').includes('*Thinking*') &&
           String(block.elements?.[0]?.text ?? '').includes('Planning the tool calls.')
       )
-    ).toBe(true)
+    ).toBe(false)
     expect(
       blocks.some(
         (block: any) =>

@@ -2,6 +2,7 @@ interface EnvironmentVariables {
   readonly PORT: string
   readonly ENVIRONMENT: 'development' | 'production' | 'test'
   readonly COMMIT_SHA: string
+  readonly SHOW_THINKING_TEXT: 'true' | 'false'
 }
 
 // Node.js `process.env` auto-completion

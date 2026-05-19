@@ -1,5 +1,5 @@
 import type { WebClient } from '@slack/web-api'
-import { slackReplyLimits } from '../constants'
+import { SHOW_THINKING_TEXT, slackReplyLimits } from '../constants'
 import { AgentSessionRenderer } from './agent-session'
 import { thinkingContextBlock } from './render'
 import {
@@ -170,7 +170,7 @@ export class CodexSessionRenderer {
     }
 
     const reasoningMessage = reasoningText(event).trim()
-    if (reasoningMessage) {
+    if (SHOW_THINKING_TEXT && reasoningMessage) {
       const task: HarnessTask = {
         id: `reasoning-${++state.stepCounter}`,
         title: 'Reasoning',
@@ -259,7 +259,9 @@ export class CodexSessionRenderer {
     if (!canStream) return
 
     const pendingCommentary = state.commentaryText.slice(state.streamedCommentaryText.length)
-    if (pendingCommentary && shouldFlushThinking(pendingCommentary, opts.force)) {
+    if (!SHOW_THINKING_TEXT) {
+      state.streamedCommentaryText = state.commentaryText
+    } else if (pendingCommentary && shouldFlushThinking(pendingCommentary, opts.force)) {
       const delta = state.commentaryText.slice(state.streamedCommentaryText.length)
       const thinkingBlock = thinkingContextBlock(delta, { heading: !state.thinkingPublished })
       if (thinkingBlock) {

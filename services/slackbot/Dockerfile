@@ -3,6 +3,9 @@ FROM oven/bun:1.3.13-slim
 WORKDIR /app
 ENV NODE_ENV=production
 
+ARG SHOW_THINKING_TEXT
+ENV SHOW_THINKING_TEXT=${SHOW_THINKING_TEXT:-false}
+
 COPY services/slackbot/package.json services/slackbot/bun.lock ./
 RUN bun install --frozen-lockfile
 
