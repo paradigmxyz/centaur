@@ -219,6 +219,24 @@ class TestToolArgValidation:
             is None
         )
 
+    def test_forbidden_path_argument_is_rejected(self):
+        def fn(output_path: str):
+            return output_path
+
+        error = _tool_arg_validation_error(
+            ToolMethod("drive_download", fn),
+            {"output_path": "/app/tools/productivity/gsuite/client.py"},
+        )
+
+        assert error == {
+            "error": "tool_argument_validation_failed",
+            "message": (
+                "Forbidden argument(s): output_path. Tools may not write API-process "
+                "files to caller-supplied paths; return Centaur attachments instead."
+            ),
+            "forbidden_args": ["output_path"],
+        }
+
 
 # ---------------------------------------------------------------------------
 # _to_toon

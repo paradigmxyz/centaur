@@ -17,7 +17,7 @@ from urllib.parse import quote, urljoin, urlparse
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import get_tool_context, secret
+from centaur_sdk.tool_sdk import get_tool_context, save_attachment, secret
 
 # Cache for channel list to avoid repeated API calls
 
@@ -1913,34 +1913,12 @@ class SlackClient:
         The attachment is scoped to the thread the tool is running in, read
         from the tool context.
         """
-        thread_key = self._require_thread_key()
-
-        base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
-        payload = json.dumps(
-            {
-                "thread_key": thread_key,
-                "name": name,
-                "mime_type": mime_type,
-                "data": base64.b64encode(data).decode(),
-                "source_url": source_url,
-            }
-        ).encode()
-        headers = {"Content-Type": "application/json"}
-        api_key = secret("CENTAUR_API_KEY", "").strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(
-            f"{base_url}/agent/attachments/upload",
-            data=payload,
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.loads(response.read())
-        attachment_id = result.get("id")
-        if not attachment_id:
-            raise RuntimeError(f"attachment upload returned no id: {result!r}")
-        return attachment_id
+        return save_attachment(
+            name=name,
+            mime_type=mime_type,
+            data=data,
+            source_url=source_url,
+        )["attachment_id"]
 
     def download_file(self, url: str) -> dict:
         """Download a Slack file into a Centaur attachment.

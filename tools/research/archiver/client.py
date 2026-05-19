@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from centaur_sdk import save_attachment_from_path
+
 from .download.orchestrator import download_source
 from .ingest.parse import parse_manifest
 from .utils import (
@@ -21,29 +23,62 @@ from .utils import (
 class ArchiverClient:
     """Extraction-first client for investment document parsing."""
 
+    def _attach_download_payload(self, payload: dict, manifest_path: Path) -> dict:
+        attachments: list[dict[str, Any]] = []
+        for record in payload.get("files") or []:
+            raw_path = record.get("file_path")
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if not path.exists() or not path.is_file():
+                continue
+            attachment = save_attachment_from_path(
+                path,
+                name=record.get("filename") or path.name,
+                mime_type=record.get("mime_type"),
+                source_url=record.get("source_url") or payload.get("source_url"),
+            )
+            attachments.append({**attachment, "source_type": record.get("source_type")})
+
+        manifest_attachment = save_attachment_from_path(
+            manifest_path,
+            name="manifest.json",
+            mime_type="application/json",
+            source_url=payload.get("source_url"),
+        )
+        return {
+            **payload,
+            "files": [
+                {k: v for k, v in record.items() if k != "file_path"}
+                for record in payload.get("files") or []
+            ],
+            "attachments": attachments,
+            "manifest_attachment": manifest_attachment,
+        }
+
     def download(
         self,
         source_url: str,
-        output_dir: str,
         company: str | None = None,
         account: str | None = None,
         password: str | None = None,
         email: str | None = None,
         max_depth: int = 3,
     ) -> dict:
-        output_dir = Path(output_dir)
-        payload = download_source(
-            source_url=source_url,
-            output_dir=output_dir,
-            company=company,
-            account=account,
-            password=password,
-            email=email,
-            max_depth=max_depth,
-        )
-        manifest_path = output_dir / "manifest.json"
-        manifest_path.write_text(dump_json(payload))
-        return {**payload, "manifest_path": str(manifest_path)}
+        with tempfile.TemporaryDirectory(prefix="centaur-archiver-") as tmpdir:
+            output_dir = Path(tmpdir)
+            payload = download_source(
+                source_url=source_url,
+                output_dir=output_dir,
+                company=company,
+                account=account,
+                password=password,
+                email=email,
+                max_depth=max_depth,
+            )
+            manifest_path = output_dir / "manifest.json"
+            manifest_path.write_text(dump_json(payload))
+            return self._attach_download_payload(payload, manifest_path)
 
     def _manifest_with_context(
         self, manifest_path: Path, context: dict | None
@@ -134,7 +169,6 @@ class ArchiverClient:
     def extract_source(
         self,
         source_url: str,
-        output_dir: str,
         company: str | None = None,
         account: str | None = None,
         password: str | None = None,
@@ -143,35 +177,38 @@ class ArchiverClient:
         context: dict | None = None,
     ) -> dict:
         """Download source and run Reducto extraction in one call."""
-        download_payload = self.download(
-            source_url=source_url,
-            output_dir=output_dir,
-            company=company,
-            account=account,
-            password=password,
-            email=email,
-            max_depth=max_depth,
-        )
-        if download_payload.get("status") != "ok":
-            return {
-                "status": "error",
-                "error": download_payload.get("error") or "Download stage failed",
-                "source": source_url,
-                "manifest_path": download_payload.get("manifest_path"),
-                "download": download_payload,
-                "files": download_payload.get("files") or [],
-            }
-        if not download_payload.get("files"):
-            return {
-                "status": "error",
-                "error": "Download stage produced no files",
-                "source": source_url,
-                "manifest_path": download_payload.get("manifest_path"),
-                "download": download_payload,
-                "files": [],
-            }
-        manifest_path = Path(output_dir) / "manifest.json"
-        return self.extract_manifest(str(manifest_path), context=context)
+        with tempfile.TemporaryDirectory(prefix="centaur-archiver-") as tmpdir:
+            output_dir = Path(tmpdir)
+            payload = download_source(
+                source_url=source_url,
+                output_dir=output_dir,
+                company=company,
+                account=account,
+                password=password,
+                email=email,
+                max_depth=max_depth,
+            )
+            manifest_path = output_dir / "manifest.json"
+            manifest_path.write_text(dump_json(payload))
+            attached_download = self._attach_download_payload(payload, manifest_path)
+            if payload.get("status") != "ok":
+                return {
+                    "status": "error",
+                    "error": payload.get("error") or "Download stage failed",
+                    "source": source_url,
+                    "download": attached_download,
+                    "files": attached_download.get("files") or [],
+                }
+            if not payload.get("files"):
+                return {
+                    "status": "error",
+                    "error": "Download stage produced no files",
+                    "source": source_url,
+                    "download": attached_download,
+                    "files": [],
+                }
+            extracted = self.extract_manifest(str(manifest_path), context=context)
+            return {**extracted, "download": attached_download}
 
 
 def _client() -> ArchiverClient:

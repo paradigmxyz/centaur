@@ -71,7 +71,7 @@ async def upload_attachment(request: Request):
     mime_type = body.get("mime_type")
     data_b64 = body.get("data")
 
-    if not all([thread_key, name, mime_type, data_b64]):
+    if not thread_key or not name or not mime_type or data_b64 is None:
         raise HTTPException(
             status_code=422,
             detail="thread_key, name, mime_type, and data are required",
