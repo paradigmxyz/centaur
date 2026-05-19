@@ -8,14 +8,30 @@
   --centaur-muted: light-dark(#727278, #9b9ba1);
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
-  --centaur-sans: 'Instrument Sans', system-ui, sans-serif;
+  --centaur-sans: 'PolySans Var', system-ui, sans-serif;
   --centaur-serif: 'Sagittaire Text', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Sagittaire Display', var(--centaur-serif);
 }
 
 @font-face {
+  font-family: 'PolySans Var';
+  src: url('/fonts/PolySans-variable.woff2') format('woff2-variations');
+  font-style: normal;
+  font-weight: 300 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'PolySans Var';
+  src: url('/fonts/PolySansItalic-variable.woff2') format('woff2-variations');
+  font-style: italic;
+  font-weight: 300 800;
+  font-display: swap;
+}
+
+@font-face {
   font-family: 'Sagittaire Display';
-  src: url('https://ampcode.com/fonts/SagittaireDisplay-Regular.woff2') format('woff2');
+  src: url('/fonts/SagittaireDisplay-Regular.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
@@ -23,7 +39,7 @@
 
 @font-face {
   font-family: 'Sagittaire Display';
-  src: url('https://ampcode.com/fonts/SagittaireDisplay-Extralight.woff2') format('woff2');
+  src: url('/fonts/SagittaireDisplay-Extralight.woff2') format('woff2');
   font-style: normal;
   font-weight: 200;
   font-display: swap;
@@ -31,7 +47,7 @@
 
 @font-face {
   font-family: 'Sagittaire Text';
-  src: url('https://ampcode.com/fonts/SagittaireText-Light.woff2') format('woff2');
+  src: url('/fonts/SagittaireText-Light.woff2') format('woff2');
   font-style: normal;
   font-weight: 300;
   font-display: swap;
@@ -39,7 +55,7 @@
 
 @font-face {
   font-family: 'Sagittaire Text';
-  src: url('https://ampcode.com/fonts/SagittaireText-Medium.woff2') format('woff2');
+  src: url('/fonts/SagittaireText-Medium.woff2') format('woff2');
   font-style: normal;
   font-weight: 500;
   font-display: swap;
@@ -47,7 +63,7 @@
 
 @font-face {
   font-family: 'Sagittaire Text';
-  src: url('https://ampcode.com/fonts/SagittaireText-MediumItalic.woff2') format('woff2');
+  src: url('/fonts/SagittaireText-MediumItalic.woff2') format('woff2');
   font-style: italic;
   font-weight: 500;
   font-display: swap;
@@ -69,6 +85,11 @@
 body,
 .vocs_DocsLayout {
   font-family: var(--centaur-sans);
+}
+
+.centaur-home,
+.vocs_Content {
+  letter-spacing: clamp(0em, 0.48px - 0.03em, 0.3em);
 }
 
 .vocs_Content h1,
