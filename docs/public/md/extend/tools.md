@@ -1,6 +1,6 @@
 ---
 title: Creating Tools
-description: Add Centaur tool plugins with client.py, pyproject metadata, allowed hosts, and secret placeholders.
+description: Add Centaur tool plugins with client.py, pyproject metadata, and typed secret declarations.
 ---
 
 # Creating Tools
@@ -34,13 +34,25 @@ build-backend = "hatchling.build"
 
 [tool.ai-v2]
 module = "client.py"
-hosts = ["warehouse.internal.example.com"]
-secrets = ["WAREHOUSE_API_KEY"]
+secrets = [
+    {type = "http", name = "WAREHOUSE_API_KEY", match_headers = ["Authorization"], hosts = ["warehouse.internal.example.com"]},
+]
 ```
 
-`hosts` is the outbound allowlist used by the proxy secret-injection path.
-`secrets` declares the placeholder values that the tool can request with
-`secret(...)`.
+Each entry in `secrets` declares one credential the tool can request with
+`secret(...)`. The fields tell iron-proxy what to swap and where:
+
+- `type = "http"` is the common case: an HTTP credential injected into outbound
+  requests. Other types include `oauth_token`, `gcp_auth`, and `pg_dsn` for
+  upstreams that need OAuth, Google service-account auth, or proxied Postgres.
+- `name` is the placeholder string the sandbox sees and what
+  `secret("...")` looks up.
+- `match_headers`, `match_query`, or `match_path` tell iron-proxy where in the
+  request the placeholder is allowed to appear. At least one is required.
+- `hosts` is the upstream allowlist for this secret. iron-proxy will only
+  inject the real value on requests to these hosts.
+
+Use `optional_secrets` for credentials the tool can run without.
 
 ## Write the client
 

@@ -92,11 +92,6 @@ export default defineConfig({
       text: 'GitHub',
       link: 'https://github.com/paradigmxyz/centaur',
     },
-    {
-      text: 'Security',
-      link: '/security',
-      match: (path) => path === '/security',
-    },
   ],
   search: {
     boostDocument(documentId) {
