@@ -326,6 +326,31 @@ body,
   background: #050506;
 }
 
+.topnav-github {
+  align-items: center;
+  color: currentColor;
+  display: inline-flex;
+  height: var(--vocs-topNav_horizontalPadding, 100%);
+  justify-content: center;
+  line-height: 1;
+  opacity: 0.85;
+  padding: 0 10px;
+  text-decoration: none;
+  transition: opacity 0.15s ease;
+}
+
+.topnav-github:hover,
+.topnav-github:focus-visible {
+  opacity: 1;
+  outline: none;
+}
+
+.topnav-github svg {
+  display: block;
+  height: 18px;
+  width: 18px;
+}
+
 .vocs_DocsLayout[data-layout="landing"] .vocs_NavLogo_logoImage {
   height: 32px;
 }
