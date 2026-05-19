@@ -16,7 +16,8 @@ Slack ETL keeps an indexed, queryable copy of public Slack history in Postgres
 for agent context and operator workflows. It runs as scheduled Centaur
 workflows: one workflow keeps recent channel history fresh, one drains deferred
 historical backfill work, and one turns synced messages into company context
-documents.
+documents. See [Creating Workflows](/extend/workflows) for the durable workflow
+model behind these jobs.
 
 The ETL path is separate from Slackbot delivery. Slackbot handles live user
 turns in Slack threads; Slack ETL reads Slack history with a dedicated user
