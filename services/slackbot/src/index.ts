@@ -12,6 +12,7 @@ import { AgentSessionRenderer } from './slack/agent-session'
 import { authorizeSlackOrg } from './slack/authorization'
 import { CodexSessionRenderer, codexFooter } from './slack/codex-session'
 import { EventDeduper, slackDedupKey } from './slack/dedup'
+import { duplicateSlackAlertText, type DuplicateSlackEventDetails } from './slack/duplicate-alert'
 import { EnvSlackInstallationStore, SlackClientResolver } from './slack/installations'
 import { normalizeSlackEnvelope } from './slack/normalize'
 import { markdownToStreamChunks } from './slack/render'
@@ -20,6 +21,9 @@ import type { SlackEnvelope } from './slack/types'
 import type { AnyBlock, AnyChunk } from '@slack/types'
 
 const config = loadConfig()
+// This is the existing deployments/runtime alert channel wired by the Helm
+// chart from slackbot.runtimeErrorAlertChannel.
+const deploymentAlertChannel = config.RUNTIME_ERROR_ALERT_CHANNEL.trim()
 const resolver = new SlackClientResolver(
   new EnvSlackInstallationStore({
     token: config.SLACK_BOT_TOKEN
@@ -27,6 +31,7 @@ const resolver = new SlackClientResolver(
 )
 const handoff = new CentaurHandoff(config)
 const deduper = new EventDeduper(config.SLACK_EVENT_DEDUP_TTL_MS)
+const CODEX_THREAD_RE = /\b(?:codex|agent|amp)\s+thread\b[^A-Z0-9]*(T-[A-Z0-9-]+)/i
 
 void resolver
   .resolve({})
@@ -107,6 +112,19 @@ const slackHandler = async (c: Context<{ Variables: Variables }>) => {
     messageTs: typeof event?.ts === 'string' ? event.ts : undefined
   })
   if (!deduper.checkAndRemember(key)) {
+    const duplicate = duplicateSlackEventDetails(envelope, event, key)
+    logWarn(
+      key.startsWith('message:')
+        ? 'slack_duplicate_message_skipped'
+        : 'slack_duplicate_event_skipped',
+      {
+        ...duplicate,
+        alert_channel_id: deploymentAlertChannel || undefined
+      }
+    )
+    if (deploymentAlertChannel) {
+      runInBackground(c, notifyDuplicateSlackAlert(duplicate))
+    }
     return c.json({ ok: true, duplicate: true })
   }
 
@@ -383,6 +401,73 @@ if (process.env.NODE_ENV === 'development') showRoutes(app)
 export default {
   port: config.PORT,
   fetch: app.fetch
+}
+
+function duplicateSlackEventDetails(
+  envelope: SlackEnvelope,
+  event: Record<string, unknown> | undefined,
+  dedupeKey: string
+): DuplicateSlackEventDetails {
+  const messageTs = typeof event?.ts === 'string' ? event.ts : undefined
+  return {
+    dedupe_key: dedupeKey,
+    event_id: envelope.event_id,
+    team_id: envelope.team_id,
+    channel_id: typeof event?.channel === 'string' ? event.channel : undefined,
+    message_ts: messageTs,
+    thread_ts: typeof event?.thread_ts === 'string' ? event.thread_ts : messageTs,
+    event_type: typeof event?.type === 'string' ? event.type : undefined,
+    codex_thread_id: codexThreadIdFromSlackEvent(event)
+  }
+}
+
+async function notifyDuplicateSlackAlert(details: DuplicateSlackEventDetails): Promise<void> {
+  if (!deploymentAlertChannel) return
+  try {
+    const { client } = await resolver.resolve({ teamId: details.team_id })
+    await client.chat.postMessage({
+      channel: deploymentAlertChannel,
+      text: duplicateSlackAlertText(details)
+    })
+    logWarn('slack_duplicate_alert_posted', {
+      ...details,
+      alert_channel_id: deploymentAlertChannel,
+      alert_posted: true
+    })
+  } catch (error) {
+    logWarn('slack_duplicate_alert_failed', {
+      ...details,
+      alert_channel_id: deploymentAlertChannel,
+      alert_posted: false,
+      error: error instanceof Error ? error.message : String(error)
+    })
+  }
+}
+
+function codexThreadIdFromSlackEvent(event: Record<string, unknown> | undefined): string | undefined {
+  if (!event) return undefined
+  for (const key of ['codex_thread_id', 'agent_thread_id', 'thread_id', 'session_id']) {
+    const value = event[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return codexThreadIdFromUnknown(event)
+}
+
+function codexThreadIdFromUnknown(value: unknown): string | undefined {
+  if (typeof value === 'string') return CODEX_THREAD_RE.exec(value)?.[1]
+  if (!value || typeof value !== 'object') return undefined
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = codexThreadIdFromUnknown(item)
+      if (found) return found
+    }
+    return undefined
+  }
+  for (const item of Object.values(value)) {
+    const found = codexThreadIdFromUnknown(item)
+    if (found) return found
+  }
+  return undefined
 }
 
 async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {

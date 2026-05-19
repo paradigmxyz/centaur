@@ -8,6 +8,7 @@ const config: AppConfig = {
   CENTAUR_API_URL: 'http://centaur-api.test',
   CENTAUR_API_KEY: 'centaur-test-key',
   CENTAUR_SLACK_EVENTS_PATH: '/api/webhooks/slack',
+  RUNTIME_ERROR_ALERT_CHANNEL: '',
   SLACK_EVENT_DEDUP_TTL_MS: 600000,
   SLACK_SIGNATURE_MAX_AGE_SECONDS: 300,
   SLACK_FEEDBACK_COMMANDS: ['/website-feedback'],
@@ -28,7 +29,7 @@ describe('final delivery polling', () => {
     let claimCount = 0
     const fetchMock = mock(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input)
-      const body = init?.body ? JSON.parse(String(init.body)) : undefined
+      const body = init?.body ? JSON.parse(init.body as string) : undefined
       fetchCalls.push({ path: url.pathname, body })
 
       if (url.pathname === '/agent/final-deliveries/claim') {
@@ -102,9 +103,11 @@ describe('final delivery polling', () => {
         fetchCalls.filter(call => call.path === '/agent/final-deliveries/exe-duplicate-guard/delivered')
       ).toHaveLength(1)
       expect(slackCalls.filter(call => call.method === 'chat.startStream')).toHaveLength(1)
-      expect(
-        (slackCalls.find(call => call.method === 'chat.startStream')?.params as any).chunks[0]
-      ).toEqual({ type: 'plan_update', title: 'Centaur · codex' })
+      const startStream = slackCalls.find(call => call.method === 'chat.startStream')
+      expect((startStream?.params as any)?.chunks[0]).toEqual({
+        type: 'plan_update',
+        title: 'Centaur · codex'
+      })
       expect(slackCalls.filter(call => call.method === 'chat.stopStream')).toHaveLength(1)
     } finally {
       globalThis.fetch = originalFetch
