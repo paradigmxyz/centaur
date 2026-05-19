@@ -396,18 +396,28 @@ body,
 }
 
 /*
- * Right-align the hamburger on the mobile landing nav. Vocs lays the
- * mobile topNav out as a flex row: [logo group] [nav group] [search].
- * On landing we hid the search button, so the menu trigger sits to the
- * right of the logo — bump it to the far edge with margin-left: auto.
+ * Mobile / tablet landing nav layout. Vocs nests everything inside a
+ * single `.vocs_MobileTopNav_section` flex row whose direct children are:
+ *   1. logo group       (.vocs_MobileTopNav_group with .vocs_MobileTopNav_logo)
+ *   2. nav-links group  (.vocs_MobileTopNav_group with horizontal links)
+ *   3. menu-trigger     (.vocs_MobileTopNav_navigation_compact wrapping the
+ *                       hamburger button)
+ * Space-between distributes them as logo-left / nav-center / hamburger-right.
+ * The hamburger row already lives inside its own wrapper; force it to the
+ * far right edge via margin-left: auto in case space-between can't push it
+ * (e.g. nav links overflow).
  */
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav .vocs_MobileTopNav_menuTrigger {
-  margin-left: auto;
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_section {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  gap: 16px;
+  justify-content: space-between;
+  width: 100%;
 }
 
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav {
-  align-items: center;
-  justify-content: space-between;
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation_compact {
+  margin-left: auto;
 }
 
 /*
