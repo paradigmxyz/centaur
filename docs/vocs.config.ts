@@ -7,8 +7,9 @@ const basePath = process.env.VOCS_BASE_PATH || undefined
 const siteUrl = 'https://centaur.run'
 
 function canonicalHref(path: string) {
-  if (path === '/') return `${siteUrl}/`
-  return `${siteUrl}${path.replace(/\/+$/, '')}/`
+  const root = 'https://centaur.run'
+  if (path === '/') return `${root}/`
+  return `${root}${path.replace(/\/+$/, '')}/`
 }
 
 export default defineConfig({
@@ -64,7 +65,7 @@ export default defineConfig({
   ogImageUrl: (path: string, { baseUrl }: { baseUrl: string }) => {
     const key = path.replace(/\/$/, '') || '/'
     const slug = key === '/' ? 'index' : key.replace(/^\//, '').replace(/\//g, '_')
-    const root = baseUrl ?? siteUrl
+    const root = baseUrl ?? 'https://centaur.run'
     return `${root.replace(/\/$/, '')}/og/${slug}.png`
   },
   ...(basePath ? { basePath } : {}),
