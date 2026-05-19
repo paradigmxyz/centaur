@@ -2,3 +2,8 @@
 # scripts/build-brand-zip.sh — never commit the binary, always rebuild.
 public/centaur-brand-assets.zip
 bun.lock
+
+# Generated on every prebuild by scripts/build-og.ts from the page
+# frontmatter and the og-template SVG, plus a local font cache.
+public/og/
+scripts/.font-cache/

@@ -34,6 +34,24 @@ export default defineConfig({
   font: {
     mono: { google: 'Geist Mono' },
   },
+  // Open Graph cards are pre-rendered at build time by scripts/build-og.ts
+  // (ported from tempoxyz/mpp's /api/og handler) using the vendored brand
+  // fonts. Map each known route to its card; new routes fall back to
+  // _default.png until the next build picks them up.
+  ogImageUrl: {
+    '/': '/og/index.png',
+    '/what-is-centaur': '/og/what-is-centaur.png',
+    '/quickstart': '/og/quickstart.png',
+    '/deploying-in-production': '/og/deploying-in-production.png',
+    '/architecture': '/og/architecture.png',
+    '/brand': '/og/brand.png',
+    '/extend/overlay': '/og/extend_overlay.png',
+    '/extend/tools': '/og/extend_tools.png',
+    '/extend/workflows': '/og/extend_workflows.png',
+    '/extend/skills': '/og/extend_skills.png',
+    '/secrets/onepassword': '/og/secrets_onepassword.png',
+    '/secrets/environment': '/og/secrets_environment.png',
+  },
   ...(basePath ? { basePath } : {}),
   editLink: {
     pattern: 'https://github.com/paradigmxyz/centaur/edit/main/docs/pages/:path',
