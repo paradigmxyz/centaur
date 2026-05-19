@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import httplib2
 import socks
+from centaur_sdk import save_attachment
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
@@ -684,19 +685,15 @@ def drive_list(
     ]
 
 
-def drive_download(file_id: str, output_path: str) -> str:
-    """Download a file from Google Drive.
-
-    Args:
-        file_id: The file ID
-        output_path: Local path to save the file
-
-    Returns:
-        The output path
-    """
+def _drive_download_bytes(file_id: str) -> tuple[dict, bytes]:
     import io
 
     service = get_drive_service()
+    metadata = service.files().get(
+        fileId=file_id,
+        fields="name,mimeType,webViewLink",
+        supportsAllDrives=True,
+    ).execute()
 
     request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
     fh = io.BytesIO()
@@ -706,10 +703,25 @@ def drive_download(file_id: str, output_path: str) -> str:
     while not done:
         _, done = downloader.next_chunk()
 
-    with open(output_path, "wb") as f:
-        f.write(fh.getvalue())
+    return metadata, fh.getvalue()
 
-    return output_path
+
+def drive_download(file_id: str) -> dict:
+    """Download a file from Google Drive into a thread-scoped Centaur attachment.
+
+    Args:
+        file_id: The file ID
+
+    Returns:
+        Attachment metadata
+    """
+    metadata, data = _drive_download_bytes(file_id)
+    return save_attachment(
+        name=metadata.get("name") or f"drive-{file_id}",
+        mime_type=metadata.get("mimeType") or "application/octet-stream",
+        data=data,
+        source_url=metadata.get("webViewLink"),
+    )
 
 
 def drive_upload(
@@ -1168,19 +1180,8 @@ def drive_setup_channel_permissions(
     return results
 
 
-def drive_export(file_id: str, export_format: str = "txt", output_path: str | None = None) -> str:
-    """Export a Google Docs/Sheets/Slides file to a specific format.
-
-    Args:
-        file_id: The file ID
-        export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx)
-        output_path: Optional output path (defaults to temp file)
-
-    Returns:
-        The output path
-    """
+def _drive_export_bytes(file_id: str, export_format: str = "txt") -> tuple[dict, str, bytes]:
     import io
-    import tempfile
 
     service = get_drive_service()
 
@@ -1202,9 +1203,11 @@ def drive_export(file_id: str, export_format: str = "txt", output_path: str | No
             f"Unsupported export format: {export_format}. Supported: {list(format_map.keys())}"
         )
 
-    # Determine output path
-    if not output_path:
-        output_path = tempfile.mktemp(suffix=f".{export_format}")
+    metadata = service.files().get(
+        fileId=file_id,
+        fields="name,webViewLink",
+        supportsAllDrives=True,
+    ).execute()
 
     # Export the file
     request = service.files().export_media(fileId=file_id, mimeType=mime_type)
@@ -1215,10 +1218,27 @@ def drive_export(file_id: str, export_format: str = "txt", output_path: str | No
     while not done:
         _, done = downloader.next_chunk()
 
-    with open(output_path, "wb") as f:
-        f.write(fh.getvalue())
+    return metadata, mime_type, fh.getvalue()
 
-    return output_path
+
+def drive_export(file_id: str, export_format: str = "txt") -> dict:
+    """Export a Google Docs/Sheets/Slides file into a thread-scoped attachment.
+
+    Args:
+        file_id: The file ID
+        export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx)
+
+    Returns:
+        Attachment metadata
+    """
+    metadata, mime_type, data = _drive_export_bytes(file_id, export_format)
+    stem = Path(metadata.get("name") or f"drive-{file_id}").stem
+    return save_attachment(
+        name=f"{stem}.{export_format}",
+        mime_type=mime_type,
+        data=data,
+        source_url=metadata.get("webViewLink"),
+    )
 
 
 # Docs functions
@@ -2618,17 +2638,16 @@ class GSuiteClient:
         """
         return drive_get(file_id)
 
-    def drive_download(self, file_id: str, output_path: str) -> str:
-        """Download a file from Google Drive.
+    def drive_download(self, file_id: str) -> dict:
+        """Download a file from Google Drive into a thread-scoped attachment.
 
         Args:
             file_id: The file ID
-            output_path: Local path to save the file
 
         Returns:
-            The output path
+            Attachment metadata
         """
-        return drive_download(file_id, output_path)
+        return drive_download(file_id)
 
     def drive_upload(
         self,
@@ -2788,20 +2807,17 @@ class GSuiteClient:
         """
         return drive_setup_channel_permissions(file_id, channel_member_emails, requester_email)
 
-    def drive_export(
-        self, file_id: str, export_format: str = "txt", output_path: str | None = None
-    ) -> str:
-        """Export a Google Docs/Sheets/Slides file to a specific format.
+    def drive_export(self, file_id: str, export_format: str = "txt") -> dict:
+        """Export a Google Docs/Sheets/Slides file into a thread-scoped attachment.
 
         Args:
             file_id: The file ID
             export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx)
-            output_path: Optional output path (defaults to temp file)
 
         Returns:
-            The output path
+            Attachment metadata
         """
-        return drive_export(file_id, export_format=export_format, output_path=output_path)
+        return drive_export(file_id, export_format=export_format)
 
     # --- Docs ---
 

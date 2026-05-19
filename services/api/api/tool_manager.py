@@ -756,11 +756,34 @@ _COMMON_ARGUMENT_ALIASES: dict[str, str] = {
     "table": "table_name",
 }
 
+_FORBIDDEN_TOOL_ARGUMENT_NAMES = frozenset(
+    {
+        "output_path",
+        "output_dir",
+        "download_path",
+        "save_path",
+        "dest_path",
+        "destination_path",
+    }
+)
+
 
 def _tool_arg_validation_error(
     method: ToolMethod, args: dict[str, Any]
 ) -> dict[str, Any] | None:
     """Return a structured argument error before invoking a tool method."""
+    forbidden = sorted(set(args) & _FORBIDDEN_TOOL_ARGUMENT_NAMES)
+    if forbidden:
+        return {
+            "error": "tool_argument_validation_failed",
+            "message": (
+                "Forbidden argument(s): "
+                f"{', '.join(forbidden)}. Tools may not write API-process files "
+                "to caller-supplied paths; return Centaur attachments instead."
+            ),
+            "forbidden_args": forbidden,
+        }
+
     sig = inspect.signature(method.fn)
     params = sig.parameters
     accepts_var_kwargs = any(
