@@ -144,12 +144,19 @@
 }
 
 /*
- * Mirror Amp manual typography: serif docs body copy, Perfectly Nineties
- * headings, and explicit mono code.
+ * Type system split:
+ *   - Body copy (docs paragraphs, lists, tables, captions, landing lede,
+ *     buttons) → PolySans Var (--centaur-sans). Perfectly Nineties at
+ *     body size and tight line-height was hard to read; humans skim the
+ *     prose, the serif belongs to display copy only.
+ *   - Display copy (hero h1, docs h1-h6, nav links) → Perfectly Nineties
+ *     (--centaur-serif / --centaur-manual-display). Nav links stay on
+ *     the serif by explicit override since body's default is now sans.
+ *   - Code → mono (explicit per-selector).
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-serif);
+  font-family: var(--centaur-sans);
 }
 
 .centaur-home,
@@ -159,7 +166,7 @@ body,
 
 .vocs_Content {
   color: #dfdfd8;
-  font-family: var(--centaur-serif);
+  font-family: var(--centaur-sans);
   font-size: 1rem;
   line-height: 1.5;
 }
@@ -381,6 +388,26 @@ body,
 }
 
 /*
+ * Narrow-desktop range (1081-1280px): Vocs defaults the nav-item gap to
+ * `var(--vocs-space_20)` (~20px) and the four text labels + GH icon
+ * read fine at >=1281px, but between 1081-1280 the right-aligned group
+ * starts to clip on the right edge if the topNav's outer gutter padding
+ * eats the last few pixels. Tighten the inter-item gap so all five
+ * fit without truncation. Same effect could be had by shrinking the
+ * font-size, but the labels are already small enough that a gap nudge
+ * preserves type weight.
+ */
+@media (min-width: 1081px) and (max-width: 1280px) {
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav {
+    gap: 14px;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_NavigationMenu_list {
+    gap: 14px;
+  }
+}
+
+/*
  * Hide ONLY the desktop topNav logo on landing — the hero already carries
  * a large centaur mark above the headline, so the small lockup in the
  * desktop topNav reads as a redundant duplicate.
@@ -396,16 +423,27 @@ body,
 }
 
 /*
- * Mobile / tablet landing nav layout. Vocs nests everything inside a
- * single `.vocs_MobileTopNav_section` flex row whose direct children are:
- *   1. logo group       (.vocs_MobileTopNav_group with .vocs_MobileTopNav_logo)
- *   2. nav-links group  (.vocs_MobileTopNav_group with horizontal links)
- *   3. menu-trigger     (.vocs_MobileTopNav_navigation_compact wrapping the
- *                       hamburger button)
- * Space-between distributes them as logo-left / nav-center / hamburger-right.
- * The hamburger row already lives inside its own wrapper; force it to the
- * far right edge via margin-left: auto in case space-between can't push it
- * (e.g. nav links overflow).
+ * Mobile / tablet landing nav layout.
+ *
+ * Actual Vocs DOM looks like this:
+ *   .vocs_MobileTopNav (flex root)
+ *   ├ .vocs_MobileTopNav_section            ← main row (logo + nav)
+ *   │   ├ .vocs_MobileTopNav_group          ← logo wrapper
+ *   │   └ .vocs_MobileTopNav_group          ← nav wrapper
+ *   │       ├ .vocs_MobileTopNav_navigation         ← inline links (tablet)
+ *   │       └ .vocs_MobileTopNav_navigation_compact ← hamburger (mobile)
+ *   └ .vocs_MobileTopNav_section            ← search-button section
+ *       └ .vocs_MobileTopNav_group / search button
+ *
+ * The second section (search) eats the right 50% of the topNav even when
+ * the search button itself is hidden on landing, because we only hide
+ * the button, not its wrapper section. That stranded empty section is
+ * what was pushing the hamburger / inline links into the visual middle
+ * of the row instead of the right edge. Hide the whole second section
+ * on landing so the first section spans full width, then space-between
+ * cleanly distributes its two groups as logo-left / nav-right. Pin the
+ * last child group with `margin-left: auto` as a belt-and-braces guard
+ * in case the section ever picks up a non-space-between layout.
  */
 .vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_section {
   align-items: center;
@@ -416,7 +454,11 @@ body,
   width: 100%;
 }
 
-.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_navigation_compact {
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_section + .vocs_MobileTopNav_section {
+  display: none;
+}
+
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_section > .vocs_MobileTopNav_group:last-child {
   margin-left: auto;
 }
 
@@ -474,6 +516,20 @@ body,
 
 .vocs_NavigationMenu_list {
   align-items: center;
+}
+
+/*
+ * Body defaults to sans (--centaur-sans / PolySans Var), but the nav
+ * text labels stay on Perfectly Nineties (--centaur-serif) for the
+ * editorial voice. Covers both the desktop topNav items (which carry
+ * BOTH .vocs_DesktopTopNav_item and .vocs_NavigationMenu_link) and the
+ * mobile topNav inline links (.vocs_NavigationMenu_link alone) plus
+ * the hamburger drawer items (.vocs_MobileTopNav_navigationItem).
+ */
+.vocs_DesktopTopNav_item,
+.vocs_NavigationMenu_link,
+.vocs_MobileTopNav_navigationItem {
+  font-family: var(--centaur-serif);
 }
 
 /*
@@ -625,7 +681,10 @@ body,
 
 .home-lede {
   color: #b8b8b0;
-  font-family: var(--centaur-manual-display);
+  /* Body-sized lede uses PolySans (sans) — Perfectly Nineties at this
+   * size with this much copy was hard to skim. The hero h1 above keeps
+   * the serif for display impact. */
+  font-family: var(--centaur-sans);
   font-size: clamp(1.3rem, 1.4vw, 1.48rem);
   font-weight: 400;
   letter-spacing: 0.01em;
@@ -1384,7 +1443,6 @@ body,
 @media (max-width: 760px) {
   .centaur-home {
     min-height: calc(100dvh - 64px);
-    padding: 54px 20px 40px;
   }
 
   /* Same flow as the tablet branch above — zero the parent gap and
