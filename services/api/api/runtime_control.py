@@ -74,14 +74,14 @@ EXECUTION_STALE_RECOVERY_INTERVAL_S = float(
     os.getenv("EXECUTION_STALE_RECOVERY_INTERVAL_S", "5.0")
 )
 EXECUTION_WORKER_CONCURRENCY = max(
-    int(os.getenv("EXECUTION_WORKER_CONCURRENCY", "4")),
+    int(os.getenv("EXECUTION_WORKER_CONCURRENCY", "128")),
     1,
 )
 # Number of execution worker slots reserved for non-workflow (user-facing)
 # requests.  Workflow-spawned executions cannot consume more than
 # EXECUTION_WORKER_CONCURRENCY - EXECUTION_RESERVED_USER_SLOTS slots.
 EXECUTION_RESERVED_USER_SLOTS = max(
-    int(os.getenv("EXECUTION_RESERVED_USER_SLOTS", "2")),
+    int(os.getenv("EXECUTION_RESERVED_USER_SLOTS", "16")),
     0,
 )
 _MAX_SLACKBOT_TEXT_CHARS = 12_000
