@@ -7,7 +7,12 @@ description: Boot Centaur locally and verify the control plane.
 
 This guide gets you from a fresh checkout to a working local Centaur stack. The
 happy path is: point `kubectl` at a local cluster, bootstrap the required infra
-Secret, run `just up`, then verify the API is healthy.
+Secret, run `just up`, verify the API, then run one agent turn without Slack.
+
+If you want an agent to drive setup with you, point it at these docs: every page
+is available as Markdown through `/llms.txt`, `/llms-full.txt`, and `/md/...`,
+or add this site's Vocs MCP server at `/api/mcp` so the agent can search and
+read the docs directly.
 
 ## 1. Install prerequisites
 
@@ -106,7 +111,39 @@ Expected shape:
 {"status":"ok"}
 ```
 
-## 5. Try Slack after the API works
+## 5. Run an agent turn
+
+Before testing Slack, run the local smoke test. It uses the same durable agent
+API that Slackbot uses: spawn or reuse a runtime, persist a message, enqueue an
+execution, and poll the execution state until the result contains `PONG`.
+
+```bash
+just smoke
+```
+
+The successful result includes the terminal execution row. The important fields
+are:
+
+```json
+{
+  "status": "completed",
+  "result_text": "...PONG..."
+}
+```
+
+If the smoke test times out or fails, start with the local stack state:
+
+```bash
+just status
+just logs api
+kubectl get pods -n centaur -l centaur.ai/managed=true
+```
+
+If you changed the namespace or release name, set `CENTAUR_NAMESPACE` and
+`CENTAUR_RELEASE` before running `just smoke` so the recipe targets the right
+deployment.
+
+## 6. Try Slack after the API works
 
 Mention the bot in a test channel where the Slack app is installed:
 

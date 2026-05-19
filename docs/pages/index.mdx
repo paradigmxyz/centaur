@@ -90,6 +90,25 @@ import ThreadPanel from '../components/ThreadPanel'
       </li>
     </ul>
 
+  </section>
+
+  <section className="home-overview home-media-section" aria-labelledby="home-extensible-title">
+    <div className="home-overview-heading">
+      <h2 id="home-extensible-title">Extensible by default</h2>
+      <p>Layer team-specific skills, tools, workflows, personas, and app code over the open-source Centaur kernel without carrying a long-lived fork.</p>
+    </div>
+
+    <figure className="home-architecture-diagram">
+      <img src="/brand/containers.svg" alt="Centaur deployment layout: the open-source kernel wrapped by an organization overlay and a per-app repository." />
+    </figure>
+  </section>
+
+  <section className="home-overview home-media-section" aria-labelledby="home-architecture-title">
+    <div className="home-overview-heading">
+      <h2 id="home-architecture-title">Architecture</h2>
+      <p>Self-host the control plane, isolate each harness in sandbox pods, persist every turn, and inject secrets only through controlled egress.</p>
+    </div>
+
     <figure className="home-architecture-diagram">
       <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
     </figure>

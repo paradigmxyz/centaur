@@ -134,8 +134,9 @@ A few honest caveats:
   Per-user and per-channel scoping is on the roadmap. A thread in
   `#payments` would get the payments `GITHUB_TOKEN` rather than a
   deployment-wide one, and a DM would resolve to the invoking user's
-  credentials. Until that lands, pick which tools and harnesses an
-  installation exposes with the current scope in mind.
+  credentials. See the [Advanced Permissioning roadmap](/secrets/advanced-permissioning).
+  Until that lands, pick which tools and harnesses an installation
+  exposes with the current scope in mind.
 - **The default egress allowlist is permissive.** Leaving it open is
   a deliberate UX choice. An open configuration lets users start
   using agents immediately and develop an allowlist over time. If
