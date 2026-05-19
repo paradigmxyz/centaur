@@ -51,6 +51,11 @@ Deployments can layer organization-specific tools, workflows, skills, personas, 
 
 Overlays are ordered, so later entries can override or extend earlier ones without forcing every deployment into a long-lived fork.
 
+<figure className="architecture-figure">
+  <img src="/brand/containers.png" alt="Centaur deployment layout — paradigmxyz/centaur kernel wrapped by an org-level userspace repo and a per-app application repo" />
+  <figcaption>Three nested repos: <code>paradigmxyz/centaur</code> is the kernel (control loop, workflow engine, sandboxing), the org's <code>centaur</code> overlay holds shared business logic, and each <code>example-centaur-app</code> sits on top with app-specific workflows wired to its Slackbot.</figcaption>
+</figure>
+
 ## Production Shape
 
 Centaur is built around a Kubernetes deployment model:
