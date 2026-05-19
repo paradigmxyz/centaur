@@ -1,8 +1,9 @@
 import type { AnyBlock, AnyChunk, MarkdownBlock, RichTextBlock } from '@slack/types'
+import { slackReplyLimits } from '../constants'
 
 const MAX_BLOCKS = 50
-const MAX_MARKDOWN_CHARS = 12_000
-const MAX_FALLBACK_CHARS = 3_900
+const MAX_MARKDOWN_CHARS = slackReplyLimits.stream.markdownChunkChars
+const MAX_FALLBACK_CHARS = slackReplyLimits.text.maxUntruncatedChars
 const MAX_STREAM_CHUNK_CHARS = 4_000
 
 export type StatusMetadata = {

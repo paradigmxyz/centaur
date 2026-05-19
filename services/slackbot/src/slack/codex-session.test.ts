@@ -154,8 +154,8 @@ describe('CodexSessionRenderer', () => {
     expect(taskUpdates.some(chunk => chunk.title.includes('call demo ping'))).toBe(true)
     expect(taskUpdates.at(-1)).toMatchObject({
       id: 'cmd-2',
-      status: 'error',
-      title: 'Run command: call grafana health'
+      status: 'complete',
+      title: 'Command failed: call grafana health'
     })
   })
 

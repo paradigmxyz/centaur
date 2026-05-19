@@ -1,6 +1,7 @@
 import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
 import { ulid } from '@std/ulid'
+import { slackReplyLimits } from '../constants'
 import {
   markdownChunk,
   planBlock,
@@ -75,10 +76,11 @@ const TEXT_FLUSH_INTERVAL_MS = 250
 const TEXT_FLUSH_CHARS = 1000
 const FIRST_TEXT_FLUSH_CHARS = 1
 const EXECUTION_PLAN_ID = 'codex-execution-timeline'
-const FINAL_PLAN_MAX_TASKS = 12
-const FINAL_PLAN_TITLE_CHARS = 140
-const FINAL_PLAN_DETAILS_CHARS = 192
-const FINAL_PLAN_OUTPUT_CHARS = 256
+const LIVE_PLAN_MAX_TASKS = slackReplyLimits.stream.taskCount
+const FINAL_PLAN_MAX_TASKS = slackReplyLimits.finalPlan.maxTasks
+const FINAL_PLAN_TITLE_CHARS = slackReplyLimits.finalPlan.taskTitleChars
+const FINAL_PLAN_DETAILS_LINES = slackReplyLimits.finalPlan.taskDetailsCodeBlockLines
+const FINAL_PLAN_OUTPUT_LINES = slackReplyLimits.finalPlan.taskOutputCodeBlockLines
 
 export class AgentSessionRenderer {
   constructor(private readonly client: WebClient) {}
@@ -205,9 +207,10 @@ export class AgentSessionRenderer {
     if (!segment.streamTs) return
     const originalTasks = finalTaskSnapshot(segment)
     const tasks = compactFinalTasks(originalTasks)
+    const streamedText = finalMarkdownForBlocks(segment.streamedText, tasks)
     const blocks = [
       ...(tasks.length ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)] : []),
-      ...renderMarkdownBlocks(segment.streamedText),
+      ...(streamedText ? renderMarkdownBlocks(streamedText) : []),
       ...(footer ? footerBlocks(footer) : [])
     ] as AnyBlock[]
     const stopResponse = await this.client.chat.stopStream({
@@ -334,6 +337,7 @@ export class AgentSessionRenderer {
     segment: Segment,
     task: StreamTask
   ): Promise<void> {
+    if (!shouldStreamTaskUpdate(segment, task.id)) return
     const taskChunk = taskUpdateChunk(task)
     const chunks = [...this.planPrefix(state, segment), taskChunk]
     await this.streamChunks(state, segment, chunks)
@@ -396,6 +400,10 @@ function finalTaskSnapshot(segment: Segment): StreamTask[] {
   return Array.from(segment.tasks.values())
 }
 
+function shouldStreamTaskUpdate(segment: Segment, taskId: string): boolean {
+  return Array.from(segment.tasks.keys()).indexOf(taskId) < LIVE_PLAN_MAX_TASKS
+}
+
 function planTitle(title: string, tasks: StreamTask[]): string {
   if (!tasks.length) return title
   const total = tasks.length
@@ -409,8 +417,8 @@ function compactFinalTasks(tasks: StreamTask[]): StreamTask[] {
   const visible: StreamTask[] = tasks.slice(0, FINAL_PLAN_MAX_TASKS).map(task => ({
     ...task,
     title: clipText(task.title, FINAL_PLAN_TITLE_CHARS),
-    details: compactTaskBody(task.details, FINAL_PLAN_DETAILS_CHARS),
-    output: compactTaskBody(task.output, FINAL_PLAN_OUTPUT_CHARS)
+    details: compactTaskBody(task.details, FINAL_PLAN_DETAILS_LINES),
+    output: compactTaskBody(task.output, FINAL_PLAN_OUTPUT_LINES)
   }))
   const omitted = tasks.length - visible.length
   if (omitted <= 0) return visible
@@ -428,9 +436,9 @@ function compactFinalTasks(tasks: StreamTask[]): StreamTask[] {
   return visible
 }
 
-function compactTaskBody(body: StreamTask['details'], maxChars: number): StreamTask['details'] {
+function compactTaskBody(body: StreamTask['details'], maxLines: number): StreamTask['details'] {
   if (!body) return undefined
-  if (typeof body === 'string') return clipText(body, maxChars)
+  if (typeof body === 'string') return clipLines(body, maxLines)
   const text = body.elements
     .map(element =>
       element.elements
@@ -446,15 +454,59 @@ function compactTaskBody(body: StreamTask['details'], maxChars: number): StreamT
     firstPre?.type === 'rich_text_preformatted' && 'language' in firstPre
       ? String(firstPre.language)
       : 'text'
-  return richText([preformatted(clipText(text, maxChars), language)])
+  return richText([preformatted(clipLines(text, maxLines), language)])
+}
+
+function finalMarkdownForBlocks(markdown: string, tasks: StreamTask[]): string {
+  if (!tasks.length) return markdown
+  const remainingChars = slackReplyLimits.mixedBodyAndPlan.maxVisibleChars - taskVisibleChars(tasks)
+  if (remainingChars <= 0) return ''
+  return clipText(markdown, remainingChars)
+}
+
+function taskVisibleChars(tasks: StreamTask[]): number {
+  return tasks.reduce((total, task) => {
+    return total + task.title.length + taskBodyVisibleChars(task.details) + taskBodyVisibleChars(task.output)
+  }, 0)
+}
+
+function taskBodyVisibleChars(body: StreamTask['details']): number {
+  if (!body) return 0
+  if (typeof body === 'string') return body.length
+  return body.elements.reduce((total, element) => {
+    return (
+      total +
+      element.elements.reduce((innerTotal, inline) => {
+        if ('text' in inline) return innerTotal + (inline.text ?? '').length
+        if ('url' in inline) return innerTotal + (inline.url ?? '').length
+        if ('user_id' in inline) return innerTotal + inline.user_id.length + 3
+        return innerTotal
+      }, 0)
+    )
+  }, 0)
 }
 
 function clipText(value: string, maxChars: number): string {
+  if (maxChars <= 0) return ''
+  if (maxChars <= 13) return value.length > maxChars ? value.slice(0, maxChars) : value
   return value.length > maxChars ? `${value.slice(0, maxChars - 13)}\n// truncated` : value
 }
 
+function clipLines(value: string, maxLines: number): string {
+  if (maxLines <= 0) return ''
+  const lines = value.split('\n')
+  if (lines.length <= maxLines) return value
+  if (maxLines === 1) return '// truncated'
+  return [...lines.slice(0, maxLines - 1), '// truncated'].join('\n')
+}
+
 function fallbackTextForBlocks(title: string, text: string, footer?: string): string {
-  return [title, text, footer].filter(Boolean).join('\n').slice(0, 3900) || title
+  return (
+    [title, text, footer]
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, slackReplyLimits.text.maxUntruncatedChars) || title
+  )
 }
 
 function currentSegment(state: AgentSessionState): Segment {

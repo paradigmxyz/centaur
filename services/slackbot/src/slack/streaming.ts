@@ -1,4 +1,5 @@
 import type { AnyChunk, RichTextBlock } from '@slack/types'
+import { slackReplyLimits } from '../constants'
 
 export type StreamTaskStatus = 'pending' | 'in_progress' | 'complete' | 'error'
 
@@ -41,12 +42,12 @@ export type StreamTask = {
 
 export type StreamChunk = AnyChunk
 
-export const SLACK_STREAM_MARKDOWN_TEXT_LIMIT = 12_000
-export const SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT = 256
-export const SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT = 256
-const SLACK_STREAM_TASK_UPDATE_TITLE_LIMIT = 64
-const SLACK_STREAM_TASK_UPDATE_DETAILS_LIMIT = 48
-const SLACK_STREAM_TASK_UPDATE_OUTPUT_LIMIT = 48
+export const SLACK_STREAM_MARKDOWN_TEXT_LIMIT = slackReplyLimits.stream.markdownChunkChars
+export const SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT = slackReplyLimits.stream.taskDetailsChars
+export const SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT = slackReplyLimits.stream.planTitleChars
+const SLACK_STREAM_TASK_UPDATE_TITLE_LIMIT = slackReplyLimits.stream.taskTitleChars
+const SLACK_STREAM_TASK_UPDATE_DETAILS_LIMIT = slackReplyLimits.stream.taskDetailsChars
+const SLACK_STREAM_TASK_UPDATE_OUTPUT_LIMIT = slackReplyLimits.stream.taskOutputChars
 
 export function planUpdateChunk(title: string): StreamChunk {
   return { type: 'plan_update', title: clip(title, SLACK_STREAM_PLAN_UPDATE_TITLE_LIMIT) }
@@ -165,7 +166,7 @@ function parseInlineMarkdown(value: string): StreamInline[] {
 
 function taskBodyToPlain(
   body: StreamRichText | string | undefined,
-  maxChars = SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT
+  maxChars: number = SLACK_STREAM_TASK_UPDATE_FIELD_LIMIT
 ): string | undefined {
   if (!body) return undefined
   if (typeof body === 'string') return clip(body, maxChars)

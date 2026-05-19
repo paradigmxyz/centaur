@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api'
+import { slackReplyLimits } from '../constants'
 import { AgentSessionRenderer } from './agent-session'
 import {
   preformatted as pre,
@@ -391,7 +392,7 @@ function setPlanTask(
   step: string,
   status: HarnessTask['status']
 ): void {
-  const title = oneLine(stripPlanMarker(step), 256)
+  const title = oneLine(stripPlanMarker(step), slackReplyLimits.stream.planTitleChars)
   if (!title) return
   state.taskByUseId.set(`plan-${index + 1}`, {
     id: `plan-${index + 1}`,
@@ -517,12 +518,18 @@ function commandTask(
   const command = String(item.command ?? 'Command')
   const status = commandStatus(item, eventType)
   const exitCode = item.exitCode ?? item.exit_code
+  const failed = isCommandFailure(item, eventType)
   const isCompletionUpdate =
     eventType === 'item.completed' || status === 'complete' || status === 'error'
-  const output = commandOutputElements(accumulatedOutput ?? '')
+  const output = commandOutputElements(accumulatedOutput ?? '', exitCode)
   return {
     id,
-    title: command === 'Command' ? 'Run command' : `Run command: ${oneLine(command, 220)}`,
+    title:
+      command === 'Command'
+        ? failed
+          ? 'Command failed'
+          : 'Run command'
+        : `${failed ? 'Command failed' : 'Run command'}: ${oneLine(command, 220)}`,
     status,
     details: isCompletionUpdate && existing ? [] : [pre(command, 'bash')],
     output
@@ -537,10 +544,14 @@ function commandAggregatedOutput(item: any): string {
   return ''
 }
 
-function commandOutputElements(output: string): StreamRichTextElement[] {
+function commandOutputElements(output: string, exitCode?: number | null): StreamRichTextElement[] {
   const elements: StreamRichTextElement[] = []
-  if (output) {
-    const formatted = formatCommandOutput(output)
+  const normalizedOutput =
+    exitCode !== null && exitCode !== undefined && exitCode !== 0
+      ? `exit code ${exitCode}${output ? `\n${output}` : ''}`
+      : output
+  if (normalizedOutput) {
+    const formatted = formatCommandOutput(normalizedOutput)
     elements.push(pre(formatted.body, formatted.language))
   }
   return elements
@@ -559,7 +570,10 @@ function formatCommandOutput(output: string): { body: string; language: string }
   return { body: clip(output), language: languageFromContent(output) }
 }
 
-function clipJsonPreview(value: string, max = 420): string {
+function clipJsonPreview(
+  value: string,
+  max: number = slackReplyLimits.finalPlan.jsonPreviewChars
+): string {
   return value.length > max ? `${value.slice(0, max).trimEnd()}\n// truncated` : value
 }
 
@@ -597,7 +611,20 @@ function mergeTask(existing: HarnessTask | undefined, update: HarnessTask): Harn
 }
 
 function commandStatus(item: any, eventType: string): HarnessTask['status'] {
+  if (isCommandFailure(item, eventType)) return 'complete'
   return itemStatus(item, eventType, item.exitCode ?? item.exit_code)
+}
+
+function isCommandFailure(item: any, eventType: string): boolean {
+  const status = String(item.status ?? '').toLowerCase()
+  const exitCode = item.exitCode ?? item.exit_code
+  return (
+    status === 'failed' ||
+    (eventType === 'item.completed' &&
+      exitCode !== 0 &&
+      exitCode !== null &&
+      exitCode !== undefined)
+  )
 }
 
 function itemStatus(item: any, eventType: string, exitCode?: number | null): HarnessTask['status'] {
@@ -735,11 +762,14 @@ function languageFromContent(value: string): string {
   return 'text'
 }
 
-function clip(value: string, max = 2200): string {
+function clip(
+  value: string,
+  max: number = slackReplyLimits.finalPlan.outputPreviewChars
+): string {
   return value.length > max ? `${value.slice(0, max)}\n/* truncated */` : value
 }
 
-function oneLine(value: string, max = 900): string {
+function oneLine(value: string, max: number = slackReplyLimits.finalPlan.taskTitleChars): string {
   const normalized = value.replace(/\s+/g, ' ').trim()
   return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized
 }

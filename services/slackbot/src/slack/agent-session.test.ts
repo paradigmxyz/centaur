@@ -162,6 +162,85 @@ describe('AgentSessionRenderer', () => {
     })
   })
 
+  it('keeps final task code blocks to three lines and preserves visible body text', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async (params: any) => {
+            calls.push({ method: 'assistant.threads.setStatus', params })
+            return { ok: true }
+          }
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    await renderer.text(sessionId, 'Final answer stays visible.')
+    await renderer.step(sessionId, {
+      id: 'cmd-1',
+      title: 'Run command: call workflow list',
+      status: 'complete',
+      details: {
+        type: 'rich_text',
+        elements: [
+          {
+            type: 'rich_text_preformatted',
+            language: 'sh',
+            elements: [{ type: 'text', text: 'call workflow list' }]
+          }
+        ]
+      } as any,
+      output: {
+        type: 'rich_text',
+        elements: [
+          {
+            type: 'rich_text_preformatted',
+            language: 'json',
+            elements: [{ type: 'text', text: '{\n  "items": [\n    1,\n    2,\n    3\n  ]\n}' }]
+          }
+        ]
+      } as any
+    })
+    await renderer.done(sessionId)
+
+    const update = calls.find(call => call.method === 'chat.update')
+    const plan = update?.params.blocks?.find((block: any) => block.type === 'plan')
+    const body = update?.params.blocks?.find((block: any) => block.type === 'markdown')
+    const outputText =
+      plan?.tasks?.[0]?.output?.elements?.[0]?.elements?.[0]?.text ?? ''
+
+    expect(outputText.split('\n')).toHaveLength(3)
+    expect(outputText.endsWith('// truncated')).toBe(true)
+    expect(body).toBeTruthy()
+  })
+
   it('clears assistant status even when closing the stream fails', async () => {
     const calls: Array<{ method: string; params: any }> = []
     let stopAttempts = 0
