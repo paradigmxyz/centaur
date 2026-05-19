@@ -227,6 +227,44 @@ function wrapText(text: string, maxChars: number, maxLines: number): string[] {
   return lines.slice(0, maxLines)
 }
 
+// Layout constants for the left content stack inside the 1200x657 card.
+// Positions are computed so the (eyebrow + title + description) block is
+// vertically centered around CENTER_Y. The 0.78 ASCENT_RATIO converts each
+// line's visual top (its "box") into the baseline that SVG y= anchors to —
+// it's tuned by eye for Perfectly Nineties + Berkeley Mono Variable.
+const LEFT_X = 81
+const CENTER_Y = 328.5
+const EYEBROW_H = 30
+const TITLE_LINE_H = 89
+const DESC_LINE_H = 49
+const GAP_EYEBROW_TITLE = 32
+const GAP_TITLE_DESC = 28
+const ASCENT_RATIO = 0.78
+
+function computeStackY(nTitle: number, nDesc: number) {
+  const titleBlock = nTitle * TITLE_LINE_H
+  const descBlock = nDesc > 0 ? GAP_TITLE_DESC + nDesc * DESC_LINE_H : 0
+  const totalH = EYEBROW_H + GAP_EYEBROW_TITLE + titleBlock + descBlock
+  const topY = CENTER_Y - totalH / 2
+
+  const titleTop = topY + EYEBROW_H + GAP_EYEBROW_TITLE
+  const firstTitleBaseline = titleTop + TITLE_LINE_H * ASCENT_RATIO
+  const titleBaselines = Array.from(
+    { length: nTitle },
+    (_, i) => firstTitleBaseline + i * TITLE_LINE_H,
+  )
+  const titleBottom = titleTop + titleBlock
+
+  const descBaselines = Array.from({ length: nDesc }, (_, i) => {
+    const descTop = titleBottom + GAP_TITLE_DESC
+    return descTop + DESC_LINE_H * ASCENT_RATIO + i * DESC_LINE_H
+  })
+
+  const eyebrowBaseline = topY + EYEBROW_H * ASCENT_RATIO
+
+  return { eyebrowBaseline, titleBaselines, descBaselines }
+}
+
 function buildSvg(
   category: string | null,
   subcategory: string | null,
@@ -235,65 +273,55 @@ function buildSvg(
 ): string {
   let svg = TEMPLATE_SVG
 
+  const titleLines = balanceLines(title, 99)
+  const descLines = description ? wrapText(description, 41, 3) : []
+  const { eyebrowBaseline, titleBaselines, descBaselines } = computeStackY(
+    titleLines.length,
+    descLines.length,
+  )
+
+  // The current template only has a CATEGORY eyebrow (no SUBCATEGORY or
+  // chevron). We keep the subcategory parameter so we can append it inline
+  // if a future template/sidebar grows that capability.
   if (category) {
     const catUp = esc(category.toUpperCase())
-    svg = svg.replace(
-      /<tspan x="130" y="94\.18">CATEGORY<\/tspan>/,
-      `<tspan x="130" y="94.18">${catUp}</tspan>`,
-    )
+    let eyebrowText = `<tspan x="${LEFT_X}" y="${eyebrowBaseline.toFixed(2)}">${catUp}</tspan>`
     if (subcategory) {
       const subUp = esc(subcategory.toUpperCase())
-      const subX = 130 + catUp.length * 16 + 48
-      svg = svg.replace(
-        /<tspan x="315" y="94\.18">SUBCATEGORY<\/tspan>/,
-        `<tspan x="${subX}" y="94.18">${subUp}</tspan>`,
-      )
-      const chevX = 130 + catUp.length * 16 + 18
-      svg = svg.replace(
-        /<tspan x="286" y="92\.4058">/,
-        `<tspan x="${chevX}" y="92.4058">`,
-      )
-    } else {
-      svg = svg.replace(/<text id="SUBCATEGORY"[^>]*>[\s\S]*?<\/text>/, '')
-      svg = svg.replace(/<text id="&#194;&#187;"[^>]*>[\s\S]*?<\/text>/, '')
-      svg = svg.replace(/id="CATEGORY" opacity="0\.5"/, 'id="CATEGORY" opacity="0.8"')
+      const subX = LEFT_X + catUp.length * 16 + 48
+      const chevX = LEFT_X + catUp.length * 16 + 18
+      eyebrowText += `<tspan x="${chevX}" y="${(eyebrowBaseline - 1.77).toFixed(2)}">»</tspan>`
+      eyebrowText += `<tspan x="${subX}" y="${eyebrowBaseline.toFixed(2)}">${subUp}</tspan>`
     }
+    svg = svg.replace(
+      /<text id="CATEGORY"[^>]*>[\s\S]*?<\/text>/,
+      `<text id="CATEGORY" opacity="0.4" fill="white" xml:space="preserve" font-family="Berkeley Mono Variable" font-size="30" font-weight="100" letter-spacing="0.01em">${eyebrowText}</text>`,
+    )
   } else {
     svg = svg.replace(/<text id="CATEGORY"[^>]*>[\s\S]*?<\/text>/, '')
-    svg = svg.replace(/<text id="SUBCATEGORY"[^>]*>[\s\S]*?<\/text>/, '')
-    svg = svg.replace(/<text id="&#194;&#187;"[^>]*>[\s\S]*?<\/text>/, '')
-    svg = svg.replace(/<g id="folder"[^>]*>[\s\S]*?<\/g>/, '')
   }
 
-  const titleLines = balanceLines(title, 99)
-  const needsWrap = titleLines.length > 1
-  if (titleLines.length >= 3) {
-    svg = svg.replace(
-      /<text id="Route title"[^>]*>[\s\S]*?<\/text>/,
-      `<text fill="white" xml:space="preserve" font-family="Perfectly Nineties" font-size="99" letter-spacing="-0.02em"><tspan x="77" y="220">${esc(titleLines[0])}</tspan><tspan x="77" y="309">${esc(titleLines[1])}</tspan><tspan x="77" y="398">${esc(titleLines[2])}</tspan></text>`,
+  const titleTspans = titleLines
+    .map(
+      (line, i) =>
+        `<tspan x="${LEFT_X}" y="${titleBaselines[i].toFixed(2)}">${esc(line)}</tspan>`,
     )
-  } else if (titleLines.length === 2) {
-    svg = svg.replace(
-      /<text id="Route title"[^>]*>[\s\S]*?<\/text>/,
-      `<text fill="white" xml:space="preserve" font-family="Perfectly Nineties" font-size="99" letter-spacing="-0.02em"><tspan x="77" y="264.15">${esc(titleLines[0])}</tspan><tspan x="77" y="353.15">${esc(titleLines[1])}</tspan></text>`,
-    )
-  } else {
-    svg = svg.replace(
-      /<text id="Route title"[^>]*>[\s\S]*?<\/text>/,
-      `<text fill="white" xml:space="preserve" font-family="Perfectly Nineties" font-size="99" letter-spacing="-0.02em"><tspan x="77" y="285.16">${esc(title)}</tspan></text>`,
-    )
-  }
+    .join('')
+  svg = svg.replace(
+    /<text id="Route title"[^>]*>[\s\S]*?<\/text>/,
+    `<text id="Route title" fill="white" xml:space="preserve" font-family="Perfectly Nineties" font-size="99" letter-spacing="-0.02em">${titleTspans}</text>`,
+  )
 
-  // Push the description down when the title wraps so it doesn't overlap.
-  const descY = needsWrap ? (titleLines.length === 3 ? 460.05 : 430.05) : 361.26
-  if (description) {
-    const lines = wrapText(description, 41, 3)
-    const tspans = lines
-      .map((l, i) => `<tspan x="77" y="${descY + i * 49}">${esc(l)}</tspan>`)
+  if (descLines.length > 0) {
+    const descTspans = descLines
+      .map(
+        (line, i) =>
+          `<tspan x="${LEFT_X}" y="${descBaselines[i].toFixed(2)}">${esc(line)}</tspan>`,
+      )
       .join('')
     svg = svg.replace(
       /<text id="Description[^>]*>[\s\S]*?<\/text>/,
-      `<text opacity="0.6" fill="white" xml:space="preserve" font-family="Perfectly Nineties" font-size="41" letter-spacing="0em">${tspans}</text>`,
+      `<text opacity="0.6" fill="white" xml:space="preserve" font-family="Perfectly Nineties" font-size="41" letter-spacing="0em">${descTspans}</text>`,
     )
   } else {
     svg = svg.replace(/<text id="Description[^>]*>[\s\S]*?<\/text>/, '')

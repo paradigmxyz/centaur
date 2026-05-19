@@ -12,20 +12,19 @@
 <text fill="white" fill-opacity="0.4" style="white-space: pre" xml:space="preserve" font-family="Berkeley Mono Variable" font-size="30" font-weight="100" letter-spacing="0.01em"><tspan x="775" y="94.18">PARADIGMXYZ/</tspan></text>
 </g>
 </g>
-<g id="Frame 2147253826">
-<text id="Route title" fill="white" style="white-space: pre" xml:space="preserve" font-family="Sagittaire Display" font-size="99" letter-spacing="-0.02em"><tspan x="77" y="285.16">Route title</tspan></text>
-<text id="Description of the section goes here and might wrap onto two lines or maybe even three" opacity="0.6" fill="white" style="white-space: pre" xml:space="preserve" font-family="Perfectly Nineties" font-size="41" letter-spacing="0em"><tspan x="77" y="361.26">Description of the section goes here </tspan><tspan x="77" y="410.26">and might wrap onto two lines or </tspan><tspan x="77" y="459.26">maybe even three</tspan></text>
-</g>
+<g id="Frame 2147253832">
+<g id="Frame 2147253831">
 <g id="Frame 2147253830">
-<text id="CATEGORY" opacity="0.5" fill="white" style="white-space: pre" xml:space="preserve" font-family="Berkeley Mono Variable" font-size="30" font-weight="100" letter-spacing="0.01em"><tspan x="130" y="94.18">CATEGORY</tspan></text>
-<text id="&#194;&#187;" opacity="0.5" fill="white" stroke="white" style="white-space: pre" stroke-width="0.22" xml:space="preserve" font-family="Berkeley Mono Variable" font-size="30" letter-spacing="0.02em"><tspan x="286" y="92.4058">&#xbb; </tspan></text>
-<text id="SUBCATEGORY" opacity="0.8" fill="white" style="white-space: pre" xml:space="preserve" font-family="Berkeley Mono Variable" font-size="30" font-weight="100" letter-spacing="0.01em"><tspan x="315" y="94.18">SUBCATEGORY</tspan></text>
-</g>
-<g id="folder" opacity="0.5">
-<path id="Vector_2" fill-rule="evenodd" clip-rule="evenodd" d="M100 72.5H88V93.5H112V78.5H103V75.5H115V96.5H85V69.5H100V72.5ZM100 72.5H103V75.5H100V72.5Z" fill="white"/>
+<text id="CATEGORY" opacity="0.5" fill="white" style="white-space: pre" xml:space="preserve" font-family="Berkeley Mono Variable" font-size="30" font-weight="100" letter-spacing="0.01em"><tspan x="81" y="197.18">CATEGORY</tspan></text>
 </g>
 </g>
-<g id="Vector_3">
+<g id="Frame 2147253826">
+<text id="Route title" fill="white" style="white-space: pre" xml:space="preserve" font-family="Perfectly Nineties" font-size="99" letter-spacing="-0.02em"><tspan x="81" y="307.16">Route title</tspan></text>
+<text id="Description of the section goes here and might wrap onto two lines or maybe even three" opacity="0.6" fill="white" style="white-space: pre" xml:space="preserve" font-family="Perfectly Nineties" font-size="39" letter-spacing="0em"><tspan x="81" y="381.54">Description of the section goes here </tspan><tspan x="81" y="428.54">and might wrap onto two lines or </tspan><tspan x="81" y="475.54">maybe even three</tspan></text>
+</g>
+</g>
+</g>
+<g id="Vector_2">
 <path d="M904.189 522.276C903.42 522.63 902.663 523.396 902.331 524.139C901.826 525.282 902.044 527.054 902.847 528.163C903.317 528.826 903.902 529.283 904.934 529.774C906.276 530.437 906.723 530.609 907.457 530.769C908.421 530.997 908.708 531.02 908.799 530.883C908.845 530.803 908.914 530.517 908.971 530.254C909.017 529.98 909.121 529.523 909.178 529.214C909.556 527.477 909.602 524.928 909.281 524.219C908.994 523.602 907.882 522.448 907.572 522.448C907.503 522.448 907.457 522.39 907.457 522.333C907.457 522.265 907.354 522.219 907.24 522.219C907.113 522.219 906.976 522.162 906.941 522.105C906.907 522.036 906.402 521.99 905.817 522.002C904.957 522.002 904.659 522.059 904.189 522.276Z" fill="white"/>
 <path d="M902.87 531.878V532.735H897.686L896.929 533.512C894.577 535.878 889.623 540.987 889.6 541.056C889.577 541.102 890.552 542.108 891.756 543.308C892.96 544.497 894.05 545.605 894.165 545.754L894.382 546.028L894.566 545.594C894.784 545.068 895.805 544.051 896.114 544.051C896.229 544.051 896.332 544.017 896.332 543.982C896.332 543.936 896.195 543.765 896.023 543.605C895.839 543.434 895.369 542.919 894.956 542.462C894.543 541.993 894.142 541.548 894.073 541.468C893.992 541.388 893.924 541.273 893.924 541.228C893.924 541.102 894.933 540.119 896.734 538.496C897.491 537.81 898.236 537.113 898.385 536.941C898.534 536.758 898.741 536.621 898.844 536.621C899.073 536.621 899.314 536.838 899.314 537.044C899.314 537.124 899.406 537.41 899.532 537.684C899.647 537.947 899.865 538.473 900.014 538.85C900.152 539.227 900.381 539.787 900.53 540.107C901.275 541.799 901.631 542.656 902.182 544.051C902.514 544.897 902.812 545.617 902.847 545.651C902.881 545.685 902.916 545.651 902.95 545.582C902.973 545.514 903.592 544.577 904.338 543.502C905.072 542.416 906.047 540.987 906.483 540.325C906.93 539.65 907.366 539.01 907.469 538.896C907.572 538.781 908.077 538.027 908.604 537.227C909.132 536.427 909.912 535.238 910.336 534.609L911.116 533.455L910.634 533.375C910.038 533.272 908.662 533.101 907.744 533.009C907.366 532.975 907.01 532.895 906.941 532.838C906.884 532.781 906.54 532.735 906.173 532.735C905.542 532.735 905.187 532.62 904.854 532.312C904.762 532.232 904.544 532.083 904.361 531.969C904.166 531.866 904.017 531.729 904.017 531.683C904.017 531.637 903.936 531.592 903.845 531.592C903.753 531.592 903.673 531.546 903.673 531.5C903.673 531.409 903.076 531.02 902.939 531.02C902.904 531.02 902.87 531.409 902.87 531.878Z" fill="white"/>
 <path d="M913.204 538.77L913.192 541.868L913.938 543.354L914.695 544.828L920.016 544.737L919.959 544.474C919.879 544.051 919.89 542.645 919.993 542.245L920.097 541.879H916.449L915.004 538.987C914.201 537.41 913.479 536.004 913.387 535.89C913.249 535.695 913.227 536.072 913.204 538.77Z" fill="white"/>
