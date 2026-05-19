@@ -15,6 +15,7 @@ function canonicalHref(path: string) {
 export default defineConfig({
   rootDir: '.',
   srcDir: '.',
+  colorScheme: 'dark',
   renderStrategy: 'full-static',
   // The dead-link checker doesn't know about static assets shipped via
   // public/ (like our zip and brand SVGs), so downgrade to a warning rather
@@ -143,7 +144,6 @@ export default defineConfig({
       light: '#00E100',
       dark: '#00E100',
     },
-    colorScheme: 'dark',
     variables: {
       color: {
         background: {

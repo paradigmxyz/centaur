@@ -13,7 +13,7 @@
   "dependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "vocs": "https://pkg.pr.new/vocs@e90555e",
+    "vocs": "https://pkg.pr.new/vocs@3f54829",
     "waku": "1.0.0-alpha.6"
   },
   "devDependencies": {

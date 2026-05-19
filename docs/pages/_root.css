@@ -15,7 +15,8 @@
   --vocs-spacing-content: 920px;
 }
 
-:root.dark {
+:root[style*='color-scheme:dark'],
+:root[style*='color-scheme: dark'] {
   --centaur-bg: #101012;
   --centaur-code: #0b0b0d;
   --centaur-line: rgba(255, 255, 255, 0.12);
@@ -332,7 +333,8 @@ body,
   --vocs-color_title: #050505;
 }
 
-:root.dark {
+:root[style*='color-scheme:dark'],
+:root[style*='color-scheme: dark'] {
   --vocs-color_background: #050506;
   --vocs-color_background2: #0b0b0d;
   --vocs-color_background3: #111114;
