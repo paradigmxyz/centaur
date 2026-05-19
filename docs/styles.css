@@ -102,6 +102,30 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: 'Lato';
+  src: url('/fonts/slack/lato-latin-400-normal.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Lato';
+  src: url('/fonts/slack/lato-latin-700-normal.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Lato';
+  src: url('/fonts/slack/lato-latin-900-normal.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+}
+
 /*
  * Header lockup: Vocs sizes the NavLogo image at 50% of the 56px anchor on
  * docs layouts (= 28px) and forces 32px on the landing layout, which makes
@@ -492,6 +516,7 @@ body,
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42), 0 1px 0 rgba(255, 255, 255, 0.04);
   color: var(--thread-ink);
   display: grid;
+  font-family: Slack-Lato, Slack-Fractions, appleLogo, Lato, Arial, sans-serif;
   grid-template-columns: minmax(136px, 168px) minmax(0, 1fr);
   height: min(760px, calc(100dvh - 160px));
   min-height: 640px;
