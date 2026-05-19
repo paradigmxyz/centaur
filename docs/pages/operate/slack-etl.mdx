@@ -5,6 +5,13 @@ description: Sync Slack channel history into Postgres, drain historical backfill
 
 # Slack ETL
 
+:::warning[Off by default in production]
+Slack ETL is disabled unless the API service has `SLACK_ETL_ENABLED=true`.
+Production deployments should enable it deliberately after choosing the Slack
+token, channel scope, exclusion patterns, and retention boundary they want
+agents to use.
+:::
+
 Slack ETL keeps a local, queryable copy of public Slack history for agent
 context and operator workflows. It runs as scheduled Centaur workflows: one
 workflow keeps recent channel history fresh, one drains deferred historical
