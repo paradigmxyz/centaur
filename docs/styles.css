@@ -277,6 +277,7 @@ body,
 .vocs_CodeBlock span[style*="#E3B341"],
 .vocs_CodeBlock span[style*="#e3b341"] {
   color: var(--centaur-accent) !important;
+  --shiki-dark: var(--centaur-accent) !important;
 }
 
 .vocs_DesktopTopNav,
