@@ -142,10 +142,10 @@ body,
 
 .home-hero h1 {
   color: #f7f7f2;
-  font-size: 4.9rem;
-  font-weight: 720;
+  font-size: 4rem;
+  font-weight: 600;
   letter-spacing: 0;
-  line-height: 0.98;
+  line-height: 0.9;
   margin: 0;
   max-width: 790px;
 }
@@ -196,11 +196,14 @@ body,
   border-color: #ffd95c;
 }
 
+/* Single-row "Built with love by <Paradigm> <Tempo>" — keeps the three
+ * pieces on one line when there's space and lets them flow onto a second
+ * line on narrow viewports. */
 .home-built-with {
-  align-items: flex-start;
+  align-items: center;
   display: flex;
-  flex-direction: column;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 14px;
   margin-top: 46px;
 }
 
@@ -212,9 +215,9 @@ body,
 
 .home-logo-row {
   align-items: center;
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 18px;
   justify-content: flex-start;
 }
 
@@ -222,23 +225,22 @@ body,
   align-items: center;
   display: inline-flex;
   justify-content: center;
-  min-height: 58px;
   text-decoration: none;
 }
 
 .home-brand img {
   display: block;
   filter: invert(1);
-  height: 54px;
-  max-width: min(42vw, 204px);
+  height: 22px;
+  max-width: min(28vw, 120px);
   object-fit: contain;
 }
 
-/* Tempo's wordmark is much wider per em than Paradigm's — scale it down so
+/* Tempo's wordmark is shorter per em than Paradigm's — bump it a touch so
  * the two read at the same optical weight. */
 .home-brand-tempo img {
-  height: 28px;
-  max-width: min(28vw, 120px);
+  height: 16px;
+  max-width: min(22vw, 96px);
 }
 
 .home-thread-demo {
@@ -326,48 +328,47 @@ body,
 .thread-list-channel-row {
   align-items: center;
   display: flex;
-  gap: 6px;
-  margin-bottom: 3px;
+  gap: 8px;
+  justify-content: space-between;
+  margin-bottom: 4px;
 }
 
 .thread-list-channel {
+  align-items: center;
   color: var(--thread-ink-3);
+  display: inline-flex;
   font-size: 9.5px;
   font-weight: 650;
+  gap: 6px;
   letter-spacing: 0.05em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.thread-list-time {
+  color: var(--thread-ink-3);
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .thread-list-live-dot {
   background: var(--thread-accent);
   border-radius: 50%;
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--thread-accent) 22%, transparent);
+  flex-shrink: 0;
   height: 6px;
   width: 6px;
 }
 
 .thread-list-name {
   color: var(--thread-ink);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.thread-list-meta {
-  color: var(--thread-ink-3);
-  display: flex;
-  font-size: 9.5px;
-  gap: 6px;
-  justify-content: space-between;
-  margin-top: 4px;
-}
-
-.thread-list-meta span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

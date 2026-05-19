@@ -23,6 +23,10 @@ type TaskCardData = {
 type ThreadData = {
   id: string
   channel: string
+  // Short, human-authored title that displays in the threads sidebar — does
+  // NOT come from the message body. Keeps the list readable when bodies are
+  // long, mention-heavy, or contain markdown-y noise.
+  title: string
   parent: {
     who: string
     glyph: string
@@ -37,6 +41,7 @@ const threadData: ThreadData[] = [
   {
     id: 'tempo-merch',
     channel: 'builds',
+    title: 'Build a Tempo merch store',
     parent: {
       who: 'Perry Dime',
       glyph: 'P',
@@ -238,6 +243,7 @@ const threadData: ThreadData[] = [
   {
     id: 'prod-alert',
     channel: 'prod-alerts',
+    title: 'Investigate elevated API 5xx alert',
     parent: {
       who: 'Perry Dime',
       glyph: 'P',
@@ -316,6 +322,7 @@ const threadData: ThreadData[] = [
   {
     id: 'warehouse-tool',
     channel: 'tools',
+    title: 'Add a warehouse-lookup tool',
     parent: {
       who: 'Alex Kim',
       glyph: 'A',
@@ -787,14 +794,13 @@ export default function ThreadPanel({
                 type="button"
               >
                 <div className="thread-list-channel-row">
-                  <span className="thread-list-channel"># {thread.channel}</span>
-                  {isActive && <span className="thread-list-live-dot" />}
+                  <span className="thread-list-channel">
+                    # {thread.channel}
+                    {isActive && <span className="thread-list-live-dot" />}
+                  </span>
+                  <span className="thread-list-time">{thread.replies.at(-1)?.time}</span>
                 </div>
-                <div className="thread-list-name">{thread.parent.body.trim()}</div>
-                <div className="thread-list-meta">
-                  <span>{thread.parent.who} · {thread.replies.length} replies</span>
-                  <span>{thread.replies.at(-1)?.time}</span>
-                </div>
+                <div className="thread-list-name">{thread.title}</div>
               </button>
             )
           })}
