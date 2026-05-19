@@ -45,7 +45,7 @@ const threadData: ThreadData[] = [
     parent: {
       who: 'Perry Dime',
       glyph: 'P',
-      color: '#f97316',
+      color: '#00e100',
       time: 'Today at 9:02 AM',
       body: ' build a merch store: stablecoin checkout, NFT receipt, one-time redemption for shipping details, and an admin view for fulfillment. Use Vite, Cloudflare Workers, D1, R2, Tempo Accounts, wagmi, viem, and MPP image generation.',
     },
@@ -135,7 +135,7 @@ const threadData: ThreadData[] = [
         time: '10:05 AM',
         who: 'Perry Dime',
         glyph: 'P',
-        color: '#f97316',
+        color: '#00e100',
       },
       {
         from: 'bot',
@@ -163,7 +163,7 @@ const threadData: ThreadData[] = [
         time: '11:12 AM',
         who: 'Perry Dime',
         glyph: 'P',
-        color: '#f97316',
+        color: '#00e100',
       },
       {
         from: 'bot',
@@ -217,7 +217,7 @@ const threadData: ThreadData[] = [
         time: '11:25 AM',
         who: 'Perry Dime',
         glyph: 'P',
-        color: '#f97316',
+        color: '#00e100',
       },
       {
         from: 'bot',

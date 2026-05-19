@@ -264,6 +264,21 @@ body,
   border-color: rgba(255, 255, 255, 0.14);
 }
 
+.vocs_CodeBlock span[style*="#FFA657"],
+.vocs_CodeBlock span[style*="#ffa657"],
+.vocs_CodeBlock span[style*="#FF7B72"],
+.vocs_CodeBlock span[style*="#ff7b72"],
+.vocs_CodeBlock span[style*="#D29922"],
+.vocs_CodeBlock span[style*="#d29922"],
+.vocs_CodeBlock span[style*="#F0883E"],
+.vocs_CodeBlock span[style*="#f0883e"],
+.vocs_CodeBlock span[style*="#DB6D28"],
+.vocs_CodeBlock span[style*="#db6d28"],
+.vocs_CodeBlock span[style*="#E3B341"],
+.vocs_CodeBlock span[style*="#e3b341"] {
+  color: var(--centaur-accent) !important;
+}
+
 .vocs_DesktopTopNav,
 .vocs_MobileTopNav {
   background: rgba(5, 5, 6, 0.88);
