@@ -25,6 +25,10 @@ describe('AgentSessionRenderer', () => {
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
           return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
         }
       }
     }
@@ -49,12 +53,15 @@ describe('AgentSessionRenderer', () => {
     await renderer.done(sessionId)
 
     const start = calls.find(call => call.method === 'chat.startStream')
-    expect(start?.params.task_display_mode).toBe('dense')
+    expect(start?.params.task_display_mode).toBe('plan')
     expect(start?.params.chunks).toEqual([
       { type: 'plan_update', title: 'Centaur execution' },
       {
-        type: 'markdown_text',
-        text: '```python\nprint("Hello, world!")\n```\n\nTiny keys wake up\n'
+        type: 'task_update',
+        id: 'sleep-1',
+        title: 'Run command',
+        status: 'in_progress',
+        details: '```bash\nsleep 2\n```'
       }
     ])
     expect(calls.slice(0, 3).map(call => call.method)).toEqual([
@@ -70,18 +77,16 @@ describe('AgentSessionRenderer', () => {
     const appends = calls.filter(call => call.method === 'chat.appendStream')
     expect(appends[0]?.params.chunks).toEqual([
       {
-        type: 'task_update',
-        id: 'sleep-1',
-        title: 'Run command',
-        status: 'in_progress',
-        details: '```bash\nsleep 2\n```',
-        output: undefined,
-        sources: undefined
+        type: 'markdown_text',
+        text: '```python\nprint("Hello, world!")\n```\n\nTiny keys wake up\n'
       }
     ])
     expect(appends[1]?.params.chunks).toEqual([
       { type: 'markdown_text', text: '\n```js\nconsole.log("Hello, world!")\n```' }
     ])
+    const update = calls.find(call => call.method === 'chat.update')
+    expect(update?.params.blocks?.[0]?.type).toBe('plan')
+    expect(update?.params.blocks?.[0]?.tasks?.[0]?.status).toBe('complete')
   })
 
   it('streams task updates with accumulated details and output', async () => {
@@ -106,6 +111,10 @@ describe('AgentSessionRenderer', () => {
         },
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
           return { ok: true }
         }
       }
@@ -134,7 +143,7 @@ describe('AgentSessionRenderer', () => {
     })
 
     const start = calls.find(call => call.method === 'chat.startStream')
-    expect(start?.params.task_display_mode).toBe('dense')
+    expect(start?.params.task_display_mode).toBe('plan')
     expect(start?.params.chunks?.[0]).toEqual({
       type: 'plan_update',
       title: 'Centaur execution'
@@ -149,9 +158,7 @@ describe('AgentSessionRenderer', () => {
       id: 'cmd-1',
       title: 'Run command: pnpm test',
       status: 'complete',
-      details: undefined,
-      output: '```text\nok\n```',
-      sources: undefined
+      output: '```text\nok\n```'
     })
   })
 

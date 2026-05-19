@@ -88,6 +88,10 @@ describe('final delivery polling', () => {
         stopStream: async (params: unknown) => {
           slackCalls.push({ method: 'chat.stopStream', params })
           return { ok: true }
+        },
+        update: async (params: unknown) => {
+          slackCalls.push({ method: 'chat.update', params })
+          return { ok: true }
         }
       }
     }

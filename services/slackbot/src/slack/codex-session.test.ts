@@ -26,6 +26,10 @@ describe('CodexSessionRenderer', () => {
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
           return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
         }
       }
     }
@@ -73,13 +77,10 @@ describe('CodexSessionRenderer', () => {
 
     expect(taskUpdates.at(-1)).toEqual({
       type: 'task_update',
-      id: 'codex-activity',
-      title: 'Execution timeline',
+      id: 'cmd-1',
+      title: 'Run command: pnpm --filter slackbot test',
       status: 'complete',
-      details: undefined,
-      output:
-        '[run]\n```sh\npnpm --filter slackbot test\n```\n\n[output]\n```text\none\ntwo\n```\nexit code 0',
-      sources: undefined
+      output: 'one\ntwo\n'
     })
   })
 
@@ -105,6 +106,10 @@ describe('CodexSessionRenderer', () => {
         },
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
           return { ok: true }
         }
       }
@@ -145,15 +150,13 @@ describe('CodexSessionRenderer', () => {
       .flatMap(call => call.params.chunks ?? [])
       .filter(chunk => chunk.type === 'task_update')
 
-    expect(new Set(taskUpdates.map(chunk => chunk.id))).toEqual(new Set(['codex-activity']))
-    expect(taskUpdates.at(-1)?.details).toBeUndefined()
-    expect(taskUpdates.some(chunk => richTextPlain(chunk.output).includes('call demo ping'))).toBe(
-      true
-    )
-    expect(richTextPlain(taskUpdates.at(-1)?.output)).toContain('call grafana health')
-    expect(richTextPlain(taskUpdates.at(-1)?.output)).toContain('[run]')
-    expect(taskUpdates.at(-1)?.output).toContain('```sh\ncall grafana health\n```')
-    expect(taskUpdates.at(-1)?.output).toContain('[error]')
+    expect(new Set(taskUpdates.map(chunk => chunk.id))).toEqual(new Set(['cmd-1', 'cmd-2']))
+    expect(taskUpdates.some(chunk => chunk.title.includes('call demo ping'))).toBe(true)
+    expect(taskUpdates.at(-1)).toMatchObject({
+      id: 'cmd-2',
+      status: 'error',
+      title: 'Run command: call grafana health'
+    })
   })
 
   it('marks the aggregate activity task complete on terminal turn events', async () => {
@@ -179,6 +182,10 @@ describe('CodexSessionRenderer', () => {
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
           return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
         }
       }
     }
@@ -198,17 +205,11 @@ describe('CodexSessionRenderer', () => {
     })
     await renderer.event(sessionId, { type: 'turn.completed' })
 
-    const taskUpdates = calls
-      .flatMap(call => call.params.chunks ?? [])
-      .filter(chunk => chunk.type === 'task_update')
-
-    expect(taskUpdates.at(-1)).toMatchObject({
-      id: 'codex-activity',
-      status: 'complete',
-      title: 'Execution timeline',
-      output: undefined
-    })
     expect(calls.some(call => call.method === 'chat.stopStream')).toBe(true)
+    const update = calls.find(call => call.method === 'chat.update')
+    expect(update?.params.blocks?.[0]?.type).toBe('plan')
+    expect(update?.params.blocks?.[0]?.tasks?.[0]?.status).toBe('complete')
+    expect(update?.params.blocks?.[0]?.tasks?.[0]?.title).toBe('Run command: call demo ping')
   })
 
   it('pretty prints JSON command output before streaming it', async () => {
@@ -233,6 +234,10 @@ describe('CodexSessionRenderer', () => {
         },
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
           return { ok: true }
         }
       }
@@ -282,10 +287,8 @@ describe('CodexSessionRenderer', () => {
       .filter(chunk => chunk.type === 'task_update')
 
     const output = taskUpdates.map(chunk => richTextPlain(chunk.output)).join('\n')
-    expect(output).toContain('[run]')
-    expect(output).toContain('call discover grafana')
+    expect(output).toContain('"tool": "grafana"')
     expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).not.toContain('```text')
-    expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).toContain('```json')
     expect(output).not.toContain('"method-11"')
   })
 
@@ -311,6 +314,10 @@ describe('CodexSessionRenderer', () => {
         },
         stopStream: async (params: any) => {
           calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
           return { ok: true }
         }
       }
@@ -362,10 +369,8 @@ describe('CodexSessionRenderer', () => {
       .filter(chunk => chunk.type === 'task_update')
 
     const output = taskUpdates.map(chunk => richTextPlain(chunk.output)).join('\n')
-    expect(output).toContain('[run]')
-    expect(output).toContain('call tools')
+    expect(output).toContain('"demo"')
     expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).not.toContain('```text')
-    expect(JSON.stringify(taskUpdates.map(chunk => chunk.output))).toContain('```json')
     expect(output).not.toContain('"grafana"')
   })
 })

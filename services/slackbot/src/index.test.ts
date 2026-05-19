@@ -100,7 +100,9 @@ describe('Slack event HTTP dedupe', () => {
       const executionCtx = {
         waitUntil: (promise: Promise<unknown>) => {
           waits.push(promise)
-        }
+        },
+        passThroughOnException: () => {},
+        props: {}
       }
 
       const first = await app.request(
