@@ -1,5 +1,5 @@
 <h1 align="center">
-<img src="./contrib/assets/banner-green.png" alt="Centaur" width="100%" align="center">
+<img src="./docs/public/brand/git-header.svg" alt="Centaur" width="100%" align="center">
 </h1>
 
 <h4 align="center">
