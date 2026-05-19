@@ -264,16 +264,16 @@ body,
 .home-brand img {
   display: block;
   filter: invert(1);
-  height: 36px;
-  max-width: min(34vw, 180px);
+  height: 44px;
+  max-width: min(38vw, 220px);
   object-fit: contain;
 }
 
 /* Tempo's wordmark sits taller per em than Paradigm's — pull it down so the
  * two read at the same optical weight. */
 .home-brand-tempo img {
-  height: 22px;
-  max-width: min(26vw, 128px);
+  height: 28px;
+  max-width: min(30vw, 160px);
 }
 
 .home-thread-demo {
