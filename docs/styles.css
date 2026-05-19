@@ -129,19 +129,21 @@ body,
   box-sizing: border-box;
 }
 
-/* Single centaur outline anchored to the left margin of the hero. 1px
- * stroke, large but fully visible — never clipped by the top nav or the
- * viewport edges. Pointer-events are disabled so the mark never intercepts
- * clicks intended for the hero copy. */
+/* Single centaur outline anchored to the left of the hero, masked into a
+ * left -> right fade so only the leading edge of the silhouette is visible
+ * and the right side dissolves into the page background. */
 .home-bg {
   inset: 0;
   pointer-events: none;
   position: absolute;
+  -webkit-mask-image: linear-gradient(to right, #000 0%, transparent 70%);
+  mask-image: linear-gradient(to right, #000 0%, transparent 70%);
 }
 
 .home-bg-mark {
   height: clamp(440px, 80vh, 960px);
-  left: clamp(-160px, 2vw, 40px);
+  left: clamp(-320px, -8vw, -40px);
+  opacity: 0.55;
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
@@ -821,6 +823,15 @@ body,
   color: var(--vocs-color_text3);
   font-size: 0.9rem;
   margin-top: 0.7rem;
+}
+
+/* Inline <code> inside figcaption was inheriting the global code font-size
+ * (which is sized for body copy at 1rem) and a muted ink color, leaving it
+ * larger and dimmer than the surrounding caption text. Match the caption's
+ * size and pump the ink a notch brighter so the repo paths read in-line. */
+.architecture-figure figcaption code {
+  color: light-dark(rgba(0, 0, 0, 0.82), rgba(255, 255, 255, 0.82));
+  font-size: 0.82em;
 }
 
 @media (max-width: 760px) {
