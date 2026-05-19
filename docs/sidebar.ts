@@ -11,6 +11,12 @@ export const sidebar = [
     ],
   },
   {
+    text: 'Operate',
+    items: [
+      { text: 'Slack ETL', link: '/operate/slack-etl' },
+    ],
+  },
+  {
     text: 'Extend Centaur',
     items: [
       { text: 'ACME example', link: '/extend/acme-example' },

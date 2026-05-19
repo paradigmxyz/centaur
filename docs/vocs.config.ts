@@ -64,6 +64,7 @@ export default defineConfig({
     '/quickstart': '/og/quickstart.png',
     '/deploying-in-production': '/og/deploying-in-production.png',
     '/architecture': '/og/architecture.png',
+    '/operate/slack-etl': '/og/operate_slack-etl.png',
     '/brand': '/og/brand.png',
     '/extend/overlay': '/og/extend_overlay.png',
     '/extend/apps': '/og/extend_apps.png',
@@ -116,6 +117,7 @@ export default defineConfig({
     boostDocument(documentId) {
       if (documentId.includes('what-is-centaur')) return 4.5
       if (documentId.includes('quickstart')) return 4
+      if (documentId.includes('operate/')) return 3.8
       if (documentId.includes('extend/')) return 3.8
       if (documentId.includes('secrets/')) return 3.8
       if (documentId.includes('security')) return 3.6
