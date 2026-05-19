@@ -172,15 +172,6 @@
 }
 
 /*
- * Landing owns its own links in the hero. Hide Vocs's desktop and mobile
- * top navigation there so docs routes keep the normal navigation chrome.
- */
-.vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_gutterTop,
-[data-layout="landing"] > div[class*="vocs:fixed"][class*="vocs:h-topNav"] {
-  display: none;
-}
-
-/*
  * Mirror Amp manual typography: serif docs body copy, Perfectly Nineties
  * headings, and explicit mono code.
  */
