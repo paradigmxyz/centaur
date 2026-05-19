@@ -17,10 +17,7 @@ import ThreadPanel from '../components/ThreadPanel'
   <section className="home-hero" aria-labelledby="home-title">
     <div className="home-copy">
       <a className="home-lockup-link" href="https://github.com/paradigmxyz/centaur" target="_blank" rel="noopener noreferrer" aria-label="Centaur on GitHub">
-        <picture>
-          <source srcSet="/brand/lockup-white.svg" media="(prefers-color-scheme: dark)" />
-          <img className="home-lockup" src="/brand/lockup-black.svg" alt="Centaur" />
-        </picture>
+        <img className="home-lockup" src="/brand/lockup-white.svg" alt="Centaur" />
       </a>
       <h1 id="home-title">Multiplayer, self-hosted, secure agents for teams.</h1>
 

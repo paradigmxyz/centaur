@@ -127,12 +127,6 @@
   font-display: swap;
 }
 
-/* Lockup is wider per em than the standalone mark — keep the topNav
- * tidy by dropping the rendered height a touch. */
-.vocs_NavLogo_logoImage {
-  height: 26px;
-}
-
 /*
  * Sidebar active state: Vocs bumps font-weight to medium on the active
  * item, which causes a horizontal layout shift in the link text (the
