@@ -150,7 +150,10 @@ export class CodexSessionRenderer {
         const resultText = event.result.trim()
         if (resultText) {
           state.messageText += resultText
-          await this.publishPendingAssistantText(agentSessionId, state, { force: true })
+          await this.publishPendingAssistantText(agentSessionId, state, {
+            force: true,
+            flush: false
+          })
         }
       }
       await this.done(agentSessionId)
@@ -165,10 +168,11 @@ export class CodexSessionRenderer {
     state.done = true
     completeOpenTasks(state)
     await this.publishActivitySummary(agentSessionId, state, { final: true })
-    await this.publishPendingAssistantText(agentSessionId, state, { force: true })
+    await this.publishPendingAssistantText(agentSessionId, state, { force: true, flush: false })
     await this.renderer.done(
       agentSessionId,
-      state.threadId ? codexFooter(state.threadId) : undefined
+      state.threadId ? codexFooter(state.threadId) : undefined,
+      { streamFinalUpdates: false }
     )
     state.done = true
     states.delete(agentSessionId)
@@ -200,13 +204,13 @@ export class CodexSessionRenderer {
   private async publishPendingAssistantText(
     agentSessionId: string,
     state: CodexSessionState,
-    opts: { force?: boolean } = {}
+    opts: { force?: boolean; flush?: boolean } = {}
   ): Promise<void> {
     if (!opts.force && !state.taskByUseId.size) return
     if (state.messageText.length <= state.streamedMessageText.length) return
     const delta = state.messageText.slice(state.streamedMessageText.length)
     state.streamedMessageText = state.messageText
-    await this.renderer.textDelta(agentSessionId, delta)
+    await this.renderer.textDelta(agentSessionId, delta, { flush: opts.flush })
   }
 
   private async publishStructuredPlan(

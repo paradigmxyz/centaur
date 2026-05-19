@@ -61,6 +61,14 @@ export type StepOptions = {
   flush?: boolean
 }
 
+export type TextOptions = {
+  flush?: boolean
+}
+
+export type DoneOptions = {
+  streamFinalUpdates?: boolean
+}
+
 const sessions = new Map<string, AgentSessionState>()
 const THINKING_STATUS = 'Thinking...'
 const TEXT_FLUSH_INTERVAL_MS = 250
@@ -100,7 +108,11 @@ export class AgentSessionRenderer {
     await this.queueText(state, segment, markdown)
   }
 
-  async textDelta(sessionId: string, markdownDelta: string): Promise<void> {
+  async textDelta(
+    sessionId: string,
+    markdownDelta: string,
+    opts: TextOptions = {}
+  ): Promise<void> {
     if (!markdownDelta) return
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
@@ -108,6 +120,13 @@ export class AgentSessionRenderer {
     const lastIndex = segment.textParts.length - 1
     if (lastIndex >= 0) segment.textParts[lastIndex] += markdownDelta
     else segment.textParts.push(markdownDelta)
+    if (opts.flush === false) {
+      segment.pendingText += normalizeDeltaBoundary(
+        segment.streamedText + segment.pendingText,
+        markdownDelta
+      )
+      return
+    }
     await this.queueText(state, segment, markdownDelta)
   }
 
@@ -136,19 +155,26 @@ export class AgentSessionRenderer {
     await this.flushText(state, segment, { force: true })
   }
 
-  async done(sessionId: string, footer?: string): Promise<void> {
+  async done(sessionId: string, footer?: string, opts: DoneOptions = {}): Promise<void> {
     const state = requireSession(sessionId)
     state.done = true
     state.footer = footer
+    const streamFinalUpdates = opts.streamFinalUpdates ?? true
     let closed = false
 
     try {
       for (const segment of state.segments) {
         balancePendingMarkdown(segment)
-        await this.flushText(state, segment, { force: true })
+        if (streamFinalUpdates) {
+          await this.flushText(state, segment, { force: true })
+        } else {
+          await this.absorbPendingText(segment)
+        }
         const finalizedTasks = finalizeOpenTasks(segment)
-        for (const task of finalizedTasks) {
-          await this.flushTask(state, segment, task)
+        if (streamFinalUpdates) {
+          for (const task of finalizedTasks) {
+            await this.flushTask(state, segment, task)
+          }
         }
         await this.closeTextStream(state, segment)
       }
@@ -268,6 +294,19 @@ export class AgentSessionRenderer {
       segment.pendingTextFlush = undefined
     })
     await segment.pendingTextFlush
+  }
+
+  private async absorbPendingText(segment: Segment): Promise<void> {
+    raiseStreamError(segment)
+    if (segment.pendingTextTimer) {
+      clearTimeout(segment.pendingTextTimer)
+      segment.pendingTextTimer = undefined
+    }
+    if (segment.pendingTextFlush) await segment.pendingTextFlush
+    if (!segment.pendingText) return
+    const markdown = normalizeMarkdownChunk(segment.streamedText, segment.pendingText)
+    segment.pendingText = ''
+    segment.streamedText += markdown
   }
 
   private async flushTextNow(

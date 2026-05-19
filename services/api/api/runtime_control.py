@@ -874,15 +874,13 @@ async def _mark_slackbot_live_delivery_failed(pool, execution_id: str, reason: s
     await pool.execute(
         "UPDATE agent_execution_requests "
         "SET metadata = jsonb_set("
-        "  metadata - $2::text - $3::text, "
+        "  metadata, "
         "  '{slackbot_live_delivery_failed}', "
-        "  to_jsonb($4::text), "
+        "  to_jsonb($2::text), "
         "  true"
         "), updated_at = NOW() "
         "WHERE execution_id = $1",
         execution_id,
-        _SLACKBOT_LIVE_DELIVERY_METADATA_KEY,
-        _LEGACY_SLACKBOT_LIVE_DELIVERY_METADATA_KEY,
         reason,
     )
 
