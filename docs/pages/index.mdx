@@ -86,5 +86,9 @@ import ThreadPanel from '../components/ThreadPanel'
         <span>Messages, executions, streamed events, and final delivery state are stored so Slack and API clients can reconnect without losing the result.</span>
       </li>
     </ul>
+
+    <figure className="home-architecture-diagram">
+      <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
+    </figure>
   </section>
 </main>

@@ -599,6 +599,22 @@ body,
   line-height: 1.5;
 }
 
+.home-architecture-diagram {
+  margin: clamp(44px, 6dvh, 72px) 0 0;
+  padding-top: clamp(28px, 4dvh, 44px);
+}
+
+.home-architecture-diagram img {
+  aspect-ratio: 1524 / 894;
+  background: #0f0f10;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  display: block;
+  height: auto;
+  object-fit: contain;
+  width: 100%;
+}
+
 .thread-panel {
   --thread-panel: #101012;
   --thread-bg: #111114;
