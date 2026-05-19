@@ -57,7 +57,7 @@ egress policy is enforced in one place. By default the policy is
 open.
 
 To lock egress down, edit
-[`services/api/api/iron-proxy.base.yaml`](https://github.com/paradigmxyz/centaur/blob/main/services/api/api/iron-proxy.base.yaml)
+[`iron-proxy.base.yaml`](https://github.com/paradigmxyz/centaur/blob/main/services/api/api/iron-proxy.base.yaml)
 and replace:
 
 ```yaml
