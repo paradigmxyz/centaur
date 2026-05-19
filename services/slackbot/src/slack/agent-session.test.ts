@@ -188,6 +188,10 @@ describe('AgentSessionRenderer', () => {
           stopAttempts += 1
           if (stopAttempts === 2) return { ok: true }
           return { ok: false, error: 'stream_already_closed' }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
         }
       }
     }

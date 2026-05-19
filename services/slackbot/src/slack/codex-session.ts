@@ -600,7 +600,7 @@ function itemStatus(item: any, eventType: string, exitCode?: number | null): Har
   const status = String(item.status ?? '').toLowerCase()
   if (status === 'failed' || status === 'declined') return 'error'
   if (status === 'completed' || eventType === 'item.completed') {
-    return 'complete'
+    return exitCode === 0 || exitCode === null || exitCode === undefined ? 'complete' : 'error'
   }
   return 'in_progress'
 }

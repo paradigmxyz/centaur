@@ -142,18 +142,21 @@ export class AgentSessionRenderer {
     state.footer = footer
     let closed = false
 
-    for (const segment of state.segments) {
-      balancePendingMarkdown(segment)
-      await this.flushText(state, segment, { force: true })
-      const finalizedTasks = finalizeOpenTasks(segment)
-      for (const task of finalizedTasks) {
-        await this.flushTask(state, segment, task)
+    try {
+      for (const segment of state.segments) {
+        balancePendingMarkdown(segment)
+        await this.flushText(state, segment, { force: true })
+        const finalizedTasks = finalizeOpenTasks(segment)
+        for (const task of finalizedTasks) {
+          await this.flushTask(state, segment, task)
+        }
+        await this.closeTextStream(state, segment)
       }
-      await this.closeTextStream(state, segment)
+      closed = true
+    } finally {
+      await this.setStatus(sessionId, '')
+      if (closed) sessions.delete(sessionId)
     }
-
-    await this.setStatus(sessionId, '')
-    sessions.delete(sessionId)
   }
 
   private async setStatus(sessionId: string, status: string): Promise<void> {
