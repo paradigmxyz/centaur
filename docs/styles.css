@@ -113,11 +113,11 @@
 }
 
 /*
- * Keep body/UI copy readable, and reserve Amp's serif treatment for headings.
+ * Use Perfectly Nineties across the docs surface; keep code explicitly mono.
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-sans);
+  font-family: var(--centaur-manual-display);
 }
 
 .centaur-home,
@@ -198,6 +198,7 @@ body,
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 4px;
   color: #f7f7f2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 0.88em;
   padding: 0.08em 0.28em;
 }
@@ -206,6 +207,14 @@ body,
   background: #0b0b0d !important;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
+}
+
+.vocs_Content pre,
+.vocs_Content pre code,
+.vocs_CodeBlock,
+.vocs_CodeBlock code,
+.vocs_CodeBlock span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .vocs_Content table {
