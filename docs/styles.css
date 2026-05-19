@@ -402,7 +402,7 @@ body,
 .home-button-primary {
   background: var(--centaur-accent);
   border-color: var(--centaur-accent);
-  color: #111113;
+  color: #ffffff;
 }
 
 .home-button-primary:hover {
