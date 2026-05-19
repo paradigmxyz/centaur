@@ -13,9 +13,6 @@ content:
 import ThreadPanel from '../components/ThreadPanel'
 
 <main className="centaur-home">
-  <div className="home-bg" aria-hidden="true">
-    <img className="home-bg-mark" src="/brand/outline.svg" alt="" />
-  </div>
   <section className="home-hero" aria-labelledby="home-title">
     <div className="home-copy">
       <picture>

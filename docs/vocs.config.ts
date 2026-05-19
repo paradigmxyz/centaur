@@ -30,10 +30,9 @@ export default defineConfig({
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',
   },
-  // Body copy: Instrument Sans. Code blocks: Geist Mono. The landing hero
-  // uses Instrument Serif via the styles.css override.
+  // Body copy uses Instrument Serif via the styles.css override. Code blocks
+  // stay on Geist Mono.
   font: {
-    default: { google: 'Instrument Sans' },
     mono: { google: 'Geist Mono' },
   },
   ...(basePath ? { basePath } : {}),
