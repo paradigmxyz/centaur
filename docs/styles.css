@@ -654,6 +654,15 @@ body,
   white-space: pre-wrap;
 }
 
+/* Invisible measurement layer rendered alongside the streamed text so the
+ * bubble reserves its final height immediately. Keeps auto-scroll from
+ * clipping the bottom edge during the typing animation. */
+.thread-panel-stream-ghost {
+  color: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+
 .thread-panel-caret {
   animation: thread-panel-caret-blink 0.9s steps(1) infinite;
   background: var(--thread-accent);

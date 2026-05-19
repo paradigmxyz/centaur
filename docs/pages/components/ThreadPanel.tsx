@@ -525,12 +525,24 @@ function StreamingBubble({
   }, [onDone, speed, text, words])
 
   const shown = words.slice(0, count).join('')
+  const remaining = words.slice(count).join('')
   const isDone = count >= words.length
 
   return (
     <span className="thread-panel-stream">
       {shown}
       {!isDone && <span className="thread-panel-caret" />}
+      {/*
+        Render the un-streamed remainder invisible so the bubble reserves its
+        final height from frame one. The scroll-on-phase-change effect can
+        then settle on a scrollHeight that already accounts for the full
+        message, and the bottom edge stops clipping as words come in.
+       */}
+      {!isDone && (
+        <span className="thread-panel-stream-ghost" aria-hidden="true">
+          {remaining}
+        </span>
+      )}
     </span>
   )
 }
