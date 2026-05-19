@@ -156,7 +156,7 @@
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-serif);
+  font-family: var(--centaur-sans);
 }
 
 .centaur-home,
@@ -166,7 +166,7 @@ body,
 
 .vocs_Content {
   color: #dfdfd8;
-  font-family: var(--centaur-serif);
+  font-family: var(--centaur-sans);
   font-size: 1rem;
   line-height: 1.5;
 }
