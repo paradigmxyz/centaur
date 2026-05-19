@@ -4,6 +4,7 @@ const EnvSchema = z.object({
   NODE_ENV: z.string().default('development'),
   PORT: z.coerce.number().int().positive().default(3001),
   SLACK_BOT_TOKEN: z.string().optional(),
+  SLACK_API_URL: z.string().url().optional(),
   SLACK_SIGNING_SECRET: z.string().optional(),
   SLACKBOT_API_KEY: z.string().optional(),
   CENTAUR_API_URL: z.string().url().default('http://localhost:8000'),

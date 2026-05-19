@@ -26,8 +26,10 @@ const config = loadConfig()
 const deploymentAlertChannel = config.RUNTIME_ERROR_ALERT_CHANNEL.trim()
 const resolver = new SlackClientResolver(
   new EnvSlackInstallationStore({
-    token: config.SLACK_BOT_TOKEN
-  })
+    token: config.SLACK_BOT_TOKEN,
+    slackApiUrl: config.SLACK_API_URL
+  }),
+  { slackApiUrl: config.SLACK_API_URL }
 )
 const handoff = new CentaurHandoff(config)
 const deduper = new EventDeduper(config.SLACK_EVENT_DEDUP_TTL_MS)

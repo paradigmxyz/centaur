@@ -39,7 +39,8 @@
   },
   "include": [
     "src/**/*",
-    "examples/**/*"
+    "examples/**/*",
+    "test/**/*"
   ],
   "files": [
     "env.d.ts",
