@@ -337,7 +337,7 @@ body,
   min-height: calc(100dvh - var(--vocs-topNav_height));
 }
 
-.vocs_Footer {
+.vocs_Footer:not([data-layout="docs"]) {
   display: none;
 }
 
