@@ -9,7 +9,7 @@
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
   --centaur-sans: 'PolySans Var', system-ui, sans-serif;
-  --centaur-serif: 'Sagittaire Text', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+  --centaur-serif: 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
   --centaur-display: 'Sagittaire Display', var(--centaur-serif);
   --centaur-manual-display: 'Perfectly Nineties', var(--centaur-serif);
 }
@@ -126,8 +126,70 @@
   font-display: swap;
 }
 
+/* Lockup is wider per em than the standalone mark — keep the topNav
+ * tidy by dropping the rendered height a touch. */
 .vocs_NavLogo_logoImage {
-  height: 32px;
+  height: 26px;
+}
+
+/*
+ * Sidebar active state: Vocs bumps font-weight to medium on the active
+ * item, which causes a horizontal layout shift in the link text (the
+ * bolder glyphs are wider). Keep the weight constant and let color
+ * carry the active state instead.
+ */
+.vocs_Sidebar_item[data-active="true"] {
+  font-weight: inherit;
+}
+
+/*
+ * "On this page" outline (Vocs) currently renders every shortcut at
+ * the same brightness as the active one, so it reads as a list of
+ * white labels rather than a navigable jump-list. Establish a three-
+ * tier hierarchy: muted heading (non-link), dim inactive shortcuts,
+ * accent-colored active shortcut.
+ */
+.vocs_Outline_heading {
+  color: var(--vocs-color_text3);
+  opacity: 0.55;
+}
+
+.vocs_Outline_link[data-active="false"] {
+  color: var(--vocs-color_text2);
+  opacity: 0.55;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.vocs_Outline_link[data-active="false"]:hover {
+  opacity: 1;
+}
+
+.vocs_Outline_link[data-active="true"] {
+  opacity: 1;
+}
+
+/*
+ * Header nav: replace Vocs's solid color-mix background with a fade so
+ * content scrolls under the top bar instead of getting hard-clipped.
+ * The gradient goes from fully opaque page-bg at the top of the bar to
+ * fully transparent at its bottom edge. A backdrop-filter blur keeps
+ * any text peeking through legible.
+ */
+.vocs_DocsLayout_gutterTop {
+  background-color: transparent;
+  background-image: linear-gradient(
+    to bottom,
+    rgba(5, 5, 6, 1) 0%,
+    rgba(5, 5, 6, 0.85) 60%,
+    rgba(5, 5, 6, 0) 100%
+  );
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* Strip the curtain's solid background so the gradient is what shows. */
+.vocs_DocsLayout_gutterTopCurtain {
+  background: transparent;
 }
 
 @media (min-width: 1081px) {
@@ -386,7 +448,22 @@ body,
   display: block;
   height: auto;
   margin-bottom: 24px;
-  width: min(390px, 80vw);
+  opacity: 0.7;
+  transition: opacity 140ms ease;
+  width: min(312px, 64vw);
+}
+
+/* The .home-lockup img is wrapped in an anchor pointing at the GitHub
+ * repo — restore baseline opacity on hover so the affordance reads as
+ * a clickable jump-link. */
+a.home-lockup-link {
+  display: inline-block;
+  line-height: 0;
+}
+
+a.home-lockup-link:hover .home-lockup,
+a.home-lockup-link:focus-visible .home-lockup {
+  opacity: 1;
 }
 
 .home-hero h1 {
@@ -417,10 +494,11 @@ body,
   background: rgba(255, 255, 255, 0.035);
   color: #f7f7f2;
   display: inline-flex;
-  font-family: var(--centaur-serif);
-  font-size: 0.875rem;
-  font-weight: 400;
+  font-family: var(--centaur-sans);
+  font-size: 1rem;
+  font-weight: 550;
   justify-content: center;
+  letter-spacing: 0.005em;
   line-height: 1;
   min-height: 48px;
   padding: 0 20px;
@@ -459,6 +537,13 @@ body,
   line-height: 1;
   min-height: 48px;
   padding: 0 16px;
+  text-decoration: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.home-license:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.32);
 }
 
 .home-license strong {
@@ -480,8 +565,11 @@ body,
 
 .home-built-with > span {
   color: #8f8f88;
-  font-size: 0.96rem;
-  font-weight: 650;
+  font-family: var(--vocs-fontFamily_mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .home-logo-row {
@@ -567,7 +655,7 @@ body,
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   display: grid;
   gap: 8px;
-  padding: 22px 28px 24px 24px;
+  padding: 22px 28px 24px 40px;
   position: relative;
 }
 
@@ -580,9 +668,9 @@ body,
   border-radius: 50%;
   content: "";
   height: 7px;
-  left: 0;
+  left: 16px;
   position: absolute;
-  top: 30px;
+  top: 32px;
   width: 7px;
 }
 
@@ -666,7 +754,15 @@ body,
   flex: 1;
   flex-direction: column;
   min-height: 0;
+  -ms-overflow-style: none;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.thread-list-items::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
 }
 
 .thread-list-item {
@@ -804,20 +900,17 @@ body,
 .thread-panel-scroll {
   flex: 1;
   min-height: 0;
+  -ms-overflow-style: none;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 18px 22px 10px;
-  scrollbar-color: var(--thread-border-strong) transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 
 .thread-panel-scroll::-webkit-scrollbar {
-  width: 8px;
-}
-
-.thread-panel-scroll::-webkit-scrollbar-thumb {
-  background: var(--thread-border-strong);
-  border-radius: 99px;
+  display: none;
+  height: 0;
+  width: 0;
 }
 
 .thread-panel-parent {
@@ -1190,7 +1283,7 @@ body,
 
   .home-lockup {
     margin-bottom: 18px;
-    width: min(300px, 72vw);
+    width: min(240px, 58vw);
   }
 
   .home-hero h1 {
@@ -1203,9 +1296,16 @@ body,
     margin-top: 24px;
   }
 
+  /* Tablet + mobile: stack the "BUILT BY" label above the partner logos
+   * so the column reads centered and the eyebrow doesn't fight the lockups
+   * for horizontal space. */
   .home-built-with {
+    align-items: center;
+    flex-direction: column;
+    gap: 12px;
     justify-content: center;
     margin-top: 30px;
+    text-align: center;
   }
 
   .home-logo-row {
@@ -1251,7 +1351,7 @@ body,
   .home-lockup {
     margin-left: auto;
     margin-right: auto;
-    width: min(260px, 76vw);
+    width: min(208px, 60vw);
   }
 
   .home-hero h1 {
@@ -1302,19 +1402,31 @@ body,
 }
 
 @media (max-width: 680px) {
+  /* Stack thread list (horizontal row of channels) on top, conversation
+   * detail underneath. Pin each row to an explicit height so the
+   * streaming animation underneath doesn't push the list around as the
+   * detail panel grows/scrolls. */
   .thread-panel {
     grid-template-columns: 1fr;
+    grid-template-rows: 116px minmax(0, 1fr);
     height: 640px;
   }
 
   .thread-list {
     border-bottom: 1px solid var(--thread-border);
     border-right: 0;
-    max-height: 188px;
+    flex-shrink: 0;
+    height: 116px;
+    max-height: 116px;
+    min-height: 116px;
+    overflow: hidden;
   }
 
   .thread-list-items {
+    flex: 1;
     flex-direction: row;
+    height: 100%;
+    min-height: 0;
     overflow-x: auto;
     overflow-y: hidden;
   }
@@ -1325,6 +1437,7 @@ body,
     border-right: 1px solid var(--thread-border);
     border-top: 3px solid transparent;
     flex: 0 0 230px;
+    height: 100%;
     padding: 10px 12px;
   }
 

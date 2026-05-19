@@ -15,17 +15,19 @@ import ThreadPanel from '../components/ThreadPanel'
 <main className="centaur-home">
   <section className="home-hero" aria-labelledby="home-title">
     <div className="home-copy">
-      <picture>
-        <source srcSet="/brand/lockup-white.svg" media="(prefers-color-scheme: dark)" />
-        <img className="home-lockup" src="/brand/lockup-black.svg" alt="Centaur" />
-      </picture>
+      <a className="home-lockup-link" href="https://github.com/paradigmxyz/centaur" target="_blank" rel="noopener noreferrer" aria-label="Centaur on GitHub">
+        <picture>
+          <source srcSet="/brand/lockup-white.svg" media="(prefers-color-scheme: dark)" />
+          <img className="home-lockup" src="/brand/lockup-black.svg" alt="Centaur" />
+        </picture>
+      </a>
       <h1 id="home-title">Multiplayer, self-hosted, secure agents for teams.</h1>
 
       <div className="home-actions" aria-label="Primary documentation links">
         <a className="home-button home-button-primary" href="/quickstart">Get Started</a>
         <a className="home-button" href="/what-is-centaur">Why Centaur</a>
         <a className="home-button" href="https://github.com/paradigmxyz/centaur">GitHub</a>
-        <span className="home-license">license <strong>MIT</strong></span>
+        <a className="home-license" href="https://github.com/paradigmxyz/centaur/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">license <strong>MIT</strong></a>
       </div>
 
       <div className="home-built-with" aria-label="Built by">

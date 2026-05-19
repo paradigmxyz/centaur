@@ -28,11 +28,13 @@ export default defineConfig({
     light: '/brand/mark-black.svg',
     dark: '/brand/mark-white.svg',
   },
-  // Top-left site logo: standalone mark only. The landing hero carries the
-  // full Centaur lockup so the header can stay compact next to search.
+  // Top-left site logo: full lockup on docs routes (the sidebar / topNav
+  // gets enough space to carry the wordmark). Landing already hides the
+  // topNav logo via .vocs_DesktopTopNav_logoWrapper { display: none } so
+  // the lockup is only visible on docs pages.
   logoUrl: {
-    light: '/brand/mark-black.svg',
-    dark: '/brand/mark-white.svg',
+    light: '/brand/lockup-black.svg',
+    dark: '/brand/lockup-white.svg',
   },
   // Body copy uses Amp's PolySans via the styles.css override. Docs headings
   // use Perfectly Nineties, while the landing hero uses Sagittaire Display.
