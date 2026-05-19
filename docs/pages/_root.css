@@ -1105,6 +1105,7 @@ a.home-lockup-link {
 
 .thread-panel-avatar {
   align-items: center;
+  align-self: start;
   border-radius: 6px;
   color: #ffffff;
   display: flex;
@@ -1113,6 +1114,7 @@ a.home-lockup-link {
   font-weight: 700;
   height: 30px;
   justify-content: center;
+  margin-top: 2px;
   width: 30px;
 }
 
