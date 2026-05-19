@@ -659,10 +659,12 @@ function ThreadDetail({
   return (
     <section className="thread-panel-detail" aria-label={`Thread in ${thread.channel}`}>
       <header className="thread-panel-head">
-        <div>
-          <div className="thread-panel-title">Thread</div>
+        <div className="thread-panel-head-titles">
+          <div className="thread-panel-title">{thread.title}</div>
           <div className="thread-panel-sub">
-            # {thread.channel} · with {botName}
+            <span>Thread</span>
+            <span className="thread-panel-head-sep" aria-hidden="true">·</span>
+            <span className="thread-panel-head-channel"># {thread.channel}</span>
           </div>
         </div>
       </header>

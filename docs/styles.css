@@ -395,26 +395,52 @@ body,
   min-width: 0;
 }
 
+/* Slack-style thread detail header: bold thread title on top, breadcrumb
+ * meta (Thread · #channel) below in muted ink. Padding matches the threads
+ * list head so they sit on the same horizontal rule. */
 .thread-panel-head {
   align-items: center;
   border-bottom: 1px solid var(--thread-border);
   display: flex;
   gap: 12px;
-  padding: 10px 12px;
-  min-height: 41px;
+  padding: 9px 16px;
+  min-height: 50px;
   box-sizing: border-box;
 }
 
+.thread-panel-head-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .thread-panel-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thread-panel-sub {
+  align-items: center;
   color: var(--thread-ink-3);
+  display: flex;
   font-size: 11px;
-  margin-top: 1px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.thread-panel-head-sep {
+  opacity: 0.6;
+}
+
+.thread-panel-head-channel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thread-panel-scroll {
