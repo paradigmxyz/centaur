@@ -7,7 +7,32 @@
   --centaur-muted: light-dark(#727278, #9b9ba1);
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
-  --centaur-serif: 'Instrument Serif', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+  --centaur-sans: 'PolySans Var', system-ui, sans-serif;
+  --centaur-display: 'Perfectly Nineties', serif;
+}
+
+@font-face {
+  font-family: 'PolySans Var';
+  src: url('https://ampcode.com/fonts/PolySans-variable.woff2') format('woff2-variations');
+  font-style: normal;
+  font-weight: 300 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'PolySans Var';
+  src: url('https://ampcode.com/fonts/PolySansItalic-variable.woff2') format('woff2-variations');
+  font-style: italic;
+  font-weight: 300 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Perfectly Nineties';
+  src: url('https://ampcode.com/fonts/PerfectlyNineties-Regular.woff') format('woff');
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
 }
 
 /*
@@ -21,21 +46,12 @@
 }
 
 /*
- * Heading typography: Vocs loads Instrument Sans (body) + Geist Mono (code)
- * via `font` in vocs.config.ts. Instrument Serif is preloaded via the head
- * <link> so we can apply it to every heading without an @import flash.
+ * Amp-style typography: keep docs and UI sans-serif, and reserve the display
+ * face for the landing hero headline.
  */
-.vocs_Content h1,
-.vocs_Content h2,
-.vocs_Content h3,
-.vocs_Content h4,
-.vocs_Content h5,
-.vocs_Content h6,
-.centaur-home h1,
-.centaur-home h2 {
-  font-family: var(--centaur-serif);
-  font-weight: 400;
-  letter-spacing: -0.01em;
+body,
+.vocs_DocsLayout {
+  font-family: var(--centaur-sans);
 }
 
 :root,
@@ -177,10 +193,11 @@ body,
 
 .home-hero h1 {
   color: #f7f7f2;
+  font-family: var(--centaur-display);
   font-size: 4rem;
-  font-weight: medium;
+  font-weight: 500;
   letter-spacing: 0;
-  line-height: 0.94;
+  line-height: 0.9;
   margin: 0;
   max-width: 790px;
 }
