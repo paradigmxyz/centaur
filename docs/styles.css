@@ -144,8 +144,8 @@ body,
 
 .vocs_Content h1 {
   color: #f7f7f2;
-  font-size: clamp(2.55rem, 4.6vw, 4.15rem);
-  line-height: 0.96;
+  font-size: clamp(2.35rem, 3.8vw, 3.35rem);
+  line-height: 1;
   margin-bottom: 1.2rem;
 }
 
