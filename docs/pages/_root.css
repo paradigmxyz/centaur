@@ -604,10 +604,10 @@ a.home-lockup-link {
 
 .home-media-grid {
   display: grid;
-  gap: clamp(28px, 4vw, 56px);
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: clamp(32px, 4dvh, 44px) auto 0;
-  max-width: 1440px;
+  gap: clamp(48px, 6dvh, 84px);
+  grid-template-columns: 1fr;
+  margin: clamp(48px, 6dvh, 84px) auto 0;
+  max-width: 1280px;
   width: 100%;
 }
 
@@ -621,9 +621,20 @@ a.home-lockup-link {
 }
 
 .home-media-link {
+  align-items: center;
   color: inherit;
-  display: block;
+  display: grid;
+  gap: clamp(36px, 5vw, 80px);
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
   text-decoration: none;
+}
+
+.home-media-grid .home-media-section:nth-child(even) .home-media-link {
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+}
+
+.home-media-grid .home-media-section:nth-child(even) .home-architecture-diagram {
+  order: -1;
 }
 
 .home-media-link:focus-visible {
@@ -633,6 +644,12 @@ a.home-lockup-link {
 
 .home-media-link:hover .home-architecture-diagram img {
   border-color: rgba(255, 255, 255, 0.28);
+}
+
+.home-media-section .home-architecture-diagram {
+  margin: 0;
+  max-width: 100%;
+  padding-top: 0;
 }
 
 .home-overview-heading {
@@ -707,13 +724,6 @@ a.home-lockup-link {
   margin: clamp(44px, 6dvh, 72px) auto 0;
   max-width: 75%;
   padding-top: clamp(28px, 4dvh, 44px);
-}
-
-.home-media-section .home-architecture-diagram {
-  margin-left: 0;
-  margin-right: auto;
-  margin-top: 30px;
-  padding-top: 0;
 }
 
 .home-architecture-diagram img {
@@ -971,6 +981,61 @@ a.home-lockup-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.slack-chrome {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  margin-left: auto;
+  pointer-events: none;
+}
+
+.slack-chrome-btn {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: var(--thread-ink-2);
+  cursor: default;
+  display: inline-flex;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 5px;
+  height: 28px;
+  letter-spacing: 0;
+  padding: 0 8px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.slack-chrome-split {
+  gap: 4px;
+  padding-right: 6px;
+}
+
+.slack-chrome-bell {
+  padding: 0 8px;
+  position: relative;
+}
+
+.slack-chrome-dot {
+  background: #f15a4a;
+  border: 1.5px solid var(--thread-panel);
+  border-radius: 50%;
+  height: 7px;
+  position: absolute;
+  right: 6px;
+  top: 4px;
+  width: 7px;
+}
+
+@media (max-width: 760px) {
+  .slack-chrome > .slack-chrome-btn:not(:last-child) {
+    display: none;
+  }
 }
 
 .thread-panel-scroll {
@@ -1399,8 +1464,24 @@ a.home-lockup-link {
   }
 
   .home-media-grid {
+    gap: 28px;
+    max-width: 720px;
+    text-align: center;
+  }
+
+  .home-media-link {
+    gap: 28px;
     grid-template-columns: 1fr;
-    max-width: 980px;
+  }
+
+  .home-media-grid .home-media-section:nth-child(even) .home-architecture-diagram {
+    order: 0;
+  }
+
+  .home-media-section .home-architecture-diagram {
+    margin-inline: auto;
+    max-width: 65vw;
+    width: 100%;
   }
 
   .home-overview-heading {

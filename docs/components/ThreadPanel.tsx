@@ -571,6 +571,46 @@ function renderHumanText(text: string, botName: string) {
   )
 }
 
+function SlackChrome() {
+  return (
+    <div className="slack-chrome" aria-hidden="true">
+      <span className="slack-chrome-btn">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="6" cy="6" r="2.6" />
+          <path d="M2 13.2c.5-2 2.2-3.2 4-3.2s3.5 1.2 4 3.2" />
+          <circle cx="11.5" cy="5.5" r="1.8" />
+          <path d="M11 9.6c1.6 0 2.7 1 3 2.4" />
+        </svg>
+        <span>21</span>
+      </span>
+      <span className="slack-chrome-btn slack-chrome-split">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 9.5V7a5 5 0 1 1 10 0v2.5" />
+          <rect x="2" y="9" width="3" height="4" rx="1" />
+          <rect x="11" y="9" width="3" height="4" rx="1" />
+        </svg>
+        <svg viewBox="0 0 10 10" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2 4l3 3 3-3" />
+        </svg>
+      </span>
+      <span className="slack-chrome-btn slack-chrome-bell">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 11V7.5a4 4 0 0 1 8 0V11l1.2 1.5H2.8z" />
+          <path d="M6.5 13.5a1.5 1.5 0 0 0 3 0" />
+        </svg>
+        <span className="slack-chrome-dot" />
+      </span>
+      <span className="slack-chrome-btn">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
+          <circle cx="3.2" cy="8" r="1.3" />
+          <circle cx="8" cy="8" r="1.3" />
+          <circle cx="12.8" cy="8" r="1.3" />
+        </svg>
+      </span>
+    </div>
+  )
+}
+
 function ThreadDetail({
   accent,
   botGlyph,
@@ -681,6 +721,7 @@ function ThreadDetail({
             <span className="thread-panel-head-channel"># {thread.channel}</span>
           </div>
         </div>
+        <SlackChrome />
       </header>
 
       <div className="thread-panel-scroll" onScroll={handleScroll} ref={scrollRef}>

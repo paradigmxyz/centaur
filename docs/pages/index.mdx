@@ -19,7 +19,7 @@ import ThreadPanel from '../components/ThreadPanel'
       <a className="home-lockup-link" href="https://github.com/paradigmxyz/centaur" target="_blank" rel="noopener noreferrer" aria-label="Centaur on GitHub">
         <img className="home-lockup" src="/brand/lockup-white.svg" alt="Centaur" />
       </a>
-      <h1 id="home-title">Multiplayer, self-hosted, secure agents for teams.</h1>
+      <h1 id="home-title">Multiplayer, self-hosted, secure agents for Slack.</h1>
 
       <div className="home-actions" aria-label="Primary documentation links">
         <a className="home-button home-button-primary" href="/quickstart">Get Started</a>
