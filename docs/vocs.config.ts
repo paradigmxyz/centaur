@@ -142,6 +142,7 @@ export default defineConfig({
       light: '#00E100',
       dark: '#00E100',
     },
+    colorScheme: 'dark',
     variables: {
       color: {
         background: {
