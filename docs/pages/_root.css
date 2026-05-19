@@ -631,11 +631,9 @@ a.home-lockup-link {
 }
 
 .home-overview-heading {
-  border-top: 1px solid rgba(255, 255, 255, 0.14);
   display: grid;
   gap: 24px;
   grid-template-columns: minmax(220px, 0.38fr) minmax(0, 1fr);
-  padding-top: 34px;
 }
 
 .home-overview h2 {
@@ -656,9 +654,8 @@ a.home-lockup-link {
 }
 
 .home-overview-list {
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
   display: grid;
-  gap: 0;
+  gap: 24px 40px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   list-style: none;
   margin: 38px 0 0;
@@ -666,15 +663,14 @@ a.home-lockup-link {
 }
 
 .home-overview-list li {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   display: grid;
   gap: 8px;
-  padding: 22px 28px 24px 40px;
+  padding: 0 28px 0 40px;
   position: relative;
 }
 
 .home-overview-list li:nth-child(odd) {
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  border-right: 0;
 }
 
 .home-overview-list li::before {
@@ -1406,7 +1402,6 @@ a.home-lockup-link {
   .home-overview-heading {
     gap: 16px;
     grid-template-columns: 1fr;
-    padding-top: 28px;
     text-align: center;
   }
 
