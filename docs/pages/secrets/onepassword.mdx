@@ -85,7 +85,7 @@ Those are boot-time service secrets, not tool credentials.
 For the normal tool declaration:
 
 ```toml
-[tool.ai-v2]
+[tool.centaur]
 secrets = [
     {type = "http", name = "WAREHOUSE_API_KEY", match_headers = ["Authorization"], hosts = ["warehouse.internal.example.com"]},
 ]

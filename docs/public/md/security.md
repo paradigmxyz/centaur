@@ -79,7 +79,7 @@ Tool and harness credentials never reach the sandbox. Tools declare
 their secrets in `pyproject.toml`:
 
 ```toml
-[tool.ai-v2]
+[tool.centaur]
 secrets = [
     {type = "http", name = "WAREHOUSE_API_KEY", match_headers = ["Authorization"], hosts = ["warehouse.internal.example.com"]},
 ]
@@ -99,10 +99,20 @@ Three properties of this declaration matter:
   The placeholder cannot be smuggled out in a different field or
   header.
 
-Other typed variants (`oauth_token`, `gcp_auth`, `pg_dsn`) extend the
-same pattern to OAuth2 token minting, Google service-account auth,
-and proxied Postgres connections. See
-[Creating Tools](/extend/tools) for the full schema.
+Other typed variants extend the same boundary in different ways:
+
+- **`oauth_token`** resolves the declared OAuth credential fields from the
+  secret source, exchanges them for an access token, caches and refreshes that
+  token, then injects it as `Authorization: Bearer ...` for matching hosts. The
+  sandbox never sees the client secret, refresh token, or minted access token.
+- **`gcp_auth`** resolves a Google service-account keyfile, mints Google OAuth
+  tokens for the configured scopes, and injects those bearer tokens for the
+  configured Google API hosts.
+- **`pg_dsn`** resolves the real upstream Postgres DSN inside iron-proxy. The
+  sandbox receives a local DSN that points at its per-sandbox proxy listener,
+  so tool code can connect normally without receiving the real database URL.
+
+See [Creating Tools](/extend/tools) for the full schema.
 
 ### Audit trail
 

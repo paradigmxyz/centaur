@@ -66,22 +66,24 @@ header contains the placeholder.
 for upstreams that need more than a header swap:
 
 ```toml
-[[tool.ai-v2.secrets]]
+[[tool.centaur.secrets]]
 type = "gcp_auth"
 name = "ANALYTICS_BIGQUERY_CREDENTIAL"
 secret_ref = "ANALYTICS_BIGQUERY_CREDENTIAL"
 
-[[tool.ai-v2.secrets]]
+[[tool.centaur.secrets]]
 type = "pg_dsn"
 name = "WAREHOUSE_POSTGRES_DSN"
 secret_ref = "WAREHOUSE_POSTGRES_DSN"
 database = "analytics"
 ```
 
-Use `gcp_auth` when [iron-proxy](https://docs.iron.sh) should mint Google OAuth tokens for Google APIs.
-Use `pg_dsn` when a sandbox needs a proxied Postgres DSN instead of a raw
-database URL. Use `oauth_token` for OAuth2 access-token minting against a
-named token endpoint.
+Use `gcp_auth` when [iron-proxy](https://docs.iron.sh) should resolve a Google
+service-account keyfile, mint Google OAuth tokens, and inject them for matching
+Google API hosts. Use `pg_dsn` when a sandbox needs a local Postgres URL that
+points at iron-proxy instead of the raw upstream DSN. Use `oauth_token` when
+iron-proxy should resolve OAuth credential fields, exchange them at a token
+endpoint, and inject a short-lived bearer token for matching API hosts.
 
 ## Verify
 

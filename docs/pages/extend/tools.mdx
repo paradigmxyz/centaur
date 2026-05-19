@@ -18,7 +18,7 @@ intentionally.
 
 ## Define metadata
 
-Each tool needs `pyproject.toml` with a `[tool.ai-v2]` block:
+Each tool needs `pyproject.toml` with a `[tool.centaur]` block:
 
 ```toml
 [project]
@@ -32,7 +32,7 @@ dependencies = ["httpx>=0.27.0"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.ai-v2]
+[tool.centaur]
 module = "client.py"
 secrets = [
     {type = "http", name = "WAREHOUSE_API_KEY", match_headers = ["Authorization"], hosts = ["warehouse.internal.example.com"]},
@@ -43,10 +43,22 @@ Each entry in `secrets` declares one credential the tool can request with
 `secret(...)`. The fields tell iron-proxy what to swap and where:
 
 - `type = "http"` is the common case: an HTTP credential injected into outbound
-  requests. Other types include `oauth_token`, `gcp_auth`, and `pg_dsn` for
-  upstreams that need OAuth, Google service-account auth, or proxied Postgres.
+  requests. Replace-mode HTTP secrets give the tool a placeholder from
+  `secret("...")`; iron-proxy swaps that placeholder for the real value at the
+  network boundary.
+- `type = "oauth_token"` is for OAuth2 APIs. iron-proxy resolves the declared
+  `fields`, runs either a `refresh_token` or `client_credentials` exchange,
+  caches and refreshes the access token, then injects `Authorization: Bearer ...`
+  for the configured `hosts`.
+- `type = "gcp_auth"` is for Google service-account JSON. iron-proxy resolves
+  the keyfile, mints Google OAuth tokens for `scopes`, and injects them for the
+  configured Google API `hosts`. If omitted, hosts default to
+  `*.googleapis.com` and scopes default to `cloud-platform`.
+- `type = "pg_dsn"` is for Postgres. iron-proxy resolves the real upstream DSN,
+  while the sandbox gets a local proxy DSN in an environment variable named by
+  `name`; `database` must match the upstream database name.
 - `name` is the placeholder string the sandbox sees and what
-  `secret("...")` looks up.
+  `secret("...")` looks up for replace-mode HTTP secrets.
 - `match_headers`, `match_query`, or `match_path` tell iron-proxy where in the
   request the placeholder is allowed to appear. At least one is required.
 - `hosts` is the upstream allowlist for this secret. iron-proxy will only
@@ -96,4 +108,4 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
 
 Check that the tool appears and that missing-secret warnings match what you
 expect. If a tool is missing, inspect the overlay image contents, `TOOL_DIRS`,
-the tool directory name, and `[tool.ai-v2] module = "client.py"`.
+the tool directory name, and `[tool.centaur] module = "client.py"`.
