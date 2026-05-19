@@ -140,9 +140,8 @@ body,
 }
 
 .home-bg-mark {
-  height: clamp(420px, 78vh, 920px);
+  height: clamp(440px, 80vh, 960px);
   left: clamp(-160px, 2vw, 40px);
-  opacity: 0.09;
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
