@@ -11,6 +11,16 @@
 }
 
 /*
+ * Header lockup: Vocs sizes the NavLogo image at 50% of the 56px anchor on
+ * docs layouts (= 28px) and forces 32px on the landing layout, which makes
+ * the lockup visibly shrink when you click from "/" into "/architecture".
+ * Pin every layout to 32px so the wordmark stays the same height.
+ */
+.vocs_NavLogo_logoImage {
+  height: 32px !important;
+}
+
+/*
  * Heading typography: Vocs loads Instrument Sans (body) + Geist Mono (code)
  * via `font` in vocs.config.ts. Instrument Serif is preloaded via the head
  * <link> so we can apply it to every heading without an @import flash.
@@ -231,8 +241,8 @@ body,
 .home-brand img {
   display: block;
   filter: invert(1);
-  height: 32px;
-  max-width: min(34vw, 160px);
+  height: 36px;
+  max-width: min(34vw, 180px);
   object-fit: contain;
 }
 
@@ -366,12 +376,15 @@ body,
 
 .thread-list-name {
   color: var(--thread-ink);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 .thread-panel-detail {
