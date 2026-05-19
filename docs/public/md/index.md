@@ -28,7 +28,7 @@ import ThreadPanel from '../components/ThreadPanel'
       </div>
 
       <div className="home-built-with" aria-label="Built by">
-        <span>Built with love by</span>
+        <span>Built by</span>
         <div className="home-logo-row" aria-label="Paradigm and Tempo">
           <a className="home-brand" href="https://paradigm.xyz" aria-label="Paradigm">
             <img src="/paradigm-logo.svg" alt="Paradigm" />
