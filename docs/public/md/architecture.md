@@ -10,8 +10,8 @@ runtime, exposes approved tools, injects credentials through a proxy, and keeps
 an event trail clients can replay.
 
 <figure className="architecture-figure">
-  <img src="/brand/workflow.svg" alt="Centaur workflow diagram — Centaur API to Kubernetes backend to sandbox pod, with iron-proxy handling outbound credentials" />
-  <figcaption>A single Centaur agent turn: API persists the message, hands off to the Kubernetes backend, attaches a sandbox pod, and routes the pod's outbound HTTP through iron-proxy.</figcaption>
+  <img src="/brand/architecture.svg" alt="Centaur architecture — ingress, durable control plane, isolated execution, tools, workflows, and controlled egress" />
+  <figcaption>Architecture 2.0: ingress, durable control plane, isolated execution, tools, workflows, and controlled egress — every plane lives at the layer that can own it cleanly.</figcaption>
 </figure>
 
 ## Planes

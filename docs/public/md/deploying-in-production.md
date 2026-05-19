@@ -17,7 +17,7 @@ creates sandbox pods for agent work. [iron-proxy](https://docs.iron.sh) handles 
 need credentials:
 
 <figure className="architecture-figure">
-  <img src="/brand/architecture.svg" alt="Centaur production architecture — ingress, control plane, sandbox runtime, tools/workflows, secrets, and egress" />
+  <img src="/brand/workflow.svg" alt="Centaur production workflow — Centaur API plus Postgres hands a run to the Kubernetes backend, which attaches a sandbox pod whose outbound HTTP routes through iron-proxy" />
   <figcaption>Slackbot and API ingress → Centaur API (Postgres-backed) → Kubernetes sandbox runtime → outbound traffic through iron-proxy.</figcaption>
 </figure>
 

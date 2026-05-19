@@ -4,6 +4,12 @@ import { defineConfig } from 'vocs'
 import { sidebar } from './sidebar.js'
 
 const basePath = process.env.VOCS_BASE_PATH || undefined
+const siteUrl = 'https://centaur.run'
+
+function canonicalHref(path: string) {
+  if (path === '/') return `${siteUrl}/`
+  return `${siteUrl}${path.replace(/\/+$/, '')}/`
+}
 
 export default defineConfig({
   rootDir: '.',
@@ -11,6 +17,7 @@ export default defineConfig({
   // public/ (like our zip and brand SVGs), so downgrade to a warning rather
   // than failing the build.
   checkDeadlinks: 'warn',
+  baseUrl: siteUrl,
   title: 'Centaur',
   titleTemplate: '%s - Centaur',
   description: 'The production control plane for shared AI agents, tools, workflows, and sandboxes.',
@@ -26,25 +33,30 @@ export default defineConfig({
     dark: '/brand/lockup-white.svg',
   },
   // Body copy: Instrument Sans. Code blocks: Geist Mono. Headings use
-  // Instrument Serif via a styles.css override since Vocs only natively
+  // Instrument Serif via the styles.css override since Vocs only natively
   // configures body + mono.
   font: {
     default: { google: 'Instrument Sans' },
     mono: { google: 'Geist Mono' },
   },
-  head: createElement(Fragment, null,
-    createElement('link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }),
-    createElement('link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: '' }),
-    createElement('link', {
-      rel: 'stylesheet',
-      href: 'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap',
-    }),
-    createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
-  ),
   ...(basePath ? { basePath } : {}),
   editLink: {
     pattern: 'https://github.com/paradigmxyz/centaur/edit/main/docs/pages/:path',
     text: 'Edit this page',
+  },
+  // Per-page <head>: canonical URL for SEO plus the global font preload and
+  // the centaur-brand-menu.js script that powers the right-click logo menu.
+  head({ path }) {
+    return createElement(Fragment, null,
+      createElement('link', { rel: 'canonical', href: canonicalHref(path) }),
+      createElement('link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }),
+      createElement('link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: '' }),
+      createElement('link', {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap',
+      }),
+      createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
+    )
   },
   llms: {
     generateMarkdown: true,

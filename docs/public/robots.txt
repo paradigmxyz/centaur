@@ -1,0 +1,7 @@
+# Centaur welcomes search engines and AI assistants that respect robots.txt.
+# Documentation pages are designed to be crawled and cited from the canonical site.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://centaur.run/sitemap.xml
