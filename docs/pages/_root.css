@@ -509,22 +509,18 @@ body,
   display: block;
   height: auto;
   margin-bottom: 24px;
-  opacity: 0.6;
-  transition: opacity 140ms ease;
+  opacity: 1;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
   width: min(250px, 51vw);
 }
 
-/* The .home-lockup img is wrapped in an anchor pointing at the GitHub
- * repo — restore baseline opacity on hover so the affordance reads as
- * a clickable jump-link. */
 a.home-lockup-link {
   display: inline-block;
   line-height: 0;
-}
-
-a.home-lockup-link:hover .home-lockup,
-a.home-lockup-link:focus-visible .home-lockup {
-  opacity: 1;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .home-hero h1 {
@@ -671,10 +667,14 @@ a.home-lockup-link:focus-visible .home-lockup {
 }
 
 .home-overview {
-  margin: clamp(76px, 9dvh, 128px) auto 0;
+  margin: clamp(36px, 4.5dvh, 56px) auto 0;
   max-width: 1280px;
   text-align: left;
   width: 100%;
+}
+
+.home-media-section {
+  margin-top: clamp(32px, 4dvh, 44px);
 }
 
 .home-overview-heading {
@@ -752,6 +752,11 @@ a.home-lockup-link:focus-visible .home-lockup {
   margin: clamp(44px, 6dvh, 72px) auto 0;
   max-width: 100%;
   padding-top: clamp(28px, 4dvh, 44px);
+}
+
+.home-media-section .home-architecture-diagram {
+  margin-top: 30px;
+  padding-top: 0;
 }
 
 .home-architecture-diagram img {
