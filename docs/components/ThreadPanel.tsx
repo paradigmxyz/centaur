@@ -764,7 +764,7 @@ function ThreadDetail({
 }
 
 export default function ThreadPanel({
-  accent = '#ff9318',
+  accent = '#00e100',
   speed = 34,
   botName = 'Centaur',
   botGlyph = 'C',

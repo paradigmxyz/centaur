@@ -30,9 +30,10 @@ export default defineConfig({
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',
   },
-  // Body copy is overridden to PolySans in styles.css to match Amp's stack.
-  // Keep Vocs on a system sans fallback here since PolySans is self-hosted.
+  // Body copy: Instrument Sans. Code blocks: Geist Mono. The landing hero
+  // uses Instrument Serif via the styles.css override.
   font: {
+    default: { google: 'Instrument Sans' },
     mono: { google: 'Geist Mono' },
   },
   ...(basePath ? { basePath } : {}),
@@ -45,6 +46,12 @@ export default defineConfig({
   head({ path }) {
     return createElement(Fragment, null,
       createElement('link', { rel: 'canonical', href: canonicalHref(path) }),
+      createElement('link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }),
+      createElement('link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: '' }),
+      createElement('link', {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap',
+      }),
       createElement('script', { src: '/centaur-brand-menu.js', defer: true }),
     )
   },
@@ -96,8 +103,8 @@ export default defineConfig({
   sidebar,
   theme: {
     accentColor: {
-      light: '#ff9318',
-      dark: '#ffc517',
+      light: '#00e100',
+      dark: '#00e100',
     },
     colorScheme: 'dark',
     variables: {

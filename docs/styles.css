@@ -1,38 +1,15 @@
 :root {
-  --centaur-accent: light-dark(#ff9318, #ffc517);
-  --centaur-accent-soft: light-dark(rgba(255, 147, 24, 0.11), rgba(255, 197, 23, 0.12));
+  --centaur-accent: #00e100;
+  --centaur-accent-hover: #35f335;
+  --centaur-accent-soft: rgba(0, 225, 0, 0.14);
   --centaur-bg: light-dark(#ffffff, #101012);
   --centaur-code: light-dark(#f6f6f7, #0b0b0d);
   --centaur-line: light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
   --centaur-muted: light-dark(#727278, #9b9ba1);
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
-  --centaur-sans: 'PolySans Var', system-ui, sans-serif;
-  --centaur-display: 'Perfectly Nineties', serif;
-}
-
-@font-face {
-  font-family: 'PolySans Var';
-  src: url('https://ampcode.com/fonts/PolySans-variable.woff2') format('woff2-variations');
-  font-style: normal;
-  font-weight: 300 800;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'PolySans Var';
-  src: url('https://ampcode.com/fonts/PolySansItalic-variable.woff2') format('woff2-variations');
-  font-style: italic;
-  font-weight: 300 800;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Perfectly Nineties';
-  src: url('https://ampcode.com/fonts/PerfectlyNineties-Regular.woff') format('woff');
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
+  --centaur-sans: 'Instrument Sans', system-ui, sans-serif;
+  --centaur-display: 'Instrument Serif', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
 }
 
 /*
@@ -46,8 +23,8 @@
 }
 
 /*
- * Amp-style typography: keep docs and UI sans-serif, and reserve the display
- * face for the landing hero headline.
+ * Keep docs and UI sans-serif, and reserve the display face for the landing
+ * hero headline.
  */
 body,
 .vocs_DocsLayout {
@@ -66,21 +43,21 @@ body,
   --vocs-color_codeBlockBackground: #0b0b0d;
   --vocs-color_codeInlineBackground: #111114;
   --vocs-color_codeInlineBorder: rgba(255, 255, 255, 0.12);
-  --vocs-color_codeInlineText: #ffc517;
+  --vocs-color_codeInlineText: var(--centaur-accent);
   --vocs-color_border: rgba(255, 255, 255, 0.12);
   --vocs-color_border2: rgba(255, 255, 255, 0.2);
   --vocs-color_heading: #f7f7f2;
   --vocs-color_hr: rgba(255, 255, 255, 0.12);
-  --vocs-color_link: #ffc517;
-  --vocs-color_linkHover: #ffd95c;
+  --vocs-color_link: var(--centaur-accent);
+  --vocs-color_linkHover: var(--centaur-accent-hover);
   --vocs-color_shadow: rgba(0, 0, 0, 0.45);
   --vocs-color_shadow2: rgba(0, 0, 0, 0.35);
   --vocs-color_text: #f7f7f2;
   --vocs-color_text2: #dfdfd8;
   --vocs-color_text3: #a5a59d;
   --vocs-color_text4: #76766f;
-  --vocs-color_textAccent: #ffc517;
-  --vocs-color_textAccentHover: #ffd95c;
+  --vocs-color_textAccent: var(--centaur-accent);
+  --vocs-color_textAccentHover: var(--centaur-accent-hover);
   --vocs-color_textHover: #ffffff;
   --vocs-color_title: #f7f7f2;
 }
@@ -195,9 +172,9 @@ body,
   color: #f7f7f2;
   font-family: var(--centaur-display);
   font-size: 4rem;
-  font-weight: 500;
-  letter-spacing: 0;
-  line-height: 0.9;
+  font-weight: 400;
+  letter-spacing: 0.012em;
+  line-height: 0.92;
   margin: 0;
   max-width: 790px;
 }
@@ -238,14 +215,14 @@ body,
 }
 
 .home-button-primary {
-  background: #ffc517;
-  border-color: #ffc517;
+  background: var(--centaur-accent);
+  border-color: var(--centaur-accent);
   color: #111113;
 }
 
 .home-button-primary:hover {
-  background: #ffd95c;
-  border-color: #ffd95c;
+  background: var(--centaur-accent-hover);
+  border-color: var(--centaur-accent-hover);
 }
 
 /* Single-row "Built with love by <Paradigm> <Tempo>" — keeps the three
@@ -310,7 +287,7 @@ body,
   --thread-ink: #f0f0ea;
   --thread-ink-2: #d8d8d1;
   --thread-ink-3: #a4a49d;
-  --thread-accent-soft: rgba(255, 197, 23, 0.16);
+  --thread-accent-soft: rgba(0, 225, 0, 0.16);
   background: var(--thread-panel);
   border: 1px solid var(--thread-border);
   border-radius: 8px;
@@ -560,7 +537,7 @@ body,
 }
 
 .thread-panel-name-bot {
-  color: #ffd95c;
+  color: var(--centaur-accent-hover);
 }
 
 .thread-panel-time {
