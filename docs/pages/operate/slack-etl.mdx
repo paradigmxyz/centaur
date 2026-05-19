@@ -8,8 +8,8 @@ description: Sync Slack channel history into Postgres, drain historical backfill
 :::warning[Off by default in production]
 Slack ETL is disabled unless the API service has `SLACK_ETL_ENABLED=true`.
 Production deployments should enable it deliberately after choosing the Slack
-token, channel scope, exclusion patterns, and retention boundary they want
-agents to use.
+token, channel scope, exclusion patterns, and data boundary they want agents to
+use.
 :::
 
 Slack ETL keeps an indexed, queryable copy of public Slack history in Postgres
@@ -97,6 +97,11 @@ The first incremental run reads a small recent window so useful data appears
 quickly, then seeds historical backfill jobs for the configured lookback. Later
 incremental runs resume from each channel checkpoint and re-read a trailing
 thread window so recent edits and replies are picked up.
+
+The lookback values are read windows, not retention windows. Lowering
+`SLACK_SYNC_BACKFILL_LOOKBACK_DAYS` or `SLACK_SYNC_THREAD_LOOKBACK_DAYS` limits
+future backfill and refresh work, but it does not delete Slack rows or company
+context documents that were already synced.
 
 ## Run it manually
 
