@@ -654,7 +654,7 @@ body,
   height: auto;
   margin-bottom: clamp(24px, 3dvh, 42px);
   opacity: 0.5;
-  width: clamp(132px, 9.6vw, 186px);
+  width: clamp(168px, 12vw, 232px);
 }
 
 @media (max-width: 1080px) {
