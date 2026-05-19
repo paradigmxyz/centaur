@@ -103,10 +103,10 @@ export default defineConfig({
       match: (path) => path === '/architecture',
     },
     {
-      // GitHub icon link rendered inline at the end of the topNav. The
-      // footer's socials entry covers the docs pages; this one keeps the
-      // affordance reachable on the landing page where the footer isn't
-      // visible above the fold.
+      // GitHub icon link rendered inline at the end of the topNav. This
+      // is the only entry point to the repo from the chrome — the
+      // footer's vocs `socials` block has been removed so we don't
+      // ship two GitHub affordances on the same page.
       element: createElement(
         'a',
         {
@@ -135,7 +135,6 @@ export default defineConfig({
       ),
     },
   ],
-  socials: [{ icon: 'github', link: 'https://github.com/paradigmxyz/centaur' }],
   search: {
     boostDocument(documentId) {
       if (documentId.includes('what-is-centaur')) return 4.5

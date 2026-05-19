@@ -9,8 +9,13 @@
   --centaur-soft: light-dark(rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.055));
   --centaur-text: light-dark(#101012, #ffffff);
   --centaur-sans: 'PolySans Var', system-ui, sans-serif;
-  --centaur-serif: 'Sagittaire Text', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
-  --centaur-display: 'Sagittaire Display', var(--centaur-serif);
+  /* Perfectly Nineties is THE landing serif. Every selector that resolves
+   * through these vars now picks Perfectly Nineties (with humanist
+   * fallbacks). The older @font-face definitions below are still loaded
+   * so concurrent sibling work that references them by name doesn't
+   * break, but no selector here points at them anymore. */
+  --centaur-serif: 'Perfectly Nineties', 'Iowan Old Style', 'Apple Garamond', Georgia, serif;
+  --centaur-display: 'Perfectly Nineties', var(--centaur-serif);
   --centaur-manual-display: 'Perfectly Nineties', var(--centaur-serif);
 }
 
@@ -130,10 +135,12 @@
  * Header lockup: Vocs sizes the NavLogo image at 50% of the 56px anchor on
  * docs layouts (= 28px) and forces 32px on the landing layout, which makes
  * the lockup visibly shrink when you click from "/" into "/architecture".
- * Pin every layout to 32px so the wordmark stays the same height.
+ * Pin every layout to a single height so the wordmark stays the same on
+ * both, and keep it short enough that it doesn't crowd the topNav's
+ * bottom rule on tablet-width viewports.
  */
 .vocs_NavLogo_logoImage {
-  height: 32px !important;
+  height: 26px !important;
 }
 
 /*
@@ -326,17 +333,113 @@ body,
   background: #050506;
 }
 
+/*
+ * Top-nav layout — landing only.
+ *
+ * The landing hero already carries a large centaur mark above the title,
+ * so the topNav lockup is redundant on `/`. Hide it (desktop + mobile)
+ * and right-align the remaining nav items via flex-end. Docs routes keep
+ * Vocs's sidebar-driven default — the sidebar shows the lockup, the
+ * topNav doesn't — so the landing-only `display: none` doesn't affect
+ * them. The safety-net rule below also hides any rogue topNav logo on
+ * non-landing layouts in case Vocs's defaults shift in a future release.
+ *
+ * Vocs's _withLogo padding offsets the topNav contents by half the page
+ * gutter so they line up with the content_width column; on landing we
+ * drop that gutter padding so the nav items hug the right page edge
+ * instead of sitting indented.
+ */
+/*
+ * Vocs hides .vocs_DesktopTopNav at ≤1080px and shows .vocs_MobileTopNav
+ * instead. Our flex override must sit inside the same desktop range,
+ * otherwise the !important display: flex resurrects the desktop nav
+ * underneath the mobile nav at narrower widths and the landing page
+ * shows two stacked nav bars.
+ */
+@media (min-width: 1081px) {
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav {
+    display: flex !important;
+    align-items: center !important;
+    gap: 24px;
+    justify-content: flex-end !important;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav.vocs_DesktopTopNav_withLogo {
+    padding-left: var(--vocs-topNav_horizontalPadding);
+    padding-right: var(--vocs-topNav_horizontalPadding);
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_section:last-child {
+    align-items: center;
+    display: flex;
+    margin-left: auto;
+  }
+
+  .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_section:empty {
+    display: none;
+  }
+}
+
+.vocs_DocsLayout[data-layout="landing"] .vocs_DesktopTopNav_logoWrapper,
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logo,
+.vocs_DocsLayout[data-layout="landing"] .vocs_MobileTopNav_logoWrapper {
+  display: none !important;
+}
+
+/*
+ * Safety net: hide the topNav logo wrapper on every non-landing layout.
+ * The lockup already lives in the sidebar there, and any rogue topNav
+ * copy (e.g. if Vocs reflows on a future release) would render as a
+ * duplicate Centaur lockup in the header on docs pages.
+ */
+.vocs_DocsLayout:not([data-layout="landing"]) .vocs_DesktopTopNav_logoWrapper {
+  display: none !important;
+}
+
+.vocs_NavigationMenu_list {
+  align-items: center;
+}
+
+/*
+ * Dim inactive nav items so the active route reads as the focal item.
+ * The topNav has no "active" state for the GitHub icon, so it picks up
+ * the same 0.7 baseline (see .topnav-github below) and lifts to 1 on
+ * hover/focus.
+ */
+.vocs_DesktopTopNav_item:not([data-active="true"]),
+.vocs_NavigationMenu_link:not([data-active="true"]) {
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+}
+
+.vocs_DesktopTopNav_item:not([data-active="true"]):hover,
+.vocs_DesktopTopNav_item:not([data-active="true"]):focus-visible,
+.vocs_NavigationMenu_link:not([data-active="true"]):hover,
+.vocs_NavigationMenu_link:not([data-active="true"]):focus-visible {
+  opacity: 1;
+}
+
+/*
+ * Inline GitHub icon at the end of the topNav. Matches sibling
+ * .vocs_NavigationMenu_link items (height: 100%; align-items: center)
+ * so it shares the row's vertical centerline. The 1px nudge accounts
+ * for the GitHub mark's optical center sitting slightly above the SVG
+ * box's geometric center, which otherwise reads a touch high next to
+ * the text baseline.
+ */
 .topnav-github {
   align-items: center;
   color: currentColor;
   display: inline-flex;
-  height: var(--vocs-topNav_horizontalPadding, 100%);
+  height: 100%;
   justify-content: center;
   line-height: 1;
-  opacity: 0.85;
-  padding: 0 10px;
+  opacity: 0.7;
+  padding: 0;
+  position: relative;
   text-decoration: none;
-  transition: opacity 0.15s ease;
+  top: 1px;
+  transition: opacity 120ms ease;
 }
 
 .topnav-github:hover,
@@ -349,10 +452,6 @@ body,
   display: block;
   height: 18px;
   width: 18px;
-}
-
-.vocs_DocsLayout[data-layout="landing"] .vocs_NavLogo_logoImage {
-  height: 32px;
 }
 
 .vocs_DocsLayout[data-layout="landing"] .vocs_DesktopSearch_search,
@@ -409,26 +508,39 @@ body,
   min-width: 0;
 }
 
+/* Hero centaur mark sits above the title as a quiet stamp, not the primary
+ * visual — half-opacity at ~1.5× the previous size so it grounds the
+ * composition without competing with the headline. */
 .home-mark {
   display: block;
-  width: clamp(88px, 6.4vw, 124px);
   height: auto;
   margin-bottom: clamp(24px, 3dvh, 42px);
+  opacity: 0.5;
+  width: clamp(132px, 9.6vw, 186px);
 }
 
 .home-hero h1 {
   color: #f7f7f2;
-  font-size: clamp(4.2rem, 5vw, 6.6rem);
+  /* Hero title + body copy share one editorial voice (Perfectly Nineties).
+   * Vocs's reset CSS applies `text-wrap: balance` globally to h1-h6, which
+   * shuffles the line breaks unevenly with display-serif metrics; reset to
+   * `wrap` so the hero falls naturally and gaps between lines stay even. */
+  font-family: var(--centaur-manual-display);
+  font-size: clamp(3.7rem, 4.5vw, 6.1rem);
   font-weight: 400;
   letter-spacing: 0.012em;
-  line-height: 0.92;
+  line-height: 0.95;
   margin: 0;
   max-width: 790px;
+  text-wrap: wrap;
 }
 
 .home-lede {
   color: #b8b8b0;
-  font-size: clamp(1.17rem, 1.25vw, 1.35rem);
+  font-family: var(--centaur-manual-display);
+  font-size: clamp(1.3rem, 1.4vw, 1.48rem);
+  font-weight: 400;
+  letter-spacing: 0.01em;
   line-height: 1.58;
   margin: clamp(24px, 3dvh, 36px) 0 0;
   max-width: 680px;
@@ -483,10 +595,16 @@ body,
   margin-top: 46px;
 }
 
+/* Eyebrow label: small-caps mono so it reads as a tag, not a sentence.
+ * Geist Mono is the project's mono face (configured via vocs `font.mono`)
+ * and is exposed through --vocs-fontFamily_mono with system fallbacks. */
 .home-built-with > span {
   color: #8f8f88;
-  font-size: 0.9rem;
-  font-weight: 650;
+  font-family: var(--vocs-fontFamily_mono);
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .home-logo-row {
@@ -582,7 +700,6 @@ body,
   background: transparent;
   border: 0;
   border-bottom: 1px solid var(--thread-border);
-  border-left: 2px solid transparent;
   color: inherit;
   cursor: pointer;
   display: block;
@@ -597,9 +714,14 @@ body,
   background: var(--thread-hover);
 }
 
+/* Active row's green accent sits on the BOTTOM edge of the row so it
+ * reads as an underline under the selected thread. Padding-bottom drops
+ * by 1px to absorb the extra pixel the 2px accent border adds vs the
+ * 1px separator border on inactive rows — keeps row heights identical. */
 .thread-list-item-active {
   background: var(--thread-panel);
-  border-left-color: var(--thread-accent);
+  border-bottom: 2px solid var(--thread-accent);
+  padding-bottom: 7px;
 }
 
 .thread-list-channel-row {
@@ -1077,9 +1199,13 @@ body,
 }
 
 @media (min-width: 761px) and (max-aspect-ratio: 4 / 3) {
+  /* Tablet / tall portrait: hero collapses to a single column. Grow the
+   * bottom padding so the built-with row sits well above the viewport
+   * floor with real scroll room beneath it, and let the hero grow past
+   * the fold rather than locking to exactly one viewport height. */
   .centaur-home {
-    justify-content: center;
-    padding: clamp(32px, 4dvh, 56px) 28px;
+    justify-content: flex-start;
+    padding: clamp(32px, 4dvh, 56px) 28px clamp(120px, 14vh, 160px);
   }
 
   .home-hero {
@@ -1087,8 +1213,12 @@ body,
     flex-direction: column;
     gap: clamp(28px, 4dvh, 44px);
     max-width: 980px;
-    min-height: calc(100dvh - var(--vocs-topNav_height) - clamp(64px, 8dvh, 112px));
+    min-height: auto;
     text-align: center;
+  }
+
+  .home-copy {
+    padding-bottom: clamp(80px, 12vh, 160px);
   }
 
   .home-thread-demo {
@@ -1103,8 +1233,8 @@ body,
   }
 
   .home-mark {
-    width: clamp(68px, 7vw, 92px);
     margin-bottom: 18px;
+    width: clamp(102px, 10.5vw, 138px);
   }
 
   .home-hero h1 {
@@ -1132,10 +1262,14 @@ body,
     justify-content: center;
   }
 
+  /* Lock the demo's height so streaming text scrolls inside the inner
+   * .thread-panel-scroll without resizing the surrounding hero. */
   .thread-panel {
+    flex-shrink: 0;
     grid-template-columns: minmax(138px, 180px) minmax(0, 1fr);
-    height: clamp(360px, 40dvh, 480px);
-    min-height: 0;
+    height: clamp(360px, 40dvh, 480px) !important;
+    max-height: clamp(360px, 40dvh, 480px);
+    min-height: 0 !important;
   }
 }
 
@@ -1154,9 +1288,9 @@ body,
   }
 
   .home-mark {
-    width: 76px;
     margin-left: auto;
     margin-right: auto;
+    width: 114px;
   }
 
   .home-hero h1 {
@@ -1176,16 +1310,23 @@ body,
     justify-content: center;
   }
 
+  /* Mobile/tablet: hard-lock to a single height so the streaming animation
+   * scrolls inside the panel without pushing the page taller. */
   .thread-panel {
-    height: 560px;
-    min-height: 520px;
+    flex-shrink: 0;
+    height: 560px !important;
+    max-height: 560px !important;
+    min-height: 0 !important;
   }
 }
 
 @media (max-width: 680px) {
   .thread-panel {
+    flex-shrink: 0;
     grid-template-columns: 1fr;
-    height: 640px;
+    height: 560px !important;
+    max-height: 560px !important;
+    min-height: 0 !important;
   }
 
   .thread-list {
@@ -1201,16 +1342,19 @@ body,
   }
 
   .thread-list-item {
-    border-bottom: 0;
+    border-bottom: 3px solid transparent;
     border-left: 0;
     border-right: 1px solid var(--thread-border);
-    border-top: 3px solid transparent;
+    border-top: 0;
     flex: 0 0 230px;
-    padding: 10px 12px;
+    padding: 10px 12px 7px;
   }
 
+  /* Mirror the desktop pattern at the horizontal mobile layout: green
+   * accent sits on the bottom edge of the selected thread tab. */
   .thread-list-item-active {
-    border-top-color: var(--thread-accent);
+    border-bottom-color: var(--thread-accent);
+    padding-bottom: 7px;
   }
 }
 
@@ -1405,4 +1549,27 @@ body,
 .centaur-brand-menu a:focus-visible {
   background: var(--centaur-accent-soft);
   outline: none;
+}
+
+/*
+ * Primary landing CTA — bulletproof contrast.
+ *
+ * The "Deploy in production" button needs dark ink on the green accent
+ * pill. Previous attempts kept regressing to white-on-green or green-
+ * on-green when layered rules from sibling work redefined the accent
+ * color or the .home-button base. Pinning the colors explicitly (with
+ * !important and a literal hex so it can't be re-themed) at the very
+ * end of the file guarantees this stays legible regardless of what
+ * cascade reaches the selector first. The :hover variant deliberately
+ * matches the resting state — the green is already attention-grabbing
+ * enough that brightening it makes the contrast worse, not better.
+ */
+.home-button-primary,
+a.home-button-primary,
+.home-button-primary:hover,
+.home-button-primary:focus-visible,
+.home-button-primary:visited {
+  background: #00e100 !important;
+  border-color: #00e100 !important;
+  color: #050505 !important;
 }
