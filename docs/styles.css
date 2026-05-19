@@ -113,11 +113,12 @@
 }
 
 /*
- * Use Perfectly Nineties across the docs surface; keep code explicitly mono.
+ * Keep body/UI copy readable in PolySans, with Perfectly Nineties reserved
+ * for docs headings. Code stays explicitly mono.
  */
 body,
 .vocs_DocsLayout {
-  font-family: var(--centaur-manual-display);
+  font-family: var(--centaur-sans);
 }
 
 .centaur-home,
