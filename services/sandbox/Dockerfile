@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     git curl wget ca-certificates gnupg lsb-release sudo \
     build-essential pkg-config cmake ninja-build \
-    ffmpeg ghostscript dvisvgm \
+    ffmpeg ghostscript dvisvgm file \
     libssl-dev libclang-dev protobuf-compiler \
     libcairo2-dev libpango1.0-dev \
     ripgrep fd-find jq tree tmux unzip xz-utils gettext-base \
@@ -71,7 +71,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libcairo-gobject2 libcairo2 libgdk-pixbuf-2.0-0 libxrender1 \
         libasound2t64 libfreetype6 libfontconfig1 libdbus-1-3 libnss3 \
         libnspr4 libatk-bridge2.0-0t64 libdrm2 libxkbcommon0 \
-        libatspi2.0-0t64 libcups2t64 libxshmfence1 libgbm1 file \
+        libatspi2.0-0t64 libcups2t64 libxshmfence1 libgbm1 \
         fonts-noto-color-emoji fonts-noto-cjk fonts-freefont-ttf; \
     else \
       apt-get update && apt-get install -y --no-install-recommends \

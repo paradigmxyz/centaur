@@ -72,3 +72,4 @@ next-env.d.ts
 # TypeScript incremental build state
 *.tsbuildinfo
 _
+.notes
