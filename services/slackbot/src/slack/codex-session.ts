@@ -560,25 +560,22 @@ function changedActivityTaskUpdates(
     let details: StreamRichText | undefined
     let output: StreamRichText | undefined
     if (opts.final) {
-      if (!state.emittedActivityRunByTaskId.has(task.id)) {
+      if (task.details.length && !state.emittedActivityRunByTaskId.has(task.id)) {
         state.emittedActivityRunByTaskId.add(task.id)
         details = activityRunBlock(task)
       }
-      if (
-        (task.output.length || task.title !== 'Thinking') &&
-        !state.emittedActivityOutputByTaskId.has(task.id)
-      ) {
+      if (task.output.length && !state.emittedActivityOutputByTaskId.has(task.id)) {
         state.emittedActivityOutputByTaskId.add(task.id)
         output = activityOutputBlock(task)
       }
-    } else if (!state.emittedActivityRunByTaskId.has(task.id)) {
+    } else if (task.details.length && !state.emittedActivityRunByTaskId.has(task.id)) {
       state.emittedActivityRunByTaskId.add(task.id)
       details = activityRunBlock(task)
     }
     if (
       !opts.final &&
       task.status === 'complete' &&
-      (task.output.length || task.title !== 'Thinking') &&
+      task.output.length &&
       !state.emittedActivityOutputByTaskId.has(task.id)
     ) {
       state.emittedActivityOutputByTaskId.add(task.id)
@@ -604,14 +601,10 @@ function activityRunBlock(task: HarnessTask): StreamRichText {
   if (command) {
     return richText([pre(command, shellLanguage(firstPreformattedLanguage(task.details)))])
   }
-  const body = task.details.length ? elementsToPlainText(task.details) : task.title
-  return richText([pre(body, 'text')])
+  return richText(task.details)
 }
 
 function activityOutputBlock(task: HarnessTask): StreamRichText {
-  if (!task.output.length) {
-    return richText([pre('Done', 'text')])
-  }
   return richText([
     pre(elementsToPlainText(task.output), firstPreformattedLanguage(task.output) ?? 'text')
   ])
@@ -635,8 +628,7 @@ function shellLanguage(language: string | undefined): string {
 }
 
 function shellLanguageForCommand(command: string): string {
-  if (command.startsWith('call ')) return 'sh'
-  return languageFromContent(command)
+  return 'sh'
 }
 
 function commandOutputDelta(event: any): { id: string; delta: string } | null {
