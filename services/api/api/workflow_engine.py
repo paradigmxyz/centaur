@@ -1226,6 +1226,13 @@ async def do_agent_turn(
                 if not history_parts:
                     skipped += 1
                     continue
+                if await _message_request_exists(
+                    ctx._pool,
+                    thread_key=effective_thread_key,
+                    message_id=history_message_id,
+                ):
+                    skipped += 1
+                    continue
                 history_role = str(item.get("role") or "user").strip().lower()
                 if history_role not in {"user", "assistant"}:
                     skipped += 1
@@ -1321,6 +1328,21 @@ async def do_agent_turn(
 
     # Not terminal yet — suspend and wait for notify_execution_terminal
     raise SuspendWorkflow(status="waiting")
+
+
+async def _message_request_exists(
+    pool,
+    *,
+    thread_key: str,
+    message_id: str,
+) -> bool:
+    row = await pool.fetchrow(
+        "SELECT 1 FROM agent_message_requests "
+        "WHERE thread_key = $1 AND message_id = $2",
+        thread_key,
+        message_id,
+    )
+    return row is not None
 
 
 # ── Handler discovery ─────────────────────────────────────────────────
