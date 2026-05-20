@@ -2,6 +2,43 @@ import { describe, expect, it } from 'bun:test'
 import { AgentSessionRenderer, withAgentSessionLock } from './agent-session'
 
 describe('AgentSessionRenderer', () => {
+  it('stops calling assistant.threads.setStatus after the channel returns user_not_found', async () => {
+    const setStatusCalls: any[] = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async (params: any) => {
+            setStatusCalls.push(params)
+            return { ok: false, error: 'user_not_found' }
+          }
+        }
+      },
+      chat: {
+        startStream: async () => ({ ok: true, ts: '1778866940.295499' }),
+        appendStream: async () => ({ ok: true }),
+        stopStream: async () => ({ ok: true }),
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    expect(setStatusCalls.length).toBe(1)
+
+    await renderer.text(sessionId, 'Hi there')
+    await renderer.step(sessionId, { id: 's1', title: 'Run command', status: 'in_progress' })
+    await renderer.done(sessionId)
+
+    expect(setStatusCalls.length).toBe(1)
+  })
+
   it('streams pending text before appending inline task updates', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {

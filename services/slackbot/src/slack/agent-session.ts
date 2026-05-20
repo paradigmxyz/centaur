@@ -54,6 +54,7 @@ type AgentSessionState = {
   finalAnswerMarkdown?: string
   done: boolean
   statusCleared: boolean
+  statusUnsupported: boolean
   segments: Segment[]
 }
 
@@ -134,7 +135,8 @@ export class AgentSessionRenderer {
       header,
       segments: [newSegment()],
       done: false,
-      statusCleared: false
+      statusCleared: false,
+      statusUnsupported: false
     })
     await this.setStatus(id, THINKING_STATUS)
     return { sessionId: id }
@@ -248,6 +250,9 @@ export class AgentSessionRenderer {
 
   private async setStatus(sessionId: string, status: string): Promise<boolean> {
     const state = requireSession(sessionId)
+    // assistant.threads.setStatus is only valid on AI Assistant threads; cache
+    // the first not-supported response so we skip retrying for the session.
+    if (state.statusUnsupported) return false
     try {
       const response = await this.client.assistant.threads.setStatus({
         channel_id: state.channel,
@@ -256,12 +261,24 @@ export class AgentSessionRenderer {
         ...(status ? { loading_messages: [status] } : {})
       })
       if (!response.ok) {
-        logStatusFailure(state, status, response.error ?? 'unknown_error')
+        const errorCode = response.error ?? 'unknown_error'
+        if (isUnsupportedStatusChannel(errorCode)) {
+          state.statusUnsupported = true
+          logStatusUnsupported(state, errorCode)
+          return false
+        }
+        logStatusFailure(state, status, errorCode)
         return false
       }
       return true
     } catch (error) {
-      logStatusFailure(state, status, error instanceof Error ? error.message : String(error))
+      const message = error instanceof Error ? error.message : String(error)
+      if (isUnsupportedStatusChannel(message)) {
+        state.statusUnsupported = true
+        logStatusUnsupported(state, message)
+        return false
+      }
+      logStatusFailure(state, status, message)
       return false
     }
   }
@@ -516,6 +533,31 @@ function logStatusFailure(state: AgentSessionState, status: string, error: strin
     channel_id: state.channel,
     thread_ts: state.parentTs,
     status: status ? 'set' : 'clear',
+    error
+  })
+}
+
+const UNSUPPORTED_STATUS_ERROR_CODES = new Set([
+  'user_not_found',
+  'channel_not_found',
+  'channel_type_not_supported',
+  'not_in_channel',
+  'restricted_action'
+])
+
+function isUnsupportedStatusChannel(error: string): boolean {
+  const trimmed = error.trim().toLowerCase()
+  if (UNSUPPORTED_STATUS_ERROR_CODES.has(trimmed)) return true
+  for (const code of UNSUPPORTED_STATUS_ERROR_CODES) {
+    if (trimmed.includes(code)) return true
+  }
+  return false
+}
+
+function logStatusUnsupported(state: AgentSessionState, error: string): void {
+  logWarn('slack_assistant_status_unsupported', {
+    channel_id: state.channel,
+    thread_ts: state.parentTs,
     error
   })
 }
