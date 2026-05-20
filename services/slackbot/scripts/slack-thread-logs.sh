@@ -25,4 +25,15 @@ echo "Searching ${namespace} logs for channel=${channel} ts=${ts_exact} since=${
   while IFS= read -r pod; do
     kubectl -n "$namespace" logs "$pod" --since="$since" --prefix=true || true
   done < <(kubectl -n "$namespace" get pod -o name | rg "sandbox-slack.*${channel_lc}" || true)
-} | rg "${channel}|${channel_lc}|${ts_exact}|${ts_prefix}" || true
+} | rg "${channel}|${channel_lc}|${ts_exact}|${ts_prefix}" | while IFS= read -r line; do
+  if [[ "$line" =~ ^(\[[^]]+\][[:space:]]+)(\{.*\})$ ]]; then
+    prefix="${BASH_REMATCH[1]}"
+    json="${BASH_REMATCH[2]}"
+    printf '%s\n' "${prefix}"
+    if ! jq . <<<"$json"; then
+      printf '%s\n' "$json"
+    fi
+  else
+    printf '%s\n' "$line"
+  fi
+done || true

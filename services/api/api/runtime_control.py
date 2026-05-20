@@ -1795,11 +1795,10 @@ async def _mark_execution_terminal(
                 isinstance(steer_replacement, dict)
                 and steer_replacement.get("suppress_cancellation_delivery") is True
             )
-            suppress_legacy_delivery = _has_slackbot_live_delivery(metadata) and not metadata.get(
-                "slackbot_live_delivery_failed"
-            )
+            slackbot_live_delivery_failed = bool(metadata.get("slackbot_live_delivery_failed"))
+            suppress_legacy_delivery = _has_slackbot_live_delivery(metadata) and not slackbot_live_delivery_failed
             raw_streamed_answer_chars = metadata.get("slackbot_streamed_answer_chars")
-            if isinstance(raw_streamed_answer_chars, int):
+            if isinstance(raw_streamed_answer_chars, int) and not slackbot_live_delivery_failed:
                 slackbot_streamed_answer_chars = max(raw_streamed_answer_chars, 0)
         assignment_row = await pool.fetchrow(
             "SELECT harness, engine, persona_id, prompt_ref, effective_agents_md_sha256 "
@@ -2497,7 +2496,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         finalize_session_id = slackbot_session_id or str(
             execution_metadata.get("slackbot_agent_session_id") or ""
         )
-        if finalize_session_id and not slackbot_done:
+        if finalize_session_id and not slackbot_done and slackbot_forward_live:
             try:
                 if result_text.strip() and not slackbot_text_sent:
                     await slackbot_client.session_text(finalize_session_id, result_text)
@@ -2662,6 +2661,8 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                             "harness_event_failed",
                             streamed_answer_chars=slackbot_streamed_answer_chars,
                         )
+                        with contextlib.suppress(Exception):
+                            await slackbot_client.set_status(delivery, "")
                         slackbot_forward_live = False
                         break
                     if isinstance(harness_result, dict):
