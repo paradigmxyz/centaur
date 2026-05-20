@@ -50,49 +50,13 @@ function capMarkdownBlocksCumulative(blocks: AnyBlock[], maxChars: number): AnyB
 
 function shrinkToPayloadByteBudget(blocks: AnyBlock[], maxBytes: number): AnyBlock[] {
   let sanitized = blocks
-  let bytes = estimatePayloadBytes(sanitized)
+  if (estimatePayloadBytes(sanitized) <= maxBytes) return sanitized
+
+  sanitized = trimPlanTasks(stripPlanTaskBodies(sanitized), 0)
+  const bytes = estimatePayloadBytes(sanitized)
   if (bytes <= maxBytes) return sanitized
 
-  sanitized = trimMarkdownFromEnd(sanitized, 0.25)
-  bytes = estimatePayloadBytes(sanitized)
-  if (bytes <= maxBytes) return sanitized
-
-  sanitized = dropTrailingMarkdownBlocks(sanitized)
-  bytes = estimatePayloadBytes(sanitized)
-  if (bytes <= maxBytes) return sanitized
-
-  sanitized = stripPlanTaskBodies(sanitized)
-  bytes = estimatePayloadBytes(sanitized)
-  if (bytes <= maxBytes) return sanitized
-
-  sanitized = trimPlanTasks(sanitized, slackReplyLimits.finalPlan.maxTasks)
-  return sanitized
-}
-
-function trimMarkdownFromEnd(blocks: AnyBlock[], fraction: number): AnyBlock[] {
-  const out = blocks.map(block => ({ ...block })) as AnyBlock[]
-  for (let index = out.length - 1; index >= 0; index -= 1) {
-    const block = out[index]
-    if (block?.type !== 'markdown') continue
-    const markdown = block as MarkdownBlock
-    const keep = Math.max(1, Math.floor(markdown.text.length * (1 - fraction)))
-    markdown.text = markdown.text.slice(0, keep).trimEnd() || ' '
-    if (estimatePayloadBytes(out) <= PAYLOAD_BYTE_BUDGET) break
-  }
-  return out
-}
-
-function dropTrailingMarkdownBlocks(blocks: AnyBlock[]): AnyBlock[] {
-  const out = [...blocks]
-  while (out.length > 0 && estimatePayloadBytes(out) > PAYLOAD_BYTE_BUDGET) {
-    const lastIndex = out.length - 1
-    if (out[lastIndex]?.type === 'markdown') {
-      out.pop()
-      continue
-    }
-    break
-  }
-  return out
+  return blocks.filter(block => block.type === 'markdown') as AnyBlock[]
 }
 
 function stripPlanTaskBodies(blocks: AnyBlock[]): AnyBlock[] {

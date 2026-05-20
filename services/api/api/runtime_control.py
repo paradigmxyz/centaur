@@ -1784,7 +1784,9 @@ async def _mark_execution_terminal(
                 isinstance(steer_replacement, dict)
                 and steer_replacement.get("suppress_cancellation_delivery") is True
             )
-            suppress_legacy_delivery = _has_slackbot_live_delivery(metadata)
+            suppress_legacy_delivery = _has_slackbot_live_delivery(metadata) and not metadata.get(
+                "slackbot_live_delivery_failed"
+            )
         assignment_row = await pool.fetchrow(
             "SELECT harness, engine, persona_id, prompt_ref, effective_agents_md_sha256 "
             "FROM agent_runtime_assignments WHERE thread_key = $1 AND assignment_generation = $2",
