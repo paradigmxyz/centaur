@@ -91,16 +91,16 @@ import ThreadPanel from '../components/ThreadPanel'
     </a>
   </section>
 
-  <section className="home-feature home-feature-copy-right" aria-labelledby="home-architecture-title">
-    <a className="home-feature-visual" href="/architecture" aria-labelledby="home-architecture-title">
-      <figure className="home-architecture-diagram">
-        <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
-      </figure>
-    </a>
+  <section className="home-feature home-feature-copy-left" aria-labelledby="home-architecture-title">
     <div className="home-feature-copy">
       <h2 id="home-architecture-title">Modular Architecture</h2>
       <p>Durable control plane, isolated execution, and credential-safe egress. Each layer is independently observable, replaceable, and self-hosted inside your boundary.</p>
       <a className="home-feature-cta" href="/architecture">View the architecture →</a>
     </div>
+    <a className="home-feature-visual" href="/architecture" aria-labelledby="home-architecture-title">
+      <figure className="home-architecture-diagram">
+        <img src="/brand/architecture.svg" alt="Centaur architecture: ingress, durable control plane, isolated execution, capabilities, secrets, and controlled egress." />
+      </figure>
+    </a>
   </section>
 </main>

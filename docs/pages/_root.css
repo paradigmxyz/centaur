@@ -467,6 +467,7 @@ body,
 }
 
 .centaur-home {
+  --home-layout-gap: clamp(34px, 4vw, 72px);
   align-items: center;
   background: #050506;
   box-sizing: border-box;
@@ -489,7 +490,7 @@ body,
 .home-hero {
   align-items: center;
   display: grid;
-  gap: clamp(34px, 4vw, 72px);
+  gap: var(--home-layout-gap);
   grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   margin: 0 auto;
   max-width: 1440px;
@@ -688,17 +689,15 @@ a.home-lockup-link {
 .home-feature {
   align-items: center;
   display: grid;
-  gap: clamp(36px, 5vw, 80px);
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: var(--home-layout-gap);
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   margin: clamp(48px, 6dvh, 84px) auto 0;
-  max-width: 1280px;
+  max-width: 1440px;
   width: 100%;
 }
 
-/* Visual sits in the second column for the copy-left variant and in the
- * first column for the copy-right variant. Source order already matches
- * (copy first vs visual first) so we don't need `order:` overrides on
- * desktop — the grid auto-flow handles it. */
+/* Visuals sit in the second column on desktop so the feature rows read as a
+ * consistent left-copy, right-preview stack. */
 
 .home-feature-copy {
   align-items: flex-start;
@@ -797,8 +796,8 @@ a.home-lockup-link {
 
 .home-overview-list {
   display: grid;
-  gap: 24px 40px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px var(--home-layout-gap);
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   list-style: none;
   margin: 38px 0 0;
   padding: 0;
@@ -813,7 +812,7 @@ a.home-lockup-link {
   display: grid;
   gap: 8px;
   min-height: 100%;
-  padding: 22px 28px 24px;
+  padding: 0;
   text-decoration: none;
   transition: background 140ms ease, border-color 140ms ease;
 }
@@ -1561,6 +1560,10 @@ a.home-lockup-link {
     max-width: 980px;
   }
 
+  .home-overview-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   /* Below tablet width, the alternating split collapses into a centered
    * single column. Copy stacks above visual on both sections so the
    * reading order stays predictable; the visual is capped at 65vw so it
@@ -1579,10 +1582,6 @@ a.home-lockup-link {
 
   .home-feature-copy p {
     margin-inline: auto;
-  }
-
-  .home-feature-copy-right .home-feature-copy {
-    order: -1;
   }
 
   .home-feature-visual {
