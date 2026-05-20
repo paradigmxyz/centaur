@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Lightweight SDK for building Centaur-compatible tools"
 requires-python = ">=3.11"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0 OR MIT"
 dependencies = [
     "rich>=13.0",
 ]
