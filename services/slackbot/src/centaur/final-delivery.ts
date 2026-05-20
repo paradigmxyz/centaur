@@ -67,9 +67,8 @@ export async function pollFinalDeliveriesOnce(
             delivery,
           );
         } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          const errorClass = slackDeliveryErrorClass(errorMessage);
+          const errorMessage = slackDeliveryErrorMessage(error);
+          const errorClass = slackDeliveryErrorClass(error);
           await centaur(
             config,
             `/agent/final-deliveries/${executionId}/failed`,
@@ -244,12 +243,29 @@ function splitFinalDeliveryText(text: string): string[] {
   return chunks;
 }
 
-function slackDeliveryErrorClass(error: string): string | null {
-  const normalized = error.trim().toLowerCase();
+function slackDeliveryErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function slackDeliveryErrorClass(error: unknown): string | null {
+  const normalized = slackDeliveryErrorFingerprint(error).trim().toLowerCase();
   for (const errorClass of NON_RETRYABLE_SLACK_ERRORS) {
     if (normalized.includes(errorClass)) return errorClass;
   }
   return null;
+}
+
+function slackDeliveryErrorFingerprint(error: unknown): string {
+  const parts = [slackDeliveryErrorMessage(error)];
+  const data = (error as { data?: unknown })?.data;
+  if (data && typeof data === "object") {
+    const slackError = (data as { error?: unknown }).error;
+    if (slackError) parts.push(String(slackError));
+  }
+  const code = (error as { code?: unknown })?.code;
+  if (code) parts.push(String(code));
+  return parts.join(" ");
 }
 
 function targetFromDelivery(delivery: any): {
