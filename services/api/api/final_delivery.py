@@ -1,11 +1,23 @@
 from __future__ import annotations
 
-NON_RETRYABLE_ERROR_CLASSES = frozenset({
-    "invalid_destination",
-    "restricted_destination",
-    "invalid_payload",
-    "duplicate_or_conflict",
-})
+# Slack-side classes cannot recover within a single delivery window, so the
+# outbox should dead-letter immediately rather than burn 50 retry attempts.
+NON_RETRYABLE_ERROR_CLASSES = frozenset(
+    {
+        "invalid_destination",
+        "restricted_destination",
+        "invalid_payload",
+        "duplicate_or_conflict",
+        "msg_too_long",
+        "user_not_found",
+        "channel_not_found",
+        "missing_slack_delivery_target",
+        "account_inactive",
+        "is_archived",
+        "restricted_action",
+        "not_in_channel",
+    }
+)
 
 
 def normalize_error_class(error_class: str | None) -> str | None:

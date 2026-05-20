@@ -606,7 +606,9 @@ describe('AgentSessionRenderer', () => {
       }
     })
 
-    expect(renderer.done(sessionId)).resolves.toBeUndefined()
+    await expect(renderer.done(sessionId)).resolves.toEqual({
+      streamedTextChars: expect.any(Number)
+    })
     expect(stopAttempts).toBe(2)
   })
 

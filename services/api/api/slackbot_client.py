@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -7,6 +8,11 @@ import httpx
 import structlog
 
 log = structlog.get_logger()
+
+# Other 4xx is permanent: the slackbot is telling us the call is malformed.
+_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY_S = 0.25
 
 
 def _base_url() -> str:
@@ -32,32 +38,49 @@ async def post(
     if not base_url or not api_key:
         return None
     request_timeout = timeout or httpx.Timeout(8.0, connect=2.0)
-    try:
-        async with httpx.AsyncClient(timeout=request_timeout) as client:
-            response = await client.post(
-                f"{base_url}{path}",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-            text = response.text
-            if not response.is_success:
-                log.warning(
-                    "slackbot_call_failed",
-                    path=path,
-                    status=response.status_code,
-                    response=text[:500],
+    last_status: int | None = None
+    last_response: str | None = None
+    last_error: str | None = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
+                response = await client.post(
+                    f"{base_url}{path}",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
                 )
-                return None
-            if not text:
-                return {}
-            data = response.json()
-            return data if isinstance(data, dict) else {}
-    except Exception as exc:
-        log.warning("slackbot_call_error", path=path, error=str(exc))
-        return None
+                text = response.text
+                if response.is_success:
+                    if not text:
+                        return {}
+                    data = response.json()
+                    return data if isinstance(data, dict) else {}
+                last_status = response.status_code
+                last_response = text[:500]
+                if response.status_code not in _RETRYABLE_STATUS:
+                    log.warning(
+                        "slackbot_call_failed",
+                        path=path,
+                        status=response.status_code,
+                        response=last_response,
+                    )
+                    return None
+        except Exception as exc:
+            last_error = str(exc)
+        if attempt + 1 < _RETRY_ATTEMPTS:
+            await asyncio.sleep(_RETRY_BASE_DELAY_S * (2**attempt))
+    log.warning(
+        "slackbot_call_failed",
+        path=path,
+        status=last_status,
+        response=last_response,
+        error=last_error,
+        attempts=_RETRY_ATTEMPTS,
+    )
+    return None
 
 
 def is_slack_delivery(delivery: dict[str, Any] | None) -> bool:
@@ -157,7 +180,9 @@ async def session_done(session_id: str | None, thread_id: str | None = None) -> 
     await post(f"/api/slack/agent-sessions/{session_id}/done", body)
 
 
-async def harness_event(session_id: str | None, event: dict[str, Any]) -> dict[str, Any] | None:
+async def harness_event(
+    session_id: str | None, event: dict[str, Any]
+) -> dict[str, Any] | None:
     if not session_id:
         return None
     return await post(
