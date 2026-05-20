@@ -50,7 +50,7 @@ describe('final delivery polling', () => {
                     },
                     final_payload: {
                       session_title: 'Centaur · codex',
-                      result_text: 'done once'
+                      result_text: 'done [once](https://example.com) with **bold** text'
                     }
                   }
                 ]
@@ -115,7 +115,15 @@ describe('final delivery polling', () => {
       expect(slackCalls.filter(call => call.method === 'chat.startStream')).toHaveLength(0)
       expect(slackCalls.filter(call => call.method === 'chat.stopStream')).toHaveLength(0)
       const postMessage = slackCalls.find(call => call.method === 'chat.postMessage')
-      expect((postMessage?.params as any)?.text).toBe('done once')
+      expect((postMessage?.params as any)?.text).toBe(
+        'done [once](https://example.com) with **bold** text'
+      )
+      expect((postMessage?.params as any)?.blocks).toEqual([
+        {
+          type: 'markdown',
+          text: 'done [once](https://example.com) with **bold** text'
+        }
+      ])
     } finally {
       globalThis.fetch = originalFetch
     }

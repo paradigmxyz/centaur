@@ -271,12 +271,6 @@ export class CodexSessionRenderer {
     const canStream = hasPlan || opts.force || graceExpired
     if (!canStream) return
 
-    // Slack's stream markdown parser can silently corrupt rich_text_list output when
-    // list-shaped answer text is appended live. Fall back to authoritative final delivery.
-    if (containsMarkdownList(state.answerText)) {
-      throw new Error('slack_live_delivery_unsafe_markdown_list')
-    }
-
     if (state.commentaryText.length > state.streamedCommentaryText.length) return
     if (state.answerText.length <= state.streamedAnswerText.length) return
     const delta = state.answerText.slice(state.streamedAnswerText.length)
@@ -346,10 +340,6 @@ function getState(agentSessionId: string): CodexSessionState {
     states.set(agentSessionId, state)
   }
   return state
-}
-
-function containsMarkdownList(markdown: string): boolean {
-  return /^ {0,3}(?:\d{1,9}[.)]|[-*+])(?:\s|$)/m.test(markdown)
 }
 
 function content(event: any): any[] {

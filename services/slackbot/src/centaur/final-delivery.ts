@@ -2,6 +2,7 @@ import type { WebClient } from '@slack/web-api'
 import { centaurApiKey, type AppConfig } from '../config'
 import { slackReplyLimits } from '../constants'
 import { logError } from '../logging'
+import { renderMarkdownBlocks } from '../slack/render'
 import { withLaminarSpan } from './laminar'
 
 const CONSUMER_ID = `slackbot-${process.pid}`
@@ -83,6 +84,7 @@ async function postFollowups(
       channel,
       thread_ts: threadTs,
       text: chunk,
+      blocks: renderMarkdownBlocks(chunk),
       unfurl_links: false,
       unfurl_media: false
     })
