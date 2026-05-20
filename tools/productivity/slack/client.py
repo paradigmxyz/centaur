@@ -1466,28 +1466,36 @@ class SlackClient:
             and custom_fields (dict of label -> value for non-empty custom fields)
         """
         try:
-            response = self._retry_on_ratelimit(
+            user_response = self._retry_on_ratelimit(
                 self._client.users_info,
                 user=user_id,
                 method_key="users.info",
             )
+            profile_response = self._retry_on_ratelimit(
+                self._client.users_profile_get,
+                user=user_id,
+                include_labels=True,
+                method_key="users.profile.get",
+            )
         except SlackApiError as e:
             self._raise_slack_api_error(
                 e,
-                slack_method="users.info",
+                slack_method="users.profile.get",
                 access_path="bot_token",
             )
 
-        user = response.get("user", {})
-        profile = user.get("profile", {})
+        user = user_response.get("user", {})
+        profile = profile_response.get("profile", {}) or user.get("profile", {})
 
         # Extract custom profile fields (Telegram, Skype, pronouns, etc.)
         custom_fields: dict[str, str] = {}
-        for _field_id, field_data in (profile.get("fields") or {}).items():
-            label = field_data.get("label", "")
-            value = field_data.get("value", "")
-            if label and value:
+        raw_custom_fields: dict[str, dict] = {}
+        for field_id, field_data in (profile.get("fields") or {}).items():
+            label = field_data.get("label") or field_id
+            value = field_data.get("value")
+            if value:
                 custom_fields[label] = value
+                raw_custom_fields[field_id] = dict(field_data)
 
         return {
             "id": user.get("id", ""),
@@ -1506,6 +1514,7 @@ class SlackClient:
             "is_bot": user.get("is_bot", False),
             "deleted": user.get("deleted", False),
             "custom_fields": custom_fields,
+            "raw_custom_fields": raw_custom_fields,
         }
 
     def _format_requester_attribution(self) -> str:

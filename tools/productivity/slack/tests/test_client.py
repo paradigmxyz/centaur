@@ -30,6 +30,9 @@ class _FakeWebClient:
         self.list_calls: list[dict] = []
         self.list_pages: list[dict] = []
         self.api_calls: list[tuple[str, dict]] = []
+        self.user_info_response: dict | None = None
+        self.user_profile_response: dict | None = None
+        self.user_profile_calls: list[dict] = []
         self.upload_exception: Exception | None = None
 
     def chat_postMessage(self, **kwargs):
@@ -47,6 +50,14 @@ class _FakeWebClient:
     def users_list(self, **kwargs):
         self.users_calls.append(kwargs)
         return self.users_pages.pop(0)
+
+    def users_info(self, **kwargs):
+        self.users_calls.append(kwargs)
+        return self.user_info_response or {"user": {}}
+
+    def users_profile_get(self, **kwargs):
+        self.user_profile_calls.append(kwargs)
+        return self.user_profile_response or {"profile": {}}
 
     def conversations_list(self, **kwargs):
         self.list_calls.append(kwargs)
@@ -248,6 +259,45 @@ def test_list_etl_channels_uses_user_token_client() -> None:
             "is_member": False,
         }
     ]
+
+
+def test_get_user_profile_reads_labeled_custom_fields() -> None:
+    client, fake_web_client = _make_client()
+    fake_web_client.user_info_response = {
+        "user": {
+            "id": "U123",
+            "name": "test-user",
+            "real_name": "Test User",
+            "tz": "Europe/London",
+            "tz_label": "British Summer Time",
+            "is_bot": False,
+            "deleted": False,
+        }
+    }
+    fake_web_client.user_profile_response = {
+        "profile": {
+            "display_name": "test-user",
+            "email": "test.user@example.com",
+            "fields": {
+                "Xf123": {
+                    "label": "Affiliations",
+                    "value": "GitHub: test-user",
+                    "alt": "",
+                }
+            },
+        }
+    }
+
+    profile = client.get_user_profile("U123")
+
+    assert fake_web_client.users_calls == [{"user": "U123"}]
+    assert fake_web_client.user_profile_calls == [
+        {"user": "U123", "include_labels": True}
+    ]
+    assert profile["custom_fields"] == {"Affiliations": "GitHub: test-user"}
+    assert profile["raw_custom_fields"] == {
+        "Xf123": {"label": "Affiliations", "value": "GitHub: test-user", "alt": ""}
+    }
 
 
 def test_get_etl_channel_history_page_uses_user_token_client_and_window() -> None:
