@@ -405,6 +405,146 @@ def test_parser_oauth_token_rejects_missing_required_field() -> None:
         )
 
 
+def test_parser_typed_oauth_token_password_grant() -> None:
+    secret = _parse_secret(
+        {
+            "type": "oauth_token",
+            "grant": "password",
+            "name": "VENDOR_OAUTH",
+            "hosts": ["api.example.com"],
+            "token_endpoint": "https://api.example.com/token",
+            "fields": {
+                "username": "API_USERNAME",
+                "password": "API_PASSWORD",
+                "client_id": "API_CLIENT_ID",
+                "client_secret": "API_CLIENT_SECRET",
+            },
+        }
+    )
+    assert isinstance(secret, OAuthTokenSecret)
+    assert secret.grant == "password"
+    assert secret.token_endpoint == "https://api.example.com/token"
+    fields = dict(secret.fields)
+    assert fields["username"] == OAuthFieldSource("API_USERNAME")
+    assert fields["password"] == OAuthFieldSource("API_PASSWORD")
+    assert fields["client_id"] == OAuthFieldSource("API_CLIENT_ID")
+    assert fields["client_secret"] == OAuthFieldSource("API_CLIENT_SECRET")
+
+
+def test_parser_oauth_token_password_grant_makes_client_secret_optional() -> None:
+    # Public clients (RFC 6749 4.3) authenticate with username/password and a
+    # client_id only — client_secret is optional.
+    secret = _parse_secret(
+        {
+            "type": "oauth_token",
+            "grant": "password",
+            "name": "VENDOR_OAUTH",
+            "hosts": ["api.example.com"],
+            "fields": {
+                "username": "API_USERNAME",
+                "password": "API_PASSWORD",
+                "client_id": "API_CLIENT_ID",
+            },
+        }
+    )
+    assert isinstance(secret, OAuthTokenSecret)
+    assert "client_secret" not in dict(secret.fields)
+
+
+def test_parser_oauth_token_password_grant_rejects_missing_username() -> None:
+    with pytest.raises(ValueError, match="requires fields \\['username'\\]"):
+        _parse_secret(
+            {
+                "type": "oauth_token",
+                "grant": "password",
+                "name": "X",
+                "hosts": ["h"],
+                "fields": {
+                    "password": "PW",
+                    "client_id": "CID",
+                },
+            }
+        )
+
+
+def test_parser_oauth_token_token_endpoint_headers_accepts_bare_string() -> None:
+    secret = _parse_secret(
+        {
+            "type": "oauth_token",
+            "grant": "client_credentials",
+            "name": "OAUTH_APP",
+            "hosts": ["api.example.com"],
+            "fields": {
+                "client_id": "OAUTH_CLIENT_ID",
+                "client_secret": "OAUTH_CLIENT_SECRET",
+            },
+            "token_endpoint_headers": {
+                "x-api-key": "API_KEY",
+            },
+        }
+    )
+    assert isinstance(secret, OAuthTokenSecret)
+    assert secret.token_endpoint_headers == (
+        ("x-api-key", OAuthFieldSource("API_KEY")),
+    )
+
+
+def test_parser_oauth_token_token_endpoint_headers_accepts_table_with_json_key() -> None:
+    secret = _parse_secret(
+        {
+            "type": "oauth_token",
+            "grant": "client_credentials",
+            "name": "OAUTH_APP",
+            "hosts": ["api.example.com"],
+            "fields": {
+                "client_id": "OAUTH_CLIENT_ID",
+                "client_secret": "OAUTH_CLIENT_SECRET",
+            },
+            "token_endpoint_headers": {
+                "x-api-key": {"secret_ref": "BUNDLE", "json_key": "api_key"},
+            },
+        }
+    )
+    assert secret.token_endpoint_headers == (
+        ("x-api-key", OAuthFieldSource("BUNDLE", "api_key")),
+    )
+
+
+def test_parser_oauth_token_token_endpoint_headers_rejects_empty_table() -> None:
+    with pytest.raises(
+        ValueError, match="'token_endpoint_headers' must be a non-empty table"
+    ):
+        _parse_secret(
+            {
+                "type": "oauth_token",
+                "grant": "client_credentials",
+                "name": "X",
+                "hosts": ["h"],
+                "fields": {
+                    "client_id": "CID",
+                    "client_secret": "CS",
+                },
+                "token_endpoint_headers": {},
+            }
+        )
+
+
+def test_parser_oauth_token_token_endpoint_headers_defaults_to_empty() -> None:
+    secret = _parse_secret(
+        {
+            "type": "oauth_token",
+            "grant": "client_credentials",
+            "name": "OAUTH_APP",
+            "hosts": ["api.example.com"],
+            "fields": {
+                "client_id": "OAUTH_CLIENT_ID",
+                "client_secret": "OAUTH_CLIENT_SECRET",
+            },
+        }
+    )
+    assert secret.token_endpoint_headers == ()
+
+
 def test_parser_oauth_token_rejects_field_invalid_for_grant() -> None:
     with pytest.raises(ValueError, match="is not valid for grant 'refresh_token'"):
         _parse_secret(
@@ -827,6 +967,128 @@ def test_render_oauth_token_separate_entries_for_distinct_fields() -> None:
         t for t in cfg["transforms"] if t["name"] == "oauth_token"
     )["config"]["tokens"]
     assert len(tokens) == 2
+
+
+_RENDER_PASSWORD_FIELDS = (
+    ("client_id", OAuthFieldSource("API_CLIENT_ID")),
+    ("client_secret", OAuthFieldSource("API_CLIENT_SECRET")),
+    ("password", OAuthFieldSource("API_PASSWORD")),
+    ("username", OAuthFieldSource("API_USERNAME")),
+)
+
+
+def test_render_oauth_token_password_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    secrets = [
+        OAuthTokenSecret(
+            name="VENDOR_OAUTH",
+            grant="password",
+            hosts=("api.example.com",),
+            fields=_RENDER_PASSWORD_FIELDS,
+            token_endpoint="https://api.example.com/token",
+        )
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    assert tokens[0]["grant"] == "password"
+    assert tokens[0]["username"] == {"type": "env", "var": "API_USERNAME"}
+    assert tokens[0]["password"] == {"type": "env", "var": "API_PASSWORD"}
+    assert tokens[0]["client_id"] == {"type": "env", "var": "API_CLIENT_ID"}
+    assert tokens[0]["client_secret"] == {"type": "env", "var": "API_CLIENT_SECRET"}
+    assert tokens[0]["token_endpoint"] == "https://api.example.com/token"
+    assert tokens[0]["rules"] == [{"host": "api.example.com"}]
+
+
+def test_render_oauth_token_emits_token_endpoint_headers_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    secrets = [
+        OAuthTokenSecret(
+            name="OAUTH_APP",
+            grant="client_credentials",
+            hosts=("api.example.com",),
+            fields=_RENDER_CC_FIELDS,
+            token_endpoint="https://login.example.com/oauth2/token",
+            token_endpoint_headers=(
+                ("x-api-key", OAuthFieldSource("API_KEY")),
+            ),
+        )
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    assert tokens[0]["token_endpoint_headers"] == {
+        "x-api-key": {"type": "env", "var": "API_KEY"},
+    }
+
+
+def test_render_oauth_token_omits_token_endpoint_headers_when_empty() -> None:
+    secrets = [
+        OAuthTokenSecret(
+            name="OAUTH_APP",
+            grant="client_credentials",
+            hosts=("api.example.com",),
+            fields=_RENDER_CC_FIELDS,
+        )
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    assert "token_endpoint_headers" not in tokens[0]
+
+
+def test_render_oauth_token_separate_entries_for_distinct_endpoint_headers() -> None:
+    secrets = [
+        OAuthTokenSecret(
+            "A",
+            "client_credentials",
+            ("a.example.com",),
+            _RENDER_CC_FIELDS,
+            token_endpoint_headers=(("x-api-key", OAuthFieldSource("KEY_A")),),
+        ),
+        OAuthTokenSecret(
+            "B",
+            "client_credentials",
+            ("b.example.com",),
+            _RENDER_CC_FIELDS,
+            token_endpoint_headers=(("x-api-key", OAuthFieldSource("KEY_B")),),
+        ),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    assert len(tokens) == 2
+
+
+def test_render_oauth_token_endpoint_headers_resolve_via_onepassword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+    monkeypatch.setenv("OP_VAULT", "ai-agents")
+    secrets = [
+        OAuthTokenSecret(
+            name="OAUTH_APP",
+            grant="client_credentials",
+            hosts=("api.example.com",),
+            fields=_RENDER_CC_FIELDS,
+            token_endpoint_headers=(("x-api-key", OAuthFieldSource("API_KEY")),),
+        )
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    headers = tokens[0]["token_endpoint_headers"]
+    assert headers["x-api-key"]["type"] == "1password"
+    assert headers["x-api-key"]["secret_ref"] == "op://ai-agents/API_KEY/credential"
 
 
 def test_render_oauth_token_emits_token_endpoint_when_set() -> None:

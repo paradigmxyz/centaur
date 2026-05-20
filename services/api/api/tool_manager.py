@@ -185,13 +185,16 @@ class OAuthTokenSecret:
     credential fields nor the minted token ever reach the sandbox.
 
     ``grant`` is one of ``refresh_token`` (RFC 6749 — an authorized-user
-    credential) or ``client_credentials`` (RFC 6749 4.4 — a client id and
-    secret).
+    credential), ``client_credentials`` (RFC 6749 4.4 — a client id and
+    secret), or ``password`` (RFC 6749 4.3 — a resource-owner username and
+    password exchanged for a token).
 
     ``fields`` maps each grant's credential fields to a source; fields may be
     sourced from separate secrets or pulled from one JSON secret via
     ``json_key``. ``token_endpoint`` is the OAuth2 token endpoint to exchange
-    against.
+    against. ``token_endpoint_headers`` adds extra headers to the token POST
+    itself, each value resolved from its own source; use this when the token
+    endpoint requires an API key alongside the standard form-body client auth.
     """
 
     name: str
@@ -200,6 +203,7 @@ class OAuthTokenSecret:
     fields: tuple[tuple[str, OAuthFieldSource], ...]
     scopes: tuple[str, ...] = ()
     token_endpoint: str | None = None
+    token_endpoint_headers: tuple[tuple[str, OAuthFieldSource], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -261,6 +265,10 @@ _OAUTH_GRANT_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "client_credentials": (
         frozenset({"client_id", "client_secret"}),
         frozenset(),
+    ),
+    "password": (
+        frozenset({"username", "password", "client_id"}),
+        frozenset({"client_secret"}),
     ),
 }
 
@@ -336,6 +344,37 @@ def _parse_oauth_fields(
         raise ValueError(
             f"oauth_token entry {secret_name!r} grant {grant!r} requires "
             f"fields {sorted(missing)}"
+        )
+    return tuple(sorted(parsed.items()))
+
+
+def _parse_oauth_token_endpoint_headers(
+    secret_name: str, raw: Any
+) -> tuple[tuple[str, OAuthFieldSource], ...]:
+    """Parse the ``token_endpoint_headers`` table for an ``oauth_token`` entry.
+
+    Each entry maps a header name to a secret source. iron-proxy sends these
+    headers on the token POST itself, alongside the form-body client auth, so
+    each value is resolved like any other ``OAuthFieldSource``: a bare
+    ``secret_ref`` string or a table with ``secret_ref`` and optional
+    ``json_key``.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(
+            f"oauth_token entry {secret_name!r} 'token_endpoint_headers' must "
+            f"be a non-empty table"
+        )
+    parsed: dict[str, OAuthFieldSource] = {}
+    for header_name, value in raw.items():
+        if not isinstance(header_name, str) or not header_name:
+            raise ValueError(
+                f"oauth_token entry {secret_name!r} 'token_endpoint_headers' "
+                f"keys must be non-empty header names"
+            )
+        parsed[header_name] = _parse_oauth_field_source(
+            secret_name, f"token_endpoint_headers.{header_name}", value
         )
     return tuple(sorted(parsed.items()))
 
@@ -683,6 +722,9 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
                 f"non-empty string"
             )
         fields = _parse_oauth_fields(name, grant, entry.get("fields"))
+        token_endpoint_headers = _parse_oauth_token_endpoint_headers(
+            name, entry.get("token_endpoint_headers")
+        )
         return OAuthTokenSecret(
             name=name,
             grant=grant,
@@ -690,6 +732,7 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
             fields=fields,
             scopes=tuple(scopes),
             token_endpoint=token_endpoint,
+            token_endpoint_headers=token_endpoint_headers,
         )
     if secret_type == "pg_dsn":
         database = entry.get("database")

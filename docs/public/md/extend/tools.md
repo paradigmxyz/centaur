@@ -47,9 +47,11 @@ Each entry in `secrets` declares one credential the tool can request with
   `secret("...")`; iron-proxy swaps that placeholder for the real value at the
   network boundary.
 - `type = "oauth_token"` is for OAuth2 APIs. iron-proxy resolves the declared
-  `fields`, runs either a `refresh_token` or `client_credentials` exchange,
+  `fields`, runs a `refresh_token`, `client_credentials`, or `password` exchange,
   caches and refreshes the access token, then injects `Authorization: Bearer ...`
-  for the configured `hosts`.
+  for the configured `hosts`. Set `token_endpoint_headers` to send extra headers
+  on the token POST itself (for endpoints that require an API key alongside the
+  standard form-body client auth).
 - `type = "gcp_auth"` is for Google service-account JSON. iron-proxy resolves
   the keyfile, mints Google OAuth tokens for `scopes`, and injects them for the
   configured Google API `hosts`. If omitted, hosts default to
