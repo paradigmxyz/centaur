@@ -32,8 +32,10 @@ type Segment = {
   planStarted: boolean
   headerEmitted: boolean
   pendingText: string
+  pendingTextSourceChars: number
   pendingTextPlanPrefix: boolean
   streamedText: string
+  streamedTextSourceChars: number
   pendingTextTimer?: ReturnType<typeof setTimeout>
   pendingTextFlush?: Promise<void>
   streamError?: Error
@@ -164,6 +166,11 @@ export class AgentSessionRenderer {
     })
   }
 
+  streamedTextChars(sessionId: string): number {
+    const state = requireSession(sessionId)
+    return streamedTextSourceChars(state)
+  }
+
   async blocks(
     sessionId: string,
     blocks: AnyBlock[],
@@ -203,13 +210,14 @@ export class AgentSessionRenderer {
     await this.flushText(state, segment, { force: true })
   }
 
-  async done(sessionId: string, opts: DoneOptions = {}): Promise<void> {
+  async done(sessionId: string, opts: DoneOptions = {}): Promise<{ streamedTextChars: number }> {
     const state = requireSession(sessionId)
     state.done = true
     state.finalCommentaryMarkdown = opts.commentaryMarkdown
     state.finalAnswerMarkdown = opts.answerMarkdown
     const streamFinalUpdates = opts.streamFinalUpdates ?? true
     let closed = false
+    let streamedTextChars = 0
 
     try {
       for (const segment of state.segments) {
@@ -227,6 +235,7 @@ export class AgentSessionRenderer {
         }
         await this.closeTextStream(state, segment)
       }
+      streamedTextChars = streamedTextSourceChars(state)
       closed = true
     } finally {
       if (!state.statusCleared) {
@@ -234,6 +243,7 @@ export class AgentSessionRenderer {
       }
       if (closed) sessions.delete(sessionId)
     }
+    return { streamedTextChars }
   }
 
   private async setStatus(sessionId: string, status: string): Promise<boolean> {
@@ -339,8 +349,12 @@ export class AgentSessionRenderer {
     segment.pendingTextPlanPrefix = planPrefix
     const accepted = appendPendingTextWithinLiveLimit(segment, markdown)
     if (accepted <= 0) return 0
-    if (opts.force || segment.pendingText.length >= TEXT_FLUSH_CHARS) {
+    if (opts.force) {
       await this.flushText(state, segment, { force: true })
+      return accepted
+    }
+    if (segment.pendingText.length >= TEXT_FLUSH_CHARS) {
+      await this.flushText(state, segment, { force: false })
       return accepted
     }
     this.scheduleTextFlush(state, segment)
@@ -389,6 +403,7 @@ export class AgentSessionRenderer {
     if (!segment.pendingText) return
     const markdown = normalizeMarkdownChunk(segment.streamedText, segment.pendingText)
     segment.pendingText = ''
+    segment.pendingTextSourceChars = 0
     segment.streamedText += markdown
   }
 
@@ -411,12 +426,15 @@ export class AgentSessionRenderer {
     }
     const markdown = normalizeMarkdownChunk(segment.streamedText, segment.pendingText)
     if (!markdown) return
+    const pendingSourceChars = segment.pendingTextSourceChars
     segment.pendingText = ''
-    segment.streamedText += markdown
+    segment.pendingTextSourceChars = 0
     await this.streamChunks(state, segment, [
       ...(segment.pendingTextPlanPrefix ? this.planPrefix(state, segment) : []),
       ...markdownToStreamChunks(markdown)
     ])
+    segment.streamedText += markdown
+    segment.streamedTextSourceChars += pendingSourceChars
   }
 
   private async flushTask(
@@ -599,6 +617,10 @@ function currentSegment(state: AgentSessionState): Segment {
   return state.segments.at(-1) ?? newSegment()
 }
 
+function streamedTextSourceChars(state: AgentSessionState): number {
+  return state.segments.reduce((total, segment) => total + segment.streamedTextSourceChars, 0)
+}
+
 function newSegment(): Segment {
   return {
     id: ulid(),
@@ -607,8 +629,10 @@ function newSegment(): Segment {
     planStarted: false,
     headerEmitted: false,
     pendingText: '',
+    pendingTextSourceChars: 0,
     pendingTextPlanPrefix: true,
     streamedText: '',
+    streamedTextSourceChars: 0,
     closed: false
   }
 }
@@ -634,7 +658,6 @@ function hasVisibleStreamChunks(chunks: AnyChunk[]): boolean {
 
 function safeMarkdownFlush(markdown: string, pendingText: string, streamedText: string): boolean {
   if (hasOpenFence(markdown)) return false
-  if (pendingText.length >= TEXT_FLUSH_CHARS) return true
   if (!streamedText && pendingText.trim().length < FIRST_TEXT_FLUSH_CHARS) return false
   if (isBareListPrefix(pendingText)) return false
   return (
@@ -741,8 +764,10 @@ function appendPendingTextWithinLiveLimit(segment: Segment, markdown: string): n
   const remaining = MAX_LIVE_TEXT_CHARS - segment.streamedText.length - segment.pendingText.length
   if (remaining <= 0) return 0
   const acceptedNormalized = normalized.slice(0, remaining)
+  const acceptedSourceChars = Math.max(0, acceptedNormalized.length - prefixChars)
   segment.pendingText += acceptedNormalized
-  return Math.max(0, acceptedNormalized.length - prefixChars)
+  segment.pendingTextSourceChars += acceptedSourceChars
+  return acceptedSourceChars
 }
 
 export async function withAgentSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {

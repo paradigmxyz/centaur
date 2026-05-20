@@ -34,6 +34,7 @@ type CodexSessionState = {
   firstBufferedTextAt: number | null
   streamedCommentaryText: string
   streamedAnswerText: string
+  deliveredAnswerChars: number
   agentMessagePhase: AgentMessagePhase | null
   planText: string
   taskByUseId: Map<string, HarnessTask>
@@ -205,7 +206,7 @@ export class CodexSessionRenderer {
     return {
       threadId: state.threadId || undefined,
       done: state.done,
-      streamedAnswerChars: state.streamedAnswerText.length
+      streamedAnswerChars: state.deliveredAnswerChars
     }
   }
 
@@ -218,11 +219,12 @@ export class CodexSessionRenderer {
     completeOpenTasks(state)
     await this.publishActivitySummary(agentSessionId, state, { final: true })
     await this.publishPendingAssistantText(agentSessionId, state, { force: true })
-    await this.renderer.done(agentSessionId, {
+    const { streamedTextChars } = await this.renderer.done(agentSessionId, {
       streamFinalUpdates: true,
       commentaryMarkdown: state.commentaryText,
       answerMarkdown: state.answerText
     })
+    state.deliveredAnswerChars = streamedTextChars
     state.done = true
     states.delete(agentSessionId)
   }
@@ -279,6 +281,7 @@ export class CodexSessionRenderer {
     })
     if (acceptedChars > 0) {
       state.streamedAnswerText += delta.slice(0, acceptedChars)
+      state.deliveredAnswerChars = this.renderer.streamedTextChars(agentSessionId)
     }
   }
 
@@ -325,6 +328,7 @@ function getState(agentSessionId: string): CodexSessionState {
       firstBufferedTextAt: null,
       streamedCommentaryText: '',
       streamedAnswerText: '',
+      deliveredAnswerChars: 0,
       agentMessagePhase: null,
       planText: '',
       taskByUseId: new Map(),

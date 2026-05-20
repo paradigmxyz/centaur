@@ -2,11 +2,10 @@ import type { WebClient } from '@slack/web-api'
 import { centaurApiKey, type AppConfig } from '../config'
 import { slackReplyLimits } from '../constants'
 import { logError } from '../logging'
-import { AgentSessionRenderer } from '../slack/agent-session'
 import { withLaminarSpan } from './laminar'
 
 const CONSUMER_ID = `slackbot-${process.pid}`
-const FINAL_DELIVERY_CHUNK_CHARS = slackReplyLimits.stream.maxLiveTextChars
+const FINAL_DELIVERY_CHUNK_CHARS = slackReplyLimits.text.maxFallbackChars
 
 export function startFinalDeliveryPoller(config: AppConfig, client: WebClient): void {
   if (!centaurApiKey(config)) return
@@ -69,24 +68,8 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
   const threadTs = meta.thread_ts ?? target.threadTs
   if (!channel || !threadTs) throw new Error('missing_slack_delivery_target')
   const text = extractText(payload)
-  const continuation = continuationText(payload, text)
-  if (continuation !== null) {
-    await postFollowups(client, channel, threadTs, splitFinalDeliveryText(continuation))
-    return
-  }
-  const renderer = new AgentSessionRenderer(client)
-  const { sessionId } = await renderer.open({
-    channel,
-    parentTs: threadTs,
-    recipientTeamId: String(meta.team_id ?? delivery.team_id ?? target.teamId ?? ''),
-    recipientUserId: String(meta.recipient_user_id ?? meta.user_id ?? delivery.user_id ?? ''),
-    title: sessionTitle(payload),
-    header: sessionHeader(payload)
-  })
-  const chunks = splitFinalDeliveryText(text)
-  await renderer.text(sessionId, chunks[0] ?? '')
-  await renderer.done(sessionId)
-  await postFollowups(client, channel, threadTs, chunks.slice(1))
+  const textToPost = continuationText(payload, text) ?? text
+  await postFollowups(client, channel, threadTs, splitFinalDeliveryText(textToPost))
 }
 
 async function postFollowups(
@@ -105,11 +88,6 @@ async function postFollowups(
     })
     if (!response.ok) throw new Error(response.error ?? 'chat.postMessage failed')
   }
-}
-
-function sessionTitle(payload: any): string {
-  const title = String(payload?.session_title ?? payload?.title ?? '').trim()
-  return title || 'Execution steps'
 }
 
 function extractText(payload: any): string {
@@ -138,7 +116,9 @@ function firstNonEmpty(...values: unknown[]): string {
 function continuationText(payload: any, text: string): string | null {
   const rawOffset = Number(payload?.slackbot_streamed_answer_chars)
   if (!Number.isFinite(rawOffset) || rawOffset <= 0) return null
-  return text.slice(Math.min(Math.floor(rawOffset), text.length)).trimStart()
+  const offset = Math.floor(rawOffset)
+  if (offset >= text.length) return null
+  return text.slice(offset).trimStart()
 }
 
 function splitFinalDeliveryText(text: string): string[] {
@@ -160,11 +140,6 @@ function splitFinalDeliveryText(text: string): string[] {
   }
   if (remaining) chunks.push(remaining)
   return chunks
-}
-
-function sessionHeader(payload: any): string | undefined {
-  const value = String(payload?.session_header ?? payload?.header ?? '').trim()
-  return value || undefined
 }
 
 function targetFromDelivery(delivery: any): {
