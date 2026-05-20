@@ -74,6 +74,7 @@ transforms:
         - "x-cb-access-timestamp"
         - "addepar-firm"
         - "clientid"
+        - "x-as-user-email"
         - "/^x-[a-z0-9-]*(api-key|apikey|secret|token|auth|key)$/"
 
 log:
