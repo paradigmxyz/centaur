@@ -273,11 +273,13 @@ export class CodexSessionRenderer {
     if (state.answerText.length <= state.streamedAnswerText.length) return
     const delta = state.answerText.slice(state.streamedAnswerText.length)
     if (!delta) return
-    state.streamedAnswerText = state.answerText
-    await this.renderer.textDelta(agentSessionId, delta, {
+    const acceptedChars = await this.renderer.textDelta(agentSessionId, delta, {
       force: opts.force ?? false,
       planPrefix: hasPlan
     })
+    if (acceptedChars > 0) {
+      state.streamedAnswerText += delta.slice(0, acceptedChars)
+    }
   }
 
   private async publishStructuredPlan(

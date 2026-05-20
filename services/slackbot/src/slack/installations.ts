@@ -79,7 +79,10 @@ export class SlackClientResolver {
   }
 }
 
-export function createSlackWebClient(token: string, opts: SlackClientOptions = {}): WebClient {
+export function createSlackWebClient(
+  token: string,
+  opts: SlackClientOptions = {}
+): WebClient {
   return new WebClient(
     token,
     opts.slackApiUrl

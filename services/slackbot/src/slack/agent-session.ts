@@ -138,16 +138,16 @@ export class AgentSessionRenderer {
     return { sessionId: id }
   }
 
-  async text(sessionId: string, markdown: string): Promise<void> {
+  async text(sessionId: string, markdown: string): Promise<number> {
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
 
     segment.textParts.push(markdown)
-    await this.queueText(state, segment, markdown)
+    return await this.queueText(state, segment, markdown)
   }
 
-  async textDelta(sessionId: string, markdownDelta: string, opts: TextOptions = {}): Promise<void> {
-    if (!markdownDelta) return
+  async textDelta(sessionId: string, markdownDelta: string, opts: TextOptions = {}): Promise<number> {
+    if (!markdownDelta) return 0
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
 
@@ -155,13 +155,10 @@ export class AgentSessionRenderer {
     if (lastIndex >= 0) segment.textParts[lastIndex] += markdownDelta
     else segment.textParts.push(markdownDelta)
     if (opts.flush === false) {
-      segment.pendingText += normalizeDeltaBoundary(
-        segment.streamedText + segment.pendingText,
-        markdownDelta
-      )
-      return
+      const accepted = appendPendingTextWithinLiveLimit(segment, markdownDelta)
+      return accepted
     }
-    await this.queueText(state, segment, markdownDelta, {
+    return await this.queueText(state, segment, markdownDelta, {
       force: opts.force,
       planPrefix: opts.planPrefix
     })
@@ -333,22 +330,21 @@ export class AgentSessionRenderer {
     segment: Segment,
     markdown: string,
     opts: { force?: boolean; planPrefix?: boolean } = {}
-  ): Promise<void> {
+  ): Promise<number> {
     raiseStreamError(segment)
     const planPrefix = opts.planPrefix !== false
     if (segment.pendingText && segment.pendingTextPlanPrefix !== planPrefix) {
       await this.flushText(state, segment, { force: true })
     }
     segment.pendingTextPlanPrefix = planPrefix
-    const normalized = normalizeDeltaBoundary(segment.streamedText + segment.pendingText, markdown)
-    const remaining = MAX_LIVE_TEXT_CHARS - segment.streamedText.length - segment.pendingText.length
-    if (remaining <= 0) return
-    segment.pendingText += normalized.slice(0, remaining)
+    const accepted = appendPendingTextWithinLiveLimit(segment, markdown)
+    if (accepted <= 0) return 0
     if (opts.force || segment.pendingText.length >= TEXT_FLUSH_CHARS) {
       await this.flushText(state, segment, { force: true })
-      return
+      return accepted
     }
     this.scheduleTextFlush(state, segment)
+    return accepted
   }
 
   private scheduleTextFlush(state: AgentSessionState, segment: Segment): void {
@@ -415,7 +411,7 @@ export class AgentSessionRenderer {
     segment.streamedText += markdown
     await this.streamChunks(state, segment, [
       ...(segment.pendingTextPlanPrefix ? this.planPrefix(state, segment) : []),
-      markdownChunk(markdown)
+      ...markdownToStreamChunks(markdown)
     ])
   }
 
@@ -726,6 +722,17 @@ function normalizeDeltaBoundary(previous: string, delta: string): string {
     return `\n${delta}`
   }
   return delta
+}
+
+function appendPendingTextWithinLiveLimit(segment: Segment, markdown: string): number {
+  const previous = segment.streamedText + segment.pendingText
+  const normalized = normalizeDeltaBoundary(previous, markdown)
+  const prefixChars = normalized.length - markdown.length
+  const remaining = MAX_LIVE_TEXT_CHARS - segment.streamedText.length - segment.pendingText.length
+  if (remaining <= 0) return 0
+  const acceptedNormalized = normalized.slice(0, remaining)
+  segment.pendingText += acceptedNormalized
+  return Math.max(0, acceptedNormalized.length - prefixChars)
 }
 
 export async function withAgentSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {

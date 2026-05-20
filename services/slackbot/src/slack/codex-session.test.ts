@@ -891,12 +891,15 @@ describe('CodexSessionRenderer', () => {
     expect(String(detailUpdates[0]?.details ?? '')).toContain('```sh\ncall demo ping\n```')
   })
 
-  it('flushes the final buffered answer tail before stopping the stream', async () => {
+  it('reports only Slack-visible streamed answer chars after live text is capped', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
         threads: {
-          setStatus: async () => ({ ok: true })
+          setStatus: async (params: any) => {
+            calls.push({ method: 'assistant.threads.setStatus', params })
+            return { ok: true }
+          }
         }
       },
       chat: {
@@ -927,11 +930,8 @@ describe('CodexSessionRenderer', () => {
       title: 'Centaur execution'
     })
     const renderer = new CodexSessionRenderer(client as any)
+    const longAnswer = 'x'.repeat(30_010)
 
-    await renderer.event(sessionId, {
-      type: 'item.started',
-      item: { id: 'cmd-1', type: 'commandExecution', command: 'call demo ping' }
-    })
     await renderer.event(sessionId, {
       type: 'item.started',
       item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer' }
@@ -939,18 +939,18 @@ describe('CodexSessionRenderer', () => {
     await renderer.event(sessionId, {
       type: 'item.agentMessage.delta',
       itemId: 'msg-1',
-      delta: 'Nulla facilisi.'
+      delta: longAnswer
     })
-    await renderer.event(sessionId, { type: 'turn.completed', result: 'Nulla facilisi.' })
+    const result = await renderer.event(sessionId, { type: 'turn.done', result: longAnswer })
 
-    const streamed = calls
+    expect(result.streamedAnswerChars).toBe(30_000)
+    const visibleText = calls
       .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
       .flatMap(call => call.params.chunks ?? [])
-      .filter(chunk => chunk.type === 'markdown_text')
-      .map(chunk => String(chunk.text))
+      .filter((chunk: any) => chunk.type === 'markdown_text')
+      .map((chunk: any) => String(chunk.text ?? ''))
       .join('')
-    expect(streamed).toContain('Nulla facilisi.')
-    expect(calls.some(call => call.method === 'chat.stopStream')).toBe(true)
+    expect(visibleText.length).toBe(30_000)
   })
 
   it('streams commentary and answer markdown live without duplicating them on stopStream', async () => {
