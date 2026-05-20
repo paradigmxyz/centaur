@@ -58,8 +58,8 @@ import ThreadPanel from '../components/ThreadPanel'
       </li>
       <li>
         <a href="/security#credentials">
-          <strong>Zero-trust credentials.</strong>
-          <span>Agents never receive raw long-lived keys. They get placeholders, and credentials only get injected at the network edge.</span>
+          <strong>Credential-safe by design.</strong>
+          <span>Agents never receive raw long-lived keys; credentials only get injected at the network edge.</span>
         </a>
       </li>
       <li>
@@ -100,7 +100,7 @@ import ThreadPanel from '../components/ThreadPanel'
     <div className="home-feature-copy">
       <h2 id="home-architecture-title">Modular Architecture</h2>
       <p>Durable control plane, isolated execution, and credential-safe egress. Each layer is independently observable, replaceable, and self-hosted inside your boundary.</p>
-      <a className="home-feature-cta" href="/architecture">Walk the architecture →</a>
+      <a className="home-feature-cta" href="/architecture">View the architecture →</a>
     </div>
   </section>
 </main>

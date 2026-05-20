@@ -1,7 +1,7 @@
 :root {
-  --centaur-accent: #00E100;
-  --centaur-accent-hover: #35f335;
-  --centaur-accent-soft: rgba(0, 225, 0, 0.14);
+  --centaur-accent: #28c26a;
+  --centaur-accent-hover: #55d487;
+  --centaur-accent-soft: rgba(40, 194, 106, 0.14);
   --centaur-bg: #ffffff;
   --centaur-code: #f6f6f7;
   --centaur-line: rgba(0, 0, 0, 0.12);
@@ -270,7 +270,7 @@ body,
   border-radius: 4px;
   color: var(--vocs-color_codeInlineText);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 0.88em;
+  font-size: 0.82em;
   padding: 0.08em 0.28em;
 }
 
@@ -416,6 +416,26 @@ body,
   --shiki-dark: var(--centaur-accent) !important;
 }
 
+.vocs_CodeBlock,
+.vocs_CodeBlock code,
+.vocs_CodeBlock span,
+.vocs_Content pre,
+.vocs_Content pre code {
+  font-size: 0.92em;
+}
+
+[data-v-code-container] pre[data-v-shell] code .line > span:first-child {
+  color: var(--vocs-color_text2) !important;
+  --shiki-dark: var(--vocs-color_text2) !important;
+  --shiki-light: var(--vocs-color_text2) !important;
+}
+
+[data-v-code-container] pre[data-v-shell] code .line > span:nth-child(2) {
+  color: var(--centaur-accent) !important;
+  --shiki-dark: var(--centaur-accent) !important;
+  --shiki-light: var(--centaur-accent) !important;
+}
+
 .vocs_DocsLayout[data-layout="landing"] .vocs_DocsLayout_content,
 [data-layout="landing"] [data-v-main] {
   min-height: 100dvh;
@@ -494,6 +514,7 @@ body,
   height: auto;
   margin-bottom: 24px;
   opacity: 1;
+  text-decoration: none;
   user-select: none;
   -webkit-user-drag: none;
   -webkit-user-select: none;
@@ -503,6 +524,7 @@ body,
 a.home-lockup-link {
   display: inline-block;
   line-height: 0;
+  text-decoration: none;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -791,9 +813,9 @@ a.home-lockup-link {
   display: grid;
   gap: 8px;
   min-height: 100%;
-  padding: 22px 28px 24px 0;
+  padding: 22px 28px 24px;
   text-decoration: none;
-  transition: background 140ms ease;
+  transition: background 140ms ease, border-color 140ms ease;
 }
 
 .home-overview-list a:hover {
@@ -890,7 +912,7 @@ a.home-lockup-link {
   --thread-ink: #f0f0ea;
   --thread-ink-2: #d8d8d1;
   --thread-ink-3: #a4a49d;
-  --thread-accent-soft: rgba(0, 225, 0, 0.16);
+  --thread-accent-soft: rgba(40, 194, 106, 0.16);
   background: var(--thread-panel);
   border: 1px solid var(--thread-border);
   border-radius: 8px;
@@ -1088,7 +1110,7 @@ a.home-lockup-link {
 }
 
 .thread-panel-head::after {
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='178' height='32' viewBox='0 0 178 32'%3E%3Cg fill='%23ffffff' fill-opacity='.04' stroke='%23ffffff' stroke-opacity='.12'%3E%3Crect x='0.5' y='2.5' width='42' height='27' rx='6'/%3E%3Crect x='50.5' y='2.5' width='38' height='27' rx='6'/%3E%3Crect x='96.5' y='2.5' width='28' height='27' rx='6'/%3E%3Crect x='132.5' y='2.5' width='28' height='27' rx='6'/%3E%3C/g%3E%3Cg fill='none' stroke='%23d8d8d1' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.4'%3E%3Ccircle cx='14' cy='13' r='2.6'/%3E%3Cpath d='M10 22c.5-2 2.2-3.2 4-3.2s3.5 1.2 4 3.2'/%3E%3Ccircle cx='19.5' cy='12.5' r='1.8'/%3E%3Cpath d='M19 16.6c1.6 0 2.7 1 3 2.4'/%3E%3Cpath d='M61 18.5V16a5 5 0 0 1 10 0v2.5'/%3E%3Crect x='60' y='18' width='3' height='4' rx='1'/%3E%3Crect x='69' y='18' width='3' height='4' rx='1'/%3E%3Cpath d='M77 15l3 3 3-3'/%3E%3Cpath d='M105 19v-3.5a4 4 0 0 1 8 0V19l1.2 1.5h-10.4z'/%3E%3Cpath d='M107.5 22.5a1.5 1.5 0 0 0 3 0'/%3E%3C/g%3E%3Cg fill='%23d8d8d1'%3E%3Ctext x='27' y='20' font-family='Arial,sans-serif' font-size='12' font-weight='700'%3E21%3C/text%3E%3Ccircle cx='141.2' cy='16' r='1.3'/%3E%3Ccircle cx='146' cy='16' r='1.3'/%3E%3Ccircle cx='150.8' cy='16' r='1.3'/%3E%3C/g%3E%3Ccircle cx='116' cy='7' r='4' fill='%23f15a4a'/%3E%3C/svg%3E") center / contain no-repeat;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='178' height='32' viewBox='0 0 178 32'%3E%3Cg fill='%23ffffff' fill-opacity='.04' stroke='%23ffffff' stroke-opacity='.12'%3E%3Crect x='0.5' y='2.5' width='45' height='27' rx='6'/%3E%3Crect x='53.5' y='2.5' width='38' height='27' rx='6'/%3E%3Crect x='99.5' y='2.5' width='28' height='27' rx='6'/%3E%3Crect x='135.5' y='2.5' width='28' height='27' rx='6'/%3E%3C/g%3E%3Cg fill='none' stroke='%23d8d8d1' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.4'%3E%3Ccircle cx='14' cy='13' r='2.6'/%3E%3Cpath d='M10 22c.5-2 2.2-3.2 4-3.2s3.5 1.2 4 3.2'/%3E%3Ccircle cx='19.5' cy='12.5' r='1.8'/%3E%3Cpath d='M19 16.6c1.6 0 2.7 1 3 2.4'/%3E%3Cpath d='M64 18.5V16a5 5 0 0 1 10 0v2.5'/%3E%3Crect x='63' y='18' width='3' height='4' rx='1'/%3E%3Crect x='72' y='18' width='3' height='4' rx='1'/%3E%3Cpath d='M80 15l3 3 3-3'/%3E%3Cpath d='M108 19v-3.5a4 4 0 0 1 8 0V19l1.2 1.5h-10.4z'/%3E%3Cpath d='M110.5 22.5a1.5 1.5 0 0 0 3 0'/%3E%3C/g%3E%3Cg fill='%23d8d8d1'%3E%3Ctext x='27' y='20' font-family='Arial,sans-serif' font-size='12' font-weight='700'%3E21%3C/text%3E%3Ccircle cx='144.2' cy='16' r='1.3'/%3E%3Ccircle cx='149' cy='16' r='1.3'/%3E%3Ccircle cx='153.8' cy='16' r='1.3'/%3E%3C/g%3E%3Ccircle cx='119' cy='7' r='4' fill='%23f15a4a'/%3E%3C/svg%3E") center / contain no-repeat;
   content: "";
   flex: 0 0 auto;
   height: 32px;
@@ -1193,10 +1215,11 @@ a.home-lockup-link {
 }
 
 .thread-panel-mention {
-  background: rgba(97, 183, 255, 0.16);
+  background: rgba(97, 183, 255, 0.12);
+  border-radius: 3px;
   color: #8fcfff;
   font-weight: 500;
-  padding: 1px 4px;
+  padding: 1px 3px;
 }
 
 .thread-panel-rule {
@@ -1302,16 +1325,23 @@ a.home-lockup-link {
 
 .thread-task-head {
   align-items: center;
-  background: transparent;
-  border: 0;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: inherit;
   cursor: pointer;
   display: flex;
   font: inherit;
   gap: 8px;
-  padding: 0;
+  padding: 7px 8px;
   text-align: left;
+  transition: background 140ms ease, border-color 140ms ease;
   width: 100%;
+}
+
+.thread-task-head:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: var(--thread-border);
 }
 
 .thread-task-title {

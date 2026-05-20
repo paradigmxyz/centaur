@@ -11,7 +11,6 @@ an event trail clients can replay.
 
 <figure className="architecture-figure">
   <img src="/brand/architecture.svg" alt="Centaur architecture — ingress, durable control plane, isolated execution, tools, workflows, and controlled egress" />
-  <figcaption>Architecture 2.0: ingress, durable control plane, isolated execution, tools, workflows, and controlled egress — every plane lives at the layer that can own it cleanly.</figcaption>
 </figure>
 
 ## Planes
