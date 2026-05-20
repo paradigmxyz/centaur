@@ -1343,6 +1343,159 @@ async def test_agent_turn_idempotency_ids_follow_deduped_step_names(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_agent_turn_opens_slack_session_after_spawn_with_resolved_header(
+    db_pool,
+    monkeypatch,
+):
+    from api.workflow_engine import SuspendWorkflow, WorkflowContext, do_agent_turn
+
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:session-after-spawn"
+    await db_pool.execute(
+        "INSERT INTO workflow_runs ("
+        "run_id, workflow_name, workflow_version, request_hash, root_run_id, "
+        "status, input_json, worker_id"
+        ") VALUES ($1, 'test', 'test-v1', 'hash', $1, 'running', '{}'::jsonb, 'w1')",
+        run_id,
+    )
+
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    order: list[str] = []
+
+    async def spawn_after_recording(*args, **kwargs):
+        order.append("spawn")
+        await db_pool.execute(
+            "INSERT INTO agent_runtime_assignments ("
+            "thread_key, assignment_generation, runtime_id, harness, engine, "
+            "persona_id, prompt_ref, effective_agents_md_sha256, state"
+            ") VALUES ($1, 1, 'rt-session-after-spawn', 'codex', 'codex', "
+            "NULL, 'harness:codex', 'sha', 'active')",
+            thread_key,
+        )
+        return {"assignment_generation": 1}
+
+    async def open_after_spawn(**kwargs):
+        order.append("open")
+        assert kwargs["title"] == "Centaur · codex"
+        assert kwargs["header"] == "base · codex"
+        return "sess-resolved"
+
+    append_message_mock = AsyncMock()
+    enqueue_execution_mock = AsyncMock(
+        return_value={"ok": True, "execution_id": "exe-resolved", "status": "queued"},
+    )
+
+    with (
+        patch(
+            "api.workflow_engine.spawn_assignment",
+            new=AsyncMock(side_effect=spawn_after_recording),
+        ),
+        patch(
+            "api.workflow_engine.slackbot_client.open_agent_session",
+            new=AsyncMock(side_effect=open_after_spawn),
+        ) as open_session_mock,
+        patch("api.workflow_engine.append_message", new=append_message_mock),
+        patch("api.workflow_engine.enqueue_execution", new=enqueue_execution_mock),
+    ):
+        with pytest.raises(SuspendWorkflow):
+            await do_agent_turn(
+                ctx,
+                prompt="hello",
+                thread_key=thread_key,
+                delivery={
+                    "platform": "slack",
+                    "channel": "C-test",
+                    "thread_ts": "1700000000.000100",
+                },
+            )
+
+    assert order == ["spawn", "open"]
+    open_session_mock.assert_awaited_once()
+    message_metadata = append_message_mock.await_args.kwargs["metadata"]
+    assert message_metadata["slackbot_agent_session_id"] == "sess-resolved"
+    assert message_metadata["slackbot_live_delivery"] is True
+    enqueue_metadata = enqueue_execution_mock.await_args.kwargs["metadata"]
+    assert enqueue_metadata["slackbot_agent_session_id"] == "sess-resolved"
+    assert enqueue_metadata["slackbot_live_delivery"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_spawn_failure_opens_unresolved_failure_session(db_pool):
+    from api.workflow_engine import WorkflowContext, do_agent_turn
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:spawn-failure-session"
+    await db_pool.execute(
+        "INSERT INTO workflow_runs ("
+        "run_id, workflow_name, workflow_version, request_hash, root_run_id, "
+        "status, input_json, worker_id"
+        ") VALUES ($1, 'test', 'test-v1', 'hash', $1, 'running', '{}'::jsonb, 'w1')",
+        run_id,
+    )
+
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    append_message_mock = AsyncMock()
+    enqueue_execution_mock = AsyncMock()
+
+    with (
+        patch(
+            "api.workflow_engine.spawn_assignment",
+            new=AsyncMock(side_effect=RuntimeError("spawn unavailable")),
+        ),
+        patch(
+            "api.workflow_engine.slackbot_client.open_agent_session",
+            new=AsyncMock(return_value="sess-failed"),
+        ) as open_session_mock,
+        patch(
+            "api.workflow_engine.slackbot_client.session_text",
+            new=AsyncMock(),
+        ) as session_text_mock,
+        patch(
+            "api.workflow_engine.slackbot_client.session_done",
+            new=AsyncMock(),
+        ) as session_done_mock,
+        patch("api.workflow_engine.append_message", new=append_message_mock),
+        patch("api.workflow_engine.enqueue_execution", new=enqueue_execution_mock),
+    ):
+        with pytest.raises(RuntimeError, match="spawn unavailable"):
+            await do_agent_turn(
+                ctx,
+                prompt="hello",
+                thread_key=thread_key,
+                delivery={
+                    "platform": "slack",
+                    "channel": "C-test",
+                    "thread_ts": "1700000000.000100",
+                },
+            )
+
+    open_session_mock.assert_awaited_once()
+    open_kwargs = open_session_mock.await_args.kwargs
+    assert open_kwargs["title"] == "Centaur"
+    assert open_kwargs["header"] is None
+    session_text_mock.assert_awaited_once_with(
+        "sess-failed",
+        "Failed to start the runtime: spawn unavailable",
+    )
+    session_done_mock.assert_awaited_once_with("sess-failed")
+    append_message_mock.assert_not_awaited()
+    enqueue_execution_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_step_only_auto_links_execution_ids_for_agent_turn_steps(db_pool):
     from api.workflow_engine import WorkflowContext
 
