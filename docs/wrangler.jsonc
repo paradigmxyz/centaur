@@ -7,10 +7,6 @@
     {
       "pattern": "centaur.run",
       "custom_domain": true
-    },
-    {
-      "pattern": "www.centaur.run",
-      "custom_domain": true
     }
   ],
   "assets": {
