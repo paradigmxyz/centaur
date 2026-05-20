@@ -400,7 +400,11 @@ export class AgentSessionRenderer {
     raiseStreamError(segment)
     if (
       !opts.force &&
-      !safeMarkdownFlush(segment.streamedText + segment.pendingText, segment.streamedText)
+      !safeMarkdownFlush(
+        segment.streamedText + segment.pendingText,
+        segment.pendingText,
+        segment.streamedText
+      )
     ) {
       this.scheduleTextFlush(state, segment)
       return
@@ -628,15 +632,21 @@ function hasVisibleStreamChunks(chunks: AnyChunk[]): boolean {
   })
 }
 
-function safeMarkdownFlush(markdown: string, streamedText: string): boolean {
+function safeMarkdownFlush(markdown: string, pendingText: string, streamedText: string): boolean {
   if (hasOpenFence(markdown)) return false
-  if (!streamedText && markdown.trim().length >= FIRST_TEXT_FLUSH_CHARS) return true
+  if (pendingText.length >= TEXT_FLUSH_CHARS) return true
+  if (!streamedText && pendingText.trim().length < FIRST_TEXT_FLUSH_CHARS) return false
+  if (isBareListPrefix(pendingText)) return false
   return (
-    markdown.endsWith('\n\n') ||
-    markdown.endsWith('```') ||
-    /[.!?](?:\s|$)$/.test(markdown) ||
-    markdown.length >= TEXT_FLUSH_CHARS
+    pendingText.endsWith('\n') ||
+    pendingText.endsWith('\n\n') ||
+    pendingText.endsWith('```') ||
+    /[.!?](?:\s|$)$/.test(pendingText)
   )
+}
+
+function isBareListPrefix(markdown: string): boolean {
+  return /^\s*\d+[.)]\s*$/.test(markdown)
 }
 
 function balancePendingMarkdown(segment: Segment): void {

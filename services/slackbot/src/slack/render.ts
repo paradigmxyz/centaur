@@ -120,14 +120,14 @@ function splitText(input: string, maxChars: number): string[] {
   let remaining = input
   while (remaining.length > maxChars) {
     const hard = remaining.slice(0, maxChars)
-    const boundary = Math.max(
-      hard.lastIndexOf('\n\n'),
-      hard.lastIndexOf('\n'),
-      hard.lastIndexOf(' ')
-    )
-    const take = boundary > maxChars * 0.5 ? boundary : maxChars
+    const paragraphBoundary = hard.lastIndexOf('\n\n')
+    const lineBoundary = hard.lastIndexOf('\n')
+    const spaceBoundary = hard.lastIndexOf(' ')
+    const boundary = Math.max(paragraphBoundary, lineBoundary, spaceBoundary)
+    const delimiterLength = boundary === paragraphBoundary ? 2 : boundary >= 0 ? 1 : 0
+    const take = boundary > maxChars * 0.5 ? boundary + delimiterLength : maxChars
     chunks.push(remaining.slice(0, take))
-    remaining = remaining.slice(take).trimStart()
+    remaining = remaining.slice(take)
   }
   if (remaining) chunks.push(remaining)
   return chunks
