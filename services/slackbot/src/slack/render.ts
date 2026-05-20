@@ -4,7 +4,7 @@ import { slackReplyLimits } from '../constants'
 const MAX_BLOCKS = slackReplyLimits.message.maxBlocks
 const MAX_MARKDOWN_CHARS = slackReplyLimits.stream.markdownChunkChars
 const MAX_FALLBACK_CHARS = slackReplyLimits.text.maxFallbackChars
-const MAX_STREAM_CHUNK_CHARS = 4_000
+const MAX_STREAM_CHUNK_CHARS = slackReplyLimits.stream.markdownChunkChars
 
 export type StatusMetadata = {
   title?: string

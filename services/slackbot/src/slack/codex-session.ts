@@ -53,7 +53,10 @@ export class CodexSessionRenderer {
     this.renderer = new AgentSessionRenderer(client)
   }
 
-  async event(agentSessionId: string, event: any): Promise<{ threadId?: string; done: boolean }> {
+  async event(
+    agentSessionId: string,
+    event: any
+  ): Promise<{ threadId?: string; done: boolean; streamedAnswerChars: number }> {
     const state = getState(agentSessionId)
     if (event?.session_id) state.threadId = String(event.session_id)
     if (event?.thread_id) state.threadId = String(event.thread_id)
@@ -199,7 +202,11 @@ export class CodexSessionRenderer {
       await this.done(agentSessionId)
     }
 
-    return { threadId: state.threadId || undefined, done: state.done }
+    return {
+      threadId: state.threadId || undefined,
+      done: state.done,
+      streamedAnswerChars: state.streamedAnswerText.length
+    }
   }
 
   async done(agentSessionId: string, threadId?: string): Promise<void> {
@@ -212,7 +219,7 @@ export class CodexSessionRenderer {
     await this.publishActivitySummary(agentSessionId, state, { final: true })
     await this.publishPendingAssistantText(agentSessionId, state, { force: true })
     await this.renderer.done(agentSessionId, {
-      streamFinalUpdates: false,
+      streamFinalUpdates: true,
       commentaryMarkdown: state.commentaryText,
       answerMarkdown: state.answerText
     })
@@ -627,7 +634,7 @@ function shellLanguage(language: string | undefined): string {
   return language === 'bash' || !language ? 'sh' : language
 }
 
-function shellLanguageForCommand(command: string): string {
+function shellLanguageForCommand(_command: string): string {
   return 'sh'
 }
 

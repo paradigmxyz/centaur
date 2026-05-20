@@ -278,7 +278,8 @@ export class AgentSessionRenderer {
     const answerMarkdown = finalMarkdownForBlocks(answerSource)
     const streamedTextLive =
       Boolean(segment.streamedText.trim()) && segment.streamedText.length < MAX_LIVE_TEXT_CHARS
-    const showThinking = !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
+    const showThinking =
+      !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
     const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
     // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
     // Only add blocks for content that was not streamed live; live task_update chunks carry
@@ -339,10 +340,7 @@ export class AgentSessionRenderer {
       await this.flushText(state, segment, { force: true })
     }
     segment.pendingTextPlanPrefix = planPrefix
-    const normalized = normalizeDeltaBoundary(
-      segment.streamedText + segment.pendingText,
-      markdown
-    )
+    const normalized = normalizeDeltaBoundary(segment.streamedText + segment.pendingText, markdown)
     const remaining = MAX_LIVE_TEXT_CHARS - segment.streamedText.length - segment.pendingText.length
     if (remaining <= 0) return
     segment.pendingText += normalized.slice(0, remaining)

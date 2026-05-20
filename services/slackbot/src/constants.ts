@@ -6,6 +6,7 @@ export const slackReplyLimits = {
     maxUntruncatedChars: 40_000
   },
   stream: {
+    /** {@link https://docs.slack.dev/reference/methods/chat.postMessage/} */
     markdownChunkChars: 12_000,
     planTitleChars: 256,
     taskCount: 24,
