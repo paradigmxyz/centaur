@@ -1783,6 +1783,17 @@ async def _insert_workflow_run(
         )
         if existing:
             if existing["request_hash"] != req_hash:
+                keys = ",".join(sorted(str(key) for key in run_input.keys()))
+                log.warning(
+                    "workflow_idempotency_payload_mismatch",
+                    workflow_name=workflow_name,
+                    trigger_key=trigger_key,
+                    thread_key=run_input.get("thread_key"),
+                    input_keys=keys,
+                    existing_request_hash_prefix=str(existing["request_hash"])[:12],
+                    request_hash_prefix=req_hash[:12],
+                    run_id=str(existing["run_id"]),
+                )
                 raise ControlPlaneError(
                     "IDEMPOTENCY_PAYLOAD_MISMATCH",
                     "trigger_key was already used with a different payload",
