@@ -298,6 +298,66 @@ describe("final delivery polling", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("marks thrown Slack Web API block-size errors non-retryable", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<{ path: string; body: any }> = [];
+    const fetchMock = mock(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        const body = init?.body ? JSON.parse(init.body as string) : undefined;
+        fetchCalls.push({ path: url.pathname, body });
+        if (url.pathname === "/agent/final-deliveries/claim") {
+          return jsonResponse({
+            deliveries: [
+              {
+                execution_id: "exe-blocks-too-long",
+                thread_key: "slack:T123:C123:1778883099.579529",
+                delivery: {
+                  platform: "slack",
+                  channel: "C123",
+                  thread_ts: "1778883099.579529",
+                },
+                final_payload: { result_text: "hello" },
+              },
+            ],
+          });
+        }
+        if (
+          url.pathname ===
+          "/agent/final-deliveries/exe-blocks-too-long/failed"
+        )
+          return jsonResponse({ ok: true });
+        throw new Error(`unexpected request: ${url.pathname}`);
+      },
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = {
+      chat: {
+        postMessage: async () => {
+          const error = new Error("An API error occurred");
+          (error as any).data = { ok: false, error: "msg_blocks_too_long" };
+          throw error;
+        },
+      },
+      conversations: { replies: async () => ({ ok: true, messages: [] }) },
+    };
+
+    try {
+      await pollFinalDeliveriesOnce(config, client as any);
+      const failed = fetchCalls.find((call) =>
+        call.path.endsWith("/final-deliveries/exe-blocks-too-long/failed"),
+      );
+      expect(failed?.body).toMatchObject({
+        error: "An API error occurred",
+        error_class: "msg_blocks_too_long",
+        non_retryable: true,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 function jsonResponse(body: unknown): Response {
