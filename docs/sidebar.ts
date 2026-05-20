@@ -42,6 +42,10 @@ export const sidebar = [
     text: 'Resources',
     items: [
       { text: 'Brand', link: '/brand' },
+      {
+        text: 'MIT License',
+        link: 'https://github.com/paradigmxyz/centaur/blob/main/LICENSE',
+      },
     ],
   },
 ] satisfies Config['sidebar']

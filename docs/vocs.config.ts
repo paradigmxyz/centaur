@@ -133,9 +133,10 @@ export default defineConfig({
   },
   sidebar,
   theme: {
+    // Keep in sync with --centaur-accent in docs/pages/_root.css.
     accentColor: {
-      light: '#00E100',
-      dark: '#00E100',
+      light: '#28c26a',
+      dark: '#28c26a',
     },
     variables: {
       color: {
