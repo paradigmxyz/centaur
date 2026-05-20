@@ -6,6 +6,8 @@ from typing import Any
 import httpx
 import structlog
 
+from api.slack_sanitize import sanitize_for_slack
+
 log = structlog.get_logger()
 
 
@@ -124,9 +126,10 @@ async def open_agent_session(
 
 
 async def session_text(session_id: str | None, markdown: str) -> None:
-    if not session_id or not markdown.strip():
+    sanitized = sanitize_for_slack(markdown)
+    if not session_id or not sanitized.strip():
         return
-    await post(f"/api/slack/agent-sessions/{session_id}/text", {"markdown": markdown})
+    await post(f"/api/slack/agent-sessions/{session_id}/text", {"markdown": sanitized})
 
 
 async def session_step(
@@ -140,11 +143,15 @@ async def session_step(
 ) -> None:
     if not session_id or not step_id or not title:
         return
-    body: dict[str, Any] = {"id": step_id, "title": title, "status": status}
+    body: dict[str, Any] = {
+        "id": step_id,
+        "title": sanitize_for_slack(title),
+        "status": status,
+    }
     if details:
-        body["details"] = details
+        body["details"] = sanitize_for_slack(details)
     if output:
-        body["output"] = output
+        body["output"] = sanitize_for_slack(output)
     await post(f"/api/slack/agent-sessions/{session_id}/step", body)
 
 
@@ -157,12 +164,14 @@ async def session_done(session_id: str | None, thread_id: str | None = None) -> 
     await post(f"/api/slack/agent-sessions/{session_id}/done", body)
 
 
-async def harness_event(session_id: str | None, event: dict[str, Any]) -> dict[str, Any] | None:
+async def harness_event(
+    session_id: str | None, event: dict[str, Any]
+) -> dict[str, Any] | None:
     if not session_id:
         return None
     return await post(
         f"/api/slack/agent-sessions/{session_id}/harness-event",
-        {"event": event},
+        {"event": sanitize_slack_event(event)},
         timeout=httpx.Timeout(60.0, connect=2.0),
     )
 
@@ -178,3 +187,33 @@ async def set_status(delivery: dict[str, Any], status: str) -> None:
         "/api/slack/assistant/status",
         {"channel_id": channel, "thread_ts": ts, "status": status},
     )
+
+
+_TEXT_KEYS = {
+    "content",
+    "delta",
+    "details",
+    "error",
+    "message",
+    "output",
+    "result",
+    "summary",
+    "text",
+    "title",
+}
+
+
+def sanitize_slack_event(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_for_slack(value)
+    if isinstance(value, list):
+        return [sanitize_slack_event(item) for item in value]
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, (dict, list)) or key in _TEXT_KEYS:
+                sanitized[key] = sanitize_slack_event(item)
+            else:
+                sanitized[key] = item
+        return sanitized
+    return value
