@@ -17,8 +17,10 @@ import { EnvSlackInstallationStore, SlackClientResolver } from './slack/installa
 import { normalizeSlackEnvelope } from './slack/normalize'
 import { markdownToStreamChunks } from './slack/render'
 import { verifySlackSignature } from './slack/signature'
-import type { SlackEnvelope } from './slack/types'
+import { shouldAckWithReaction } from './slack/trivial-ack'
+import type { NormalizedSlackEvent, SlackEnvelope } from './slack/types'
 import type { AnyBlock, AnyChunk } from '@slack/types'
+import type { WebClient } from '@slack/web-api'
 
 const config = loadConfig()
 // This is the existing deployments/runtime alert channel wired by the Helm
@@ -514,6 +516,11 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
   if (!normalized) return
   if (!normalized.is_mention) return
 
+  if (shouldAckWithReaction(normalized)) {
+    await ackWithReaction(client, normalized)
+    return
+  }
+
   const result = await handoff.emit(normalized)
   if (!result.ok) {
     if (result.status === 409) {
@@ -521,6 +528,24 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
       return
     }
     throw new Error(`Centaur Slack handoff failed: ${result.status}`)
+  }
+}
+
+const TRIVIAL_ACK_REACTION = 'ok_hand'
+
+async function ackWithReaction(client: WebClient, event: NormalizedSlackEvent): Promise<void> {
+  try {
+    await client.reactions.add({
+      channel: event.channel_id,
+      timestamp: event.slack?.message_ts ?? event.thread_ts,
+      name: TRIVIAL_ACK_REACTION
+    })
+  } catch (error) {
+    logWarn('slack_trivial_ack_reaction_failed', {
+      channel_id: event.channel_id,
+      thread_ts: event.thread_ts,
+      error: error instanceof Error ? error.message : String(error)
+    })
   }
 }
 
