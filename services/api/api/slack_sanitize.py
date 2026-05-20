@@ -58,7 +58,7 @@ def _is_tool_error_envelope(value: dict[str, Any]) -> bool:
     )
 
 
-def sanitize_for_slack(text: str | None) -> str:
+def sanitize_for_slack(text: str | None, *, preserve_edges: bool = False) -> str:
     """Strip known plumbing leaks from `text`. Idempotent; empty input -> ""."""
     if not text:
         return ""
@@ -73,4 +73,4 @@ def sanitize_for_slack(text: str | None) -> str:
     sanitized = _CURL_EXIT_RE.sub(r"transport_error(\1)", sanitized)
     sanitized = re.sub(r"[ \t]+\n", "\n", sanitized)
     sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
-    return sanitized.strip()
+    return sanitized if preserve_edges else sanitized.strip()

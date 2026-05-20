@@ -228,7 +228,7 @@ _TEXT_KEYS = {
 
 def sanitize_slack_event(value: Any) -> Any:
     if isinstance(value, str):
-        return sanitize_for_slack(value)
+        return sanitize_for_slack(value, preserve_edges=True)
     if isinstance(value, list):
         return [sanitize_slack_event(item) for item in value]
     if isinstance(value, dict):
