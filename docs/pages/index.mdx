@@ -26,6 +26,13 @@ import ThreadPanel from '../components/ThreadPanel'
         <a className="home-button" href="https://github.com/paradigmxyz/centaur">GitHub</a>
       </div>
 
+      <div className="home-agent-prompt-mini" aria-label="Copy this prompt into a local coding agent">
+
+```text
+Onboard me to Centaur locally. Use https://centaur.run/llms-full.txt and follow https://centaur.run/md/extend/acme-example.md.
+```
+      </div>
+
       <div className="home-built-with" aria-label="Built by">
         <span>Built by</span>
         <div className="home-logo-row" aria-label="Paradigm and Tempo">
@@ -41,6 +48,7 @@ import ThreadPanel from '../components/ThreadPanel'
 
     <div className="home-thread-demo" aria-label="Centaur thread preview">
       <ThreadPanel />
+      <div className="home-thread-demo-caption">transcripts from the Paradigm & Tempo Slacks</div>
     </div>
   </section>
 

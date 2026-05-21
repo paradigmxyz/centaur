@@ -1,6 +1,6 @@
 'use client'
 
-import type { CSSProperties } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 type Reply = {
@@ -8,9 +8,11 @@ type Reply = {
   text: string
   time: string
   card?: TaskCardData
+  table?: TableData
   who?: string
   glyph?: string
   color?: string
+  avatar?: string
 }
 
 type TaskCardData = {
@@ -20,6 +22,45 @@ type TaskCardData = {
     output: string
     exitCode?: number
   }>
+}
+
+type TableData = {
+  headers: string[]
+  rows: string[][]
+}
+
+const personalizedQuestionsTable: TableData = {
+  headers: ['Who', 'Questions'],
+  rows: [
+    [
+      '*MatX: Reiner Pope / Mike Gunter*',
+      '“What workload shape makes MatX most advantaged: training, prefill, decode, RL, or MoE routing?” “Does putting weights in SRAM reduce total HBM demand, or does it free HBM to support longer KV/context?” “What becomes binding in a MatX cluster: SRAM capacity, HBM bandwidth, HBM capacity, scale-up interconnect, power, or software?”',
+    ],
+    [
+      '*Xiaoyu Ma / David Patterson*',
+      '“If you had to rank 2027 bottlenecks, how would you order HBM bandwidth, HBM capacity, interconnect latency, packaging, and power?” “Which proposed fix is closest to production: HBF, PNM, 3D memory-logic stacking, CXL/memory pooling, or low-latency interconnect?” “What would falsify the ‘memory not compute’ inference thesis?”',
+    ],
+    [
+      '*TurboQuant: Amir Zandieh / Vahab Mirrokni*',
+      '“In production, does KV compression reduce HBM capacity purchased, or mostly increase max context/concurrency?” “Where does TurboQuant break: model size, MoE, multimodal, very long context, latency budgets, or kernel integration?” “How much of the claimed gain survives in vLLM/SGLang/TensorRT-LLM with real batching and scheduling?”',
+    ],
+    [
+      '*vLLM / SGLang / TensorRT-LLM maintainers*',
+      '“For decode today, where do tokens actually stall: HBM bandwidth, KV fragmentation, attention kernels, scheduler overhead, interconnect, or CPU orchestration?” “What optimizations have mattered most in real deployments over the last 12 months?” “If hardware gave you 2x HBM bandwidth, 2x HBM capacity, or 2x interconnect, which improves $/token most?”',
+    ],
+    [
+      '*Hyperscaler inference infra leads*',
+      '“What is the binding procurement constraint for 2026-27: GPUs, HBM, networking, power, racks, cooling, or deployment labor?” “Are you buying more memory per accelerator because of longer context/agents, or using compression/offload to hold memory flat?” “How do you split spend between Nvidia GPUs, custom ASICs, storage, and networking for inference?”',
+    ],
+    [
+      '*HBM / packaging architects*',
+      '“What is the true HBM bottleneck: DRAM wafer starts, TSV stacking, base die, packaging, test, substrate/interposer, or CoWoS capacity?” “How much can HBM4 supply realistically expand in 2027 without hurting yields?” “Are HBM margins high enough that suppliers will reallocate commodity DRAM wafer capacity, or is packaging the limiter?”',
+    ],
+    [
+      '*NAND / HBF experts*',
+      '“Is HBF a real 2027-28 product path or a standards/narrative exercise?” “What workloads can tolerate NAND-like latency if bandwidth and capacity improve?” “Does KV compression reduce the need for HBF, or does long-context/memory-tiering still create demand?”',
+    ],
+  ],
 }
 
 type ThreadData = {
@@ -33,6 +74,7 @@ type ThreadData = {
     who: string
     glyph: string
     color: string
+    avatar?: string
     time: string
     body: string
   }
@@ -40,6 +82,83 @@ type ThreadData = {
 }
 
 const threadData: ThreadData[] = [
+  {
+    id: 'memory-stocks',
+    channel: 'ai-agent',
+    title: 'Compare AI memory stocks',
+    parent: {
+      who: 'Matt Huang',
+      glyph: 'M',
+      color: '#28c26a',
+      avatar: '/avatars/matt-huang.jpg',
+      time: 'Today at 10:13 AM',
+      body: '@centaur_ai Compare the top HBM, NAND, DRAM, HDD stocks based on 2027 estimates',
+    },
+    replies: [
+      {
+        from: 'bot',
+        text: 'Top screen on 2027E earnings: *SK Hynix and Samsung are cheapest, SanDisk has the highest NAND beta, Micron is the cleanest U.S. HBM/DRAM liquid play, and HDD looks more expensive despite strong fundamentals.*\n\nSources: StockAnalysis consensus for MU, SNDK, STX, WDC; MarketScreener for SK Hynix and Samsung; Tom’s Hardware/Bloomberg summary for SK Hynix HBM share/capacity context. (stockanalysis.com)\n\nMy ranking for a 2027 memory/storage basket: *1. SK Hynix, 2. Samsung, 3. Micron, 4. SanDisk, 5. WDC, 6. Seagate*. If you want purity over valuation: *SanDisk for NAND, SK Hynix for HBM, Micron for U.S. HBM/DRAM, Seagate for HDD*.',
+        time: '10:13 AM',
+      },
+      {
+        from: 'user',
+        text: 'Makes sense. @centaur_ai Where are the bottlenecks looking like based on latest published papers in top tier conferences, as well as what ppl are saying on X?',
+        time: '10:21 AM',
+        who: 'Georgios Konstantopoulos',
+        glyph: 'G',
+        color: '#0f766e',
+        avatar: '/avatars/georgios.jpg',
+      },
+      {
+        from: 'bot',
+        text: '@georgios The bottleneck is shifting from “can we get GPUs?” to *memory bandwidth/capacity + data movement*, especially for inference.\n\nBottom line: *HBM bandwidth is the cleanest bottleneck; KV cache capacity is the most actively attacked bottleneck; NAND/HBF is the interesting optionality; HDD is a capacity-cycle story, not the core model-runtime bottleneck.* That keeps my preference tilted toward *SK Hynix/Micron/Samsung for bottleneck purity*, with *SanDisk as the convex HBF/NAND bet* and *STX/WDC as storage-cycle plays*.\n\nSources include ICLR 2026 TurboQuant, AAAI 2026 KV prefetching, 2026 LLM inference hardware/HBM-PIM papers, and recent X posts discussing HBM/KV cache constraints. (openreview.net)',
+        time: '10:21 AM',
+      },
+      {
+        from: 'user',
+        text: '@centaur_ai Does any of this analysis change based on new AI chips like MatX?',
+        time: '10:24 AM',
+        who: 'Matt Huang',
+        glyph: 'M',
+        color: '#28c26a',
+        avatar: '/avatars/matt-huang.jpg',
+      },
+      {
+        from: 'bot',
+        text: 'Yes, but it *reinforces* the prior analysis more than overturning it.\n\nMatX is explicitly designed around the same bottleneck: *keep weights in SRAM, use HBM mostly for KV cache, and add heavy scale-up interconnect for MoE/long-context workloads*. That means chips like MatX reduce _wasted_ HBM traffic, but they do not remove HBM from the stack; they make HBM bandwidth more targeted toward KV/context. MatX itself says weights are typically in SRAM and KVs in HBM, while CEO Reiner Pope says the design spends “none” of HBM bandwidth loading weights and instead uses it for KV cache. (matx.com) (chipstrat.com)\n\nInvestment read-through: *slightly less bullish for generic GPU incumbency, still bullish HBM, more bullish SRAM/on-chip memory/interconnect-aware architectures, and still only optional for NAND/HBF*. For the memory stock basket, I would not change the ranking much: SK Hynix/Micron/Samsung remain the bottleneck-pure plays; MatX-style designs actually validate that memory/interconnect, not raw FLOPs, are the constraint.',
+        time: '10:24 AM',
+      },
+      {
+        from: 'user',
+        text: '@centaur_ai Who should we go talk to to get a better read? Ideally people that are more technical who can give us a nuanced understanding.',
+        time: '10:26 AM',
+        who: 'Georgios Konstantopoulos',
+        glyph: 'G',
+        color: '#0f766e',
+        avatar: '/avatars/georgios.jpg',
+      },
+      {
+        from: 'bot',
+        text: '@georgios I’d prioritize *technical operators/researchers over equity analysts*: people who can explain where tokens stall in real serving systems.\n\nKey diligence questions: “For decode, what percent of time is HBM bandwidth vs interconnect vs scheduler overhead?” “Does KV compression reduce HBM purchases or just enable longer contexts/more users?” “What part of HBM supply is actually binding?” “Do MoE models make scale-up interconnect the next bottleneck?” Sources: MatX interview/site, Ma/Patterson inference hardware paper, TurboQuant authors/paper.',
+        time: '10:26 AM',
+      },
+      {
+        from: 'user',
+        text: '@centaur_ai Let’s personalize the questions for each.',
+        time: '10:28 AM',
+        who: 'Georgios Konstantopoulos',
+        glyph: 'G',
+        color: '#0f766e',
+        avatar: '/avatars/georgios.jpg',
+      },
+      {
+        from: 'bot',
+        text: '@georgios Here’s a personalized question set by expert type.',
+        table: personalizedQuestionsTable,
+        time: '10:28 AM',
+      },
+    ],
+  },
   {
     id: 'tempo-merch',
     channel: 'builds',
@@ -243,85 +362,6 @@ const threadData: ThreadData[] = [
     ],
   },
   {
-    id: 'prod-alert',
-    channel: 'prod-alerts',
-    title: 'Investigate elevated API 5xx alert',
-    parent: {
-      who: 'Perry Dime',
-      glyph: 'P',
-      color: '#0f766e',
-      time: 'Today at 10:32 AM',
-      body: ' can you investigate the elevated API error alert? Please check observability first, then Kubernetes if it looks real.',
-    },
-    replies: [
-      {
-        from: 'bot',
-        text: 'I pulled the alert window from observability and the spike is real: API 5xx increased over the last ten minutes, concentrated on agent execution requests. Latency also widened, but only on the API service.',
-        time: '10:33 AM',
-        card: {
-          title: 'Calling tools...',
-          items: [
-            {
-              command:
-                "/bin/bash -lc \"call observability query '{\\\"service\\\":\\\"api\\\",\\\"metric\\\":\\\"http_5xx_rate\\\",\\\"window\\\":\\\"10m\\\"}'\"",
-              output:
-                '{"status":"success","data":{"resultType":"vector","result":[{"metric":{"service":"api","route":"/agent/execute","status_class":"5xx"},"value":[1779028382.441,"0.0431"]}]},"stats":{"seriesFetched":18,"executionTimeMsec":37}}',
-            },
-            {
-              command:
-                "/bin/bash -lc \"call observability logs '{\\\"query\\\":\\\"service=api level=error route=/agent/execute\\\",\\\"limit\\\":20}'\"",
-              output:
-                '{"hits":[{"_time":"2026-05-17T08:33:14.928Z","_stream":"{service=\\"api\\",pod=\\"centaur-api-7d9f6\\"}","level":"error","event":"sandbox_attach_timeout","execution_id":"exe_01HX7R6V","thread_key":"slack:C0A87C21805:1779028272.441829"},{"_time":"2026-05-17T08:33:18.102Z","level":"error","event":"execution_failed","route":"/agent/execute"}],"limit":20}',
-            },
-            {
-              command:
-                "/bin/bash -lc \"call observability query '{\\\"service\\\":\\\"api\\\",\\\"metric\\\":\\\"p95_latency\\\",\\\"group_by\\\":\\\"route\\\",\\\"window\\\":\\\"10m\\\"}'\"",
-              output:
-                '{"status":"success","data":{"resultType":"vector","result":[{"metric":{"route":"/agent/execute"},"value":[1779028411.006,"4.812"]},{"metric":{"route":"/health"},"value":[1779028411.006,"0.018"]}]}}',
-            },
-          ],
-        },
-      },
-      {
-        from: 'user',
-        text: 'Can you see which pods are involved?',
-        time: '10:34 AM',
-      },
-      {
-        from: 'bot',
-        text: 'Using the Kubernetes tool, two API pods are healthy and one restarted twice. Its logs show repeated sandbox attach timeouts. The worker pods are healthy, and Postgres has no connection saturation.',
-        time: '10:35 AM',
-        card: {
-          title: 'Calling tools...',
-          items: [
-            {
-              command:
-                "/bin/bash -lc \"call kubernetes get_pods '{\\\"namespace\\\":\\\"centaur\\\",\\\"selector\\\":\\\"app.kubernetes.io/name=centaur\\\"}'\"",
-              output:
-                '{"apiVersion":"v1","items":[{"metadata":{"name":"centaur-api-7d9f6","namespace":"centaur","uid":"0f89c6e2"},"status":{"phase":"Running","containerStatuses":[{"name":"api","ready":true,"restartCount":2}]}},{"metadata":{"name":"centaur-api-84cc9","namespace":"centaur","uid":"be722a1d"},"status":{"phase":"Running","containerStatuses":[{"name":"api","ready":true,"restartCount":0}]}}]}',
-            },
-            {
-              command:
-                "/bin/bash -lc \"call kubernetes logs '{\\\"namespace\\\":\\\"centaur\\\",\\\"pod\\\":\\\"centaur-api-7d9f6\\\",\\\"tail\\\":50}'\"",
-              output:
-                '{"pod":"centaur-api-7d9f6","container":"api","lines":["{\\"level\\":\\"error\\",\\"event\\":\\"sandbox_attach_timeout\\",\\"execution_id\\":\\"exe_01HX7R6V\\",\\"thread_key\\":\\"slack:C0A87C21805:1779028272.441829\\",\\"elapsed_ms\\":30001}"],"truncated":false}',
-            },
-          ],
-        },
-      },
-      {
-        from: 'user',
-        text: 'What should we do first?',
-        time: '10:36 AM',
-      },
-      {
-        from: 'bot',
-        text: 'First step is to drain the restarted API pod and watch the observability error rate for five minutes. If errors drop, follow up by inspecting its sandbox attach logs and recent Kubernetes events before rolling anything.',
-        time: '10:36 AM',
-      },
-    ],
-  },
-  {
     id: 'warehouse-tool',
     channel: 'tools',
     title: 'Add a warehouse-lookup tool',
@@ -393,6 +433,22 @@ function BotAvatar({ accent }: { glyph?: string; accent: string }) {
       style={{ '--thread-accent': accent } as CSSProperties}
     >
       <img src="/brand/slack-icon.svg" alt="Centaur" />
+    </div>
+  )
+}
+
+function Avatar({
+  avatar,
+  color,
+  glyph,
+}: {
+  avatar?: string
+  color: string
+  glyph: string
+}) {
+  return (
+    <div className="thread-panel-avatar" style={{ background: color }}>
+      {avatar ? <img className="thread-panel-avatar-img" src={avatar} alt="" /> : glyph}
     </div>
   )
 }
@@ -532,7 +588,7 @@ function StreamingBubble({
 
   return (
     <span className="thread-panel-stream">
-      {shown}
+      {renderSlackText(shown)}
       {!isDone && <span className="thread-panel-caret" />}
       {/*
         Render the un-streamed remainder invisible so the bubble reserves its
@@ -542,32 +598,87 @@ function StreamingBubble({
        */}
       {!isDone && (
         <span className="thread-panel-stream-ghost" aria-hidden="true">
-          {remaining}
+          {renderSlackText(remaining)}
         </span>
       )}
     </span>
   )
 }
 
-function renderHumanText(text: string, botName: string) {
-  const parts = text.includes('#')
-    ? text.split(/(#[a-z0-9-]+)/gi).map((part, index) =>
-        part.startsWith('#') ? (
-          <span key={`${part}-${index}`} className="thread-panel-mention">
-            {part}
-          </span>
-        ) : (
-          <span key={`${part}-${index}`}>{part}</span>
-        ),
-      )
-    : [<span key="text">{text}</span>]
+function renderSlackInline(text: string, keyPrefix: string): ReactNode[] {
+  const tokenPattern = /(<https?:\/\/[^|>]+(?:\|[^>]+)?>|@[a-z0-9_]+|\*[^*\n]+\*|_[^_\n]+_)/gi
+  const nodes: ReactNode[] = []
+  let lastIndex = 0
 
+  for (const match of text.matchAll(tokenPattern)) {
+    const token = match[0]
+    const index = match.index ?? 0
+    if (index > lastIndex) nodes.push(text.slice(lastIndex, index))
+
+    if (token.startsWith('<http')) {
+      const [url, label] = token.slice(1, -1).split('|')
+      nodes.push(
+        <span
+          className="thread-panel-link"
+          key={`${keyPrefix}-link-${index}`}
+        >
+          {label || url}
+        </span>,
+      )
+    } else if (token.startsWith('@')) {
+      nodes.push(
+        <span className="thread-panel-mention" key={`${keyPrefix}-mention-${index}`}>
+          {token}
+        </span>,
+      )
+    } else if (token.startsWith('*')) {
+      nodes.push(<strong key={`${keyPrefix}-strong-${index}`}>{token.slice(1, -1)}</strong>)
+    } else if (token.startsWith('_')) {
+      nodes.push(<em key={`${keyPrefix}-em-${index}`}>{token.slice(1, -1)}</em>)
+    } else {
+      nodes.push(token)
+    }
+
+    lastIndex = index + token.length
+  }
+
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex))
+  return nodes
+}
+
+function renderSlackText(text: string): ReactNode {
+  return <>{renderSlackInline(text, text.slice(0, 16))}</>
+}
+
+function renderHumanText(text: string, botName: string) {
+  const body = text.trimStart().startsWith('@')
+    ? text
+    : `@${botName}${text.startsWith(' ') ? '' : ' '}${text}`
+  return renderSlackText(body)
+}
+
+function SlackTable({ table }: { table: TableData }) {
   return (
-    <>
-      <span className="thread-panel-mention">@{botName}</span>
-      <span> </span>
-      {parts}
-    </>
+    <div className="thread-table-wrap">
+      <table className="thread-table">
+        <thead>
+          <tr>
+            {table.headers.map((header) => (
+              <th key={header}>{renderSlackText(header)}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rows.map((row, rowIndex) => (
+            <tr key={`${row[0]}-${rowIndex}`}>
+              {row.map((cell, cellIndex) => (
+                <td key={`${cellIndex}-${cell.slice(0, 16)}`}>{renderSlackText(cell)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -686,9 +797,11 @@ function ThreadDetail({
       <div className="thread-panel-scroll" onScroll={handleScroll} ref={scrollRef}>
         <div className="thread-panel-parent">
           <div className="thread-panel-row">
-            <div className="thread-panel-avatar" style={{ background: thread.parent.color }}>
-              {thread.parent.glyph}
-            </div>
+            <Avatar
+              avatar={thread.parent.avatar}
+              color={thread.parent.color}
+              glyph={thread.parent.glyph}
+            />
             <div>
               <div className="thread-panel-msg-head">
                 <span className="thread-panel-name">{thread.parent.who}</span>
@@ -716,12 +829,11 @@ function ThreadDetail({
             {reply.from === 'bot' ? (
               <BotAvatar glyph={botGlyph} accent={accent} />
             ) : (
-              <div
-                className="thread-panel-avatar thread-panel-avatar-user"
-                style={reply.color ? { background: reply.color } : undefined}
-              >
-                {reply.glyph ?? thread.parent.glyph}
-              </div>
+              <Avatar
+                avatar={reply.avatar}
+                color={reply.color ?? thread.parent.color}
+                glyph={reply.glyph ?? thread.parent.glyph}
+              />
             )}
             <div>
               <div className="thread-panel-msg-head">
@@ -753,7 +865,10 @@ function ThreadDetail({
                 ) : reply.from === 'user' ? (
                   renderHumanText(reply.text, botName)
                 ) : (
-                  <span>{reply.text}</span>
+                  <>
+                    {renderSlackText(reply.text)}
+                    {reply.table && <SlackTable table={reply.table} />}
+                  </>
                 )}
               </div>
             </div>
@@ -783,6 +898,7 @@ export default function ThreadPanel({
     <div className="thread-panel" style={{ '--thread-accent': accent } as CSSProperties}>
       <aside className="thread-list" aria-label="Threads">
         <div className="thread-list-head">
+          <img className="thread-list-brand" src="/paradigm-mark.svg" alt="" aria-hidden="true" />
           <div className="thread-list-title">Threads</div>
         </div>
         <div className="thread-list-items">
