@@ -186,8 +186,10 @@ class OAuthTokenSecret:
 
     ``grant`` is one of ``refresh_token`` (RFC 6749 — an authorized-user
     credential), ``client_credentials`` (RFC 6749 4.4 — a client id and
-    secret), or ``password`` (RFC 6749 4.3 — a resource-owner username and
-    password exchanged for a token).
+    secret), ``password`` (RFC 6749 4.3 — a resource-owner username and
+    password exchanged for a token), or ``jwt_bearer`` (RFC 7523 — a JWT
+    assertion signed by an RSA ``private_key`` and exchanged at the token
+    endpoint for a bearer token).
 
     ``fields`` maps each grant's credential fields to a source; fields may be
     sourced from separate secrets or pulled from one JSON secret via
@@ -195,6 +197,8 @@ class OAuthTokenSecret:
     against. ``token_endpoint_headers`` adds extra headers to the token POST
     itself, each value resolved from its own source; use this when the token
     endpoint requires an API key alongside the standard form-body client auth.
+    ``audience`` is the JWT ``aud`` claim — required for ``jwt_bearer``, unused
+    by the other grants.
     """
 
     name: str
@@ -204,6 +208,7 @@ class OAuthTokenSecret:
     scopes: tuple[str, ...] = ()
     token_endpoint: str | None = None
     token_endpoint_headers: tuple[tuple[str, OAuthFieldSource], ...] = ()
+    audience: str | None = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +274,10 @@ _OAUTH_GRANT_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "password": (
         frozenset({"username", "password", "client_id"}),
         frozenset({"client_secret"}),
+    ),
+    "jwt_bearer": (
+        frozenset({"issuer", "subject", "private_key"}),
+        frozenset({"private_key_id"}),
     ),
 }
 
@@ -725,6 +734,18 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
         token_endpoint_headers = _parse_oauth_token_endpoint_headers(
             name, entry.get("token_endpoint_headers")
         )
+        audience = entry.get("audience")
+        if grant == "jwt_bearer":
+            if not isinstance(audience, str) or not audience:
+                raise ValueError(
+                    f"oauth_token entry {name!r} grant 'jwt_bearer' requires a "
+                    f"non-empty 'audience'"
+                )
+        elif audience is not None:
+            raise ValueError(
+                f"oauth_token entry {name!r} 'audience' is only valid for grant "
+                f"'jwt_bearer', not {grant!r}"
+            )
         return OAuthTokenSecret(
             name=name,
             grant=grant,
@@ -733,6 +754,7 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
             scopes=tuple(scopes),
             token_endpoint=token_endpoint,
             token_endpoint_headers=token_endpoint_headers,
+            audience=audience,
         )
     if secret_type == "pg_dsn":
         database = entry.get("database")

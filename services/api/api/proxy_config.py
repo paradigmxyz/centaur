@@ -221,6 +221,7 @@ def _build_oauth_token_transform(
             tuple[tuple[str, OAuthFieldSource], ...],
             str | None,
             tuple[tuple[str, OAuthFieldSource], ...],
+            str | None,
         ],
         dict[str, set[str]],
     ] = {}
@@ -232,6 +233,7 @@ def _build_oauth_token_transform(
             secret.fields,
             secret.token_endpoint,
             secret.token_endpoint_headers,
+            secret.audience,
         )
         agg = by_token.setdefault(key, {"hosts": set(), "scopes": set()})
         agg["hosts"].update(secret.hosts)
@@ -246,21 +248,23 @@ def _build_oauth_token_transform(
             tuple[tuple[str, OAuthFieldSource], ...],
             str | None,
             tuple[tuple[str, OAuthFieldSource], ...],
+            str | None,
         ],
     ) -> tuple[str, ...]:
-        grant, fields, token_endpoint, endpoint_headers = k
+        grant, fields, token_endpoint, endpoint_headers, audience = k
         # None sorts before any string; normalize None to "" so mixed
         # None/str keys stay comparable.
         return (
             grant,
             token_endpoint or "",
+            audience or "",
             tuple(name for name, _ in fields),
             tuple(name for name, _ in endpoint_headers),
         )
 
     tokens: list[dict[str, Any]] = []
     for key in sorted(by_token, key=_sort_key):
-        grant, fields, token_endpoint, endpoint_headers = key
+        grant, fields, token_endpoint, endpoint_headers, audience = key
         agg = by_token[key]
         entry: dict[str, Any] = {"grant": grant}
         for field_name, field_source in fields:
@@ -270,6 +274,8 @@ def _build_oauth_token_transform(
             entry["scopes"] = sorted(agg["scopes"])
         if token_endpoint is not None:
             entry["token_endpoint"] = token_endpoint
+        if audience is not None:
+            entry["audience"] = audience
         if endpoint_headers:
             entry["token_endpoint_headers"] = {
                 header_name: _build_field_source(source)

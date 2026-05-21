@@ -467,6 +467,111 @@ def test_parser_oauth_token_password_grant_rejects_missing_username() -> None:
         )
 
 
+def test_parser_typed_oauth_token_jwt_bearer() -> None:
+    secret = _parse_secret(
+        {
+            "type": "oauth_token",
+            "grant": "jwt_bearer",
+            "name": "DOCUSIGN_JWT",
+            "hosts": ["*.docusign.net"],
+            "audience": "account-d.docusign.com",
+            "token_endpoint": "https://account-d.docusign.com/oauth/token",
+            "scopes": ["signature", "impersonation"],
+            "fields": {
+                "issuer": "DOCUSIGN_INTEGRATION_KEY",
+                "subject": "DOCUSIGN_USER_GUID",
+                "private_key": {
+                    "secret_ref": "DOCUSIGN_BUNDLE",
+                    "json_key": "private_key",
+                },
+                "private_key_id": "DOCUSIGN_KEY_ID",
+            },
+        }
+    )
+    assert isinstance(secret, OAuthTokenSecret)
+    assert secret.grant == "jwt_bearer"
+    assert secret.audience == "account-d.docusign.com"
+    assert secret.token_endpoint == "https://account-d.docusign.com/oauth/token"
+    assert secret.scopes == ("signature", "impersonation")
+    fields = dict(secret.fields)
+    assert fields["issuer"] == OAuthFieldSource("DOCUSIGN_INTEGRATION_KEY")
+    assert fields["subject"] == OAuthFieldSource("DOCUSIGN_USER_GUID")
+    assert fields["private_key"] == OAuthFieldSource(
+        "DOCUSIGN_BUNDLE", "private_key"
+    )
+    assert fields["private_key_id"] == OAuthFieldSource("DOCUSIGN_KEY_ID")
+
+
+def test_parser_oauth_token_jwt_bearer_makes_private_key_id_optional() -> None:
+    secret = _parse_secret(
+        {
+            "type": "oauth_token",
+            "grant": "jwt_bearer",
+            "name": "VENDOR_JWT",
+            "hosts": ["api.vendor.com"],
+            "audience": "api.vendor.com",
+            "fields": {
+                "issuer": "INTEGRATION_KEY",
+                "subject": "USER_GUID",
+                "private_key": "PRIVATE_KEY_PEM",
+            },
+        }
+    )
+    assert isinstance(secret, OAuthTokenSecret)
+    assert "private_key_id" not in dict(secret.fields)
+
+
+def test_parser_oauth_token_jwt_bearer_requires_audience() -> None:
+    with pytest.raises(ValueError, match="requires a non-empty 'audience'"):
+        _parse_secret(
+            {
+                "type": "oauth_token",
+                "grant": "jwt_bearer",
+                "name": "X",
+                "hosts": ["h"],
+                "fields": {
+                    "issuer": "ISS",
+                    "subject": "SUB",
+                    "private_key": "PK",
+                },
+            }
+        )
+
+
+def test_parser_oauth_token_jwt_bearer_rejects_missing_private_key() -> None:
+    with pytest.raises(ValueError, match="requires fields \\['private_key'\\]"):
+        _parse_secret(
+            {
+                "type": "oauth_token",
+                "grant": "jwt_bearer",
+                "name": "X",
+                "hosts": ["h"],
+                "audience": "aud",
+                "fields": {
+                    "issuer": "ISS",
+                    "subject": "SUB",
+                },
+            }
+        )
+
+
+def test_parser_oauth_token_audience_rejected_for_non_jwt_bearer_grant() -> None:
+    with pytest.raises(ValueError, match="'audience' is only valid for grant"):
+        _parse_secret(
+            {
+                "type": "oauth_token",
+                "grant": "client_credentials",
+                "name": "X",
+                "hosts": ["h"],
+                "audience": "aud",
+                "fields": {
+                    "client_id": "CID",
+                    "client_secret": "CSEC",
+                },
+            }
+        )
+
+
 def test_parser_oauth_token_token_endpoint_headers_accepts_bare_string() -> None:
     secret = _parse_secret(
         {
@@ -1106,6 +1211,95 @@ def test_render_oauth_token_emits_token_endpoint_when_set() -> None:
         t for t in cfg["transforms"] if t["name"] == "oauth_token"
     )["config"]["tokens"]
     assert tokens[0]["token_endpoint"] == "https://login.example.com/oauth2/token"
+
+
+_RENDER_JWT_BEARER_FIELDS = (
+    ("issuer", OAuthFieldSource("DOCUSIGN_INTEGRATION_KEY")),
+    ("private_key", OAuthFieldSource("DOCUSIGN_BUNDLE", "private_key")),
+    ("private_key_id", OAuthFieldSource("DOCUSIGN_KEY_ID")),
+    ("subject", OAuthFieldSource("DOCUSIGN_USER_GUID")),
+)
+
+
+def test_render_oauth_token_jwt_bearer_emits_audience_and_field_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    secrets = [
+        OAuthTokenSecret(
+            name="DOCUSIGN_JWT",
+            grant="jwt_bearer",
+            hosts=("demo.docusign.net",),
+            fields=_RENDER_JWT_BEARER_FIELDS,
+            scopes=("signature", "impersonation"),
+            token_endpoint="https://account-d.docusign.com/oauth/token",
+            audience="account-d.docusign.com",
+        )
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    assert tokens[0]["grant"] == "jwt_bearer"
+    assert tokens[0]["issuer"] == {
+        "type": "env",
+        "var": "DOCUSIGN_INTEGRATION_KEY",
+    }
+    assert tokens[0]["subject"] == {"type": "env", "var": "DOCUSIGN_USER_GUID"}
+    assert tokens[0]["private_key"] == {
+        "type": "env",
+        "var": "DOCUSIGN_BUNDLE",
+        "json_key": "private_key",
+    }
+    assert tokens[0]["private_key_id"] == {
+        "type": "env",
+        "var": "DOCUSIGN_KEY_ID",
+    }
+    assert tokens[0]["audience"] == "account-d.docusign.com"
+    assert tokens[0]["token_endpoint"] == "https://account-d.docusign.com/oauth/token"
+    assert tokens[0]["scopes"] == ["impersonation", "signature"]
+    assert tokens[0]["rules"] == [{"host": "demo.docusign.net"}]
+
+
+def test_render_oauth_token_omits_audience_when_unset() -> None:
+    secrets = [
+        OAuthTokenSecret(
+            name="OAUTH_APP",
+            grant="client_credentials",
+            hosts=("api.example.com",),
+            fields=_RENDER_CC_FIELDS,
+        )
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    assert "audience" not in tokens[0]
+
+
+def test_render_oauth_token_separate_entries_for_distinct_audiences() -> None:
+    secrets = [
+        OAuthTokenSecret(
+            "A",
+            "jwt_bearer",
+            ("a.example.net",),
+            _RENDER_JWT_BEARER_FIELDS,
+            audience="a.example.com",
+        ),
+        OAuthTokenSecret(
+            "B",
+            "jwt_bearer",
+            ("b.example.net",),
+            _RENDER_JWT_BEARER_FIELDS,
+            audience="b.example.com",
+        ),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    tokens = next(
+        t for t in cfg["transforms"] if t["name"] == "oauth_token"
+    )["config"]["tokens"]
+    assert len(tokens) == 2
+    assert {t["audience"] for t in tokens} == {"a.example.com", "b.example.com"}
 
 
 _RENDER_HMAC_CREDS: tuple[tuple[str, OAuthFieldSource], ...] = (
