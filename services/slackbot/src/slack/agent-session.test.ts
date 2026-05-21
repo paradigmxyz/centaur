@@ -462,6 +462,7 @@ describe('AgentSessionRenderer', () => {
     const blocks = stop?.params.blocks ?? []
     expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
     expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
+    expect(stop?.params.chunks).toBeUndefined()
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)

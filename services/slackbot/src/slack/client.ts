@@ -115,7 +115,7 @@ export class SlackEdgeClient {
     const response = await this.client.chat.stopStream({
       channel: opts.channel,
       ts: opts.ts,
-      chunks: opts.chunks ?? markdownToStreamChunks(opts.markdown ?? ' '),
+      chunks: opts.chunks ?? (opts.markdown ? markdownToStreamChunks(opts.markdown) : undefined),
       blocks: opts.blocks ? enforceBlockLimits(opts.blocks) : undefined
     })
     return assertSlackOk('chat.stopStream', response)

@@ -320,10 +320,12 @@ export class AgentSessionRenderer {
       commentaryMarkdown: showThinking ? commentaryMarkdown : '',
       answerMarkdown
     })
+    const chunks =
+      blocks.length || streamedTextLive ? undefined : markdownToStreamChunks(fallbackText)
     const stopResponse = await this.client.chat.stopStream({
       channel: state.channel,
       ts: segment.streamTs,
-      chunks: markdownToStreamChunks(blocks.length || streamedTextLive ? ' ' : fallbackText),
+      ...(chunks ? { chunks } : {}),
       ...(blocks.length ? { blocks } : {})
     })
     if (!stopResponse.ok) throw new Error(stopResponse.error ?? 'chat.stopStream failed')

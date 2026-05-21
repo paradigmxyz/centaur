@@ -1026,6 +1026,7 @@ describe('CodexSessionRenderer', () => {
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []
+    expect(stop?.params.chunks).toBeUndefined()
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
   })

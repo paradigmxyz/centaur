@@ -279,7 +279,7 @@ app.post('/api/slack/streams/stop', apiKeyMiddleware, async c => {
     const response = await client.chat.stopStream({
       channel: body.channel,
       ts: body.ts,
-      chunks: body.chunks ?? markdownToStreamChunks(body.markdown ?? ' '),
+      chunks: body.chunks ?? (body.markdown ? markdownToStreamChunks(body.markdown) : undefined),
       blocks: body.blocks
     })
     if (!response.ok) return c.json(response, 502)
