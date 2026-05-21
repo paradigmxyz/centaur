@@ -1809,6 +1809,7 @@ async def _mark_execution_terminal(
     slackbot_streamed_answer_chars = 0
     suppress_final_delivery = False
     suppress_legacy_delivery = False
+    metadata: dict[str, Any] = {}
     raw_agent_thread_id = await pool.fetchval(
         "SELECT agent_thread_id FROM sandbox_sessions WHERE thread_key = $1",
         thread_key,
@@ -1900,6 +1901,27 @@ async def _mark_execution_terminal(
         decode_jsonb(row["delivery"], {}) if row else {}
     )
     if delivery_platform == "dev" or suppress_legacy_delivery:
+        slackbot_agent_session_id = str(metadata.get("slackbot_agent_session_id") or "")
+        result_size = payload_size_bytes(result_text)
+        if (
+            suppress_legacy_delivery
+            and result_size > 0
+            and slackbot_streamed_answer_chars <= 0
+        ):
+            log.warning(
+                "final_delivery_skipped_without_live_answer",
+                execution_id=execution_id,
+                thread_key=thread_key,
+                status=status,
+                terminal_reason=terminal_reason,
+                agent_thread_id=agent_thread_id or None,
+                slackbot_agent_session_id=slackbot_agent_session_id or None,
+                slackbot_streamed_answer_chars=slackbot_streamed_answer_chars,
+                result_size_bytes=result_size,
+                slackbot_live_delivery_failed=bool(
+                    metadata.get("slackbot_live_delivery_failed")
+                ),
+            )
         log.info(
             "final_delivery_skipped"
             if suppress_legacy_delivery
@@ -1911,6 +1933,10 @@ async def _mark_execution_terminal(
             reason="slackbot_live_delivery"
             if suppress_legacy_delivery
             else "dev_delivery",
+            agent_thread_id=agent_thread_id or None,
+            slackbot_agent_session_id=slackbot_agent_session_id or None,
+            slackbot_streamed_answer_chars=slackbot_streamed_answer_chars,
+            result_size_bytes=result_size,
         )
         try:
             from api.workflow_engine import notify_execution_terminal
@@ -2559,13 +2585,26 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         )
         if finalize_session_id and not slackbot_done and slackbot_forward_live:
             try:
+                terminal_result_sent_to_slackbot = False
                 if result_text.strip() and slackbot_streamed_answer_chars <= 0:
                     await slackbot_client.session_text(finalize_session_id, result_text)
                     slackbot_text_sent = True
+                    terminal_result_sent_to_slackbot = True
                 await slackbot_client.session_done(
                     finalize_session_id, harness_thread_id or None
                 )
                 slackbot_done = True
+                log.info(
+                    "slackbot_live_delivery_finalized",
+                    execution_id=execution_id,
+                    thread_key=thread_key,
+                    slackbot_agent_session_id=finalize_session_id,
+                    harness_thread_id=harness_thread_id or None,
+                    streamed_answer_chars=slackbot_streamed_answer_chars,
+                    terminal_result_sent_to_slackbot=terminal_result_sent_to_slackbot,
+                    result_size_bytes=payload_size_bytes(result_text),
+                    slackbot_text_sent=slackbot_text_sent,
+                )
             except Exception:
                 log.warning(
                     "slackbot_live_delivery_finalize_failed",
