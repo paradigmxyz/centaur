@@ -994,6 +994,14 @@ def _canonical_text_blocks(event: dict[str, Any]) -> list[str]:
     return []
 
 
+def _slackbot_streamed_answer_chars(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    return 0
+
+
 async def _send_slackbot_canonical_event(
     session_id: str, event: dict[str, Any]
 ) -> bool:
@@ -2551,7 +2559,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         )
         if finalize_session_id and not slackbot_done and slackbot_forward_live:
             try:
-                if result_text.strip() and not slackbot_text_sent:
+                if result_text.strip() and slackbot_streamed_answer_chars <= 0:
                     await slackbot_client.session_text(finalize_session_id, result_text)
                     slackbot_text_sent = True
                 await slackbot_client.session_done(
@@ -2741,17 +2749,24 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                         )
                         slackbot_done = bool(harness_result.get("done"))
                         streamed_chars = harness_result.get("streamedAnswerChars")
-                        if isinstance(streamed_chars, int):
+                        previous_streamed_answer_chars = slackbot_streamed_answer_chars
+                        streamed_chars = _slackbot_streamed_answer_chars(streamed_chars)
+                        if streamed_chars:
                             slackbot_streamed_answer_chars = max(
                                 slackbot_streamed_answer_chars,
                                 streamed_chars,
                             )
-                        if slack_event.get("type") in {
-                            "assistant",
-                            "item.agentMessage.delta",
-                            "result",
-                            "turn.done",
-                        }:
+                        if (
+                            slack_event.get("type")
+                            in {
+                                "assistant",
+                                "item.agentMessage.delta",
+                                "result",
+                                "turn.done",
+                            }
+                            and slackbot_streamed_answer_chars
+                            > previous_streamed_answer_chars
+                        ):
                             slackbot_text_sent = True
             observations.raw_event_count += 1
             # ``amp_raw_event`` is a HISTORICAL label preserved for API and
