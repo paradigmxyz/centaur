@@ -468,6 +468,61 @@ describe('AgentSessionRenderer', () => {
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
+  it('keeps a durable final answer when the answer did not stream live', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const renderer = new AgentSessionRenderer(client as any)
+    const { sessionId } = await renderer.open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+
+    await renderer.step(sessionId, {
+      id: 'cmd-1',
+      title: '1. Command execution',
+      status: 'in_progress'
+    })
+    await renderer.done(sessionId, {
+      commentaryMarkdown: 'Planning the tool calls.',
+      answerMarkdown: 'Final answer body.'
+    })
+
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const blocks = stop?.params.blocks ?? []
+    expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
+    expect(
+      blocks.some(
+        (block: any) => block.type === 'markdown' && block.text.includes('Final answer body.')
+      )
+    ).toBe(true)
+    expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
+  })
+
   it('shows thinking text by default and renders the answer in markdown on finalize', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
