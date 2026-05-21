@@ -10,9 +10,8 @@ happy path is: point `kubectl` at a local cluster, bootstrap the required infra
 Secret, run `just up`, verify the API, then run one agent turn without Slack.
 
 If you want an agent to drive setup with you, point it at these docs: every page
-is available as Markdown through `/llms.txt`, `/llms-full.txt`, and `/md/...`,
-or add this site's Vocs MCP server at `/api/mcp` so the agent can search and
-read the docs directly.
+is available through `/llms.txt`, `/llms-full.txt`, and static Markdown files
+such as `/md/quickstart.md`.
 
 ## 1. Install prerequisites
 

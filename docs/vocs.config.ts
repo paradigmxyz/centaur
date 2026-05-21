@@ -1,5 +1,5 @@
 import { createElement, Fragment } from 'react'
-import { defineConfig, McpSource } from 'vocs/config'
+import { defineConfig } from 'vocs/config'
 
 import { sidebar } from './sidebar.js'
 
@@ -36,16 +36,6 @@ export default defineConfig({
   logoUrl: {
     light: '/brand/lockup-black.svg',
     dark: '/brand/lockup-white.svg',
-  },
-  mcp: {
-    enabled: true,
-    sources: [
-      McpSource.github({
-        name: 'centaur',
-        repo: 'paradigmxyz/centaur',
-        paths: ['docs', 'services', 'centaur_sdk', 'packages', 'tools', 'workflows'],
-      }),
-    ],
   },
   // Body copy uses Amp's PolySans via the pages/_root.css override. Docs headings
   // use Perfectly Nineties, while the landing hero uses Sagittaire Display.
