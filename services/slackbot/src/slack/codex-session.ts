@@ -193,12 +193,10 @@ export class CodexSessionRenderer {
     }
 
     if (isTerminalTurnEvent(event)) {
-      if (typeof event.result === 'string' && !state.answerText.trim()) {
-        const resultText = event.result.trim()
-        if (resultText) {
-          state.answerText += resultText
-          await this.publishPendingAssistantText(agentSessionId, state, { force: true })
-        }
+      const resultText = terminalResultText(event)
+      if (resultText && !state.answerText.trim()) {
+        state.answerText += resultText
+        await this.publishPendingAssistantText(agentSessionId, state, { force: true })
       }
       await this.done(agentSessionId)
     }
@@ -443,6 +441,16 @@ function reasoningText(event: any): string {
 
 function isTerminalTurnEvent(event: any): boolean {
   return event?.type === 'result' || event?.type === 'turn.done' || event?.type === 'turn.completed'
+}
+
+function terminalResultText(event: any): string {
+  for (const key of ['result', 'result_text', 'text', 'final_text']) {
+    const value = event?.[key]
+    if (typeof value !== 'string') continue
+    const text = value.trim()
+    if (text) return text
+  }
+  return ''
 }
 
 function toolUses(event: any): any[] {

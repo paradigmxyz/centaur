@@ -13,6 +13,66 @@ describe('assistant message sections', () => {
 })
 
 describe('CodexSessionRenderer', () => {
+  it('streams canonical terminal result text before closing the session', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async (params: any) => {
+            calls.push({ method: 'assistant.threads.setStatus', params })
+            return { ok: true }
+          }
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    const result = await renderer.event(sessionId, {
+      type: 'result',
+      text: 'PONG'
+    })
+
+    const streamed = calls
+      .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
+      .flatMap(call => call.params.chunks ?? [])
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => String(chunk.text))
+      .join('')
+    expect(streamed).toContain('PONG')
+    expect(result.done).toBe(true)
+    expect(result.streamedAnswerChars).toBe(4)
+    expect(calls.some(call => call.method === 'chat.stopStream')).toBe(true)
+    expect(
+      stopStreamFallbackText(calls.find(call => call.method === 'chat.stopStream')?.params)
+    ).toBe('')
+  })
+
   it('accumulates command output deltas into the same task update', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
