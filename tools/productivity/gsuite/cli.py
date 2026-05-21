@@ -1,5 +1,7 @@
 """CLI for GSuite operations - Gmail, Calendar, Drive."""
 
+from pathlib import Path
+
 import typer
 from centaur_sdk import Table
 from rich.console import Console
@@ -550,6 +552,7 @@ def drive_upload(
         gsuite drive upload report.pdf -c general -r U123ABC -n "Q4 Report.pdf"
         gsuite drive upload data.csv -c general -r U123ABC --sheets
     """
+    import base64
     import subprocess
     import json
     from .client import drive_upload as upload, drive_setup_channel_permissions
@@ -585,7 +588,14 @@ def drive_upload(
 
     try:
         # Upload the file (optionally converting to Google Sheets)
-        result = upload(file_path, name=name, folder_id=folder, convert_to_sheets=sheets)
+        path = Path(file_path)
+        result = upload(
+            content_base64=base64.b64encode(path.read_bytes()).decode("ascii"),
+            name=name,
+            filename=path.name,
+            folder_id=folder,
+            convert_to_sheets=sheets,
+        )
         file_type = "spreadsheet" if sheets else "file"
         console.print(f"[green]✓ Uploaded {result['name']} as {file_type}[/]")
         console.print(f"[dim]{result['web_view_link']}[/]", soft_wrap=True)

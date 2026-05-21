@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 
 from gsuite import client
@@ -159,21 +161,59 @@ def test_drive_upload_sets_supports_all_drives(tmp_path, monkeypatch):
     monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
     monkeypatch.setattr(
         client,
-        "MediaFileUpload",
-        lambda file_path, mimetype, resumable: {
-            "file_path": file_path,
+        "MediaIoBaseUpload",
+        lambda fd, mimetype, resumable: {
+            "content": fd.getvalue(),
             "mimetype": mimetype,
             "resumable": resumable,
         },
     )
 
-    result = client.drive_upload(str(upload_file), folder_id="parent-123")
+    result = client.drive_upload(
+        content_base64=base64.b64encode(upload_file.read_bytes()).decode("ascii"),
+        filename="example.txt",
+        folder_id="parent-123",
+    )
 
     create_call = fake_service.files_api.create_calls[0]
     assert create_call["supportsAllDrives"] is True
     assert create_call["body"]["parents"] == ["parent-123"]
+    assert create_call["media_body"]["content"] == b"hello"
     assert result["id"] == "file-123"
     assert result["name"] == "example.txt"
+
+
+def test_drive_upload_rejects_local_path_argument():
+    with pytest.raises(TypeError, match="unexpected keyword argument 'file_path'"):
+        client.drive_upload(file_path="/tmp/secret.txt")
+
+
+def test_drive_upload_requires_a_content_source():
+    with pytest.raises(ValueError, match="content_base64, attachment_id, or attachment_url"):
+        client.drive_upload()
+
+
+def test_drive_upload_accepts_attachment_id(monkeypatch):
+    fake_service = _FakeDriveService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+    monkeypatch.setattr(client, "_download_attachment_bytes", lambda **_: b"from-attachment")
+    monkeypatch.setattr(
+        client,
+        "MediaIoBaseUpload",
+        lambda fd, mimetype, resumable: {
+            "content": fd.getvalue(),
+            "mimetype": mimetype,
+            "resumable": resumable,
+        },
+    )
+
+    result = client.drive_upload(attachment_id="att-123", filename="report.csv")
+
+    create_call = fake_service.files_api.create_calls[0]
+    assert create_call["body"]["name"] == "report.csv"
+    assert create_call["media_body"]["content"] == b"from-attachment"
+    assert create_call["media_body"]["mimetype"] == "text/csv"
+    assert result["id"] == "file-123"
 
 
 def test_drive_create_folder_uses_folder_mime_type(monkeypatch):
