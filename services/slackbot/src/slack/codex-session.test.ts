@@ -1033,6 +1033,11 @@ describe('CodexSessionRenderer', () => {
 
   it('treats an unphased terminal agent message after tool use as the final answer', async () => {
     const calls: Array<{ method: string; params: any }> = []
+    const logCalls: unknown[][] = []
+    const originalLog = console.log
+    console.log = ((...args: unknown[]) => {
+      logCalls.push(args)
+    }) as typeof console.log
     const client = {
       assistant: {
         threads: {
@@ -1068,34 +1073,42 @@ describe('CodexSessionRenderer', () => {
     })
     const renderer = new CodexSessionRenderer(client as any)
 
-    await renderer.event(sessionId, {
-      type: 'item.started',
-      item: { id: 'msg-thinking', type: 'agentMessage', phase: 'commentary' }
-    })
-    await renderer.event(sessionId, {
-      type: 'item.agentMessage.delta',
-      itemId: 'msg-thinking',
-      delta: 'I’ll inspect the runtime metadata.'
-    })
-    await renderer.event(sessionId, {
-      type: 'item.completed',
-      item: {
-        id: 'cmd-1',
-        type: 'commandExecution',
-        command: 'kubectl get pod',
-        aggregated_output: 'main-sha-df02d81',
-        exitCode: 0
-      }
-    })
-    await renderer.event(sessionId, {
-      type: 'item.completed',
-      item: {
-        id: 'msg-final',
-        type: 'agentMessage',
-        text: 'Staging is running `main-sha-df02d81`.'
-      }
-    })
-    await renderer.event(sessionId, { type: 'turn.completed' })
+    try {
+      await renderer.event(sessionId, {
+        type: 'item.started',
+        item: { id: 'msg-thinking', type: 'agentMessage', phase: 'commentary' }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.agentMessage.delta',
+        itemId: 'msg-thinking',
+        delta: 'I’ll inspect the runtime metadata.'
+      })
+      await renderer.event(sessionId, {
+        type: 'item.completed',
+        item: {
+          id: 'cmd-1',
+          type: 'commandExecution',
+          command: 'kubectl get pod',
+          aggregated_output: 'main-sha-df02d81',
+          exitCode: 0
+        }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.completed',
+        centaur_thread_key: 'slack:C123:1778866921.505479',
+        centaur_execution_id: 'exe-test',
+        centaur_assignment_generation: 3,
+        session_id: 'codex-session-test',
+        item: {
+          id: 'msg-final',
+          type: 'agentMessage',
+          text: 'Staging is running `main-sha-df02d81`.'
+        }
+      })
+      await renderer.event(sessionId, { type: 'turn.completed' })
+    } finally {
+      console.log = originalLog
+    }
 
     const streamed = calls
       .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
@@ -1105,6 +1118,21 @@ describe('CodexSessionRenderer', () => {
       .join('')
     expect(streamed).toContain('Staging is running `main-sha-df02d81`.')
     expect(thinkingBlockText(calls)).not.toContain('Staging is running')
+    const fallbackLogs = logCalls.filter(
+      call => call[0] === 'slack_codex_unphased_final_agent_message_classified'
+    )
+    expect(fallbackLogs).toHaveLength(1)
+    expect(fallbackLogs[0]?.[1]).toMatchObject({
+      agent_session_id: sessionId,
+      centaur_thread_key: 'slack:C123:1778866921.505479',
+      execution_id: 'exe-test',
+      assignment_generation: 3,
+      codex_id: 'msg-final',
+      codex_item_id: 'msg-final',
+      codex_item_type: 'agentMessage',
+      codex_session_id: 'codex-session-test',
+      task_count: 1
+    })
   })
 })
 

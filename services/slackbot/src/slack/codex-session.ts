@@ -1,5 +1,6 @@
 import type { WebClient } from '@slack/web-api'
 import { slackReplyLimits } from '../constants'
+import { logInfo } from '../logging'
 import { AgentSessionRenderer } from './agent-session'
 import {
   clipLines,
@@ -163,7 +164,7 @@ export class CodexSessionRenderer {
 
     const assistantMessage = assistantText(event)
     if (assistantMessage) {
-      const buffer = activeAssistantBuffer(state, event)
+      const buffer = activeAssistantBuffer(state, event, agentSessionId)
       const current = buffer === 'answer' ? state.answerText : state.commentaryText
       const delta = messageDelta(current, assistantMessage)
       if (delta) {
@@ -409,15 +410,34 @@ function completeThinkingTasks(state: CodexSessionState): void {
   }
 }
 
-function activeAssistantBuffer(state: CodexSessionState, event: any): 'commentary' | 'answer' {
+function activeAssistantBuffer(
+  state: CodexSessionState,
+  event: any,
+  agentSessionId: string
+): 'commentary' | 'answer' {
   if (event?.type === 'item.agentMessage.delta' || event?.type === 'item.completed') {
-    const itemPhase = state.agentMessagePhaseByItemId.get(agentMessageEventId(event))
+    const codexId = agentMessageEventId(event)
+    const itemPhase = state.agentMessagePhaseByItemId.get(codexId)
     if (itemPhase) return itemPhase === 'final_answer' ? 'answer' : 'commentary'
     if (
       event?.type === 'item.completed' &&
       (event?.item?.type === 'agentMessage' || event?.item?.type === 'agent_message') &&
       state.taskByUseId.size > 0
     ) {
+      logInfo('slack_codex_unphased_final_agent_message_classified', {
+        agent_session_id: agentSessionId,
+        centaur_thread_key: event?.centaur_thread_key,
+        execution_id: event?.centaur_execution_id,
+        assignment_generation: event?.centaur_assignment_generation,
+        codex_id: codexId,
+        codex_item_id: codexId,
+        codex_item_type: event?.item?.type,
+        codex_session_id: state.threadId || event?.session_id || event?.thread_id,
+        task_count: state.taskByUseId.size,
+        commentary_chars: state.commentaryText.length,
+        answer_chars: state.answerText.length,
+        item_text_chars: String(event?.item?.text ?? '').length
+      })
       return 'answer'
     }
     return state.agentMessagePhase === 'final_answer' ? 'answer' : 'commentary'

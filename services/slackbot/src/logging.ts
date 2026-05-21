@@ -90,6 +90,10 @@ export function logWarn(event: string, ...values: unknown[]): void {
   console.warn(event, ...values.map(value => sanitizeLogValue(value)))
 }
 
+export function logInfo(event: string, ...values: unknown[]): void {
+  console.log(event, ...values.map(value => sanitizeLogValue(value)))
+}
+
 export function logError(event: string, ...values: unknown[]): void {
   console.error(event, ...values.map(value => sanitizeLogValue(value)))
 }

@@ -2710,6 +2710,12 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 for slack_event in slack_events:
                     if harness_thread_id and isinstance(slack_event, dict):
                         slack_event.setdefault("session_id", harness_thread_id)
+                    if isinstance(slack_event, dict):
+                        slack_event.setdefault("centaur_thread_key", thread_key)
+                        slack_event.setdefault("centaur_execution_id", execution_id)
+                        slack_event.setdefault(
+                            "centaur_assignment_generation", assignment_generation
+                        )
                     harness_result = await slackbot_client.harness_event(
                         slackbot_session_id, slack_event
                     )
