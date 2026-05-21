@@ -900,6 +900,74 @@ describe('CodexSessionRenderer', () => {
     expect(String(detailUpdates[0]?.details ?? '')).toContain('```sh\ncall demo ping\n```')
   })
 
+  it('preserves leading spaces between live streamed answer deltas', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async (params: any) => {
+            calls.push({ method: 'assistant.threads.setStatus', params })
+            return { ok: true }
+          }
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    await renderer.event(sessionId, {
+      type: 'item.started',
+      item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer' }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-1',
+      delta: 'hello'
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-1',
+      delta: ' world\n```ts\nconst value = 1'
+    })
+    const answerText = 'hello world\n```ts\nconst value = 1'
+    const result = await renderer.event(sessionId, { type: 'turn.done', result: answerText })
+
+    const visibleText = calls
+      .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
+      .flatMap(call => call.params.chunks ?? [])
+      .filter((chunk: any) => chunk.type === 'markdown_text')
+      .map((chunk: any) => String(chunk.text ?? ''))
+      .join('')
+    expect(visibleText).toBe('hello world\n```ts\nconst value = 1\n```')
+    expect(visibleText).not.toBe('helloworld')
+    expect(result.streamedAnswerChars).toBe(answerText.length)
+  })
+
   it('reports only Slack-visible streamed answer chars after live text is capped', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
