@@ -224,8 +224,7 @@ export class CodexSessionRenderer {
       commentaryMarkdown: state.commentaryText,
       answerMarkdown: state.answerText
     })
-    const finalBlockAnswerChars = state.taskByUseId.size > 0 ? state.answerText.trim().length : 0
-    state.deliveredAnswerChars = Math.max(streamedTextChars, finalBlockAnswerChars)
+    state.deliveredAnswerChars = streamedTextChars
     state.done = true
     states.delete(agentSessionId)
   }
@@ -274,7 +273,6 @@ export class CodexSessionRenderer {
 
     if (state.commentaryText.length > state.streamedCommentaryText.length) return
     if (state.answerText.length <= state.streamedAnswerText.length) return
-    if (hasPlan) return
     const delta = state.answerText.slice(state.streamedAnswerText.length)
     if (!delta) return
     const acceptedChars = await this.renderer.textDelta(agentSessionId, delta, {

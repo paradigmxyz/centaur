@@ -303,13 +303,11 @@ export class AgentSessionRenderer {
     const commentaryMarkdown = state.finalCommentaryMarkdown?.trim() ?? ''
     const answerSource =
       state.finalAnswerMarkdown?.trim() || segment.streamedText.trim() || segment.textParts.join('')
-    const answerMarkdown = finalMarkdownForFinalBlocks(answerSource, segment)
+    const answerMarkdown = finalMarkdownForBlocks(answerSource)
     const streamedTextLive =
       Boolean(segment.streamedText.trim()) && segment.streamedText.length < MAX_LIVE_TEXT_CHARS
     const showThinking =
-      !tasks.length &&
-      !streamedTextLive &&
-      shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
+      !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
     const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
     // Keep a durable final layout even when the live stream already showed
     // tasks/text. Slack's streamed surface is not reliable enough to be the only
@@ -651,15 +649,8 @@ function compactTaskBody(body: StreamTask['details'], maxLines: number): StreamT
   return richText([preformatted(clipLines(text, maxLines), language)])
 }
 
-function finalMarkdownForFinalBlocks(markdown: string, segment: Segment): string {
-  const trimmed = markdown.trim()
-  if (!trimmed) return ''
-  if (!segment.streamedText.trim()) {
-    return clipText(trimmed, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
-  }
-  const unstreamed = markdown.slice(segment.streamedTextSourceChars).trim()
-  if (!unstreamed) return ''
-  return clipText(unstreamed, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+function finalMarkdownForBlocks(markdown: string): string {
+  return clipText(markdown, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
 }
 
 function clipText(value: string, maxChars: number): string {

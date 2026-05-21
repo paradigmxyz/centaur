@@ -583,22 +583,19 @@ describe('CodexSessionRenderer', () => {
           String(block.elements?.[0]?.text ?? '').includes('*Thinking*')
         )
     )
+    const firstTextIndex = chunks.findIndex(
+      chunk => chunk.type === 'markdown_text' && String(chunk.text).includes('Done.')
+    )
     expect(firstTaskIndex).toBeGreaterThanOrEqual(0)
     expect(thinkingIndex).toBe(-1)
-    expect(
-      chunks.some(chunk => chunk.type === 'markdown_text' && String(chunk.text).includes('Done.'))
-    ).toBe(false)
+    expect(firstTextIndex).toBeGreaterThan(firstTaskIndex)
     expect(thinkingBlockText(calls)).toBe('')
 
     await renderer.event(sessionId, { type: 'turn.completed', result: 'Done.' })
 
+    expect(streamedMarkdown()).toContain('Done.')
     expect(calls.some(call => call.method === 'chat.update')).toBe(false)
     const stop = calls.find(call => call.method === 'chat.stopStream')
-    expect(
-      (stop?.params.blocks ?? []).some(
-        (block: any) => block.type === 'markdown' && String(block.text).includes('Done.')
-      )
-    ).toBe(true)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
   })
 
@@ -790,13 +787,7 @@ describe('CodexSessionRenderer', () => {
       .map(chunk => String(chunk.text))
       .join('')
 
-    expect(streamed).not.toContain('Done.')
-    const stop = calls.find(call => call.method === 'chat.stopStream')
-    expect(
-      (stop?.params.blocks ?? []).some(
-        (block: any) => block.type === 'markdown' && String(block.text).includes('Done.')
-      )
-    ).toBe(true)
+    expect(streamed).toContain('Done.')
     expect(thinkingBlockText(calls)).toBe('')
   })
 
@@ -962,7 +953,7 @@ describe('CodexSessionRenderer', () => {
     expect(visibleText.length).toBe(30_000)
   })
 
-  it('buffers tool-run final answers and renders them once on stopStream', async () => {
+  it('streams commentary and answer markdown live without duplicating them on stopStream', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -1030,7 +1021,7 @@ describe('CodexSessionRenderer', () => {
       .filter(chunk => chunk.type === 'markdown_text')
       .map(chunk => String(chunk.text))
       .join('')
-    expect(streamed).not.toContain('Done: five tools called.')
+    expect(streamed).toContain('Done: five tools called.')
     expect(thinkingBlockText(calls)).toBe('')
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
