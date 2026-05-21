@@ -809,13 +809,31 @@ async def test_mark_execution_terminal_delays_outbox_claimability(db_pool):
     execution_id = f"exe-{uuid.uuid4().hex[:10]}"
     thread_key = f"slack:C-test:{uuid.uuid4().hex}"
     agent_thread_id = "T-terminal-thread"
+    runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
     await db_pool.execute(
         "INSERT INTO sandbox_sessions ("
         "thread_key, sandbox_id, harness, engine, state, agent_thread_id"
         ") VALUES ($1, $2, 'amp', 'amp', 'idle', $3)",
         thread_key,
-        f"rt-{uuid.uuid4().hex[:8]}",
+        runtime_id,
         agent_thread_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, started_at"
+        ") VALUES ($1, $2, 1, 'exec-terminal', 'hash-terminal', 'running', "
+        "'{\"platform\":\"slack\"}'::jsonb, '{}'::jsonb, NOW())",
+        execution_id,
+        thread_key,
     )
     await db_pool.execute(
         "INSERT INTO agent_final_delivery_outbox ("
@@ -863,6 +881,76 @@ async def test_mark_execution_terminal_delays_outbox_claimability(db_pool):
     if isinstance(event_json, str):
         event_json = json.loads(event_json)
     assert event_json["agent_thread_id"] == agent_thread_id
+
+
+@pytest.mark.asyncio
+async def test_mark_execution_terminal_skips_durable_delivery_after_live_answer(db_pool):
+    from api.runtime_control import _mark_execution_terminal
+
+    execution_id = f"exe-{uuid.uuid4().hex[:10]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions (thread_key, sandbox_id, harness, engine, state) "
+        "VALUES ($1, $2, 'codex', 'codex', 'idle')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'codex', 'codex', NULL, 'harness:codex', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, started_at"
+        ") VALUES ($1, $2, 1, 'exec-live-answer', 'hash-live-answer', 'running', "
+        "$3::jsonb, $4::jsonb, NOW())",
+        execution_id,
+        thread_key,
+        json.dumps({"platform": "slack", "channel": "C-test"}),
+        json.dumps(
+            {
+                "slackbot_live_delivery": True,
+                "slackbot_agent_session_id": "sess-live-answer",
+            }
+        ),
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_final_delivery_outbox (execution_id, thread_key, delivery, state) "
+        "VALUES ($1, $2, '{}'::jsonb, 'awaiting_terminal')",
+        execution_id,
+        thread_key,
+    )
+
+    await _mark_execution_terminal(
+        db_pool,
+        execution_id=execution_id,
+        thread_key=thread_key,
+        status="completed",
+        terminal_reason="completed",
+        result_text="already streamed",
+        error_text=None,
+        slackbot_streamed_answer_chars_override=15,
+    )
+
+    outbox = await db_pool.fetchrow(
+        "SELECT state, final_payload FROM agent_final_delivery_outbox WHERE execution_id = $1",
+        execution_id,
+    )
+    assert outbox is not None
+    assert outbox["state"] == "awaiting_terminal"
+    assert outbox["final_payload"] is None
+    ready_events = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM agent_execution_events "
+        "WHERE execution_id = $1 AND event_kind = 'final_delivery_ready'",
+        execution_id,
+    )
+    assert int(ready_events or 0) == 0
 
 
 @pytest.mark.asyncio
@@ -1304,7 +1392,7 @@ async def test_worker_sends_final_result_when_live_slack_only_streamed_placehold
     ):
         await _process_execution(db_pool, row)
 
-    session_text_mock.assert_awaited_once_with("sess-blank", final_text)
+    session_text_mock.assert_not_awaited()
     session_done_mock.assert_awaited_once_with("sess-blank", "turn-059d374be813486b")
     execution = await db_pool.fetchrow(
         "SELECT status, terminal_reason, result_text FROM agent_execution_requests WHERE execution_id = $1",
@@ -1319,7 +1407,11 @@ async def test_worker_sends_final_result_when_live_slack_only_streamed_placehold
         execution_id,
     )
     assert outbox is not None
-    assert outbox["state"] == "delivered"
+    assert outbox["state"] == "pending"
+    final_payload = outbox["final_payload"]
+    if isinstance(final_payload, str):
+        final_payload = json.loads(final_payload)
+    assert final_payload["result_text"] == final_text
 
 
 @pytest.mark.asyncio

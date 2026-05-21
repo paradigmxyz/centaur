@@ -73,6 +73,113 @@ describe('CodexSessionRenderer', () => {
     ).toBe('')
   })
 
+  it('ignores duplicate terminal events after the session is already done', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    const first = await renderer.event(sessionId, { type: 'result', result: 'PONG' })
+    const second = await renderer.event(sessionId, { type: 'turn.done', result: 'PONG' })
+
+    const streamed = calls
+      .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
+      .flatMap(call => call.params.chunks ?? [])
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => String(chunk.text))
+      .join('')
+    expect(streamed).toContain('PONG')
+    expect(streamed.match(/PONG/g)?.length).toBe(1)
+    expect(first.done).toBe(true)
+    expect(second.done).toBe(true)
+    expect(second.streamedAnswerChars).toBe(4)
+    expect(calls.filter(call => call.method === 'chat.stopStream')).toHaveLength(1)
+  })
+
+  it('waits for turn.done when a result event has no terminal text', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    const emptyResult = await renderer.event(sessionId, { type: 'result' })
+    const done = await renderer.event(sessionId, { type: 'turn.done', result: 'PONG' })
+
+    const streamed = calls
+      .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
+      .flatMap(call => call.params.chunks ?? [])
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => String(chunk.text))
+      .join('')
+    expect(emptyResult.done).toBe(false)
+    expect(done.done).toBe(true)
+    expect(streamed).toContain('PONG')
+    expect(done.streamedAnswerChars).toBe(4)
+    expect(calls.filter(call => call.method === 'chat.stopStream')).toHaveLength(1)
+  })
+
   it('accumulates command output deltas into the same task update', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {

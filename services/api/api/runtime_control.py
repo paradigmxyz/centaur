@@ -1767,6 +1767,7 @@ async def _mark_execution_terminal(
     terminal_reason: str,
     result_text: str,
     error_text: str | None,
+    slackbot_streamed_answer_chars_override: int | None = None,
 ) -> None:
     next_attempt_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
         seconds=FINAL_DELIVERY_READY_GRACE_S,
@@ -1832,16 +1833,27 @@ async def _mark_execution_terminal(
             slackbot_live_delivery_failed = bool(
                 metadata.get("slackbot_live_delivery_failed")
             )
-            suppress_legacy_delivery = (
-                _has_slackbot_live_delivery(metadata)
-                and not slackbot_live_delivery_failed
-            )
             raw_streamed_answer_chars = metadata.get("slackbot_streamed_answer_chars")
             if (
                 isinstance(raw_streamed_answer_chars, int)
                 and not slackbot_live_delivery_failed
             ):
                 slackbot_streamed_answer_chars = max(raw_streamed_answer_chars, 0)
+            if (
+                slackbot_streamed_answer_chars_override is not None
+                and not slackbot_live_delivery_failed
+            ):
+                slackbot_streamed_answer_chars = max(
+                    slackbot_streamed_answer_chars,
+                    slackbot_streamed_answer_chars_override,
+                    0,
+                )
+            result_has_text = bool(result_text.strip())
+            suppress_legacy_delivery = (
+                _has_slackbot_live_delivery(metadata)
+                and not slackbot_live_delivery_failed
+                and (not result_has_text or slackbot_streamed_answer_chars > 0)
+            )
         assignment_row = await pool.fetchrow(
             "SELECT harness, engine, persona_id, prompt_ref, effective_agents_md_sha256 "
             "FROM agent_runtime_assignments WHERE thread_key = $1 AND assignment_generation = $2",
@@ -1903,11 +1915,7 @@ async def _mark_execution_terminal(
     if delivery_platform == "dev" or suppress_legacy_delivery:
         slackbot_agent_session_id = str(metadata.get("slackbot_agent_session_id") or "")
         result_size = payload_size_bytes(result_text)
-        if (
-            suppress_legacy_delivery
-            and result_size > 0
-            and slackbot_streamed_answer_chars <= 0
-        ):
+        if suppress_legacy_delivery and result_size > 0 and slackbot_streamed_answer_chars <= 0:
             log.warning(
                 "final_delivery_skipped_without_live_answer",
                 execution_id=execution_id,
@@ -2586,10 +2594,6 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         if finalize_session_id and not slackbot_done and slackbot_forward_live:
             try:
                 terminal_result_sent_to_slackbot = False
-                if result_text.strip() and slackbot_streamed_answer_chars <= 0:
-                    await slackbot_client.session_text(finalize_session_id, result_text)
-                    slackbot_text_sent = True
-                    terminal_result_sent_to_slackbot = True
                 await slackbot_client.session_done(
                     finalize_session_id, harness_thread_id or None
                 )
@@ -2626,6 +2630,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             terminal_reason=terminal_reason,
             result_text=result_text,
             error_text=error_text,
+            slackbot_streamed_answer_chars_override=slackbot_streamed_answer_chars,
         )
 
     execution_started_payload = {

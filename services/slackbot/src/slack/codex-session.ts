@@ -46,8 +46,16 @@ type CodexSessionState = {
   done: boolean
 }
 
+type CompletedCodexSessionState = {
+  threadId: string
+  streamedAnswerChars: number
+  completedAt: number
+}
+
 const states = new Map<string, CodexSessionState>()
+const completedStates = new Map<string, CompletedCodexSessionState>()
 const PRE_STREAM_GRACE_MS = 500
+const COMPLETED_STATE_TTL_MS = 10 * 60 * 1000
 
 export class CodexSessionRenderer {
   private readonly renderer: AgentSessionRenderer
@@ -60,6 +68,17 @@ export class CodexSessionRenderer {
     agentSessionId: string,
     event: any
   ): Promise<{ threadId?: string; done: boolean; streamedAnswerChars: number }> {
+    const completed = completedState(agentSessionId)
+    if (completed) {
+      if (isTerminalTurnEvent(event)) {
+        logCodexTerminalEventIgnoredAfterDone(agentSessionId, event, completed)
+      }
+      return {
+        threadId: completed.threadId || undefined,
+        done: true,
+        streamedAnswerChars: completed.streamedAnswerChars
+      }
+    }
     const state = getState(agentSessionId)
     if (event?.session_id) state.threadId = String(event.session_id)
     if (event?.thread_id) state.threadId = String(event.thread_id)
@@ -196,11 +215,18 @@ export class CodexSessionRenderer {
 
     if (isTerminalTurnEvent(event)) {
       const resultText = terminalResultText(event)
+      const willClose = Boolean(resultText || event?.type !== 'result')
+      logCodexTerminalEventReceived(agentSessionId, event, state, {
+        resultText,
+        willClose
+      })
       if (resultText && !state.answerText.trim()) {
         state.answerText += resultText
         await this.publishPendingAssistantText(agentSessionId, state, { force: true })
       }
-      await this.done(agentSessionId)
+      if (willClose) {
+        await this.done(agentSessionId)
+      }
     }
 
     return {
@@ -226,6 +252,11 @@ export class CodexSessionRenderer {
     })
     state.deliveredAnswerChars = streamedTextChars
     state.done = true
+    completedStates.set(agentSessionId, {
+      threadId: state.threadId,
+      streamedAnswerChars: state.deliveredAnswerChars,
+      completedAt: Date.now()
+    })
     states.delete(agentSessionId)
   }
 
@@ -488,6 +519,58 @@ function terminalResultText(event: any): string {
     if (text) return text
   }
   return ''
+}
+
+function completedState(agentSessionId: string): CompletedCodexSessionState | undefined {
+  const completed = completedStates.get(agentSessionId)
+  if (!completed) return undefined
+  if (Date.now() - completed.completedAt > COMPLETED_STATE_TTL_MS) {
+    completedStates.delete(agentSessionId)
+    return undefined
+  }
+  return completed
+}
+
+function logCodexTerminalEventReceived(
+  agentSessionId: string,
+  event: any,
+  state: CodexSessionState,
+  opts: { resultText: string; willClose: boolean }
+): void {
+  logInfo('slack_codex_terminal_event_received', {
+    agent_session_id: agentSessionId,
+    centaur_thread_key: event?.centaur_thread_key,
+    execution_id: event?.centaur_execution_id,
+    assignment_generation: event?.centaur_assignment_generation,
+    event_type: event?.type,
+    codex_session_id: state.threadId || event?.session_id || event?.thread_id,
+    already_completed: false,
+    will_close: opts.willClose,
+    result_text_chars: opts.resultText.length,
+    answer_chars_before_event: state.answerText.length,
+    streamed_answer_chars_before_event: state.deliveredAnswerChars,
+    task_count: state.taskByUseId.size
+  })
+}
+
+function logCodexTerminalEventIgnoredAfterDone(
+  agentSessionId: string,
+  event: any,
+  completed: CompletedCodexSessionState
+): void {
+  logInfo('slack_codex_terminal_event_ignored_after_done', {
+    agent_session_id: agentSessionId,
+    centaur_thread_key: event?.centaur_thread_key,
+    execution_id: event?.centaur_execution_id,
+    assignment_generation: event?.centaur_assignment_generation,
+    event_type: event?.type,
+    codex_session_id: completed.threadId || event?.session_id || event?.thread_id,
+    already_completed: true,
+    will_close: false,
+    result_text_chars: terminalResultText(event).length,
+    streamed_answer_chars_at_completion: completed.streamedAnswerChars,
+    completed_age_ms: Date.now() - completed.completedAt
+  })
 }
 
 function toolUses(event: any): any[] {
