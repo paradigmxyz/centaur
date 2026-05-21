@@ -48,7 +48,7 @@ Onboard me to Centaur locally. Use https://centaur.run/llms-full.txt and follow 
 
     <div className="home-thread-demo" aria-label="Centaur thread preview">
       <ThreadPanel />
-      <div className="home-thread-demo-caption">transcripts from the Paradigm & Tempo Slacks</div>
+      <div className="home-thread-demo-caption">Transcripts from the Paradigm & Tempo Slacks</div>
     </div>
   </section>
 
