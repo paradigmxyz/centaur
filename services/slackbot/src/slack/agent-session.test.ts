@@ -401,8 +401,9 @@ describe('AgentSessionRenderer', () => {
     })
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
-    const plan = stop?.params.blocks?.find((block: any) => block.type === 'plan')
-    const body = stop?.params.blocks?.find((block: any) => block.type === 'markdown')
+    const blocks = finalBlocksFromCalls(calls)
+    const plan = blocks.find((block: any) => block.type === 'plan')
+    const body = blocks.find((block: any) => block.type === 'markdown')
     const outputText = plan?.tasks?.[0]?.output?.elements?.[0]?.elements?.[0]?.text ?? ''
 
     expect(outputText.split('\n')).toHaveLength(4)
@@ -410,7 +411,8 @@ describe('AgentSessionRenderer', () => {
     expect(body).toBeTruthy()
     expect(String(body?.text ?? '')).toContain('Final answer stays visible.')
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
-    expect(stop?.params.blocks?.length ?? 0).toBeLessThanOrEqual(50)
+    expect(stop?.params.blocks).toBeUndefined()
+    expect(blocks.length).toBeLessThanOrEqual(50)
   })
 
   it('keeps a durable final plan and answer after live streaming', async () => {
@@ -434,7 +436,10 @@ describe('AgentSessionRenderer', () => {
           calls.push({ method: 'chat.stopStream', params })
           return { ok: true }
         },
-        update: async () => ({ ok: true })
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
       }
     }
 
@@ -459,7 +464,7 @@ describe('AgentSessionRenderer', () => {
     })
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
-    const blocks = stop?.params.blocks ?? []
+    const blocks = finalBlocksFromCalls(calls)
     expect(blocks.some((block: any) => block.type === 'plan')).toBe(true)
     expect(
       blocks.some(
@@ -468,6 +473,7 @@ describe('AgentSessionRenderer', () => {
     ).toBe(true)
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
+    expect(stop?.params.blocks).toBeUndefined()
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
   })
 
@@ -513,8 +519,7 @@ describe('AgentSessionRenderer', () => {
       answerMarkdown: 'Done: five tools called.'
     })
 
-    const stop = calls.find(call => call.method === 'chat.stopStream')
-    const blocks = stop?.params.blocks ?? []
+    const blocks = finalBlocksFromCalls(calls)
     expect(
       blocks.some(
         (block: any) =>
@@ -581,7 +586,7 @@ describe('AgentSessionRenderer', () => {
     await renderer.done(sessionId)
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
-    const markdownBlocks = (stop?.params.blocks ?? []).filter(
+    const markdownBlocks = finalBlocksFromCalls(calls).filter(
       (block: any) => block.type === 'markdown'
     )
     const displayedAnswer = markdownBlocks.map((block: any) => block.text).join('\n')
@@ -647,7 +652,8 @@ describe('AgentSessionRenderer', () => {
       }
     })
 
-    await expect(renderer.done(sessionId)).resolves.toEqual({
+    const doneResult = await renderer.done(sessionId)
+    expect(doneResult).toEqual({
       streamedTextChars: expect.any(Number)
     })
     expect(stopAttempts).toBe(2)
@@ -702,8 +708,7 @@ describe('AgentSessionRenderer', () => {
     ).length
     expect(headerOccurrences).toBe(1)
 
-    const stop = calls.find(call => call.method === 'chat.stopStream')
-    const blocks = stop?.params.blocks ?? []
+    const blocks = finalBlocksFromCalls(calls)
     expect(
       blocks.some(
         (block: any) => block.type === 'markdown' && block.text === '_legal · codex-gpt-5_'
@@ -746,8 +751,7 @@ describe('AgentSessionRenderer', () => {
 
     const start = calls.find(call => call.method === 'chat.startStream')
     expect(start?.params.chunks?.[0]?.type).not.toBe('markdown_text')
-    const stop = calls.find(call => call.method === 'chat.stopStream')
-    const blocks = stop?.params.blocks ?? []
+    const blocks = finalBlocksFromCalls(calls)
     expect(
       blocks.some((block: any) => block.type === 'markdown' && /^_.*_$/.test(block.text))
     ).toBe(false)
@@ -808,6 +812,13 @@ function stopStreamFallbackText(params: any): string {
     .filter((chunk: any) => chunk?.type === 'markdown_text')
     .map((chunk: any) => String(chunk.text ?? ''))
     .join('')
+}
+
+function finalBlocksFromCalls(calls: Array<{ method: string; params: any }>): any[] {
+  const update = calls.findLast(call => call.method === 'chat.update')
+  if (update?.params.blocks?.length) return update.params.blocks
+  const stop = calls.find(call => call.method === 'chat.stopStream')
+  return stop?.params.blocks ?? []
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {

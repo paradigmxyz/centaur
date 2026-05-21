@@ -88,7 +88,7 @@ describe('CodexSessionRenderer', () => {
     expect(richTextPlain(cmd?.output)).toContain('one\ntwo')
     expect(calls.filter(call => call.method === 'chat.startStream')).toHaveLength(1)
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
-    expect(calls.some(call => call.method === 'chat.update')).toBe(false)
+    expect(calls.some(call => call.method === 'chat.update')).toBe(true)
   })
 
   it('renders multiple command executions as one visible activity task', async () => {
@@ -453,7 +453,10 @@ describe('CodexSessionRenderer', () => {
           calls.push({ method: 'chat.stopStream', params })
           return { ok: true }
         },
-        update: async () => ({ ok: true })
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
       }
     }
 
@@ -521,7 +524,10 @@ describe('CodexSessionRenderer', () => {
           calls.push({ method: 'chat.stopStream', params })
           return { ok: true }
         },
-        update: async () => ({ ok: true })
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
       }
     }
 
@@ -594,8 +600,9 @@ describe('CodexSessionRenderer', () => {
     await renderer.event(sessionId, { type: 'turn.completed', result: 'Done.' })
 
     expect(streamedMarkdown()).toContain('Done.')
-    expect(calls.some(call => call.method === 'chat.update')).toBe(false)
+    expect(calls.some(call => call.method === 'chat.update')).toBe(true)
     const stop = calls.find(call => call.method === 'chat.stopStream')
+    expect(stop?.params.blocks).toBeUndefined()
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
   })
 
@@ -1025,8 +1032,9 @@ describe('CodexSessionRenderer', () => {
     expect(thinkingBlockText(calls)).toBe('')
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
-    const blocks = stop?.params.blocks ?? []
+    const blocks = finalBlocksFromCalls(calls)
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
+    expect(stop?.params.blocks).toBeUndefined()
     expect(
       blocks.some(
         (block: any) =>
@@ -1056,7 +1064,10 @@ describe('CodexSessionRenderer', () => {
           calls.push({ method: 'chat.stopStream', params })
           return { ok: true }
         },
-        update: async () => ({ ok: true })
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
       }
     }
 
@@ -1101,7 +1112,7 @@ describe('CodexSessionRenderer', () => {
     await renderer.event(sessionId, { type: 'turn.completed', result: 'Found the bug.' })
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
-    const finalBlocks = stop?.params.blocks ?? []
+    const finalBlocks = finalBlocksFromCalls(calls)
     const finalChunkText = stopStreamFallbackText(stop?.params).trim()
     const durableText = [
       finalChunkText,
@@ -1116,8 +1127,7 @@ describe('CodexSessionRenderer', () => {
 })
 
 function planTasksFromCalls(calls: Array<{ method: string; params: any }>): any[] {
-  const stop = calls.find(call => call.method === 'chat.stopStream')
-  const plan = stop?.params.blocks?.find((block: any) => block.type === 'plan')
+  const plan = finalBlocksFromCalls(calls).find((block: any) => block.type === 'plan')
   if (plan?.tasks?.length) return plan.tasks
 
   const byId = new Map<string, any>()
@@ -1159,6 +1169,13 @@ function stopStreamFallbackText(params: any): string {
     .filter((chunk: any) => chunk?.type === 'markdown_text')
     .map((chunk: any) => String(chunk.text ?? ''))
     .join('')
+}
+
+function finalBlocksFromCalls(calls: Array<{ method: string; params: any }>): any[] {
+  const update = calls.findLast(call => call.method === 'chat.update')
+  if (update?.params.blocks?.length) return update.params.blocks
+  const stop = calls.find(call => call.method === 'chat.stopStream')
+  return stop?.params.blocks ?? []
 }
 
 function thinkingBlockText(calls: Array<{ method: string; params: any }>): string {

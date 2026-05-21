@@ -101,10 +101,6 @@ function headerMarkdown(header: string): string {
   return `_${header.trim()}_`
 }
 
-function headerBlock(header: string): AnyBlock {
-  return { type: 'markdown', text: headerMarkdown(header) }
-}
-
 const sessions = new Map<string, AgentSessionState>()
 const sessionQueues = new Map<string, Promise<void>>()
 const THINKING_STATUS = 'Thinking...'
@@ -310,8 +306,9 @@ export class AgentSessionRenderer {
       !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
     const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
     // Keep a durable final layout even when the live stream already showed
-    // tasks/text. Slack's streamed surface is not reliable enough to be the only
-    // persisted content.
+    // tasks/text. Close the assistant stream first, then rewrite it as a normal
+    // message so Slack does not replay final blocks as fresh streaming content
+    // when users reopen the thread.
     const blocks = sanitizeFinalMessagePayload([
       ...(tasks.length
         ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
@@ -327,10 +324,18 @@ export class AgentSessionRenderer {
     const stopResponse = await this.client.chat.stopStream({
       channel: state.channel,
       ts: segment.streamTs,
-      chunks: markdownToStreamChunks(blocks.length || streamedTextLive ? ' ' : fallbackText),
-      ...(blocks.length ? { blocks } : {})
+      chunks: markdownToStreamChunks(blocks.length || streamedTextLive ? ' ' : fallbackText)
     })
     if (!stopResponse.ok) throw new Error(stopResponse.error ?? 'chat.stopStream failed')
+    if (blocks.length) {
+      const updateResponse = await this.client.chat.update({
+        channel: state.channel,
+        ts: segment.streamTs,
+        text: fallbackText || state.title,
+        blocks
+      })
+      if (!updateResponse.ok) throw new Error(updateResponse.error ?? 'chat.update failed')
+    }
     segment.closed = true
   }
 
