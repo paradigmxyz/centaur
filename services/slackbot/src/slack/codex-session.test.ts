@@ -1030,6 +1030,82 @@ describe('CodexSessionRenderer', () => {
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
   })
+
+  it('treats an unphased terminal agent message after tool use as the final answer', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async (params: any) => {
+          calls.push({ method: 'chat.update', params })
+          return { ok: true }
+        }
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    await renderer.event(sessionId, {
+      type: 'item.started',
+      item: { id: 'msg-thinking', type: 'agentMessage', phase: 'commentary' }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-thinking',
+      delta: 'I’ll inspect the runtime metadata.'
+    })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'cmd-1',
+        type: 'commandExecution',
+        command: 'kubectl get pod',
+        aggregated_output: 'main-sha-df02d81',
+        exitCode: 0
+      }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'msg-final',
+        type: 'agentMessage',
+        text: 'Staging is running `main-sha-df02d81`.'
+      }
+    })
+    await renderer.event(sessionId, { type: 'turn.completed' })
+
+    const streamed = calls
+      .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
+      .flatMap(call => call.params.chunks ?? [])
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => String(chunk.text))
+      .join('')
+    expect(streamed).toContain('Staging is running `main-sha-df02d81`.')
+    expect(thinkingBlockText(calls)).not.toContain('Staging is running')
+  })
 })
 
 function planTasksFromCalls(calls: Array<{ method: string; params: any }>): any[] {

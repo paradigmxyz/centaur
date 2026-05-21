@@ -36,6 +36,7 @@ type CodexSessionState = {
   streamedAnswerText: string
   deliveredAnswerChars: number
   agentMessagePhase: AgentMessagePhase | null
+  agentMessagePhaseByItemId: Map<string, AgentMessagePhase>
   planText: string
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
@@ -330,6 +331,7 @@ function getState(agentSessionId: string): CodexSessionState {
       streamedAnswerText: '',
       deliveredAnswerChars: 0,
       agentMessagePhase: null,
+      agentMessagePhaseByItemId: new Map(),
       planText: '',
       taskByUseId: new Map(),
       commandOutputById: new Map(),
@@ -358,6 +360,12 @@ function trackAgentMessageLifecycle(event: any, state: CodexSessionState): void 
   const phase = agentMessageItemPhase(event?.item)
   if (!phase) return
   state.agentMessagePhase = phase
+  const id = agentMessageEventId(event)
+  if (id) state.agentMessagePhaseByItemId.set(id, phase)
+}
+
+function agentMessageEventId(event: any): string {
+  return String(event?.itemId ?? event?.item_id ?? event?.item?.id ?? '')
 }
 
 /** Codex may emit several commentary agentMessages in one turn; keep a blank line between them. */
@@ -403,6 +411,15 @@ function completeThinkingTasks(state: CodexSessionState): void {
 
 function activeAssistantBuffer(state: CodexSessionState, event: any): 'commentary' | 'answer' {
   if (event?.type === 'item.agentMessage.delta' || event?.type === 'item.completed') {
+    const itemPhase = state.agentMessagePhaseByItemId.get(agentMessageEventId(event))
+    if (itemPhase) return itemPhase === 'final_answer' ? 'answer' : 'commentary'
+    if (
+      event?.type === 'item.completed' &&
+      (event?.item?.type === 'agentMessage' || event?.item?.type === 'agent_message') &&
+      state.taskByUseId.size > 0
+    ) {
+      return 'answer'
+    }
     return state.agentMessagePhase === 'final_answer' ? 'answer' : 'commentary'
   }
   return 'answer'
