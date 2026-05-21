@@ -159,7 +159,7 @@ describe('CodexSessionRenderer', () => {
     expect(new Set(tasks.map(task => task.task_id ?? task.id))).toEqual(new Set(['cmd-1', 'cmd-2']))
     expect(planTaskDetailsText(calls, 'cmd-1')).toContain('call demo ping')
     expect(planTaskFromStop(calls, 'cmd-2')).toMatchObject({
-      id: 'cmd-2',
+      task_id: 'cmd-2',
       status: 'complete',
       title: '2. Command execution'
     })
@@ -1027,7 +1027,91 @@ describe('CodexSessionRenderer', () => {
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
-    expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
+    expect(
+      blocks.some(
+        (block: any) =>
+          block.type === 'markdown' && String(block.text).includes('Done: five tools called.')
+      )
+    ).toBe(true)
+  })
+
+  it('keeps durable visible content when finalizing a many-step streamed reply', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async (params: any) => {
+          calls.push({ method: 'chat.startStream', params })
+          return { ok: true, ts: '1778866940.295499' }
+        },
+        appendStream: async (params: any) => {
+          calls.push({ method: 'chat.appendStream', params })
+          return { ok: true }
+        },
+        stopStream: async (params: any) => {
+          calls.push({ method: 'chat.stopStream', params })
+          return { ok: true }
+        },
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    for (let index = 1; index <= 15; index += 1) {
+      await renderer.event(sessionId, {
+        type: 'item.started',
+        item: {
+          id: `cmd-${index}`,
+          type: 'commandExecution',
+          command: `call demo step ${index}`
+        }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.completed',
+        item: {
+          id: `cmd-${index}`,
+          type: 'commandExecution',
+          command: `call demo step ${index}`,
+          exitCode: 0,
+          aggregated_output: `step ${index} ok`
+        }
+      })
+    }
+    await renderer.event(sessionId, {
+      type: 'item.started',
+      item: { id: 'msg-final', type: 'agentMessage', phase: 'final_answer' }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-final',
+      delta: 'Found the bug.'
+    })
+    await renderer.event(sessionId, { type: 'turn.completed', result: 'Found the bug.' })
+
+    const stop = calls.find(call => call.method === 'chat.stopStream')
+    const finalBlocks = stop?.params.blocks ?? []
+    const finalChunkText = stopStreamFallbackText(stop?.params).trim()
+    const durableText = [
+      finalChunkText,
+      ...finalBlocks.map((block: any) => JSON.stringify(block))
+    ].join('\n')
+
+    expect(durableText).toContain('Found the bug.')
+    expect(
+      finalBlocks.some((block: any) => block.type === 'plan' && (block.tasks?.length ?? 0) >= 15)
+    ).toBe(true)
   })
 })
 

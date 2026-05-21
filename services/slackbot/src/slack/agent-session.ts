@@ -150,7 +150,11 @@ export class AgentSessionRenderer {
     return await this.queueText(state, segment, markdown)
   }
 
-  async textDelta(sessionId: string, markdownDelta: string, opts: TextOptions = {}): Promise<number> {
+  async textDelta(
+    sessionId: string,
+    markdownDelta: string,
+    opts: TextOptions = {}
+  ): Promise<number> {
     if (!markdownDelta) return 0
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
@@ -305,15 +309,15 @@ export class AgentSessionRenderer {
     const showThinking =
       !streamedTextLive && shouldShowThinkingBlock(commentaryMarkdown, answerMarkdown)
     const thinkingBlock = showThinking ? thinkingContextBlock(commentaryMarkdown) : null
-    // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
-    // Only add blocks for content that was not streamed live; live task_update chunks carry
-    // fenced details/output, and the header has already been streamed as the first chunk.
+    // Keep a durable final layout even when the live stream already showed
+    // tasks/text. Slack's streamed surface is not reliable enough to be the only
+    // persisted content.
     const blocks = sanitizeFinalMessagePayload([
-      ...(tasks.length && !segment.planStarted
+      ...(tasks.length
         ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
         : []),
       ...(thinkingBlock ? [thinkingBlock] : []),
-      ...(!streamedTextLive && answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
+      ...(answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
     ] as AnyBlock[])
     const fallbackText = buildFinalFallbackText({
       title: state.title,
