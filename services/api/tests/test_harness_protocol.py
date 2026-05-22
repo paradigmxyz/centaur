@@ -442,3 +442,41 @@ class TestMessagesToContentBlocks:
             {"type": "text", "text": "first"},
             {"type": "text", "text": "second"},
         ]
+
+
+class TestHermesProtocol:
+    def test_is_turn_done_completed(self):
+        assert is_turn_done("hermes", {"type": "turn.completed"}) is True
+
+    def test_is_turn_done_failed(self):
+        assert is_turn_done("hermes", {"type": "turn.failed"}) is True
+
+    def test_is_turn_done_error(self):
+        assert is_turn_done("hermes", {"type": "error", "message": "boom"}) is True
+
+    def test_is_turn_done_chunk_not_done(self):
+        assert is_turn_done("hermes", {"type": "agent_message_chunk", "text": "x"}) is False
+        assert is_turn_done("hermes", {"type": "tool_call", "tool_call_id": "t"}) is False
+
+    def test_extract_result_from_turn_completed(self):
+        event = {"type": "turn.completed", "stop_reason": "end_turn", "text": "Final answer"}
+        assert extract_result("hermes", event) == "Final answer"
+
+    def test_extract_result_empty_text_none(self):
+        event = {"type": "turn.completed", "stop_reason": "end_turn", "text": ""}
+        assert extract_result("hermes", event) is None
+
+    def test_extract_result_chunk_is_none(self):
+        # Streamed deltas must not be treated as the final result.
+        assert extract_result("hermes", {"type": "agent_message_chunk", "text": "frag"}) is None
+
+    def test_extract_thread_id_from_init(self):
+        event = {"type": "system", "subtype": "init", "session_id": "sess-7"}
+        assert extract_thread_id("hermes", event) == "sess-7"
+
+    def test_extract_thread_id_empty_session(self):
+        event = {"type": "system", "subtype": "init", "session_id": ""}
+        assert extract_thread_id("hermes", event) is None
+
+    def test_extract_thread_id_unrelated(self):
+        assert extract_thread_id("hermes", {"type": "agent_message_chunk"}) is None

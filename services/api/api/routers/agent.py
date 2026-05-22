@@ -81,6 +81,7 @@ _HARNESS_FLAGS: dict[str, str] = {
     "codex": "codex",
     "pi": "pi-mono",
     "pi-mono": "pi-mono",
+    "hermes": "hermes",
 }
 
 _KNOWN_FLAGS = {

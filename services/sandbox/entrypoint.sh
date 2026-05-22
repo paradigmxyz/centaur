@@ -101,6 +101,20 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
 }
 EOF
 
+# ── Hermes settings ──────────────────────────────────────────────────────────
+# Hermes (ACP harness) resolves its provider/model from ~/.hermes/config.yaml.
+# Default to Anthropic + Claude so it works out of the box through iron-proxy
+# using the stubbed ANTHROPIC_API_KEY; HERMES_PROVIDER/HERMES_MODEL override
+# fleet-wide or per-session (the model is set per spawn by the API).
+mkdir -p "$HOME_DIR/.hermes"
+HERMES_PROVIDER_VALUE="${HERMES_PROVIDER:-anthropic}"
+HERMES_MODEL_VALUE="${HERMES_MODEL:-claude-sonnet-4-20250514}"
+cat > "$HOME_DIR/.hermes/config.yaml" <<EOF
+model:
+  provider: "$(toml_escape "$HERMES_PROVIDER_VALUE")"
+  default: "$(toml_escape "$HERMES_MODEL_VALUE")"
+EOF
+
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
     WORKSPACE_DIR="$STATE_DIR/workspace"

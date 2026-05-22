@@ -221,3 +221,160 @@ class TestAutoDetect:
     def test_detect_amp_fallback(self):
         result = normalize_harness_event("", {"type": "result", "result": "ok"})
         assert result == [{"type": "result", "text": "ok"}]
+
+    def test_detect_hermes_message_chunk(self):
+        result = normalize_harness_event(
+            "", {"type": "agent_message_chunk", "text": "hi"}
+        )
+        assert result == [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}
+        ]
+
+    def test_detect_hermes_tool_call(self):
+        result = normalize_harness_event(
+            "", {"type": "tool_call", "tool_call_id": "t1", "name": "Read", "input": {}}
+        )
+        assert result[0]["message"]["content"][0]["type"] == "tool_use"
+
+
+class TestHermes:
+    def test_init_session(self):
+        result = normalize_harness_event(
+            "hermes", {"type": "system", "subtype": "init", "session_id": "s9"}
+        )
+        assert result == [{"type": "system", "subtype": "init", "session_id": "s9"}]
+
+    def test_heartbeat_ignored(self):
+        result = normalize_harness_event(
+            "hermes",
+            {"type": "system", "subtype": "wrapper_heartbeat", "phase": "startup"},
+        )
+        assert result == []
+
+    def test_agent_message_chunk(self):
+        result = normalize_harness_event(
+            "hermes", {"type": "agent_message_chunk", "text": "Hello"}
+        )
+        assert result == [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Hello"}]},
+            }
+        ]
+
+    def test_empty_message_chunk_dropped(self):
+        assert (
+            normalize_harness_event("hermes", {"type": "agent_message_chunk", "text": ""})
+            == []
+        )
+
+    def test_thought_chunk(self):
+        result = normalize_harness_event(
+            "hermes", {"type": "agent_thought_chunk", "text": "thinking"}
+        )
+        assert result == [{"type": "reasoning", "text": "thinking"}]
+
+    def test_tool_call(self):
+        result = normalize_harness_event(
+            "hermes",
+            {
+                "type": "tool_call",
+                "tool_call_id": "t1",
+                "name": "Read file",
+                "input": {"path": "x"},
+            },
+        )
+        assert result == [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t1",
+                            "name": "Read file",
+                            "input": {"path": "x"},
+                        }
+                    ]
+                },
+            }
+        ]
+
+    def test_tool_call_update_completed(self):
+        result = normalize_harness_event(
+            "hermes",
+            {
+                "type": "tool_call_update",
+                "tool_call_id": "t1",
+                "status": "completed",
+                "output": "file body",
+                "is_error": False,
+            },
+        )
+        assert result == [
+            {
+                "type": "tool",
+                "content": [
+                    {"tool_use_id": "t1", "content": "file body", "is_error": False}
+                ],
+            }
+        ]
+
+    def test_tool_call_update_in_progress_dropped(self):
+        result = normalize_harness_event(
+            "hermes",
+            {"type": "tool_call_update", "tool_call_id": "t1", "status": "in_progress"},
+        )
+        assert result == []
+
+    def test_tool_call_update_failed_is_error(self):
+        result = normalize_harness_event(
+            "hermes",
+            {
+                "type": "tool_call_update",
+                "tool_call_id": "t1",
+                "status": "failed",
+                "output": "boom",
+                "is_error": True,
+            },
+        )
+        assert result[0]["content"][0]["is_error"] is True
+
+    def test_plan(self):
+        entries = [{"content": "step", "priority": "medium", "status": "pending"}]
+        result = normalize_harness_event("hermes", {"type": "plan", "entries": entries})
+        assert result == [{"type": "turn.plan.updated", "entries": entries}]
+
+    def test_turn_completed_usage(self):
+        result = normalize_harness_event(
+            "hermes",
+            {
+                "type": "turn.completed",
+                "stop_reason": "end_turn",
+                "text": "done",
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            },
+        )
+        assert result == [
+            {
+                "type": "usage",
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+                "authoritative": True,
+            }
+        ]
+
+    def test_turn_completed_without_usage(self):
+        result = normalize_harness_event(
+            "hermes", {"type": "turn.completed", "stop_reason": "end_turn", "text": "done"}
+        )
+        assert result == []
+
+    def test_error(self):
+        result = normalize_harness_event("hermes", {"type": "error", "message": "boom"})
+        assert result == [{"type": "error", "error": "boom"}]
+
+    def test_turn_failed(self):
+        result = normalize_harness_event(
+            "hermes", {"type": "turn.failed", "error": {"message": "nope"}}
+        )
+        assert result == [{"type": "error", "error": "nope"}]
