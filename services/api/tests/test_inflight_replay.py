@@ -184,6 +184,122 @@ async def test_inject_stdin_persists_inflight_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inject_stdin_prepends_current_session_context_after_cursor() -> None:
+    session = SandboxSession(
+        sandbox_id="sbx-4",
+        thread_key="slack:C123:1712345678.000100",
+        harness="amp",
+        engine="amp",
+    )
+
+    backend = AsyncMock()
+    backend.refresh_token_by_id = AsyncMock()
+    backend.attach = AsyncMock()
+    backend.write_stdin = AsyncMock()
+
+    with (
+        patch(
+            "api.agent._insert_system_message",
+            new_callable=AsyncMock,
+            return_value=(
+                "# Session Context\n\n"
+                "## GitHub PR Attribution\n\n"
+                "- If you create a GitHub PR for this Slack request, "
+                "the PR body MUST contain this standalone line: `Prompted by: @alice`"
+            ),
+        ),
+        patch(
+            "api.agent._get_last_delivered_id",
+            new_callable=AsyncMock,
+            return_value="msg-after-system",
+        ),
+        patch("api.agent._flush_pending", new_callable=AsyncMock, return_value=[]),
+        patch("api.agent._db_set_inflight_turn", new_callable=AsyncMock),
+        patch("api.agent._db_update_state", new_callable=AsyncMock),
+        patch("api.agent._advance_cursor", new_callable=AsyncMock),
+        patch("api.agent.get_backend", return_value=backend),
+        patch("api.agent.mint_sandbox_token", return_value="sbx-token"),
+    ):
+        from api.agent import inject_stdin
+
+        result = await inject_stdin(
+            session,
+            "please make a PR",
+            platform="slack",
+            user_id="U123",
+        )
+
+    assert result["ok"] is True
+    payload = backend.write_stdin.await_args.args[1]
+    content = payload["message"]["content"]
+    assert "Prompted by: @alice" in content[0]["text"]
+    assert content[1] == {"type": "text", "text": "please make a PR"}
+
+
+@pytest.mark.asyncio
+async def test_inject_stdin_deduplicates_queued_session_context() -> None:
+    session = SandboxSession(
+        sandbox_id="sbx-5",
+        thread_key="slack:C123:1712345678.000200",
+        harness="amp",
+        engine="amp",
+    )
+
+    backend = AsyncMock()
+    backend.refresh_token_by_id = AsyncMock()
+    backend.attach = AsyncMock()
+    backend.write_stdin = AsyncMock()
+
+    system_id = f"system-{session.thread_key}-slack"
+    with (
+        patch(
+            "api.agent._insert_system_message",
+            new_callable=AsyncMock,
+            return_value="fresh session context with Prompted by: @alice",
+        ),
+        patch(
+            "api.agent._get_last_delivered_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "api.agent._flush_pending",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": system_id,
+                    "role": "system",
+                    "parts": [{"type": "text", "text": "stale session context"}],
+                    "metadata": {},
+                },
+                {
+                    "id": "msg-user",
+                    "role": "user",
+                    "parts": [{"type": "text", "text": "make a PR"}],
+                    "metadata": {},
+                },
+            ],
+        ),
+        patch("api.agent._db_set_inflight_turn", new_callable=AsyncMock),
+        patch("api.agent._db_update_state", new_callable=AsyncMock),
+        patch("api.agent._advance_cursor", new_callable=AsyncMock),
+        patch("api.agent.get_backend", return_value=backend),
+        patch("api.agent.mint_sandbox_token", return_value="sbx-token"),
+    ):
+        from api.agent import inject_stdin
+
+        result = await inject_stdin(session, "", platform="slack", user_id="U123")
+
+    assert result["ok"] is True
+    payload = backend.write_stdin.await_args.args[1]
+    texts = [part["text"] for part in payload["message"]["content"]]
+    assert texts == [
+        "fresh session context with Prompted by: @alice",
+        "make a PR",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_flush_pending_skips_assistant_messages(db_pool) -> None:
     thread_key = "test:thread-flush"
     user_one = "msg-1"

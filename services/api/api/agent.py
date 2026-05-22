@@ -711,7 +711,7 @@ async def _insert_system_message(
     platform: str | None,
     *,
     user_id: str | None = None,
-) -> None:
+) -> str:
     """Insert a static system message with platform formatting rules (idempotent)."""
     pool = _get_pool()
     effective_platform = platform or ("slack" if thread_key.startswith("slack:") else None)
@@ -748,6 +748,7 @@ async def _insert_system_message(
         json.dumps([{"type": "text", "text": context}]),
         bool(effective_user_id),
     )
+    return context
 
 
 # ── Harness / persona resolution ────────────────────────────────────────────
@@ -1382,8 +1383,9 @@ async def inject_stdin(
     rt = _get_runtime(session.sandbox_id)
 
     effective_platform = platform or ("slack" if session.thread_key.startswith("slack:") else None)
+    current_session_context: str | None = None
     if effective_platform:
-        await _insert_system_message(
+        current_session_context = await _insert_system_message(
             session.thread_key,
             effective_platform,
             user_id=user_id,
@@ -1391,6 +1393,14 @@ async def inject_stdin(
 
     last_delivered_id = await _get_last_delivered_id(session.thread_key)
     flushed = await _flush_pending(session.thread_key, last_delivered_id)
+    if current_session_context:
+        # The system context row is updated in place so its created_at stays at
+        # the top of the thread. Existing harness sessions may have already
+        # advanced their delivery cursor past that row, so prepend the freshly
+        # built context to every turn while removing any queued copy to avoid a
+        # duplicate on first delivery.
+        system_msg_id = f"system-{session.thread_key}-{effective_platform}"
+        flushed = [row for row in flushed if row.get("id") != system_msg_id]
 
     # Build harness-native input
     inline_blocks: list[dict] | None = None
@@ -1399,7 +1409,32 @@ async def inject_stdin(
     elif isinstance(message, str) and message:
         inline_blocks = [{"type": "text", "text": message}]
 
-    if flushed and inline_blocks:
+    context_blocks = (
+        [{"type": "text", "text": current_session_context}]
+        if current_session_context
+        else []
+    )
+
+    if context_blocks and flushed and inline_blocks:
+        msgs = _flushed_to_messages(flushed)
+        content_blocks = (
+            context_blocks + messages_to_content_blocks(msgs) + inline_blocks
+        )
+        turn_input = build_user_input(
+            content_blocks, thread_key=session.thread_key, trace_id=session.trace_id
+        )
+    elif context_blocks and flushed:
+        msgs = _flushed_to_messages(flushed)
+        content_blocks = context_blocks + messages_to_content_blocks(msgs)
+        turn_input = build_user_input(
+            content_blocks, thread_key=session.thread_key, trace_id=session.trace_id
+        )
+    elif context_blocks and inline_blocks:
+        content_blocks = context_blocks + inline_blocks
+        turn_input = build_user_input(
+            content_blocks, thread_key=session.thread_key, trace_id=session.trace_id
+        )
+    elif flushed and inline_blocks:
         msgs = _flushed_to_messages(flushed)
         content_blocks = messages_to_content_blocks(msgs) + inline_blocks
         turn_input = build_user_input(
