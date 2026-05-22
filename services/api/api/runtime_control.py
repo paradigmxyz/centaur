@@ -2471,13 +2471,15 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         if silence_deadline <= dt.datetime.now(dt.timezone.utc):
             silence_deadline = await _touch_execution_progress(pool, execution_id)
     else:
+        requester_user_id = None
+        if isinstance(delivery, dict):
+            requester_user_id = delivery.get("recipient_user_id") or delivery.get("user_id")
+        requester_user_id = requester_user_id or execution_metadata.get("user_id")
         inject_result = await inject_stdin(
             session,
             "",
             platform=delivery.get("platform") if isinstance(delivery, dict) else None,
-            user_id=delivery.get("recipient_user_id")
-            if isinstance(delivery, dict)
-            else None,
+            user_id=requester_user_id,
         )
         durable_turn_id = str(inject_result.get("durable_turn_id") or "")
         await pool.execute(

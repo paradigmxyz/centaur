@@ -639,6 +639,41 @@ class TestBuildSessionContext:
         assert await _get_latest_thread_user_id(thread_key) == "U123"
 
     @pytest.mark.asyncio
+    async def test_latest_thread_user_id_reads_execution_delivery(self, db_pool):
+        from api.agent import _get_latest_thread_user_id
+
+        thread_key = "test:requester-execution-fallback"
+        await db_pool.execute(
+            "INSERT INTO agent_execution_requests ("
+            "execution_id, thread_key, assignment_generation, execute_id, request_hash, "
+            "status, delivery, metadata"
+            ") VALUES ($1, $2, 1, $3, 'hash', 'queued', $4::jsonb, '{}'::jsonb)",
+            "exe-requester-fallback",
+            thread_key,
+            "exec-requester-fallback",
+            '{"platform": "slack", "recipient_user_id": "U456"}',
+        )
+
+        assert await _get_latest_thread_user_id(thread_key) == "U456"
+
+    @pytest.mark.asyncio
+    async def test_latest_thread_user_id_reads_slack_workflow_input(self, db_pool):
+        from api.agent import _get_latest_thread_user_id
+
+        thread_key = "test:requester-workflow-fallback"
+        await db_pool.execute(
+            "INSERT INTO workflow_runs ("
+            "run_id, workflow_name, workflow_version, request_hash, root_run_id, "
+            "thread_key, status, input_json"
+            ") VALUES ($1, 'slack_thread_turn', 'test', 'hash', $1, $2, 'queued', $3::jsonb)",
+            "wfr-requester-fallback",
+            thread_key,
+            '{"delivery": {"recipient_user_id": "U789"}}',
+        )
+
+        assert await _get_latest_thread_user_id(thread_key) == "U789"
+
+    @pytest.mark.asyncio
     async def test_insert_system_message_uses_thread_user_id_fallback(
         self, db_pool, monkeypatch
     ):
@@ -682,6 +717,48 @@ class TestBuildSessionContext:
         assert "Requester Identity" in text
         assert "Slack user ID: U123" in text
         assert "GitHub handle from Slack profile: @alice" in text
+
+    @pytest.mark.asyncio
+    async def test_insert_system_message_infers_slack_platform_from_thread_key(
+        self, db_pool, monkeypatch
+    ):
+        from api import agent
+
+        thread_key = "slack:C123:1712345678.000100"
+        await db_pool.execute(
+            "INSERT INTO chat_messages (id, thread_key, role, parts, user_id, metadata) "
+            "VALUES ($1, $2, 'user', '[]'::jsonb, 'U123', '{}'::jsonb)",
+            "msg-requester-context-infer-platform",
+            thread_key,
+        )
+
+        async def fake_resolve_requester_identity(*, platform, user_id):
+            assert platform == "slack"
+            assert user_id == "U123"
+            return {
+                "slack_user_id": user_id,
+                "slack_mention": f"<@{user_id}>",
+                "github_handle_verified": False,
+                "github_handle_unavailable_reason": "no GitHub custom field found",
+            }
+
+        monkeypatch.setattr(
+            agent,
+            "_resolve_requester_identity",
+            fake_resolve_requester_identity,
+        )
+
+        await agent._insert_system_message(thread_key, None)
+
+        row = await db_pool.fetchrow(
+            "SELECT parts FROM chat_messages WHERE id = $1",
+            f"system-{thread_key}-slack",
+        )
+        parts = row["parts"]
+        if isinstance(parts, str):
+            parts = json.loads(parts)
+        assert "Requester Identity" in parts[0]["text"]
+        assert "Slack user ID: U123" in parts[0]["text"]
 
 
 # ── Test 7: Status endpoint ──────────────────────────────────────────────────
