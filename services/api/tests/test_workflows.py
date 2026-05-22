@@ -291,7 +291,7 @@ async def test_slack_thread_turn_attachment_roundtrip_to_agent(
     )
     assert attachment is not None
     att_id = attachment["id"]
-    assert attachment["name"] == f"{att_id}.bin"
+    assert attachment["name"] == "customer-list.pdf"
     assert attachment["mime_type"] == "application/pdf"
     assert bytes(attachment["data"]) == raw_attachment
 
@@ -308,7 +308,7 @@ async def test_slack_thread_turn_attachment_roundtrip_to_agent(
     stored_part = event_json["message"]["content"][1]
     assert stored_part["type"] == "attachment_ref"
     assert stored_part["attachment_id"] == att_id
-    assert "name" not in stored_part
+    assert stored_part["name"] == "customer-list.pdf"
     assert "source" not in stored_part
 
     chat_row = await db_pool.fetchrow(
@@ -322,7 +322,7 @@ async def test_slack_thread_turn_attachment_roundtrip_to_agent(
     assert chat_parts[1] == {
         "type": "attachment_ref",
         "id": att_id,
-        "name": f"{att_id}.bin",
+        "name": "customer-list.pdf",
         "mime_type": "application/pdf",
     }
 
@@ -336,7 +336,7 @@ async def test_slack_thread_turn_attachment_roundtrip_to_agent(
         ]
     )
     assert blocks[0]["text"] == "<@U123>: please inspect this Slack file"
-    assert f"User attached file: {att_id}.bin (application/pdf)" in blocks[1]["text"]
+    assert "User attached file: customer-list.pdf (application/pdf)" in blocks[1]["text"]
     assert f"/agent/attachments/{att_id}/download" in blocks[1]["text"]
 
     sandbox_token = mint_sandbox_token(thread_key, "rt-test")
