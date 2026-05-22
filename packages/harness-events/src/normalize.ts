@@ -838,6 +838,66 @@ function normalizePiEvent(event: Record<string, unknown>): CanonicalEvent[] {
 }
 
 // ---------------------------------------------------------------------------
+// Hermes normalizer
+// ---------------------------------------------------------------------------
+
+function normalizeHermesEvent(event: Record<string, unknown>): CanonicalEvent[] {
+  const eventType = asString(event.type)
+
+  if (eventType === 'system') {
+    if (asString(event.subtype) === 'init') {
+      const sessionId = firstNonEmptyString(event.session_id)
+      return sessionId ? [{ type: 'system', subtype: 'init', session_id: sessionId }] : []
+    }
+    return []
+  }
+
+  if (eventType === 'agent_message_chunk') {
+    const text = asString(event.text)
+    return text ? [assistantTextEvent(text)] : []
+  }
+
+  if (eventType === 'agent_thought_chunk') {
+    const text = asString(event.text)
+    return text ? [{ type: 'reasoning', text }] : []
+  }
+
+  if (eventType === 'tool_call') {
+    const toolId = asString(event.tool_call_id)
+    const name = asString(event.name) || 'tool'
+    return [assistantToolUseEvent(toolId, name, event.input)]
+  }
+
+  if (eventType === 'tool_call_update') {
+    const status = asString(event.status)
+    if (status !== 'completed' && status !== 'failed') return []
+    const toolId = asString(event.tool_call_id)
+    if (!toolId) return []
+    return [toolResultEvent(toolId, event.output, Boolean(event.is_error))]
+  }
+
+  if (eventType === 'plan') {
+    return [{ type: 'turn.plan.updated', entries: asList(event.entries) }]
+  }
+
+  if (eventType === 'turn.completed') {
+    return attachUsageMetadata([], event, true)
+  }
+
+  if (eventType === 'turn.failed' || eventType === 'error') {
+    const errorValue = event.error
+    const message =
+      asString(errorValue) ||
+      asString(asRecord(errorValue).message) ||
+      asString(event.message) ||
+      'Unknown error'
+    return [{ type: 'error', error: message }]
+  }
+
+  return []
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
@@ -867,6 +927,13 @@ export function normalizeHarnessEvent(
       eventType === 'tool_execution_end'
     ) {
       normalizedHarness = 'pi-mono'
+    } else if (
+      eventType === 'agent_message_chunk' ||
+      eventType === 'agent_thought_chunk' ||
+      eventType === 'tool_call' ||
+      eventType === 'tool_call_update'
+    ) {
+      normalizedHarness = 'hermes'
     } else {
       normalizedHarness = 'amp'
     }
@@ -877,6 +944,9 @@ export function normalizeHarnessEvent(
   }
   if (normalizedHarness === 'pi-mono') {
     return normalizePiEvent(event)
+  }
+  if (normalizedHarness === 'hermes') {
+    return normalizeHermesEvent(event)
   }
   // eng/legal use claude-code under the hood, same event format as amp/claude-code
   return normalizeAmpLikeEvent(event)

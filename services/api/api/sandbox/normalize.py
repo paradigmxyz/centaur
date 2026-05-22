@@ -841,10 +841,77 @@ def _normalize_pi_event(event: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Hermes normalizer
+# ---------------------------------------------------------------------------
+
+
+def _normalize_hermes_event(event: dict) -> list[dict]:
+    """Normalize Hermes ACP-bridge events (emitted by hermes-app-wrapper).
+
+    The wrapper flattens Hermes' ACP ``session/update`` notifications into a
+    small set of Centaur-shaped events; map those onto canonical events.
+    """
+    event_type = _as_str(event.get("type"))
+
+    if event_type == "system":
+        if _as_str(event.get("subtype")) == "init":
+            session_id = _first_non_empty(event.get("session_id"))
+            return (
+                [{"type": "system", "subtype": "init", "session_id": session_id}]
+                if session_id
+                else []
+            )
+        return []
+
+    if event_type == "agent_message_chunk":
+        text = _as_str(event.get("text"))
+        return [_assistant_text_event(text)] if text else []
+
+    if event_type == "agent_thought_chunk":
+        text = _as_str(event.get("text"))
+        return [{"type": "reasoning", "text": text}] if text else []
+
+    if event_type == "tool_call":
+        tool_id = _as_str(event.get("tool_call_id"))
+        name = _as_str(event.get("name")) or "tool"
+        return [_assistant_tool_use_event(tool_id, name, event.get("input"))]
+
+    if event_type == "tool_call_update":
+        if _as_str(event.get("status")) not in ("completed", "failed"):
+            return []
+        tool_id = _as_str(event.get("tool_call_id"))
+        if not tool_id:
+            return []
+        return [
+            _tool_result_event(
+                tool_id, event.get("output"), bool(event.get("is_error"))
+            )
+        ]
+
+    if event_type == "plan":
+        return [{"type": "turn.plan.updated", "entries": _as_list(event.get("entries"))}]
+
+    if event_type == "turn.completed":
+        return _attach_usage_metadata([], event, authoritative=True)
+
+    if event_type in ("turn.failed", "error"):
+        error_value = event.get("error")
+        message = (
+            _as_str(error_value)
+            or _as_str(_as_record(error_value).get("message"))
+            or _as_str(event.get("message"))
+            or "Unknown error"
+        )
+        return [{"type": "error", "error": message}]
+
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
-_ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono"}
+_ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono", "hermes"}
 
 
 def normalize_harness_event(engine: str, event: dict) -> list[dict]:
@@ -885,6 +952,13 @@ def normalize_harness_event(engine: str, event: dict) -> list[dict]:
             "tool_execution_end",
         ):
             normalized = "pi-mono"
+        elif event_type in (
+            "agent_message_chunk",
+            "agent_thought_chunk",
+            "tool_call",
+            "tool_call_update",
+        ):
+            normalized = "hermes"
         else:
             normalized = "amp"
 
@@ -892,5 +966,7 @@ def normalize_harness_event(engine: str, event: dict) -> list[dict]:
         return _normalize_codex_event(event)
     if normalized == "pi-mono":
         return _normalize_pi_event(event)
+    if normalized == "hermes":
+        return _normalize_hermes_event(event)
     # Personas (legal, eng, etc.) use amp/claude-code format
     return _normalize_amp_like_event(event)

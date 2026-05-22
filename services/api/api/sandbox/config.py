@@ -27,6 +27,10 @@ _SANDBOX_PASSTHROUGH_ENV_KEYS = (
     "CODEX_OTEL_LAMINAR_BASE_URL",
     "LMNR_BASE_URL",
     "LMNR_PROJECT_API_KEY",
+    # Hermes harness model selection. Defaults to Anthropic/Claude inside the
+    # wrapper; deployers can override the provider/model fleet-wide here.
+    "HERMES_PROVIDER",
+    "HERMES_MODEL",
 )
 
 # Keep Claude Code deterministic in the pod while still allowing Centaur-owned
@@ -93,6 +97,8 @@ def build_harness_cmd(engine: str, model: str | None = None) -> list[str]:
         return ["codex-app-wrapper"]
     if engine == "claude-code":
         return ["claude-app-wrapper"]
+    if engine == "hermes":
+        return ["hermes-app-wrapper"]
     return ["sleep", "infinity"]
 
 

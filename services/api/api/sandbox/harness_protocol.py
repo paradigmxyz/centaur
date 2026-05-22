@@ -60,6 +60,8 @@ def is_turn_done(engine: str, event: dict) -> bool:
         return False
     if engine == "codex":
         return t in ("turn.completed", "turn.failed")
+    if engine == "hermes":
+        return t in ("turn.completed", "turn.failed")
     return t == "agent_end"  # pi-mono
 
 
@@ -109,6 +111,9 @@ def extract_result(engine: str, event: dict) -> str | None:
             content = msg.get("content", [])
             if content:
                 return content[-1].get("text", "")
+    if engine == "hermes" and t == "turn.completed":
+        text = event.get("text")
+        return text if isinstance(text, str) and text else None
     return None
 
 
@@ -125,6 +130,9 @@ def extract_thread_id(engine: str, event: dict) -> str | None:
             return event.get("thread_id") or None
     elif engine == "pi-mono" and t == "session":
         return event.get("id") or None
+    elif engine == "hermes":
+        if t == "system" and event.get("subtype") == "init":
+            return event.get("session_id") or None
     return None
 
 

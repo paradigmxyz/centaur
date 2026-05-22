@@ -49,6 +49,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 ARG CLAUDE_CODE_VERSION=2.1.143
 ARG CODEX_VERSION=0.130.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
+ARG HERMES_AGENT_VERSION=0.14.0
 ARG NUSHELL_VERSION=0.112.2
 
 # ── Nushell ─────────────────────────────────────────────────────────────────
@@ -75,6 +76,15 @@ RUN npm install -g --prefer-online --force \
       agent-browser@0.26.0 \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}"
+
+# ── Hermes Agent (NousResearch) + ACP stdio adapter (root, system-wide) ───────
+# Installs the `hermes` CLI and the `hermes-acp` console script that
+# hermes-app-wrapper drives over the Agent Client Protocol. `--check` verifies
+# the ACP dependency + adapter imports resolve at build time.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip3 install --break-system-packages \
+      "hermes-agent[acp]==${HERMES_AGENT_VERSION}" \
+    && hermes-acp --check
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
 # Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium
@@ -146,7 +156,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
     npx -y skills add vercel-labs/agent-browser
-RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/github ~/workspace \
+RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/.hermes ~/github ~/workspace \
     && git config --global init.defaultBranch main \
     && git config --global push.autoSetupRemote true \
     && git config --global --add safe.directory '*' \
@@ -169,6 +179,7 @@ COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
 COPY --link --chmod=755 services/sandbox/amp-wrapper.py /usr/local/bin/amp-wrapper
 COPY --link --chmod=755 services/sandbox/codex-app-wrapper.py /usr/local/bin/codex-app-wrapper
 COPY --link --chmod=755 services/sandbox/claude-app-wrapper.py /usr/local/bin/claude-app-wrapper
+COPY --link --chmod=755 services/sandbox/hermes-app-wrapper.py /usr/local/bin/hermes-app-wrapper
 COPY --link --chmod=755 services/sandbox/harness_adapter.py /usr/local/bin/harness-adapter
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh

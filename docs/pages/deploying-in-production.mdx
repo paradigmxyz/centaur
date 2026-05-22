@@ -83,6 +83,17 @@ Store one secret per enabled harness credential:
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+| Hermes | `hermes` | `--hermes` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+
+Hermes ([NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent))
+runs through its Agent Client Protocol (ACP) stdio server, bridged by
+`hermes-app-wrapper`. It defaults to the Anthropic provider + a Claude model so
+it reuses the same `ANTHROPIC_API_KEY` credential and iron-proxy path as Claude
+Code. To point Hermes at a different provider/model, set `HERMES_PROVIDER` and
+`HERMES_MODEL` in `KUBERNETES_SANDBOX_EXTRA_ENV` (the API also forwards a
+per-spawn model override). For a non-Anthropic provider — e.g. Hermes' native
+Nous models — also store that provider's key (e.g. `NOUS_API_KEY`) and add its
+upstream host to the iron-proxy allowlist.
 
 In normal sandbox mode, containers receive placeholder values such as
 `OPENAI_API_KEY=OPENAI_API_KEY`. [iron-proxy](https://docs.iron.sh) swaps the
@@ -233,7 +244,10 @@ reply with exactly PONG
 ```
 
 Slack messages without a harness flag use Codex. Use `--amp`, `--claude`,
-`--codex`, or `--pi` only when you want to select a specific harness.
+`--codex`, `--pi`, or `--hermes` only when you want to select a specific
+harness. API callers can pass the same selection as `"harness": "hermes"`
+(or `harness=hermes` in the message text) to `/agent/spawn` and
+`/agent/execute`.
 
 Inspect sandbox pods with the labels Centaur actually sets:
 

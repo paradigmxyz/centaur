@@ -98,7 +98,7 @@ _VALID_STDOUT_EVENT_TYPES = frozenset(
     }
 )
 
-_ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono"}
+_ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono", "hermes"}
 _REUSABLE_DB_STATES = {"running", "idle", "delivering", "error", "suspended"}
 
 IDLE_TTL_S = int(os.getenv("IDLE_TTL_S", "86400"))  # 24 hours
