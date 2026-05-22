@@ -543,6 +543,25 @@ async def _get_last_delivered_id(thread_key: str) -> str | None:
     return row["last_delivered_id"] if row else None
 
 
+async def _get_latest_thread_user_id(thread_key: str) -> str | None:
+    """Return the most recent user id recorded for this thread."""
+    pool = _get_pool()
+    row = await pool.fetchrow(
+        "SELECT COALESCE(user_id, metadata->>'user_id') AS user_id "
+        "FROM chat_messages "
+        "WHERE thread_key = $1 "
+        "AND role = 'user' "
+        "AND COALESCE(user_id, metadata->>'user_id') IS NOT NULL "
+        "ORDER BY created_at DESC "
+        "LIMIT 1",
+        thread_key,
+    )
+    user_id = row["user_id"] if row else None
+    if not user_id:
+        return None
+    return str(user_id).strip() or None
+
+
 def _valid_github_handle(value: str) -> str | None:
     candidate = value.strip().strip("@").strip()
     candidate = candidate.rstrip("/").split("/", 1)[0]
@@ -678,14 +697,15 @@ async def _insert_system_message(
     """Insert a static system message with platform formatting rules (idempotent)."""
     pool = _get_pool()
     msg_id = f"system-{thread_key}-{platform}"
+    effective_user_id = user_id or await _get_latest_thread_user_id(thread_key)
     requester_identity = await _resolve_requester_identity(
         platform=platform,
-        user_id=user_id,
+        user_id=effective_user_id,
     )
     context = _build_session_context(
         thread_key,
         platform=platform,
-        user_id=user_id,
+        user_id=effective_user_id,
         requester_identity=requester_identity,
     )
     await pool.execute(
@@ -696,7 +716,7 @@ async def _insert_system_message(
         msg_id,
         thread_key,
         json.dumps([{"type": "text", "text": context}]),
-        bool(user_id),
+        bool(effective_user_id),
     )
 
 
