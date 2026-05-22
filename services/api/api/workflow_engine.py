@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from api.agent import _insert_system_message
 from api import slackbot_client
 from api.runtime_control import (
     ControlPlaneError,
@@ -1194,6 +1195,23 @@ async def do_agent_turn(
         if slackbot_session_id:
             effective_metadata["slackbot_agent_session_id"] = slackbot_session_id
             effective_metadata["slackbot_live_delivery"] = True
+
+        effective_platform = str(effective_delivery.get("platform") or "").strip().lower()
+        if effective_platform == "slack" or effective_thread_key.startswith("slack:"):
+            requester_user_id = (
+                str(
+                    effective_delivery.get("recipient_user_id")
+                    or effective_delivery.get("user_id")
+                    or effective_metadata.get("user_id")
+                    or "",
+                ).strip()
+                or None
+            )
+            await _insert_system_message(
+                effective_thread_key,
+                effective_platform or "slack",
+                user_id=requester_user_id,
+            )
 
         if isinstance(effective_history, list):
             backfilled = 0

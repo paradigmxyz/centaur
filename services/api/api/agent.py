@@ -741,7 +741,7 @@ async def _insert_system_message(
     await pool.execute(
         "INSERT INTO chat_messages (id, thread_key, role, parts, metadata) "
         "VALUES ($1, $2, 'system', $3::jsonb, '{}'::jsonb) "
-        "ON CONFLICT (id) DO UPDATE SET parts = EXCLUDED.parts, created_at = NOW() "
+        "ON CONFLICT (id) DO UPDATE SET parts = EXCLUDED.parts "
         "WHERE $4::boolean",
         msg_id,
         thread_key,

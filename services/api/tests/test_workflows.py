@@ -73,6 +73,19 @@ async def test_create_slack_thread_turn_workflow_eager_start(
             "status": "queued",
         },
     )
+    calls: list[str] = []
+
+    async def fake_insert_system_message(thread_key_arg, platform, *, user_id=None):
+        calls.append("system")
+        assert thread_key_arg == thread_key
+        assert platform == "slack"
+        assert user_id == "U123"
+
+    async def fake_append_message(*args, **kwargs):
+        calls.append("message")
+        return {"ok": True, "message_id": "wf-msg"}
+
+    append_message_mock.side_effect = fake_append_message
 
     with (
         patch(
@@ -86,6 +99,10 @@ async def test_create_slack_thread_turn_workflow_eager_start(
         patch(
             "api.workflow_engine.enqueue_execution",
             new=enqueue_execution_mock,
+        ),
+        patch(
+            "api.workflow_engine._insert_system_message",
+            new=AsyncMock(side_effect=fake_insert_system_message),
         ),
     ):
         response = await client.post(
@@ -118,6 +135,7 @@ async def test_create_slack_thread_turn_workflow_eager_start(
     assert append_message_mock.await_args_list[0].kwargs["message_id"] == "slack:prior"
     assert append_message_mock.await_args_list[0].kwargs["metadata"]["history_backfill"] is True
     assert append_message_mock.await_args_list[0].kwargs["event"]["message"]["role"] == "user"
+    assert calls[:2] == ["system", "message"]
     assert append_message_mock.await_args_list[1].kwargs["message_id"] == "slack:assistant-prior"
     assert append_message_mock.await_args_list[1].kwargs["event"]["message"]["role"] == "assistant"
     assert append_message_mock.await_args_list[2].kwargs["message_id"] == "slack:current"

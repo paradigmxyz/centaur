@@ -760,6 +760,54 @@ class TestBuildSessionContext:
         assert "Requester Identity" in parts[0]["text"]
         assert "Slack user ID: U123" in parts[0]["text"]
 
+    @pytest.mark.asyncio
+    async def test_insert_system_message_preserves_created_at_on_refresh(
+        self, db_pool, monkeypatch
+    ):
+        from api import agent
+
+        thread_key = "test:requester-context-order"
+
+        async def fake_resolve_requester_identity(*, platform, user_id):
+            return {
+                "slack_user_id": user_id,
+                "slack_mention": f"<@{user_id}>",
+                "github_handle": "@alice",
+                "github_handle_source": 'Slack profile custom field "GitHub"',
+                "github_handle_verified": True,
+            }
+
+        monkeypatch.setattr(
+            agent,
+            "_resolve_requester_identity",
+            fake_resolve_requester_identity,
+        )
+
+        await agent._insert_system_message(thread_key, "slack", user_id="U123")
+        first_created_at = await db_pool.fetchval(
+            "SELECT created_at FROM chat_messages WHERE id = $1",
+            f"system-{thread_key}-slack",
+        )
+
+        await db_pool.execute(
+            "UPDATE chat_messages SET created_at = NOW() + INTERVAL '1 minute' "
+            "WHERE id = $1",
+            f"system-{thread_key}-slack",
+        )
+        expected_created_at = await db_pool.fetchval(
+            "SELECT created_at FROM chat_messages WHERE id = $1",
+            f"system-{thread_key}-slack",
+        )
+
+        await agent._insert_system_message(thread_key, "slack", user_id="U123")
+        refreshed_created_at = await db_pool.fetchval(
+            "SELECT created_at FROM chat_messages WHERE id = $1",
+            f"system-{thread_key}-slack",
+        )
+
+        assert first_created_at is not None
+        assert refreshed_created_at == expected_created_at
+
 
 # ── Test 7: Status endpoint ──────────────────────────────────────────────────
 
