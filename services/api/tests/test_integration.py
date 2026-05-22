@@ -579,6 +579,10 @@ class TestBuildSessionContext:
         assert "Requester Identity" in ctx
         assert "GitHub handle from Slack profile: @alice" in ctx
         assert "GitHub handle verified: yes" in ctx
+        assert "GitHub PR Attribution" in ctx
+        assert "Prompted by: @alice" in ctx
+        assert "Assign the PR to the requester when possible: `alice`" in ctx
+        assert "not a Slack response mention rule" in ctx
 
     def test_requester_identity_without_github_handle(self):
         from api.agent import _build_session_context
@@ -600,6 +604,9 @@ class TestBuildSessionContext:
         assert "GitHub handle from Slack profile: unavailable" in ctx
         assert "no GitHub custom field found on Slack profile" in ctx
         assert "GitHub handle verified: no" in ctx
+        assert "GitHub PR Attribution" in ctx
+        assert "do not infer a GitHub username" in ctx
+        assert "Omit the `Prompted by` line" in ctx
 
     def test_extract_github_handle_from_slack_profile(self):
         from api.agent import _extract_github_handle_from_slack_profile

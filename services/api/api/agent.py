@@ -989,13 +989,23 @@ def _build_session_context(
             ]
         )
         if requester_identity.get("github_handle_verified"):
+            github_handle = requester_identity["github_handle"]
+            github_login = github_handle.removeprefix("@")
             lines.extend(
                 [
                     "- GitHub handle from Slack profile: "
-                    f"{requester_identity['github_handle']}",
+                    f"{github_handle}",
                     "- GitHub handle source: "
                     f"{requester_identity['github_handle_source']}",
                     "- GitHub handle verified: yes",
+                    "",
+                    "## GitHub PR Attribution",
+                    "",
+                    "- If you create a GitHub PR for this Slack request, "
+                    f"the PR body MUST contain this standalone line: `Prompted by: {github_handle}`",
+                    "- This is a GitHub PR body requirement, not a Slack response mention rule.",
+                    "- Assign the PR to the requester when possible: "
+                    f"`{github_login}`",
                 ]
             )
         else:
@@ -1005,6 +1015,12 @@ def _build_session_context(
                     "- GitHub handle unavailable reason: "
                     f"{requester_identity['github_handle_unavailable_reason']}",
                     "- GitHub handle verified: no",
+                    "",
+                    "## GitHub PR Attribution",
+                    "",
+                    "- If you create a GitHub PR for this Slack request, do not infer a GitHub "
+                    "username from Slack display name, real name, or email.",
+                    "- Omit the `Prompted by` line unless a verified GitHub handle is present.",
                 ]
             )
 
@@ -1025,7 +1041,9 @@ def _build_session_context(
         )
         if user_id:
             lines.append(
-                f"- After completing a long task, tag the requester with their real Slack mention: <@{user_id}>"
+                "- For Slack replies after completing a long task, tag the requester with "
+                f"their real Slack mention: <@{user_id}>. This Slack reply rule does not "
+                "replace GitHub PR attribution requirements."
             )
 
     lines.extend(["", "---", ""])
