@@ -558,6 +558,69 @@ class TestBuildSessionContext:
         ctx = _build_session_context("test:1")
         assert "Date/Time" in ctx
 
+    def test_requester_identity_with_github_handle(self):
+        from api.agent import _build_session_context
+
+        ctx = _build_session_context(
+            "test:1",
+            platform="slack",
+            user_id="U123",
+            requester_identity={
+                "slack_user_id": "U123",
+                "slack_mention": "<@U123>",
+                "github_handle": "@alice",
+                "github_handle_source": 'Slack profile custom field "GitHub"',
+                "github_handle_verified": True,
+            },
+        )
+
+        assert "Requester Identity" in ctx
+        assert "GitHub handle from Slack profile: @alice" in ctx
+        assert "GitHub handle verified: yes" in ctx
+
+    def test_requester_identity_without_github_handle(self):
+        from api.agent import _build_session_context
+
+        ctx = _build_session_context(
+            "test:1",
+            platform="slack",
+            user_id="U123",
+            requester_identity={
+                "slack_user_id": "U123",
+                "slack_mention": "<@U123>",
+                "github_handle_verified": False,
+                "github_handle_unavailable_reason": (
+                    "no GitHub custom field found on Slack profile"
+                ),
+            },
+        )
+
+        assert "GitHub handle from Slack profile: unavailable" in ctx
+        assert "no GitHub custom field found on Slack profile" in ctx
+        assert "GitHub handle verified: no" in ctx
+
+    def test_extract_github_handle_from_slack_profile(self):
+        from api.agent import _extract_github_handle_from_slack_profile
+
+        handle, source, reason = _extract_github_handle_from_slack_profile(
+            {"custom_fields": {"Affiliations": "GitHub: test-user"}}
+        )
+
+        assert handle == "@test-user"
+        assert source == 'Slack profile custom field "Affiliations"'
+        assert reason == ""
+
+    def test_extract_github_handle_unavailable_reason(self):
+        from api.agent import _extract_github_handle_from_slack_profile
+
+        handle, source, reason = _extract_github_handle_from_slack_profile(
+            {"custom_fields": {"Telegram": "@alice"}}
+        )
+
+        assert handle is None
+        assert source is None
+        assert reason == "no GitHub custom field found on Slack profile"
+
 
 # ── Test 7: Status endpoint ──────────────────────────────────────────────────
 
