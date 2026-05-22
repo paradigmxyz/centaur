@@ -973,6 +973,46 @@ async def _compute_agent_session_header(
     )
 
 
+def _history_has_assistant_message(history_messages: Any) -> bool:
+    if not isinstance(history_messages, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("role") or "").strip().lower() == "assistant"
+        for item in history_messages
+    )
+
+
+async def _thread_has_prior_slack_agent_reply(pool, thread_key: str) -> bool:
+    execution_row = await pool.fetchrow(
+        "SELECT 1 FROM agent_execution_requests "
+        "WHERE thread_key = $1 AND COALESCE(delivery->>'platform', '') = 'slack' "
+        "AND COALESCE(metadata->>'slackbot_agent_session_id', '') <> '' "
+        "LIMIT 1",
+        thread_key,
+    )
+    if execution_row is not None:
+        return True
+    message_row = await pool.fetchrow(
+        "SELECT 1 FROM agent_message_requests "
+        "WHERE thread_key = $1 AND event_json->>'type' = 'assistant' "
+        "LIMIT 1",
+        thread_key,
+    )
+    return message_row is not None
+
+
+async def _should_show_agent_session_header(
+    pool,
+    *,
+    thread_key: str,
+    history_messages: Any,
+) -> bool:
+    if _history_has_assistant_message(history_messages):
+        return False
+    return not await _thread_has_prior_slack_agent_reply(pool, thread_key)
+
+
 def _assignment_display_engine(active: dict[str, Any]) -> str | None:
     engine = _nonempty(active.get("engine"))
     if engine:
@@ -1182,8 +1222,18 @@ async def do_agent_turn(
         session_title = await _compute_agent_session_title(
             ctx._pool, effective_thread_key, selector,
         )
-        session_header = await _compute_agent_session_header(
-            ctx._pool, effective_thread_key, selector,
+        session_header = (
+            await _compute_agent_session_header(
+                ctx._pool,
+                effective_thread_key,
+                selector,
+            )
+            if await _should_show_agent_session_header(
+                ctx._pool,
+                thread_key=effective_thread_key,
+                history_messages=effective_history,
+            )
+            else None
         )
         slackbot_session_id = await slackbot_client.open_agent_session(
             delivery=effective_delivery,
