@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import type { WebClient } from '@slack/web-api'
 import { slackReplyLimits } from '../constants'
 import { logInfo } from '../logging'
@@ -187,8 +188,14 @@ export class CodexSessionRenderer {
       const current = buffer === 'answer' ? state.answerText : state.commentaryText
       const delta = messageDelta(current, assistantMessage)
       if (delta) {
-        if (buffer === 'answer') state.answerText += delta
-        else {
+        if (buffer === 'answer') {
+          logSuspiciousAnswerDelta(agentSessionId, event, state, {
+            current,
+            incoming: assistantMessage,
+            delta
+          })
+          state.answerText += delta
+        } else {
           state.commentaryText += delta
           trackCommentaryText(state, event, delta)
         }
@@ -500,6 +507,61 @@ function messageDelta(current: string, incoming: string): string {
   if (incoming.startsWith(current)) return incoming.slice(current.length)
   if (current.endsWith(incoming)) return ''
   return incoming
+}
+
+function logSuspiciousAnswerDelta(
+  agentSessionId: string,
+  event: any,
+  state: CodexSessionState,
+  texts: { current: string; incoming: string; delta: string }
+): void {
+  const { current, incoming, delta } = texts
+  if (current.length <= 200 || incoming.length <= 200 || delta.length <= 200) return
+
+  const incomingHead = incoming.slice(0, 200)
+  const currentTail = current.slice(-200)
+  const currentContainsIncomingHead = current.includes(incomingHead)
+  const incomingContainsCurrentTail = incoming.includes(currentTail)
+  const largeIncomingRelativeToCurrent = incoming.length > current.length * 0.75
+  const largeDeltaRelativeToCurrent = delta.length > current.length * 0.5
+
+  if (
+    !currentContainsIncomingHead &&
+    !incomingContainsCurrentTail &&
+    !largeIncomingRelativeToCurrent &&
+    !largeDeltaRelativeToCurrent
+  ) {
+    return
+  }
+
+  logInfo('slack_codex_suspicious_answer_delta', {
+    agent_session_id: agentSessionId,
+    centaur_thread_key: event?.centaur_thread_key,
+    execution_id: event?.centaur_execution_id,
+    assignment_generation: event?.centaur_assignment_generation,
+    event_type: event?.type,
+    codex_id: agentMessageEventId(event),
+    codex_item_id: agentMessageEventId(event),
+    codex_item_type: event?.item?.type,
+    codex_item_phase: event?.item?.phase,
+    codex_session_id: state.threadId || event?.session_id || event?.thread_id,
+    current_answer_chars: current.length,
+    incoming_chars: incoming.length,
+    delta_chars: delta.length,
+    answer_chars_after: current.length + delta.length,
+    streamed_answer_chars: state.deliveredAnswerChars,
+    current_hash: textHash(current),
+    incoming_hash: textHash(incoming),
+    delta_hash: textHash(delta),
+    current_contains_incoming_head: currentContainsIncomingHead,
+    incoming_contains_current_tail: incomingContainsCurrentTail,
+    large_incoming_relative_to_current: largeIncomingRelativeToCurrent,
+    large_delta_relative_to_current: largeDeltaRelativeToCurrent
+  })
+}
+
+function textHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16)
 }
 
 function reasoningText(event: any): string {

@@ -1126,6 +1126,150 @@ describe('CodexSessionRenderer', () => {
     expect(result.streamedAnswerChars).toBe(answerText.length)
   })
 
+  it('logs suspicious large answer snapshots without logging answer text', async () => {
+    const logCalls: unknown[][] = []
+    const originalLog = console.log
+    console.log = ((...args: unknown[]) => {
+      logCalls.push(args)
+    }) as typeof console.log
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async () => ({ ok: true, ts: '1778866940.295499' }),
+        appendStream: async () => ({ ok: true }),
+        stopStream: async () => ({ ok: true }),
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+    const answer = 'first generated answer '.repeat(13)
+
+    try {
+      await renderer.event(sessionId, {
+        type: 'item.started',
+        item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer' }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.agentMessage.delta',
+        itemId: 'msg-1',
+        delta: answer
+      })
+      await renderer.event(sessionId, {
+        type: 'item.completed',
+        centaur_thread_key: 'slack:C123:1778866921.505479',
+        centaur_execution_id: 'exe-test',
+        centaur_assignment_generation: 3,
+        session_id: 'codex-session-test',
+        item: {
+          id: 'msg-1',
+          type: 'agentMessage',
+          phase: 'final_answer',
+          text: `${answer}\n${answer}`
+        }
+      })
+    } finally {
+      console.log = originalLog
+    }
+
+    const suspiciousLogs = logCalls.filter(
+      call => call[0] === 'slack_codex_suspicious_answer_delta'
+    )
+    expect(suspiciousLogs).toHaveLength(1)
+    expect(suspiciousLogs[0]?.[1]).toMatchObject({
+      agent_session_id: sessionId,
+      centaur_thread_key: 'slack:C123:1778866921.505479',
+      execution_id: 'exe-test',
+      assignment_generation: 3,
+      event_type: 'item.completed',
+      codex_id: 'msg-1',
+      codex_item_id: 'msg-1',
+      codex_item_type: 'agentMessage',
+      codex_item_phase: 'final_answer',
+      codex_session_id: 'codex-session-test',
+      current_answer_chars: answer.length,
+      incoming_chars: answer.length * 2 + 1,
+      delta_chars: answer.length + 1,
+      answer_chars_after: answer.length * 2 + 1,
+      current_contains_incoming_head: true,
+      incoming_contains_current_tail: true,
+      large_incoming_relative_to_current: true,
+      large_delta_relative_to_current: true
+    })
+    expect(suspiciousLogs[0]?.[1]).toEqual(
+      expect.objectContaining({
+        current_hash: expect.any(String),
+        incoming_hash: expect.any(String),
+        delta_hash: expect.any(String)
+      })
+    )
+    expect(JSON.stringify(suspiciousLogs)).not.toContain(answer.slice(0, 30))
+  })
+
+  it('does not log suspicious answer deltas for small incremental answer updates', async () => {
+    const logCalls: unknown[][] = []
+    const originalLog = console.log
+    console.log = ((...args: unknown[]) => {
+      logCalls.push(args)
+    }) as typeof console.log
+    const client = {
+      assistant: {
+        threads: {
+          setStatus: async () => ({ ok: true })
+        }
+      },
+      chat: {
+        startStream: async () => ({ ok: true, ts: '1778866940.295499' }),
+        appendStream: async () => ({ ok: true }),
+        stopStream: async () => ({ ok: true }),
+        update: async () => ({ ok: true })
+      }
+    }
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    try {
+      await renderer.event(sessionId, {
+        type: 'item.started',
+        item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer' }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.agentMessage.delta',
+        itemId: 'msg-1',
+        delta: 'ordinary answer text '.repeat(13)
+      })
+      await renderer.event(sessionId, {
+        type: 'item.agentMessage.delta',
+        itemId: 'msg-1',
+        delta: 'done'
+      })
+    } finally {
+      console.log = originalLog
+    }
+
+    expect(
+      logCalls.filter(call => call[0] === 'slack_codex_suspicious_answer_delta')
+    ).toHaveLength(0)
+  })
+
   it('reports only Slack-visible streamed answer chars after live text is capped', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
