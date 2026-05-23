@@ -132,6 +132,17 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "subPath": { "type": "string" }
+          }
+        }
+      }
+    },
     "runnerAccess": {
       "type": "object",
       "properties": {

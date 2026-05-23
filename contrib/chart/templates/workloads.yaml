@@ -73,6 +73,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+              {{- with .Values.postgres.persistence.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler

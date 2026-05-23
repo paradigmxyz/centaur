@@ -159,6 +159,7 @@ postgres:
     enabled: true
     size: 20Gi
     storageClassName: ""
+    subPath: ""
   resources: {}
 
 laminar:
