@@ -268,6 +268,114 @@ describe('normalizeSlackEnvelope', () => {
     ])
   })
 
+  it('does not duplicate text when Slack sends both rich_text blocks and event.text', async () => {
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-rich-text-dup',
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          channel: 'C123',
+          channel_type: 'channel',
+          ts: '1778875070.942789',
+          text: '<@UBOT> how would we release this to pypi?',
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'user', user_id: 'UBOT' },
+                    { type: 'text', text: ' how would we release this to pypi?' }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      botUserId: 'UBOT',
+      client
+    })
+
+    expect(normalized?.parts).toEqual([
+      { type: 'text', text: 'how would we release this to pypi?' }
+    ])
+  })
+
+  it('does not duplicate history backfill text when blocks and text both present', async () => {
+    const replies = mock(async () => ({
+      ok: true,
+      messages: [
+        {
+          type: 'message',
+          user: 'U111',
+          channel: 'C123',
+          ts: '1778875060.000100',
+          text: 'https://example.com looks interesting',
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'link', url: 'https://example.com', text: 'https://example.com' },
+                    { type: 'text', text: ' looks interesting' }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          type: 'message',
+          user: 'U123',
+          channel: 'C123',
+          ts: '1778875070.942789',
+          text: '<@UBOT> investigate'
+        }
+      ]
+    }))
+
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-history-dup',
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          channel: 'C123',
+          channel_type: 'channel',
+          thread_ts: '1778875060.000100',
+          ts: '1778875070.942789',
+          text: '<@UBOT> investigate'
+        }
+      },
+      botUserId: 'UBOT',
+      client: {
+        token: 'xoxb-test-token',
+        conversations: { replies }
+      } as any
+    })
+
+    expect(normalized?.history_messages).toEqual([
+      {
+        message_id: 'slack:T123:C123:1778875060.000100',
+        role: 'user',
+        parts: [
+          { type: 'text', text: 'https://example.com (https://example.com) looks interesting' }
+        ],
+        user_id: 'U111',
+        metadata: { platform: 'slack', history_backfill: true }
+      }
+    ])
+  })
+
   it('keeps mention handoff actionable when Slack thread history fetch fails', async () => {
     const replies = mock(async () => {
       throw new Error('ratelimited')

@@ -49,10 +49,8 @@ export async function normalizeSlackEnvelope(opts: {
   if (!teamId) return null
 
   const threadTs = event.thread_ts ?? event.ts
-  const text = normalizeSlackText(event.text ?? '', opts.botUserId)
-  const richText = normalizeRichTextBlocks(event.blocks)
+  const textPart = preferRichText(event.text, event.blocks, opts.botUserId)
   const parts: NormalizedPart[] = []
-  const textPart = [richText, text].filter(Boolean).join('\n').trim()
   if (textPart) parts.push({ type: 'text', text: textPart })
 
   for (const file of event.files ?? []) {
@@ -176,10 +174,8 @@ async function partsFromSlackMessage(
   message: SlackThreadMessage,
   botUserId?: string
 ): Promise<NormalizedPart[]> {
-  const text = normalizeSlackText(message.text ?? '', botUserId)
-  const richText = normalizeRichTextBlocks(message.blocks)
+  const textPart = preferRichText(message.text, message.blocks, botUserId)
   const parts: NormalizedPart[] = []
-  const textPart = [richText, text].filter(Boolean).join('\n').trim()
   if (textPart) parts.push({ type: 'text', text: textPart })
 
   for (const file of message.files ?? []) {
@@ -187,6 +183,21 @@ async function partsFromSlackMessage(
     if (part) parts.push(part)
   }
   return parts
+}
+
+function preferRichText(
+  rawText: string | undefined,
+  blocks: unknown[] | undefined,
+  botUserId?: string
+): string {
+  const richText = normalizeRichTextBlocks(blocks)
+  if (richText) return stripBotMention(richText, botUserId)
+  return normalizeSlackText(rawText ?? '', botUserId)
+}
+
+function stripBotMention(text: string, botUserId?: string): string {
+  if (!botUserId) return text.trim()
+  return text.replaceAll(`@${botUserId}`, '').trim()
 }
 
 function compareSlackTs(a: string, b: string): number {
