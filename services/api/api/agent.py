@@ -1037,6 +1037,7 @@ def _build_session_context(
                 "- Prefer concise, well-structured markdown; long replies may be split across multiple Slack messages",
                 "- Markdown tables are allowed and may render as native Slack tables when the structure is clean",
                 "- NEVER put links/URLs inside code blocks (``` ```) — they won't be clickable. Use markdown tables or plain text with `[text](url)` links instead",
+                "- For links to Slack threads or messages, always use the canonical `https://slack.com/archives/{CHANNEL_ID}/p{TS_WITHOUT_DOT}` form. Slack redirects this to the correct workspace. Do not invent or hardcode a `<workspace>.slack.com` subdomain.",
             ]
         )
         if user_id:
