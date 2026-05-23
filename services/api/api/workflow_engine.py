@@ -34,6 +34,7 @@ import structlog
 
 from api.agent import _insert_system_message
 from api import slackbot_client
+from api.harness_config import default_harness
 from api.runtime_control import (
     ControlPlaneError,
     append_message,
@@ -931,7 +932,7 @@ async def _compute_agent_session_title(
     if persona and (not harness or harness == persona):
         harness = _persona_default_engine(persona) or (None if harness == persona else harness)
     if not persona and not harness:
-        harness = "codex"
+        harness = default_harness()
     parts = ["Centaur"]
     if persona:
         parts.append(str(persona))

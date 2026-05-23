@@ -35,6 +35,7 @@ from api.sandbox.harness_protocol import (
     messages_to_content_blocks,
 )
 from api.deps import mint_sandbox_token
+from api.harness_config import default_harness
 from api.sandbox.normalize import normalize_harness_event
 from api.sandbox.registry import get_backend
 from api.trace_context import get_or_create_thread_trace_id
@@ -764,7 +765,7 @@ def _resolve_harness_profile(
     ``harness`` is the legacy caller-facing name for what is now treated as
     the sandbox engine. Precedence is:
     explicit ``engine_override`` > explicit differing ``harness`` >
-    persona-declared engine > ``codex`` default.
+    persona-declared engine > deployment default.
     """
     from api.app import get_tool_manager
 
@@ -804,7 +805,7 @@ def _resolve_harness_profile(
     elif normalized_harness:
         engine = normalized_harness
     else:
-        engine = "codex"
+        engine = default_harness()
 
     if persona_info:
         return engine, persona_info.name, persona_info.default_repo
@@ -816,7 +817,7 @@ def _resolve_harness_profile(
 
 async def get_or_spawn(
     thread_key: str,
-    harness: str = "codex",
+    harness: str | None = None,
     *,
     engine: str | None = None,
     persona: str | None = None,
@@ -866,9 +867,11 @@ async def get_or_spawn(
     pool = _get_pool()
     thread_trace_id = await get_or_create_thread_trace_id(pool, thread_key)
 
+    effective_harness = harness or default_harness()
+
     # Resolve harness profile (engine, persona, repo) once for both warm and cold paths
     resolved_engine, resolved_persona, repo = _resolve_harness_profile(
-        harness, persona=persona, engine_override=engine
+        effective_harness, persona=persona, engine_override=engine
     )
 
     # Try warm pool first
@@ -876,14 +879,14 @@ async def get_or_spawn(
         not engine
         and not old_agent_thread_id
         and not old_inflight_turn_id
-        and not (harness == "amp" and resolved_engine == "codex")
+        and not (effective_harness == "amp" and resolved_engine == "codex")
     )
     if should_try_warm:
         from api.warm_pool import claim_container
 
         trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
         claimed = await claim_container(
-            thread_key, harness, persona=resolved_persona, repo=repo, trace_id=trace_id
+            thread_key, effective_harness, persona=resolved_persona, repo=repo, trace_id=trace_id
         )
         if claimed:
             if old_agent_thread_id:
@@ -905,14 +908,14 @@ async def get_or_spawn(
 
     # Cold spawn
     resolved_engine, resolved_persona, repo = _resolve_harness_profile(
-        harness, persona=persona, engine_override=engine
+        effective_harness, persona=persona, engine_override=engine
     )
     backend = get_backend()
     await _evict_idle_sessions_for_capacity(backend)
     trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
     session = await backend.create(
         thread_key,
-        harness,
+        effective_harness,
         resolved_engine,
         persona=resolved_persona,
         repo=repo,

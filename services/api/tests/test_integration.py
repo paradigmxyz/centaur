@@ -443,7 +443,7 @@ class TestResolveHarnessProfile:
             1. engine_override
             2. harness (when DIFFERENT from persona's declared engine)
             3. persona.engine
-            4. system default ("codex")
+            4. deployment default (CENTAUR_DEFAULT_HARNESS, falling back to "codex")
 
         Regression-locked: the previous resolver hardcoded engine="codex"
         for harness=="amp" regardless of persona, silently dropping the
@@ -487,7 +487,10 @@ class TestResolveHarnessProfile:
         # Rule 4: no override, no persona → harness if given, else system default.
         assert resolve("amp", persona=None)[0] == "amp"
         assert resolve("claude-code", persona=None)[0] == "claude-code"
+        monkeypatch.delenv("CENTAUR_DEFAULT_HARNESS", raising=False)
         assert resolve(None, persona=None)[0] == "codex"
+        monkeypatch.setenv("CENTAUR_DEFAULT_HARNESS", "claude")
+        assert resolve(None, persona=None)[0] == "claude-code"
 
     def test_unknown_harness_or_persona_is_rejected(self, monkeypatch):
         import sys

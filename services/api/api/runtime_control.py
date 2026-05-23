@@ -24,6 +24,7 @@ from api.agent import (
     stop_session,
 )
 from api import slackbot_client
+from api.harness_config import default_harness
 from api.observability import (
     ExecutionObservationAccumulator,
     extract_usage_metrics,
@@ -188,7 +189,7 @@ def _agent_session_title(
 ) -> str:
     parts = ["Centaur"]
     persona = (persona_id or "").strip()
-    runtime = (engine or harness or "codex").strip()
+    runtime = (engine or harness or default_harness()).strip()
     if persona:
         parts.append(persona)
     if runtime and runtime != persona:
@@ -459,19 +460,19 @@ async def spawn_assignment(
     )
 
     if active_assignment:
-        effective_harness = active_assignment.get("harness") or "codex"
+        effective_harness = active_assignment.get("harness") or default_harness()
         effective_engine = active_assignment.get("engine")
         effective_persona_id = active_assignment.get("persona_id")
         effective_agents_md_override = active_assignment.get("agents_md_override")
     else:
         # Explicit harness wins; otherwise inherit from the persona's declared
-        # engine; otherwise default to codex.
+        # engine; otherwise use the deployment default.
         if harness:
             effective_harness = harness
         elif persona_info is not None:
             effective_harness = persona_info.engine
         else:
-            effective_harness = "codex"
+            effective_harness = default_harness()
         effective_engine = engine
         effective_persona_id = persona_id
         effective_agents_md_override = agents_md_override
@@ -1316,7 +1317,7 @@ async def enqueue_execution(
 
     _worker_wake.set()
 
-    resolved_harness = str(active["harness"] or harness or "codex")
+    resolved_harness = str(active["harness"] or harness or default_harness())
     log.info(
         "execute_queued",
         thread_key=thread_key,

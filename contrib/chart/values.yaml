@@ -54,6 +54,7 @@ api:
     tag: latest
     pullPolicy: Always
   executionWorkerEnabled: false
+  defaultHarness: codex
   workflowWorkerEnabled: true
   warmPoolEnabled: false
   slackEtlEnabled: false
