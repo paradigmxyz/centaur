@@ -344,6 +344,15 @@ spec:
           port: 80
         - protocol: TCP
           port: 5432
+{{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "centaur.onepasswordConnectAppName" . | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ include "centaur.onepasswordConnectPort" . }}
+{{- end }}
 ---
 {{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
 # Targets the 1Password Connect subchart's pods, which carry

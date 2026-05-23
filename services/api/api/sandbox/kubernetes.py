@@ -117,6 +117,21 @@ def _proxy_health_port() -> int:
     return _env_int("KUBERNETES_IRON_PROXY_HEALTH_PORT", 9090)
 
 
+def _op_connect_app_name() -> str:
+    return os.getenv("KUBERNETES_OP_CONNECT_APP_NAME", "onepassword-connect").strip()
+
+
+def _op_connect_port() -> int:
+    return _env_int("KUBERNETES_OP_CONNECT_PORT", 8080)
+
+
+def _uses_op_connect_secret_source() -> bool:
+    return (
+        os.getenv("KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+        == "onepassword-connect"
+    )
+
+
 def _proxy_image() -> str:
     return os.getenv("KUBERNETES_IRON_PROXY_IMAGE", "centaur-iron-proxy:latest")
 
@@ -164,10 +179,7 @@ def _proxy_iron_env(
             },
         }
     ]
-    if (
-        os.getenv("KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
-        == "onepassword-connect"
-    ):
+    if _uses_op_connect_secret_source():
         connect_host = os.getenv("KUBERNETES_OP_CONNECT_HOST", "").strip()
         if connect_host:
             env.append({"name": "OP_CONNECT_HOST", "value": connect_host})
@@ -668,6 +680,32 @@ class KubernetesExecutorBackend(SandboxBackend):
         for _, port in sorted(pg_listen_ports.items(), key=lambda item: item[1]):
             sandbox_to_proxy_ports.append({"protocol": "TCP", "port": port})
 
+        proxy_egress = [
+            {
+                "to": [{"podSelector": {"matchLabels": _api_pod_match_labels()}}],
+                "ports": [{"protocol": "TCP", "port": 8000}],
+            },
+            {
+                "ports": [{"protocol": "TCP", "port": 443}],
+            },
+            {
+                "ports": [{"protocol": "TCP", "port": 5432}],
+            },
+        ]
+        if _uses_op_connect_secret_source():
+            proxy_egress.append(
+                {
+                    "to": [
+                        {
+                            "podSelector": {
+                                "matchLabels": {"app": _op_connect_app_name()}
+                            }
+                        }
+                    ],
+                    "ports": [{"protocol": "TCP", "port": _op_connect_port()}],
+                }
+            )
+
         await self._networking_api().create_namespaced_network_policy(
             _namespace(),
             {
@@ -749,24 +787,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                             "ports": sandbox_to_proxy_ports,
                         }
                     ],
-                    "egress": [
-                        {
-                            "to": [
-                                {
-                                    "podSelector": {
-                                        "matchLabels": _api_pod_match_labels()
-                                    }
-                                }
-                            ],
-                            "ports": [{"protocol": "TCP", "port": 8000}],
-                        },
-                        {
-                            "ports": [{"protocol": "TCP", "port": 443}],
-                        },
-                        {
-                            "ports": [{"protocol": "TCP", "port": 5432}],
-                        },
-                    ],
+                    "egress": proxy_egress,
                 },
             },
         )

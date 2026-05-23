@@ -660,6 +660,14 @@ async def test_create_builds_per_sandbox_proxy_resources(
         "centaur.ai/iron-proxy": "true",
         "centaur.ai/sandbox-id": session.sandbox_id,
     }
+    assert not any(
+        egress.get("to", [{}])[0]
+        .get("podSelector", {})
+        .get("matchLabels", {})
+        .get("app")
+        == "onepassword-connect"
+        for egress in fake_networking.created_network_policies[1][1]["spec"]["egress"]
+    )
 
     replacement = await backend.create("slack:C123:123.456", "amp", "amp")
     assert replacement.sandbox_id != session.sandbox_id
@@ -690,6 +698,37 @@ async def test_per_sandbox_proxy_uses_bootstrap_secret_for_onepassword(
         {"secretRef": {"name": "centaur-infra-env"}},
         {"secretRef": {"name": "centaur-bootstrap"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_per_sandbox_proxy_allows_onepassword_connect_egress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    fake_networking = FakeNetworkingApi()
+    backend._networking = fake_networking
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+    monkeypatch.setenv(
+        "KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE", "onepassword-connect"
+    )
+    monkeypatch.setenv("KUBERNETES_OP_CONNECT_APP_NAME", "custom-connect")
+    monkeypatch.setenv("KUBERNETES_OP_CONNECT_PORT", "8181")
+
+    await backend._create_proxy_network_policies("sandbox-pod", {})
+
+    proxy_policy = fake_networking.created_network_policies[1][1]
+    assert {
+        "to": [
+            {
+                "podSelector": {
+                    "matchLabels": {
+                        "app": "custom-connect",
+                    }
+                }
+            }
+        ],
+        "ports": [{"protocol": "TCP", "port": 8181}],
+    } in proxy_policy["spec"]["egress"]
 
 
 @pytest.mark.asyncio
