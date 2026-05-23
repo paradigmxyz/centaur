@@ -984,22 +984,20 @@ def _history_has_assistant_message(history_messages: Any) -> bool:
 
 
 async def _thread_has_prior_slack_agent_reply(pool, thread_key: str) -> bool:
-    execution_row = await pool.fetchrow(
-        "SELECT 1 FROM agent_execution_requests "
+    if await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM agent_execution_requests "
         "WHERE thread_key = $1 AND COALESCE(delivery->>'platform', '') = 'slack' "
-        "AND COALESCE(metadata->>'slackbot_agent_session_id', '') <> '' "
-        "LIMIT 1",
+        "AND COALESCE(metadata->>'slackbot_agent_session_id', '') <> '')",
         thread_key,
-    )
-    if execution_row is not None:
+    ):
         return True
-    message_row = await pool.fetchrow(
-        "SELECT 1 FROM agent_message_requests "
-        "WHERE thread_key = $1 AND event_json->>'type' = 'assistant' "
-        "LIMIT 1",
-        thread_key,
+    return bool(
+        await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM agent_message_requests "
+            "WHERE thread_key = $1 AND event_json->>'type' = 'assistant')",
+            thread_key,
+        )
     )
-    return message_row is not None
 
 
 async def _should_show_agent_session_header(
