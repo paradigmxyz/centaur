@@ -1542,7 +1542,120 @@ _ALLOWED_TABLES = {
     "agent_final_delivery_outbox", "agent_spawn_requests",
     "agent_release_requests",
 }
+_ALLOWED_SCHEMAS = {"public"}
 _BLOCKED_PATTERNS = {"drop ", "delete ", "insert ", "update ", "alter ", "create ", "truncate ", "grant ", "revoke "}
+# Server-side functions that can read arbitrary files, cross-DB-link, or
+# perturb other backends. None of these are needed for the introspection
+# queries the SYSTEM_PROMPT advertises; refuse them outright.
+_BLOCKED_FUNCTIONS = (
+    "pg_read_file",
+    "pg_read_server_files",
+    "pg_read_binary_file",
+    "pg_ls_dir",
+    "pg_stat_file",
+    "lo_import",
+    "lo_export",
+    "dblink",
+    "dblink_exec",
+    "pg_terminate_backend",
+    "pg_cancel_backend",
+)
+# Match SQL noise so the table-reference scan does not trip on identifiers
+# that appear inside string literals or comments.
+_SQL_NOISE_RE = re.compile(
+    r"""'(?:[^']|'')*'|--[^\n]*|/\*[\s\S]*?\*/|\$(\w*)\$[\s\S]*?\$\1\$""",
+    re.MULTILINE,
+)
+_TABLE_REF_RE = re.compile(
+    # Match table identifier after FROM / JOIN / INTO / USING / UPDATE.
+    # Accepts unquoted (foo, public.foo) and quoted ("foo", "public"."foo")
+    # forms, optionally schema-qualified.
+    r"""\b(?:from|join|into|using|update)\s+
+        (?P<ident>
+            (?:"(?:[^"]|"")+"|[A-Za-z_][\w$]*)
+            (?:\s*\.\s*(?:"(?:[^"]|"")+"|[A-Za-z_][\w$]*))?
+        )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _strip_sql_noise(sql: str) -> str:
+    """Replace string literals and comments with spaces.
+
+    Preserves overall character count so callsite line/column reporting
+    (if any) stays aligned. Conservative — leaves anything we cannot
+    classify untouched.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        return " " * (match.end() - match.start())
+
+    return _SQL_NOISE_RE.sub(_replace, sql)
+
+
+def _normalize_table_ref(ident: str) -> tuple[str, str | None]:
+    """Split ``schema.table`` / ``"schema"."table"`` / ``table`` into
+    ``(table, schema_or_None)``, lowercased with quotes stripped."""
+    parts: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    i = 0
+    while i < len(ident):
+        c = ident[i]
+        if c == '"':
+            if in_quotes and i + 1 < len(ident) and ident[i + 1] == '"':
+                current.append('"')
+                i += 2
+                continue
+            in_quotes = not in_quotes
+            i += 1
+            continue
+        if c == "." and not in_quotes:
+            parts.append("".join(current).strip())
+            current = []
+            i += 1
+            continue
+        current.append(c)
+        i += 1
+    parts.append("".join(current).strip())
+    parts = [p.lower() for p in parts if p]
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[-1], parts[-2]
+
+
+def _validate_query_safety(sql: str) -> None:
+    """Reject queries that touch non-allowlisted tables or dangerous
+    functions. Best-effort token-level scan; pairs with the
+    ``startswith('select')`` gate and the blocked-keywords check as
+    defense-in-depth, restoring the allowlist behavior advertised in the
+    docstring and SYSTEM_PROMPT.md.
+    """
+    scrubbed = _strip_sql_noise(sql)
+    scrubbed_lower = scrubbed.lower()
+
+    for fn in _BLOCKED_FUNCTIONS:
+        if re.search(rf"\b{re.escape(fn)}\s*\(", scrubbed_lower):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Query uses blocked function: {fn}",
+            )
+
+    for match in _TABLE_REF_RE.finditer(scrubbed):
+        table, schema = _normalize_table_ref(match.group("ident"))
+        if schema is not None and schema not in _ALLOWED_SCHEMAS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Query references non-allowlisted schema '{schema}'",
+            )
+        if table not in _ALLOWED_TABLES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Query references table '{table}' outside the read "
+                    f"allowlist (allowed: {sorted(_ALLOWED_TABLES)})"
+                ),
+            )
 
 
 @router.post("/query", dependencies=[Depends(verify_api_key)])
@@ -1565,6 +1678,7 @@ async def query_db(request: Request):
     for pat in _BLOCKED_PATTERNS:
         if pat in sql_lower:
             raise HTTPException(status_code=400, detail=f"Query contains blocked keyword: {pat.strip()}")
+    _validate_query_safety(sql)
 
     pool = request.app.state.db_pool
     try:
