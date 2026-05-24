@@ -86,8 +86,9 @@ Store one secret per enabled harness credential:
 | Hermes | `hermes` | `--hermes` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 
 Hermes ([NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent))
-runs through its Agent Client Protocol (ACP) stdio server, bridged by
-`hermes-app-wrapper`. It defaults to the Anthropic provider + a Claude model so
+is driven by `hermes-app-wrapper`, which runs Hermes' native agent loop in
+process and streams its events into Centaur. It defaults to the Anthropic
+provider + a Claude model so
 it reuses the same `ANTHROPIC_API_KEY` credential and iron-proxy path as Claude
 Code. To point Hermes at a different provider/model, set `HERMES_PROVIDER` and
 `HERMES_MODEL` in `KUBERNETES_SANDBOX_EXTRA_ENV` (the API also forwards a

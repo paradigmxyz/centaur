@@ -77,14 +77,15 @@ RUN npm install -g --prefer-online --force \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}"
 
-# ── Hermes Agent (NousResearch) + ACP stdio adapter (root, system-wide) ───────
-# Installs the `hermes` CLI and the `hermes-acp` console script that
-# hermes-app-wrapper drives over the Agent Client Protocol. `--check` verifies
-# the ACP dependency + adapter imports resolve at build time.
+# ── Hermes Agent (NousResearch), root system-wide ────────────────────────────
+# hermes-app-wrapper drives Hermes' native AIAgent Python API in process (no
+# ACP — that protocol is externally governed and an unstable seam to depend on),
+# so we install the base package only. The import check verifies the embedding
+# API (run_agent.AIAgent + supporting modules) resolves at build time.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages \
-      "hermes-agent[acp]==${HERMES_AGENT_VERSION}" \
-    && hermes-acp --check
+      "hermes-agent==${HERMES_AGENT_VERSION}" \
+    && python3 -c "import run_agent, hermes_state, hermes_cli.runtime_provider, hermes_cli.tools_config"
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
 # Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium
