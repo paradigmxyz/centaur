@@ -37,13 +37,22 @@ class HmacAuth:
 
 
 @dataclass(frozen=True)
+class BearerAuth:
+    secret_ref: str
+    header: str = "Authorization"
+    scheme: str = "Bearer"
+
+
+@dataclass(frozen=True)
 class WebhookSpec:
     slug: str
-    auth: str | HmacAuth = "none"
+    auth: str | HmacAuth | BearerAuth = "none"
     provider: str | None = None
     trigger_key: HeaderTriggerKey | str | None = None
     allowed_methods: list[str] = field(default_factory=lambda: ["POST"])
-    allowed_content_types: list[str] = field(default_factory=lambda: ["application/json"])
+    allowed_content_types: list[str] = field(
+        default_factory=lambda: ["application/json"]
+    )
 
 
 @dataclass(frozen=True)
@@ -77,13 +86,15 @@ def _coerce_trigger_key(value: Any) -> HeaderTriggerKey | str | None:
         kind = value.get("type", "header")
         if kind == "header" and isinstance(value.get("header"), str):
             return HeaderTriggerKey(value["header"])
-    raise ValueError("trigger_key must be a string, HeaderTriggerKey, or header trigger dict")
+    raise ValueError(
+        "trigger_key must be a string, HeaderTriggerKey, or header trigger dict"
+    )
 
 
-def _coerce_auth(value: Any) -> str | HmacAuth:
+def _coerce_auth(value: Any) -> str | HmacAuth | BearerAuth:
     if value is None:
         return "none"
-    if isinstance(value, HmacAuth):
+    if isinstance(value, (HmacAuth, BearerAuth)):
         return value
     if isinstance(value, str):
         return value
@@ -99,7 +110,10 @@ def _coerce_auth(value: Any) -> str | HmacAuth:
         if kind == "hmac":
             data = {k: v for k, v in value.items() if k not in {"type", "kind"}}
             return HmacAuth(**data)
-    raise ValueError("auth must be 'none', HmacAuth, or an auth dict")
+        if kind == "bearer":
+            data = {k: v for k, v in value.items() if k not in {"type", "kind"}}
+            return BearerAuth(**data)
+    raise ValueError("auth must be 'none', HmacAuth, BearerAuth, or an auth dict")
 
 
 def _coerce_spec(raw: Any) -> WebhookSpec:
@@ -135,6 +149,17 @@ def _validate_spec(spec: WebhookSpec) -> None:
             raise ValueError("HMAC auth requires secret_ref")
         if not spec.auth.signature_header:
             raise ValueError("HMAC auth requires signature_header")
+    elif isinstance(spec.auth, BearerAuth):
+        if not spec.auth.secret_ref:
+            raise ValueError("bearer auth requires secret_ref")
+        if not spec.auth.header:
+            raise ValueError("bearer auth requires header")
+        if not spec.auth.scheme:
+            raise ValueError("bearer auth requires scheme")
+        if any(ch.isspace() for ch in spec.auth.header) or ":" in spec.auth.header:
+            raise ValueError("bearer auth header must be an HTTP header name")
+        if any(ch.isspace() for ch in spec.auth.scheme):
+            raise ValueError("bearer auth scheme must not contain whitespace")
     else:
         raise ValueError("unsupported webhook auth")
     if not spec.allowed_methods:
@@ -192,6 +217,8 @@ def register_workflow_webhooks(
                 normalized_spec.auth
                 if isinstance(normalized_spec.auth, str)
                 else "hmac"
+                if isinstance(normalized_spec.auth, HmacAuth)
+                else "bearer"
             ),
             provider=normalized_spec.provider,
         )

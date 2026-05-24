@@ -167,6 +167,91 @@ async def test_hmac_workflow_webhook_enqueues_run_with_valid_signature(
 
 
 @pytest.mark.asyncio
+async def test_bearer_workflow_webhook_enqueues_run_with_valid_token(
+    anonymous_client,
+    db_pool,
+    monkeypatch,
+    tmp_path,
+):
+    from api.workflow_engine import discover_workflow_handlers
+
+    token = "test-webhook-token"
+    monkeypatch.setenv("TEST_WEBHOOK_TOKEN", token)
+    workflow_name = f"webhook_bearer_{uuid.uuid4().hex}"
+    slug = f"bearer-{uuid.uuid4().hex}"
+    workflow_file = tmp_path / "webhook_bearer.py"
+    workflow_file.write_text(
+        "WORKFLOW_NAME = " + repr(workflow_name) + "\n"
+        "WEBHOOKS = [{\n"
+        "    'slug': " + repr(slug) + ",\n"
+        "    'auth': {\n"
+        "        'type': 'bearer',\n"
+        "        'secret_ref': 'TEST_WEBHOOK_TOKEN',\n"
+        "    },\n"
+        "}]\n"
+        "async def handler(inp, ctx):\n"
+        "    return {'received': inp['webhook']['body']}\n",
+    )
+    monkeypatch.setenv("WORKFLOW_DIRS", str(tmp_path))
+    discover_workflow_handlers()
+
+    response = await anonymous_client.post(
+        f"/api/webhooks/{slug}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"hello": "bearer"},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["workflow_name"] == workflow_name
+
+    run_row = await db_pool.fetchrow(
+        "SELECT input_json FROM workflow_runs WHERE run_id = $1",
+        body["run_id"],
+    )
+    run_input = _jsonb(run_row["input_json"])
+    assert run_input["webhook"]["body"] == {"hello": "bearer"}
+    assert "authorization" not in run_input["webhook"]["headers"]
+
+
+@pytest.mark.asyncio
+async def test_bearer_workflow_webhook_rejects_invalid_token_without_run(
+    anonymous_client,
+    db_pool,
+    monkeypatch,
+    tmp_path,
+):
+    from api.workflow_engine import discover_workflow_handlers
+
+    monkeypatch.setenv("TEST_WEBHOOK_TOKEN", "test-webhook-token")
+    slug = f"bearer-reject-{uuid.uuid4().hex}"
+    workflow_file = tmp_path / "webhook_bearer_reject.py"
+    workflow_file.write_text(
+        "WORKFLOW_NAME = 'webhook_bearer_reject'\n"
+        "WEBHOOKS = [{\n"
+        f"    'slug': {slug!r},\n"
+        "    'auth': {'type': 'bearer', 'secret_ref': 'TEST_WEBHOOK_TOKEN'},\n"
+        "}]\n"
+        "async def handler(inp, ctx):\n"
+        "    return {'ok': True}\n",
+    )
+    monkeypatch.setenv("WORKFLOW_DIRS", str(tmp_path))
+    discover_workflow_handlers()
+
+    response = await anonymous_client.post(
+        f"/api/webhooks/{slug}",
+        headers={"Authorization": "Bearer wrong-token"},
+        json={"hello": "bad-token"},
+    )
+
+    assert response.status_code == 401
+    run_count = await db_pool.fetchval(
+        "SELECT COUNT(*)::int FROM workflow_runs WHERE workflow_name = 'webhook_bearer_reject'",
+    )
+    assert run_count == 0
+
+
+@pytest.mark.asyncio
 async def test_workflow_webhook_parses_form_payload_json(
     anonymous_client,
     db_pool,
@@ -201,7 +286,7 @@ async def test_workflow_webhook_parses_form_payload_json(
     monkeypatch.setenv("WORKFLOW_DIRS", str(tmp_path))
     discover_workflow_handlers()
 
-    raw_body = b'payload=%7B%22hello%22%3A%22form%22%7D'
+    raw_body = b"payload=%7B%22hello%22%3A%22form%22%7D"
     response = await anonymous_client.post(
         f"/api/webhooks/{slug}",
         content=raw_body,
@@ -263,12 +348,16 @@ async def test_hmac_workflow_webhook_rejects_invalid_signature_without_run(
 
 @pytest.mark.asyncio
 async def test_workflow_webhook_rejects_unregistered_slug(client):
-    response = await client.post("/api/webhooks/missing-webhook", json={"hello": "world"})
+    response = await client.post(
+        "/api/webhooks/missing-webhook", json={"hello": "world"}
+    )
     assert response.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_workflow_webhook_rejects_disallowed_method(client, monkeypatch, tmp_path):
+async def test_workflow_webhook_rejects_disallowed_method(
+    client, monkeypatch, tmp_path
+):
     from api.workflow_engine import discover_workflow_handlers
 
     slug = f"post-only-{uuid.uuid4().hex}"

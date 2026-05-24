@@ -15,7 +15,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from api.runtime_control import ControlPlaneError
-from api.webhooks import HeaderTriggerKey, HmacAuth, WebhookSpec, get_webhook_spec
+from api.webhooks import (
+    BearerAuth,
+    HeaderTriggerKey,
+    HmacAuth,
+    WebhookSpec,
+    get_webhook_spec,
+)
 from api.workflow_engine import create_workflow_run
 
 log = structlog.get_logger().bind(service="api", component="workflow_webhooks")
@@ -50,6 +56,8 @@ def _safe_headers_for_spec(request: Request, spec: WebhookSpec) -> dict[str, str
     headers = _safe_headers(request)
     if isinstance(spec.auth, HmacAuth):
         headers.pop(spec.auth.signature_header.lower(), None)
+    if isinstance(spec.auth, BearerAuth):
+        headers.pop(spec.auth.header.lower(), None)
     return headers
 
 
@@ -74,9 +82,13 @@ async def _parse_body(request: Request, raw_body: bytes) -> Any:
         try:
             return json.loads(raw_body)
         except Exception as exc:
-            raise HTTPException(status_code=400, detail="invalid JSON webhook body") from exc
+            raise HTTPException(
+                status_code=400, detail="invalid JSON webhook body"
+            ) from exc
     if content_type == "application/x-www-form-urlencoded":
-        parsed = parse_qs(raw_body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        parsed = parse_qs(
+            raw_body.decode("utf-8", errors="replace"), keep_blank_values=True
+        )
         form = {
             key: values[0] if len(values) == 1 else values
             for key, values in parsed.items()
@@ -116,40 +128,99 @@ def _expected_hmac_signature(auth: HmacAuth, secret: str, raw_body: bytes) -> st
     return f"{auth.signature_prefix}{encoded}"
 
 
-def _verify_webhook_auth(spec: WebhookSpec, request: Request, raw_body: bytes) -> None:
-    if spec.auth == "none":
-        return
-    if not isinstance(spec.auth, HmacAuth):
-        raise HTTPException(status_code=500, detail="unsupported webhook auth configuration")
-
-    signature = request.headers.get(spec.auth.signature_header)
+def _verify_hmac_auth(
+    spec: WebhookSpec, auth: HmacAuth, request: Request, raw_body: bytes
+) -> None:
+    signature = request.headers.get(auth.signature_header)
     if not signature:
         log.warning(
             "workflow_webhook_auth_failed",
             slug=spec.slug,
             reason="missing_signature",
-            signature_header=spec.auth.signature_header,
+            signature_header=auth.signature_header,
         )
         raise HTTPException(status_code=401, detail="missing webhook signature")
 
-    secret = os.getenv(spec.auth.secret_ref)
+    secret = os.getenv(auth.secret_ref)
     if not secret:
         log.error(
             "workflow_webhook_auth_config_error",
             slug=spec.slug,
-            secret_ref=spec.auth.secret_ref,
+            secret_ref=auth.secret_ref,
         )
-        raise HTTPException(status_code=500, detail="webhook auth secret is not configured")
+        raise HTTPException(
+            status_code=500, detail="webhook auth secret is not configured"
+        )
 
-    expected = _expected_hmac_signature(spec.auth, secret, raw_body)
+    expected = _expected_hmac_signature(auth, secret, raw_body)
     if not hmac.compare_digest(signature.strip(), expected):
         log.warning(
             "workflow_webhook_auth_failed",
             slug=spec.slug,
             reason="invalid_signature",
-            signature_header=spec.auth.signature_header,
+            signature_header=auth.signature_header,
         )
         raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+
+def _verify_bearer_auth(spec: WebhookSpec, auth: BearerAuth, request: Request) -> None:
+    authorization = request.headers.get(auth.header)
+    if not authorization:
+        log.warning(
+            "workflow_webhook_auth_failed",
+            slug=spec.slug,
+            reason="missing_authorization",
+            authorization_header=auth.header,
+        )
+        raise HTTPException(status_code=401, detail="missing webhook authorization")
+
+    secret = os.getenv(auth.secret_ref)
+    if not secret:
+        log.error(
+            "workflow_webhook_auth_config_error",
+            slug=spec.slug,
+            secret_ref=auth.secret_ref,
+        )
+        raise HTTPException(
+            status_code=500, detail="webhook auth secret is not configured"
+        )
+
+    value = authorization.strip()
+    prefix = f"{auth.scheme} "
+    if not value.lower().startswith(prefix.lower()):
+        log.warning(
+            "workflow_webhook_auth_failed",
+            slug=spec.slug,
+            reason="invalid_authorization_scheme",
+            authorization_header=auth.header,
+        )
+        raise HTTPException(status_code=401, detail="invalid webhook authorization")
+
+    token = value[len(prefix) :].strip()
+    if not token or not hmac.compare_digest(
+        token.encode("utf-8"), secret.encode("utf-8")
+    ):
+        log.warning(
+            "workflow_webhook_auth_failed",
+            slug=spec.slug,
+            reason="invalid_authorization_token",
+            authorization_header=auth.header,
+        )
+        raise HTTPException(status_code=401, detail="invalid webhook authorization")
+
+
+def _verify_webhook_auth(spec: WebhookSpec, request: Request, raw_body: bytes) -> None:
+    if spec.auth == "none":
+        return
+    if isinstance(spec.auth, HmacAuth):
+        _verify_hmac_auth(spec, spec.auth, request, raw_body)
+        return
+    if isinstance(spec.auth, BearerAuth):
+        _verify_bearer_auth(spec, spec.auth, request)
+        return
+    raise HTTPException(
+        status_code=500, detail="unsupported webhook auth configuration"
+    )
 
 
 @router.api_route("/{slug}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
