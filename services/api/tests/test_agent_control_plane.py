@@ -55,7 +55,9 @@ async def _insert_assignment(db_pool, thread_key: str, generation: int = 1) -> N
 
 
 @pytest.mark.asyncio
-async def test_spawn_assignment_defaults_to_codex_when_no_selector(db_pool, monkeypatch):
+async def test_spawn_assignment_defaults_to_codex_when_no_selector(
+    db_pool, monkeypatch
+):
     from api.runtime_control import spawn_assignment
 
     monkeypatch.delenv("CENTAUR_DEFAULT_HARNESS", raising=False)
@@ -1080,7 +1082,9 @@ async def test_mark_execution_terminal_delays_outbox_claimability(db_pool):
 
 
 @pytest.mark.asyncio
-async def test_mark_execution_terminal_skips_durable_delivery_after_live_answer(db_pool):
+async def test_mark_execution_terminal_skips_durable_delivery_after_live_answer(
+    db_pool,
+):
     from api.runtime_control import _mark_execution_terminal
 
     execution_id = f"exe-{uuid.uuid4().hex[:10]}"
@@ -2692,16 +2696,19 @@ async def test_steer_execution_reports_cancel_when_execution_finishes_during_inj
 
 
 @pytest.mark.asyncio
-async def test_steer_stdin_interrupts_amp_before_injecting(monkeypatch):
+@pytest.mark.parametrize("harness", ["amp", "hermes"])
+async def test_steer_stdin_interrupts_harness_before_injecting(monkeypatch, harness):
     from api.agent import steer_stdin
 
     calls: list[str] = []
+    payloads: list[dict] = []
 
     async def _interrupt_by_id(_sandbox_id: str) -> None:
         calls.append("interrupt")
 
-    async def _write_stdin(_session: SandboxSession, _payload: dict) -> None:
+    async def _write_stdin(_session: SandboxSession, payload: dict) -> None:
         calls.append("write")
+        payloads.append(payload)
 
     backend = SimpleNamespace(
         interrupt_by_id=AsyncMock(side_effect=_interrupt_by_id),
@@ -2713,28 +2720,40 @@ async def test_steer_stdin_interrupts_amp_before_injecting(monkeypatch):
     session = SandboxSession(
         sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
         thread_key=f"slack:C-test:{uuid.uuid4().hex}",
-        harness="amp",
-        engine="amp",
+        harness=harness,
+        engine=harness,
     )
 
     result = await steer_stdin(session, [{"type": "text", "text": "stop"}])
 
     assert result == {"ok": True, "steered": True}
-    assert calls == ["interrupt", "write"]
+    assert calls == (
+        ["interrupt", "write", "write"]
+        if harness == "hermes"
+        else ["interrupt", "write"]
+    )
+    if harness == "hermes":
+        assert payloads[0] == {"type": "interrupt"}
+        assert payloads[1]["type"] == "user"
+    else:
+        assert payloads[0]["type"] == "user"
     backend.interrupt_by_id.assert_awaited_once_with(session.sandbox_id)
 
 
 @pytest.mark.asyncio
-async def test_steer_stdin_reattaches_when_interrupt_closes_stdin(monkeypatch):
+@pytest.mark.parametrize("harness", ["amp", "hermes"])
+async def test_steer_stdin_reattaches_when_interrupt_closes_stdin(monkeypatch, harness):
     from api.agent import steer_stdin
 
     calls: list[str] = []
+    payloads: list[dict] = []
 
     async def _interrupt_by_id(_sandbox_id: str) -> None:
         calls.append("interrupt")
 
-    async def _write_stdin(_session: SandboxSession, _payload: dict) -> None:
+    async def _write_stdin(_session: SandboxSession, payload: dict) -> None:
         calls.append("write")
+        payloads.append(payload)
         if calls.count("write") == 1:
             raise RuntimeError("not attached (stdin)")
 
@@ -2752,14 +2771,25 @@ async def test_steer_stdin_reattaches_when_interrupt_closes_stdin(monkeypatch):
     session = SandboxSession(
         sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
         thread_key=f"slack:C-test:{uuid.uuid4().hex}",
-        harness="amp",
-        engine="amp",
+        harness=harness,
+        engine=harness,
     )
 
     result = await steer_stdin(session, [{"type": "text", "text": "stop"}])
 
     assert result == {"ok": True, "steered": True}
-    assert calls == ["interrupt", "write", "reattach", "write"]
+    assert calls == (
+        ["interrupt", "write", "reattach", "write", "write"]
+        if harness == "hermes"
+        else ["interrupt", "write", "reattach", "write"]
+    )
+    if harness == "hermes":
+        assert payloads[0] == {"type": "interrupt"}
+        assert payloads[1] == {"type": "interrupt"}
+        assert payloads[2]["type"] == "user"
+    else:
+        assert payloads[0]["type"] == "user"
+        assert payloads[1]["type"] == "user"
     backend.reattach_stdin.assert_awaited_once_with(session)
 
 

@@ -56,6 +56,8 @@ _GITHUB_PREFIX_RE = re.compile(
 _VALID_STDOUT_EVENT_TYPES = frozenset(
     {
         "amp_raw_event",
+        "agent_message_chunk",
+        "agent_thought_chunk",
         "assistant",
         "command_execution",
         "content_block_delta",
@@ -85,6 +87,8 @@ _VALID_STDOUT_EVENT_TYPES = frozenset(
         "thread.goal.cleared",
         "thread.goal.updated",
         "thread.started",
+        "tool_call",
+        "tool_call_update",
         "tool",
         "tool_result",
         "tool_use",
@@ -715,7 +719,9 @@ async def _insert_system_message(
 ) -> None:
     """Insert a static system message with platform formatting rules (idempotent)."""
     pool = _get_pool()
-    effective_platform = platform or ("slack" if thread_key.startswith("slack:") else None)
+    effective_platform = platform or (
+        "slack" if thread_key.startswith("slack:") else None
+    )
     msg_id = f"system-{thread_key}-{effective_platform or 'generic'}"
     effective_user_id = user_id or await _get_latest_thread_user_id(thread_key)
     requester_identity = await _resolve_requester_identity(
@@ -780,9 +786,7 @@ def _resolve_harness_profile(
     if normalized_harness and normalized_harness not in _ENGINE_HARNESSES:
         raise ValueError(f"Unknown harness: {normalized_harness}")
 
-    persona_info = (
-        get_tool_manager().get_persona(persona) if persona else None
-    )
+    persona_info = get_tool_manager().get_persona(persona) if persona else None
     if persona and persona_info is None:
         raise ValueError(f"Unknown persona: {persona}")
 
@@ -886,7 +890,11 @@ async def get_or_spawn(
 
         trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
         claimed = await claim_container(
-            thread_key, effective_harness, persona=resolved_persona, repo=repo, trace_id=trace_id
+            thread_key,
+            effective_harness,
+            persona=resolved_persona,
+            repo=repo,
+            trace_id=trace_id,
         )
         if claimed:
             if old_agent_thread_id:
@@ -996,8 +1004,7 @@ def _build_session_context(
             github_login = github_handle.removeprefix("@")
             lines.extend(
                 [
-                    "- GitHub handle from Slack profile: "
-                    f"{github_handle}",
+                    f"- GitHub handle from Slack profile: {github_handle}",
                     "- GitHub handle source: "
                     f"{requester_identity['github_handle_source']}",
                     "- GitHub handle verified: yes",
@@ -1007,8 +1014,7 @@ def _build_session_context(
                     "- If you create a GitHub PR for this Slack request, "
                     f"the PR body MUST contain this standalone line: `Prompted by: {github_handle}`",
                     "- This is a GitHub PR body requirement, not a Slack response mention rule.",
-                    "- Assign the PR to the requester when possible: "
-                    f"`{github_login}`",
+                    f"- Assign the PR to the requester when possible: `{github_login}`",
                 ]
             )
         else:
@@ -1292,7 +1298,9 @@ async def stream_connect(
     """
     rt = _get_runtime(session.sandbox_id)
 
-    effective_platform = platform or ("slack" if session.thread_key.startswith("slack:") else None)
+    effective_platform = platform or (
+        "slack" if session.thread_key.startswith("slack:") else None
+    )
     if effective_platform:
         await _insert_system_message(
             session.thread_key,
@@ -1385,7 +1393,9 @@ async def inject_stdin(
     """
     rt = _get_runtime(session.sandbox_id)
 
-    effective_platform = platform or ("slack" if session.thread_key.startswith("slack:") else None)
+    effective_platform = platform or (
+        "slack" if session.thread_key.startswith("slack:") else None
+    )
     if effective_platform:
         await _insert_system_message(
             session.thread_key,
@@ -1512,8 +1522,8 @@ async def steer_stdin(
     """Inject a steer message into a running sandbox's stdin.
 
     Unlike inject_stdin(), this does NOT start a new turn or reset turn counters.
-    The steer message tells Amp to cancel the current tool call and process
-    the new message instead, preserving conversation context.
+    The steer message tells interruptible harnesses to cancel the current tool
+    call and process the new message instead, preserving conversation context.
     """
     turn_input = build_user_input(
         content_blocks,
@@ -1523,18 +1533,28 @@ async def steer_stdin(
     )
     backend = get_backend()
 
-    is_amp = session.engine == "amp" or session.harness == "amp"
-    try:
-        if is_amp:
-            await backend.interrupt_by_id(session.sandbox_id)
-            await asyncio.sleep(0.05)
+    is_hermes = session.engine == "hermes" or session.harness == "hermes"
+    is_interruptible = session.engine in {"amp", "hermes"} or session.harness in {
+        "amp",
+        "hermes",
+    }
+
+    async def _write_with_reattach(payload: dict[str, Any]) -> None:
         try:
-            await backend.write_stdin(session, turn_input)
+            await backend.write_stdin(session, payload)
         except (BrokenPipeError, OSError, RuntimeError, AssertionError):
-            if not is_amp:
+            if not is_interruptible:
                 raise
             await backend.reattach_stdin(session)
-            await backend.write_stdin(session, turn_input)
+            await backend.write_stdin(session, payload)
+
+    try:
+        if is_interruptible:
+            await backend.interrupt_by_id(session.sandbox_id)
+            if is_hermes:
+                await _write_with_reattach({"type": "interrupt"})
+            await asyncio.sleep(0.05)
+        await _write_with_reattach(turn_input)
     except (BrokenPipeError, OSError, RuntimeError, AssertionError) as exc:
         log.warning(
             "steer_stdin_failed",

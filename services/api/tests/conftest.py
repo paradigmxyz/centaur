@@ -51,6 +51,29 @@ def _have_local_pg_binaries() -> bool:
     return all(shutil.which(cmd) for cmd in ("initdb", "pg_ctl", "pg_isready"))
 
 
+def _local_pg_has_extension(extension: str) -> bool:
+    pg_config = shutil.which("pg_config")
+    if not pg_config:
+        return False
+    result = subprocess.run(
+        [pg_config, "--sharedir"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    sharedir = result.stdout.strip()
+    return (
+        bool(sharedir)
+        and (Path(sharedir) / "extension" / f"{extension}.control").exists()
+    )
+
+
+def _can_use_local_pg_for_tests() -> bool:
+    return _have_local_pg_binaries() and _local_pg_has_extension("pg_search")
+
+
 def _have_docker() -> bool:
     return shutil.which("docker") is not None
 
@@ -86,7 +109,9 @@ async def _wait_for_postgres(dsn: str, timeout_s: float = 30.0) -> None:
 async def _ensure_database(admin_dsn: str, database: str) -> None:
     conn = await asyncpg.connect(admin_dsn)
     try:
-        exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database)
+        exists = await conn.fetchval(
+            "SELECT 1 FROM pg_database WHERE datname = $1", database
+        )
         if not exists:
             safe_db = database.replace('"', '""')
             await conn.execute(f'CREATE DATABASE "{safe_db}"')
@@ -124,7 +149,7 @@ def pg():
         yield dsn
         return
 
-    if _have_local_pg_binaries():
+    if _can_use_local_pg_for_tests():
         tmpdir = tempfile.mkdtemp(prefix="centaur-test-pg-")
         port = _pick_free_port()
         admin_dsn = f"postgresql://localhost:{port}/postgres?host={tmpdir}"
@@ -138,8 +163,14 @@ def pg():
             )
             subprocess.run(
                 [
-                    "pg_ctl", "-D", tmpdir, "-o", f"-p {port} -k {tmpdir}",
-                    "-l", f"{tmpdir}/pg.log", "start",
+                    "pg_ctl",
+                    "-D",
+                    tmpdir,
+                    "-o",
+                    f"-p {port} -k {tmpdir} -c shared_preload_libraries=pg_search",
+                    "-l",
+                    f"{tmpdir}/pg.log",
+                    "start",
                 ],
                 check=True,
                 capture_output=True,

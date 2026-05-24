@@ -39,7 +39,10 @@ class TestDescribeMethodDocstring:
         assert _describe_method_docstring("   \n  \n") == ""
 
     def test_single_line_docstring_returned_verbatim(self):
-        assert _describe_method_docstring("Search Slack for messages.") == "Search Slack for messages."
+        assert (
+            _describe_method_docstring("Search Slack for messages.")
+            == "Search Slack for messages."
+        )
 
     def test_multi_paragraph_description_preserved(self):
         doc = """Hybrid research engine.
@@ -73,6 +76,20 @@ class TestDescribeMethodDocstring:
         out = _describe_method_docstring(doc)
         assert len(out) <= 1200
         assert out.endswith("\u2026")
+
+
+def test_infra_secrets_stay_provider_generic_for_harnesses() -> None:
+    names = {secret.name for secret in ToolManager._INFRA_SECRETS}
+
+    assert names == {
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "XAI_API_KEY",
+        "GEMINI_API_KEY",
+        "AMP_API_KEY",
+        "GITHUB_TOKEN",
+        "SLACK_BOT_TOKEN",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +674,6 @@ async def test_tool_rest_router_lists_describes_and_invokes_tools(
         missing_response = await client.post("/tools/alpha/missing", json={})
         assert missing_response.status_code == 200
         assert missing_response.json()["result"] == (
-            '{"error": "Method \'missing\' not found in tool \'alpha\'", '
+            "{\"error\": \"Method 'missing' not found in tool 'alpha'\", "
             '"available_methods": ["async_echo", "secret_values", "sync_echo"]}'
         )

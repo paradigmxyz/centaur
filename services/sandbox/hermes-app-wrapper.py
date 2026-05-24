@@ -82,6 +82,7 @@ def _install_protocol_channel() -> None:
 
 # ── content helpers ──────────────────────────────────────────────────────────
 
+
 def _prompt_text(turn_input: dict[str, Any]) -> str:
     """Flatten a Centaur turn envelope's content blocks into prompt text."""
     message = turn_input.get("message")
@@ -158,6 +159,7 @@ def _plan_entries_from_todo(result: Any) -> list[dict] | None:
 
 
 # ── AIAgent streaming callbacks → Centaur NDJSON ─────────────────────────────
+
 
 class TurnEmitter:
     """Translates ``AIAgent`` streaming callbacks into Centaur NDJSON events.
@@ -261,6 +263,7 @@ class TurnEmitter:
 
 # ── agent construction (mirrors hermes_cli.oneshot._run_agent) ───────────────
 
+
 def _clarify_callback(question: str, choices: Any = None) -> str:
     """Non-interactive clarify: instruct the agent to pick a sensible default.
 
@@ -342,12 +345,14 @@ def _build_agent(emitter: TurnEmitter) -> Any:
 
 # ── main driver ──────────────────────────────────────────────────────────────
 
+
 class Wrapper:
     def __init__(self) -> None:
         self.emitter = TurnEmitter()
         self.agent: Any = None
         self.inputs: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._interrupted = False
+        self._pending_interrupt = False
 
     def _stdin_reader(self) -> None:
         for raw in sys.stdin:
@@ -369,6 +374,7 @@ class Wrapper:
 
     def request_interrupt(self, *_args: Any) -> None:
         self._interrupted = True
+        self._pending_interrupt = True
         if self.agent is None:
             return
         try:
@@ -378,7 +384,8 @@ class Wrapper:
 
     def _run_turn(self, turn_input: dict[str, Any]) -> None:
         self.emitter.reset()
-        self._interrupted = False
+        self._interrupted = self._pending_interrupt
+        self._pending_interrupt = False
         prompt = _prompt_text(turn_input)
 
         # Run the (blocking) turn on a worker thread so the stdin reader can
@@ -387,7 +394,7 @@ class Wrapper:
 
         def _go() -> None:
             try:
-                result["text"] = self.agent.chat(prompt) or ""
+                result["text"] = self.agent.chat(prompt)
             except Exception as exc:  # pragma: no cover - provider/tool errors
                 result["error"] = str(exc)
 
@@ -396,9 +403,21 @@ class Wrapper:
         worker.join()
 
         if "error" in result:
+            if self._interrupted:
+                emit({"type": "system", "subtype": "turn_interrupted"})
+                return
             emit({"type": "error", "message": result["error"]})
+            emit({"type": "turn.failed", "error": {"message": result["error"]}})
             return
         text = result.get("text") or self.emitter.final_text
+        if not str(text or "").strip():
+            if self._interrupted:
+                emit({"type": "system", "subtype": "turn_interrupted"})
+                return
+            message = "hermes returned no assistant output"
+            emit({"type": "error", "message": message})
+            emit({"type": "turn.failed", "error": {"message": message}})
+            return
         emit(
             {
                 "type": "turn.completed",
@@ -426,7 +445,11 @@ class Wrapper:
         if session_id:
             emit({"type": "system", "subtype": "init", "session_id": session_id})
         emit(
-            {"type": "system", "subtype": "wrapper_heartbeat", "phase": "session_started"}
+            {
+                "type": "system",
+                "subtype": "wrapper_heartbeat",
+                "phase": "session_started",
+            }
         )
 
         threading.Thread(target=self._stdin_reader, daemon=True).start()

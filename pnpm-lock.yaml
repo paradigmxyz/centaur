@@ -29,6 +29,9 @@ importers:
 
   packages/harness-events:
     devDependencies:
+      '@types/node':
+        specifier: ^25.7.0
+        version: 25.9.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3

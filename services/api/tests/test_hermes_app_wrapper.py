@@ -57,7 +57,11 @@ def test_module_loads_without_hermes_installed():
 
 def test_prompt_text_joins_blocks():
     wrapper = _load_wrapper()
-    turn = {"message": {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}
+    turn = {
+        "message": {
+            "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+        }
+    }
     assert wrapper._prompt_text(turn) == "a\nb"
 
 
@@ -68,7 +72,9 @@ def test_prompt_text_empty_defaults_to_continue():
 
 def test_prompt_text_image_placeholder():
     wrapper = _load_wrapper()
-    assert "image attachment" in wrapper._prompt_text({"message": {"content": [{"type": "image"}]}})
+    assert "image attachment" in wrapper._prompt_text(
+        {"message": {"content": [{"type": "image"}]}}
+    )
 
 
 def test_stringify_passthrough_and_json():
@@ -131,7 +137,9 @@ def test_tool_progress_only_started_emits():
 def test_tool_progress_parses_string_args():
     wrapper = _load_wrapper()
     em = wrapper.TurnEmitter()
-    events = _capture(lambda: em.on_tool_progress("tool.started", "read", None, '{"path":"x"}'))
+    events = _capture(
+        lambda: em.on_tool_progress("tool.started", "read", None, '{"path":"x"}')
+    )
     assert events[0]["type"] == "tool_call"
     assert events[0]["name"] == "read"
     assert events[0]["input"] == {"path": "x"}
@@ -144,7 +152,13 @@ def test_tool_start_complete_correlation_parallel_same_name():
     def run():
         em.on_tool_progress("tool.started", "read_file", None, {"path": "x"})
         em.on_tool_progress("tool.started", "read_file", None, {"path": "y"})
-        em.on_step(1, [{"name": "read_file", "result": "BODY-x"}, {"name": "read_file", "result": "BODY-y"}])
+        em.on_step(
+            1,
+            [
+                {"name": "read_file", "result": "BODY-x"},
+                {"name": "read_file", "result": "BODY-y"},
+            ],
+        )
 
     events = _capture(run)
     starts = [e for e in events if e["type"] == "tool_call"]
@@ -171,7 +185,10 @@ def test_step_todo_emits_plan():
     em = wrapper.TurnEmitter()
     result = '{"todos":[{"content":"step1","status":"completed"}]}'
     events = _capture(lambda: em.on_step(1, [{"name": "todo", "result": result}]))
-    assert {"type": "plan", "entries": [{"content": "step1", "priority": "medium", "status": "completed"}]} in events
+    assert {
+        "type": "plan",
+        "entries": [{"content": "step1", "priority": "medium", "status": "completed"}],
+    } in events
 
 
 def test_step_ignores_non_list():
@@ -186,3 +203,103 @@ def test_reset_clears_state():
     em.on_stream_delta("x")
     em.reset()
     assert em.final_text == ""
+
+
+# ── Wrapper turn completion semantics ─────────────────────────────────────────
+
+
+def test_run_turn_fails_closed_when_agent_returns_no_text():
+    wrapper = _load_wrapper()
+
+    class FakeAgent:
+        def chat(self, _prompt):
+            return None
+
+    subject = wrapper.Wrapper()
+    subject.agent = FakeAgent()
+
+    events = _capture(
+        lambda: subject._run_turn(
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}
+        )
+    )
+
+    assert events == [
+        {"type": "error", "message": "hermes returned no assistant output"},
+        {
+            "type": "turn.failed",
+            "error": {"message": "hermes returned no assistant output"},
+        },
+    ]
+
+
+def test_run_turn_suppresses_empty_failure_when_interrupted():
+    wrapper = _load_wrapper()
+    subject = wrapper.Wrapper()
+
+    class FakeAgent:
+        def interrupt(self):
+            return None
+
+        def chat(self, _prompt):
+            subject.request_interrupt()
+            return None
+
+    subject.agent = FakeAgent()
+
+    events = _capture(
+        lambda: subject._run_turn(
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}
+        )
+    )
+
+    assert events == [{"type": "system", "subtype": "turn_interrupted"}]
+
+
+def test_run_turn_preserves_interrupt_received_before_turn_reset():
+    wrapper = _load_wrapper()
+    subject = wrapper.Wrapper()
+
+    class FakeAgent:
+        def interrupt(self):
+            return None
+
+        def chat(self, _prompt):
+            return None
+
+    subject.agent = FakeAgent()
+    subject.request_interrupt()
+
+    events = _capture(
+        lambda: subject._run_turn(
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}
+        )
+    )
+
+    assert events == [{"type": "system", "subtype": "turn_interrupted"}]
+
+
+def test_run_turn_uses_streamed_text_when_agent_returns_none():
+    wrapper = _load_wrapper()
+
+    class FakeAgent:
+        def __init__(self, emitter):
+            self.emitter = emitter
+
+        def chat(self, _prompt):
+            self.emitter.on_stream_delta("PONG")
+            return None
+
+    subject = wrapper.Wrapper()
+    subject.agent = FakeAgent(subject.emitter)
+
+    events = _capture(
+        lambda: subject._run_turn(
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}
+        )
+    )
+
+    assert events == [
+        {"type": "agent_message_chunk", "text": "PONG"},
+        {"type": "turn.completed", "stop_reason": "end_turn", "text": "PONG"},
+    ]

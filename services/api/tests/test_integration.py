@@ -250,7 +250,11 @@ class TestFlushedToMessages:
         from api.agent import _flushed_to_messages
 
         rows = [
-            {"role": "user", "parts": [{"type": "text", "text": "hi"}], "user_id": "U123"},
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "hi"}],
+                "user_id": "U123",
+            },
         ]
         msgs = _flushed_to_messages(rows)
         assert len(msgs) == 1
@@ -263,7 +267,11 @@ class TestFlushedToMessages:
         from api.agent import _flushed_to_messages
 
         rows = [
-            {"role": "user", "parts": '[{"type": "text", "text": "world"}]', "user_id": None},
+            {
+                "role": "user",
+                "parts": '[{"type": "text", "text": "world"}]',
+                "user_id": None,
+            },
         ]
         msgs = _flushed_to_messages(rows)
         assert msgs[0]["parts"] == [{"type": "text", "text": "world"}]
@@ -274,8 +282,16 @@ class TestFlushedToMessages:
         from api.agent import _flushed_to_messages
 
         rows = [
-            {"role": "user", "parts": [{"type": "text", "text": "hi"}], "user_id": "U123"},
-            {"role": "user", "parts": '[{"type": "text", "text": "world"}]', "user_id": None},
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "hi"}],
+                "user_id": "U123",
+            },
+            {
+                "role": "user",
+                "parts": '[{"type": "text", "text": "world"}]',
+                "user_id": None,
+            },
         ]
         msgs = _flushed_to_messages(rows)
         assert len(msgs) == 2
@@ -290,19 +306,21 @@ class TestMessagesToContentBlocksWithAttachmentRef:
         """DB message with attachment_ref → download instruction."""
         from api.sandbox.harness_protocol import messages_to_content_blocks
 
-        msgs = [{
-            "role": "user",
-            "parts": [
-                {"type": "text", "text": "check this"},
-                {
-                    "type": "attachment_ref",
-                    "id": "att-1",
-                    "name": "doc.pdf",
-                    "mime_type": "application/pdf",
-                },
-            ],
-            "user_id": "U999",
-        }]
+        msgs = [
+            {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "check this"},
+                    {
+                        "type": "attachment_ref",
+                        "id": "att-1",
+                        "name": "doc.pdf",
+                        "mime_type": "application/pdf",
+                    },
+                ],
+                "user_id": "U999",
+            }
+        ]
         blocks = messages_to_content_blocks(msgs)
         assert len(blocks) == 2
         assert blocks[0]["text"] == "<@U999>: check this"
@@ -467,7 +485,10 @@ class TestResolveHarnessProfile:
 
         # Rule 1: engine_override always wins.
         assert resolve("amp", persona="invest", engine_override="codex")[0] == "codex"
-        assert resolve(None, persona="invest", engine_override="claude-code")[0] == "claude-code"
+        assert (
+            resolve(None, persona="invest", engine_override="claude-code")[0]
+            == "claude-code"
+        )
         assert resolve("codex", persona=None, engine_override="amp")[0] == "amp"
 
         # Rule 2: explicit harness arg DIFFERENT from persona's engine wins

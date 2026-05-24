@@ -80,12 +80,14 @@ RUN npm install -g --prefer-online --force \
 # ── Hermes Agent (NousResearch), root system-wide ────────────────────────────
 # hermes-app-wrapper drives Hermes' native AIAgent Python API in process (no
 # ACP — that protocol is externally governed and an unstable seam to depend on),
-# so we install the base package only. The import check verifies the embedding
-# API (run_agent.AIAgent + supporting modules) resolves at build time.
+# so we install the base package plus the provider SDK used by the default
+# sandbox config. The import check verifies the embedding API and provider
+# client resolve at build time.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages \
       "hermes-agent==${HERMES_AGENT_VERSION}" \
-    && python3 -c "import run_agent, hermes_state, hermes_cli.runtime_provider, hermes_cli.tools_config"
+      "anthropic>=0.39.0" \
+    && python3 -c "import anthropic, run_agent, hermes_state, hermes_cli.runtime_provider, hermes_cli.tools_config"
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
 # Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium
