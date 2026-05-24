@@ -803,6 +803,165 @@ async def test_final_delivery_claim_and_mark_delivered(client, db_pool, api_key:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_orphaned_executions_terminalizes_past_hard_deadline(db_pool):
+    from api.runtime_control import _reconcile_orphaned_executions
+
+    thread_key = f"slack:C-orphan:{uuid.uuid4().hex}"
+    orphan_id = f"exe-orphan-{uuid.uuid4().hex[:8]}"
+    fresh_id = f"exe-fresh-{uuid.uuid4().hex[:8]}"
+    await _insert_assignment(db_pool, thread_key)
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, hard_deadline_at, created_at"
+        ") VALUES ($1, $2, 1, 'exec-orphan', 'hash-orphan', 'running', "
+        "'{\"platform\":\"slack\"}'::jsonb, '{}'::jsonb, NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '12 hours')",
+        orphan_id,
+        thread_key,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_final_delivery_outbox (execution_id, thread_key, delivery, state) "
+        "VALUES ($1, $2, '{\"platform\":\"slack\"}'::jsonb, 'awaiting_terminal')",
+        orphan_id,
+        thread_key,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, hard_deadline_at, created_at"
+        ") VALUES ($1, $2, 1, 'exec-fresh', 'hash-fresh', 'running', "
+        "'{\"platform\":\"slack\"}'::jsonb, '{}'::jsonb, NOW() + INTERVAL '30 minutes', NOW() - INTERVAL '1 minute')",
+        fresh_id,
+        f"slack:C-fresh:{uuid.uuid4().hex}",
+    )
+
+    reconciled = await _reconcile_orphaned_executions(db_pool)
+    assert reconciled >= 1
+
+    orphan_row = await db_pool.fetchrow(
+        "SELECT status, terminal_reason FROM agent_execution_requests WHERE execution_id = $1",
+        orphan_id,
+    )
+    assert orphan_row is not None
+    assert orphan_row["status"] == "failed_permanent"
+    assert orphan_row["terminal_reason"] == "hard_deadline_reaped"
+
+    fresh_row = await db_pool.fetchrow(
+        "SELECT status, terminal_reason FROM agent_execution_requests WHERE execution_id = $1",
+        fresh_id,
+    )
+    assert fresh_row is not None
+    assert fresh_row["status"] == "running"
+    assert fresh_row["terminal_reason"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transient_status", ["retry_wait", "cancel_requested", "queued"]
+)
+async def test_claim_preserves_existing_hard_deadline_at_on_reclaim(
+    db_pool, transient_status
+):
+    from api.runtime_control import _claim_next_execution
+
+    thread_key = f"slack:C-deadline:{uuid.uuid4().hex}:{transient_status}"
+    execution_id = f"exe-keep-{uuid.uuid4().hex[:8]}"
+    await _insert_assignment(db_pool, thread_key)
+    original_deadline = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=12)
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, hard_deadline_at, claimed_at, started_at"
+        ") VALUES ($1, $2, 1, $3, 'hash-keep', $4, "
+        "'{\"platform\":\"slack\"}'::jsonb, '{}'::jsonb, $5, "
+        "NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '2 minutes')",
+        execution_id,
+        thread_key,
+        f"exec-keep-{transient_status}",
+        transient_status,
+        original_deadline,
+    )
+
+    claimed = await _claim_next_execution(db_pool)
+    assert claimed is not None
+    assert claimed["execution_id"] == execution_id
+
+    row = await db_pool.fetchrow(
+        "SELECT hard_deadline_at FROM agent_execution_requests WHERE execution_id = $1",
+        execution_id,
+    )
+    assert row is not None
+    assert row["hard_deadline_at"] is not None
+    delta = abs((row["hard_deadline_at"] - original_deadline).total_seconds())
+    assert delta < 1.0, f"hard_deadline_at moved by {delta}s across reclaim"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orphaned_executions_terminalizes_null_hard_deadline(db_pool):
+    from api.runtime_control import (
+        EXECUTION_HARD_TIMEOUT_S,
+        _reconcile_orphaned_executions,
+    )
+
+    thread_key = f"slack:C-orphan-null:{uuid.uuid4().hex}"
+    execution_id = f"exe-null-{uuid.uuid4().hex[:8]}"
+    await _insert_assignment(db_pool, thread_key)
+    aged_created_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
+        seconds=EXECUTION_HARD_TIMEOUT_S * 3
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, created_at, hard_deadline_at"
+        ") VALUES ($1, $2, 1, 'exec-null-deadline', 'hash-null', 'running', "
+        "'{}'::jsonb, '{}'::jsonb, $3, NULL)",
+        execution_id,
+        thread_key,
+        aged_created_at,
+    )
+
+    reconciled = await _reconcile_orphaned_executions(db_pool)
+    assert reconciled >= 1
+
+    row = await db_pool.fetchrow(
+        "SELECT status, terminal_reason FROM agent_execution_requests "
+        "WHERE execution_id = $1",
+        execution_id,
+    )
+    assert row is not None
+    assert row["status"] == "failed_permanent"
+    assert row["terminal_reason"] == "hard_deadline_reaped"
+
+
+@pytest.mark.asyncio
+async def test_claim_first_claim_of_queued_row_anchors_hard_deadline(db_pool):
+    from api.runtime_control import EXECUTION_HARD_TIMEOUT_S, _claim_next_execution
+
+    thread_key = f"slack:C-fresh:{uuid.uuid4().hex}"
+    execution_id = f"exe-fresh-{uuid.uuid4().hex[:8]}"
+    await _insert_assignment(db_pool, thread_key)
+    past = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, hard_deadline_at, created_at"
+        ") VALUES ($1, $2, 1, 'exec-fresh', 'hash-fresh', 'queued', "
+        "'{\"platform\":\"slack\"}'::jsonb, '{}'::jsonb, $3, NOW() - INTERVAL '40 minutes')",
+        execution_id,
+        thread_key,
+        past,
+    )
+
+    before_claim = dt.datetime.now(dt.timezone.utc)
+    claimed = await _claim_next_execution(db_pool)
+    assert claimed is not None
+    assert claimed["execution_id"] == execution_id
+    assert claimed["hard_deadline_at"] > before_claim + dt.timedelta(
+        seconds=EXECUTION_HARD_TIMEOUT_S - 5
+    )
+
+
+@pytest.mark.asyncio
 async def test_mark_execution_terminal_delays_outbox_claimability(db_pool):
     from api.runtime_control import _mark_execution_terminal
 
