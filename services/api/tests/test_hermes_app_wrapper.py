@@ -1,21 +1,18 @@
-"""Tests for hermes-app-wrapper — command selection + ACP event translation.
+"""Tests for hermes-app-wrapper — command selection + AIAgent event translation.
 
-The wrapper imports ``acp`` lazily, so the module loads (and its pure helpers +
-``session_update`` translation are exercised) without the sandbox-only
-``agent-client-protocol`` package installed.
+The wrapper drives Hermes' native ``AIAgent`` in process and imports it lazily,
+so the module loads (and its pure helpers + ``TurnEmitter`` callback→event
+translation are exercised) without the sandbox-only ``hermes-agent`` package.
 """
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import io
 import json
 import sys
 from pathlib import Path
 from types import ModuleType
-
-import pytest
 
 from api.sandbox.config import build_harness_cmd
 
@@ -30,37 +27,15 @@ def _load_wrapper() -> ModuleType:
     return module
 
 
-class _FakeUpdate:
-    """Stands in for an ACP session-update pydantic model."""
-
-    def __init__(self, data: dict) -> None:
-        self._data = data
-
-    def model_dump(self, **_kwargs: object) -> dict:
-        return self._data
-
-
-class _Opt:
-    def __init__(self, kind: str, option_id: str) -> None:
-        self.kind = kind
-        self.option_id = option_id
-
-
-def _capture(coro_factory) -> list[dict]:
-    """Run an async client driver, capturing emitted NDJSON lines as dicts."""
-    wrapper = _load_wrapper()
+def _capture(fn) -> list[dict]:
+    """Run ``fn`` while capturing emitted NDJSON lines (emit falls back to stdout)."""
     buf = io.StringIO()
-    real_stdout = sys.stdout
-
-    async def driver() -> None:
-        client = wrapper.CentaurHermesClient()
-        sys.stdout = buf
-        try:
-            await coro_factory(client)
-        finally:
-            sys.stdout = real_stdout
-
-    asyncio.run(driver())
+    real = sys.stdout
+    sys.stdout = buf
+    try:
+        fn()
+    finally:
+        sys.stdout = real
     return [json.loads(line) for line in buf.getvalue().splitlines() if line]
 
 
@@ -71,32 +46,10 @@ def test_build_harness_cmd_selects_hermes_wrapper():
     assert build_harness_cmd("hermes") == ["hermes-app-wrapper"]
 
 
-def test_hermes_acp_cmd_prefers_console_script(monkeypatch):
+def test_module_loads_without_hermes_installed():
     wrapper = _load_wrapper()
-    monkeypatch.delenv("HERMES_ACP_COMMAND", raising=False)
-    monkeypatch.setattr(
-        wrapper, "_hermes_acp_cmd", wrapper._hermes_acp_cmd
-    )  # no-op, keep ref
-    import shutil
-
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/" + name)
-    assert wrapper._hermes_acp_cmd() == ["hermes-acp"]
-
-
-def test_hermes_acp_cmd_env_override(monkeypatch):
-    wrapper = _load_wrapper()
-    monkeypatch.setenv("HERMES_ACP_COMMAND", "hermes acp --foo")
-    assert wrapper._hermes_acp_cmd() == ["hermes", "acp", "--foo"]
-
-
-def test_hermes_acp_cmd_module_fallback(monkeypatch):
-    wrapper = _load_wrapper()
-    monkeypatch.delenv("HERMES_ACP_COMMAND", raising=False)
-    import shutil
-
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    cmd = wrapper._hermes_acp_cmd()
-    assert cmd[1:] == ["-m", "acp_adapter.entry"]
+    assert hasattr(wrapper, "TurnEmitter")
+    assert "run_agent" not in sys.modules
 
 
 # ── pure helpers ───────────────────────────────────────────────────────────────
@@ -115,149 +68,121 @@ def test_prompt_text_empty_defaults_to_continue():
 
 def test_prompt_text_image_placeholder():
     wrapper = _load_wrapper()
-    turn = {"message": {"content": [{"type": "image"}]}}
-    assert "image attachment" in wrapper._prompt_text(turn)
+    assert "image attachment" in wrapper._prompt_text({"message": {"content": [{"type": "image"}]}})
 
 
-def test_tool_output_text_from_content_blocks():
+def test_stringify_passthrough_and_json():
     wrapper = _load_wrapper()
-    update = {"content": [{"type": "content", "content": {"type": "text", "text": "done"}}]}
-    assert wrapper._tool_output_text(update) == "done"
+    assert wrapper._stringify("plain") == "plain"
+    assert wrapper._stringify(None) == ""
+    assert wrapper._stringify({"x": 1}) == json.dumps({"x": 1})
 
 
-def test_tool_output_text_raw_output_fallback():
+def test_plan_entries_from_todo_with_trailing_hint():
     wrapper = _load_wrapper()
-    assert wrapper._tool_output_text({"rawOutput": {"x": 1}}) == json.dumps({"x": 1})
+    result = '{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"cancelled"}]} (hint)'
+    entries = wrapper._plan_entries_from_todo(result)
+    assert entries == [
+        {"content": "a", "priority": "medium", "status": "in_progress"},
+        {"content": "[cancelled] b", "priority": "medium", "status": "completed"},
+    ]
 
 
-def test_pick_allow_option_prefers_allow_always():
+def test_plan_entries_from_todo_invalid_returns_none():
     wrapper = _load_wrapper()
-    options = [_Opt("reject_once", "r"), _Opt("allow_once", "a1"), _Opt("allow_always", "a2")]
-    assert wrapper._pick_allow_option(options) == "a2"
+    assert wrapper._plan_entries_from_todo("not json") is None
+    assert wrapper._plan_entries_from_todo("") is None
 
 
-def test_pick_allow_option_falls_back_to_allow_once():
+# ── TurnEmitter: AIAgent callbacks → Centaur NDJSON ─────────────────────────────
+
+
+def test_stream_delta_accumulates_and_emits():
     wrapper = _load_wrapper()
-    options = [_Opt("allow_once", "a1"), _Opt("reject_always", "r")]
-    assert wrapper._pick_allow_option(options) == "a1"
-
-
-def test_pick_allow_option_none_when_only_rejects():
-    wrapper = _load_wrapper()
-    options = [_Opt("reject_once", "r1"), _Opt("reject_always", "r2")]
-    assert wrapper._pick_allow_option(options) is None
-
-
-# ── session_update translation ─────────────────────────────────────────────────
-
-
-def test_session_update_message_chunk_accumulates_and_emits():
-    wrapper = _load_wrapper()
-    client = wrapper.CentaurHermesClient()
-    buf = io.StringIO()
-    real = sys.stdout
-
-    async def drive():
-        sys.stdout = buf
-        try:
-            await client.session_update(
-                "s", _FakeUpdate({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Hel"}})
-            )
-            await client.session_update(
-                "s", _FakeUpdate({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "lo"}})
-            )
-        finally:
-            sys.stdout = real
-
-    asyncio.run(drive())
-    events = [json.loads(line) for line in buf.getvalue().splitlines() if line]
+    em = wrapper.TurnEmitter()
+    events = _capture(lambda: (em.on_stream_delta("Hel"), em.on_stream_delta("lo")))
     assert events == [
         {"type": "agent_message_chunk", "text": "Hel"},
         {"type": "agent_message_chunk", "text": "lo"},
     ]
-    assert client.final_text == "Hello"
+    assert em.final_text == "Hello"
 
 
-def test_session_update_thought_chunk():
-    events = _capture(
-        lambda c: c.session_update(
-            "s", _FakeUpdate({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "hmm"}})
-        )
-    )
+def test_stream_delta_empty_dropped():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    assert _capture(lambda: em.on_stream_delta("")) == []
+
+
+def test_reasoning_emits_thought_chunk():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    events = _capture(lambda: em.on_reasoning("hmm"))
     assert events == [{"type": "agent_thought_chunk", "text": "hmm"}]
 
 
-def test_session_update_tool_call():
-    events = _capture(
-        lambda c: c.session_update(
-            "s",
-            _FakeUpdate(
-                {
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": "t1",
-                    "title": "Read file",
-                    "kind": "read",
-                    "rawInput": {"path": "x"},
-                }
-            ),
-        )
-    )
-    assert events == [
-        {
-            "type": "tool_call",
-            "tool_call_id": "t1",
-            "name": "Read file",
-            "kind": "read",
-            "input": {"path": "x"},
-        }
-    ]
-
-
-def test_session_update_tool_call_update_completed():
-    events = _capture(
-        lambda c: c.session_update(
-            "s",
-            _FakeUpdate(
-                {
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": "t1",
-                    "status": "completed",
-                    "content": [{"type": "content", "content": {"type": "text", "text": "BODY"}}],
-                }
-            ),
-        )
-    )
-    assert events == [
-        {
-            "type": "tool_call_update",
-            "tool_call_id": "t1",
-            "status": "completed",
-            "output": "BODY",
-            "is_error": False,
-        }
-    ]
-
-
-def test_session_update_tool_call_update_in_progress_suppressed():
-    events = _capture(
-        lambda c: c.session_update(
-            "s", _FakeUpdate({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress"})
-        )
-    )
+def test_tool_progress_only_started_emits():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    events = _capture(lambda: em.on_tool_progress("tool.completed", "read", None, {}))
     assert events == []
 
 
-def test_session_update_plan():
-    entries = [{"content": "step", "priority": "medium", "status": "pending"}]
-    events = _capture(
-        lambda c: c.session_update("s", _FakeUpdate({"sessionUpdate": "plan", "entries": entries}))
-    )
-    assert events == [{"type": "plan", "entries": entries}]
+def test_tool_progress_parses_string_args():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    events = _capture(lambda: em.on_tool_progress("tool.started", "read", None, '{"path":"x"}'))
+    assert events[0]["type"] == "tool_call"
+    assert events[0]["name"] == "read"
+    assert events[0]["input"] == {"path": "x"}
 
 
-def test_session_update_dict_fallback():
-    # A raw dict (no model_dump) is tolerated.
-    events = _capture(
-        lambda c: c.session_update("s", {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x"}})
-    )
-    assert events == [{"type": "agent_message_chunk", "text": "x"}]
+def test_tool_start_complete_correlation_parallel_same_name():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+
+    def run():
+        em.on_tool_progress("tool.started", "read_file", None, {"path": "x"})
+        em.on_tool_progress("tool.started", "read_file", None, {"path": "y"})
+        em.on_step(1, [{"name": "read_file", "result": "BODY-x"}, {"name": "read_file", "result": "BODY-y"}])
+
+    events = _capture(run)
+    starts = [e for e in events if e["type"] == "tool_call"]
+    updates = [e for e in events if e["type"] == "tool_call_update"]
+    assert len(starts) == 2 and len(updates) == 2
+    # FIFO correlation: first start pairs with first completion.
+    assert starts[0]["tool_call_id"] == updates[0]["tool_call_id"]
+    assert starts[1]["tool_call_id"] == updates[1]["tool_call_id"]
+    assert updates[0]["output"] == "BODY-x" and updates[1]["output"] == "BODY-y"
+    assert all(u["status"] == "completed" and u["is_error"] is False for u in updates)
+
+
+def test_step_error_marks_failed():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    events = _capture(lambda: em.on_step(1, [{"name": "web", "error": "timeout"}]))
+    assert events[0]["type"] == "tool_call_update"
+    assert events[0]["status"] == "failed"
+    assert events[0]["is_error"] is True
+
+
+def test_step_todo_emits_plan():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    result = '{"todos":[{"content":"step1","status":"completed"}]}'
+    events = _capture(lambda: em.on_step(1, [{"name": "todo", "result": result}]))
+    assert {"type": "plan", "entries": [{"content": "step1", "priority": "medium", "status": "completed"}]} in events
+
+
+def test_step_ignores_non_list():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    assert _capture(lambda: em.on_step(1, None)) == []
+
+
+def test_reset_clears_state():
+    wrapper = _load_wrapper()
+    em = wrapper.TurnEmitter()
+    em.on_stream_delta("x")
+    em.reset()
+    assert em.final_text == ""

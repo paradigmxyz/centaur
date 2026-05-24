@@ -102,7 +102,7 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
 EOF
 
 # ── Hermes settings ──────────────────────────────────────────────────────────
-# Hermes (ACP harness) resolves its provider/model from ~/.hermes/config.yaml.
+# Hermes resolves its provider/model from ~/.hermes/config.yaml.
 # Default to Anthropic + Claude so it works out of the box through iron-proxy
 # using the stubbed ANTHROPIC_API_KEY; HERMES_PROVIDER/HERMES_MODEL override
 # fleet-wide or per-session (the model is set per spawn by the API).

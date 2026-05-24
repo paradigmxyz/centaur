@@ -1,111 +1,86 @@
 #!/usr/bin/env python3
-"""hermes-app-wrapper — Centaur NDJSON bridge for the Hermes Agent ACP server.
+"""hermes-app-wrapper — Centaur NDJSON bridge for the Hermes Agent.
 
-Hermes Agent (NousResearch/hermes-agent) speaks the Agent Client Protocol over
-stdio via ``hermes acp`` (entry point ``hermes-acp``). This wrapper acts as the
-ACP *client*: it keeps a single Hermes ACP session alive, translates each
-Centaur turn into an ACP ``session/prompt``, auto-approves tool permission
-requests, and re-emits Hermes' streaming ``session/update`` notifications as
-Centaur-shaped NDJSON for the API to normalize.
+Hermes Agent (NousResearch/hermes-agent) is integrated by driving its native
+``AIAgent`` Python API *in process* — the same class the interactive CLI and
+gateway use — with streaming callbacks wired to Centaur's event stream. We
+deliberately do NOT use Hermes' Agent Client Protocol (ACP) adapter: ACP is
+governed by an external committee and is an unstable seam to depend on. We also
+do not use the oneshot CLI (``hermes chat -q``), which nulls the streaming
+callbacks and only returns a final string. Driving ``AIAgent`` directly gives
+1:1 parity with the codex/claude/amp wrappers (streamed text, reasoning, tool
+start/complete, plan, interrupt, multi-turn) while coupling only to the
+``hermes-agent`` package we already install + version-pin.
 
-The stdin/stdout contract matches the other sandbox wrappers (codex/claude/amp):
+The stdin/stdout contract matches the other sandbox wrappers:
 
 * Read NDJSON turn envelopes from stdin:
-  ``{"type":"user","message":{"content":[blocks]}, "steer"?, "trace_id"?}`` and
+  ``{"type":"user","message":{"content":[blocks]}, ...}`` and
   ``{"type":"interrupt"}``.
-* Emit Hermes-native NDJSON events on stdout. The matching ``"hermes"`` engine
-  branch in ``api/sandbox/normalize.py`` + ``harness_protocol.py`` maps these to
-  canonical Centaur events:
+* Emit Hermes-native NDJSON events on stdout. The ``"hermes"`` engine branch in
+  ``api/sandbox/normalize.py`` + ``harness_protocol.py`` maps these to canonical
+  Centaur events:
     - ``{"type":"system","subtype":"init","session_id":...}``  (thread id)
     - ``{"type":"agent_message_chunk","text":...}``            (streamed answer)
     - ``{"type":"agent_thought_chunk","text":...}``            (reasoning)
     - ``{"type":"tool_call","tool_call_id":...,"name":...,"input":...}``
     - ``{"type":"tool_call_update","tool_call_id":...,"status":...,"output":...}``
     - ``{"type":"plan","entries":[...]}``                      (todo/plan panel)
-    - ``{"type":"turn.completed","stop_reason":...,"text":...,"usage":...}``
+    - ``{"type":"turn.completed","stop_reason":...,"text":...}``
     - ``{"type":"error","message":...}``
 
-Model/provider selection lives in ``~/.hermes/config.yaml`` (written by the
-sandbox entrypoint from ``HERMES_PROVIDER``/``HERMES_MODEL``), so this wrapper
-stays transport-only. Hermes inherits the firewall proxy + stubbed
-``ANTHROPIC_API_KEY`` from the container env, so its model traffic flows through
-iron-proxy like every other harness.
+Provider/model are resolved from ``~/.hermes/config.yaml`` (written by the
+sandbox entrypoint from ``HERMES_PROVIDER``/``HERMES_MODEL``), defaulting to the
+Anthropic provider + a Claude model so Hermes flows through iron-proxy using the
+stubbed ``ANTHROPIC_API_KEY`` like every other harness.
+
+Hermes runs in process, so its stray stdout would corrupt the NDJSON stream. We
+dup the real stdout to a private "protocol" channel for events and redirect the
+process's fd 1 to stderr, so any ``print`` from Hermes lands in pod logs.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
+import queue
 import signal
 import sys
 import threading
+import uuid
+from collections import defaultdict, deque
 from typing import Any
 
-# NOTE: ``acp`` (agent-client-protocol) is only present in the sandbox image, so
-# it is imported lazily inside the functions that need it. This keeps the module
-# importable — and its pure helpers unit-testable — in environments without it.
-
-# ── stdout (Centaur NDJSON) ──────────────────────────────────────────────────
-# ACP talks to the Hermes subprocess over its own pipes, so our stdout is free
-# for Centaur events. A lock keeps concurrent emits (loop callbacks + main)
-# from interleaving partial lines.
+# ── protocol channel ─────────────────────────────────────────────────────────
+# ``_OUT`` is the stream Centaur reads NDJSON from. Until the runtime installs
+# the dedicated channel (in ``main``), emit falls back to ``sys.stdout`` so the
+# module's helpers stay importable + unit-testable without fd surgery.
+_OUT: Any = None
 _EMIT_LOCK = threading.Lock()
 
 
 def emit(payload: dict[str, Any]) -> None:
+    out = _OUT if _OUT is not None else sys.stdout
     line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     with _EMIT_LOCK:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        out.write(line + "\n")
+        out.flush()
 
 
-def _hermes_acp_cmd() -> list[str]:
-    """Resolve the Hermes ACP server command.
+def _install_protocol_channel() -> None:
+    """Reserve real stdout for NDJSON; route everything else to stderr.
 
-    Prefer the installed ``hermes-acp`` console script; fall back to the module
-    entry point so the wrapper still works in editable/dev installs.
+    Hermes runs in this process and may print directly to fd 1. Dup fd 1 to a
+    private channel for events, then point fd 1 at stderr so stray output can't
+    corrupt the protocol stream.
     """
-    override = (os.environ.get("HERMES_ACP_COMMAND") or "").strip()
-    if override:
-        return override.split()
-    from shutil import which
-
-    if which("hermes-acp"):
-        return ["hermes-acp"]
-    if which("hermes"):
-        return ["hermes", "acp"]
-    return [sys.executable, "-m", "acp_adapter.entry"]
+    global _OUT
+    protocol_fd = os.dup(1)
+    os.dup2(2, 1)
+    _OUT = os.fdopen(protocol_fd, "w", encoding="utf-8", closefd=True)
 
 
 # ── content helpers ──────────────────────────────────────────────────────────
-
-def _content_block_text(content: Any) -> str:
-    """Extract text from an ACP content block (dict) or list of blocks."""
-    if isinstance(content, list):
-        return "".join(_content_block_text(c) for c in content)
-    if isinstance(content, dict):
-        if content.get("type") == "text":
-            return str(content.get("text") or "")
-        # tool-call ``content`` wrapper: {"type":"content","content":{...}}
-        inner = content.get("content")
-        if isinstance(inner, (dict, list)):
-            return _content_block_text(inner)
-    return ""
-
-
-def _tool_output_text(update: dict[str, Any]) -> str:
-    """Flatten a tool_call_update's content / rawOutput into a string."""
-    text = _content_block_text(update.get("content"))
-    if text:
-        return text
-    raw = update.get("rawOutput")
-    if isinstance(raw, str):
-        return raw
-    if raw is not None:
-        return json.dumps(raw, ensure_ascii=False)
-    return ""
-
 
 def _prompt_text(turn_input: dict[str, Any]) -> str:
     """Flatten a Centaur turn envelope's content blocks into prompt text."""
@@ -128,160 +103,253 @@ def _prompt_text(turn_input: dict[str, Any]) -> str:
     return "\n".join(p for p in parts if p).strip() or "continue"
 
 
-def _prompt_blocks(turn_input: dict[str, Any]) -> list[Any]:
-    """Build ACP prompt content blocks from a Centaur turn envelope."""
-    import acp
+def _stringify(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(value)
 
-    return [acp.text_block(_prompt_text(turn_input))]
+
+_TODO_STATUS_MAP = {
+    "pending": "pending",
+    "in_progress": "in_progress",
+    "completed": "completed",
+    # Centaur plans only render pending/in_progress/completed; keep cancelled
+    # tasks visible as terminal entries instead of dropping them.
+    "cancelled": "completed",
+}
 
 
-# ── ACP client implementation ────────────────────────────────────────────────
+def _plan_entries_from_todo(result: Any) -> list[dict] | None:
+    """Translate Hermes' ``todo`` tool result into Centaur plan entries.
 
-class CentaurHermesClient:
-    """ACP client that re-emits Hermes session updates as Centaur NDJSON."""
+    The result is JSON shaped like ``{"todos": [{"content","status",...}]}``,
+    sometimes with a human hint appended after the JSON object.
+    """
+    if not isinstance(result, str) or not result.strip():
+        return None
+    text = result.strip()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    if not isinstance(data, dict) or not isinstance(data.get("todos"), list):
+        return None
+    entries: list[dict] = []
+    for item in data["todos"]:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or item.get("id") or "").strip()
+        if not content:
+            continue
+        raw_status = str(item.get("status") or "pending").strip()
+        status = _TODO_STATUS_MAP.get(raw_status, "pending")
+        if raw_status == "cancelled":
+            content = f"[cancelled] {content}"
+        entries.append({"content": content, "priority": "medium", "status": status})
+    return entries
+
+
+# ── AIAgent streaming callbacks → Centaur NDJSON ─────────────────────────────
+
+class TurnEmitter:
+    """Translates ``AIAgent`` streaming callbacks into Centaur NDJSON events.
+
+    Tool starts and completions are correlated via a FIFO of generated ids per
+    tool name (Hermes' callbacks don't carry a shared id), matching how the ACP
+    adapter tracked parallel/duplicate same-name calls.
+    """
 
     def __init__(self) -> None:
-        # Accumulated agent message text for the in-flight turn, so the API's
-        # extract_result() gets the full final answer (streamed deltas only
-        # carry fragments).
+        self._tool_ids: dict[str, deque[str]] = defaultdict(deque)
         self.final_text_parts: list[str] = []
 
-    def reset_turn(self) -> None:
+    def reset(self) -> None:
         self.final_text_parts = []
+        self._tool_ids.clear()
 
     @property
     def final_text(self) -> str:
         return "".join(self.final_text_parts)
 
-    async def session_update(self, session_id: str, update: Any, **_kwargs: Any) -> None:
-        try:
-            data = update.model_dump(by_alias=True, exclude_none=True)
-        except AttributeError:
-            data = update if isinstance(update, dict) else {}
-        kind = data.get("sessionUpdate")
+    # AIAgent.stream_delta_callback(text)
+    def on_stream_delta(self, text: str) -> None:
+        if not text:
+            return
+        self.final_text_parts.append(text)
+        emit({"type": "agent_message_chunk", "text": text})
 
-        if kind == "agent_message_chunk":
-            text = _content_block_text(data.get("content"))
-            if text:
-                self.final_text_parts.append(text)
-                emit({"type": "agent_message_chunk", "text": text})
-        elif kind == "agent_thought_chunk":
-            text = _content_block_text(data.get("content"))
-            if text:
-                emit({"type": "agent_thought_chunk", "text": text})
-        elif kind == "tool_call":
-            emit(
-                {
-                    "type": "tool_call",
-                    "tool_call_id": data.get("toolCallId") or "",
-                    "name": data.get("title") or data.get("kind") or "tool",
-                    "kind": data.get("kind"),
-                    "input": data.get("rawInput") or {},
-                }
-            )
-        elif kind == "tool_call_update":
-            status = data.get("status")
-            # Only the terminal update carries the result Centaur renders.
-            if status in ("completed", "failed"):
-                emit(
-                    {
-                        "type": "tool_call_update",
-                        "tool_call_id": data.get("toolCallId") or "",
-                        "status": status,
-                        "output": _tool_output_text(data),
-                        "is_error": status == "failed",
-                    }
-                )
-        elif kind == "plan":
-            emit({"type": "plan", "entries": data.get("entries") or []})
-        # usage_update / available_commands_update / mode updates carry no
-        # Centaur-facing payload; usage is surfaced via turn.completed instead.
+    # AIAgent.reasoning_callback(text)
+    def on_reasoning(self, text: str) -> None:
+        if text:
+            emit({"type": "agent_thought_chunk", "text": text})
 
-    async def request_permission(
-        self, options: Any, session_id: str, tool_call: Any, **_kwargs: Any
-    ) -> Any:
-        """Auto-approve tool use (the sandbox is the trust boundary)."""
-        from acp.schema import (
-            AllowedOutcome,
-            DeniedOutcome,
-            RequestPermissionResponse,
+    # AIAgent.tool_progress_callback(event_type, name, preview, args, **kwargs)
+    def on_tool_progress(
+        self,
+        event_type: str,
+        name: str | None = None,
+        preview: str | None = None,
+        args: Any = None,
+        **_kwargs: Any,
+    ) -> None:
+        if event_type != "tool.started":
+            return
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                args = {"raw": args}
+        if not isinstance(args, dict):
+            args = {}
+        tool_name = name or "tool"
+        tc_id = "tool-" + uuid.uuid4().hex[:12]
+        self._tool_ids[tool_name].append(tc_id)
+        emit(
+            {
+                "type": "tool_call",
+                "tool_call_id": tc_id,
+                "name": tool_name,
+                "input": args,
+            }
         )
 
-        chosen = _pick_allow_option(options)
-        if chosen is not None:
-            return RequestPermissionResponse(
-                outcome=AllowedOutcome(outcome="selected", option_id=chosen)
+    # AIAgent.step_callback(api_call_count, prev_tools)
+    def on_step(self, api_call_count: int, prev_tools: Any = None) -> None:
+        if not isinstance(prev_tools, list):
+            return
+        for info in prev_tools:
+            if isinstance(info, dict):
+                name = info.get("name") or info.get("function_name") or "tool"
+                result = info.get("result")
+                if result is None:
+                    result = info.get("output")
+                is_error = bool(info.get("error") or info.get("is_error"))
+            elif isinstance(info, str):
+                name, result, is_error = info, None, False
+            else:
+                continue
+            queue_for_name = self._tool_ids.get(name)
+            tc_id = (
+                queue_for_name.popleft()
+                if queue_for_name
+                else "tool-" + uuid.uuid4().hex[:12]
             )
-        return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-
-    # Minimal no-op extension hooks so the connection never errors on them.
-    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        return {}
-
-    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        return None
-
-    def on_connect(self, conn: Any) -> None:
-        return None
-
-
-def _pick_allow_option(options: Any) -> str | None:
-    """Pick an 'allow' permission option id, preferring allow_always."""
-    fallback: str | None = None
-    for opt in options or []:
-        kind = getattr(opt, "kind", None)
-        option_id = getattr(opt, "option_id", None) or getattr(opt, "optionId", None)
-        if not option_id:
-            continue
-        if kind == "allow_always":
-            return option_id
-        if kind == "allow_once" and fallback is None:
-            fallback = option_id
-        if fallback is None and kind not in ("reject_once", "reject_always"):
-            fallback = option_id
-    return fallback
-
-
-# ── session lifecycle ────────────────────────────────────────────────────────
-
-async def _start_session(conn: acp.ClientSideConnection, cwd: str) -> str:
-    """Create or resume a Hermes ACP session; return its id."""
-    resume = (
-        os.environ.get("HERMES_CONTINUE_SESSION_ID")
-        or os.environ.get("AMP_CONTINUE_THREAD_ID")
-        or ""
-    ).strip()
-    if resume:
-        try:
-            result = await conn.load_session(cwd=cwd, session_id=resume)
-            if result is not None:
-                return resume
-        except Exception:
-            # Fall through to a fresh session if resume isn't supported / valid.
+            if queue_for_name is not None and not queue_for_name:
+                self._tool_ids.pop(name, None)
             emit(
                 {
-                    "type": "system",
-                    "subtype": "wrapper_heartbeat",
-                    "phase": "resume_failed",
+                    "type": "tool_call_update",
+                    "tool_call_id": tc_id,
+                    "status": "failed" if is_error else "completed",
+                    "output": _stringify(result),
+                    "is_error": is_error,
                 }
             )
-    result = await conn.new_session(cwd=cwd, mcp_servers=[])
-    return getattr(result, "session_id", None) or resume or ""
+            if name == "todo":
+                entries = _plan_entries_from_todo(result)
+                if entries is not None:
+                    emit({"type": "plan", "entries": entries})
+
+
+# ── agent construction (mirrors hermes_cli.oneshot._run_agent) ───────────────
+
+def _clarify_callback(question: str, choices: Any = None) -> str:
+    """Non-interactive clarify: instruct the agent to pick a sensible default.
+
+    There is no user at a terminal in the sandbox, so a clarify prompt would
+    otherwise stall the turn.
+    """
+    return (
+        "No interactive user is available. Choose the most reasonable default "
+        "and proceed without asking for clarification."
+    )
+
+
+def _build_agent(emitter: TurnEmitter) -> Any:
+    """Construct an ``AIAgent`` like a normal CLI chat turn, with callbacks wired."""
+    from hermes_cli.config import load_config
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_cli.tools_config import _get_platform_tools
+    from run_agent import AIAgent
+
+    try:
+        from hermes_state import SessionDB
+
+        session_db = SessionDB()
+    except Exception:
+        session_db = None
+
+    cfg = load_config()
+    model_cfg = cfg.get("model") or {}
+    if isinstance(model_cfg, str):
+        cfg_model = model_cfg
+    else:
+        cfg_model = model_cfg.get("default") or model_cfg.get("model") or ""
+
+    effective_model = (
+        (os.getenv("HERMES_MODEL") or "").strip()
+        or os.getenv("HERMES_INFERENCE_MODEL", "").strip()
+        or cfg_model
+    )
+    requested_provider = (os.getenv("HERMES_PROVIDER") or "").strip() or None
+    runtime = resolve_runtime_provider(
+        requested=requested_provider, target_model=effective_model or None
+    )
+
+    try:
+        toolsets = sorted(_get_platform_tools(cfg, "cli"))
+    except Exception:
+        toolsets = None
+
+    resume = (
+        os.getenv("HERMES_CONTINUE_SESSION_ID")
+        or os.getenv("AMP_CONTINUE_THREAD_ID")
+        or ""
+    ).strip() or None
+
+    agent = AIAgent(
+        api_key=runtime.get("api_key"),
+        base_url=runtime.get("base_url"),
+        provider=runtime.get("provider"),
+        api_mode=runtime.get("api_mode"),
+        model=effective_model,
+        enabled_toolsets=toolsets,
+        quiet_mode=True,
+        platform="cli",
+        session_db=session_db,
+        credential_pool=runtime.get("credential_pool"),
+        session_id=resume,
+        clarify_callback=_clarify_callback,
+    )
+    agent.suppress_status_output = True
+    # Local "kawaii" status updates are noise; route real provider reasoning
+    # deltas to the thought stream instead.
+    agent.thinking_callback = None
+    agent.reasoning_callback = emitter.on_reasoning
+    agent.stream_delta_callback = emitter.on_stream_delta
+    agent.tool_progress_callback = emitter.on_tool_progress
+    agent.step_callback = emitter.on_step
+    return agent
 
 
 # ── main driver ──────────────────────────────────────────────────────────────
 
 class Wrapper:
     def __init__(self) -> None:
-        self.loop: asyncio.AbstractEventLoop | None = None
-        self.conn: acp.ClientSideConnection | None = None
-        self.session_id: str = ""
-        self.inputs: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        self.client = CentaurHermesClient()
+        self.emitter = TurnEmitter()
+        self.agent: Any = None
+        self.inputs: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._interrupted = False
 
-    # stdin runs in a background thread; it can't touch the loop directly.
     def _stdin_reader(self) -> None:
-        assert self.loop is not None
         for raw in sys.stdin:
             line = raw.strip()
             if not line:
@@ -296,118 +364,91 @@ class Wrapper:
             if msg.get("type") == "interrupt":
                 self.request_interrupt()
                 continue
-            self.loop.call_soon_threadsafe(self.inputs.put_nowait, msg)
-        self.loop.call_soon_threadsafe(self.inputs.put_nowait, None)
+            self.inputs.put(msg)
+        self.inputs.put(None)
 
     def request_interrupt(self, *_args: Any) -> None:
-        if self.loop is None or self.conn is None or not self.session_id:
-            return
-        self.loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(self._cancel())
-        )
-
-    async def _cancel(self) -> None:
-        if self.conn is None or not self.session_id:
+        self._interrupted = True
+        if self.agent is None:
             return
         try:
-            await self.conn.cancel(session_id=self.session_id)
+            self.agent.interrupt()
         except Exception as exc:
             emit({"type": "error", "message": f"interrupt failed: {exc}"})
 
-    async def _run_turn(self, turn_input: dict[str, Any]) -> None:
-        assert self.conn is not None
-        self.client.reset_turn()
-        try:
-            resp = await self.conn.prompt(
-                prompt=_prompt_blocks(turn_input), session_id=self.session_id
-            )
-        except Exception as exc:
-            emit({"type": "error", "message": str(exc)})
-            return
-        stop_reason = getattr(resp, "stop_reason", None) or "end_turn"
-        usage = getattr(resp, "usage", None)
-        payload: dict[str, Any] = {
-            "type": "turn.completed",
-            "stop_reason": stop_reason,
-            "text": self.client.final_text,
-        }
-        if usage is not None:
+    def _run_turn(self, turn_input: dict[str, Any]) -> None:
+        self.emitter.reset()
+        self._interrupted = False
+        prompt = _prompt_text(turn_input)
+
+        # Run the (blocking) turn on a worker thread so the stdin reader can
+        # deliver an interrupt to AIAgent.interrupt() from another thread.
+        result: dict[str, Any] = {}
+
+        def _go() -> None:
             try:
-                payload["usage"] = usage.model_dump(by_alias=True, exclude_none=True)
-            except AttributeError:
-                payload["usage"] = usage
-        emit(payload)
+                result["text"] = self.agent.chat(prompt) or ""
+            except Exception as exc:  # pragma: no cover - provider/tool errors
+                result["error"] = str(exc)
 
-    async def run(self) -> None:
-        import acp
-        from acp.schema import (
-            ClientCapabilities,
-            FileSystemCapabilities,
-            Implementation,
+        worker = threading.Thread(target=_go)
+        worker.start()
+        worker.join()
+
+        if "error" in result:
+            emit({"type": "error", "message": result["error"]})
+            return
+        text = result.get("text") or self.emitter.final_text
+        emit(
+            {
+                "type": "turn.completed",
+                "stop_reason": "interrupted" if self._interrupted else "end_turn",
+                "text": text,
+            }
         )
 
-        self.loop = asyncio.get_running_loop()
-        cwd = os.getcwd()
-        env = dict(os.environ)
-        cmd, *args = _hermes_acp_cmd()
-
-        capabilities = ClientCapabilities(
-            fs=FileSystemCapabilities(read_text_file=False, write_text_file=False),
-            terminal=False,
-        )
-        client_info = Implementation(name="centaur", title="Centaur", version="0.1.0")
+    def run(self) -> None:
+        _install_protocol_channel()
+        # Non-interactive: auto-approve shell/tool/hook gates (the sandbox is the
+        # trust boundary, matching claude's --dangerously-skip-permissions).
+        os.environ.setdefault("HERMES_YOLO_MODE", "1")
+        os.environ.setdefault("HERMES_ACCEPT_HOOKS", "1")
 
         emit({"type": "system", "subtype": "wrapper_heartbeat", "phase": "startup"})
-        async with acp.spawn_agent_process(
-            self.client, cmd, *args, env=env, cwd=cwd, use_unstable_protocol=True
-        ) as (conn, _proc):
-            self.conn = conn
-            await conn.initialize(
-                acp.PROTOCOL_VERSION,
-                client_capabilities=capabilities,
-                client_info=client_info,
-            )
-            self.session_id = await _start_session(conn, cwd)
-            if self.session_id:
-                emit({"type": "system", "subtype": "init", "session_id": self.session_id})
-            emit(
-                {
-                    "type": "system",
-                    "subtype": "wrapper_heartbeat",
-                    "phase": "session_started",
-                }
-            )
+        try:
+            self.agent = _build_agent(self.emitter)
+        except Exception as exc:
+            emit({"type": "error", "message": f"failed to start hermes: {exc}"})
+            emit({"type": "turn.failed", "error": {"message": str(exc)}})
+            return
 
-            threading.Thread(target=self._stdin_reader, daemon=True).start()
+        session_id = getattr(self.agent, "session_id", None) or ""
+        if session_id:
+            emit({"type": "system", "subtype": "init", "session_id": session_id})
+        emit(
+            {"type": "system", "subtype": "wrapper_heartbeat", "phase": "session_started"}
+        )
 
-            while True:
-                item = await self.inputs.get()
-                if item is None:
-                    break
-                if item.get("type") != "user":
-                    continue
-                try:
-                    await self._run_turn(item)
-                except Exception as exc:  # pragma: no cover - defensive
-                    emit({"type": "error", "message": str(exc)})
+        threading.Thread(target=self._stdin_reader, daemon=True).start()
+
+        while True:
+            item = self.inputs.get()
+            if item is None:
+                break
+            if item.get("type") != "user":
+                continue
+            try:
+                self._run_turn(item)
+            except Exception as exc:  # pragma: no cover - defensive
+                emit({"type": "error", "message": str(exc)})
 
 
 def main() -> None:
     wrapper = Wrapper()
-
-    def _stop(*_args: Any) -> None:
-        # Best-effort: stop the loop so the spawn context manager tears the
-        # Hermes subprocess down.
-        if wrapper.loop is not None:
-            wrapper.loop.call_soon_threadsafe(wrapper.loop.stop)
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGUSR1, wrapper.request_interrupt)
-
     try:
-        asyncio.run(wrapper.run())
-    except (KeyboardInterrupt, RuntimeError):
+        wrapper.run()
+    except KeyboardInterrupt:
         pass
 
 

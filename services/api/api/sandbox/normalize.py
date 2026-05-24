@@ -846,10 +846,11 @@ def _normalize_pi_event(event: dict) -> list[dict]:
 
 
 def _normalize_hermes_event(event: dict) -> list[dict]:
-    """Normalize Hermes ACP-bridge events (emitted by hermes-app-wrapper).
+    """Normalize Hermes events (emitted by hermes-app-wrapper).
 
-    The wrapper flattens Hermes' ACP ``session/update`` notifications into a
-    small set of Centaur-shaped events; map those onto canonical events.
+    The wrapper drives Hermes' native ``AIAgent`` in process and flattens its
+    streaming callbacks into a small set of Centaur-shaped events; map those
+    onto canonical events.
     """
     event_type = _as_str(event.get("type"))
 
