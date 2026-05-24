@@ -56,6 +56,7 @@ api:
   executionWorkerEnabled: false
   workflowWorkerEnabled: true
   warmPoolEnabled: false
+  pluginWatcherEnabled: false
   slackEtlEnabled: false
   slackSyncIntervalSeconds: 3600
   slackBackfillIntervalSeconds: 3600

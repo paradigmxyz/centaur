@@ -111,8 +111,19 @@ for _uvi_name in ("uvicorn.access",):
     logging.getLogger(_uvi_name).propagate = False
 
 
+def _plugin_watcher_enabled() -> bool:
+    return os.getenv("PLUGIN_WATCHER_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
 async def _watch_tools(pm: ToolManager) -> None:
     """Watch all plugin directories and auto-reload when files change."""
+    if not _plugin_watcher_enabled():
+        log.info("tool_watcher_disabled", reason="plugin_watcher_disabled")
+        return
     from starlette.concurrency import run_in_threadpool
     from watchfiles import awatch
 
@@ -130,6 +141,9 @@ async def _watch_tools(pm: ToolManager) -> None:
 
 async def _watch_workflows() -> None:
     """Watch external workflow directories and auto-reload when files change."""
+    if not _plugin_watcher_enabled():
+        log.info("workflow_watcher_disabled", reason="plugin_watcher_disabled")
+        return
     from watchfiles import awatch
 
     watch_dirs = [d for d in get_workflow_dirs() if d.exists()]

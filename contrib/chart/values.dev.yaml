@@ -17,6 +17,7 @@ slackbot:
 
 api:
   executionWorkerEnabled: true
+  pluginWatcherEnabled: true
   egressDiscovery:
     enabled: false
 

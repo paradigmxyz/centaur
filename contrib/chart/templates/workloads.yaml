@@ -249,6 +249,8 @@ spec:
               value: {{ ternary "1" "0" .Values.api.workflowWorkerEnabled | quote }}
             - name: WARM_POOL_ENABLED
               value: {{ ternary "1" "0" .Values.api.warmPoolEnabled | quote }}
+            - name: PLUGIN_WATCHER_ENABLED
+              value: {{ ternary "1" "0" .Values.api.pluginWatcherEnabled | quote }}
 {{- if not (hasKey $apiExtraEnv "SLACK_ETL_ENABLED") }}
             - name: SLACK_ETL_ENABLED
               value: {{ ternary "1" "0" .Values.api.slackEtlEnabled | quote }}
