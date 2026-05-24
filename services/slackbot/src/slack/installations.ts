@@ -9,6 +9,7 @@ export type SlackInstallation = {
   enterpriseId?: string
   botToken: string
   botUserId?: string
+  botId?: string
 }
 
 export type SlackInstallationKey = {
@@ -23,7 +24,7 @@ export interface SlackInstallationStore {
 export class EnvSlackInstallationStore implements SlackInstallationStore {
   readonly token?: string
   private readonly slackApiUrl?: string
-  private botUserId?: string
+  private botIdentity?: SlackBotIdentity
 
   constructor(opts: { token?: string; slackApiUrl?: string }) {
     this.token = opts.token
@@ -32,24 +33,34 @@ export class EnvSlackInstallationStore implements SlackInstallationStore {
 
   async findInstallation(key: SlackInstallationKey): Promise<SlackInstallation | null> {
     if (!this.token) return null
-    this.botUserId ??= await fetchBotUserId(this.token, {
+    this.botIdentity ??= await fetchBotIdentity(this.token, {
       slackApiUrl: this.slackApiUrl
     })
     return {
       teamId: key.teamId,
       enterpriseId: key.enterpriseId,
       botToken: this.token,
-      botUserId: this.botUserId
+      botUserId: this.botIdentity.botUserId,
+      botId: this.botIdentity.botId
     }
   }
 }
 
-async function fetchBotUserId(
+type SlackBotIdentity = {
+  botUserId?: string
+  botId?: string
+}
+
+async function fetchBotIdentity(
   token: string,
   opts: SlackClientOptions = {}
-): Promise<string | undefined> {
+): Promise<SlackBotIdentity> {
   const auth = await createSlackWebClient(token, opts).auth.test()
-  return typeof auth.user_id === 'string' ? auth.user_id : undefined
+  const botId = (auth as { bot_id?: unknown }).bot_id
+  return {
+    botUserId: typeof auth.user_id === 'string' ? auth.user_id : undefined,
+    botId: typeof botId === 'string' ? botId : undefined
+  }
 }
 
 export class SlackClientResolver {
@@ -79,10 +90,7 @@ export class SlackClientResolver {
   }
 }
 
-export function createSlackWebClient(
-  token: string,
-  opts: SlackClientOptions = {}
-): WebClient {
+export function createSlackWebClient(token: string, opts: SlackClientOptions = {}): WebClient {
   return new WebClient(
     token,
     opts.slackApiUrl

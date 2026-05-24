@@ -37,7 +37,10 @@ export class CentaurHandoff {
               message_ts: event.slack.message_ts,
               enterprise_id: event.slack.enterprise_id,
               user_team: event.slack.user_team,
-              source_team: event.slack.source_team
+              source_team: event.slack.source_team,
+              bot_id: event.slack.bot_id,
+              app_id: event.slack.app_id,
+              bot_user_id: event.slack.bot_user_id
             },
             is_mention: event.is_mention
           },

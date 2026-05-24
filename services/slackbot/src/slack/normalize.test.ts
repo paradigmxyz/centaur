@@ -193,6 +193,85 @@ describe('normalizeSlackEnvelope', () => {
     expect(normalized?.slack.user_team).toBe('TEXTERNAL')
   })
 
+  it('keeps non-self bot-authored alert mentions actionable', async () => {
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-alertmanager-mention',
+        event: {
+          type: 'message',
+          subtype: 'bot_message',
+          bot_id: 'BALERT',
+          app_id: 'AALERT',
+          bot_profile: {
+            user_id: 'UALERTBOT',
+            app_id: 'AALERT',
+            name: 'Alertmanager'
+          },
+          channel: 'C123',
+          channel_type: 'channel',
+          ts: '1778875070.942789',
+          text: '<@UBOT>',
+          attachments: [
+            {
+              title: 'ValidatorConsensusFailure',
+              text: 'firing on validator-0',
+              fields: [
+                { title: 'cluster', value: 'prd-nae' },
+                { title: 'severity', value: 'critical' }
+              ]
+            }
+          ]
+        }
+      },
+      botUserId: 'UBOT',
+      botId: 'BCENTAUR',
+      client
+    })
+
+    expect(normalized?.is_mention).toBe(true)
+    expect(normalized?.user_id).toBe('UALERTBOT')
+    expect(normalized?.parts).toEqual([
+      {
+        type: 'text',
+        text: [
+          'ValidatorConsensusFailure',
+          'firing on validator-0',
+          'cluster: prd-nae',
+          'severity: critical'
+        ].join('\n')
+      }
+    ])
+    expect(normalized?.slack.bot_id).toBe('BALERT')
+    expect(normalized?.slack.app_id).toBe('AALERT')
+    expect(normalized?.slack.bot_user_id).toBe('UALERTBOT')
+  })
+
+  it('ignores its own bot-authored messages even when Slack omits user', async () => {
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-self-bot-message',
+        event: {
+          type: 'message',
+          subtype: 'bot_message',
+          bot_id: 'BCENTAUR',
+          channel: 'C123',
+          channel_type: 'channel',
+          ts: '1778875070.942789',
+          text: '<@UBOT> loop'
+        }
+      },
+      botUserId: 'UBOT',
+      botId: 'BCENTAUR',
+      client
+    })
+
+    expect(normalized).toBeNull()
+  })
+
   it('backfills prior Slack thread messages for mid-thread mentions', async () => {
     const replies = mock(async () => ({
       ok: true,
@@ -203,6 +282,15 @@ describe('normalizeSlackEnvelope', () => {
           channel: 'C123',
           ts: '1778875060.000100',
           text: 'Earlier market context'
+        },
+        {
+          type: 'message',
+          subtype: 'bot_message',
+          bot_id: 'BALERT',
+          bot_profile: { user_id: 'UALERTBOT', app_id: 'AALERT', name: 'Alertmanager' },
+          channel: 'C123',
+          ts: '1778875062.000100',
+          text: 'Alertmanager: ValidatorConsensusFailure'
         },
         {
           type: 'message',
@@ -238,6 +326,7 @@ describe('normalizeSlackEnvelope', () => {
         }
       },
       botUserId: 'UBOT',
+      botId: 'BCENTAUR',
       client: {
         token: 'xoxb-test-token',
         conversations: { replies }
@@ -256,6 +345,13 @@ describe('normalizeSlackEnvelope', () => {
         role: 'user',
         parts: [{ type: 'text', text: 'Earlier market context' }],
         user_id: 'U111',
+        metadata: { platform: 'slack', history_backfill: true }
+      },
+      {
+        message_id: 'slack:T123:C123:1778875062.000100',
+        role: 'user',
+        parts: [{ type: 'text', text: 'Alertmanager: ValidatorConsensusFailure' }],
+        user_id: 'UALERTBOT',
         metadata: { platform: 'slack', history_backfill: true }
       },
       {

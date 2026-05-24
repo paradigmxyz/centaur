@@ -511,6 +511,7 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
   const normalized = await normalizeSlackEnvelope({
     envelope,
     botUserId: installation.botUserId,
+    botId: installation.botId,
     client
   })
   if (!normalized) return
