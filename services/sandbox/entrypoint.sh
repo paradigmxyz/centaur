@@ -122,18 +122,36 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
 EOF
 
 # ── Hermes settings ──────────────────────────────────────────────────────────
-# Hermes resolves its provider/model from ~/.hermes/config.yaml.
-# Default to Anthropic + Claude so it works out of the box through iron-proxy
-# using the stubbed ANTHROPIC_API_KEY; HERMES_PROVIDER/HERMES_MODEL override
-# fleet-wide or per-session (the model is set per spawn by the API).
+# Hermes resolves its provider/model from ~/.hermes/config.yaml. Prefer explicit
+# Hermes envs, but also auto-configure from Anthropic-compatible deployment envs
+# so the same provider/model settings used by other harnesses work here.
 mkdir -p "$HOME_DIR/.hermes"
-HERMES_PROVIDER_VALUE="${HERMES_PROVIDER:-anthropic}"
-HERMES_MODEL_VALUE="${HERMES_MODEL:-claude-sonnet-4-20250514}"
-cat > "$HOME_DIR/.hermes/config.yaml" <<EOF
+if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    export ANTHROPIC_API_KEY="$ANTHROPIC_AUTH_TOKEN"
+fi
+if [ -z "${ANTHROPIC_TOKEN:-}" ] && [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    export ANTHROPIC_TOKEN="$ANTHROPIC_AUTH_TOKEN"
+fi
+HERMES_PROVIDER_VALUE="${HERMES_PROVIDER:-${HERMES_INFERENCE_PROVIDER:-}}"
+if [ -z "$HERMES_PROVIDER_VALUE" ]; then
+    HERMES_PROVIDER_VALUE="anthropic"
+fi
+HERMES_MODEL_VALUE="${HERMES_MODEL:-${HERMES_INFERENCE_MODEL:-${ANTHROPIC_MODEL:-${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}}}}"
+HERMES_BASE_URL_VALUE="${HERMES_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
+HERMES_API_MODE_VALUE="${HERMES_API_MODE:-}"
+{
+cat <<EOF
 model:
   provider: "$(toml_escape "$HERMES_PROVIDER_VALUE")"
   default: "$(toml_escape "$HERMES_MODEL_VALUE")"
 EOF
+if [ -n "$HERMES_BASE_URL_VALUE" ]; then
+    printf '  base_url: "%s"\n' "$(toml_escape "$HERMES_BASE_URL_VALUE")"
+fi
+if [ -n "$HERMES_API_MODE_VALUE" ]; then
+    printf '  api_mode: "%s"\n' "$(toml_escape "$HERMES_API_MODE_VALUE")"
+fi
+} > "$HOME_DIR/.hermes/config.yaml"
 
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 WORKSPACE_DIR="$HOME_DIR/workspace"

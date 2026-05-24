@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -102,6 +103,7 @@ class HttpSecret:
 
     name: str
     secret_ref: str
+    source_kind: str = ""
     mode: SecretMode = SecretMode.REPLACE
     hosts: tuple[str, ...] = ()
     # Replace mode — where iron-proxy scans for ``replacer``.
@@ -1635,6 +1637,36 @@ class ToolManager:
         ),
     ]
 
+    @staticmethod
+    def _anthropic_compatible_secret_ref() -> str:
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN"):
+            if os.getenv(name):
+                return name
+        return "ANTHROPIC_API_KEY"
+
+    @classmethod
+    def _dynamic_infra_secrets(cls) -> list[HttpSecret]:
+        hosts: set[str] = set()
+        for name in ("ANTHROPIC_BASE_URL", "HERMES_BASE_URL"):
+            raw = (os.getenv(name) or "").strip()
+            if not raw:
+                continue
+            host = urlsplit(raw).hostname
+            if host:
+                hosts.add(host)
+        if not hosts:
+            return []
+        secret_ref = cls._anthropic_compatible_secret_ref()
+        return [
+            HttpSecret(
+                name="ANTHROPIC_API_KEY",
+                secret_ref=secret_ref,
+                source_kind="env" if os.getenv(secret_ref) else "",
+                hosts=tuple(sorted(hosts)),
+                match_headers=("X-Api-Key", "Authorization"),
+            )
+        ]
+
     def collect_secrets(self) -> list[SecretDef]:
         """Return all secrets (infra + tool).
 
@@ -1642,6 +1674,7 @@ class ToolManager:
         its own ``hosts``; ``PgDsnSecret`` is a TCP listener with no host.
         """
         out: list[SecretDef] = list(self._INFRA_SECRETS)
+        out.extend(self._dynamic_infra_secrets())
         for lt in self.tools.values():
             out.extend(lt.all_secrets)
         return out

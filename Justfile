@@ -45,15 +45,27 @@ build-one service:
 
 _build-api:
     docker build -t centaur-api:latest -f services/api/Dockerfile .
+    just _load-kind-image centaur-api:latest
 
 _build-iron-proxy:
     docker build -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
+    just _load-kind-image centaur-iron-proxy:latest
 
 _build-slackbot:
     docker build -t centaur-slackbot:latest -f services/slackbot/Dockerfile .
+    just _load-kind-image centaur-slackbot:latest
 
 _build-agent:
     docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .
+    just _load-kind-image centaur-agent:latest
+
+_load-kind-image image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    context="$(kubectl config current-context 2>/dev/null || true)"
+    if [[ "$context" == kind-* ]] && command -v kind >/dev/null 2>&1; then
+      kind load docker-image "{{image}}" --name "${context#kind-}"
+    fi
 
 bootstrap-secrets *args:
     contrib/scripts/bootstrap-k8s-secrets.sh --namespace {{namespace}} {{args}}

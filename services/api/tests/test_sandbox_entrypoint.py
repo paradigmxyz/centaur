@@ -183,3 +183,38 @@ def test_sandbox_entrypoint_appends_codex_laminar_otel_config(tmp_path: Path) ->
     assert '"x-centaur-thread-key" = "slack:C123:1700000000.000100"' in result.stdout
     assert '"authorization" = "Bearer lmnr-key"' in result.stdout
     assert 'environment = "staging"' in result.stdout
+
+
+def test_sandbox_entrypoint_writes_hermes_config_from_anthropic_compatible_env(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    harness_dir = _write_codex_harness_config(home)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ENTRYPOINT_SH),
+            "sh",
+            "-lc",
+            'cat "$HOME/.hermes/config.yaml" && printf "\\nTOKEN=%s\\nAPI_KEY=%s\\n" "$ANTHROPIC_TOKEN" "$ANTHROPIC_API_KEY"',
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CENTAUR_HARNESS_CONFIG_DIR": str(harness_dir),
+            "ANTHROPIC_AUTH_TOKEN": "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL": "https://llm.example.test/anthropic",
+            "ANTHROPIC_MODEL": "example-model",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert 'provider: "anthropic"' in result.stdout
+    assert 'default: "example-model"' in result.stdout
+    assert 'base_url: "https://llm.example.test/anthropic"' in result.stdout
+    assert "TOKEN=ANTHROPIC_API_KEY" in result.stdout
+    assert "API_KEY=ANTHROPIC_API_KEY" in result.stdout

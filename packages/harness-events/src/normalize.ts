@@ -10,7 +10,7 @@
  */
 
 import { asString, asRecord } from './parse-utils'
-import type { CanonicalEvent, ContentBlock, SubagentActivity } from './types'
+import type { CanonicalEvent, SubagentActivity } from './types'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -639,19 +639,7 @@ function normalizeCodexEvent(event: Record<string, unknown>): CanonicalEvent[] {
   }
 
   if (eventType === 'assistant') {
-    const message = asRecord(event.message)
-    const content = asList(message.content)
-    if (!content.length) return []
-    return [
-      {
-        type: 'assistant',
-        message: {
-          content: content as ContentBlock[],
-          usage: asRecord(message.usage),
-          model: asString(message.model) || undefined
-        }
-      }
-    ]
+    return [event as CanonicalEvent]
   }
 
   if (eventType === 'error') {

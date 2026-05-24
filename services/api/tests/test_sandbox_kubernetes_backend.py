@@ -228,6 +228,24 @@ def test_container_env_passes_laminar_otel_config(
     assert env_map["CODEX_OTEL_ENVIRONMENT"] == "staging"
 
 
+def test_container_env_passes_hermes_anthropic_compatible_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.test/anthropic")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "example-model")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "real-token-never-forwarded")
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    assert env_map["ANTHROPIC_BASE_URL"] == "https://llm.example.test/anthropic"
+    assert env_map["ANTHROPIC_MODEL"] == "example-model"
+    assert env_map["ANTHROPIC_API_KEY"] == "ANTHROPIC_API_KEY"
+    assert env_map["ANTHROPIC_AUTH_TOKEN"] == "ANTHROPIC_API_KEY"
+    assert env_map["ANTHROPIC_TOKEN"] == "ANTHROPIC_API_KEY"
+    assert "real-token-never-forwarded" not in env
+
+
 def test_container_env_applies_kubernetes_sandbox_extra_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

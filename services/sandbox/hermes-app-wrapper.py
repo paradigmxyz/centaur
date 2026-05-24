@@ -57,6 +57,7 @@ from typing import Any
 # module's helpers stay importable + unit-testable without fd surgery.
 _OUT: Any = None
 _EMIT_LOCK = threading.Lock()
+_MAX_TRANSCRIPT_CHARS = 20_000
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -113,6 +114,37 @@ def _stringify(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _transcript_chars(transcript: list[tuple[str, str]]) -> int:
+    return sum(
+        len(user_text) + len(assistant_text)
+        for user_text, assistant_text in transcript
+    )
+
+
+def _trim_transcript(transcript: list[tuple[str, str]]) -> None:
+    """Bound in-process Hermes context while preserving the newest turns."""
+    while len(transcript) > 1 and _transcript_chars(transcript) > _MAX_TRANSCRIPT_CHARS:
+        transcript.pop(0)
+
+
+def _prompt_with_transcript(
+    current_prompt: str,
+    transcript: list[tuple[str, str]],
+) -> str:
+    if not transcript:
+        return current_prompt
+    turns = [
+        f"User:\n{user_text}\n\nAssistant:\n{assistant_text}"
+        for user_text, assistant_text in transcript
+    ]
+    return (
+        "Previous conversation in this Hermes runtime:\n\n"
+        + "\n\n---\n\n".join(turns)
+        + "\n\nCurrent user message:\n"
+        + current_prompt
+    )
 
 
 _TODO_STATUS_MAP = {
@@ -351,6 +383,7 @@ class Wrapper:
         self.emitter = TurnEmitter()
         self.agent: Any = None
         self.inputs: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self.transcript: list[tuple[str, str]] = []
         self._interrupted = False
         self._pending_interrupt = False
 
@@ -386,7 +419,8 @@ class Wrapper:
         self.emitter.reset()
         self._interrupted = self._pending_interrupt
         self._pending_interrupt = False
-        prompt = _prompt_text(turn_input)
+        current_prompt = _prompt_text(turn_input)
+        prompt = _prompt_with_transcript(current_prompt, self.transcript)
 
         # Run the (blocking) turn on a worker thread so the stdin reader can
         # deliver an interrupt to AIAgent.interrupt() from another thread.
@@ -425,6 +459,8 @@ class Wrapper:
                 "text": text,
             }
         )
+        self.transcript.append((current_prompt, str(text)))
+        _trim_transcript(self.transcript)
 
     def run(self) -> None:
         _install_protocol_channel()

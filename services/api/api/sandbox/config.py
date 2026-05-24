@@ -27,10 +27,21 @@ _SANDBOX_PASSTHROUGH_ENV_KEYS = (
     "CODEX_OTEL_LAMINAR_BASE_URL",
     "LMNR_BASE_URL",
     "LMNR_PROJECT_API_KEY",
-    # Hermes harness model selection. Defaults to Anthropic/Claude inside the
-    # wrapper; deployers can override the provider/model fleet-wide here.
+    # Hermes harness model selection. Explicit Hermes envs win, but the
+    # sandbox entrypoint can also derive Hermes config from Anthropic-compatible
+    # envs used by Claude-style deployments.
     "HERMES_PROVIDER",
     "HERMES_MODEL",
+    "HERMES_BASE_URL",
+    "HERMES_API_MODE",
+    "HERMES_INFERENCE_PROVIDER",
+    "HERMES_INFERENCE_MODEL",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "API_TIMEOUT_MS",
 )
 
 # Keep Claude Code deterministic in the pod while still allowing Centaur-owned
@@ -148,6 +159,10 @@ def container_env(
         value = (os.getenv(key) or "").strip()
         if value:
             env.append(f"{key}={value}")
+    if os.getenv("ANTHROPIC_AUTH_TOKEN") and not os.getenv("ANTHROPIC_TOKEN"):
+        env.append("ANTHROPIC_TOKEN=ANTHROPIC_API_KEY")
+    if os.getenv("ANTHROPIC_AUTH_TOKEN"):
+        env.append("ANTHROPIC_AUTH_TOKEN=ANTHROPIC_API_KEY")
     for key, value in _CLAUDE_HARDENING_ENV:
         env.append(f"{key}={value}")
     env.extend(

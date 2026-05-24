@@ -7,6 +7,24 @@ firewall:
   existingCaSecretName: centaur-firewall-ca
   existingCaKeySecretName: centaur-firewall-ca-key
 
+api:
+  image:
+    pullPolicy: IfNotPresent
+  executionWorkerEnabled: true
+  pluginWatcherEnabled: true
+  egressDiscovery:
+    enabled: false
+
+sandbox:
+  image:
+    pullPolicy: IfNotPresent
+
+ironProxy:
+  image:
+    pullPolicy: IfNotPresent
+  manager:
+    secretSource: onepassword
+
 postgres:
   auth:
     existingSecretName: centaur-infra-env
@@ -14,16 +32,8 @@ postgres:
 
 slackbot:
   enabled: true
-
-api:
-  executionWorkerEnabled: true
-  pluginWatcherEnabled: true
-  egressDiscovery:
-    enabled: false
+  image:
+    pullPolicy: IfNotPresent
 
 laminar:
   enabled: true
-
-ironProxy:
-  manager:
-    secretSource: onepassword

@@ -84,6 +84,24 @@ def test_stringify_passthrough_and_json():
     assert wrapper._stringify({"x": 1}) == json.dumps({"x": 1})
 
 
+def test_prompt_with_transcript_empty_returns_current_prompt():
+    wrapper = _load_wrapper()
+    assert wrapper._prompt_with_transcript("current", []) == "current"
+
+
+def test_prompt_with_transcript_includes_prior_turns():
+    wrapper = _load_wrapper()
+    prompt = wrapper._prompt_with_transcript(
+        "What nonce did I give you?",
+        [("Remember nonce HERMES_NONCE_7429.", "SAVED")],
+    )
+
+    assert "Previous conversation in this Hermes runtime" in prompt
+    assert "User:\nRemember nonce HERMES_NONCE_7429." in prompt
+    assert "Assistant:\nSAVED" in prompt
+    assert "Current user message:\nWhat nonce did I give you?" in prompt
+
+
 def test_plan_entries_from_todo_with_trailing_hint():
     wrapper = _load_wrapper()
     result = '{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"cancelled"}]} (hint)'
@@ -302,4 +320,64 @@ def test_run_turn_uses_streamed_text_when_agent_returns_none():
     assert events == [
         {"type": "agent_message_chunk", "text": "PONG"},
         {"type": "turn.completed", "stop_reason": "end_turn", "text": "PONG"},
+    ]
+
+
+def test_run_turn_carries_prior_completed_turns_into_next_prompt():
+    wrapper = _load_wrapper()
+
+    class FakeAgent:
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def chat(self, prompt):
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return "SAVED"
+            return "HERMES_NONCE_7429"
+
+    agent = FakeAgent()
+    subject = wrapper.Wrapper()
+    subject.agent = agent
+
+    first = {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Remember nonce HERMES_NONCE_7429. Reply exactly SAVED.",
+                }
+            ]
+        },
+    }
+    second = {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What nonce did I give you? Reply only with the nonce.",
+                }
+            ]
+        },
+    }
+
+    events = _capture(lambda: (subject._run_turn(first), subject._run_turn(second)))
+
+    assert agent.prompts[0] == "Remember nonce HERMES_NONCE_7429. Reply exactly SAVED."
+    assert "Previous conversation in this Hermes runtime" in agent.prompts[1]
+    assert "User:\nRemember nonce HERMES_NONCE_7429. Reply exactly SAVED." in agent.prompts[1]
+    assert "Assistant:\nSAVED" in agent.prompts[1]
+    assert (
+        "Current user message:\nWhat nonce did I give you? Reply only with the nonce."
+        in agent.prompts[1]
+    )
+    assert events == [
+        {"type": "turn.completed", "stop_reason": "end_turn", "text": "SAVED"},
+        {
+            "type": "turn.completed",
+            "stop_reason": "end_turn",
+            "text": "HERMES_NONCE_7429",
+        },
     ]

@@ -1441,7 +1441,10 @@ def test_render_emits_postgres_listeners_with_env_refs(
     ]
     cfg = yaml.safe_load(render_proxy_yaml(secrets))
     listeners = cfg["postgres"]
-    assert [l["name"] for l in listeners] == ["analytics_pg", "database_url"]
+    assert [listener["name"] for listener in listeners] == [
+        "analytics_pg",
+        "database_url",
+    ]
     assert listeners[0]["listen"] == "0.0.0.0:5432"
     assert listeners[1]["listen"] == "0.0.0.0:5433"
     # upstream.dsn uses the secret_ref directly so iron-proxy can resolve it
@@ -1479,6 +1482,28 @@ def test_render_with_onepassword_source_emits_op_ref(
         gcp["config"]["keyfile"]["secret_ref"]
         == "op://engineering/GCP_GCLOUD_CREDENTIAL/credential"
     )
+
+
+def test_render_http_secret_can_override_global_secret_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+    secrets = [
+        HttpSecret(
+            name="ANTHROPIC_API_KEY",
+            secret_ref="ANTHROPIC_AUTH_TOKEN",
+            source_kind="env",
+            hosts=("api.minimax.io",),
+            match_headers=("X-Api-Key", "Authorization"),
+        )
+    ]
+
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    secret = next(t for t in cfg["transforms"] if t["name"] == "secrets")["config"][
+        "secrets"
+    ][0]
+
+    assert secret["source"] == {"type": "env", "var": "ANTHROPIC_AUTH_TOKEN"}
 
 
 def test_render_groups_header_secret_hosts_when_repeated() -> None:

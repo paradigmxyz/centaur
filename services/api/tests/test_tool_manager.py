@@ -92,6 +92,26 @@ def test_infra_secrets_stay_provider_generic_for_harnesses() -> None:
     }
 
 
+def test_collect_secrets_scopes_anthropic_compatible_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "real-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.test/anthropic")
+
+    manager = ToolManager(tmp_path)
+    secrets = [
+        secret
+        for secret in manager.collect_secrets()
+        if secret.name == "ANTHROPIC_API_KEY" and "llm.example.test" in secret.hosts
+    ]
+
+    assert len(secrets) == 1
+    assert secrets[0].secret_ref == "ANTHROPIC_AUTH_TOKEN"
+    assert secrets[0].source_kind == "env"
+    assert secrets[0].match_headers == ("X-Api-Key", "Authorization")
+
+
 # ---------------------------------------------------------------------------
 # _normalize_for_serialization
 # ---------------------------------------------------------------------------

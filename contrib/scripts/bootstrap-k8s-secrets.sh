@@ -11,6 +11,9 @@ Usage: scripts/bootstrap-k8s-secrets.sh [--namespace NAMESPACE] [--force]
 Creates the required local-dev Kubernetes infra Secrets consumed by the Helm chart.
 Requires OP_SERVICE_ACCOUNT_TOKEN, OP_VAULT, SLACK_BOT_TOKEN,
 SLACK_SIGNING_SECRET, and SLACKBOT_API_KEY in the shell environment.
+Optional provider/model envs such as ANTHROPIC_AUTH_TOKEN,
+ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, HERMES_PROVIDER, and HERMES_MODEL are
+copied when present.
 
 Optional 1Password Connect bootstrap (when ironProxy.manager.secretSource is
 set to onepassword-connect in the Helm values):
@@ -80,6 +83,56 @@ require_env SLACK_BOT_TOKEN
 require_env SLACK_SIGNING_SECRET
 require_env SLACKBOT_API_KEY
 
+optional_secret_keys=(
+  LMNR_PROJECT_API_KEY
+  LMNR_BASE_URL
+  OP_CONNECT_TOKEN
+  HERMES_PROVIDER
+  HERMES_MODEL
+  HERMES_BASE_URL
+  HERMES_API_MODE
+  HERMES_INFERENCE_PROVIDER
+  HERMES_INFERENCE_MODEL
+  ANTHROPIC_API_KEY
+  ANTHROPIC_AUTH_TOKEN
+  ANTHROPIC_TOKEN
+  ANTHROPIC_BASE_URL
+  ANTHROPIC_MODEL
+  ANTHROPIC_DEFAULT_SONNET_MODEL
+  ANTHROPIC_DEFAULT_OPUS_MODEL
+  ANTHROPIC_DEFAULT_HAIKU_MODEL
+  API_TIMEOUT_MS
+)
+
+optional_secret_value() {
+  local name="$1"
+  if [[ "$name" == "ANTHROPIC_API_KEY" && -z "${ANTHROPIC_API_KEY:-}" && -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    printf '%s' "$ANTHROPIC_AUTH_TOKEN"
+    return
+  fi
+  printf '%s' "${!name:-}"
+}
+
+append_optional_literal_args() {
+  local value
+  for name in "${optional_secret_keys[@]}"; do
+    value="$(optional_secret_value "$name")"
+    if [[ -n "$value" ]]; then
+      secret_args+=(--from-literal="$name=$value")
+    fi
+  done
+}
+
+append_optional_patch_data() {
+  local value
+  for name in "${optional_secret_keys[@]}"; do
+    value="$(optional_secret_value "$name")"
+    if [[ -n "$value" ]]; then
+      patch_data+=("\"$name\":\"$(printf '%s' "$value" | base64 | tr -d '\n')\"")
+    fi
+  done
+}
+
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 delete_if_forced centaur-infra-env
@@ -89,19 +142,11 @@ delete_if_forced centaur-onepassword-connect-credentials
 
 if secret_exists centaur-infra-env; then
   patch_data=()
-  if [[ -n "${LMNR_PROJECT_API_KEY:-}" ]]; then
-    patch_data+=("\"LMNR_PROJECT_API_KEY\":\"$(printf '%s' "$LMNR_PROJECT_API_KEY" | base64 | tr -d '\n')\"")
-  fi
-  if [[ -n "${LMNR_BASE_URL:-}" ]]; then
-    patch_data+=("\"LMNR_BASE_URL\":\"$(printf '%s' "$LMNR_BASE_URL" | base64 | tr -d '\n')\"")
-  fi
-  if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
-    patch_data+=("\"OP_CONNECT_TOKEN\":\"$(printf '%s' "$OP_CONNECT_TOKEN" | base64 | tr -d '\n')\"")
-  fi
+  append_optional_patch_data
   if [[ "${#patch_data[@]}" -gt 0 ]]; then
     patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
     kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p "$patch_json" >/dev/null
-    echo "Updated optional Laminar keys in Secret centaur-infra-env in namespace $NAMESPACE"
+    echo "Updated optional keys in Secret centaur-infra-env in namespace $NAMESPACE"
   fi
   echo "Secret centaur-infra-env already exists in namespace $NAMESPACE; leaving unchanged"
 else
@@ -119,15 +164,7 @@ else
     --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
     --from-literal=DATABASE_URL="$DATABASE_URL"
   )
-  if [[ -n "${LMNR_PROJECT_API_KEY:-}" ]]; then
-    secret_args+=(--from-literal=LMNR_PROJECT_API_KEY="$LMNR_PROJECT_API_KEY")
-  fi
-  if [[ -n "${LMNR_BASE_URL:-}" ]]; then
-    secret_args+=(--from-literal=LMNR_BASE_URL="$LMNR_BASE_URL")
-  fi
-  if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
-    secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
-  fi
+  append_optional_literal_args
   kubectl "${secret_args[@]}" >/dev/null
   echo "Created Secret centaur-infra-env in namespace $NAMESPACE"
 fi

@@ -64,7 +64,9 @@ _OP_REF_SOURCES: dict[str, str] = {
 }
 
 
-def _secret_source_kind() -> str:
+def _secret_source_kind(override: str = "") -> str:
+    if override:
+        return override.strip().lower()
     return os.environ.get("FIREWALL_MANAGER_SECRET_SOURCE", "env").strip().lower()
 
 
@@ -76,8 +78,8 @@ def _op_vault() -> str:
     return os.environ.get("OP_VAULT", "ai-agents").strip()
 
 
-def _build_source(secret_ref: str) -> dict[str, str]:
-    iron_proxy_type = _OP_REF_SOURCES.get(_secret_source_kind())
+def _build_source(secret_ref: str, *, source_kind: str = "") -> dict[str, str]:
+    iron_proxy_type = _OP_REF_SOURCES.get(_secret_source_kind(source_kind))
     if iron_proxy_type is not None:
         return {
             "type": iron_proxy_type,
@@ -148,7 +150,7 @@ def _build_secret_transform(
         action, block = _secret_action_block(secret)
         entries.append(
             {
-                "source": _build_source(secret.secret_ref),
+                "source": _build_source(secret.secret_ref, source_kind=secret.source_kind),
                 action: block,
                 "rules": [{"host": h} for h in sorted(host_set)],
             }
