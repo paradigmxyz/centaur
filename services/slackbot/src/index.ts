@@ -512,6 +512,7 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
     envelope,
     botUserId: installation.botUserId,
     botId: installation.botId,
+    triggerBotAllowlist: config.SLACKBOT_TRIGGER_BOT_ALLOWLIST,
     client
   })
   if (!normalized) return

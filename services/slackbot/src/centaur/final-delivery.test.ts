@@ -16,6 +16,7 @@ const config: AppConfig = {
   SLACK_FEEDBACK_LINEAR_PROJECT_ID: "project-test",
   SLACK_FEEDBACK_ALLOWED_CHANNELS: [],
   SLACKBOT_EXTERNAL_ORG_ALLOWLIST: [],
+  SLACKBOT_TRIGGER_BOT_ALLOWLIST: [],
 };
 
 afterEach(() => {

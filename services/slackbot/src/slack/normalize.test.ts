@@ -227,6 +227,7 @@ describe('normalizeSlackEnvelope', () => {
       },
       botUserId: 'UBOT',
       botId: 'BCENTAUR',
+      triggerBotAllowlist: ['app:AALERT'],
       client
     })
 
@@ -246,6 +247,42 @@ describe('normalizeSlackEnvelope', () => {
     expect(normalized?.slack.bot_id).toBe('BALERT')
     expect(normalized?.slack.app_id).toBe('AALERT')
     expect(normalized?.slack.bot_user_id).toBe('UALERTBOT')
+  })
+
+  it('ignores non-self bot-authored mentions unless their app is allowlisted', async () => {
+    const replies = mock(async () => ({ ok: true, messages: [] }))
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-untrusted-bot-mention',
+        event: {
+          type: 'message',
+          subtype: 'bot_message',
+          bot_id: 'BUNTRUSTED',
+          app_id: 'AUNTRUSTED',
+          bot_profile: {
+            user_id: 'UUNTRUSTEDBOT',
+            app_id: 'AUNTRUSTED',
+            name: 'Untrusted Bot'
+          },
+          channel: 'C123',
+          channel_type: 'channel',
+          ts: '1778875070.942789',
+          text: '<@UBOT> please run something'
+        }
+      },
+      botUserId: 'UBOT',
+      botId: 'BCENTAUR',
+      triggerBotAllowlist: ['app:AALERT'],
+      client: {
+        token: 'xoxb-test-token',
+        conversations: { replies }
+      } as any
+    })
+
+    expect(normalized).toBeNull()
+    expect(replies).not.toHaveBeenCalled()
   })
 
   it('ignores its own bot-authored messages even when Slack omits user', async () => {

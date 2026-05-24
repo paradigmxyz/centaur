@@ -64,6 +64,7 @@ export async function normalizeSlackEnvelope(opts: {
   envelope: SlackEnvelope
   botUserId?: string
   botId?: string
+  triggerBotAllowlist?: readonly string[]
   client: WebClient
 }): Promise<NormalizedSlackEvent | null> {
   if (opts.envelope.type !== 'event_callback') return null
@@ -74,6 +75,8 @@ export async function normalizeSlackEnvelope(opts: {
     return null
   if (!event.channel || !event.ts) return null
   if (isSelfBotMessage(event, opts)) return null
+  if (isBotAuthoredMessage(event) && !isAllowedTriggerBotMessage(event, opts.triggerBotAllowlist))
+    return null
 
   const actorId = slackActorId(event)
   if (!actorId) return null
@@ -268,8 +271,54 @@ function isSelfBotMessage(
   return Boolean(
     (opts.botUserId &&
       (message.user === opts.botUserId || message.bot_profile?.user_id === opts.botUserId)) ||
-    (opts.botId && message.bot_id === opts.botId)
+    (opts.botId && (message.bot_id === opts.botId || message.bot_profile?.id === opts.botId))
   )
+}
+
+function isBotAuthoredMessage(
+  message: Pick<SlackMessageEvent, 'subtype' | 'bot_id' | 'bot_profile'>
+): boolean {
+  return Boolean(message.bot_id || message.bot_profile || message.subtype === 'bot_message')
+}
+
+function isAllowedTriggerBotMessage(
+  message: Pick<SlackMessageEvent, 'user' | 'bot_id' | 'app_id' | 'bot_profile'>,
+  allowlist: readonly string[] | undefined
+): boolean {
+  if (!allowlist?.length) return false
+  const appIds = normalizedIdentifierSet(message.app_id, message.bot_profile?.app_id)
+  const botIds = normalizedIdentifierSet(message.bot_id, message.bot_profile?.id)
+  const botUserIds = normalizedIdentifierSet(message.user, message.bot_profile?.user_id)
+  const anyIds = new Set([...appIds, ...botIds, ...botUserIds])
+
+  for (const entry of allowlist) {
+    const parsed = parseTriggerBotAllowlistEntry(entry)
+    if (!parsed) continue
+    if (parsed.kind === 'app' && appIds.has(parsed.value)) return true
+    if (parsed.kind === 'bot' && botIds.has(parsed.value)) return true
+    if (parsed.kind === 'user' && botUserIds.has(parsed.value)) return true
+    if (parsed.kind === 'any' && anyIds.has(parsed.value)) return true
+  }
+  return false
+}
+
+function normalizedIdentifierSet(...values: Array<string | undefined>): Set<string> {
+  return new Set(
+    values.map(value => value?.trim()).filter((value): value is string => Boolean(value))
+  )
+}
+
+function parseTriggerBotAllowlistEntry(
+  entry: string
+): { kind: 'app' | 'bot' | 'user' | 'any'; value: string } | null {
+  const trimmed = entry.trim()
+  if (!trimmed) return null
+  const prefixed = /^(app|bot|user):(.+)$/i.exec(trimmed)
+  if (!prefixed) return { kind: 'any', value: trimmed }
+  const kind = prefixed[1]
+  const value = prefixed[2]?.trim()
+  if (!kind || !value) return null
+  return { kind: kind.toLowerCase() as 'app' | 'bot' | 'user', value }
 }
 
 function uniqueNonEmpty(values: string[]): string[] {
