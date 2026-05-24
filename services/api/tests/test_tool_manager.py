@@ -660,3 +660,29 @@ async def test_tool_rest_router_lists_describes_and_invokes_tools(
             '{"error": "Method \'missing\' not found in tool \'alpha\'", '
             '"available_methods": ["async_echo", "secret_values", "sync_echo"]}'
         )
+
+
+def _llm_hosts(manager: ToolManager) -> dict[str, tuple[str, ...]]:
+    return {s.name: s.hosts for s in manager._infra_secrets() if s.name in {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}
+
+
+def test_infra_secrets_default_to_provider_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CENTAUR_LLM_GATEWAY_HOST", raising=False)
+    hosts = _llm_hosts(ToolManager(tmp_path))
+    assert hosts == {
+        "ANTHROPIC_API_KEY": ("api.anthropic.com",),
+        "OPENAI_API_KEY": ("api.openai.com",),
+    }
+
+
+def test_infra_secrets_route_llm_keys_through_gateway_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CENTAUR_LLM_GATEWAY_HOST", "litellm.example.internal")
+    hosts = _llm_hosts(ToolManager(tmp_path))
+    assert hosts == {
+        "ANTHROPIC_API_KEY": ("litellm.example.internal",),
+        "OPENAI_API_KEY": ("litellm.example.internal",),
+    }

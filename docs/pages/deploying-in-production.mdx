@@ -98,6 +98,28 @@ so any thread can use any configured credential. Per-user and per-channel
 scoping is on the roadmap; until then, scope tool and harness access
 accordingly. See [Security](/security) for the full threat model.
 
+### Optional: route LLM traffic through a gateway
+
+To send harness LLM calls through a gateway (LiteLLM, Portkey, self-hosted, etc.)
+instead of directly to provider APIs, set `CENTAUR_LLM_GATEWAY_HOST` on the API
+container and point the harness CLI at the gateway via `*_BASE_URL` on the
+sandbox. Iron-proxy injects `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` for the
+gateway host instead of the provider host — store the gateway's API key under
+the existing `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` name.
+
+```yaml
+api:
+  extraEnv:
+    CENTAUR_LLM_GATEWAY_HOST: "litellm.internal.example.com"   # hostname only
+
+sandbox:
+  extraEnv:
+    ANTHROPIC_BASE_URL: "https://litellm.internal.example.com" # full URL
+    # or OPENAI_BASE_URL for the Codex harness
+```
+
+When unset, behavior is unchanged: keys route to the upstream provider hosts.
+
 ## 4. Configure Slack
 
 Create the Slackbot app at [api.slack.com/apps](https://api.slack.com/apps).

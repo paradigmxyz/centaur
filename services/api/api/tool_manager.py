@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -1589,52 +1589,59 @@ class ToolManager:
         )
         return loaded
 
-    # Hardcoded infrastructure secrets for the injection map. Each ``HttpSecret``
-    # carries the hosts iron-proxy attaches it to.
-    _INFRA_SECRETS: ClassVar[list[HttpSecret]] = [
-        HttpSecret(
-            name="ANTHROPIC_API_KEY",
-            secret_ref="ANTHROPIC_API_KEY",
-            hosts=("api.anthropic.com",),
-            match_headers=("X-Api-Key",),
-        ),
-        HttpSecret(
-            name="OPENAI_API_KEY",
-            secret_ref="OPENAI_API_KEY",
-            hosts=("api.openai.com",),
-            match_headers=("Authorization",),
-        ),
-        HttpSecret(
-            name="XAI_API_KEY",
-            secret_ref="XAI_API_KEY",
-            hosts=("api.x.ai",),
-            match_headers=("Authorization",),
-        ),
-        HttpSecret(
-            name="GEMINI_API_KEY",
-            secret_ref="GEMINI_API_KEY",
-            hosts=("generativelanguage.googleapis.com",),
-            match_headers=("X-Goog-Api-Key",),
-        ),
-        HttpSecret(
-            name="AMP_API_KEY",
-            secret_ref="AMP_API_KEY",
-            hosts=("ampcode.com",),
-            match_headers=("Authorization",),
-        ),
-        HttpSecret(
-            name="GITHUB_TOKEN",
-            secret_ref="GITHUB_TOKEN",
-            hosts=("github.com", "api.github.com"),
-            match_headers=("Authorization",),
-        ),
-        HttpSecret(
-            name="SLACK_BOT_TOKEN",
-            secret_ref="SLACK_BOT_TOKEN",
-            hosts=("*.slack.com",),
-            match_headers=("Authorization",),
-        ),
-    ]
+    # Infrastructure secrets for the injection map. Each ``HttpSecret`` carries
+    # the hosts iron-proxy attaches it to. When ``CENTAUR_LLM_GATEWAY_HOST`` is
+    # set, the LLM provider keys are also injected on outbound calls to that
+    # host, so harnesses can be pointed at a LiteLLM-style gateway via
+    # ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` without leaking placeholders.
+    def _infra_secrets(self) -> list[HttpSecret]:
+        gateway = os.getenv("CENTAUR_LLM_GATEWAY_HOST", "").strip()
+        anthropic_hosts: tuple[str, ...] = (gateway,) if gateway else ("api.anthropic.com",)
+        openai_hosts: tuple[str, ...] = (gateway,) if gateway else ("api.openai.com",)
+        return [
+            HttpSecret(
+                name="ANTHROPIC_API_KEY",
+                secret_ref="ANTHROPIC_API_KEY",
+                hosts=anthropic_hosts,
+                match_headers=("X-Api-Key",),
+            ),
+            HttpSecret(
+                name="OPENAI_API_KEY",
+                secret_ref="OPENAI_API_KEY",
+                hosts=openai_hosts,
+                match_headers=("Authorization",),
+            ),
+            HttpSecret(
+                name="XAI_API_KEY",
+                secret_ref="XAI_API_KEY",
+                hosts=("api.x.ai",),
+                match_headers=("Authorization",),
+            ),
+            HttpSecret(
+                name="GEMINI_API_KEY",
+                secret_ref="GEMINI_API_KEY",
+                hosts=("generativelanguage.googleapis.com",),
+                match_headers=("X-Goog-Api-Key",),
+            ),
+            HttpSecret(
+                name="AMP_API_KEY",
+                secret_ref="AMP_API_KEY",
+                hosts=("ampcode.com",),
+                match_headers=("Authorization",),
+            ),
+            HttpSecret(
+                name="GITHUB_TOKEN",
+                secret_ref="GITHUB_TOKEN",
+                hosts=("github.com", "api.github.com"),
+                match_headers=("Authorization",),
+            ),
+            HttpSecret(
+                name="SLACK_BOT_TOKEN",
+                secret_ref="SLACK_BOT_TOKEN",
+                hosts=("*.slack.com",),
+                match_headers=("Authorization",),
+            ),
+        ]
 
     def collect_secrets(self) -> list[SecretDef]:
         """Return all secrets (infra + tool).
@@ -1642,7 +1649,7 @@ class ToolManager:
         Every ``HttpSecret``, ``GcpAuthSecret`` and ``OAuthTokenSecret`` carries
         its own ``hosts``; ``PgDsnSecret`` is a TCP listener with no host.
         """
-        out: list[SecretDef] = list(self._INFRA_SECRETS)
+        out: list[SecretDef] = list(self._infra_secrets())
         for lt in self.tools.values():
             out.extend(lt.all_secrets)
         return out
