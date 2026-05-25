@@ -39,6 +39,12 @@ export const sidebar = [
     ],
   },
   {
+    text: 'Reference',
+    items: [
+      { text: 'Configuration', link: '/reference/configuration' },
+    ],
+  },
+  {
     text: 'Resources',
     items: [
       { text: 'Brand', link: '/brand' },
