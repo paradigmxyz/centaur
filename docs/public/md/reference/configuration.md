@@ -144,8 +144,7 @@ Sandbox entrypoint and wrappers:
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
 | `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
-| `CODEX_OTEL_*`, `CLAUDE_OTEL_*`, `LMNR_PROJECT_API_KEY`, `LMNR_BASE_URL` | API env pass-through or `sandbox.extraEnv`. | Harness telemetry export to Laminar/OTLP. |
-| `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Telemetry environment and trace context. |
+| `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
 | `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |
 
@@ -175,7 +174,6 @@ Slack ETL workflows:
 | Env var | Set from | Controls |
 | --- | --- | --- |
 | `VICTORIAMETRICS_URL`, `VICTORIAMETRICS_PUSH_ENABLED` | `api.extraEnv`, `api.victoriaMetricsPushEnabled`. | Push-based API metrics. |
-| `LMNR_PROJECT_API_KEY`, `LMNR_BASE_URL`, `LMNR_HTTP_PORT`, `LMNR_GRPC_PORT` | Secret, Laminar chart values, or `extraEnv`. | Laminar tracing for API, Slackbot, and harnesses. |
 | `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
 | `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
 | `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |

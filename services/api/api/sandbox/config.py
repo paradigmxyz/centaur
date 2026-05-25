@@ -23,10 +23,6 @@ _HARNESS_STUB_KEYS = (
 
 _SANDBOX_PASSTHROUGH_ENV_KEYS = (
     "CODEX_OTEL_ENVIRONMENT",
-    "CODEX_OTEL_LAMINAR_ENDPOINT",
-    "CODEX_OTEL_LAMINAR_BASE_URL",
-    "LMNR_BASE_URL",
-    "LMNR_PROJECT_API_KEY",
 )
 
 # Keep Claude Code deterministic in the pod while still allowing Centaur-owned

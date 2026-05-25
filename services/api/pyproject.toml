@@ -24,7 +24,6 @@ dependencies = [
     "sse-starlette>=3.2.0",
     "croniter>=6.2.2",
     "feedparser>=6.0.0",
-    "lmnr[anthropic,openai]>=0.5.2,<0.5.3",
 ]
 
 [tool.uv]

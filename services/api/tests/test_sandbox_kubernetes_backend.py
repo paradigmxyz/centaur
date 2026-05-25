@@ -276,24 +276,14 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     assert env_map["no_proxy"] == env_map["NO_PROXY"]
 
 
-def test_container_env_passes_laminar_otel_config(
+def test_container_env_passes_allowed_otel_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(
-        "LMNR_BASE_URL",
-        "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000",
-    )
-    monkeypatch.setenv("LMNR_PROJECT_API_KEY", "lmnr-key")
     monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
 
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
-    assert (
-        env_map["LMNR_BASE_URL"]
-        == "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000"
-    )
-    assert env_map["LMNR_PROJECT_API_KEY"] == "lmnr-key"
     assert env_map["CODEX_OTEL_ENVIRONMENT"] == "staging"
 
 
@@ -307,15 +297,11 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
             [
                 {
                     "name": "NO_PROXY",
-                    "value": "localhost,127.0.0.1,api.internal,laminar.internal",
+                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
                 },
                 {
                     "name": "no_proxy",
-                    "value": "localhost,127.0.0.1,api.internal,laminar.internal",
-                },
-                {
-                    "name": "LMNR_BASE_URL",
-                    "value": "http://laminar.internal:8000",
+                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
                 },
             ]
         ),
@@ -324,9 +310,8 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
-    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,api.internal,laminar.internal"
-    assert env_map["no_proxy"] == "localhost,127.0.0.1,api.internal,laminar.internal"
-    assert env_map["LMNR_BASE_URL"] == "http://laminar.internal:8000"
+    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,api.internal,metrics.internal"
+    assert env_map["no_proxy"] == "localhost,127.0.0.1,api.internal,metrics.internal"
     assert len([item for item in env if item.startswith("NO_PROXY=")]) == 1
     assert len([item for item in env if item.startswith("no_proxy=")]) == 1
 

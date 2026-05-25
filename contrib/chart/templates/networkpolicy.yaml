@@ -61,86 +61,6 @@ spec:
           port: 5432
 ---
 {{- end }}
-{{- if .Values.laminar.enabled }}
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "centaur.fullname" . }}-laminar-internal
-  labels:
-{{ include "centaur.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchExpressions:
-      - key: app.kubernetes.io/name
-        operator: In
-        values:
-          - {{ include "centaur.name" . | quote }}
-      - key: app.kubernetes.io/instance
-        operator: In
-        values:
-          - {{ .Release.Name | quote }}
-      - key: app.kubernetes.io/component
-        operator: In
-        values:
-          - laminar-postgres
-          - laminar-clickhouse
-          - laminar-quickwit
-          - laminar-query-engine
-          - laminar-app-server
-          - laminar-frontend
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    - from:
-        - podSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values:
-                  - {{ include "centaur.name" . | quote }}
-              - key: app.kubernetes.io/instance
-                operator: In
-                values:
-                  - {{ .Release.Name | quote }}
-              - key: app.kubernetes.io/component
-                operator: In
-                values:
-                  - laminar-postgres
-                  - laminar-clickhouse
-                  - laminar-quickwit
-                  - laminar-query-engine
-                  - laminar-app-server
-                  - laminar-frontend
-                  - api
-                  - secrets
-                  - slackbot
-  egress:
-    - to:
-        - podSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values:
-                  - {{ include "centaur.name" . | quote }}
-              - key: app.kubernetes.io/instance
-                operator: In
-                values:
-                  - {{ .Release.Name | quote }}
-              - key: app.kubernetes.io/component
-                operator: In
-                values:
-                  - laminar-postgres
-                  - laminar-clickhouse
-                  - laminar-quickwit
-                  - laminar-query-engine
-                  - laminar-app-server
-                  - laminar-frontend
-    - ports:
-        - protocol: TCP
-          port: 443
----
-{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -212,17 +132,6 @@ spec:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.pgPortRangeStart }}
           endPort: {{ .Values.ironProxy.service.pgPortRangeEnd }}
-{{- if .Values.laminar.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "laminar-app-server") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.laminar.appServer.service.httpPort }}
-        - protocol: TCP
-          port: {{ .Values.laminar.appServer.service.grpcPort }}
-{{- end }}
     - ports:
         - protocol: TCP
           port: 443
@@ -279,17 +188,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.proxyPort }}
-{{- if .Values.laminar.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "laminar-app-server") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.laminar.appServer.service.httpPort }}
-        - protocol: TCP
-          port: {{ .Values.laminar.appServer.service.grpcPort }}
-{{- end }}
     # Slack bootstrap and message delivery need direct HTTPS egress.
     - ports:
         - protocol: TCP

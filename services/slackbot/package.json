@@ -17,7 +17,6 @@
     "check:types": "bun tsgo --project tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@lmnr-ai/lmnr": "^0.8.23",
     "@slack/types": "^2.19.0",
     "@slack/web-api": "^7.15.2",
     "@std/ulid": "npm:@jsr/std__ulid",

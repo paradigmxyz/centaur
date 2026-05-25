@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import queue
 import signal
 import subprocess
@@ -182,27 +181,6 @@ def split_goal(items: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, 
     return goal or None, []
 
 
-def _laminar_otel_trace_endpoint() -> str:
-    endpoint = (os.environ.get("CODEX_OTEL_LAMINAR_ENDPOINT") or "").strip()
-    if endpoint:
-        return endpoint
-    base = (
-        os.environ.get("CODEX_OTEL_LAMINAR_BASE_URL")
-        or os.environ.get("LMNR_BASE_URL")
-        or ""
-    ).strip()
-    if not base:
-        return ""
-    base = base.rstrip("/")
-    if base.endswith("/v1/traces"):
-        return base
-    return f"{base}/v1/traces"
-
-
-def _toml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
 def _trace_id_to_w3c_hex(trace_id: str | None) -> str | None:
     raw = (trace_id or "").strip()
     if not raw:
@@ -237,79 +215,12 @@ def configure_trace_context(trace_id: str | None) -> None:
     os.environ["TRACEPARENT"] = traceparent
 
 
-def _strip_otel_toml_sections(contents: str) -> str:
-    kept: list[str] = []
-    skipping = False
-    for line in contents.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            section = stripped.strip("[]").strip()
-            skipping = section == "otel" or section.startswith("otel.")
-        if not skipping:
-            kept.append(line)
-    return "\n".join(kept).rstrip()
-
-
-def _write_laminar_otel_config(
-    trace_endpoint: str, trace_id: str, thread_key: str, api_key: str, environment: str
-) -> None:
-    config_path = (
-        Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
-    )
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = config_path.read_text() if config_path.exists() else ""
-    base = _strip_otel_toml_sections(existing)
-    headers = [
-        f"x-trace-id = {_toml_string(trace_id)}",
-    ]
-    if thread_key:
-        headers.append(f"x-centaur-thread-key = {_toml_string(thread_key)}")
-    if api_key:
-        headers.append(f"authorization = {_toml_string(f'Bearer {api_key}')}")
-    otel_block = "\n".join(
-        [
-            "[otel]",
-            f"environment = {_toml_string(environment)}",
-            "log_user_prompt = false",
-            "",
-            "[otel.trace_exporter.otlp-http]",
-            f"endpoint = {_toml_string(trace_endpoint)}",
-            'protocol = "binary"',
-            "",
-            "[otel.trace_exporter.otlp-http.headers]",
-            *headers,
-        ]
-    )
-    next_contents = f"{base}\n\n{otel_block}\n" if base else f"{otel_block}\n"
-    config_path.write_text(next_contents)
-
-
-def configure_laminar_otel_for_startup(
-    trace_id: str | None, thread_key: str | None
-) -> None:
+def configure_trace_context_for_startup(trace_id: str | None) -> None:
     global CONFIGURED_OTEL_TRACE_ID
     trace_id = (trace_id or os.environ.get("CENTAUR_TRACE_ID") or "").strip()
     configure_trace_context(trace_id)
-    trace_endpoint = _laminar_otel_trace_endpoint()
-    if not trace_endpoint or not trace_id or CONFIGURED_OTEL_TRACE_ID == trace_id:
+    if not trace_id or CONFIGURED_OTEL_TRACE_ID == trace_id:
         return
-
-    thread_key = (thread_key or os.environ.get("CENTAUR_THREAD_KEY") or "").strip()
-    api_key = (os.environ.get("LMNR_PROJECT_API_KEY") or "").strip()
-    environment = (
-        os.environ.get("CODEX_OTEL_ENVIRONMENT")
-        or os.environ.get("DEPLOY_ENV")
-        or os.environ.get("ENVIRONMENT")
-        or "dev"
-    ).strip() or "dev"
-
-    _write_laminar_otel_config(
-        trace_endpoint=trace_endpoint,
-        trace_id=trace_id,
-        thread_key=thread_key,
-        api_key=api_key,
-        environment=environment,
-    )
     CONFIGURED_OTEL_TRACE_ID = trace_id
 
 
@@ -432,9 +343,7 @@ def handle_input(turn_input: dict[str, Any]) -> None:
     if turn_input.get("type") != "user":
         return
 
-    configure_laminar_otel_for_startup(
-        turn_input.get("trace_id"), turn_input.get("thread_key")
-    )
+    configure_trace_context_for_startup(turn_input.get("trace_id"))
     start_app_server()
     thread_id = start_or_resume_thread()
     items = input_items(turn_input)

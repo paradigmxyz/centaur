@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-import tomllib
 from types import ModuleType
 import uuid
 
@@ -19,63 +18,10 @@ def _load_wrapper() -> ModuleType:
     return module
 
 
-def test_configure_laminar_otel_writes_startup_config(monkeypatch, tmp_path) -> None:
-    wrapper = _load_wrapper()
-    codex_home = tmp_path / ".codex"
-    codex_home.mkdir()
-    config_path = codex_home / "config.toml"
-    config_path.write_text(
-        """
-model = "gpt-5.5"
-
-[otel]
-environment = "old"
-
-[otel.exporter.otlp-http]
-endpoint = "http://old/v1/logs"
-protocol = "binary"
-
-[projects."/home/agent/workspace"]
-trust_level = "trusted"
-""".lstrip()
-    )
-
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("CENTAUR_TRACE_ID", "00000000-0000-0000-0000-000000000001")
-    monkeypatch.setenv("CENTAUR_THREAD_KEY", "warm-placeholder")
-    monkeypatch.setenv("LMNR_BASE_URL", "http://laminar:8000")
-    monkeypatch.setenv("LMNR_PROJECT_API_KEY", "lmnr-key")
-    monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
-
-    wrapper.configure_laminar_otel_for_startup(
-        "00000000-0000-0000-0000-000000000123",
-        "slack:C123:1700000000.000100",
-    )
-
-    contents = config_path.read_text()
-    parsed = tomllib.loads(contents)
-    assert parsed["model"] == "gpt-5.5"
-    assert parsed["projects"]["/home/agent/workspace"]["trust_level"] == "trusted"
-    assert parsed["otel"]["environment"] == "staging"
-    assert "exporter" not in parsed["otel"]
-    assert (
-        parsed["otel"]["trace_exporter"]["otlp-http"]["endpoint"]
-        == "http://laminar:8000/v1/traces"
-    )
-    assert parsed["otel"]["trace_exporter"]["otlp-http"]["protocol"] == "binary"
-    assert parsed["otel"]["trace_exporter"]["otlp-http"]["headers"] == {
-        "x-trace-id": "00000000-0000-0000-0000-000000000123",
-        "x-centaur-thread-key": "slack:C123:1700000000.000100",
-        "authorization": "Bearer lmnr-key",
-    }
-    assert "v1/logs" not in contents
-
-
-def test_configure_laminar_otel_sets_w3c_trace_context(monkeypatch, tmp_path) -> None:
+def test_configure_trace_context_for_startup_sets_w3c_trace_context(monkeypatch, tmp_path) -> None:
     wrapper = _load_wrapper()
     codex_home = tmp_path / ".codex"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("LMNR_BASE_URL", "http://laminar:8000")
     monkeypatch.setattr(
         wrapper.uuid,
         "uuid4",
@@ -83,10 +29,7 @@ def test_configure_laminar_otel_sets_w3c_trace_context(monkeypatch, tmp_path) ->
     )
 
     wrapper.CURRENT_TRACEPARENT = None
-    wrapper.configure_laminar_otel_for_startup(
-        "00000000-0000-4000-8000-000000000123",
-        "slack:C123:1700000000.000100",
-    )
+    wrapper.configure_trace_context_for_startup("00000000-0000-4000-8000-000000000123")
 
     assert (
         wrapper.CURRENT_TRACEPARENT
@@ -197,7 +140,7 @@ def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     monkeypatch.setattr(wrapper, "notify", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(wrapper, "emit", fake_emit)
     monkeypatch.setattr(
-        wrapper, "configure_laminar_otel_for_startup", lambda *_args, **_kwargs: None
+        wrapper, "configure_trace_context_for_startup", lambda *_args, **_kwargs: None
     )
     wrapper.SHUTTING_DOWN = False
     wrapper.APP = None

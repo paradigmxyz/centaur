@@ -28,7 +28,6 @@ from fastapi.responses import PlainTextResponse
 from toon_format import encode as toon_encode
 
 from api.api_keys import check_scope
-from api.laminar_tracing import set_span_attributes, start_span
 from api.vm_metrics import record_tool_call
 from api.deps import get_key_info, get_sandbox_claims, verify_api_key
 from api import slackbot_client
@@ -1914,37 +1913,11 @@ class ToolManager:
 
         token = set_tool_context(ctx)
         try:
-            with start_span(
-                name="centaur.tool.call",
-                span_type="TOOL",
-                metadata={
-                    "service": "api",
-                    "tool_name": tool_name,
-                    "tool_method": method_name,
-                    **(
-                        {"thread_key": sandbox_claims.get("thread_key")}
-                        if sandbox_claims
-                        else {}
-                    ),
-                },
-            ):
-                set_span_attributes(
-                    {
-                        "centaur.tool.name": tool_name,
-                        "centaur.tool.method": method_name,
-                        "centaur.tool.arg_keys": ",".join(sorted(args.keys())),
-                        **(
-                            {"centaur.thread_key": sandbox_claims.get("thread_key")}
-                            if sandbox_claims
-                            else {}
-                        ),
-                    }
-                )
-                if inspect.iscoroutinefunction(method.fn):
-                    coro = method.fn(**args)
-                else:
-                    coro = asyncio.to_thread(method.fn, **args)
-                result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
+            if inspect.iscoroutinefunction(method.fn):
+                coro = method.fn(**args)
+            else:
+                coro = asyncio.to_thread(method.fn, **args)
+            result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
             duration_ms = round((time.monotonic() - t0) * 1000)
             log.info(
                 "tool_call_completed",
@@ -2096,37 +2069,11 @@ class ToolManager:
 
         token = set_tool_context(ctx)
         try:
-            with start_span(
-                name="centaur.tool.call",
-                span_type="TOOL",
-                metadata={
-                    "service": "api",
-                    "tool_name": tool_name,
-                    "tool_method": method_name,
-                    **(
-                        {"thread_key": sandbox_claims.get("thread_key")}
-                        if sandbox_claims
-                        else {}
-                    ),
-                },
-            ):
-                set_span_attributes(
-                    {
-                        "centaur.tool.name": tool_name,
-                        "centaur.tool.method": method_name,
-                        "centaur.tool.arg_keys": ",".join(sorted(args.keys())),
-                        **(
-                            {"centaur.thread_key": sandbox_claims.get("thread_key")}
-                            if sandbox_claims
-                            else {}
-                        ),
-                    }
-                )
-                if inspect.iscoroutinefunction(method.fn):
-                    coro = method.fn(**args)
-                else:
-                    coro = asyncio.to_thread(method.fn, **args)
-                result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
+            if inspect.iscoroutinefunction(method.fn):
+                coro = method.fn(**args)
+            else:
+                coro = asyncio.to_thread(method.fn, **args)
+            result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
             duration_ms = round((time.monotonic() - t0) * 1000)
             log.info(
                 "tool_call_completed",

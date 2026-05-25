@@ -89,19 +89,13 @@ delete_if_forced centaur-onepassword-connect-credentials
 
 if secret_exists centaur-infra-env; then
   patch_data=()
-  if [[ -n "${LMNR_PROJECT_API_KEY:-}" ]]; then
-    patch_data+=("\"LMNR_PROJECT_API_KEY\":\"$(printf '%s' "$LMNR_PROJECT_API_KEY" | base64 | tr -d '\n')\"")
-  fi
-  if [[ -n "${LMNR_BASE_URL:-}" ]]; then
-    patch_data+=("\"LMNR_BASE_URL\":\"$(printf '%s' "$LMNR_BASE_URL" | base64 | tr -d '\n')\"")
-  fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     patch_data+=("\"OP_CONNECT_TOKEN\":\"$(printf '%s' "$OP_CONNECT_TOKEN" | base64 | tr -d '\n')\"")
   fi
   if [[ "${#patch_data[@]}" -gt 0 ]]; then
     patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
     kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p "$patch_json" >/dev/null
-    echo "Updated optional Laminar keys in Secret centaur-infra-env in namespace $NAMESPACE"
+    echo "Updated optional keys in Secret centaur-infra-env in namespace $NAMESPACE"
   fi
   echo "Secret centaur-infra-env already exists in namespace $NAMESPACE; leaving unchanged"
 else
@@ -119,12 +113,6 @@ else
     --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
     --from-literal=DATABASE_URL="$DATABASE_URL"
   )
-  if [[ -n "${LMNR_PROJECT_API_KEY:-}" ]]; then
-    secret_args+=(--from-literal=LMNR_PROJECT_API_KEY="$LMNR_PROJECT_API_KEY")
-  fi
-  if [[ -n "${LMNR_BASE_URL:-}" ]]; then
-    secret_args+=(--from-literal=LMNR_BASE_URL="$LMNR_BASE_URL")
-  fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
   fi

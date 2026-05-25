@@ -175,26 +175,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSANDBOX_SIGNING_KEY" .Values.secretManager.envPrefix }}
-            - name: LMNR_PROJECT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_PROJECT_API_KEY" .Values.secretManager.envPrefix }}
-                  optional: true
-            - name: LMNR_BASE_URL
-{{- if .Values.laminar.enabled }}
-              value: {{ include "centaur.laminarBaseUrl" . | quote }}
-{{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_BASE_URL" .Values.secretManager.envPrefix }}
-                  optional: true
-{{- end }}
-            - name: LMNR_HTTP_PORT
-              value: {{ .Values.laminar.appServer.service.httpPort | quote }}
-            - name: LMNR_GRPC_PORT
-              value: {{ .Values.laminar.appServer.service.grpcPort | quote }}
             - name: HTTPS_PROXY
               value: {{ include "centaur.firewallProxyUrl" . | quote }}
             - name: REQUESTS_CA_BUNDLE
@@ -202,9 +182,9 @@ spec:
             - name: SSL_CERT_FILE
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: CENTAUR_LOG_LEVEL
               value: info
             - name: CENTAUR_DEFAULT_HARNESS
@@ -500,26 +480,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
-            - name: LMNR_PROJECT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_PROJECT_API_KEY" .Values.secretManager.envPrefix }}
-                  optional: true
-            - name: LMNR_BASE_URL
-{{- if .Values.laminar.enabled }}
-              value: {{ include "centaur.laminarBaseUrl" . | quote }}
-{{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_BASE_URL" .Values.secretManager.envPrefix }}
-                  optional: true
-{{- end }}
-            - name: LMNR_HTTP_PORT
-              value: {{ .Values.laminar.appServer.service.httpPort | quote }}
-            - name: LMNR_GRPC_PORT
-              value: {{ .Values.laminar.appServer.service.grpcPort | quote }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
             - name: HTTPS_PROXY
@@ -527,9 +487,9 @@ spec:
             - name: NODE_EXTRA_CA_CERTS
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) | quote }}
 {{- if .Values.slackbot.runtimeErrorAlertChannel }}
             - name: RUNTIME_ERROR_ALERT_CHANNEL
               value: {{ .Values.slackbot.runtimeErrorAlertChannel | quote }}

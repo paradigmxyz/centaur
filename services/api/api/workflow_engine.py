@@ -54,8 +54,6 @@ from api.vm_metrics import (
     record_workflow_run_terminal,
 )
 from api.webhooks import clear_webhook_specs, register_workflow_webhooks
-from api.laminar_tracing import set_trace_context, start_span
-from api.trace_context import get_or_create_thread_trace_id
 
 log = structlog.get_logger()
 
@@ -2363,18 +2361,6 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
     run_input = decode_jsonb(run_row.get("input_json"), {})
     if not isinstance(run_input, dict):
         run_input = {}
-    thread_key = str(run_input.get("thread_key") or run_input.get("trigger_key") or "")
-    trace_id = None
-    if thread_key:
-        try:
-            trace_id = await get_or_create_thread_trace_id(pool, thread_key)
-        except Exception:
-            log.debug(
-                "workflow_trace_lookup_failed",
-                thread_key=thread_key,
-                exc_info=True,
-            )
-
     created_at = run_row.get("created_at")
     if created_at and isinstance(created_at, dt.datetime):
         aware = (
@@ -2433,32 +2419,7 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         name=f"workflow-lease-{run_id}",
     )
 
-    span_cm = start_span(
-        name="centaur.api.workflow_run",
-        span_type="DEFAULT",
-        metadata={
-            "service": "api",
-            "trace_id": trace_id,
-            "thread_key": thread_key,
-            "workflow_run_id": run_id,
-            "workflow_name": workflow_name,
-            "worker_id": worker_id,
-        },
-        trace_id=trace_id,
-    )
-    span_cm.__enter__()
     try:
-        set_trace_context(
-            session_id=trace_id or thread_key or None,
-            metadata={
-                "service": "api",
-                "environment": os.getenv("CENTAUR_ENVIRONMENT", "local"),
-                "trace_id": trace_id,
-                "thread_key": thread_key,
-                "workflow_run_id": run_id,
-                "workflow_name": workflow_name,
-            },
-        )
         result = await registered.handler(params, ctx)
         # Handler completed normally → mark run as completed
         updated = await pool.execute(
@@ -2638,7 +2599,6 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
-        span_cm.__exit__(*sys.exc_info())
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────

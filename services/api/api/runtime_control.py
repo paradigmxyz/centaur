@@ -48,8 +48,6 @@ from api.vm_metrics import (
 from api.sandbox.normalize import normalize_harness_event
 from api.sandbox.harness_protocol import extract_result
 from api.sandbox.registry import get_backend
-from api.laminar_tracing import set_trace_context, start_span
-from api.trace_context import get_or_create_thread_trace_id
 
 log = structlog.get_logger()
 
@@ -2294,40 +2292,7 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
 
 
 async def _process_execution(pool, row: dict[str, Any]) -> None:
-    thread_key = str(row.get("thread_key") or "")
-    trace_id = None
-    if thread_key:
-        try:
-            trace_id = await get_or_create_thread_trace_id(pool, thread_key)
-        except Exception:
-            log.debug(
-                "execution_trace_lookup_failed",
-                thread_key=thread_key,
-                exc_info=True,
-            )
-    with start_span(
-        name="centaur.api.agent_execution",
-        span_type="DEFAULT",
-        metadata={
-            "service": "api",
-            "trace_id": trace_id,
-            "thread_key": thread_key,
-            "execution_id": row.get("execution_id"),
-            "assignment_generation": row.get("assignment_generation"),
-        },
-        trace_id=trace_id,
-    ):
-        set_trace_context(
-            session_id=trace_id or thread_key or None,
-            metadata={
-                "service": "api",
-                "environment": os.getenv("CENTAUR_ENVIRONMENT", "local"),
-                "trace_id": trace_id,
-                "thread_key": thread_key,
-                "execution_id": row.get("execution_id"),
-            },
-        )
-        await _process_execution_impl(pool, row)
+    await _process_execution_impl(pool, row)
 
 
 async def _process_execution_impl(pool, row: dict[str, Any]) -> None:

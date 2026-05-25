@@ -3,7 +3,6 @@ import { centaurApiKey, type AppConfig } from "../config";
 import { slackReplyLimits } from "../constants";
 import { logError } from "../logging";
 import { renderMarkdownBlocks } from "../slack/render";
-import { withLaminarSpan } from "./laminar";
 
 const CONSUMER_ID = `slackbot-${process.pid}`;
 const FINAL_DELIVERY_CHUNK_CHARS = slackReplyLimits.text.maxFallbackChars;
@@ -51,42 +50,36 @@ export async function pollFinalDeliveriesOnce(
     ? claimed.deliveries
     : [];
   for (const delivery of deliveries) {
-    await withLaminarSpan(
-      "centaur.slackbot.final_delivery",
-      delivery,
-      async () => {
-        const executionId = String(delivery.execution_id);
-        try {
-          await deliver(client, delivery);
-          await centaur(
-            config,
-            `/agent/final-deliveries/${executionId}/delivered`,
-            {
-              consumer_id: CONSUMER_ID,
-            },
-            delivery,
-          );
-        } catch (error) {
-          const errorMessage = slackDeliveryErrorMessage(error);
-          const errorClass = slackDeliveryErrorClass(error);
-          await centaur(
-            config,
-            `/agent/final-deliveries/${executionId}/failed`,
-            {
-              consumer_id: CONSUMER_ID,
-              error: errorMessage,
-              retry_after_seconds: 10,
-              ...(errorClass
-                ? { error_class: errorClass, non_retryable: true }
-                : {}),
-            },
-            delivery,
-          ).catch((failError) =>
-            logError("final_delivery_mark_failed_failed", failError),
-          );
-        }
-      },
-    );
+    const executionId = String(delivery.execution_id);
+    try {
+      await deliver(client, delivery);
+      await centaur(
+        config,
+        `/agent/final-deliveries/${executionId}/delivered`,
+        {
+          consumer_id: CONSUMER_ID,
+        },
+        delivery,
+      );
+    } catch (error) {
+      const errorMessage = slackDeliveryErrorMessage(error);
+      const errorClass = slackDeliveryErrorClass(error);
+      await centaur(
+        config,
+        `/agent/final-deliveries/${executionId}/failed`,
+        {
+          consumer_id: CONSUMER_ID,
+          error: errorMessage,
+          retry_after_seconds: 10,
+          ...(errorClass
+            ? { error_class: errorClass, non_retryable: true }
+            : {}),
+        },
+        delivery,
+      ).catch((failError) =>
+        logError("final_delivery_mark_failed_failed", failError),
+      );
+    }
   }
 }
 

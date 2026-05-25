@@ -76,43 +76,12 @@ if [ -n "${CENTAUR_TRACE_ID:-}" ]; then
     printf '%s' "$CENTAUR_TRACE_ID" > "$HOME_DIR/.trace_id"
 fi
 
-toml_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
-
 HARNESS_CONFIG_DIR="${CENTAUR_HARNESS_CONFIG_DIR:-$HOME_DIR/harness}"
 if [ -f "$HARNESS_CONFIG_DIR/codex/config.toml" ]; then
     cp "$HARNESS_CONFIG_DIR/codex/config.toml" "$HOME_DIR/.codex/config.toml"
 else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
     exit 1
-fi
-
-codex_laminar_trace_endpoint="${CODEX_OTEL_LAMINAR_ENDPOINT:-}"
-if [ -z "$codex_laminar_trace_endpoint" ]; then
-    codex_laminar_base="${CODEX_OTEL_LAMINAR_BASE_URL:-${LMNR_BASE_URL:-}}"
-    if [ -n "$codex_laminar_base" ]; then
-        codex_laminar_base="${codex_laminar_base%/}"
-        case "$codex_laminar_base" in
-            */v1/traces) codex_laminar_trace_endpoint="$codex_laminar_base" ;;
-            *) codex_laminar_trace_endpoint="$codex_laminar_base/v1/traces" ;;
-        esac
-    fi
-fi
-
-if [ -n "$codex_laminar_trace_endpoint" ] && [ -n "${CENTAUR_TRACE_ID:-}" ]; then
-    codex_otel_environment="${CODEX_OTEL_ENVIRONMENT:-${DEPLOY_ENV:-${ENVIRONMENT:-dev}}}"
-    codex_otel_headers="\"x-trace-id\" = \"$(toml_escape "${CENTAUR_TRACE_ID:-}")\", \"x-centaur-thread-key\" = \"$(toml_escape "${CENTAUR_THREAD_KEY:-}")\""
-    if [ -n "${LMNR_PROJECT_API_KEY:-}" ]; then
-        codex_otel_headers="$codex_otel_headers, \"authorization\" = \"Bearer $(toml_escape "$LMNR_PROJECT_API_KEY")\""
-    fi
-    cat >> "$HOME_DIR/.codex/config.toml" <<EOF
-
-[otel]
-environment = "$(toml_escape "$codex_otel_environment")"
-log_user_prompt = false
-trace_exporter = { otlp-http = { endpoint = "$(toml_escape "$codex_laminar_trace_endpoint")", protocol = "binary", headers = { $codex_otel_headers } } }
-EOF
 fi
 
 # ── Claude Code settings ────────────────────────────────────────────────────
