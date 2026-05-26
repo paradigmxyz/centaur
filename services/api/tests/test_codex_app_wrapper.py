@@ -118,9 +118,9 @@ def test_configure_codex_otel_writes_startup_config(monkeypatch, tmp_path) -> No
         )
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("CODEX_OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlp-collector:4318")
-    monkeypatch.setenv("CODEX_OTEL_AUTHORIZATION", "otlp-key")
-    monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlp-collector:4318")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer%20otlp-key")
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=staging")
     monkeypatch.setattr(
         wrapper,
         "start_codex_otel_prefix_proxy",
@@ -157,13 +157,13 @@ def test_configure_codex_otel_writes_startup_config(monkeypatch, tmp_path) -> No
     assert proxy_calls == [("http://otlp-collector:4318/v1/traces", "codex.")]
 
 
-def test_configure_codex_otel_ignores_generic_collector_endpoint(monkeypatch, tmp_path) -> None:
+def test_configure_codex_otel_ignores_unrelated_collector_endpoint(monkeypatch, tmp_path) -> None:
     wrapper = _load_wrapper()
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv("OTLP_BASE_URL", "http://otlp-collector:4318")
-    monkeypatch.setenv("CODEX_OTEL_AUTHORIZATION", "otlp-key")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer%20otlp-key")
     monkeypatch.setattr(
         wrapper,
         "start_codex_otel_prefix_proxy",

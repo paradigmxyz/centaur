@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
+from urllib.parse import unquote
 
 from opentelemetry.proto.common.v1.common_pb2 import KeyValue
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
@@ -199,13 +200,13 @@ def split_goal(items: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, 
 
 def _codex_otel_endpoint() -> str:
     endpoint = (
-        os.environ.get("CODEX_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         or ""
     ).strip()
     if endpoint:
         return endpoint
     base = (
-        os.environ.get("CODEX_OTEL_EXPORTER_OTLP_ENDPOINT")
+        os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
         or ""
     ).strip()
     if not base:
@@ -247,10 +248,9 @@ def _write_codex_otel_config(
     if api_key:
         headers.append(f"authorization = {_toml_string(f'Bearer {api_key}')}")
 
-    span_prefix = (os.environ.get("CODEX_OTEL_SPAN_PREFIX") or "codex.").strip() or "codex."
     span_attributes = [
         f'"service.name" = {_toml_string("codex")}',
-        f'"centaur.span_prefix" = {_toml_string(span_prefix)}',
+        f'"centaur.span_prefix" = {_toml_string("codex.")}',
     ]
 
     trace_exporter = (
@@ -271,7 +271,46 @@ def _write_codex_otel_config(
 
 
 def _span_prefix() -> str:
-    return (os.environ.get("CODEX_OTEL_SPAN_PREFIX") or "codex.").strip() or "codex."
+    return "codex."
+
+
+def _otel_headers() -> dict[str, str]:
+    headers: dict[str, str] = {}
+    raw = (os.environ.get("OTEL_EXPORTER_OTLP_HEADERS") or "").strip()
+    if not raw:
+        return headers
+    for item in raw.split(","):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip().lower()
+        if key:
+            headers[key] = unquote(value.strip())
+    return headers
+
+
+def _otel_authorization_token() -> str:
+    authorization = _otel_headers().get("authorization", "").strip()
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return authorization
+
+
+def _otel_environment() -> str:
+    raw = os.environ.get("OTEL_RESOURCE_ATTRIBUTES") or ""
+    for item in raw.split(","):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        if key.strip() == "deployment.environment":
+            environment = value.strip()
+            if environment:
+                return environment
+    return (
+        os.environ.get("DEPLOY_ENV")
+        or os.environ.get("ENVIRONMENT")
+        or "dev"
+    ).strip() or "dev"
 
 
 def _attribute(span: Any, key: str) -> KeyValue | None:
@@ -476,15 +515,8 @@ def configure_codex_otel_for_startup(
     span_prefix = _span_prefix()
     export_endpoint = start_codex_otel_prefix_proxy(endpoint, span_prefix)
 
-    api_key = (os.environ.get("CODEX_OTEL_AUTHORIZATION") or "").strip()
-    if api_key.lower().startswith("bearer "):
-        api_key = api_key[7:].strip()
-    environment = (
-        os.environ.get("CODEX_OTEL_ENVIRONMENT")
-        or os.environ.get("DEPLOY_ENV")
-        or os.environ.get("ENVIRONMENT")
-        or "dev"
-    ).strip() or "dev"
+    api_key = _otel_authorization_token()
+    environment = _otel_environment()
     _write_codex_otel_config(
         endpoint=export_endpoint,
         trace_id=trace_id,

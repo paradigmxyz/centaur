@@ -22,11 +22,10 @@ _HARNESS_STUB_KEYS = (
 )
 
 _SANDBOX_PASSTHROUGH_ENV_KEYS = (
-    "CODEX_OTEL_AUTHORIZATION",
-    "CODEX_OTEL_ENVIRONMENT",
-    "CODEX_OTEL_EXPORTER_OTLP_ENDPOINT",
-    "CODEX_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-    "CODEX_OTEL_SPAN_PREFIX",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
 )
 
 # Keep Claude Code deterministic in the pod while still allowing Centaur-owned
@@ -80,8 +79,8 @@ def _sandbox_otel_endpoint_hosts(extra_env: list[tuple[str, str]]) -> list[str]:
     extra = dict(extra_env)
     hosts: list[str] = []
     for key in (
-        "CODEX_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        "CODEX_OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
     ):
         value = (os.getenv(key) or extra.get(key) or "").strip()
         host = urlsplit(value).hostname
