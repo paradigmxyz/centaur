@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -48,6 +49,7 @@ from api.routers import (
 from api.routers import agent as agent_router_mod
 from api.routers import workflows as workflow_router_mod
 from api.tool_manager import ToolManager, load_plugins_config
+from api.trace_context import normalize_trace_id
 from api.agent import reconcile_tick
 from api.runtime_control import (
     recover_interrupted_executions_on_startup,
@@ -300,6 +302,19 @@ app.add_middleware(
 )
 
 
+def _trace_id_from_traceparent(value: str | None) -> str | None:
+    parts = (value or "").strip().split("-")
+    if len(parts) < 4 or len(parts[1]) != 32:
+        return None
+    try:
+        trace_id = uuid.UUID(hex=parts[1])
+    except ValueError:
+        return None
+    if trace_id.int == 0:
+        return None
+    return str(trace_id)
+
+
 @app.middleware("http")
 async def instrument_requests(request, call_next):
     if request.url.path == "/metrics":
@@ -307,7 +322,11 @@ async def instrument_requests(request, call_next):
 
     structlog.contextvars.clear_contextvars()
 
-    trace_id = request.headers.get("x-trace-id")
+    incoming_traceparent = request.headers.get("traceparent")
+    traceparent_trace_id = _trace_id_from_traceparent(incoming_traceparent)
+    trace_id = (
+        normalize_trace_id(request.headers.get("x-trace-id")) or traceparent_trace_id
+    )
     thread_key = request.headers.get("x-centaur-thread-key")
 
     if trace_id:
@@ -335,7 +354,7 @@ async def instrument_requests(request, call_next):
             pass
 
     thread_trace_root_span_id = None
-    if not trace_id and thread_key:
+    if thread_key:
         try:
             row = await request.app.state.db_pool.fetchrow(
                 "SELECT trace_id::text AS trace_id, root_span_id FROM thread_traces "
@@ -343,21 +362,29 @@ async def instrument_requests(request, call_next):
                 thread_key,
             )
             if row:
-                trace_id = row["trace_id"]
+                stored_trace_id = normalize_trace_id(row["trace_id"])
+                if stored_trace_id:
+                    trace_id = stored_trace_id
                 thread_trace_root_span_id = row["root_span_id"]
-                structlog.contextvars.bind_contextvars(trace_id=trace_id)
+                if trace_id:
+                    structlog.contextvars.bind_contextvars(trace_id=trace_id)
         except Exception:
-            log.debug("thread_trace_lookup_failed", thread_key=thread_key, exc_info=True)
+            log.debug(
+                "thread_trace_lookup_failed", thread_key=thread_key, exc_info=True
+            )
 
     route = request.scope.get("route")
     path = getattr(route, "path", None) or request.url.path
     parent_context = context_from_headers(request.headers)
-    incoming_traceparent = request.headers.get("traceparent")
-    if trace_id and thread_trace_root_span_id and not incoming_traceparent:
+    if (
+        trace_id
+        and traceparent_trace_id != trace_id
+        and (thread_trace_root_span_id or thread_key)
+    ):
         parent_context = context_from_serialized(
             {
                 "trace_id": trace_id.replace("-", ""),
-                "span_id": thread_trace_root_span_id,
+                "span_id": thread_trace_root_span_id or "0000000000000001",
                 "trace_flags": 1,
             }
         )
@@ -385,7 +412,7 @@ async def instrument_requests(request, call_next):
                         "INSERT INTO thread_traces (thread_key, trace_id, root_span_id) "
                         "VALUES ($1, $2, $3) "
                         "ON CONFLICT (thread_key) DO UPDATE SET "
-                        "trace_id = EXCLUDED.trace_id, "
+                        "trace_id = COALESCE(thread_traces.trace_id, EXCLUDED.trace_id), "
                         "root_span_id = COALESCE(thread_traces.root_span_id, EXCLUDED.root_span_id), "
                         "updated_at = NOW()",
                         thread_key,
