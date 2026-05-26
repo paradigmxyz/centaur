@@ -133,6 +133,7 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
 
     const run = onlyRun()
     expect(run.workflow_name).toBe('slack_thread_turn')
+    expect('eager_start' in run).toBe(false)
     expect(run.trigger_key).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
     expect(run.input.thread_key).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
     expect(run.input.message_id).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)

@@ -2198,10 +2198,7 @@ async def create_workflow_run(
             eager_start=eager_start,
         )
 
-    if eager_start and inserted:
-        await _execute_run(pool, run_id)
-    else:
-        _workflow_wake.set()
+    _workflow_wake.set()
 
     response = await get_workflow_run(pool, run_id)
     if response is None:
@@ -2326,7 +2323,7 @@ async def _load_checkpoints(
 
 
 async def _execute_run(pool, run_id: str) -> None:
-    """Claim a specific run by ID and execute it (for eager_start)."""
+    """Claim a specific run by ID and execute it."""
     worker_id = _new_worker_id()
     async with pool.acquire() as conn:
         async with conn.transaction():

@@ -24,7 +24,6 @@ export class CentaurHandoff {
       body: JSON.stringify({
         workflow_name: 'slack_thread_turn',
         trigger_key: event.message_id,
-        eager_start: true,
         input: {
           thread_key: event.thread_key,
           parts: event.parts,
