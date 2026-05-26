@@ -37,3 +37,8 @@ tokenBroker:
 sandbox:
   image:
     pullPolicy: IfNotPresent
+
+# Run the tool-server sidecar by default in dev so local clusters mirror
+# production sandbox topology.
+toolServer:
+  enabled: true

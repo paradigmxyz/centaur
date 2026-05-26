@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import WSMsgType
 from kubernetes_asyncio import client, config
@@ -144,6 +144,54 @@ def _uses_op_connect_secret_source() -> bool:
 
 def _proxy_image() -> str:
     return os.getenv("KUBERNETES_IRON_PROXY_IMAGE", "centaur-iron-proxy:latest")
+
+
+def _tool_server_image() -> str | None:
+    """Tool-server sidecar image.
+
+    When set, sandbox Pods get a ``tool-server`` sidecar that exposes
+    ``/tools/*`` on loopback. Sandboxes call ``http://localhost:<port>``
+    instead of routing tool calls back to the API.
+    """
+    value = (os.getenv("KUBERNETES_TOOL_SERVER_IMAGE") or "").strip()
+    return value or None
+
+
+def _tool_server_image_pull_policy() -> str:
+    return (
+        os.getenv("KUBERNETES_TOOL_SERVER_IMAGE_PULL_POLICY") or _image_pull_policy()
+    ).strip()
+
+
+def _tool_server_port() -> int:
+    return _env_int("KUBERNETES_TOOL_SERVER_PORT", 8001)
+
+
+def _workflow_run_image() -> str:
+    """Image used for per-run workflow execution pods.
+
+    Defaults to ``KUBERNETES_WORKFLOW_RUN_IMAGE`` (Helm injects the api image
+    by default) and falls back to ``centaur-api:latest`` for local runs.
+    """
+    return os.getenv("KUBERNETES_WORKFLOW_RUN_IMAGE", "centaur-api:latest")
+
+
+def _workflow_run_image_pull_policy() -> str:
+    return (
+        os.getenv("KUBERNETES_WORKFLOW_RUN_IMAGE_PULL_POLICY") or _image_pull_policy()
+    ).strip()
+
+
+def _workflow_run_pod_name(run_id: str) -> str:
+    return _resource_name("centaur-centaur-workflow-run", run_id)
+
+
+def _tool_server_tool_dirs() -> str:
+    """TOOL_DIRS the sidecar uses. Mirrors the API's TOOL_DIRS by default."""
+    value = (os.getenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS") or "").strip()
+    if value:
+        return value
+    return (os.getenv("TOOL_DIRS") or "/app/tools").strip() or "/app/tools"
 
 
 def _token_broker_name() -> str:
@@ -330,6 +378,123 @@ def _firewall_ca_key_secret_name() -> str:
             "KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME is required for per-sandbox proxy"
         )
     return value
+
+
+def _build_tool_server_container(
+    *,
+    firewall_host: str,
+    api_url: str,
+    overlay_mount: str | None,
+) -> dict[str, Any]:
+    """Build the tool-server sidecar container spec.
+
+    The sidecar listens on loopback inside the sandbox Pod and routes its own
+    HTTP egress through the per-sandbox iron-proxy. Caller is responsible for
+    only invoking this when ``_tool_server_image()`` is set.
+    """
+    image_ref = _tool_server_image()
+    if not image_ref:
+        raise RuntimeError("_build_tool_server_container called without an image")
+
+    secret_name = _secret_env_name()
+    proxy_url = f"http://{firewall_host}:{_proxy_port()}"
+    api_host = urlsplit(api_url).hostname or ""
+    no_proxy_hosts = ["localhost", "127.0.0.1", firewall_host]
+    if api_host:
+        no_proxy_hosts.append(api_host)
+    no_proxy = ",".join(dict.fromkeys(no_proxy_hosts))
+
+    env: list[dict[str, Any]] = [
+        {
+            "name": "DATABASE_URL",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": secret_name,
+                    "key": _secret_env_key("DATABASE_URL"),
+                }
+            },
+        },
+        {
+            "name": "SANDBOX_SIGNING_KEY",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": secret_name,
+                    "key": _secret_env_key("SANDBOX_SIGNING_KEY"),
+                }
+            },
+        },
+        {"name": "HTTPS_PROXY", "value": proxy_url},
+        {"name": "HTTP_PROXY", "value": proxy_url},
+        {"name": "https_proxy", "value": proxy_url},
+        {"name": "http_proxy", "value": proxy_url},
+        {"name": "NO_PROXY", "value": no_proxy},
+        {"name": "no_proxy", "value": no_proxy},
+        {"name": "REQUESTS_CA_BUNDLE", "value": "/firewall-certs/ca-cert.pem"},
+        {"name": "SSL_CERT_FILE", "value": "/firewall-certs/ca-cert.pem"},
+        {"name": "NODE_EXTRA_CA_CERTS", "value": "/firewall-certs/ca-cert.pem"},
+        {"name": "CENTAUR_API_URL", "value": api_url},
+        {"name": "TOOL_DIRS", "value": _tool_server_tool_dirs()},
+        {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
+    ]
+
+    volume_mounts: list[dict[str, Any]] = [
+        {
+            "name": "firewall-ca",
+            "mountPath": "/firewall-certs",
+            "readOnly": True,
+        },
+    ]
+    if overlay_mount:
+        volume_mounts.append(
+            {
+                "name": "overlay-root",
+                "mountPath": overlay_mount,
+                "readOnly": True,
+            }
+        )
+
+    port = _tool_server_port()
+    # Bind the listener on 0.0.0.0 inside the pod's network namespace. The
+    # sandbox container reaches it via 127.0.0.1 (shared loopback within the
+    # pod); kubelet probes reach it via the pod IP. Listening only on
+    # 127.0.0.1 would block liveness probes — the kubelet runs on the node
+    # and can't see the container's loopback interface — and the resulting
+    # probe failures would kill the sidecar.
+    return {
+        "name": "tool-server",
+        "image": image_ref,
+        "imagePullPolicy": _tool_server_image_pull_policy(),
+        # Same image as the API; different uvicorn target.
+        "command": ["/app/.venv/bin/uvicorn"],
+        "args": [
+            "api.tool_server_app:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+        ],
+        "env": env,
+        "ports": [{"containerPort": port, "name": "tools"}],
+        "readinessProbe": {
+            "httpGet": {"path": "/healthz", "port": port},
+            "periodSeconds": 5,
+            "failureThreshold": 30,
+        },
+        "livenessProbe": {
+            "httpGet": {"path": "/healthz", "port": port},
+            "periodSeconds": 30,
+            "failureThreshold": 5,
+        },
+        "securityContext": {
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "runAsGroup": _AGENT_UID,
+            "runAsNonRoot": True,
+            "runAsUser": _AGENT_UID,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "volumeMounts": volume_mounts,
+    }
 
 
 def _resource_name(prefix: str, raw: str, *, max_length: int = 63) -> str:
@@ -1270,6 +1435,45 @@ class KubernetesExecutorBackend(SandboxBackend):
 
         cmd = build_harness_cmd(engine, model)
 
+        containers: list[dict[str, Any]] = [
+            {
+                "name": _CONTAINER_NAME,
+                "image": image(),
+                "imagePullPolicy": _image_pull_policy(),
+                "args": cmd,
+                "stdin": True,
+                "securityContext": {
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"]},
+                    "runAsGroup": _AGENT_UID,
+                    "runAsNonRoot": True,
+                    "runAsUser": _AGENT_UID,
+                    "seccompProfile": {"type": "RuntimeDefault"},
+                },
+                "tty": False,
+                "workingDir": "/home/agent",
+                "env": [
+                    {
+                        "name": item.split("=", 1)[0],
+                        "value": item.split("=", 1)[1],
+                    }
+                    for item in env
+                ],
+                "resources": _pod_resources(),
+                "volumeMounts": volume_mounts,
+            }
+        ]
+        if _tool_server_image():
+            containers.append(
+                _build_tool_server_container(
+                    firewall_host=firewall_host,
+                    api_url=os.getenv("AGENT_API_URL", "http://api:8000"),
+                    overlay_mount=(
+                        _SANDBOX_OVERLAY_ROOT if overlay_image else None
+                    ),
+                )
+            )
+
         pod_spec: dict[str, Any] = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -1286,34 +1490,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                 "automountServiceAccountToken": False,
                 "restartPolicy": "Never",
                 "initContainers": init_containers,
-                "containers": [
-                    {
-                        "name": _CONTAINER_NAME,
-                        "image": image(),
-                        "imagePullPolicy": _image_pull_policy(),
-                        "args": cmd,
-                        "stdin": True,
-                        "securityContext": {
-                            "allowPrivilegeEscalation": False,
-                            "capabilities": {"drop": ["ALL"]},
-                            "runAsGroup": _AGENT_UID,
-                            "runAsNonRoot": True,
-                            "runAsUser": _AGENT_UID,
-                            "seccompProfile": {"type": "RuntimeDefault"},
-                        },
-                        "tty": False,
-                        "workingDir": "/home/agent",
-                        "env": [
-                            {
-                                "name": item.split("=", 1)[0],
-                                "value": item.split("=", 1)[1],
-                            }
-                            for item in env
-                        ],
-                        "resources": _pod_resources(),
-                        "volumeMounts": volume_mounts,
-                    }
-                ],
+                "containers": containers,
                 "volumes": volumes,
             },
         }
@@ -1676,6 +1853,207 @@ class KubernetesExecutorBackend(SandboxBackend):
         raise TimeoutError(
             f"deployment readiness timed out after {_READY_TIMEOUT_S}s: {name}"
         )
+
+    # ── Workflow-run sandboxes (one-shot Pods) ─────────────────────────
+
+    def _build_workflow_run_pod_spec(
+        self, run_id: str, *, firewall_host: str
+    ) -> dict[str, Any]:
+        """Pod spec for a single workflow execution.
+
+        The pod runs ``python -m api.workflow_executor --run-id <run_id>``
+        against the API image, exits when the handler returns, and routes
+        outbound HTTP through its own per-run iron-proxy at
+        ``firewall_host``. Lifecycle is one-shot: ``restartPolicy: Never``.
+        """
+        secret_name = _secret_env_name()
+        pod_name = _workflow_run_pod_name(run_id)
+
+        api_url = os.getenv("AGENT_API_URL", "http://api:8000")
+        proxy_url = f"http://{firewall_host}:{_proxy_port()}"
+        api_host = urlsplit(api_url).hostname or ""
+        no_proxy_hosts = ["localhost", "127.0.0.1", firewall_host]
+        if api_host:
+            no_proxy_hosts.append(api_host)
+        no_proxy = ",".join(dict.fromkeys(no_proxy_hosts))
+        tool_dirs = (os.getenv("TOOL_DIRS") or "/app/tools").strip()
+        workflow_dirs = (os.getenv("WORKFLOW_DIRS") or "/app/workflows").strip()
+
+        env: list[dict[str, Any]] = [
+            {
+                "name": "DATABASE_URL",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": secret_name,
+                        "key": _secret_env_key("DATABASE_URL"),
+                    }
+                },
+            },
+            {
+                "name": "SANDBOX_SIGNING_KEY",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": secret_name,
+                        "key": _secret_env_key("SANDBOX_SIGNING_KEY"),
+                    }
+                },
+            },
+            {"name": "CENTAUR_API_URL", "value": api_url},
+            {"name": "AGENT_API_URL", "value": api_url},
+            {"name": "HTTPS_PROXY", "value": proxy_url},
+            {"name": "HTTP_PROXY", "value": proxy_url},
+            {"name": "https_proxy", "value": proxy_url},
+            {"name": "http_proxy", "value": proxy_url},
+            {"name": "NO_PROXY", "value": no_proxy},
+            {"name": "no_proxy", "value": no_proxy},
+            {"name": "REQUESTS_CA_BUNDLE", "value": "/firewall-certs/ca-cert.pem"},
+            {"name": "SSL_CERT_FILE", "value": "/firewall-certs/ca-cert.pem"},
+            {"name": "NODE_EXTRA_CA_CERTS", "value": "/firewall-certs/ca-cert.pem"},
+            {"name": "FIREWALL_HOST", "value": firewall_host},
+            {"name": "TOOL_DIRS", "value": tool_dirs},
+            {"name": "WORKFLOW_DIRS", "value": workflow_dirs},
+            {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
+            {"name": "CENTAUR_WORKFLOW_RUN_ID", "value": run_id},
+        ]
+
+        spec: dict[str, Any] = {
+            "restartPolicy": "Never",
+            "automountServiceAccountToken": False,
+            "imagePullSecrets": _image_pull_secrets(),
+            "containers": [
+                {
+                    "name": "workflow-executor",
+                    "image": _workflow_run_image(),
+                    "imagePullPolicy": _workflow_run_image_pull_policy(),
+                    "command": ["/app/.venv/bin/python"],
+                    "args": [
+                        "-m",
+                        "api.workflow_executor",
+                        "--run-id",
+                        run_id,
+                    ],
+                    "env": env,
+                    # Match the API container's security profile (the
+                    # api image runs as root; see services/api/Dockerfile).
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "capabilities": {"drop": ["ALL"]},
+                        "seccompProfile": {"type": "RuntimeDefault"},
+                    },
+                    "resources": _pod_resources(),
+                    "volumeMounts": [
+                        {
+                            "name": "firewall-ca",
+                            "mountPath": "/firewall-certs",
+                            "readOnly": True,
+                        }
+                    ],
+                }
+            ],
+            "volumes": [
+                {
+                    "name": "firewall-ca",
+                    "secret": {"secretName": _firewall_ca_secret_name()},
+                }
+            ],
+        }
+        service_account = _service_account_name()
+        if service_account:
+            spec["serviceAccountName"] = service_account
+        return {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": pod_name,
+                # The per-pod iron-proxy's ingress NetworkPolicy matches on
+                # ``centaur.ai/managed=true`` + ``centaur.ai/sandbox-id=<id>``,
+                # so reuse those labels with the workflow run's pod name as
+                # the sandbox id.
+                "labels": {
+                    "centaur.ai/managed": "true",
+                    "centaur.ai/sandbox-id": pod_name,
+                    "centaur.ai/component": "workflow-run",
+                    "centaur.ai/workflow-run-id": run_id,
+                },
+                "annotations": {
+                    "centaur.ai/workflow-run-id": run_id,
+                },
+            },
+            "spec": spec,
+        }
+
+    async def spawn_workflow_run(self, run_id: str) -> str:
+        """Provision a per-run sandbox (iron-proxy + executor pod).
+
+        Mirrors the agent-sandbox bring-up: ConfigMap, Service, NetworkPolicies,
+        iron-proxy Pod, then the executor Pod. The executor reaches its
+        iron-proxy at the per-run Service via HTTPS_PROXY; the network
+        policies whitelist it by ``centaur.ai/sandbox-id`` label.
+        """
+        await self._ensure_clients()
+        pod_name = _workflow_run_pod_name(run_id)
+        # The proxy helpers key everything off a string id; reuse the
+        # executor pod name so cleanup picks up the right resources.
+        proxy_id = pod_name
+        firewall_host = _proxy_service_name(proxy_id)
+        pod_spec = self._build_workflow_run_pod_spec(
+            run_id, firewall_host=firewall_host
+        )
+
+        secrets = self._collect_secrets()
+        pg_listen_ports = assign_pg_listen_ports(secrets)
+        pg_secrets = self._resolved_pg_secrets(secrets)
+
+        # If a previous attempt for this run_id left resources behind, clear
+        # them before creating fresh ones.
+        await self._delete_pod(pod_name)
+        await self._delete_proxy_resources(proxy_id)
+        try:
+            await self._create_proxy_configmap(proxy_id, secrets, pg_listen_ports)
+            await self._create_proxy_service(proxy_id, pg_listen_ports)
+            await self._create_proxy_network_policies(proxy_id, pg_listen_ports)
+            proxy_pod_name = await self._create_proxy_pod(
+                proxy_id, pg_secrets, pg_listen_ports
+            )
+            await self._wait_pod_ready(proxy_pod_name)
+            try:
+                await self._core_api().create_namespaced_pod(_namespace(), pod_spec)
+            except Exception as exc:
+                # Idempotent: an existing pod for the same run_id is fine.
+                if getattr(exc, "status", None) != 409:
+                    raise
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self._delete_pod(pod_name)
+            with contextlib.suppress(Exception):
+                await self._delete_proxy_resources(proxy_id)
+            raise
+        return pod_name
+
+    async def wait_workflow_run_terminal(self, pod_name: str) -> str:
+        """Block until the workflow-run pod terminates; return its phase."""
+        await self._ensure_clients()
+        backoff = 0.5
+        while True:
+            try:
+                pod = await self._core_api().read_namespaced_pod(
+                    pod_name, _namespace()
+                )
+            except Exception as exc:
+                if self._is_not_found(exc):
+                    return "gone"
+                raise
+            phase = (pod.status.phase or "").lower()
+            if phase in {"succeeded", "failed"}:
+                return phase
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 1.5, 5.0)
+
+    async def cleanup_workflow_run_pod(self, pod_name: str) -> None:
+        """Delete a workflow-run pod and its per-run iron-proxy (idempotent)."""
+        await self._ensure_clients()
+        await self._delete_pod(pod_name)
+        await self._delete_proxy_resources(pod_name)
 
     async def ensure_api_proxy_pod(self) -> None:
         """Create or update the API server's iron-proxy Deployment.

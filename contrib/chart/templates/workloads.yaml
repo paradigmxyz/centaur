@@ -293,6 +293,21 @@ spec:
               value: {{ .Values.ironProxy.service.managementPort | quote }}
             - name: KUBERNETES_IRON_PROXY_HEALTH_PORT
               value: {{ .Values.ironProxy.service.healthPort | quote }}
+{{- if .Values.toolServer.enabled }}
+            # Tool-server runs as a sidecar against the API image; uvicorn
+            # target is overridden to api.tool_server_app.
+            - name: KUBERNETES_TOOL_SERVER_IMAGE
+              value: {{ printf "%s:%s" .Values.api.image.repository .Values.api.image.tag | quote }}
+            - name: KUBERNETES_TOOL_SERVER_IMAGE_PULL_POLICY
+              value: {{ .Values.api.image.pullPolicy | quote }}
+            - name: KUBERNETES_TOOL_SERVER_PORT
+              value: {{ .Values.toolServer.port | quote }}
+{{- end }}
+            # Workflow-run pods reuse the API image and run python -m api.workflow_executor.
+            - name: KUBERNETES_WORKFLOW_RUN_IMAGE
+              value: {{ printf "%s:%s" .Values.api.image.repository .Values.api.image.tag | quote }}
+            - name: KUBERNETES_WORKFLOW_RUN_IMAGE_PULL_POLICY
+              value: {{ .Values.api.image.pullPolicy | quote }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL

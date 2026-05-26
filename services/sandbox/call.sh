@@ -5,6 +5,9 @@
 #   call tools                          → GET /tools (list all)
 #   call discover <tool>               → GET /tools/<tool>
 U="${CENTAUR_API_URL:-http://api:8000}"
+# Tools are served by an in-pod sidecar when CENTAUR_TOOLS_URL is set; otherwise
+# fall back to the API server. Agent and workflow calls always go to the API.
+TU="${CENTAUR_TOOLS_URL:-$U}"
 T="Accept: text/plain"
 J="Content-Type: application/json"
 # Prefer refreshed token (written on warm-pool claim) over original env var
@@ -185,7 +188,7 @@ case "$tool" in
     ;;
   tools)
     # Inject the built-in agent sub-command into the tool listing
-    response="$(request "GET" "$U/tools")" || { printf '%s\n' "$response"; exit 1; }
+    response="$(request "GET" "$TU/tools")" || { printf '%s\n' "$response"; exit 1; }
     printf '%s' "$response" | jq -c '. + {"agent":{"description":"Sub-agent dispatch (built-in). Use: call agent execute, call agent status, call agent runtime, call agent stop","methods":["execute","status","runtime","stop"]}}'
     printf '\n'
     ;;
@@ -193,7 +196,7 @@ case "$tool" in
     if [ "$2" = "agent" ]; then
       printf '%s\n' '{"tool":"agent","description":"Sub-agent dispatch (built-in, not a tool plugin)","methods":[{"name":"execute","description":"Spawn a sub-agent. Body: {\"thread_key\":\"task:<purpose>-<id>\",\"message\":\"...\",\"harness\":\"<persona>\"}. Returns {execution_id, status}."},{"name":"status","description":"Poll sub-agent. Usage: call agent status '\''?key=<thread_key>'\''"},{"name":"runtime","description":"Inspect active persona/overlay/available personas for a thread. Usage: call agent runtime '\''?key=<thread_key>'\''"},{"name":"stop","description":"Stop sub-agent. Body: {\"thread_key\":\"...\"}"}]}'
     else
-      request "GET" "$U/tools/$2"
+      request "GET" "$TU/tools/$2"
     fi
     ;;
   agent)
@@ -234,9 +237,9 @@ case "$tool" in
     ;;
   *)
     if [ -z "$body" ]; then
-      request "POST" "$U/tools/$tool/$method"
+      request "POST" "$TU/tools/$tool/$method"
     else
-      request "POST" "$U/tools/$tool/$method" "$body"
+      request "POST" "$TU/tools/$tool/$method" "$body"
     fi
     ;;
 esac

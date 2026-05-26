@@ -32,6 +32,16 @@ ironProxy:
   secretSource: onepassword
   secretTtl: 10m
 
+# Tool-server sidecar — runs alongside the sandbox container in each sandbox
+# Pod and exposes the same /tools/* surface the API used to. Same image as
+# the API; the sidecar runs uvicorn against api.tool_server_app.
+# When toolServer.enabled is false (default), the sandbox pod has no
+# sidecar — currently the API still serves /tools so this is a no-op
+# until the API drops its router (Phase 5).
+toolServer:
+  enabled: false
+  port: 8001
+
 # iron-token-broker — race-free OAuth refresh-token coordinator. Enable when
 # any tool's `oauth_token` secret uses `grant=refresh_token` against an IdP
 # that rotates refresh tokens with strict reuse detection (OpenAI Codex,
@@ -76,6 +86,8 @@ api:
     pullPolicy: Always
   executionWorkerEnabled: false
   defaultHarness: codex
+  # The API's worker claims workflow_runs and spawns a per-run sandbox to
+  # execute each handler. Disable only if you're running your own claimer.
   workflowWorkerEnabled: true
   warmPoolEnabled: false
   pluginWatcherEnabled: false
