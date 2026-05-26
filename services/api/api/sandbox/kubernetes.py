@@ -28,6 +28,7 @@ from kubernetes_asyncio.stream.ws_client import (
 )
 import structlog
 
+from api.broker_config import render_broker_yaml
 from api.proxy_config import (
     assign_pg_listen_ports,
     render_proxy_yaml,
@@ -53,6 +54,12 @@ _SANDBOX_OVERLAY_DIR = f"{_SANDBOX_OVERLAY_ROOT}/org"
 _PROXY_LABEL = "centaur.ai/iron-proxy"
 _API_PROXY_POD_NAME = "centaur-api-proxy"
 _API_PROXY_SANDBOX_ID = "api"
+# iron-token-broker resource names. The chart provisions the matching Service
+# + NetworkPolicies under the same name; ensure_token_broker() applies the
+# Deployment + ConfigMap so the broker config can be regenerated without a
+# Helm upgrade. The label keeps the chart-side NetworkPolicy selector
+# wired up.
+_TOKEN_BROKER_LABEL = "centaur.ai/iron-token-broker"
 def _get_rt(session: SandboxSession):
     return runtime_for_session(session)
 
@@ -139,6 +146,31 @@ def _proxy_image() -> str:
     return os.getenv("KUBERNETES_IRON_PROXY_IMAGE", "centaur-iron-proxy:latest")
 
 
+def _token_broker_name() -> str:
+    return (os.getenv("KUBERNETES_TOKEN_BROKER_NAME") or "").strip()
+
+
+def _token_broker_url() -> str:
+    return (os.getenv("KUBERNETES_TOKEN_BROKER_URL") or "").strip()
+
+
+def _token_broker_enabled() -> bool:
+    """Whether the iron-token-broker is deployed in this cluster.
+
+    Gated on the chart-set ``KUBERNETES_TOKEN_BROKER_URL`` (present only when
+    ``tokenBroker.enabled=true``). Routing through the broker is opt-in per
+    secret via the ``brokered_token`` type; this flag just controls whether
+    iron-proxy receives broker env and whether the API reconciles the broker
+    ConfigMap.
+    """
+    return bool(_token_broker_url())
+
+
+def _token_broker_configmap_name() -> str:
+    name = _token_broker_name()
+    return f"{name}-config" if name else ""
+
+
 def _proxy_image_pull_policy() -> str:
     return (
         os.getenv("KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY") or _image_pull_policy()
@@ -193,6 +225,23 @@ def _proxy_iron_env(
                     "secretKeyRef": {
                         "name": secret_name,
                         "key": _secret_env_key("OP_CONNECT_TOKEN"),
+                    }
+                },
+            }
+        )
+    broker_url = _token_broker_url()
+    if broker_url:
+        env.append({"name": "IRON_BROKER_URL", "value": broker_url})
+        # The broker's bearer token lives alongside other infra secrets in
+        # the centaur-infra-env Secret. Mirror IRON_MANAGEMENT_API_KEY's
+        # shape so the operator only needs to bootstrap one secret manifest.
+        env.append(
+            {
+                "name": "IRON_BROKER_TOKEN",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": secret_name,
+                        "key": _secret_env_key("IRON_BROKER_TOKEN"),
                     }
                 },
             }
@@ -1662,6 +1711,11 @@ class KubernetesExecutorBackend(SandboxBackend):
             rendered,
         )
         await self._create_proxy_service(_API_PROXY_SANDBOX_ID, pg_listen_ports)
+        # Reconcile the iron-token-broker BEFORE the proxy rollout so the
+        # proxy pods don't briefly point at a broker whose config hasn't
+        # caught up with the latest refresh-token secret set.
+        if _token_broker_enabled():
+            await self._ensure_token_broker(secrets)
         await self._apply_api_proxy_deployment(pg_secrets, pg_listen_ports, config_hash)
         await self._wait_deployment_ready(_proxy_pod_name(_API_PROXY_SANDBOX_ID))
         log.info(
@@ -1670,6 +1724,103 @@ class KubernetesExecutorBackend(SandboxBackend):
             config_hash=config_hash,
             pg_secrets=[s.name for s, _ in pg_secrets],
         )
+
+    async def _ensure_token_broker(self, secrets: list[SecretDef]) -> None:
+        """Reconcile the iron-token-broker ConfigMap and trigger a rollout.
+
+        The chart owns the broker Deployment, Service, and NetworkPolicies;
+        the API only writes the ConfigMap content (one credentials[] entry
+        per registered ``BrokeredTokenSecret``). When the rendered content
+        changes, patch the chart-managed Deployment's pod-template with a
+        fresh ``centaur.ai/config-hash`` annotation so kubectl rolls it out
+        — same effect as ``kubectl rollout restart`` but idempotent on no-op
+        reconciles.
+        """
+        name = _token_broker_name()
+        if not name:
+            raise ValueError(
+                "iron-token-broker reconcile requires "
+                "KUBERNETES_TOKEN_BROKER_NAME to be set"
+            )
+        rendered = render_broker_yaml(secrets)
+        config_hash = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+        changed = await self._apply_token_broker_configmap(rendered)
+        if changed:
+            await self._patch_token_broker_config_hash(config_hash)
+        log.info(
+            "token_broker_reconciled",
+            deployment=name,
+            config_hash=config_hash,
+            rollout_triggered=changed,
+        )
+
+    async def _apply_token_broker_configmap(self, rendered: str) -> bool:
+        """Create or replace the broker ConfigMap; return True if content changed."""
+        name = _token_broker_configmap_name()
+        labels = {
+            _TOKEN_BROKER_LABEL: "true",
+            "app.kubernetes.io/component": "token-broker",
+        }
+        body = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": name, "labels": labels},
+            "data": {"iron-token-broker.yaml": rendered},
+        }
+        try:
+            existing = await self._core_api().read_namespaced_config_map(
+                name, _namespace()
+            )
+        except Exception as exc:
+            if not self._is_not_found(exc):
+                raise
+            await self._core_api().create_namespaced_config_map(_namespace(), body)
+            return True
+        existing_data = (existing.data or {}).get("iron-token-broker.yaml")
+        if existing_data == rendered:
+            return False
+        await self._core_api().replace_namespaced_config_map(name, _namespace(), body)
+        return True
+
+    async def _patch_token_broker_config_hash(self, config_hash: str) -> None:
+        """Bump the pod-template config-hash annotation to trigger a rollout.
+
+        The chart-managed Deployment uses ``Recreate`` strategy, so this
+        terminates the running broker, k8s rolls a fresh pod that re-reads
+        the updated ConfigMap. Matches the kubectl ``rollout restart``
+        annotation contract (``kubectl.kubernetes.io/restartedAt``) plus
+        our own hash for traceability.
+        """
+        name = _token_broker_name()
+        patch = {
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "centaur.ai/config-hash": config_hash,
+                        }
+                    }
+                }
+            }
+        }
+        try:
+            await self._apps_api().patch_namespaced_deployment(
+                name, _namespace(), patch
+            )
+        except Exception as exc:
+            if self._is_not_found(exc):
+                # The chart hasn't rolled out the broker Deployment yet (or
+                # tokenBroker.enabled was just flipped on but helm upgrade
+                # hasn't run). Log and move on — the ConfigMap is in place,
+                # so when the Deployment appears it will pick up the latest
+                # rendered config on first start.
+                log.warning(
+                    "token_broker_deployment_not_found",
+                    deployment=name,
+                    hint="run `helm upgrade` to create the broker Deployment",
+                )
+                return
+            raise
 
     async def _apply_proxy_configmap_data(
         self, name: str, sandbox_id: str, rendered: str

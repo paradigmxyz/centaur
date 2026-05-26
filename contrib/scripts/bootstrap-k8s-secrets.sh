@@ -17,6 +17,11 @@ set to onepassword-connect in the Helm values):
   OP_CONNECT_CREDENTIALS_FILE  path to 1password-credentials.json; if set,
                                creates Secret centaur-onepassword-connect-credentials
   OP_CONNECT_TOKEN             Connect API token; added to centaur-infra-env
+
+Optional local-dev admin key:
+  LOCAL_DEV_API_KEY            seeded as the admin bearer for the API service
+                               (envFrom centaur-infra-env). Re-run with --force
+                               or kubectl patch to rotate.
 EOF
 }
 
@@ -87,10 +92,27 @@ delete_if_forced centaur-firewall-ca
 delete_if_forced centaur-firewall-ca-key
 delete_if_forced centaur-onepassword-connect-credentials
 
+secret_key_present() {
+  local key="$1"
+  local value
+  value="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env \
+    -o "jsonpath={.data.${key}}" 2>/dev/null || true)"
+  [[ -n "$value" ]]
+}
+
 if secret_exists centaur-infra-env; then
   patch_data=()
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     patch_data+=("\"OP_CONNECT_TOKEN\":\"$(printf '%s' "$OP_CONNECT_TOKEN" | base64 | tr -d '\n')\"")
+  fi
+  # Top-up IRON_BROKER_TOKEN for clusters bootstrapped before iron-token-broker
+  # support landed. Only generated when absent so we don't rotate it out from
+  # under cached iron-proxy access tokens on every script run.
+  if ! secret_key_present IRON_BROKER_TOKEN; then
+    patch_data+=("\"IRON_BROKER_TOKEN\":\"$(rand_hex | base64 | tr -d '\n')\"")
+  fi
+  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
+    patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
   fi
   if [[ "${#patch_data[@]}" -gt 0 ]]; then
     patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
@@ -104,6 +126,7 @@ else
   secret_args=(
     -n "$NAMESPACE" create secret generic centaur-infra-env
     --from-literal=IRON_MANAGEMENT_API_KEY="$(rand_hex)"
+    --from-literal=IRON_BROKER_TOKEN="$(rand_hex)"
     --from-literal=SANDBOX_SIGNING_KEY="$(rand_hex)"
     --from-literal=OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN"
     --from-literal=OP_VAULT="$OP_VAULT"
@@ -115,6 +138,9 @@ else
   )
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
+  fi
+  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
+    secret_args+=(--from-literal=LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY")
   fi
   kubectl "${secret_args[@]}" >/dev/null
   echo "Created Secret centaur-infra-env in namespace $NAMESPACE"

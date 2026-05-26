@@ -297,6 +297,14 @@ spec:
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
               value: {{ .Values.ironProxy.secretTtl | quote }}
+{{- if .Values.tokenBroker.enabled }}
+            - name: FIREWALL_MANAGER_TOKEN_BROKER_TTL
+              value: {{ .Values.tokenBroker.ttl | quote }}
+            - name: KUBERNETES_TOKEN_BROKER_NAME
+              value: {{ include "centaur.tokenBrokerName" . | quote }}
+            - name: KUBERNETES_TOKEN_BROKER_URL
+              value: {{ include "centaur.tokenBrokerUrl" . | quote }}
+{{- end }}
 {{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
             - name: KUBERNETES_OP_CONNECT_HOST
               value: {{ include "centaur.onepasswordConnectUrl" . | quote }}

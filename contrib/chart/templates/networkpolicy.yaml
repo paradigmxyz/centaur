@@ -273,6 +273,11 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
+{{- if .Values.tokenBroker.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 14 }}
+{{- end }}
       ports:
         - protocol: TCP
           port: {{ include "centaur.onepasswordConnectPort" . }}

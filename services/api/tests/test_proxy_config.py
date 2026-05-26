@@ -1506,3 +1506,246 @@ def test_render_groups_header_secret_hosts_when_repeated() -> None:
         "api.github.com",
         "uploads.github.com",
     }
+
+
+# ── brokered_token parser ───────────────────────────────────────────────────
+
+
+def test_parser_typed_brokered_token() -> None:
+    from api.tool_manager import BrokeredTokenSecret
+
+    secret = _parse_secret(
+        {
+            "type": "brokered_token",
+            "name": "openai-codex",
+            "hosts": ["auth.openai.com"],
+            "token_endpoint": "https://auth.openai.com/oauth/token",
+            "fields": {
+                "client_id": "CODEX_CLIENT_ID",
+                "refresh_token": "CODEX_BLOB",
+            },
+        }
+    )
+    assert isinstance(secret, BrokeredTokenSecret)
+    assert secret.hosts == ("auth.openai.com",)
+    assert secret.token_endpoint == "https://auth.openai.com/oauth/token"
+    assert [name for name, _ in secret.fields] == ["client_id", "refresh_token"]
+
+
+def test_parser_brokered_token_allows_json_key_on_read_fields() -> None:
+    secret = _parse_secret(
+        {
+            "type": "brokered_token",
+            "name": "okta",
+            "hosts": ["example.okta.com"],
+            "token_endpoint": "https://example.okta.com/token",
+            "fields": {
+                "client_id": {
+                    "secret_ref": "OKTA_BUNDLE",
+                    "json_key": "client_id",
+                },
+                "client_secret": {
+                    "secret_ref": "OKTA_BUNDLE",
+                    "json_key": "client_secret",
+                },
+                "refresh_token": "OKTA_BLOB",
+            },
+        }
+    )
+    fields = dict(secret.fields)
+    assert fields["client_id"] == OAuthFieldSource("OKTA_BUNDLE", "client_id")
+    assert fields["client_secret"] == OAuthFieldSource("OKTA_BUNDLE", "client_secret")
+
+
+def test_parser_brokered_token_rejects_json_key_on_refresh_token() -> None:
+    with pytest.raises(ValueError, match="does not support 'json_key'"):
+        _parse_secret(
+            {
+                "type": "brokered_token",
+                "name": "codex",
+                "hosts": ["auth.openai.com"],
+                "token_endpoint": "https://auth.openai.com/token",
+                "fields": {
+                    "client_id": "CODEX_CLIENT_ID",
+                    "refresh_token": {
+                        "secret_ref": "CODEX_BUNDLE",
+                        "json_key": "refresh_token",
+                    },
+                },
+            }
+        )
+
+
+def test_parser_brokered_token_requires_required_fields() -> None:
+    with pytest.raises(ValueError, match="requires fields"):
+        _parse_secret(
+            {
+                "type": "brokered_token",
+                "name": "codex",
+                "hosts": ["auth.openai.com"],
+                "token_endpoint": "https://auth.openai.com/token",
+                "fields": {"client_id": "X"},
+            }
+        )
+
+
+def test_parser_brokered_token_rejects_unknown_field() -> None:
+    with pytest.raises(ValueError, match="not valid"):
+        _parse_secret(
+            {
+                "type": "brokered_token",
+                "name": "codex",
+                "hosts": ["auth.openai.com"],
+                "token_endpoint": "https://auth.openai.com/token",
+                "fields": {
+                    "client_id": "X",
+                    "refresh_token": "Y",
+                    "audience": "Z",
+                },
+            }
+        )
+
+
+def test_parser_brokered_token_allows_json_key_on_endpoint_headers() -> None:
+    secret = _parse_secret(
+        {
+            "type": "brokered_token",
+            "name": "venue",
+            "hosts": ["api.venue.example"],
+            "token_endpoint": "https://venue.example/oauth/token",
+            "fields": {
+                "client_id": "VENUE_CLIENT_ID",
+                "refresh_token": "VENUE_BLOB",
+            },
+            "token_endpoint_headers": {
+                "x-api-key": {
+                    "secret_ref": "VENUE_BUNDLE",
+                    "json_key": "api_key",
+                },
+            },
+        }
+    )
+    assert dict(secret.token_endpoint_headers)["x-api-key"] == OAuthFieldSource(
+        "VENUE_BUNDLE", "api_key"
+    )
+
+
+# ── brokered_token routing ──────────────────────────────────────────────────
+
+
+_BROKERED_FIELDS = (
+    ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+    ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+)
+
+
+def test_render_brokered_token_emits_token_broker_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tool_manager import BrokeredTokenSecret
+
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    monkeypatch.setenv("FIREWALL_MANAGER_TOKEN_BROKER_TTL", "30s")
+    secrets = [
+        BrokeredTokenSecret(
+            name="openai-codex",
+            hosts=("auth.openai.com",),
+            fields=_BROKERED_FIELDS,
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    # brokered_token never lands on the oauth_token transform.
+    assert not any(t["name"] == "oauth_token" for t in cfg["transforms"])
+    secrets_block = next(t for t in cfg["transforms"] if t["name"] == "secrets")
+    entries = secrets_block["config"]["secrets"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["source"] == {
+        "type": "token_broker",
+        "credential_id": "openai-codex",
+        "ttl": "30s",
+    }
+    assert entry["inject"] == {
+        "header": "Authorization",
+        "formatter": "Bearer {{.Value}}",
+    }
+    assert entry["rules"] == [{"host": "auth.openai.com"}]
+
+
+def test_render_refresh_token_oauth_secret_stays_on_oauth_transform() -> None:
+    # Bare OAuthTokenSecret with refresh_token grant no longer routes through
+    # the broker — tools must opt in by declaring `brokered_token` instead.
+    secrets = [
+        OAuthTokenSecret(
+            name="legacy-oauth",
+            grant="refresh_token",
+            hosts=("auth.openai.com",),
+            fields=_RENDER_REFRESH_FIELDS,
+        ),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    oauth = next(t for t in cfg["transforms"] if t["name"] == "oauth_token")
+    assert oauth["config"]["tokens"][0]["grant"] == "refresh_token"
+
+
+def test_render_brokered_and_oauth_coexist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tool_manager import BrokeredTokenSecret
+
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    secrets = [
+        OAuthTokenSecret(
+            name="api-app",
+            grant="client_credentials",
+            hosts=("api.example.com",),
+            fields=_RENDER_CC_FIELDS,
+            token_endpoint="https://api.example.com/token",
+        ),
+        BrokeredTokenSecret(
+            name="openai-codex",
+            hosts=("auth.openai.com",),
+            fields=_BROKERED_FIELDS,
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    oauth = next(t for t in cfg["transforms"] if t["name"] == "oauth_token")
+    tokens = oauth["config"]["tokens"]
+    assert len(tokens) == 1
+    assert tokens[0]["grant"] == "client_credentials"
+    secrets_block = next(t for t in cfg["transforms"] if t["name"] == "secrets")
+    broker_entries = [
+        e for e in secrets_block["config"]["secrets"]
+        if isinstance(e.get("source"), dict)
+        and e["source"].get("type") == "token_broker"
+    ]
+    assert len(broker_entries) == 1
+    assert broker_entries[0]["source"]["credential_id"] == "openai-codex"
+
+
+def test_render_brokered_token_merges_hosts_across_duplicate_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tool_manager import BrokeredTokenSecret
+
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    secrets = [
+        BrokeredTokenSecret(
+            "claude", ("api.anthropic.com",), _BROKERED_FIELDS,
+            token_endpoint="https://console.anthropic.com/v1/oauth/token",
+        ),
+        BrokeredTokenSecret(
+            "claude", ("console.anthropic.com",), _BROKERED_FIELDS,
+            token_endpoint="https://console.anthropic.com/v1/oauth/token",
+        ),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    secrets_block = next(t for t in cfg["transforms"] if t["name"] == "secrets")
+    entries = secrets_block["config"]["secrets"]
+    assert len(entries) == 1
+    assert {r["host"] for r in entries[0]["rules"]} == {
+        "api.anthropic.com",
+        "console.anthropic.com",
+    }
