@@ -40,6 +40,7 @@ THREAD_ID: str | None = None
 ACTIVE_TURN_ID: str | None = None
 SHUTTING_DOWN = False
 CONFIGURED_OTEL_TRACE_ID: str | None = None
+CONFIGURED_TRACE_CONTEXT_ID: str | None = None
 APP_INITIALIZED = False
 CURRENT_TRACEPARENT: str | None = None
 OTEL_PROXY: ThreadingHTTPServer | None = None
@@ -131,7 +132,13 @@ def start_app_server() -> None:
     )
     notify("initialized")
     APP_INITIALIZED = True
-    emit({"type": "system", "subtype": "wrapper_heartbeat", "phase": "app_server_started"})
+    emit(
+        {
+            "type": "system",
+            "subtype": "wrapper_heartbeat",
+            "phase": "app_server_started",
+        }
+    )
 
 
 def app_stdout_reader() -> None:
@@ -199,16 +206,10 @@ def split_goal(items: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, 
 
 
 def _codex_otel_endpoint() -> str:
-    endpoint = (
-        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        or ""
-    ).strip()
+    endpoint = (os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or "").strip()
     if endpoint:
         return endpoint
-    base = (
-        os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        or ""
-    ).strip()
+    base = (os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or "").strip()
     if not base:
         return ""
     base = base.rstrip("/")
@@ -237,9 +238,13 @@ def _strip_otel_toml_sections(contents: str) -> str:
 def _write_codex_otel_config(
     *, endpoint: str, trace_id: str, thread_key: str, api_key: str, environment: str
 ) -> None:
-    config_path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    config_path = (
+        Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    )
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    base = _strip_otel_toml_sections(config_path.read_text() if config_path.exists() else "")
+    base = _strip_otel_toml_sections(
+        config_path.read_text() if config_path.exists() else ""
+    )
     headers = [
         f"x-trace-id = {_toml_string(trace_id)}",
     ]
@@ -254,7 +259,7 @@ def _write_codex_otel_config(
     ]
 
     trace_exporter = (
-        f'trace_exporter = {{ otlp-http = {{ endpoint = {_toml_string(endpoint)}, '
+        f"trace_exporter = {{ otlp-http = {{ endpoint = {_toml_string(endpoint)}, "
         f'protocol = "binary", headers = {{ {", ".join(headers)} }} }} }}'
     )
     otel_block = "\n".join(
@@ -307,14 +312,14 @@ def _otel_environment() -> str:
             if environment:
                 return environment
     return (
-        os.environ.get("DEPLOY_ENV")
-        or os.environ.get("ENVIRONMENT")
-        or "dev"
+        os.environ.get("DEPLOY_ENV") or os.environ.get("ENVIRONMENT") or "dev"
     ).strip() or "dev"
 
 
 def _attribute(span: Any, key: str) -> KeyValue | None:
-    return next((attribute for attribute in span.attributes if attribute.key == key), None)
+    return next(
+        (attribute for attribute in span.attributes if attribute.key == key), None
+    )
 
 
 def _attribute_string(span: Any, key: str) -> str:
@@ -367,7 +372,12 @@ def _append_current_llm_output(text: Any) -> None:
 
 
 def _append_llm_output_for_turn(turn_id: Any, text: Any) -> None:
-    if not isinstance(turn_id, str) or not turn_id or not isinstance(text, str) or not text:
+    if (
+        not isinstance(turn_id, str)
+        or not turn_id
+        or not isinstance(text, str)
+        or not text
+    ):
         return
     LLM_OUTPUTS_BY_TURN_ID[turn_id] = LLM_OUTPUTS_BY_TURN_ID.get(turn_id, "") + text
 
@@ -382,21 +392,35 @@ def _set_attribute_int(span: Any, key: str, value: int | None) -> None:
     attribute.value.int_value = value
 
 
+def _chat_messages_attribute(role: str, text: str) -> str:
+    return json.dumps(
+        [{"role": role, "content": text}],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def _normalize_codex_llm_span(span: Any, prefix: str) -> None:
     if span.name != f"{prefix}session_task.turn":
         return
 
     model = _attribute_string(span, "model")
     turn_id = _attribute_string(span, "turn.id")
+    input_text = LLM_INPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_INPUT_TEXT)
+    output_text = LLM_OUTPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_OUTPUT_TEXT)
     _set_attribute_string(span, "gen_ai.operation.name", "chat")
     _set_attribute_string(span, "gen_ai.system", "openai")
     _set_attribute_string(span, "gen_ai.request.model", model)
     _set_attribute_string(span, "gen_ai.response.model", model)
+    _set_attribute_string(span, "input.value", input_text)
+    _set_attribute_string(span, "output.value", output_text)
     _set_attribute_string(
-        span, "input.value", LLM_INPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_INPUT_TEXT)
+        span, "gen_ai.input.messages", _chat_messages_attribute("user", input_text)
     )
     _set_attribute_string(
-        span, "output.value", LLM_OUTPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_OUTPUT_TEXT)
+        span,
+        "gen_ai.output.messages",
+        _chat_messages_attribute("assistant", output_text),
     )
     _set_attribute_int(
         span,
@@ -588,12 +612,12 @@ def _trace_id_from_traceparent(traceparent: str | None) -> str | None:
 
 
 def configure_trace_context_for_startup(trace_id: str | None) -> None:
-    global CONFIGURED_OTEL_TRACE_ID
+    global CONFIGURED_TRACE_CONTEXT_ID
     trace_id = (trace_id or os.environ.get("CENTAUR_TRACE_ID") or "").strip()
     configure_trace_context(trace_id)
-    if not trace_id or CONFIGURED_OTEL_TRACE_ID == trace_id:
+    if not trace_id or CONFIGURED_TRACE_CONTEXT_ID == trace_id:
         return
-    CONFIGURED_OTEL_TRACE_ID = trace_id
+    CONFIGURED_TRACE_CONTEXT_ID = trace_id
 
 
 def start_or_resume_thread() -> str:
@@ -727,7 +751,8 @@ def handle_input(turn_input: dict[str, Any]) -> None:
     configure_trace_context_for_startup(turn_input.get("trace_id"))
     configure_traceparent(turn_input.get("traceparent"))
     configure_codex_otel_for_startup(
-        _trace_id_from_traceparent(turn_input.get("traceparent")) or turn_input.get("trace_id"),
+        _trace_id_from_traceparent(turn_input.get("traceparent"))
+        or turn_input.get("trace_id"),
         turn_input.get("thread_key"),
     )
     start_app_server()

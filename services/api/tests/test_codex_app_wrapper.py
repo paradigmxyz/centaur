@@ -23,7 +23,9 @@ def _load_wrapper() -> ModuleType:
     return module
 
 
-def test_configure_trace_context_for_startup_sets_w3c_trace_context(monkeypatch, tmp_path) -> None:
+def test_configure_trace_context_for_startup_sets_w3c_trace_context(
+    monkeypatch, tmp_path
+) -> None:
     wrapper = _load_wrapper()
     codex_home = tmp_path / ".codex"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
@@ -43,6 +45,36 @@ def test_configure_trace_context_for_startup_sets_w3c_trace_context(monkeypatch,
     assert (
         wrapper.os.environ["TRACEPARENT"]
         == "00-00000000000040008000000000000123-1111111122223333-01"
+    )
+    assert wrapper.CONFIGURED_TRACE_CONTEXT_ID == "00000000-0000-4000-8000-000000000123"
+    assert wrapper.CONFIGURED_OTEL_TRACE_ID is None
+
+
+def test_trace_context_startup_does_not_skip_codex_otel_config(
+    monkeypatch, tmp_path
+) -> None:
+    wrapper = _load_wrapper()
+    codex_home = tmp_path / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlp-collector:4318")
+    monkeypatch.setattr(
+        wrapper,
+        "start_codex_otel_prefix_proxy",
+        lambda _endpoint, _span_prefix: "http://127.0.0.1:4319/v1/traces",
+    )
+
+    wrapper.CONFIGURED_TRACE_CONTEXT_ID = None
+    wrapper.CONFIGURED_OTEL_TRACE_ID = None
+    wrapper.configure_trace_context_for_startup("00000000-0000-4000-8000-000000000123")
+    wrapper.configure_codex_otel_for_startup(
+        "00000000-0000-4000-8000-000000000123",
+        "slack:C123:1700000000.000100",
+    )
+
+    parsed = tomllib.loads((codex_home / "config.toml").read_text())
+    assert (
+        parsed["otel"]["trace_exporter"]["otlp-http"]["endpoint"]
+        == "http://127.0.0.1:4319/v1/traces"
     )
 
 
@@ -124,8 +156,10 @@ def test_configure_codex_otel_writes_startup_config(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(
         wrapper,
         "start_codex_otel_prefix_proxy",
-        lambda endpoint, span_prefix: proxy_calls.append((endpoint, span_prefix))
-        or "http://127.0.0.1:4319/v1/traces",
+        lambda endpoint, span_prefix: (
+            proxy_calls.append((endpoint, span_prefix))
+            or "http://127.0.0.1:4319/v1/traces"
+        ),
     )
 
     wrapper.CONFIGURED_OTEL_TRACE_ID = None
@@ -157,7 +191,9 @@ def test_configure_codex_otel_writes_startup_config(monkeypatch, tmp_path) -> No
     assert proxy_calls == [("http://otlp-collector:4318/v1/traces", "codex.")]
 
 
-def test_configure_codex_otel_ignores_unrelated_collector_endpoint(monkeypatch, tmp_path) -> None:
+def test_configure_codex_otel_ignores_unrelated_collector_endpoint(
+    monkeypatch, tmp_path
+) -> None:
     wrapper = _load_wrapper()
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
@@ -167,7 +203,9 @@ def test_configure_codex_otel_ignores_unrelated_collector_endpoint(monkeypatch, 
     monkeypatch.setattr(
         wrapper,
         "start_codex_otel_prefix_proxy",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("otel should stay disabled")),
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("otel should stay disabled")
+        ),
     )
 
     wrapper.CONFIGURED_OTEL_TRACE_ID = None
@@ -202,7 +240,11 @@ def test_prefix_otlp_span_names_prefixes_codex_spans() -> None:
 def test_prefix_otlp_span_names_normalizes_codex_turn_as_gen_ai_span() -> None:
     wrapper = _load_wrapper()
     request = ExportTraceServiceRequest()
-    span = request.resource_spans.add().scope_spans.add().spans.add(name="session_task.turn")
+    span = (
+        request.resource_spans.add()
+        .scope_spans.add()
+        .spans.add(name="session_task.turn")
+    )
 
     def set_string(key: str, value: str) -> None:
         attribute = span.attributes.add()
@@ -232,8 +274,7 @@ def test_prefix_otlp_span_names_normalizes_codex_turn_as_gen_ai_span() -> None:
     parsed.ParseFromString(rewritten)
     rewritten_span = parsed.resource_spans[0].scope_spans[0].spans[0]
     attributes = {
-        attribute.key: attribute.value
-        for attribute in rewritten_span.attributes
+        attribute.key: attribute.value for attribute in rewritten_span.attributes
     }
 
     assert rewritten_span.name == "codex.session_task.turn"
@@ -245,6 +286,12 @@ def test_prefix_otlp_span_names_normalizes_codex_turn_as_gen_ai_span() -> None:
         "Reply with exactly PONG and nothing else."
     )
     assert attributes["output.value"].string_value == "PONG"
+    assert attributes["gen_ai.input.messages"].string_value == (
+        '[{"role":"user","content":"Reply with exactly PONG and nothing else."}]'
+    )
+    assert attributes["gen_ai.output.messages"].string_value == (
+        '[{"role":"assistant","content":"PONG"}]'
+    )
     assert attributes["gen_ai.usage.input_tokens"].int_value == 20448
     assert attributes["gen_ai.usage.output_tokens"].int_value == 11
     assert attributes["gen_ai.usage.cache_read_input_tokens"].int_value == 20352
@@ -308,7 +355,9 @@ def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
                         "type": "user",
                         "trace_id": "00000000-0000-0000-0000-000000000123",
                         "thread_key": "slack:C123:1700000000.000100",
-                        "message": {"content": [{"type": "text", "text": "/goal ship"}]},
+                        "message": {
+                            "content": [{"type": "text", "text": "/goal ship"}]
+                        },
                     }
                 )
                 wrapper.INPUTS.put(None)
