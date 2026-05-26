@@ -50,6 +50,20 @@ ARG CLAUDE_CODE_VERSION=2.1.143
 ARG CODEX_VERSION=0.130.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
+ARG KUBECTL_VERSION=v1.34.2
+
+# ── kubectl ──────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    kubectl_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo amd64 ;; \
+      arm64) echo arm64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    curl -fsSL \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${kubectl_arch}/kubectl" \
+      -o /usr/local/bin/kubectl; \
+    chmod +x /usr/local/bin/kubectl; \
+    kubectl version --client=true | grep -F "${KUBECTL_VERSION#v}"
 
 # ── Nushell ─────────────────────────────────────────────────────────────────
 RUN set -eux; \
