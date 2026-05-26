@@ -10,16 +10,9 @@ machine with k3s. This can be a Mac Mini running Linux, a DigitalOcean droplet,
 another simple VPS, or a spare Linux box. You do not need a managed Kubernetes
 cluster to get started.
 
-Centaur's development workflow builds images locally:
-
-```bash
-just build
-```
-
-Those images are named `centaur-api:latest`, `centaur-iron-proxy:latest`,
-`centaur-slackbot:latest`, and `centaur-agent:latest`. On a single small host,
-the simplest setup is to build those images on the same machine that runs k3s,
-then import them into k3s' container runtime.
+Centaur publishes development images to GHCR. On a single small host, the
+simplest setup is to point the local chart at those images instead of building
+and importing images into k3s' container runtime.
 
 ## 1. Install k3s
 
@@ -54,29 +47,15 @@ git clone <repo-url>
 cd centaur
 ```
 
-## 3. Build and load images
+## 3. Use GHCR images
 
-Build the Centaur images:
+Use `source=ghcr` with the local Just recipes to point the chart at the
+published `ghcr.io/paradigmxyz/centaur-*` images instead of local image names.
+This keeps the chart's default `latest` tags and `IfNotPresent` pull policy
+from `contrib/chart/values.dev.yaml`.
 
-```bash
-just build
-```
-
-Load them into k3s' container runtime:
-
-```bash
-docker save \
-  centaur-api:latest \
-  centaur-iron-proxy:latest \
-  centaur-slackbot:latest \
-  centaur-agent:latest \
-  -o /tmp/centaur-images.tar
-
-sudo k3s ctr images import /tmp/centaur-images.tar
-```
-
-For repeated deploys on the same host, rerun `just build`, reload the changed
-images, then run `just deploy`.
+If GHCR access for the repository is private, create an image pull Secret and
+add it to the chart with `global.imagePullSecrets`.
 
 ## 4. Bootstrap secrets
 
@@ -99,10 +78,10 @@ just bootstrap-secrets
 
 ## 5. Deploy Centaur
 
-Deploy the Helm chart:
+Deploy the Helm chart with the GHCR image values:
 
 ```bash
-just deploy
+just source=ghcr deploy
 just status
 ```
 
