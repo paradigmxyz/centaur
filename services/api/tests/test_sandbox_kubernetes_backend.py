@@ -281,19 +281,17 @@ def test_container_env_passes_allowed_otel_config(
 ) -> None:
     monkeypatch.setenv("CODEX_OTEL_AUTHORIZATION", "Bearer local-key")
     monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
-    monkeypatch.setenv("CODEX_OTEL_EXPORTER_OTLP_ENDPOINT", "http://laminar:8000")
+    monkeypatch.setenv("CODEX_OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlp-collector:4318")
     monkeypatch.setenv("CODEX_OTEL_SPAN_PREFIX", "codex.")
-    monkeypatch.setenv("LMNR_PROJECT_API_KEY", "lmnr-key")
 
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
     assert env_map["CODEX_OTEL_AUTHORIZATION"] == "Bearer local-key"
     assert env_map["CODEX_OTEL_ENVIRONMENT"] == "staging"
-    assert env_map["CODEX_OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://laminar:8000"
+    assert env_map["CODEX_OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otlp-collector:4318"
     assert env_map["CODEX_OTEL_SPAN_PREFIX"] == "codex."
-    assert env_map["LMNR_PROJECT_API_KEY"] == "lmnr-key"
-    assert "laminar" in env_map["NO_PROXY"].split(",")
+    assert "otlp-collector" in env_map["NO_PROXY"].split(",")
 
 
 def test_container_env_applies_kubernetes_sandbox_extra_env(

@@ -26,11 +26,7 @@ _SANDBOX_PASSTHROUGH_ENV_KEYS = (
     "CODEX_OTEL_ENVIRONMENT",
     "CODEX_OTEL_EXPORTER_OTLP_ENDPOINT",
     "CODEX_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-    "CODEX_OTEL_LAMINAR_BASE_URL",
-    "CODEX_OTEL_LAMINAR_ENDPOINT",
     "CODEX_OTEL_SPAN_PREFIX",
-    "LMNR_BASE_URL",
-    "LMNR_PROJECT_API_KEY",
 )
 
 # Keep Claude Code deterministic in the pod while still allowing Centaur-owned
@@ -86,9 +82,6 @@ def _sandbox_otel_endpoint_hosts(extra_env: list[tuple[str, str]]) -> list[str]:
     for key in (
         "CODEX_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
         "CODEX_OTEL_EXPORTER_OTLP_ENDPOINT",
-        "CODEX_OTEL_LAMINAR_ENDPOINT",
-        "CODEX_OTEL_LAMINAR_BASE_URL",
-        "LMNR_BASE_URL",
     ):
         value = (os.getenv(key) or extra.get(key) or "").strip()
         host = urlsplit(value).hostname

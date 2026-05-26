@@ -200,15 +200,12 @@ def split_goal(items: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, 
 def _codex_otel_endpoint() -> str:
     endpoint = (
         os.environ.get("CODEX_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        or os.environ.get("CODEX_OTEL_LAMINAR_ENDPOINT")
         or ""
     ).strip()
     if endpoint:
         return endpoint
     base = (
         os.environ.get("CODEX_OTEL_EXPORTER_OTLP_ENDPOINT")
-        or os.environ.get("CODEX_OTEL_LAMINAR_BASE_URL")
-        or os.environ.get("LMNR_BASE_URL")
         or ""
     ).strip()
     if not base:
@@ -352,15 +349,15 @@ def _normalize_codex_llm_span(span: Any, prefix: str) -> None:
 
     model = _attribute_string(span, "model")
     turn_id = _attribute_string(span, "turn.id")
-    _set_attribute_string(span, "lmnr.span.type", "LLM")
+    _set_attribute_string(span, "gen_ai.operation.name", "chat")
     _set_attribute_string(span, "gen_ai.system", "openai")
     _set_attribute_string(span, "gen_ai.request.model", model)
     _set_attribute_string(span, "gen_ai.response.model", model)
     _set_attribute_string(
-        span, "lmnr.span.input", LLM_INPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_INPUT_TEXT)
+        span, "input.value", LLM_INPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_INPUT_TEXT)
     )
     _set_attribute_string(
-        span, "lmnr.span.output", LLM_OUTPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_OUTPUT_TEXT)
+        span, "output.value", LLM_OUTPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_OUTPUT_TEXT)
     )
     _set_attribute_int(
         span,
@@ -479,11 +476,7 @@ def configure_codex_otel_for_startup(
     span_prefix = _span_prefix()
     export_endpoint = start_codex_otel_prefix_proxy(endpoint, span_prefix)
 
-    api_key = (
-        os.environ.get("CODEX_OTEL_AUTHORIZATION")
-        or os.environ.get("LMNR_PROJECT_API_KEY")
-        or ""
-    ).strip()
+    api_key = (os.environ.get("CODEX_OTEL_AUTHORIZATION") or "").strip()
     if api_key.lower().startswith("bearer "):
         api_key = api_key[7:].strip()
     environment = (

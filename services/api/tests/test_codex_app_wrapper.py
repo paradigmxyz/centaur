@@ -118,8 +118,8 @@ def test_configure_codex_otel_writes_startup_config(monkeypatch, tmp_path) -> No
         )
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("LMNR_BASE_URL", "http://laminar:8000")
-    monkeypatch.setenv("LMNR_PROJECT_API_KEY", "lmnr-key")
+    monkeypatch.setenv("CODEX_OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlp-collector:4318")
+    monkeypatch.setenv("CODEX_OTEL_AUTHORIZATION", "otlp-key")
     monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
     monkeypatch.setattr(
         wrapper,
@@ -151,10 +151,32 @@ def test_configure_codex_otel_writes_startup_config(monkeypatch, tmp_path) -> No
     assert parsed["otel"]["trace_exporter"]["otlp-http"]["headers"] == {
         "x-trace-id": "00000000-0000-4000-8000-000000000123",
         "x-centaur-thread-key": "slack:C123:1700000000.000100",
-        "authorization": "Bearer lmnr-key",
+        "authorization": "Bearer otlp-key",
     }
     assert config.count("[otel]") == 1
-    assert proxy_calls == [("http://laminar:8000/v1/traces", "codex.")]
+    assert proxy_calls == [("http://otlp-collector:4318/v1/traces", "codex.")]
+
+
+def test_configure_codex_otel_ignores_generic_collector_endpoint(monkeypatch, tmp_path) -> None:
+    wrapper = _load_wrapper()
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("OTLP_BASE_URL", "http://otlp-collector:4318")
+    monkeypatch.setenv("CODEX_OTEL_AUTHORIZATION", "otlp-key")
+    monkeypatch.setattr(
+        wrapper,
+        "start_codex_otel_prefix_proxy",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("otel should stay disabled")),
+    )
+
+    wrapper.CONFIGURED_OTEL_TRACE_ID = None
+    wrapper.configure_codex_otel_for_startup(
+        "00000000-0000-4000-8000-000000000123",
+        "slack:C123:1700000000.000100",
+    )
+
+    assert not (codex_home / "config.toml").exists()
 
 
 def test_prefix_otlp_span_names_prefixes_codex_spans() -> None:
@@ -177,7 +199,7 @@ def test_prefix_otlp_span_names_prefixes_codex_spans() -> None:
     assert names == ["codex.session_task.turn", "codex.initialize"]
 
 
-def test_prefix_otlp_span_names_normalizes_codex_turn_as_laminar_llm_span() -> None:
+def test_prefix_otlp_span_names_normalizes_codex_turn_as_gen_ai_span() -> None:
     wrapper = _load_wrapper()
     request = ExportTraceServiceRequest()
     span = request.resource_spans.add().scope_spans.add().spans.add(name="session_task.turn")
@@ -215,14 +237,14 @@ def test_prefix_otlp_span_names_normalizes_codex_turn_as_laminar_llm_span() -> N
     }
 
     assert rewritten_span.name == "codex.session_task.turn"
-    assert attributes["lmnr.span.type"].string_value == "LLM"
+    assert attributes["gen_ai.operation.name"].string_value == "chat"
     assert attributes["gen_ai.system"].string_value == "openai"
     assert attributes["gen_ai.request.model"].string_value == "gpt-5.5"
     assert attributes["gen_ai.response.model"].string_value == "gpt-5.5"
-    assert attributes["lmnr.span.input"].string_value == (
+    assert attributes["input.value"].string_value == (
         "Reply with exactly PONG and nothing else."
     )
-    assert attributes["lmnr.span.output"].string_value == "PONG"
+    assert attributes["output.value"].string_value == "PONG"
     assert attributes["gen_ai.usage.input_tokens"].int_value == 20448
     assert attributes["gen_ai.usage.output_tokens"].int_value == 11
     assert attributes["gen_ai.usage.cache_read_input_tokens"].int_value == 20352
