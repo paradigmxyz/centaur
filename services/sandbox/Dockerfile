@@ -178,6 +178,10 @@ FROM toolchain AS sandbox
 
 USER root
 RUN rm -f /etc/sudoers.d/agent
+# BuildKit's COPY --link creates parent directories without an explicit mode,
+# which can leave /etc/centaur without the execute bit for non-root users.
+# Pre-create it as 0755 so the agent user can traverse into it at runtime.
+RUN install -d -m 0755 /etc/centaur
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
 COPY --link --chmod=755 services/sandbox/call.sh /usr/local/bin/call
 COPY --link --chmod=755 services/sandbox/slack-upload.sh /usr/local/bin/slack-upload

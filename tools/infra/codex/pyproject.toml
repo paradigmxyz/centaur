@@ -34,9 +34,9 @@ hosts = ["chatgpt.com"]
 #                            OAuth token endpoint doesn't need it.
 secrets = [
     { type = "brokered_token", name = "openai-codex", hosts = [
-        "*.chatgpt.com",
+        "chatgpt.com",
     ], token_endpoint = "https://auth.openai.com/oauth/token", fields = { client_id = "OPENAI_CODEX_CLIENT_ID", refresh_token = "OPENAI_CODEX_BLOB" } },
     { type = "header", mode = "inject", name = "OPENAI_CODEX_ACCOUNT_ID", inject_header = "chatgpt-account-id", hosts = [
-        "*.chatgpt.com",
+        "chatgpt.com",
     ] },
 ]

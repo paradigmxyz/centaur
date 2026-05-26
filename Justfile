@@ -82,6 +82,11 @@ deploy:
         --set onepasswordConnect.connect.create=true
       )
     fi
+    if [[ -n "${CODEX_AUTH_MODE:-}" ]]; then
+      extra_args+=(
+        --set sandbox.extraEnv.CODEX_AUTH_MODE=${CODEX_AUTH_MODE}
+      )
+    fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
 up:
