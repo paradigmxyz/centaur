@@ -25,7 +25,7 @@ async def _clear_workflow_tables(db_pool):
 
 
 @pytest.mark.asyncio
-async def test_create_slack_thread_turn_workflow_eager_start_returns_without_running(
+async def test_create_slack_thread_turn_workflow_eager_start(
     client, db_pool, api_key: str,
 ):
     thread_key = f"slack:C-test:{uuid.uuid4().hex}"
