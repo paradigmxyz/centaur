@@ -1,8 +1,8 @@
 #!/bin/bash
 # git-branch — create a writable working copy from a read-only mounted repo.
 #
-# Usage:  git-branch <org/repo>
-# Example: git-branch owner/centaur
+# Usage:  git-branch <org/repo> [branch slug]
+# Example: git-branch owner/centaur fix-flaky-slack-delivery
 #
 # Creates ~/branches/<org>/<repo> as a --shared clone from ~/github/<org>/<repo>
 # with a unique agent branch checked out. The resulting directory is fully writable
@@ -10,12 +10,13 @@
 
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-    echo "Usage: git-branch <org/repo>" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "Usage: git-branch <org/repo> [branch slug]" >&2
     exit 1
 fi
 
 REPO="$1"
+SLUG="${2:-}"
 SRC="$HOME/github/$REPO"
 DEST="$HOME/branches/$REPO"
 
@@ -45,7 +46,11 @@ if [ -n "$UPSTREAM_URL" ]; then
     git -C "$DEST" remote set-url origin "$UPSTREAM_URL"
 fi
 
-BRANCH="agent-$(date +%s)-${RANDOM}-${RANDOM}"
+if [ -n "$SLUG" ]; then
+    BRANCH="centaur/$SLUG-$(date +%s)"
+else
+    BRANCH="centaur/$(date +%s)-${RANDOM}-${RANDOM}"
+fi
 git -C "$DEST" checkout -q -b "$BRANCH"
 
 echo "$DEST"
