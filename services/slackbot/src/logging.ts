@@ -15,6 +15,13 @@ const SECRET_FIELD_NAMES = new Set([
 const EMAIL_FIELD_NAMES = new Set(['email', 'useremail', 'authoremail'])
 const PHONE_FIELD_NAMES = new Set(['phone', 'phonenumber', 'userphone'])
 const SSN_FIELD_NAMES = new Set(['ssn', 'socialsecuritynumber'])
+const LOG_VERSION_UUID = '7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14'
+
+function logVersionFields(): Record<string, string> {
+  return {
+    log_version_uuid: LOG_VERSION_UUID
+  }
+}
 
 function normalizeFieldName(fieldName: string | undefined): string {
   return (fieldName ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -86,14 +93,30 @@ export function sanitizeLogValue(
   )
 }
 
+function withLogVersionMetadata(values: unknown[]): unknown[] {
+  const metadata = logVersionFields()
+  if (values.length === 0) return [metadata]
+  const [first, ...rest] = values
+  if (
+    first &&
+    typeof first === 'object' &&
+    !Array.isArray(first) &&
+    !(first instanceof Error) &&
+    !(first instanceof Date)
+  ) {
+    return [{ ...metadata, ...(sanitizeLogValue(first) as Record<string, unknown>) }, ...rest]
+  }
+  return [metadata, ...values.map(value => sanitizeLogValue(value))]
+}
+
 export function logWarn(event: string, ...values: unknown[]): void {
-  console.warn(event, ...values.map(value => sanitizeLogValue(value)))
+  console.warn(event, ...withLogVersionMetadata(values))
 }
 
 export function logInfo(event: string, ...values: unknown[]): void {
-  console.log(event, ...values.map(value => sanitizeLogValue(value)))
+  console.log(event, ...withLogVersionMetadata(values))
 }
 
 export function logError(event: string, ...values: unknown[]): void {
-  console.error(event, ...values.map(value => sanitizeLogValue(value)))
+  console.error(event, ...withLogVersionMetadata(values))
 }

@@ -7,7 +7,7 @@ import { prettyJSON } from 'hono/pretty-json'
 import { startFinalDeliveryPoller } from './centaur/final-delivery'
 import { CentaurHandoff } from './centaur/handoff'
 import { loadConfig } from './config'
-import { logError, logWarn, sanitizeLogValue } from './logging'
+import { logError, logInfo, logWarn, sanitizeLogValue } from './logging'
 import { AgentSessionRenderer, withAgentSessionLock } from './slack/agent-session'
 import { authorizeSlackOrg } from './slack/authorization'
 import { CodexSessionRenderer, hasActiveCodexSession } from './slack/codex-session'
@@ -56,7 +56,11 @@ export const app = new Hono<{ Variables: Variables }>()
   .use(prettyJSON())
   .use('*', async (c, next) => {
     await next()
-    console.log('http_request', c.req.method, c.req.path, c.res.status)
+    logInfo('http_request', {
+      method: c.req.method,
+      path: c.req.path,
+      status: c.res.status
+    })
   })
   .use('*', timeout(5_000))
   .use(
@@ -496,7 +500,7 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
     allowedExternalTeamIds: config.SLACKBOT_EXTERNAL_ORG_ALLOWLIST
   })
   if (!authorization.ok) {
-    console.warn('slack_event_ignored_external_org_not_allowlisted', {
+    logWarn('slack_event_ignored_external_org_not_allowlisted', {
       external_team_id: authorization.externalTeamId,
       team_id: envelope.team_id,
       event_id: envelope.event_id
