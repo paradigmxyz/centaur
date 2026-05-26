@@ -135,6 +135,24 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+{{- with .Values.networkPolicy.apiServer }}
+{{- if .ports }}
+    # Egress to the Kubernetes apiserver. The in-cluster `kubernetes` Service
+    # commonly remaps 443 -> 6443 (k3s/k3d/kind/kubeadm); network-policy
+    # controllers filter egress on the post-DNAT port, so the apiserver port must
+    # be allowed explicitly. The API needs this to provision its iron-proxy pod
+    # (ensure_api_proxy_pod) and agent sandboxes; without it those calls fail and
+    # the control-plane egress proxy is never created.
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr | default "0.0.0.0/0" | quote }}
+      ports:
+{{- range .ports }}
+        - protocol: TCP
+          port: {{ . }}
+{{- end }}
+{{- end }}
+{{- end }}
 ---
 {{- if .Values.slackbot.enabled }}
 apiVersion: networking.k8s.io/v1

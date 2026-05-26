@@ -227,6 +227,20 @@ networkPolicy:
   apiIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
+  # Egress allowance for the API pod to reach the Kubernetes apiserver. The API
+  # calls the apiserver to provision its own iron-proxy pod (ensure_api_proxy_pod)
+  # and the agent sandboxes. The in-cluster `kubernetes` Service commonly remaps
+  # 443 -> 6443 (k3s, k3d, kind, kubeadm), and network-policy controllers such as
+  # k3s/kube-router filter egress on the post-DNAT destination, so the apiserver
+  # port must be allowed explicitly or those calls are silently dropped. Managed
+  # control planes (EKS/GKE/AKS) keep the endpoint on 443. Tighten `cidr` to your
+  # apiserver's stable address if you have one, or set `ports: []` to disable the
+  # rule (e.g. when another egress rule already covers the apiserver).
+  apiServer:
+    cidr: 0.0.0.0/0
+    ports:
+      - 443
+      - 6443
 
 podSecurityContext:
   fsGroupChangePolicy: OnRootMismatch
