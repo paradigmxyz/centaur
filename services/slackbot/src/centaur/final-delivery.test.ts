@@ -359,6 +359,78 @@ describe("final delivery polling", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("posts only the missing suffix when live delivery was cut off", async () => {
+    const originalFetch = globalThis.fetch;
+    const resultText =
+      "Already visible in Slack.\n\nThis is the report section that was cut off.";
+    const streamedPrefix = "Already visible in Slack.\n\n";
+    const fetchCalls: Array<{ path: string; body: unknown }> = [];
+    const fetchMock = mock(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        const body = init?.body ? JSON.parse(init.body as string) : undefined;
+        fetchCalls.push({ path: url.pathname, body });
+        if (url.pathname === "/agent/final-deliveries/claim") {
+          return jsonResponse({
+            deliveries: [
+              {
+                execution_id: "exe-cutoff",
+                thread_key: "slack:T123:C123:1778883099.579529",
+                delivery: {
+                  platform: "slack",
+                  channel: "C123",
+                  thread_ts: "1778883099.579529",
+                },
+                final_payload: {
+                  result_text: resultText,
+                  slackbot_streamed_answer_chars: streamedPrefix.length,
+                },
+              },
+            ],
+          });
+        }
+        if (url.pathname === "/agent/final-deliveries/exe-cutoff/delivered") {
+          return jsonResponse({ ok: true });
+        }
+        throw new Error(`unexpected request: ${url.pathname}`);
+      },
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const slackCalls: Array<{ method: string; params: any }> = [];
+    const client = {
+      chat: {
+        postMessage: async (params: any) => {
+          slackCalls.push({ method: "chat.postMessage", params });
+          return { ok: true };
+        },
+      },
+      conversations: {
+        replies: async () => ({ ok: true, messages: [] }),
+      },
+    };
+
+    try {
+      await pollFinalDeliveriesOnce(config, client as any);
+
+      const posts = slackCalls.filter(
+        (call) => call.method === "chat.postMessage",
+      );
+      expect(posts).toHaveLength(1);
+      expect(posts[0].params.text).toBe(
+        "This is the report section that was cut off.",
+      );
+      expect(posts[0].params.text).not.toContain("Already visible in Slack");
+      expect(
+        fetchCalls.some(
+          (call) => call.path === "/agent/final-deliveries/exe-cutoff/delivered",
+        ),
+      ).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 function jsonResponse(body: unknown): Response {

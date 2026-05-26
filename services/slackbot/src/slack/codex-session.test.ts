@@ -1277,6 +1277,47 @@ describe('CodexSessionRenderer', () => {
     })
   })
 
+  it('reports canonical completed snapshot chars after filling missing live text', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    const streamedDraft = 'The report starts here.'
+    const canonical = `${streamedDraft} This sentence only appears in item.completed.`
+
+    await renderer.event(sessionId, {
+      type: 'item.started',
+      item: { id: 'msg-missing-live-text', type: 'agentMessage', phase: 'final_answer' }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-missing-live-text',
+      delta: streamedDraft
+    })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'msg-missing-live-text',
+        type: 'agentMessage',
+        phase: 'final_answer',
+        text: canonical
+      }
+    })
+    const result = await renderer.event(sessionId, { type: 'turn.done', result: canonical })
+
+    const visible = visibleMarkdown(calls)
+    expect(countOccurrences(visible, streamedDraft)).toBe(1)
+    expect(visible).toContain('This sentence only appears in item.completed.')
+    expect(result.streamedAnswerChars).toBe(canonical.length)
+  })
+
   it('replays the exact prod event stream from exe_a89da7f248bb4724 without doubling the reply', async () => {
     // Real captured event stream from the May 23 2026 prod duplicate-reply incident.
     // Pre-fix, this exact sequence produced a Slack message that contained the entire
