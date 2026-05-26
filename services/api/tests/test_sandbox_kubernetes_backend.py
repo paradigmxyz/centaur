@@ -731,6 +731,243 @@ async def test_create_builds_per_sandbox_proxy_resources(
     )
 
 
+class FakeAppsApi:
+    """Minimal AppsV1Api stand-in. Records create/replace/patch and exposes
+    pre-seeded reads via ``deployments_to_read`` (FIFO; Exception items are
+    raised instead of returned, matching real client behavior)."""
+
+    def __init__(self) -> None:
+        self.patched_deployments: list[tuple[str, str, dict]] = []
+        self.created_deployments: list[tuple[str, dict]] = []
+        self.replaced_deployments: list[tuple[str, str, dict]] = []
+        self.deployments_to_read: list = []
+
+    async def read_namespaced_deployment(self, name: str, namespace: str):  # noqa: ANN201, ARG002
+        if not self.deployments_to_read:
+            raise AssertionError(
+                f"unexpected read_namespaced_deployment({name})"
+            )
+        item = self.deployments_to_read.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def create_namespaced_deployment(self, namespace: str, body: dict) -> None:
+        self.created_deployments.append((namespace, body))
+
+    async def replace_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.replaced_deployments.append((namespace, name, body))
+
+    async def patch_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.patched_deployments.append((namespace, name, body))
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_writes_configmap_and_patches_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+
+    # First reconcile: ConfigMap doesn't exist yet, Deployment exists.
+    fake_core.pods_to_read = []
+    not_found = type("NotFound", (Exception,), {})()
+    not_found.status = 404  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        backend, "_is_not_found", lambda exc: getattr(exc, "status", 0) == 404
+    )
+
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+    fake_apps.deployments_to_read = [object()]  # Deployment exists
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("auth.openai.com",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    await backend._ensure_token_broker(secrets)
+
+    # ConfigMap was created with the rendered broker YAML.
+    assert len(fake_core.created_configmaps) == 1
+    cm = fake_core.created_configmaps[0][1]
+    assert cm["metadata"]["name"] == "centaur-centaur-token-broker-config"
+    assert "credentials:" in cm["data"]["iron-token-broker.yaml"]
+    # Deployment got a config-hash annotation patch.
+    assert len(fake_apps.patched_deployments) == 1
+    _, dep_name, patch = fake_apps.patched_deployments[0]
+    assert dep_name == "centaur-centaur-token-broker"
+    annotations = patch["spec"]["template"]["metadata"]["annotations"]
+    assert "centaur.ai/config-hash" in annotations
+    assert annotations["centaur.ai/config-hash"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_skips_rollout_when_config_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.broker_config import render_broker_yaml
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("auth.openai.com",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    rendered = render_broker_yaml(secrets)
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+
+    # ConfigMap already has the exact rendered content.
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        return SimpleNamespace(data={"iron-token-broker.yaml": rendered})
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+
+    async def fake_replace_cm(name: str, namespace: str, body: dict) -> None:  # noqa: ARG001
+        raise AssertionError("ConfigMap should not be replaced when content unchanged")
+
+    monkeypatch.setattr(
+        fake_core, "replace_namespaced_config_map", fake_replace_cm, raising=False
+    )
+
+    await backend._ensure_token_broker(secrets)
+    # No rollout triggered: Deployment was never read or patched.
+    assert fake_apps.patched_deployments == []
+    assert fake_apps.deployments_to_read == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_tolerates_missing_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+    not_found = type("NotFound", (Exception,), {})()
+    not_found.status = 404  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        backend, "_is_not_found", lambda exc: getattr(exc, "status", 0) == 404
+    )
+
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+
+    async def fake_patch_deployment(name: str, namespace: str, body: dict) -> None:  # noqa: ARG001
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_apps, "patch_namespaced_deployment", fake_patch_deployment, raising=False
+    )
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("h",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://h/token",
+        ),
+    ]
+    # Should not raise — the ConfigMap is written so the broker picks up
+    # the latest config whenever helm upgrade lands.
+    await backend._ensure_token_broker(secrets)
+    assert len(fake_core.created_configmaps) == 1
+
+
+def test_proxy_iron_env_omits_broker_when_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _proxy_iron_env
+
+    monkeypatch.delenv("KUBERNETES_TOKEN_BROKER_URL", raising=False)
+    env = _proxy_iron_env("centaur-infra-env", [])
+    names = [e["name"] for e in env]
+    assert "IRON_BROKER_URL" not in names
+    assert "IRON_BROKER_TOKEN" not in names
+
+
+def test_proxy_iron_env_injects_broker_when_url_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _proxy_iron_env
+
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_URL", "http://centaur-token-broker:8181"
+    )
+    env = _proxy_iron_env("centaur-infra-env", [])
+    by_name = {e["name"]: e for e in env}
+    assert by_name["IRON_BROKER_URL"]["value"] == (
+        "http://centaur-token-broker:8181"
+    )
+    assert by_name["IRON_BROKER_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "centaur-infra-env",
+        "key": "IRON_BROKER_TOKEN",
+    }
+
+
 @pytest.mark.asyncio
 async def test_per_sandbox_proxy_uses_bootstrap_secret_for_onepassword(
     monkeypatch: pytest.MonkeyPatch,

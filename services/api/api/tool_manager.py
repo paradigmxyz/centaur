@@ -211,6 +211,34 @@ class OAuthTokenSecret:
 
 
 @dataclass(frozen=True)
+class BrokeredTokenSecret:
+    """OAuth2 access token minted by iron-token-broker.
+
+    Same shape as ``OAuthTokenSecret`` minus ``grant`` and ``audience`` and
+    minus ``json_key`` on field sources: the broker only handles the
+    refresh-token rotation grant, and its store reads/writes a single JSON
+    credential blob as a whole document. Use this type when the upstream IdP
+    rotates refresh tokens with strict reuse detection (OpenAI Codex,
+    Anthropic Claude Code OAuth, modern Okta / Auth0 / Entra ID); the broker
+    serializes refresh attempts so multiple iron-proxy instances can share the
+    credential without invalidating the token family.
+
+    ``fields`` requires ``client_id`` and ``refresh_token``; ``client_secret``
+    is optional. Each field's value is the secret_ref the broker reads or
+    writes through its configured store: ``client_id`` / ``client_secret`` are
+    read-only credentials; ``refresh_token`` names the writable credential
+    blob the broker rewrites on every rotation.
+    """
+
+    name: str
+    hosts: tuple[str, ...]
+    fields: tuple[tuple[str, OAuthFieldSource], ...]
+    scopes: tuple[str, ...] = ()
+    token_endpoint: str | None = None
+    token_endpoint_headers: tuple[tuple[str, OAuthFieldSource], ...] = ()
+
+
+@dataclass(frozen=True)
 class HmacHeader:
     """One header injected by iron-proxy's ``hmac_sign`` transform.
 
@@ -256,7 +284,24 @@ class HmacSignSecret:
 
 
 SecretDef = (
-    HttpSecret | GcpAuthSecret | PgDsnSecret | OAuthTokenSecret | HmacSignSecret
+    HttpSecret
+    | GcpAuthSecret
+    | PgDsnSecret
+    | OAuthTokenSecret
+    | BrokeredTokenSecret
+    | HmacSignSecret
+)
+
+
+# brokered_token credential fields. Only the refresh-token rotation grant is
+# supported (the broker doesn't speak the other OAuth2 grants), so this is a
+# single tuple instead of the per-grant table the oauth_token transform uses.
+_BROKERED_TOKEN_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {"client_id", "refresh_token"}
+)
+_BROKERED_TOKEN_OPTIONAL_FIELDS: frozenset[str] = frozenset({"client_secret"})
+_BROKERED_TOKEN_FIELDS: frozenset[str] = (
+    _BROKERED_TOKEN_REQUIRED_FIELDS | _BROKERED_TOKEN_OPTIONAL_FIELDS
 )
 
 # Per-grant credential fields: grant -> (required, optional). Field names are
@@ -352,6 +397,121 @@ def _parse_oauth_fields(
         raise ValueError(
             f"oauth_token entry {secret_name!r} grant {grant!r} requires "
             f"fields {sorted(missing)}"
+        )
+    return tuple(sorted(parsed.items()))
+
+
+def _parse_brokered_field_source(
+    secret_name: str,
+    field_name: str,
+    raw: Any,
+    *,
+    allow_json_key: bool,
+) -> OAuthFieldSource:
+    """Parse one ``fields`` entry for a ``brokered_token`` secret.
+
+    Read-side fields (``client_id``, ``client_secret``, and entries under
+    ``token_endpoint_headers``) accept ``json_key`` so an operator can keep a
+    single JSON document in their store and pluck individual values out — the
+    same affordance the ``oauth_token`` transform offers. The store field
+    (``refresh_token``) rejects ``json_key``: the broker reads and rewrites
+    that ref as a whole JSON document, so a key path doesn't apply.
+    """
+    if isinstance(raw, str):
+        if not raw:
+            raise ValueError(
+                f"brokered_token entry {secret_name!r} field {field_name!r} "
+                f"'secret_ref' must be a non-empty string"
+            )
+        return OAuthFieldSource(secret_ref=raw)
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} must be a "
+            f"string or table"
+        )
+    ref = raw.get("secret_ref")
+    if not isinstance(ref, str) or not ref:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} requires a "
+            f"non-empty 'secret_ref'"
+        )
+    json_key = raw.get("json_key")
+    if json_key is None:
+        return OAuthFieldSource(secret_ref=ref)
+    if not allow_json_key:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} does not "
+            f"support 'json_key'; the broker rewrites the whole credential blob"
+        )
+    if not isinstance(json_key, str) or not json_key:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} 'json_key' "
+            f"must be a non-empty string"
+        )
+    return OAuthFieldSource(secret_ref=ref, json_key=json_key)
+
+
+# The store field (where the broker writes the rotated blob) cannot pull out
+# a sub-key — its writes target the whole document.
+_BROKERED_STORE_FIELD = "refresh_token"
+
+
+def _parse_brokered_fields(
+    secret_name: str, raw_fields: Any
+) -> tuple[tuple[str, OAuthFieldSource], ...]:
+    """Parse and validate the ``fields`` table for a ``brokered_token`` entry."""
+    if not isinstance(raw_fields, dict) or not raw_fields:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} 'fields' must be a non-empty table"
+        )
+    parsed: dict[str, OAuthFieldSource] = {}
+    for field_name, raw in raw_fields.items():
+        if field_name not in _BROKERED_TOKEN_FIELDS:
+            raise ValueError(
+                f"brokered_token entry {secret_name!r} field {field_name!r} is not "
+                f"valid; allowed: {sorted(_BROKERED_TOKEN_FIELDS)}"
+            )
+        parsed[field_name] = _parse_brokered_field_source(
+            secret_name,
+            field_name,
+            raw,
+            allow_json_key=field_name != _BROKERED_STORE_FIELD,
+        )
+    missing = _BROKERED_TOKEN_REQUIRED_FIELDS - parsed.keys()
+    if missing:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} requires fields {sorted(missing)}"
+        )
+    return tuple(sorted(parsed.items()))
+
+
+def _parse_brokered_token_endpoint_headers(
+    secret_name: str, raw: Any
+) -> tuple[tuple[str, OAuthFieldSource], ...]:
+    """Parse ``token_endpoint_headers`` for a ``brokered_token`` entry.
+
+    These are read-only header values, so ``json_key`` is allowed — same as
+    the read-side fields above.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} 'token_endpoint_headers' must "
+            f"be a non-empty table"
+        )
+    parsed: dict[str, OAuthFieldSource] = {}
+    for header_name, value in raw.items():
+        if not isinstance(header_name, str) or not header_name:
+            raise ValueError(
+                f"brokered_token entry {secret_name!r} 'token_endpoint_headers' "
+                f"keys must be non-empty header names"
+            )
+        parsed[header_name] = _parse_brokered_field_source(
+            secret_name,
+            f"token_endpoint_headers.{header_name}",
+            value,
+            allow_json_key=True,
         )
     return tuple(sorted(parsed.items()))
 
@@ -754,6 +914,45 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
             token_endpoint=token_endpoint,
             token_endpoint_headers=token_endpoint_headers,
             audience=audience,
+        )
+    if secret_type == "brokered_token":
+        hosts = entry.get("hosts", [])
+        if (
+            not isinstance(hosts, list)
+            or not hosts
+            or not all(isinstance(h, str) and h for h in hosts)
+        ):
+            raise ValueError(
+                f"brokered_token entry {name!r} 'hosts' must be a non-empty "
+                f"array of non-empty strings"
+            )
+        scopes = entry.get("scopes", [])
+        if not isinstance(scopes, list) or not all(
+            isinstance(s, str) and s for s in scopes
+        ):
+            raise ValueError(
+                f"brokered_token entry {name!r} 'scopes' must be an array of "
+                f"non-empty strings"
+            )
+        token_endpoint = entry.get("token_endpoint")
+        if token_endpoint is not None and (
+            not isinstance(token_endpoint, str) or not token_endpoint
+        ):
+            raise ValueError(
+                f"brokered_token entry {name!r} 'token_endpoint' must be a "
+                f"non-empty string"
+            )
+        fields = _parse_brokered_fields(name, entry.get("fields"))
+        token_endpoint_headers = _parse_brokered_token_endpoint_headers(
+            name, entry.get("token_endpoint_headers")
+        )
+        return BrokeredTokenSecret(
+            name=name,
+            hosts=tuple(hosts),
+            fields=fields,
+            scopes=tuple(scopes),
+            token_endpoint=token_endpoint,
+            token_endpoint_headers=token_endpoint_headers,
         )
     if secret_type == "pg_dsn":
         database = entry.get("database")

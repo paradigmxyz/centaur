@@ -1,0 +1,42 @@
+[project]
+name = "codex"
+description = "Credentials-only tool that wires the Codex CLI OAuth path through iron-token-broker."
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[tool.centaur]
+module = "client.py"
+hosts = ["chatgpt.com"]
+# Codex OAuth: iron-token-broker holds the refresh token and rotates it; the
+# sandbox's outbound calls hit chatgpt.com so iron-proxy fetches a current
+# access token from the broker for credential id "openai-codex" and injects
+# it as Authorization: Bearer on the wire. The sandbox never sees the token.
+#
+# Operator bootstrap (1Password vault):
+# - OPENAI_CODEX_CLIENT_ID   read-only item whose `credential` field is the
+#                            Codex OAuth client id (a public client, no secret).
+# - OPENAI_CODEX_BLOB        writable item whose `credential` field is the
+#                            credential blob JSON document
+#                            ({"refresh_token": "...", ...}). The broker
+#                            overwrites this on every rotation; do not store
+#                            anything else in that field.
+# - OPENAI_CODEX_ACCOUNT_ID  read-only item whose `credential` field is the
+#                            ChatGPT account UUID the credential is bound to.
+#                            Codex CLI captures it from `~/.codex/auth.json`
+#                            after `codex login`. iron-proxy injects it as
+#                            the `chatgpt-account-id` header on requests so
+#                            the backend routes to the right workspace; the
+#                            OAuth token endpoint doesn't need it.
+secrets = [
+    { type = "brokered_token", name = "openai-codex", hosts = [
+        "*.chatgpt.com",
+    ], token_endpoint = "https://auth.openai.com/oauth/token", fields = { client_id = "OPENAI_CODEX_CLIENT_ID", refresh_token = "OPENAI_CODEX_BLOB" } },
+    { type = "header", mode = "inject", name = "OPENAI_CODEX_ACCOUNT_ID", inject_header = "chatgpt-account-id", hosts = [
+        "*.chatgpt.com",
+    ] },
+]

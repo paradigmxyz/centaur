@@ -18,11 +18,22 @@ slackbot:
     pullPolicy: IfNotPresent
 
 api:
+  image:
+    pullPolicy: IfNotPresent
   executionWorkerEnabled: true
   pluginWatcherEnabled: true
   egressDiscovery:
     enabled: false
 
 ironProxy:
+  image:
+    pullPolicy: IfNotPresent
   manager:
     secretSource: onepassword
+
+tokenBroker:
+  enabled: true
+
+sandbox:
+  image:
+    pullPolicy: IfNotPresent

@@ -32,6 +32,27 @@ ironProxy:
   secretSource: onepassword
   secretTtl: 10m
 
+# iron-token-broker — race-free OAuth refresh-token coordinator. Enable when
+# any tool's `oauth_token` secret uses `grant=refresh_token` against an IdP
+# that rotates refresh tokens with strict reuse detection (OpenAI Codex,
+# Anthropic Claude Code OAuth). Requires ironProxy.secretSource to be a
+# writable backend (onepassword or onepassword-connect) because the broker
+# rewrites the refresh-token blob on every rotation.
+tokenBroker:
+  enabled: false
+  image:
+    repository: ironsh/iron-token-broker
+    tag: 0.0.1-rc.2
+    pullPolicy: IfNotPresent
+  service:
+    httpPort: 8181
+    metricsPort: 9091
+  # iron-proxy caches each broker-issued access token for this long before
+  # re-fetching. Must be strictly less than the IdP's token lifetime or the
+  # broker resolver rejects the response.
+  ttl: 1m
+  resources: {}
+
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
 # Deployment is gated on onepasswordConnect.connect.create AND on

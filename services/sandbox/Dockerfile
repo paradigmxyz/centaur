@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ffmpeg ghostscript dvisvgm file \
     libssl-dev libclang-dev protobuf-compiler \
     libcairo2-dev libpango1.0-dev \
-    ripgrep fd-find jq tree tmux unzip xz-utils gettext-base \
+    ripgrep fd-find jq tree tmux unzip xz-utils gettext-base vim \
     postgresql-client libpq-dev \
     python3 python3-pip python3-venv python3-dev \
     texlive texlive-latex-base texlive-latex-extra \
@@ -163,6 +163,7 @@ FROM toolchain AS sandbox
 
 USER root
 RUN rm -f /etc/sudoers.d/agent
+COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
 COPY --link --chmod=755 services/sandbox/call.sh /usr/local/bin/call
 COPY --link --chmod=755 services/sandbox/slack-upload.sh /usr/local/bin/slack-upload
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx

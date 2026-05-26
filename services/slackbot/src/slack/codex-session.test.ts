@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import { describe, expect, it } from 'bun:test'
 import { shouldShowThinkingBlock } from './render'
 import { AgentSessionRenderer } from './agent-session'
@@ -1126,26 +1128,16 @@ describe('CodexSessionRenderer', () => {
     expect(result.streamedAnswerChars).toBe(answerText.length)
   })
 
-  it('logs suspicious large answer snapshots without logging answer text', async () => {
+  it('replaces the per-item buffer with item.completed canonical text and emits a correction log', async () => {
+    // The May 23 2026 prod duplicate-reply bug: codex's item.completed sometimes carries
+    // an item.text that differs by one interior character from the sum of streamed
+    // deltas. The pre-fix delta-diff heuristic appended the entire canonical text on
+    // top of the accumulated deltas, doubling the visible body.
     const logCalls: unknown[][] = []
     const originalLog = console.log
-    console.log = ((...args: unknown[]) => {
-      logCalls.push(args)
-    }) as typeof console.log
-    const client = {
-      assistant: {
-        threads: {
-          setStatus: async () => ({ ok: true })
-        }
-      },
-      chat: {
-        startStream: async () => ({ ok: true, ts: '1778866940.295499' }),
-        appendStream: async () => ({ ok: true }),
-        stopStream: async () => ({ ok: true }),
-        update: async () => ({ ok: true })
-      }
-    }
-
+    console.log = ((...args: unknown[]) => logCalls.push(args)) as typeof console.log
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
     const { sessionId } = await new AgentSessionRenderer(client as any).open({
       channel: 'C123',
       parentTs: '1778866921.505479',
@@ -1154,7 +1146,9 @@ describe('CodexSessionRenderer', () => {
       title: 'Centaur execution'
     })
     const renderer = new CodexSessionRenderer(client as any)
-    const answer = 'first generated answer '.repeat(13)
+
+    const deltaSum = 'X'.repeat(500) + ' middle delta ' + 'Y'.repeat(500)
+    const canonical = deltaSum.replace('middle delta', 'middle_delta')
 
     try {
       await renderer.event(sessionId, {
@@ -1164,7 +1158,7 @@ describe('CodexSessionRenderer', () => {
       await renderer.event(sessionId, {
         type: 'item.agentMessage.delta',
         itemId: 'msg-1',
-        delta: answer
+        delta: deltaSum
       })
       await renderer.event(sessionId, {
         type: 'item.completed',
@@ -1172,22 +1166,22 @@ describe('CodexSessionRenderer', () => {
         centaur_execution_id: 'exe-test',
         centaur_assignment_generation: 3,
         session_id: 'codex-session-test',
-        item: {
-          id: 'msg-1',
-          type: 'agentMessage',
-          phase: 'final_answer',
-          text: `${answer}\n${answer}`
-        }
+        item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer', text: canonical }
       })
+      await renderer.event(sessionId, { type: 'turn.done', result: canonical })
     } finally {
       console.log = originalLog
     }
 
-    const suspiciousLogs = logCalls.filter(
-      call => call[0] === 'slack_codex_suspicious_answer_delta'
+    const visible = visibleMarkdown(calls)
+    expect(countOccurrences(visible, 'X'.repeat(500))).toBe(1)
+    expect(countOccurrences(visible, 'Y'.repeat(500))).toBe(1)
+
+    const correctionLogs = logCalls.filter(
+      call => call[0] === 'slack_codex_canonical_answer_correction'
     )
-    expect(suspiciousLogs).toHaveLength(1)
-    expect(suspiciousLogs[0]?.[1]).toMatchObject({
+    expect(correctionLogs).toHaveLength(1)
+    expect(correctionLogs[0]?.[1]).toMatchObject({
       agent_session_id: sessionId,
       centaur_thread_key: 'slack:C123:1778866921.505479',
       execution_id: 'exe-test',
@@ -1198,45 +1192,345 @@ describe('CodexSessionRenderer', () => {
       codex_item_type: 'agentMessage',
       codex_item_phase: 'final_answer',
       codex_session_id: 'codex-session-test',
-      current_answer_chars: answer.length,
-      incoming_chars: answer.length * 2 + 1,
-      delta_chars: answer.length + 1,
-      answer_chars_after: answer.length * 2 + 1,
-      current_contains_incoming_head: true,
-      incoming_contains_current_tail: true,
-      large_incoming_relative_to_current: true,
-      large_delta_relative_to_current: true
+      delta_total_chars: deltaSum.length,
+      canonical_text_chars: canonical.length,
+      chars_diff: 0,
+      delta_hash: expect.any(String),
+      canonical_hash: expect.any(String)
     })
-    expect(suspiciousLogs[0]?.[1]).toEqual(
-      expect.objectContaining({
-        current_hash: expect.any(String),
-        incoming_hash: expect.any(String),
-        delta_hash: expect.any(String)
-      })
-    )
-    expect(JSON.stringify(suspiciousLogs)).not.toContain(answer.slice(0, 30))
+    expect(JSON.stringify(correctionLogs)).not.toContain(deltaSum.slice(0, 20))
   })
 
-  it('does not log suspicious answer deltas for small incremental answer updates', async () => {
+  it('replaces a typo-corrected final snapshot instead of appending both copies', async () => {
     const logCalls: unknown[][] = []
     const originalLog = console.log
-    console.log = ((...args: unknown[]) => {
-      logCalls.push(args)
-    }) as typeof console.log
-    const client = {
-      assistant: {
-        threads: {
-          setStatus: async () => ({ ok: true })
+    console.log = ((...args: unknown[]) => logCalls.push(args)) as typeof console.log
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    const streamedDraft =
+      '@alex The archive discount keeps the same 42,000 records exported, but bills eligible report jobs at a lower storage tier. For example, this looks like a single CSV export, so the metered rate should be 12 cents per thousand rows instead of 20 cents, with the difference credited after the run. This is low-risk because it changes billing, not data processing.\n\n' +
+      '2) export fast path means: reduce actual work by special-casing the common “CSV export to the defaut bucket” path. Today the job does normal pre-validation, writes rows, then post-proceses checksums, touching report metadata and audit state. A fast path would skip or merge some of that when the route is trivial, for example same destination bucket, no CDN purge, pure CSV export, no mixed formats. That attacks the 17,500 extra operations directly, but it is higher-risk because it changes execution/accounting.'
+    const canonical =
+      '@alex The archive discount keeps the same 42,000 records exported, but bills eligible report jobs at a lower storage tier. For example, this looks like a single CSV export, so the metered rate should be 12 cents per thousand rows instead of 20 cents, with the difference credited after the run. This is low-risk because it changes billing, not data processing.\n\n' +
+      '2) export fast path means: reduce actual work by special-casing the common “CSV export to the default bucket” path. Today the job does normal pre-validation, writes rows, then post-processes checksums, touching report metadata and audit state. A fast path would skip or merge some of that when the route is trivial, for example same destination bucket, no CDN purge, pure CSV export, no mixed formats. That attacks the 17,500 extra operations directly, but it is higher-risk because it changes execution/accounting.'
+
+    try {
+      await renderer.event(sessionId, {
+        type: 'item.started',
+        item: { id: 'msg-typo-case', type: 'agentMessage', phase: 'final_answer' }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.agentMessage.delta',
+        itemId: 'msg-typo-case',
+        delta: streamedDraft
+      })
+      await renderer.event(sessionId, {
+        type: 'item.completed',
+        centaur_thread_key: 'slack:C123:1778866921.505479',
+        centaur_execution_id: 'exe-typo-case',
+        centaur_assignment_generation: 7,
+        session_id: 'codex-session-typo-case',
+        item: {
+          id: 'msg-typo-case',
+          type: 'agentMessage',
+          phase: 'final_answer',
+          text: canonical
         }
-      },
-      chat: {
-        startStream: async () => ({ ok: true, ts: '1778866940.295499' }),
-        appendStream: async () => ({ ok: true }),
-        stopStream: async () => ({ ok: true }),
-        update: async () => ({ ok: true })
-      }
+      })
+      await renderer.event(sessionId, { type: 'turn.done', result: canonical })
+    } finally {
+      console.log = originalLog
     }
 
+    const visible = visibleMarkdown(calls)
+    expect(countOccurrences(visible, '@alex The archive discount')).toBe(1)
+    expect(visible).toContain('default bucket')
+    expect(visible).toContain('post-processes checksums')
+    expect(visible).not.toContain('defaut bucket')
+    expect(visible).not.toContain('post-proceses checksums')
+
+    const correctionLogs = logCalls.filter(
+      call => call[0] === 'slack_codex_canonical_answer_correction'
+    )
+    expect(correctionLogs).toHaveLength(1)
+    expect(correctionLogs[0]?.[1]).toMatchObject({
+      agent_session_id: sessionId,
+      centaur_thread_key: 'slack:C123:1778866921.505479',
+      execution_id: 'exe-typo-case',
+      assignment_generation: 7,
+      event_type: 'item.completed',
+      codex_id: 'msg-typo-case',
+      delta_total_chars: streamedDraft.length,
+      canonical_text_chars: canonical.length,
+      chars_diff: canonical.length - streamedDraft.length,
+      delta_hash: expect.any(String),
+      canonical_hash: expect.any(String)
+    })
+  })
+
+  it('reports canonical completed snapshot chars after filling missing live text', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    const streamedDraft = 'The report starts here.'
+    const canonical = `${streamedDraft} This sentence only appears in item.completed.`
+
+    await renderer.event(sessionId, {
+      type: 'item.started',
+      item: { id: 'msg-missing-live-text', type: 'agentMessage', phase: 'final_answer' }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-missing-live-text',
+      delta: streamedDraft
+    })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'msg-missing-live-text',
+        type: 'agentMessage',
+        phase: 'final_answer',
+        text: canonical
+      }
+    })
+    const result = await renderer.event(sessionId, { type: 'turn.done', result: canonical })
+
+    const visible = visibleMarkdown(calls)
+    expect(countOccurrences(visible, streamedDraft)).toBe(1)
+    expect(visible).toContain('This sentence only appears in item.completed.')
+    expect(result.streamedAnswerChars).toBe(canonical.length)
+  })
+
+  it('replays the exact prod event stream from exe_a89da7f248bb4724 without doubling the reply', async () => {
+    // Real captured event stream from the May 23 2026 prod duplicate-reply incident.
+    // Pre-fix, this exact sequence produced a Slack message that contained the entire
+    // 1540-char final answer twice (visible body ~3079 chars). With the per-item
+    // canonical-replace contract, the final answer appears exactly once.
+    const fixturePath = join(
+      __dirname,
+      '..',
+      '..',
+      'test-fixtures',
+      'codex',
+      'exe_a89da7f248bb4724-min.json'
+    )
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      events: Array<Record<string, unknown>>
+    }
+    const finalEvent = fixture.events.find(
+      (event: any) =>
+        event.type === 'item.completed' &&
+        event?.item?.type === 'agentMessage' &&
+        event?.item?.phase === 'final_answer'
+    ) as { item: { text: string } } | undefined
+    expect(finalEvent).toBeTruthy()
+    const canonicalAnswer = finalEvent!.item.text
+    expect(canonicalAnswer.length).toBeGreaterThan(1000)
+
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    for (const event of fixture.events) {
+      await renderer.event(sessionId, event)
+    }
+
+    const visible = visibleMarkdown(calls)
+    const openingPhrase = canonicalAnswer.slice(0, 80)
+    expect(countOccurrences(canonicalAnswer, openingPhrase)).toBe(1)
+    expect(countOccurrences(visible, openingPhrase)).toBe(1)
+    const closingPhrase = canonicalAnswer.slice(-80)
+    expect(countOccurrences(canonicalAnswer, closingPhrase)).toBe(1)
+    expect(countOccurrences(visible, closingPhrase)).toBe(1)
+  })
+
+  it('concatenates two final_answer agentMessages in the same turn exactly once each', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    for (const id of ['msg-a', 'msg-b']) {
+      await renderer.event(sessionId, {
+        type: 'item.started',
+        item: { id, type: 'agentMessage', phase: 'final_answer' }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.agentMessage.delta',
+        itemId: id,
+        delta: `Half ${id}.`
+      })
+      await renderer.event(sessionId, {
+        type: 'item.completed',
+        item: { id, type: 'agentMessage', phase: 'final_answer', text: `Half ${id}.` }
+      })
+    }
+    await renderer.event(sessionId, { type: 'turn.done', result: 'Half msg-a.Half msg-b.' })
+
+    const visible = visibleMarkdown(calls)
+    expect(countOccurrences(visible, 'Half msg-a.')).toBe(1)
+    expect(countOccurrences(visible, 'Half msg-b.')).toBe(1)
+  })
+
+  it('ignores deltas that arrive after the same item has already been completed', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    await renderer.event(sessionId, {
+      type: 'item.started',
+      item: { id: 'msg-late', type: 'agentMessage', phase: 'final_answer' }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-late',
+      delta: 'Final canonical reply.'
+    })
+    await renderer.event(sessionId, {
+      type: 'item.completed',
+      item: {
+        id: 'msg-late',
+        type: 'agentMessage',
+        phase: 'final_answer',
+        text: 'Final canonical reply.'
+      }
+    })
+    await renderer.event(sessionId, {
+      type: 'item.agentMessage.delta',
+      itemId: 'msg-late',
+      delta: ' INJECTED-LATE-CHUNK'
+    })
+    await renderer.event(sessionId, { type: 'turn.done', result: 'Final canonical reply.' })
+
+    const visible = visibleMarkdown(calls)
+    expect(visible).not.toContain('INJECTED-LATE-CHUNK')
+    expect(countOccurrences(visible, 'Final canonical reply.')).toBe(1)
+  })
+
+  it('drops item.completed without an item id and emits a missing-id log', async () => {
+    const logCalls: unknown[][] = []
+    const originalLog = console.log
+    console.log = ((...args: unknown[]) => logCalls.push(args)) as typeof console.log
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    try {
+      await renderer.event(sessionId, {
+        type: 'item.started',
+        item: { id: 'msg-pre', type: 'agentMessage', phase: 'final_answer' }
+      })
+      await renderer.event(sessionId, {
+        type: 'item.agentMessage.delta',
+        itemId: 'msg-pre',
+        delta: 'Streamed reply.'
+      })
+      await renderer.event(sessionId, {
+        type: 'item.completed',
+        centaur_thread_key: 'slack:C123:1778866921.505479',
+        centaur_execution_id: 'exe-noid',
+        item: { type: 'agentMessage', phase: 'final_answer', text: 'Malformed canonical body.' }
+      })
+      await renderer.event(sessionId, { type: 'turn.done', result: 'Streamed reply.' })
+    } finally {
+      console.log = originalLog
+    }
+
+    const visible = visibleMarkdown(calls)
+    expect(visible).toContain('Streamed reply.')
+    expect(visible).not.toContain('Malformed canonical body.')
+
+    const missingIdLogs = logCalls.filter(
+      call => call[0] === 'slack_codex_item_completed_missing_id'
+    )
+    expect(missingIdLogs).toHaveLength(1)
+    expect(missingIdLogs[0]?.[1]).toMatchObject({
+      agent_session_id: sessionId,
+      centaur_thread_key: 'slack:C123:1778866921.505479',
+      execution_id: 'exe-noid',
+      canonical_text_chars: 'Malformed canonical body.'.length,
+      canonical_hash: expect.any(String)
+    })
+  })
+
+  it('streams cumulative amp/claude assistant text without duplication', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello.' }] }
+    })
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello. World.' }] }
+    })
+    await renderer.event(sessionId, { type: 'result', result: 'Hello. World.' })
+
+    const visible = visibleMarkdown(calls)
+    expect(countOccurrences(visible, 'Hello. World.')).toBe(1)
+    expect(countOccurrences(visible, 'Hello.')).toBe(1)
+  })
+
+  it('does not log a canonical correction for plain delta streams without item.completed', async () => {
+    const logCalls: unknown[][] = []
+    const originalLog = console.log
+    console.log = ((...args: unknown[]) => logCalls.push(args)) as typeof console.log
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
     const { sessionId } = await new AgentSessionRenderer(client as any).open({
       channel: 'C123',
       parentTs: '1778866921.505479',
@@ -1266,7 +1560,7 @@ describe('CodexSessionRenderer', () => {
     }
 
     expect(
-      logCalls.filter(call => call[0] === 'slack_codex_suspicious_answer_delta')
+      logCalls.filter(call => call[0] === 'slack_codex_canonical_answer_correction')
     ).toHaveLength(0)
   })
 
@@ -1585,4 +1879,64 @@ function richTextPlain(value: any): string {
         .join('')
     )
     .join('\n')
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0
+  let count = 0
+  let index = 0
+  while (true) {
+    const at = haystack.indexOf(needle, index)
+    if (at === -1) return count
+    count += 1
+    index = at + needle.length
+  }
+}
+
+function visibleMarkdown(calls: Array<{ method: string; params: any }>): string {
+  const streamed = calls
+    .filter(call => call.method === 'chat.startStream' || call.method === 'chat.appendStream')
+    .flatMap(call => call.params.chunks ?? [])
+    .filter((chunk: any) => chunk.type === 'markdown_text')
+    .map((chunk: any) => String(chunk.text ?? ''))
+    .join('')
+  const stopBlocks = calls.find(call => call.method === 'chat.stopStream')?.params.blocks ?? []
+  const stopMarkdown = stopBlocks
+    .filter((block: any) => block.type === 'markdown')
+    .map((block: any) => String(block.text ?? ''))
+    .join('')
+  return streamed + stopMarkdown
+}
+
+function makeFakeSlackClient(
+  calls: Array<{ method: string; params: any }>
+): Record<string, unknown> {
+  return {
+    assistant: {
+      threads: {
+        setStatus: async (params: any) => {
+          calls.push({ method: 'assistant.threads.setStatus', params })
+          return { ok: true }
+        }
+      }
+    },
+    chat: {
+      startStream: async (params: any) => {
+        calls.push({ method: 'chat.startStream', params })
+        return { ok: true, ts: '1778866940.295499' }
+      },
+      appendStream: async (params: any) => {
+        calls.push({ method: 'chat.appendStream', params })
+        return { ok: true }
+      },
+      stopStream: async (params: any) => {
+        calls.push({ method: 'chat.stopStream', params })
+        return { ok: true }
+      },
+      update: async (params: any) => {
+        calls.push({ method: 'chat.update', params })
+        return { ok: true }
+      }
+    }
+  }
 }

@@ -75,6 +75,8 @@ transforms:
         - "addepar-firm"
         - "clientid"
         - "x-as-user-email"
+        - "/^x-codex-.*$/"
+        - "/^x-openai-.*$/"
         - "/^x-[a-z0-9-]*(api-key|apikey|secret|token|auth|key)$/"
 
 log:
