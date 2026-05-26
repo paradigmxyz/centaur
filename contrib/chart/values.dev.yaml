@@ -31,6 +31,9 @@ ironProxy:
   manager:
     secretSource: onepassword
 
+tokenBroker:
+  enabled: true
+
 sandbox:
   image:
     pullPolicy: IfNotPresent

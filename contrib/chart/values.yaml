@@ -39,7 +39,7 @@ ironProxy:
 # writable backend (onepassword or onepassword-connect) because the broker
 # rewrites the refresh-token blob on every rotation.
 tokenBroker:
-  enabled: true
+  enabled: false
   image:
     repository: ironsh/iron-token-broker
     tag: 0.0.1-rc.2
