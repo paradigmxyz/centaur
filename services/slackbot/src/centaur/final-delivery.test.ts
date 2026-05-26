@@ -26,13 +26,21 @@ afterEach(() => {
 describe("final delivery polling", () => {
   it("posts a claimed delivery once and marks it delivered before the next poll", async () => {
     const originalFetch = globalThis.fetch;
-    const fetchCalls: Array<{ path: string; body: unknown }> = [];
+    const fetchCalls: Array<{
+      path: string;
+      body: unknown;
+      headers: Record<string, string>;
+    }> = [];
     let claimCount = 0;
     const fetchMock = mock(
       async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(input instanceof Request ? input.url : input);
         const body = init?.body ? JSON.parse(init.body as string) : undefined;
-        fetchCalls.push({ path: url.pathname, body });
+        fetchCalls.push({
+          path: url.pathname,
+          body,
+          headers: init?.headers as Record<string, string>,
+        });
 
         if (url.pathname === "/agent/final-deliveries/claim") {
           claimCount += 1;
@@ -43,6 +51,9 @@ describe("final delivery polling", () => {
                     {
                       execution_id: "exe-duplicate-guard",
                       thread_key: "slack:T123:C123:1778883099.579529",
+                      trace_id: "90f14ffa-682c-d49f-10a4-efe83a04253d",
+                      traceparent:
+                        "00-90f14ffa682cd49f10a4efe83a04253d-2cecc7acd547b23b-01",
                       delivery: {
                         platform: "slack",
                         channel: "C123",
@@ -129,6 +140,16 @@ describe("final delivery polling", () => {
             "/agent/final-deliveries/exe-duplicate-guard/delivered",
         ),
       ).toHaveLength(1);
+      const deliveredCall = fetchCalls.find((call) =>
+        call.path.endsWith("/delivered"),
+      );
+      expect(deliveredCall?.headers).toMatchObject({
+        "X-Trace-Id": "90f14ffa-682c-d49f-10a4-efe83a04253d",
+        "X-Centaur-Thread-Key": "slack:T123:C123:1778883099.579529",
+      });
+      expect(deliveredCall?.headers.traceparent).toStartWith(
+        "00-90f14ffa682cd49f10a4efe83a04253d-",
+      );
       expect(
         slackCalls.filter((call) => call.method === "chat.startStream"),
       ).toHaveLength(0);
@@ -418,10 +439,12 @@ describe("final delivery polling", () => {
         (call) => call.method === "chat.postMessage",
       );
       expect(posts).toHaveLength(1);
-      expect(posts[0].params.text).toBe(
+      const post = posts[0];
+      if (!post) throw new Error("expected one Slack post");
+      expect(post.params.text).toBe(
         "This is the report section that was cut off.",
       );
-      expect(posts[0].params.text).not.toContain("Already visible in Slack");
+      expect(post.params.text).not.toContain("Already visible in Slack");
       expect(
         fetchCalls.some(
           (call) => call.path === "/agent/final-deliveries/exe-cutoff/delivered",
