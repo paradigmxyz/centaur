@@ -14,6 +14,7 @@ import uuid
 from typing import Any
 
 import structlog
+from opentelemetry import trace
 
 from api.agent import (
     _get_runtime,
@@ -25,6 +26,15 @@ from api.agent import (
 )
 from api import slackbot_client
 from api.harness_config import default_harness
+from api.otel import (
+    add_span_event,
+    context_from_serialized,
+    mark_error,
+    record_exception,
+    set_span_attributes,
+    span_context_to_dict,
+    start_span,
+)
 from api.observability import (
     ExecutionObservationAccumulator,
     extract_usage_metrics,
@@ -116,6 +126,8 @@ _RAW_HARNESS_AUTH_SAFE_FAILURE_MESSAGE = (
     "The agent hit a temporary runtime startup issue and could not complete the turn. "
     "Please retry in a moment."
 )
+_OTEL_METADATA_KEY = "_otel"
+_OTEL_EXECUTION_SPAN_CONTEXT_KEY = "execution_span_context"
 
 
 class ControlPlaneError(RuntimeError):
@@ -504,12 +516,34 @@ async def spawn_assignment(
             )
         return decode_jsonb(existing_idem["response_json"], {})
 
-    session = await get_or_spawn(
-        thread_key,
-        effective_harness,
-        engine=effective_engine,
-        persona=effective_persona_id,
-    )
+    with start_span(
+        "centaur.agent.spawn",
+        attributes={
+            "centaur.thread_key": thread_key,
+            "centaur.harness": effective_harness,
+            "centaur.engine": effective_engine,
+            "centaur.persona_id": effective_persona_id,
+            "centaur.spawn_id": spawn_id,
+            "centaur.assignment.attach_active": attach_active_assignment,
+        },
+    ) as span:
+        spawn_kwargs: dict[str, Any] = {"engine": effective_engine}
+        if effective_persona_id is not None:
+            spawn_kwargs["persona"] = effective_persona_id
+        session = await get_or_spawn(
+            thread_key,
+            effective_harness,
+            **spawn_kwargs,
+        )
+        set_span_attributes(
+            span,
+            {
+                "centaur.runtime_id": session.sandbox_id,
+                "centaur.trace_id": session.trace_id,
+                "centaur.engine": session.engine,
+                "centaur.harness": session.harness,
+            },
+        )
     if effective_agents_md_override is not None:
         await _write_agents_override(session.sandbox_id, effective_agents_md_override)
 
@@ -1152,6 +1186,63 @@ async def get_execution_terminal_snapshot(
 
 
 async def enqueue_execution(
+    pool,
+    *,
+    thread_key: str,
+    assignment_generation: int,
+    execute_id: str,
+    harness: str | None,
+    delivery: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    with start_span(
+        "centaur.agent.enqueue",
+        attributes={
+            "centaur.thread_key": thread_key,
+            "centaur.assignment_generation": assignment_generation,
+            "centaur.execute_id": execute_id,
+            "centaur.harness": harness,
+            "centaur.delivery.platform": _delivery_platform(delivery),
+        },
+    ) as span:
+        span_context = span_context_to_dict(span)
+        if span_context:
+            metadata = {
+                **metadata,
+                _OTEL_METADATA_KEY: {
+                    **decode_jsonb(metadata.get(_OTEL_METADATA_KEY), {}),
+                    _OTEL_EXECUTION_SPAN_CONTEXT_KEY: span_context,
+                },
+            }
+        try:
+            result = await _enqueue_execution_impl(
+                pool,
+                thread_key=thread_key,
+                assignment_generation=assignment_generation,
+                execute_id=execute_id,
+                harness=harness,
+                delivery=delivery,
+                metadata=metadata,
+            )
+        except ControlPlaneError as exc:
+            set_span_attributes(span, {"centaur.error.code": exc.code})
+            mark_error(span, exc.message)
+            raise
+        except Exception as exc:
+            record_exception(span, exc)
+            raise
+        set_span_attributes(
+            span,
+            {
+                "centaur.execution_id": result.get("execution_id"),
+                "centaur.idempotent": bool(result.get("idempotent")),
+                "centaur.execution.status": result.get("status"),
+            },
+        )
+        return result
+
+
+async def _enqueue_execution_impl(
     pool,
     *,
     thread_key: str,
@@ -1887,6 +1978,20 @@ async def _mark_execution_terminal(
         result_size_bytes=payload_size_bytes(result_text),
         error_size_bytes=payload_size_bytes(error_text) if error_text else 0,
     )
+    add_span_event(
+        "centaur.agent.execution_completed",
+        {
+            "centaur.execution_id": execution_id,
+            "centaur.thread_key": thread_key,
+            "centaur.execution.status": status,
+            "centaur.terminal_reason": terminal_reason,
+            "centaur.execution.duration_s": round(duration_s, 3),
+            "centaur.result_size_bytes": payload_size_bytes(result_text),
+            "centaur.error_size_bytes": payload_size_bytes(error_text)
+            if error_text
+            else 0,
+        },
+    )
     record_agent_execution(harness, status, duration_s)
     record_execution_terminal(harness or "unknown", status, terminal_reason)
     suppress_final_delivery_payload = (
@@ -1962,54 +2067,64 @@ async def _mark_execution_terminal(
             )
         return
 
-    await pool.execute(
-        "INSERT INTO agent_final_delivery_outbox (execution_id, thread_key, delivery, state) "
-        "VALUES ($1, $2, $3::jsonb, 'awaiting_terminal') "
-        "ON CONFLICT (execution_id) DO NOTHING",
-        execution_id,
-        thread_key,
-        canonical_json(decode_jsonb(row["delivery"], {}) if row else {}),
-    )
-    session_header = _agent_session_header(
-        persona_id=persona_id,
-        engine=engine,
-        harness=harness,
-    )
-    await pool.execute(
-        "UPDATE agent_final_delivery_outbox SET state = 'pending', final_payload = $1::jsonb, "
-        "next_attempt_at = $2, lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW() "
-        "WHERE execution_id = $3",
-        canonical_json(
-            {
-                "execution_id": execution_id,
-                "thread_key": thread_key,
-                "status": status,
-                "terminal_reason": terminal_reason,
-                "session_title": _agent_session_title(
-                    persona_id=persona_id,
-                    engine=engine,
-                    harness=harness,
-                ),
-                "session_header": session_header,
-                "result_text": result_text,
-                **({"error_text": error_text} if error_text else {}),
-                **(
-                    {"slackbot_streamed_answer_chars": slackbot_streamed_answer_chars}
-                    if slackbot_streamed_answer_chars
-                    else {}
-                ),
-                **({"agent_thread_id": agent_thread_id} if agent_thread_id else {}),
-                **({"repo_context": repo_context} if repo_context else {}),
-                **(
-                    {"suppress_final_delivery": True}
-                    if suppress_final_delivery_payload
-                    else {}
-                ),
-            }
-        ),
-        next_attempt_at,
-        execution_id,
-    )
+    with start_span(
+        "centaur.final_delivery.ready",
+        attributes={
+            "centaur.execution_id": execution_id,
+            "centaur.thread_key": thread_key,
+            "centaur.delivery.platform": delivery_platform,
+            "centaur.execution.status": status,
+            "centaur.terminal_reason": terminal_reason,
+        },
+    ):
+        await pool.execute(
+            "INSERT INTO agent_final_delivery_outbox (execution_id, thread_key, delivery, state) "
+            "VALUES ($1, $2, $3::jsonb, 'awaiting_terminal') "
+            "ON CONFLICT (execution_id) DO NOTHING",
+            execution_id,
+            thread_key,
+            canonical_json(decode_jsonb(row["delivery"], {}) if row else {}),
+        )
+        session_header = _agent_session_header(
+            persona_id=persona_id,
+            engine=engine,
+            harness=harness,
+        )
+        await pool.execute(
+            "UPDATE agent_final_delivery_outbox SET state = 'pending', final_payload = $1::jsonb, "
+            "next_attempt_at = $2, lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW() "
+            "WHERE execution_id = $3",
+            canonical_json(
+                {
+                    "execution_id": execution_id,
+                    "thread_key": thread_key,
+                    "status": status,
+                    "terminal_reason": terminal_reason,
+                    "session_title": _agent_session_title(
+                        persona_id=persona_id,
+                        engine=engine,
+                        harness=harness,
+                    ),
+                    "session_header": session_header,
+                    "result_text": result_text,
+                    **({"error_text": error_text} if error_text else {}),
+                    **(
+                        {"slackbot_streamed_answer_chars": slackbot_streamed_answer_chars}
+                        if slackbot_streamed_answer_chars
+                        else {}
+                    ),
+                    **({"agent_thread_id": agent_thread_id} if agent_thread_id else {}),
+                    **({"repo_context": repo_context} if repo_context else {}),
+                    **(
+                        {"suppress_final_delivery": True}
+                        if suppress_final_delivery_payload
+                        else {}
+                    ),
+                }
+            ),
+            next_attempt_at,
+            execution_id,
+        )
     await append_execution_event(
         pool,
         thread_key=thread_key,
@@ -2292,7 +2407,90 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
 
 
 async def _process_execution(pool, row: dict[str, Any]) -> None:
-    await _process_execution_impl(pool, row)
+    execution_id = str(row["execution_id"])
+    thread_key = str(row["thread_key"])
+    assignment_generation = int(row["assignment_generation"])
+    delivery = decode_jsonb(row.get("delivery"), {})
+    metadata = decode_jsonb(row.get("metadata"), {})
+    with start_span(
+        "centaur.agent.execution",
+        parent_context=execution_span_context_from_metadata(metadata),
+        attributes={
+            "centaur.thread_key": thread_key,
+            "centaur.execution_id": execution_id,
+            "centaur.assignment_generation": assignment_generation,
+            "centaur.delivery.platform": _delivery_platform(delivery),
+            "centaur.worker_id": WORKER_INSTANCE_ID,
+            "centaur.execute_id": row.get("execute_id"),
+        },
+    ) as span:
+        span_context = span_context_to_dict(span)
+        if span_context:
+            try:
+                await _store_execution_span_context(pool, execution_id, span_context)
+            except Exception:
+                log.warning(
+                    "execution_span_context_store_failed",
+                    execution_id=execution_id,
+                    thread_key=thread_key,
+                    exc_info=True,
+                )
+        if isinstance(metadata, dict):
+            set_span_attributes(
+                span,
+                {
+                    "centaur.user_id": metadata.get("user_id"),
+                    "centaur.slackbot.live_delivery": bool(
+                        _has_slackbot_live_delivery(metadata)
+                    ),
+                },
+            )
+        try:
+            await _process_execution_impl(pool, row)
+        except Exception as exc:
+            record_exception(span, exc)
+            raise
+        finally:
+            terminal = await pool.fetchrow(
+                "SELECT status, terminal_reason, error_text FROM agent_execution_requests "
+                "WHERE execution_id = $1",
+                execution_id,
+            )
+            if terminal:
+                status = str(terminal["status"] or "")
+                terminal_reason = terminal["terminal_reason"]
+                set_span_attributes(
+                    span,
+                    {
+                        "centaur.execution.status": status,
+                        "centaur.terminal_reason": terminal_reason,
+                    },
+                )
+                if status in {"failed_permanent", "cancelled"}:
+                    mark_error(span, str(terminal_reason or terminal["error_text"] or status))
+
+
+async def _store_execution_span_context(
+    pool,
+    execution_id: str,
+    span_context: dict[str, Any],
+) -> None:
+    await pool.execute(
+        "UPDATE agent_execution_requests "
+        "SET metadata = metadata || $1::jsonb, updated_at = NOW() "
+        "WHERE execution_id = $2",
+        canonical_json({_OTEL_METADATA_KEY: {_OTEL_EXECUTION_SPAN_CONTEXT_KEY: span_context}}),
+        execution_id,
+    )
+
+
+def execution_span_context_from_metadata(metadata: dict[str, Any] | None):
+    if not isinstance(metadata, dict):
+        return None
+    otel = decode_jsonb(metadata.get(_OTEL_METADATA_KEY), {})
+    if not isinstance(otel, dict):
+        return None
+    return context_from_serialized(otel.get(_OTEL_EXECUTION_SPAN_CONTEXT_KEY))
 
 
 async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
@@ -2445,12 +2643,31 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         if isinstance(delivery, dict):
             requester_user_id = delivery.get("recipient_user_id") or delivery.get("user_id")
         requester_user_id = requester_user_id or execution_metadata.get("user_id")
-        inject_result = await inject_stdin(
-            session,
-            "",
-            platform=delivery.get("platform") if isinstance(delivery, dict) else None,
-            user_id=requester_user_id,
-        )
+        with start_span(
+            "centaur.sandbox.inject",
+            attributes={
+                "centaur.execution_id": execution_id,
+                "centaur.thread_key": thread_key,
+                "centaur.runtime_id": session.sandbox_id,
+                "centaur.delivery.platform": delivery.get("platform")
+                if isinstance(delivery, dict)
+                else None,
+                "centaur.user_id": requester_user_id,
+            },
+        ) as span:
+            inject_result = await inject_stdin(
+                session,
+                "",
+                platform=delivery.get("platform") if isinstance(delivery, dict) else None,
+                user_id=requester_user_id,
+            )
+            set_span_attributes(
+                span,
+                {
+                    "centaur.durable_turn_id": inject_result.get("durable_turn_id"),
+                    "centaur.sandbox.injected": bool(inject_result.get("injected")),
+                },
+            )
         durable_turn_id = str(inject_result.get("durable_turn_id") or "")
         await pool.execute(
             "UPDATE agent_execution_requests SET durable_turn_id = $1, updated_at = NOW() "
@@ -2628,6 +2845,20 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         event_kind="execution_started",
         event_json=execution_started_payload,
     )
+    set_span_attributes(
+        trace.get_current_span(),
+        {
+            "centaur.harness": harness,
+            "centaur.engine": engine,
+            "centaur.persona_id": persona_id,
+            "centaur.runtime_id": session.sandbox_id,
+            "centaur.prompt_ref": prompt_ref,
+            "centaur.prompt_sha": prompt_sha,
+            "centaur.execution_sequence": execution_sequence,
+            "centaur.user_id": user_id,
+        },
+    )
+    add_span_event("centaur.agent.execution_started", execution_started_payload)
     log.info("execute_started", **execution_started_payload)
     await _touch_execution_progress(pool, execution_id)
 
@@ -2714,6 +2945,14 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 continue
             if payload.get("session_id"):
                 harness_thread_id = str(payload.get("session_id") or "")
+                add_span_event(
+                    "centaur.harness.session",
+                    {
+                        "centaur.execution_id": execution_id,
+                        "centaur.thread_key": thread_key,
+                        "centaur.harness_thread_id": harness_thread_id,
+                    },
+                )
             canonical_events = normalize_harness_event(engine, payload)
             for canonical_event in canonical_events:
                 if canonical_event.get("type") != "result":
@@ -2829,6 +3068,19 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                         event_json=observation_payload,
                     )
                     log.info(event_kind, **observation_payload)
+                    add_span_event(
+                        f"centaur.observation.{event_kind}",
+                        {
+                            "centaur.execution_id": execution_id,
+                            "centaur.thread_key": thread_key,
+                            "centaur.event_kind": event_kind,
+                            "centaur.tool.name": observation_payload.get("tool_name"),
+                            "centaur.model": observation_payload.get("model"),
+                            "centaur.error_category": observation_payload.get(
+                                "error_category"
+                            ),
+                        },
+                    )
                     was_first_token = not observations.first_token_seen
                     observations.observe(event_kind, observation_payload)
                     if was_first_token and observations.first_token_seen:

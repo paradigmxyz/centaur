@@ -20,6 +20,15 @@ from api.api_keys import bootstrap_service_api_keys
 from api.config import settings
 from api.db import close_pool, create_pool
 from api.logging_config import configure_structlog
+from api.otel import (
+    configure_otel,
+    context_from_headers,
+    current_traceparent,
+    mark_error,
+    record_exception,
+    set_span_attributes,
+    start_span,
+)
 from api.retention import start_retention_sweeper, stop_retention_sweeper
 from api.trace_context import get_or_create_thread_trace_id, traceparent_from_trace_id
 from api.vm_metrics import (
@@ -54,6 +63,7 @@ from api.workflow_engine import (
 from api.warm_pool import start_replenish_loop, stop_replenish_loop
 
 configure_structlog()
+configure_otel()
 
 log = structlog.get_logger().bind(service="api")
 
@@ -331,20 +341,47 @@ async def instrument_requests(request, call_next):
         except Exception:
             log.debug("thread_trace_lookup_failed", thread_key=thread_key, exc_info=True)
 
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or request.url.path
+    parent_context = context_from_headers(request.headers)
+
     start = time.perf_counter()
     status_code = 500
     HTTP_REQUESTS_IN_PROGRESS.inc()
     try:
-        route = request.scope.get("route")
-        path = getattr(route, "path", None) or request.url.path
-        response = await call_next(request)
-        status_code = response.status_code
-        if trace_id:
-            response.headers["X-Trace-Id"] = trace_id
-            traceparent = traceparent_from_trace_id(trace_id)
-            if traceparent:
-                response.headers["traceparent"] = traceparent
-        return response
+        with start_span(
+            "centaur.api.http_request",
+            parent_context=parent_context,
+            attributes={
+                "http.request.method": request.method,
+                "url.path": path,
+                "centaur.thread_key": thread_key,
+                "centaur.trace_id": trace_id,
+                "client.address": request.client.host if request.client else None,
+            },
+        ) as span:
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                record_exception(span, exc)
+                raise
+            status_code = response.status_code
+            set_span_attributes(
+                span,
+                {
+                    "http.response.status_code": status_code,
+                    "centaur.thread_key": thread_key,
+                    "centaur.trace_id": trace_id,
+                },
+            )
+            if status_code >= 500:
+                mark_error(span, f"HTTP {status_code}")
+            if trace_id:
+                response.headers["X-Trace-Id"] = trace_id
+                traceparent = current_traceparent(span) or traceparent_from_trace_id(trace_id)
+                if traceparent:
+                    response.headers["traceparent"] = traceparent
+            return response
     finally:
         HTTP_REQUESTS_IN_PROGRESS.dec()
         route = request.scope.get("route")
