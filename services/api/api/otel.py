@@ -225,5 +225,5 @@ def current_traceparent(span: Span | None = None) -> str | None:
         return None
     return (
         f"00-{span_context.trace_id:032x}-"
-        f"{span_context.span_id:016x}-{int(span_context.trace_flags):02x}"
+        f"{span_context.span_id:016x}-{int(span_context.trace_flags) & 0x01:02x}"
     )

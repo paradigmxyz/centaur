@@ -279,12 +279,21 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
 def test_container_env_passes_allowed_otel_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("CODEX_OTEL_AUTHORIZATION", "Bearer local-key")
     monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
+    monkeypatch.setenv("CODEX_OTEL_EXPORTER_OTLP_ENDPOINT", "http://laminar:8000")
+    monkeypatch.setenv("CODEX_OTEL_SPAN_PREFIX", "codex.")
+    monkeypatch.setenv("LMNR_PROJECT_API_KEY", "lmnr-key")
 
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
+    assert env_map["CODEX_OTEL_AUTHORIZATION"] == "Bearer local-key"
     assert env_map["CODEX_OTEL_ENVIRONMENT"] == "staging"
+    assert env_map["CODEX_OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://laminar:8000"
+    assert env_map["CODEX_OTEL_SPAN_PREFIX"] == "codex."
+    assert env_map["LMNR_PROJECT_API_KEY"] == "lmnr-key"
+    assert "laminar" in env_map["NO_PROXY"].split(",")
 
 
 def test_container_env_applies_kubernetes_sandbox_extra_env(
@@ -303,6 +312,10 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
                     "name": "no_proxy",
                     "value": "localhost,127.0.0.1,api.internal,metrics.internal",
                 },
+                {
+                    "name": "CODEX_OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "value": "http://host.orb.internal:8000",
+                },
             ]
         ),
     )
@@ -312,8 +325,30 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
 
     assert env_map["NO_PROXY"] == "localhost,127.0.0.1,api.internal,metrics.internal"
     assert env_map["no_proxy"] == "localhost,127.0.0.1,api.internal,metrics.internal"
+    assert env_map["CODEX_OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.orb.internal:8000"
     assert len([item for item in env if item.startswith("NO_PROXY=")]) == 1
     assert len([item for item in env if item.startswith("no_proxy=")]) == 1
+
+
+def test_container_env_adds_extra_otel_endpoint_host_to_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {
+                    "name": "CODEX_OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "value": "http://host.orb.internal:8000",
+                },
+            ]
+        ),
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    assert "host.orb.internal" in env_map["NO_PROXY"].split(",")
 
 
 def test_prompt_bundle_includes_live_capability_inventory_guidance(

@@ -22,15 +22,16 @@ from api.db import close_pool, create_pool
 from api.logging_config import configure_structlog
 from api.otel import (
     configure_otel,
+    context_from_serialized,
     context_from_headers,
     current_traceparent,
     mark_error,
     record_exception,
     set_span_attributes,
+    span_context_to_dict,
     start_span,
 )
 from api.retention import start_retention_sweeper, stop_retention_sweeper
-from api.trace_context import get_or_create_thread_trace_id, traceparent_from_trace_id
 from api.vm_metrics import (
     HTTP_REQUESTS_IN_PROGRESS,
     observe_http_request,
@@ -333,10 +334,17 @@ async def instrument_requests(request, call_next):
         except Exception:
             pass
 
+    thread_trace_root_span_id = None
     if not trace_id and thread_key:
         try:
-            trace_id = await get_or_create_thread_trace_id(request.app.state.db_pool, thread_key)
-            if trace_id:
+            row = await request.app.state.db_pool.fetchrow(
+                "SELECT trace_id::text AS trace_id, root_span_id FROM thread_traces "
+                "WHERE thread_key = $1",
+                thread_key,
+            )
+            if row:
+                trace_id = row["trace_id"]
+                thread_trace_root_span_id = row["root_span_id"]
                 structlog.contextvars.bind_contextvars(trace_id=trace_id)
         except Exception:
             log.debug("thread_trace_lookup_failed", thread_key=thread_key, exc_info=True)
@@ -344,6 +352,15 @@ async def instrument_requests(request, call_next):
     route = request.scope.get("route")
     path = getattr(route, "path", None) or request.url.path
     parent_context = context_from_headers(request.headers)
+    incoming_traceparent = request.headers.get("traceparent")
+    if trace_id and thread_trace_root_span_id and not incoming_traceparent:
+        parent_context = context_from_serialized(
+            {
+                "trace_id": trace_id.replace("-", ""),
+                "span_id": thread_trace_root_span_id,
+                "trace_flags": 1,
+            }
+        )
 
     start = time.perf_counter()
     status_code = 500
@@ -360,6 +377,29 @@ async def instrument_requests(request, call_next):
                 "client.address": request.client.host if request.client else None,
             },
         ) as span:
+            span_context = span_context_to_dict(span)
+            if thread_key and span_context and not thread_trace_root_span_id:
+                trace_id = span_context["trace_id"]
+                try:
+                    await request.app.state.db_pool.execute(
+                        "INSERT INTO thread_traces (thread_key, trace_id, root_span_id) "
+                        "VALUES ($1, $2, $3) "
+                        "ON CONFLICT (thread_key) DO UPDATE SET "
+                        "trace_id = EXCLUDED.trace_id, "
+                        "root_span_id = COALESCE(thread_traces.root_span_id, EXCLUDED.root_span_id), "
+                        "updated_at = NOW()",
+                        thread_key,
+                        trace_id,
+                        span_context["span_id"],
+                    )
+                    thread_trace_root_span_id = span_context["span_id"]
+                    structlog.contextvars.bind_contextvars(trace_id=trace_id)
+                except Exception:
+                    log.debug(
+                        "thread_trace_root_store_failed",
+                        thread_key=thread_key,
+                        exc_info=True,
+                    )
             try:
                 response = await call_next(request)
             except Exception as exc:
@@ -378,7 +418,7 @@ async def instrument_requests(request, call_next):
                 mark_error(span, f"HTTP {status_code}")
             if trace_id:
                 response.headers["X-Trace-Id"] = trace_id
-                traceparent = current_traceparent(span) or traceparent_from_trace_id(trace_id)
+                traceparent = current_traceparent(span)
                 if traceparent:
                     response.headers["traceparent"] = traceparent
             return response

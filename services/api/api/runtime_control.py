@@ -29,6 +29,7 @@ from api.harness_config import default_harness
 from api.otel import (
     add_span_event,
     context_from_serialized,
+    current_traceparent,
     mark_error,
     record_exception,
     set_span_attributes,
@@ -2458,6 +2459,17 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
                     ),
                 },
             )
+        input_text = await _execution_input_text(
+            pool, execution_id, thread_key, assignment_generation
+        )
+        if input_text:
+            clipped_input = _clip_slackbot(input_text)
+            set_span_attributes(
+                span,
+                {
+                    "centaur.llm.input": clipped_input,
+                },
+            )
         try:
             await _process_execution_impl(pool, row)
         except Exception as exc:
@@ -2465,7 +2477,7 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
             raise
         finally:
             terminal = await pool.fetchrow(
-                "SELECT status, terminal_reason, error_text FROM agent_execution_requests "
+                "SELECT status, terminal_reason, result_text, error_text FROM agent_execution_requests "
                 "WHERE execution_id = $1",
                 execution_id,
             )
@@ -2479,8 +2491,47 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
                         "centaur.terminal_reason": terminal_reason,
                     },
                 )
+                result_text = terminal["result_text"]
+                if result_text:
+                    clipped_output = _clip_slackbot(result_text)
+                    set_span_attributes(
+                        span,
+                        {
+                            "centaur.llm.output": clipped_output,
+                        },
+                    )
                 if status in {"failed_permanent", "cancelled"}:
                     mark_error(span, str(terminal_reason or terminal["error_text"] or status))
+
+
+async def _execution_input_text(
+    pool,
+    execution_id: str,
+    thread_key: str,
+    assignment_generation: int,
+) -> str:
+    rows = await pool.fetch(
+        "SELECT event_json FROM agent_message_requests "
+        "WHERE delivered_execution_id = $1 "
+        "OR (thread_key = $2 AND assignment_generation = $3 AND delivered_execution_id IS NULL) "
+        "ORDER BY created_at, message_id",
+        execution_id,
+        thread_key,
+        assignment_generation,
+    )
+    texts: list[str] = []
+    for row in rows:
+        event = decode_jsonb(row["event_json"], {})
+        message = event.get("message") if isinstance(event, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = str(block.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+    return "\n\n".join(texts)
 
 
 async def _store_execution_span_context(
@@ -2668,11 +2719,14 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 "centaur.user_id": requester_user_id,
             },
         ) as span:
+            inject_span_context = span_context_to_dict(span) or {}
             inject_result = await inject_stdin(
                 session,
                 "",
                 platform=delivery.get("platform") if isinstance(delivery, dict) else None,
                 user_id=requester_user_id,
+                trace_id=inject_span_context.get("trace_id"),
+                traceparent=current_traceparent(span),
             )
             set_span_attributes(
                 span,
