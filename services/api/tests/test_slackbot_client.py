@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import patch
 
@@ -99,3 +100,30 @@ async def test_post_returns_none_after_exhausting_retries():
 
     assert result is None
     assert len(fake.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_harness_event_suppresses_auto_http_span(monkeypatch):
+    from api import slackbot_client
+
+    fake = _FakeClient([_response(200, {"ok": True})])
+    entered = 0
+
+    @contextmanager
+    def suppress():
+        nonlocal entered
+        entered += 1
+        yield
+
+    monkeypatch.setattr(slackbot_client, "suppress_http_instrumentation", suppress)
+    with patch("api.slackbot_client.httpx.AsyncClient", return_value=fake):
+        result = await slackbot_client.harness_event(
+            "sess", {"type": "item.agentMessage.delta", "delta": "x"}
+        )
+
+    assert result == {"ok": True}
+    assert entered == 1
+    assert (
+        fake.calls[0]["url"]
+        == "http://slackbot.test/api/slack/agent-sessions/sess/harness-event"
+    )

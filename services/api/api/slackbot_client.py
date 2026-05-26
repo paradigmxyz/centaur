@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import nullcontext
 from typing import Any
 
 import httpx
 import structlog
+from opentelemetry.instrumentation.utils import suppress_http_instrumentation
 
 from api.slack_sanitize import sanitize_for_slack
 
@@ -34,6 +36,7 @@ async def post(
     body: dict[str, Any],
     *,
     timeout: httpx.Timeout | None = None,
+    suppress_http_span: bool = False,
 ) -> dict[str, Any] | None:
     base_url = _base_url()
     api_key = _api_key()
@@ -46,14 +49,20 @@ async def post(
     for attempt in range(_RETRY_ATTEMPTS):
         try:
             async with httpx.AsyncClient(timeout=request_timeout) as client:
-                response = await client.post(
-                    f"{base_url}{path}",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
+                span_context = (
+                    suppress_http_instrumentation()
+                    if suppress_http_span
+                    else nullcontext()
                 )
+                with span_context:
+                    response = await client.post(
+                        f"{base_url}{path}",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=body,
+                    )
                 text = response.text
                 if response.is_success:
                     if not text:
@@ -196,6 +205,7 @@ async def harness_event(
         f"/api/slack/agent-sessions/{session_id}/harness-event",
         {"event": sanitize_slack_event(event)},
         timeout=httpx.Timeout(60.0, connect=2.0),
+        suppress_http_span=True,
     )
 
 

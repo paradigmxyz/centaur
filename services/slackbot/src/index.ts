@@ -45,6 +45,7 @@ const resolver = new SlackClientResolver(
 const handoff = new CentaurHandoff(config)
 const deduper = new EventDeduper(config.SLACK_EVENT_DEDUP_TTL_MS)
 const CODEX_THREAD_RE = /\b(?:codex|agent|amp)\s+thread\b[^A-Z0-9]*(T-[A-Z0-9-]+)/i
+const HARNESS_EVENT_PATH_RE = /^\/api\/slack\/agent-sessions\/[^/]+\/harness-event$/
 
 void resolver
   .resolve({})
@@ -64,6 +65,10 @@ type WaitUntilContext = {
 export const app = new Hono<{ Variables: Variables }>()
   .use(prettyJSON())
   .use('*', async (c, next) => {
+    if (HARNESS_EVENT_PATH_RE.test(c.req.path)) {
+      await next()
+      return
+    }
     await withSpan(
       'centaur.slackbot.http_request',
       serverSpanOptions({
