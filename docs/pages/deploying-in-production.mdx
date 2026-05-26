@@ -98,6 +98,36 @@ so any thread can use any configured credential. Per-user and per-channel
 scoping is on the roadmap; until then, scope tool and harness access
 accordingly. See [Security](/security) for the full threat model.
 
+### Codex Auth Modes
+
+Codex supports two authentication modes, selected per deployment with the
+`CODEX_AUTH_MODE` env var on the sandbox (set it via `sandbox.extraEnv`):
+
+| Mode | Upstream | Secrets required |
+|------|----------|------------------|
+| `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` |
+| `access_token` | `chatgpt.com` | `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_BLOB`, `OPENAI_CODEX_ACCOUNT_ID` |
+
+`access_token` mode routes Codex through a ChatGPT account rather than a raw
+API key. [iron-token-broker](https://docs.iron.sh) holds the refresh token
+and mints short-lived access tokens, which iron-proxy injects on outbound
+requests so the sandbox never sees them.
+
+Store these three items in your secrets backend (1Password vault, Kubernetes
+Secret, etc.) when running in `access_token` mode:
+
+- `OPENAI_CODEX_CLIENT_ID`: Codex CLI's public OAuth client id. Read-only.
+- `OPENAI_CODEX_BLOB`: a JSON document `{"refresh_token": "..."}`. The
+  broker rotates this in place on every refresh, so the backing item must
+  be writable.
+- `OPENAI_CODEX_ACCOUNT_ID`: the ChatGPT account UUID the credential is
+  bound to. It is static, but iron-proxy injects it as the
+  `chatgpt-account-id` header so the backend can route to the right
+  workspace. Store it alongside the other two, not in code.
+
+To bootstrap, run `codex login` locally, then copy the values from
+`~/.codex/auth.json` into the three secret items.
+
 ## 4. Configure Slack
 
 Create the Slackbot app at [api.slack.com/apps](https://api.slack.com/apps).

@@ -146,6 +146,7 @@ Sandbox entrypoint and wrappers:
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
+| `CODEX_AUTH_MODE` | `sandbox.extraEnv`. | Codex auth flow: `api_key` (default, hits `api.openai.com`) or `access_token` (hits `chatgpt.com` via the brokered ChatGPT login). See [Codex Auth Modes](/deploying-in-production#codex-auth-modes). |
 | `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
