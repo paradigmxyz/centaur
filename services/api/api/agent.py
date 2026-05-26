@@ -1074,7 +1074,7 @@ def _build_session_context(
                 "- For links to Slack threads or messages, always use the canonical `https://slack.com/archives/{CHANNEL_ID}/p{TS_WITHOUT_DOT}` form. Slack redirects this to the correct workspace. Do not invent or hardcode a `<workspace>.slack.com` subdomain.",
             ]
         )
-        if user_id:
+        if user_id and user_id.startswith(("U", "W")):
             lines.append(
                 "- For Slack replies after completing a long task, tag the requester with "
                 f"their real Slack mention: <@{user_id}>. This Slack reply rule does not "
