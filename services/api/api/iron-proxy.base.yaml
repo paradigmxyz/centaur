@@ -57,6 +57,8 @@ transforms:
         - "range"
         - "cookie"
         - "notion-version"
+        - "mcp-session-id"
+        - "mcp-protocol-version"
         - "api-version"
         - "x-github-api-version"
         - "api-key"
