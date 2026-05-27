@@ -62,7 +62,7 @@
 
 [Environment]
 |repos: ~/github/{org}/{repo} (READ-ONLY mounts) | git pre-configured | gh authenticated
-|installed: Rust,Node24,Python3+uv,Foundry(forge/cast/anvil),rg,fd,jq,tmux,cmake,protobuf
+|installed: Rust,Node24,Python3+uv,Foundry(forge/cast/anvil),Nushell(nu),rg,fd,jq,tmux,cmake,protobuf
 |To modify a repo (commit, push, open PR): run `git-branch <org/repo>` → creates writable clone at ~/branches/<org>/<repo>
 |*NEVER run git commit/push inside* ~/github/ — it is read-only. Always use git-branch first.
 |Prefer `rg` (ripgrep) over `grep` for all codebase operations.

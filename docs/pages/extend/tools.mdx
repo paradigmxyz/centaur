@@ -55,6 +55,17 @@ Each entry in `secrets` declares one credential the tool can request with
   auth). For `jwt_bearer` (RFC 7523), supply `issuer`, `subject`, and
   `private_key` (an RSA PEM) in `fields`, plus a top-level `audience`; an
   optional `private_key_id` field is emitted as the JWT `kid` header.
+- `type = "brokered_token"` routes OAuth2 refresh-token rotation through
+  iron-token-broker instead of iron-proxy. Use this when the upstream IdP
+  rotates refresh tokens with strict reuse detection (OpenAI Codex, Anthropic
+  Claude Code OAuth, modern Okta or Auth0 with rotation enabled) and more
+  than one proxy shares the credential. Required `fields`: `client_id`,
+  `refresh_token`. Optional: `client_secret`. The `refresh_token` field names
+  the writable credential blob the broker rewrites on every rotation; the
+  other fields are read-only. Read-side fields and `token_endpoint_headers`
+  entries accept `json_key` to pluck a value out of a JSON-encoded secret;
+  the `refresh_token` field does not (the broker rewrites the whole
+  document).
 - `type = "gcp_auth"` is for Google service-account JSON. iron-proxy resolves
   the keyfile, mints Google OAuth tokens for `scopes`, and injects them for the
   configured Google API `hosts`. If omitted, hosts default to

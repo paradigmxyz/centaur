@@ -22,11 +22,10 @@ _HARNESS_STUB_KEYS = (
 )
 
 _SANDBOX_PASSTHROUGH_ENV_KEYS = (
-    "CODEX_OTEL_ENVIRONMENT",
-    "CODEX_OTEL_LAMINAR_ENDPOINT",
-    "CODEX_OTEL_LAMINAR_BASE_URL",
-    "LMNR_BASE_URL",
-    "LMNR_PROJECT_API_KEY",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
 )
 
 # Keep Claude Code deterministic in the pod while still allowing Centaur-owned
@@ -76,6 +75,20 @@ def _sandbox_extra_env() -> list[tuple[str, str]]:
     return extra
 
 
+def _sandbox_otel_endpoint_hosts(extra_env: list[tuple[str, str]]) -> list[str]:
+    extra = dict(extra_env)
+    hosts: list[str] = []
+    for key in (
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ):
+        value = (os.getenv(key) or extra.get(key) or "").strip()
+        host = urlsplit(value).hostname
+        if host:
+            hosts.append(host)
+    return hosts
+
+
 def amp_mode() -> str:
     return (os.getenv("AMP_MODE") or "deep").strip() or "deep"
 
@@ -114,6 +127,7 @@ def container_env(
     """
     api_key = mint_sandbox_token(thread_key, container_name)
     api_url = os.getenv("AGENT_API_URL", "http://api:8000")
+    extra_env = _sandbox_extra_env()
 
     env = [
         f"CENTAUR_API_URL={api_url}",
@@ -132,6 +146,7 @@ def container_env(
     api_host = urlsplit(api_url).hostname
     if api_host:
         no_proxy_hosts.append(api_host)
+    no_proxy_hosts.extend(_sandbox_otel_endpoint_hosts(extra_env))
     no_proxy = ",".join(dict.fromkeys(no_proxy_hosts))
     # Placeholder values for harness infra secrets. iron-proxy MITMs the
     # outbound TLS connection and rewrites these strings in auth headers
@@ -164,7 +179,7 @@ def container_env(
         for name, dsn in pg_dsns.items():
             env.append(f"{name}={dsn}")
 
-    for name, value in _sandbox_extra_env():
+    for name, value in extra_env:
         _set_env(env, name, value)
 
     return env

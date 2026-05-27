@@ -533,3 +533,42 @@ def test_docs_bullets_requires_revision_for_writes(monkeypatch):
         client.docs_bullets("doc-123")
 
     assert fake_service.documents_api.batch_update_calls == []
+
+
+def test_docs_append_passes_expected_revision_id_through(monkeypatch):
+    fake_service = _FakeDocsService([])
+    monkeypatch.setattr(client, "get_docs_service", lambda: fake_service)
+
+    client.docs_append("doc-123", "hello")
+    client.docs_append("doc-123", "hello", expected_revision_id="rev-42")
+
+    calls = fake_service.documents_api.batch_update_calls
+    assert len(calls) == 2
+    assert "writeControl" not in calls[0]["body"]
+    assert calls[1]["body"]["writeControl"] == {"requiredRevisionId": "rev-42"}
+
+
+def test_docs_replace_passes_expected_revision_id_through(monkeypatch):
+    fake_service = _FakeDocsService([])
+    monkeypatch.setattr(client, "get_docs_service", lambda: fake_service)
+
+    client.docs_replace("doc-123", "old", "new")
+    client.docs_replace("doc-123", "old", "new", expected_revision_id="rev-7")
+
+    calls = fake_service.documents_api.batch_update_calls
+    assert len(calls) == 2
+    assert "writeControl" not in calls[0]["body"]
+    assert calls[1]["body"]["writeControl"] == {"requiredRevisionId": "rev-7"}
+
+
+def test_docs_insert_passes_expected_revision_id_through(monkeypatch):
+    fake_service = _FakeDocsService([])
+    monkeypatch.setattr(client, "get_docs_service", lambda: fake_service)
+
+    client.docs_insert("doc-123", "hello", 1)
+    client.docs_insert("doc-123", "hello", 1, expected_revision_id="rev-99")
+
+    calls = fake_service.documents_api.batch_update_calls
+    assert len(calls) == 2
+    assert "writeControl" not in calls[0]["body"]
+    assert calls[1]["body"]["writeControl"] == {"requiredRevisionId": "rev-99"}

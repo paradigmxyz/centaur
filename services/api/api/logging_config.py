@@ -24,6 +24,9 @@ _SECRET_FIELD_NAMES = {"apikey", "authorization", "clientsecret", "accesstoken",
 _EMAIL_FIELD_NAMES = {"email", "useremail", "authoremail"}
 _PHONE_FIELD_NAMES = {"phone", "phonenumber", "userphone"}
 _SSN_FIELD_NAMES = {"ssn", "socialsecuritynumber"}
+# This can drift over time, but it is less disruptive than reading image refs
+# through Helm chart changes while we need a quick production log marker.
+_LOG_VERSION_UUID = "7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14"
 
 
 def _normalize_field_name(field_name: str | None) -> str:
@@ -83,6 +86,12 @@ def _add_default_service(logger, method_name, event_dict):
     return event_dict
 
 
+def _add_log_version(logger, method_name, event_dict):
+    """Attach a manually rotated log version marker to every structured log line."""
+    event_dict.setdefault("log_version_uuid", _LOG_VERSION_UUID)
+    return event_dict
+
+
 def _scrub_sensitive_fields(logger, method_name, event_dict):
     """Redact obvious PII and secrets before any renderer emits the log line."""
     return {k: _sanitize_log_value(v, field_name=str(k)) for k, v in event_dict.items()}
@@ -106,6 +115,7 @@ def configure_structlog() -> int:
     processors = [
         structlog.contextvars.merge_contextvars,
         _add_default_service,
+        _add_log_version,
         _scrub_sensitive_fields,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", key="timestamp"),

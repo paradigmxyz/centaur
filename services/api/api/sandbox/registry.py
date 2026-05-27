@@ -23,6 +23,14 @@ def configure(backend: SandboxBackend) -> None:
 
 def auto_configure() -> SandboxBackend:
     """Configure the Kubernetes sandbox backend."""
+    import os
+
+    controller = (os.getenv("KUBERNETES_SANDBOX_CONTROLLER") or "pod").strip().lower()
+    if controller in {"agent-sandbox", "agentsandbox"}:
+        from api.sandbox.kubernetes_agent_sandbox import KubernetesAgentSandboxBackend
+
+        return KubernetesAgentSandboxBackend()
+
     from api.sandbox.kubernetes import KubernetesExecutorBackend
 
     return KubernetesExecutorBackend()

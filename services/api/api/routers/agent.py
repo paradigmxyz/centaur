@@ -1316,41 +1316,61 @@ async def list_threads(request: Request, limit: int = 200):
     limit = min(limit, 500)
     rows = await pool.fetch(
         """
+        WITH thread_summary AS (
+            SELECT
+                cm.thread_key,
+                MIN(cm.created_at) AS created_at,
+                MAX(cm.created_at) AS last_activity,
+                COUNT(*)::int AS message_count
+            FROM chat_messages cm
+            GROUP BY cm.thread_key
+            ORDER BY MAX(cm.created_at) DESC
+            LIMIT $1
+        )
         SELECT
-            cm.thread_key,
-            MIN(cm.created_at) AS created_at,
-            MAX(cm.created_at) AS last_activity,
-            COUNT(*)::int AS message_count,
-            (SELECT parts FROM chat_messages cm2
-             WHERE cm2.thread_key = cm.thread_key AND cm2.role = 'user'
-             ORDER BY cm2.created_at ASC LIMIT 1) AS first_user_parts,
-            (SELECT parts FROM chat_messages cm3
-             WHERE cm3.thread_key = cm.thread_key AND cm3.role = 'user'
-             ORDER BY cm3.created_at DESC LIMIT 1) AS last_user_parts,
+            ts.thread_key,
+            ts.created_at,
+            ts.last_activity,
+            ts.message_count,
+            first_user.text AS first_user_text,
+            last_user.text AS last_user_text,
             ss.thread_name,
             COALESCE(ss.harness, 'amp') AS harness,
             COALESCE(ss.state, 'stopped') AS state
-        FROM chat_messages cm
-        LEFT JOIN sandbox_sessions ss ON ss.thread_key = cm.thread_key
-        GROUP BY cm.thread_key, ss.thread_name, ss.harness, ss.state
-        ORDER BY MAX(cm.created_at) DESC
-        LIMIT $1
+        FROM thread_summary ts
+        LEFT JOIN sandbox_sessions ss ON ss.thread_key = ts.thread_key
+        LEFT JOIN LATERAL (
+            SELECT (
+                SELECT left(part.elem->>'text', 500)
+                FROM jsonb_array_elements(cm2.parts) AS part(elem)
+                WHERE jsonb_typeof(part.elem) = 'object'
+                  AND part.elem ? 'text'
+                  AND jsonb_typeof(part.elem->'text') = 'string'
+                LIMIT 1
+            ) AS text
+            FROM chat_messages cm2
+            WHERE cm2.thread_key = ts.thread_key AND cm2.role = 'user'
+            ORDER BY cm2.created_at ASC
+            LIMIT 1
+        ) first_user ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT (
+                SELECT left(part.elem->>'text', 500)
+                FROM jsonb_array_elements(cm3.parts) AS part(elem)
+                WHERE jsonb_typeof(part.elem) = 'object'
+                  AND part.elem ? 'text'
+                  AND jsonb_typeof(part.elem->'text') = 'string'
+                LIMIT 1
+            ) AS text
+            FROM chat_messages cm3
+            WHERE cm3.thread_key = ts.thread_key AND cm3.role = 'user'
+            ORDER BY cm3.created_at DESC
+            LIMIT 1
+        ) last_user ON TRUE
+        ORDER BY ts.last_activity DESC
         """,
         limit,
     )
-
-    def _extract_text(parts):
-        if isinstance(parts, str):
-            try:
-                parts = _json.loads(parts)
-            except Exception:
-                return None
-        if not isinstance(parts, list):
-            return None
-        for p in parts:
-            if isinstance(p, dict) and isinstance(p.get("text"), str):
-                return p["text"]
-        return None
 
     threads = []
     for row in rows:
@@ -1361,8 +1381,8 @@ async def list_threads(request: Request, limit: int = 200):
             "created_at": row["created_at"].timestamp() if row["created_at"] else None,
             "last_activity": row["last_activity"].timestamp() if row["last_activity"] else None,
             "turn_count": row["message_count"],
-            "first_message": _extract_text(row["first_user_parts"]),
-            "last_user_message": _extract_text(row["last_user_parts"]),
+            "first_message": row["first_user_text"],
+            "last_user_message": row["last_user_text"],
             "thread_name": row["thread_name"],
         })
 

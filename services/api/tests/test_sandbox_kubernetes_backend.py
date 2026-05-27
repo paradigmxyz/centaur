@@ -15,6 +15,7 @@ from api.sandbox.kubernetes import (
     KubernetesExecutorBackend,
     STDOUT_CHANNEL,
 )
+from api.sandbox.kubernetes_agent_sandbox import KubernetesAgentSandboxBackend
 from api.sandbox.registry import auto_configure
 
 
@@ -24,6 +25,7 @@ class FakeCoreApi:
         self.deleted_pods: list[tuple[str, str, int]] = []
         self.deleted_services: list[tuple[str, str]] = []
         self.deleted_configmaps: list[tuple[str, str]] = []
+        self.deleted_pvcs: list[tuple[str, str]] = []
         self.created_secrets: list[tuple[str, dict]] = []
         self.created_pods: list[tuple[str, dict]] = []
         self.created_services: list[tuple[str, dict]] = []
@@ -53,6 +55,11 @@ class FakeCoreApi:
     async def delete_namespaced_service(self, name: str, namespace: str) -> None:
         self.deleted_services.append((namespace, name))
 
+    async def delete_namespaced_persistent_volume_claim(
+        self, name: str, namespace: str
+    ) -> None:
+        self.deleted_pvcs.append((namespace, name))
+
     async def create_namespaced_service(self, namespace: str, body: dict) -> None:
         self.created_services.append((namespace, body))
 
@@ -69,7 +76,10 @@ class FakeCoreApi:
 
     async def read_namespaced_pod(self, name: str, namespace: str) -> SimpleNamespace:  # noqa: ARG002
         if self.pods_to_read:
-            return self.pods_to_read.pop(0)
+            pod = self.pods_to_read.pop(0)
+            if isinstance(pod, Exception):
+                raise pod
+            return pod
         raise AssertionError("unexpected read_namespaced_pod call")
 
     async def list_namespaced_pod(
@@ -143,6 +153,65 @@ class FakeNetworkingApi:
         self.created_network_policies.append((namespace, body))
 
 
+class FakeCustomObjectsApi:
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str, str, str, dict]] = []
+        self.deleted: list[tuple[str, str, str, str, str]] = []
+        self.patched: list[tuple[str, str, str, str, str, dict]] = []
+        self.patch_kwargs: list[dict[str, object]] = []
+        self.objects: dict[str, dict] = {}
+
+    async def create_namespaced_custom_object(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        body: dict,
+    ) -> None:
+        self.created.append((group, version, namespace, plural, body))
+        self.objects[body["metadata"]["name"]] = body
+
+    async def get_namespaced_custom_object(
+        self,
+        group: str,  # noqa: ARG002
+        version: str,  # noqa: ARG002
+        namespace: str,  # noqa: ARG002
+        plural: str,  # noqa: ARG002
+        name: str,
+    ) -> dict:
+        if name not in self.objects:
+            exc = Exception("not found")
+            exc.status = 404  # type: ignore[attr-defined]
+            raise exc
+        return self.objects[name]
+
+    async def delete_namespaced_custom_object(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        name: str,
+    ) -> None:
+        self.deleted.append((group, version, namespace, plural, name))
+
+    async def patch_namespaced_custom_object(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        name: str,
+        body: dict,
+        **kwargs: object,
+    ) -> None:
+        self.patched.append((group, version, namespace, plural, name, body))
+        self.patch_kwargs.append(kwargs)
+        if name in self.objects:
+            self.objects[name].setdefault("spec", {}).update(body.get("spec", {}))
+
+
 class FakeWsApiClient:
     @staticmethod
     def parse_error_data(error_data: str) -> int:
@@ -207,25 +276,20 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     assert env_map["no_proxy"] == env_map["NO_PROXY"]
 
 
-def test_container_env_passes_laminar_otel_config(
+def test_container_env_passes_allowed_otel_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(
-        "LMNR_BASE_URL",
-        "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000",
-    )
-    monkeypatch.setenv("LMNR_PROJECT_API_KEY", "lmnr-key")
-    monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer%20local-key")
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=staging")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlp-collector:4318")
 
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
-    assert (
-        env_map["LMNR_BASE_URL"]
-        == "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000"
-    )
-    assert env_map["LMNR_PROJECT_API_KEY"] == "lmnr-key"
-    assert env_map["CODEX_OTEL_ENVIRONMENT"] == "staging"
+    assert env_map["OTEL_EXPORTER_OTLP_HEADERS"] == "authorization=Bearer%20local-key"
+    assert env_map["OTEL_RESOURCE_ATTRIBUTES"] == "deployment.environment=staging"
+    assert env_map["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otlp-collector:4318"
+    assert "otlp-collector" in env_map["NO_PROXY"].split(",")
 
 
 def test_container_env_applies_kubernetes_sandbox_extra_env(
@@ -238,15 +302,15 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
             [
                 {
                     "name": "NO_PROXY",
-                    "value": "localhost,127.0.0.1,api.internal,laminar.internal",
+                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
                 },
                 {
                     "name": "no_proxy",
-                    "value": "localhost,127.0.0.1,api.internal,laminar.internal",
+                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
                 },
                 {
-                    "name": "LMNR_BASE_URL",
-                    "value": "http://laminar.internal:8000",
+                    "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "value": "http://host.orb.internal:8000",
                 },
             ]
         ),
@@ -255,11 +319,32 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
-    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,api.internal,laminar.internal"
-    assert env_map["no_proxy"] == "localhost,127.0.0.1,api.internal,laminar.internal"
-    assert env_map["LMNR_BASE_URL"] == "http://laminar.internal:8000"
+    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,api.internal,metrics.internal"
+    assert env_map["no_proxy"] == "localhost,127.0.0.1,api.internal,metrics.internal"
+    assert env_map["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.orb.internal:8000"
     assert len([item for item in env if item.startswith("NO_PROXY=")]) == 1
     assert len([item for item in env if item.startswith("no_proxy=")]) == 1
+
+
+def test_container_env_adds_extra_otel_endpoint_host_to_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {
+                    "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "value": "http://host.orb.internal:8000",
+                },
+            ]
+        ),
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    assert "host.orb.internal" in env_map["NO_PROXY"].split(",")
 
 
 def test_prompt_bundle_includes_live_capability_inventory_guidance(
@@ -660,6 +745,14 @@ async def test_create_builds_per_sandbox_proxy_resources(
         "centaur.ai/iron-proxy": "true",
         "centaur.ai/sandbox-id": session.sandbox_id,
     }
+    assert not any(
+        egress.get("to", [{}])[0]
+        .get("podSelector", {})
+        .get("matchLabels", {})
+        .get("app")
+        == "onepassword-connect"
+        for egress in fake_networking.created_network_policies[1][1]["spec"]["egress"]
+    )
 
     replacement = await backend.create("slack:C123:123.456", "amp", "amp")
     assert replacement.sandbox_id != session.sandbox_id
@@ -667,6 +760,243 @@ async def test_create_builds_per_sandbox_proxy_resources(
         fake_core.created_pods[2][1]["metadata"]["name"]
         != proxy_pod["metadata"]["name"]
     )
+
+
+class FakeAppsApi:
+    """Minimal AppsV1Api stand-in. Records create/replace/patch and exposes
+    pre-seeded reads via ``deployments_to_read`` (FIFO; Exception items are
+    raised instead of returned, matching real client behavior)."""
+
+    def __init__(self) -> None:
+        self.patched_deployments: list[tuple[str, str, dict]] = []
+        self.created_deployments: list[tuple[str, dict]] = []
+        self.replaced_deployments: list[tuple[str, str, dict]] = []
+        self.deployments_to_read: list = []
+
+    async def read_namespaced_deployment(self, name: str, namespace: str):  # noqa: ANN201, ARG002
+        if not self.deployments_to_read:
+            raise AssertionError(
+                f"unexpected read_namespaced_deployment({name})"
+            )
+        item = self.deployments_to_read.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def create_namespaced_deployment(self, namespace: str, body: dict) -> None:
+        self.created_deployments.append((namespace, body))
+
+    async def replace_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.replaced_deployments.append((namespace, name, body))
+
+    async def patch_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.patched_deployments.append((namespace, name, body))
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_writes_configmap_and_patches_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+
+    # First reconcile: ConfigMap doesn't exist yet, Deployment exists.
+    fake_core.pods_to_read = []
+    not_found = type("NotFound", (Exception,), {})()
+    not_found.status = 404  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        backend, "_is_not_found", lambda exc: getattr(exc, "status", 0) == 404
+    )
+
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+    fake_apps.deployments_to_read = [object()]  # Deployment exists
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("auth.openai.com",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    await backend._ensure_token_broker(secrets)
+
+    # ConfigMap was created with the rendered broker YAML.
+    assert len(fake_core.created_configmaps) == 1
+    cm = fake_core.created_configmaps[0][1]
+    assert cm["metadata"]["name"] == "centaur-centaur-token-broker-config"
+    assert "credentials:" in cm["data"]["iron-token-broker.yaml"]
+    # Deployment got a config-hash annotation patch.
+    assert len(fake_apps.patched_deployments) == 1
+    _, dep_name, patch = fake_apps.patched_deployments[0]
+    assert dep_name == "centaur-centaur-token-broker"
+    annotations = patch["spec"]["template"]["metadata"]["annotations"]
+    assert "centaur.ai/config-hash" in annotations
+    assert annotations["centaur.ai/config-hash"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_skips_rollout_when_config_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.broker_config import render_broker_yaml
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("auth.openai.com",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    rendered = render_broker_yaml(secrets)
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+
+    # ConfigMap already has the exact rendered content.
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        return SimpleNamespace(data={"iron-token-broker.yaml": rendered})
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+
+    async def fake_replace_cm(name: str, namespace: str, body: dict) -> None:  # noqa: ARG001
+        raise AssertionError("ConfigMap should not be replaced when content unchanged")
+
+    monkeypatch.setattr(
+        fake_core, "replace_namespaced_config_map", fake_replace_cm, raising=False
+    )
+
+    await backend._ensure_token_broker(secrets)
+    # No rollout triggered: Deployment was never read or patched.
+    assert fake_apps.patched_deployments == []
+    assert fake_apps.deployments_to_read == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_tolerates_missing_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+    not_found = type("NotFound", (Exception,), {})()
+    not_found.status = 404  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        backend, "_is_not_found", lambda exc: getattr(exc, "status", 0) == 404
+    )
+
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+
+    async def fake_patch_deployment(name: str, namespace: str, body: dict) -> None:  # noqa: ARG001
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_apps, "patch_namespaced_deployment", fake_patch_deployment, raising=False
+    )
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("h",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://h/token",
+        ),
+    ]
+    # Should not raise — the ConfigMap is written so the broker picks up
+    # the latest config whenever helm upgrade lands.
+    await backend._ensure_token_broker(secrets)
+    assert len(fake_core.created_configmaps) == 1
+
+
+def test_proxy_iron_env_omits_broker_when_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _proxy_iron_env
+
+    monkeypatch.delenv("KUBERNETES_TOKEN_BROKER_URL", raising=False)
+    env = _proxy_iron_env("centaur-infra-env", [])
+    names = [e["name"] for e in env]
+    assert "IRON_BROKER_URL" not in names
+    assert "IRON_BROKER_TOKEN" not in names
+
+
+def test_proxy_iron_env_injects_broker_when_url_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _proxy_iron_env
+
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_URL", "http://centaur-token-broker:8181"
+    )
+    env = _proxy_iron_env("centaur-infra-env", [])
+    by_name = {e["name"]: e for e in env}
+    assert by_name["IRON_BROKER_URL"]["value"] == (
+        "http://centaur-token-broker:8181"
+    )
+    assert by_name["IRON_BROKER_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "centaur-infra-env",
+        "key": "IRON_BROKER_TOKEN",
+    }
 
 
 @pytest.mark.asyncio
@@ -690,6 +1020,37 @@ async def test_per_sandbox_proxy_uses_bootstrap_secret_for_onepassword(
         {"secretRef": {"name": "centaur-infra-env"}},
         {"secretRef": {"name": "centaur-bootstrap"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_per_sandbox_proxy_allows_onepassword_connect_egress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    fake_networking = FakeNetworkingApi()
+    backend._networking = fake_networking
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+    monkeypatch.setenv(
+        "KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE", "onepassword-connect"
+    )
+    monkeypatch.setenv("KUBERNETES_OP_CONNECT_APP_NAME", "custom-connect")
+    monkeypatch.setenv("KUBERNETES_OP_CONNECT_PORT", "8181")
+
+    await backend._create_proxy_network_policies("sandbox-pod", {})
+
+    proxy_policy = fake_networking.created_network_policies[1][1]
+    assert {
+        "to": [
+            {
+                "podSelector": {
+                    "matchLabels": {
+                        "app": "custom-connect",
+                    }
+                }
+            }
+        ],
+        "ports": [{"protocol": "TCP", "port": 8181}],
+    } in proxy_policy["spec"]["egress"]
 
 
 @pytest.mark.asyncio
@@ -948,6 +1309,214 @@ async def test_create_mounts_repo_cache_host_path(
 
 
 @pytest.mark.asyncio
+async def test_create_can_use_agent_sandbox_with_state_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesAgentSandboxBackend()
+    fake_core = FakeCoreApi()
+    fake_networking = FakeNetworkingApi()
+    fake_custom = FakeCustomObjectsApi()
+    backend._core = fake_core
+    backend._networking = fake_networking
+    backend._custom = fake_custom
+
+    monkeypatch.setenv("AGENT_API_URL", "http://api.internal:8000")
+    monkeypatch.setenv("FIREWALL_HOST", "firewall.internal")
+    monkeypatch.setenv("KUBERNETES_FIREWALL_CA_SECRET_NAME", "firewall-ca")
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_CONTROLLER", "agent-sandbox")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED", "1")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_STATE_VOLUME_SIZE", "7Gi")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_STATE_VOLUME_STORAGE_CLASS", "local-path")
+    monkeypatch.setattr(
+        "api.sandbox.kubernetes._prompt_bundle", lambda persona: "prompt"
+    )
+    monkeypatch.setattr(
+        "api.sandbox.kubernetes.container_env",
+        lambda *_args, **_kwargs: ["CENTAUR_API_URL=http://api.internal:8000"],
+    )
+    monkeypatch.setattr(
+        "api.sandbox.kubernetes.build_harness_cmd", lambda *_args: ["amp-wrapper"]
+    )
+    monkeypatch.setattr("api.sandbox.kubernetes.image", lambda: "centaur-agent:test")
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    async def fake_wait_ready(_pod_name: str) -> float:
+        return 0.01
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+    monkeypatch.setattr(backend, "_wait_pod_ready", fake_wait_ready)
+    monkeypatch.setattr(backend, "_wait_ready", fake_wait_ready)
+
+    session = await backend.create("slack:C123:123.456", "amp", "amp")
+
+    assert len(fake_core.created_pods) == 1
+    assert (
+        fake_core.created_pods[0][1]["metadata"]["labels"]["centaur.ai/iron-proxy"]
+        == "true"
+    )
+    assert len(fake_custom.created) == 1
+    group, version, namespace, plural, sandbox_body = fake_custom.created[0]
+    assert (group, version, namespace, plural) == (
+        "agents.x-k8s.io",
+        "v1alpha1",
+        "centaur-sandbox",
+        "sandboxes",
+    )
+    assert sandbox_body["metadata"]["name"] == session.sandbox_id
+    assert sandbox_body["spec"]["replicas"] == 1
+    assert sandbox_body["spec"]["shutdownPolicy"] == "Retain"
+    claim_template = sandbox_body["spec"]["volumeClaimTemplates"][0]
+    assert claim_template["metadata"]["name"] == "state"
+    assert claim_template["spec"]["resources"]["requests"]["storage"] == "7Gi"
+    assert claim_template["spec"]["storageClassName"] == "local-path"
+
+    pod_template = sandbox_body["spec"]["podTemplate"]
+    sandbox_container = pod_template["spec"]["containers"][0]
+    assert any(
+        mount["name"] == "state" and mount["mountPath"] == "/home/agent/state"
+        for mount in sandbox_container["volumeMounts"]
+    )
+    assert all(
+        volume["name"] != "state" for volume in pod_template["spec"].get("volumes", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_sandbox_pause_resume_and_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesAgentSandboxBackend()
+    fake_core = FakeCoreApi()
+    fake_networking = FakeNetworkingApi()
+    fake_custom = FakeCustomObjectsApi()
+    backend._core = fake_core
+    backend._networking = fake_networking
+    backend._custom = fake_custom
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_CONTROLLER", "agent-sandbox")
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    async def fake_wait_ready(_pod_name: str) -> float:
+        return 0.01
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+    monkeypatch.setattr(backend, "_wait_ready", fake_wait_ready)
+
+    await backend.pause_by_id("sandbox-1")
+    await backend.resume_by_id("sandbox-1")
+    await backend.stop_by_id("sandbox-1")
+
+    assert fake_custom.patched == [
+        (
+            "agents.x-k8s.io",
+            "v1alpha1",
+            "centaur-sandbox",
+            "sandboxes",
+            "sandbox-1",
+            {"spec": {"replicas": 0}},
+        ),
+        (
+            "agents.x-k8s.io",
+            "v1alpha1",
+            "centaur-sandbox",
+            "sandboxes",
+            "sandbox-1",
+            {"spec": {"replicas": 1}},
+        ),
+    ]
+    assert fake_custom.patch_kwargs == [
+        {"_content_type": "application/merge-patch+json"},
+        {"_content_type": "application/merge-patch+json"},
+    ]
+    assert fake_custom.deleted == [
+        (
+            "agents.x-k8s.io",
+            "v1alpha1",
+            "centaur-sandbox",
+            "sandboxes",
+            "sandbox-1",
+        )
+    ]
+    assert fake_core.deleted_pvcs == [("centaur-sandbox", "state-sandbox-1")]
+
+
+@pytest.mark.asyncio
+async def test_agent_sandbox_status_uses_sandbox_replicas_for_suspended_and_resuming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesAgentSandboxBackend()
+    fake_core = FakeCoreApi()
+    fake_custom = FakeCustomObjectsApi()
+    backend._core = fake_core
+    backend._custom = fake_custom
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_CONTROLLER", "agent-sandbox")
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+
+    fake_custom.objects["sandbox-1"] = {
+        "metadata": {"name": "sandbox-1"},
+        "spec": {"replicas": 0},
+    }
+    not_found = Exception("not found")
+    not_found.status = 404  # type: ignore[attr-defined]
+    fake_core.pods_to_read = [not_found]
+    assert await backend.status_by_id("sandbox-1") == "suspended"
+
+    fake_custom.objects["sandbox-1"]["spec"]["replicas"] = 1
+    deleting_pod = SimpleNamespace(
+        metadata=SimpleNamespace(deletion_timestamp="2026-05-23T14:00:00Z"),
+        status=SimpleNamespace(phase="Running", conditions=[]),
+    )
+    fake_core.pods_to_read = [deleting_pod]
+    assert await backend.status_by_id("sandbox-1") == "created"
+
+
+@pytest.mark.asyncio
+async def test_wait_ready_ignores_terminating_pod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+
+    terminating_pod = SimpleNamespace(
+        metadata=SimpleNamespace(deletion_timestamp="2026-05-23T14:00:00Z"),
+        status=SimpleNamespace(
+            phase="Running",
+            conditions=[SimpleNamespace(type="Ready", status="True")],
+        ),
+    )
+    ready_pod = SimpleNamespace(
+        metadata=SimpleNamespace(deletion_timestamp=None),
+        status=SimpleNamespace(
+            phase="Running",
+            conditions=[SimpleNamespace(type="Ready", status="True")],
+        ),
+    )
+    fake_core.pods_to_read = [terminating_pod, ready_pod]
+
+    assert await backend._wait_ready("sandbox-1") >= 0
+
+
+@pytest.mark.asyncio
 async def test_exec_run_prefixes_environment_and_collects_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1121,9 +1690,22 @@ async def _collect_stdout(
 def test_auto_configure_selects_kubernetes_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("KUBERNETES_SANDBOX_CONTROLLER", raising=False)
+
     backend = auto_configure()
 
     assert isinstance(backend, KubernetesExecutorBackend)
+    assert not isinstance(backend, KubernetesAgentSandboxBackend)
+
+
+def test_auto_configure_selects_agent_sandbox_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KUBERNETES_SANDBOX_CONTROLLER", "agent-sandbox")
+
+    backend = auto_configure()
+
+    assert isinstance(backend, KubernetesAgentSandboxBackend)
 
 
 def test_kubernetes_backend_supports_warm_pool() -> None:

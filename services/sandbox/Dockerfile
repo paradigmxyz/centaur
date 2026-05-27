@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ffmpeg ghostscript dvisvgm file \
     libssl-dev libclang-dev protobuf-compiler \
     libcairo2-dev libpango1.0-dev \
-    ripgrep fd-find jq tree tmux unzip xz-utils gettext-base \
+    ripgrep fd-find jq tree tmux unzip xz-utils gettext-base vim \
     postgresql-client libpq-dev \
     python3 python3-pip python3-venv python3-dev \
     texlive texlive-latex-base texlive-latex-extra \
@@ -26,7 +26,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python-docx==1.2.0 lxml==6.0.2 docx-revisions==0.1.4 \
     matplotlib==3.10.8 numpy==2.4.4 pandas==3.0.2 \
     python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.27.2 mammoth==1.12.0 \
-    faster-whisper
+    faster-whisper \
+    opentelemetry-proto==1.42.1
 
 # ── GitHub CLI + Node.js 24 (LTS) + Docker CLI (single layer, cached) ─────────────
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -49,6 +50,37 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 ARG CLAUDE_CODE_VERSION=2.1.143
 ARG CODEX_VERSION=0.130.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
+ARG NUSHELL_VERSION=0.112.2
+ARG KUBECTL_VERSION=v1.34.2
+
+# ── kubectl ──────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    kubectl_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo amd64 ;; \
+      arm64) echo arm64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    curl -fsSL \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${kubectl_arch}/kubectl" \
+      -o /usr/local/bin/kubectl; \
+    chmod +x /usr/local/bin/kubectl; \
+    kubectl version --client=true | grep -F "${KUBECTL_VERSION#v}"
+
+# ── Nushell ─────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    nu_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo x86_64 ;; \
+      arm64) echo aarch64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    curl -fsSL \
+      "https://github.com/nushell/nushell/releases/download/${NUSHELL_VERSION}/nu-${NUSHELL_VERSION}-${nu_arch}-unknown-linux-gnu.tar.gz" \
+      -o /tmp/nu.tar.gz; \
+    mkdir -p /tmp/nu; \
+    tar -xzf /tmp/nu.tar.gz -C /tmp/nu --strip-components=1; \
+    install -m 0755 /tmp/nu/nu /usr/local/bin/nu; \
+    rm -rf /tmp/nu /tmp/nu.tar.gz; \
+    nu --version | grep -F "${NUSHELL_VERSION}"
 
 # ── Global npm CLIs (root) ──────────────────────────────────────────────────
 RUN npm install -g --prefer-online --force \
@@ -146,6 +178,11 @@ FROM toolchain AS sandbox
 
 USER root
 RUN rm -f /etc/sudoers.d/agent
+# BuildKit's COPY --link creates parent directories without an explicit mode,
+# which can leave /etc/centaur without the execute bit for non-root users.
+# Pre-create it as 0755 so the agent user can traverse into it at runtime.
+RUN install -d -m 0755 /etc/centaur
+COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
 COPY --link --chmod=755 services/sandbox/call.sh /usr/local/bin/call
 COPY --link --chmod=755 services/sandbox/slack-upload.sh /usr/local/bin/slack-upload
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx

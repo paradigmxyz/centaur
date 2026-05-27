@@ -13,9 +13,6 @@ straight through. Layers three Centaur-specific behaviours on top:
   the ``claude`` process group.
 * ``AGENTS.md`` is appended as a system prompt so Claude receives the same
   Centaur context codex reads from the workspace.
-* OTel/Laminar exporters are configured from ``LMNR_BASE_URL`` +
-  ``CENTAUR_TRACE_ID`` so Claude turns land in the same observability
-  backend the codex wrapper feeds.
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ import subprocess
 import sys
 import threading
 from typing import Any
-from urllib.parse import quote as _urlquote
 
 APP: subprocess.Popen[str] | None = None
 WRITE_LOCK = threading.Lock()
@@ -191,74 +187,6 @@ def _resume_session_id() -> str:
     ).strip()
 
 
-def _laminar_otel_endpoint() -> str:
-    """Resolve the Laminar OTLP/traces endpoint, mirroring codex's fallback chain."""
-    endpoint = (os.environ.get("CLAUDE_OTEL_LAMINAR_ENDPOINT") or "").strip()
-    if endpoint:
-        return endpoint
-    base = (
-        os.environ.get("CLAUDE_OTEL_LAMINAR_BASE_URL")
-        or os.environ.get("CODEX_OTEL_LAMINAR_BASE_URL")
-        or os.environ.get("LMNR_BASE_URL")
-        or ""
-    ).strip()
-    if not base:
-        return ""
-    base = base.rstrip("/")
-    if base.endswith("/v1/traces"):
-        return base
-    return f"{base}/v1/traces"
-
-
-def _configure_otel() -> None:
-    """Export Centaur's Laminar config as OTel env vars before claude starts.
-
-    Claude Code reads ``OTEL_*`` at process startup; we set everything here so
-    the spawned ``claude`` exports its turns to the same backend codex feeds
-    via ``config/value/write``.
-    """
-    endpoint = _laminar_otel_endpoint()
-    if not endpoint:
-        return
-
-    trace_id = (os.environ.get("CENTAUR_TRACE_ID") or "").strip()
-    thread_key = (os.environ.get("CENTAUR_THREAD_KEY") or "").strip()
-    api_key = (os.environ.get("LMNR_PROJECT_API_KEY") or "").strip()
-    environment = (
-        os.environ.get("CLAUDE_OTEL_ENVIRONMENT")
-        or os.environ.get("CODEX_OTEL_ENVIRONMENT")
-        or os.environ.get("DEPLOY_ENV")
-        or os.environ.get("ENVIRONMENT")
-        or "dev"
-    ).strip() or "dev"
-
-    headers: list[str] = []
-    if api_key:
-        headers.append(f"Authorization=Bearer {api_key}")
-    if trace_id:
-        headers.append(f"x-trace-id={trace_id}")
-    if thread_key:
-        headers.append(f"x-centaur-thread-key={thread_key}")
-
-    os.environ["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
-    os.environ["OTEL_TRACES_EXPORTER"] = "otlp"
-    os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = endpoint
-    os.environ["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
-    if headers:
-        os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(headers)
-
-    attrs = [
-        "service.name=centaur-claude-code",
-        f"deployment.environment={environment}",
-    ]
-    if trace_id:
-        attrs.append(f"centaur.trace_id={trace_id}")
-    if thread_key:
-        # OTEL_RESOURCE_ATTRIBUTES disallows spaces/special chars in values.
-        attrs.append(f"centaur.thread_key={_urlquote(thread_key, safe='')}")
-    os.environ["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(attrs)
-
-
 def _build_claude_cmd() -> list[str]:
     cmd: list[str] = [
         "claude",
@@ -298,8 +226,6 @@ def main() -> None:
     signal.signal(signal.SIGTERM, exit_wrapper)
     signal.signal(signal.SIGINT, exit_wrapper)
     signal.signal(signal.SIGUSR1, interrupt_active_turn)
-
-    _configure_otel()
 
     APP = subprocess.Popen(
         _build_claude_cmd(),

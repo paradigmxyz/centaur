@@ -18,7 +18,7 @@
 ## Features
 
 - **Slack-native agent conversations**: mention the bot in Slack and get progress plus final answers back in the thread.
-- **Real execution environment**: each conversation runs in an isolated Kubernetes sandbox with a shell, workspace, git, Python, Node.js, Bun, and common development tools.
+- **Real execution environment**: each conversation runs in an isolated Kubernetes sandbox with a shell, workspace, git, Python, Node.js, Bun, and common development tools. For local setup, a lightweight k3s-based cluster is enough; you do not need a full production Kubernetes installation.
 - **Bring your own harness**: run CLI-based agents such as Amp, Claude Code, Codex, or deployment-specific harnesses.
 - **Shared tools**: add Python tool plugins once and make them available to every agent conversation.
 - **Durable workflows**: run jobs that can sleep, resume, wait for events, start child agents, and survive service restarts.
@@ -97,7 +97,9 @@ The main directories are:
 
 ## Getting Started
 
-Centaur runs locally on Kubernetes. The expected local checkout path is:
+Centaur runs locally on Kubernetes, but local setup does not require a full
+production Kubernetes installation. A lightweight k3s cluster on a small
+always-on host is enough. The expected local checkout path is:
 
 ```bash
 /Users/magelinskaas/paradigmxyz/centaur
@@ -146,6 +148,10 @@ just up
 ```
 
 After `just up` finishes, use Slack or the API examples in the [Developer Guide](AGENTS.md#e2e-testing-without-slack).
+
+For a more explicit path, see [Running Centaur on a Mac Mini-style setup](docs/pages/mac-mini-setup.mdx).
+It covers k3s on a small VPS, DigitalOcean droplet, Linux box, or Mac
+Mini-style host.
 
 ## Tools
 

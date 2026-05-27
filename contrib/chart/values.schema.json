@@ -126,10 +126,48 @@
         "resources": { "type": "object" }
       }
     },
+    "agentSandbox": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "namespace": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" },
+            "name": { "type": "string" }
+          }
+        },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "controller": {
+          "type": "object",
+          "properties": {
+            "extensions": { "type": "boolean" }
+          }
+        }
+      }
+    },
     "slackbot": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" }
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "subPath": { "type": "string" }
+          }
+        }
       }
     },
     "runnerAccess": {

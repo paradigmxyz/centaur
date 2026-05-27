@@ -2,8 +2,16 @@ import type { WebClient } from "@slack/web-api";
 import { centaurApiKey, type AppConfig } from "../config";
 import { slackReplyLimits } from "../constants";
 import { logError } from "../logging";
+import {
+  activeSpanAttributes,
+  clientSpanOptions,
+  injectTraceHeaders,
+  internalSpanOptions,
+  spanAttributes,
+  withSpan,
+  withTraceHeaders,
+} from "../otel";
 import { renderMarkdownBlocks } from "../slack/render";
-import { withLaminarSpan } from "./laminar";
 
 const CONSUMER_ID = `slackbot-${process.pid}`;
 const FINAL_DELIVERY_CHUNK_CHARS = slackReplyLimits.text.maxFallbackChars;
@@ -41,52 +49,78 @@ export async function pollFinalDeliveriesOnce(
   config: AppConfig,
   client: WebClient,
 ): Promise<void> {
-  const claimed = await centaur(config, "/agent/final-deliveries/claim", {
-    consumer_id: CONSUMER_ID,
-    platform: "slack",
-    limit: 5,
-    lease_seconds: 60,
-  });
+  const claimed = await withSpan(
+    "centaur.slackbot.final_delivery.claim",
+    clientSpanOptions({
+      "centaur.delivery.platform": "slack",
+      "centaur.final_delivery.limit": 5,
+    }),
+    async (span) => {
+      const result = await centaur(config, "/agent/final-deliveries/claim", {
+        consumer_id: CONSUMER_ID,
+        platform: "slack",
+        limit: 5,
+        lease_seconds: 60,
+      });
+      spanAttributes(span, {
+        "centaur.final_delivery.claimed_count": Array.isArray(result.deliveries)
+          ? result.deliveries.length
+          : 0,
+      });
+      return result;
+    },
+  );
   const deliveries = Array.isArray(claimed.deliveries)
     ? claimed.deliveries
     : [];
   for (const delivery of deliveries) {
-    await withLaminarSpan(
-      "centaur.slackbot.final_delivery",
-      delivery,
-      async () => {
-        const executionId = String(delivery.execution_id);
-        try {
-          await deliver(client, delivery);
-          await centaur(
-            config,
-            `/agent/final-deliveries/${executionId}/delivered`,
-            {
-              consumer_id: CONSUMER_ID,
-            },
-            delivery,
-          );
-        } catch (error) {
-          const errorMessage = slackDeliveryErrorMessage(error);
-          const errorClass = slackDeliveryErrorClass(error);
-          await centaur(
-            config,
-            `/agent/final-deliveries/${executionId}/failed`,
-            {
-              consumer_id: CONSUMER_ID,
-              error: errorMessage,
-              retry_after_seconds: 10,
-              ...(errorClass
-                ? { error_class: errorClass, non_retryable: true }
-                : {}),
-            },
-            delivery,
-          ).catch((failError) =>
-            logError("final_delivery_mark_failed_failed", failError),
-          );
-        }
-      },
-    );
+    const executionId = String(delivery.execution_id);
+    await withTraceHeaders(centaurTraceHeaders(delivery), async () => {
+      await withSpan(
+        "centaur.slackbot.final_delivery.deliver",
+        internalSpanOptions({
+          "centaur.execution_id": executionId,
+          "centaur.thread_key": String(delivery.thread_key ?? ""),
+          "centaur.delivery.platform": "slack",
+        }),
+        async (span) => {
+          try {
+            await deliver(client, delivery);
+            await centaur(
+              config,
+              `/agent/final-deliveries/${executionId}/delivered`,
+              {
+                consumer_id: CONSUMER_ID,
+              },
+              delivery,
+            );
+            spanAttributes(span, { "centaur.final_delivery.status": "delivered" });
+          } catch (error) {
+            const errorMessage = slackDeliveryErrorMessage(error);
+            const errorClass = slackDeliveryErrorClass(error);
+            spanAttributes(span, {
+              "centaur.final_delivery.status": "failed",
+              "centaur.final_delivery.error_class": errorClass,
+            });
+            await centaur(
+              config,
+              `/agent/final-deliveries/${executionId}/failed`,
+              {
+                consumer_id: CONSUMER_ID,
+                error: errorMessage,
+                retry_after_seconds: 10,
+                ...(errorClass
+                  ? { error_class: errorClass, non_retryable: true }
+                  : {}),
+              },
+              delivery,
+            ).catch((failError) =>
+              logError("final_delivery_mark_failed_failed", failError),
+            );
+          }
+        },
+      );
+    });
   }
 }
 
@@ -99,12 +133,17 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
   if (!channel || !threadTs) throw new Error("missing_slack_delivery_target");
   const text = extractText(payload);
   const textToPost = continuationText(payload, text) ?? text;
+  const chunks = splitFinalDeliveryText(textToPost);
+  activeSpanAttributes({
+    "centaur.final_delivery.chunk_count": chunks.length,
+    "centaur.final_delivery.text_chars": textToPost.length,
+  });
   await postFollowups(
     client,
     channel,
     threadTs,
     executionId(delivery),
-    splitFinalDeliveryText(textToPost),
+    chunks,
   );
 }
 
@@ -119,23 +158,38 @@ async function postFollowups(
   executionId: string,
   chunks: string[],
 ): Promise<void> {
-  const posted = await postedChunkIndexes(
-    client,
-    channel,
-    threadTs,
-    executionId,
+  const posted = await withSpan(
+    "centaur.slackbot.slack.conversations_replies",
+    clientSpanOptions({
+      "slack.channel_id": channel,
+      "slack.thread_ts": threadTs,
+      "centaur.execution_id": executionId,
+    }),
+    () => postedChunkIndexes(client, channel, threadTs, executionId),
   );
   for (const [index, chunk] of chunks.entries()) {
     if (posted.has(index)) continue;
-    const response = await client.chat.postMessage({
-      channel,
-      thread_ts: threadTs,
-      text: chunk,
-      blocks: renderMarkdownBlocks(chunk),
-      unfurl_links: false,
-      unfurl_media: false,
-      metadata: chunkMetadata(executionId, index, chunks.length),
-    });
+    const response = await withSpan(
+      "centaur.slackbot.slack.post_message",
+      clientSpanOptions({
+        "slack.channel_id": channel,
+        "slack.thread_ts": threadTs,
+        "centaur.execution_id": executionId,
+        "centaur.final_delivery.chunk_index": index,
+        "centaur.final_delivery.chunk_count": chunks.length,
+        "centaur.final_delivery.chunk_chars": chunk.length,
+      }),
+      () =>
+        client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: chunk,
+          blocks: renderMarkdownBlocks(chunk),
+          unfurl_links: false,
+          unfurl_media: false,
+          metadata: chunkMetadata(executionId, index, chunks.length),
+        }),
+    );
     if (!response.ok)
       throw new Error(response.error ?? "chat.postMessage failed");
   }
@@ -292,7 +346,10 @@ async function centaur(
   trace?: any,
 ): Promise<any> {
   const apiKey = centaurApiKey(config);
-  const traceHeaders = centaurTraceHeaders(trace);
+  const traceHeaders = {
+    ...centaurTraceHeaders(trace),
+    ...injectTraceHeaders(centaurTraceHeaders(trace)),
+  };
   const response = await fetch(new URL(path, config.CENTAUR_API_URL), {
     method: "POST",
     headers: {
@@ -301,6 +358,10 @@ async function centaur(
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
     body: JSON.stringify(body),
+  });
+  activeSpanAttributes({
+    "http.response.status_code": response.status,
+    "centaur.api.path": path,
   });
   const text = await response.text();
   const parsed: any = text ? JSON.parse(text) : {};

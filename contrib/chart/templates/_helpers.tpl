@@ -101,16 +101,6 @@ centaur-api-proxy
 {{- include "centaur.firewallProxyHost" . -}}
 {{- end -}}
 
-{{- define "centaur.laminarNoProxyHosts" -}}
-{{- if .Values.laminar.enabled -}}
-{{- printf ",%s,%s,%s,%s,%s,%s" (include "centaur.componentName" (dict "root" . "component" "laminar-app-server")) (include "centaur.componentName" (dict "root" . "component" "laminar-frontend")) (include "centaur.componentName" (dict "root" . "component" "laminar-postgres")) (include "centaur.componentName" (dict "root" . "component" "laminar-clickhouse")) (include "centaur.componentName" (dict "root" . "component" "laminar-query-engine")) (include "centaur.componentName" (dict "root" . "component" "laminar-quickwit")) -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "centaur.laminarBaseUrl" -}}
-{{- printf "http://%s" (include "centaur.componentName" (dict "root" . "component" "laminar-app-server")) -}}
-{{- end -}}
-
 {{- /*
 The upstream 1Password Connect subchart names its Service after
 `connect.applicationName` (default `onepassword-connect`) and exposes the
@@ -131,4 +121,22 @@ namespace as this release, so a short DNS name is enough.
 
 {{- define "centaur.onepasswordConnectUrl" -}}
 {{- printf "http://%s:%v" (include "centaur.onepasswordConnectHost" .) (include "centaur.onepasswordConnectPort" .) -}}
+{{- end -}}
+
+{{- /*
+iron-token-broker — owns OAuth refresh-token state for credentials whose IdP
+rotates refresh tokens with strict reuse detection (OpenAI Codex, Anthropic
+Claude Code OAuth). One process, ClusterIP service, config rendered from
+registered refresh_token OAuthTokenSecrets by the API server at startup.
+*/ -}}
+{{- define "centaur.tokenBrokerName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "token-broker") -}}
+{{- end -}}
+
+{{- define "centaur.tokenBrokerHost" -}}
+{{- include "centaur.tokenBrokerName" . -}}
+{{- end -}}
+
+{{- define "centaur.tokenBrokerUrl" -}}
+{{- printf "http://%s:%v" (include "centaur.tokenBrokerHost" .) .Values.tokenBroker.service.httpPort -}}
 {{- end -}}

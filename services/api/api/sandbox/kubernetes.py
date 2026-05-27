@@ -28,6 +28,7 @@ from kubernetes_asyncio.stream.ws_client import (
 )
 import structlog
 
+from api.broker_config import render_broker_yaml
 from api.proxy_config import (
     assign_pg_listen_ports,
     render_proxy_yaml,
@@ -53,8 +54,12 @@ _SANDBOX_OVERLAY_DIR = f"{_SANDBOX_OVERLAY_ROOT}/org"
 _PROXY_LABEL = "centaur.ai/iron-proxy"
 _API_PROXY_POD_NAME = "centaur-api-proxy"
 _API_PROXY_SANDBOX_ID = "api"
-
-
+# iron-token-broker resource names. The chart provisions the matching Service
+# + NetworkPolicies under the same name; ensure_token_broker() applies the
+# Deployment + ConfigMap so the broker config can be regenerated without a
+# Helm upgrade. The label keeps the chart-side NetworkPolicy selector
+# wired up.
+_TOKEN_BROKER_LABEL = "centaur.ai/iron-token-broker"
 def _get_rt(session: SandboxSession):
     return runtime_for_session(session)
 
@@ -100,6 +105,11 @@ def _service_account_name() -> str | None:
     return value or None
 
 
+def _state_volume_enabled() -> bool:
+    value = (os.getenv("KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _env_int(name: str, default: int) -> int:
     raw = (os.getenv(name) or "").strip()
     return int(raw) if raw else default
@@ -117,8 +127,48 @@ def _proxy_health_port() -> int:
     return _env_int("KUBERNETES_IRON_PROXY_HEALTH_PORT", 9090)
 
 
+def _op_connect_app_name() -> str:
+    return os.getenv("KUBERNETES_OP_CONNECT_APP_NAME", "onepassword-connect").strip()
+
+
+def _op_connect_port() -> int:
+    return _env_int("KUBERNETES_OP_CONNECT_PORT", 8080)
+
+
+def _uses_op_connect_secret_source() -> bool:
+    return (
+        os.getenv("KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+        == "onepassword-connect"
+    )
+
+
 def _proxy_image() -> str:
     return os.getenv("KUBERNETES_IRON_PROXY_IMAGE", "centaur-iron-proxy:latest")
+
+
+def _token_broker_name() -> str:
+    return (os.getenv("KUBERNETES_TOKEN_BROKER_NAME") or "").strip()
+
+
+def _token_broker_url() -> str:
+    return (os.getenv("KUBERNETES_TOKEN_BROKER_URL") or "").strip()
+
+
+def _token_broker_enabled() -> bool:
+    """Whether the iron-token-broker is deployed in this cluster.
+
+    Gated on the chart-set ``KUBERNETES_TOKEN_BROKER_URL`` (present only when
+    ``tokenBroker.enabled=true``). Routing through the broker is opt-in per
+    secret via the ``brokered_token`` type; this flag just controls whether
+    iron-proxy receives broker env and whether the API reconciles the broker
+    ConfigMap.
+    """
+    return bool(_token_broker_url())
+
+
+def _token_broker_configmap_name() -> str:
+    name = _token_broker_name()
+    return f"{name}-config" if name else ""
 
 
 def _proxy_image_pull_policy() -> str:
@@ -164,10 +214,7 @@ def _proxy_iron_env(
             },
         }
     ]
-    if (
-        os.getenv("KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
-        == "onepassword-connect"
-    ):
+    if _uses_op_connect_secret_source():
         connect_host = os.getenv("KUBERNETES_OP_CONNECT_HOST", "").strip()
         if connect_host:
             env.append({"name": "OP_CONNECT_HOST", "value": connect_host})
@@ -178,6 +225,23 @@ def _proxy_iron_env(
                     "secretKeyRef": {
                         "name": secret_name,
                         "key": _secret_env_key("OP_CONNECT_TOKEN"),
+                    }
+                },
+            }
+        )
+    broker_url = _token_broker_url()
+    if broker_url:
+        env.append({"name": "IRON_BROKER_URL", "value": broker_url})
+        # The broker's bearer token lives alongside other infra secrets in
+        # the centaur-infra-env Secret. Mirror IRON_MANAGEMENT_API_KEY's
+        # shape so the operator only needs to bootstrap one secret manifest.
+        env.append(
+            {
+                "name": "IRON_BROKER_TOKEN",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": secret_name,
+                        "key": _secret_env_key("IRON_BROKER_TOKEN"),
                     }
                 },
             }
@@ -542,6 +606,26 @@ class KubernetesExecutorBackend(SandboxBackend):
             if pod_name:
                 await self._delete_pod(pod_name)
 
+    def _configure_workload_volumes(
+        self,
+        volume_mounts: list[dict[str, Any]],
+        volumes: list[dict[str, Any]],
+    ) -> None:
+        if _state_volume_enabled():
+            raise ValueError(
+                "KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED requires "
+                "KUBERNETES_SANDBOX_CONTROLLER=agent-sandbox"
+            )
+
+    async def _delete_existing_workload(self, pod_name: str) -> None:
+        await self._delete_pod(pod_name)
+
+    async def _create_workload(self, pod_spec: dict[str, Any]) -> None:
+        await self._core_api().create_namespaced_pod(_namespace(), pod_spec)
+
+    async def _cleanup_workload_after_create_error(self, pod_name: str) -> None:
+        await self._delete_pod(pod_name)
+
     def _collect_secrets(self) -> list[SecretDef]:
         from api.app import get_tool_manager
 
@@ -668,6 +752,32 @@ class KubernetesExecutorBackend(SandboxBackend):
         for _, port in sorted(pg_listen_ports.items(), key=lambda item: item[1]):
             sandbox_to_proxy_ports.append({"protocol": "TCP", "port": port})
 
+        proxy_egress = [
+            {
+                "to": [{"podSelector": {"matchLabels": _api_pod_match_labels()}}],
+                "ports": [{"protocol": "TCP", "port": 8000}],
+            },
+            {
+                "ports": [{"protocol": "TCP", "port": 443}],
+            },
+            {
+                "ports": [{"protocol": "TCP", "port": 5432}],
+            },
+        ]
+        if _uses_op_connect_secret_source():
+            proxy_egress.append(
+                {
+                    "to": [
+                        {
+                            "podSelector": {
+                                "matchLabels": {"app": _op_connect_app_name()}
+                            }
+                        }
+                    ],
+                    "ports": [{"protocol": "TCP", "port": _op_connect_port()}],
+                }
+            )
+
         await self._networking_api().create_namespaced_network_policy(
             _namespace(),
             {
@@ -749,24 +859,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                             "ports": sandbox_to_proxy_ports,
                         }
                     ],
-                    "egress": [
-                        {
-                            "to": [
-                                {
-                                    "podSelector": {
-                                        "matchLabels": _api_pod_match_labels()
-                                    }
-                                }
-                            ],
-                            "ports": [{"protocol": "TCP", "port": 8000}],
-                        },
-                        {
-                            "ports": [{"protocol": "TCP", "port": 443}],
-                        },
-                        {
-                            "ports": [{"protocol": "TCP", "port": 5432}],
-                        },
-                    ],
+                    "egress": proxy_egress,
                 },
             },
         )
@@ -979,7 +1072,19 @@ class KubernetesExecutorBackend(SandboxBackend):
     async def _wait_ready(self, pod_name: str) -> float:
         deadline = time.monotonic() + _READY_TIMEOUT_S
         while time.monotonic() < deadline:
-            pod = await self._core_api().read_namespaced_pod(pod_name, _namespace())
+            try:
+                pod = await self._core_api().read_namespaced_pod(pod_name, _namespace())
+            except Exception as exc:
+                if self._is_not_found(exc):
+                    await asyncio.sleep(0.5)
+                    continue
+                raise
+            if (
+                getattr(getattr(pod, "metadata", None), "deletion_timestamp", None)
+                is not None
+            ):
+                await asyncio.sleep(0.5)
+                continue
             phase = (pod.status.phase or "").lower()
             if phase in {"failed", "succeeded"}:
                 raise RuntimeError(f"sandbox pod exited before ready (phase={phase})")
@@ -1161,6 +1266,8 @@ class KubernetesExecutorBackend(SandboxBackend):
                 }
             )
 
+        self._configure_workload_volumes(volume_mounts, volumes)
+
         cmd = build_harness_cmd(engine, model)
 
         pod_spec: dict[str, Any] = {
@@ -1221,7 +1328,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         if service_account_name:
             pod_spec["spec"]["serviceAccountName"] = service_account_name
 
-        await self._delete_pod(pod_name)
+        await self._delete_existing_workload(pod_name)
         await self._delete_proxy_resources(pod_name)
         try:
             await self._create_prompt_secret(secret_name, persona)
@@ -1232,7 +1339,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                 pod_name, pg_secrets, pg_listen_ports
             )
             await self._wait_pod_ready(proxy_pod_name)
-            await self._core_api().create_namespaced_pod(_namespace(), pod_spec)
+            await self._create_workload(pod_spec)
             await self._wait_ready(pod_name)
         except BaseException:
             # Catch BaseException so asyncio.CancelledError (e.g. from
@@ -1240,7 +1347,7 @@ class KubernetesExecutorBackend(SandboxBackend):
             # otherwise the partially created pod, proxy pod, service,
             # network policies, and prompt secret leak.
             with contextlib.suppress(Exception):
-                await self._delete_pod(pod_name)
+                await self._cleanup_workload_after_create_error(pod_name)
             with contextlib.suppress(Exception):
                 await self._delete_proxy_resources(pod_name)
             with contextlib.suppress(Exception):
@@ -1604,6 +1711,11 @@ class KubernetesExecutorBackend(SandboxBackend):
             rendered,
         )
         await self._create_proxy_service(_API_PROXY_SANDBOX_ID, pg_listen_ports)
+        # Reconcile the iron-token-broker BEFORE the proxy rollout so the
+        # proxy pods don't briefly point at a broker whose config hasn't
+        # caught up with the latest refresh-token secret set.
+        if _token_broker_enabled():
+            await self._ensure_token_broker(secrets)
         await self._apply_api_proxy_deployment(pg_secrets, pg_listen_ports, config_hash)
         await self._wait_deployment_ready(_proxy_pod_name(_API_PROXY_SANDBOX_ID))
         log.info(
@@ -1612,6 +1724,103 @@ class KubernetesExecutorBackend(SandboxBackend):
             config_hash=config_hash,
             pg_secrets=[s.name for s, _ in pg_secrets],
         )
+
+    async def _ensure_token_broker(self, secrets: list[SecretDef]) -> None:
+        """Reconcile the iron-token-broker ConfigMap and trigger a rollout.
+
+        The chart owns the broker Deployment, Service, and NetworkPolicies;
+        the API only writes the ConfigMap content (one credentials[] entry
+        per registered ``BrokeredTokenSecret``). When the rendered content
+        changes, patch the chart-managed Deployment's pod-template with a
+        fresh ``centaur.ai/config-hash`` annotation so kubectl rolls it out
+        — same effect as ``kubectl rollout restart`` but idempotent on no-op
+        reconciles.
+        """
+        name = _token_broker_name()
+        if not name:
+            raise ValueError(
+                "iron-token-broker reconcile requires "
+                "KUBERNETES_TOKEN_BROKER_NAME to be set"
+            )
+        rendered = render_broker_yaml(secrets)
+        config_hash = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+        changed = await self._apply_token_broker_configmap(rendered)
+        if changed:
+            await self._patch_token_broker_config_hash(config_hash)
+        log.info(
+            "token_broker_reconciled",
+            deployment=name,
+            config_hash=config_hash,
+            rollout_triggered=changed,
+        )
+
+    async def _apply_token_broker_configmap(self, rendered: str) -> bool:
+        """Create or replace the broker ConfigMap; return True if content changed."""
+        name = _token_broker_configmap_name()
+        labels = {
+            _TOKEN_BROKER_LABEL: "true",
+            "app.kubernetes.io/component": "token-broker",
+        }
+        body = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": name, "labels": labels},
+            "data": {"iron-token-broker.yaml": rendered},
+        }
+        try:
+            existing = await self._core_api().read_namespaced_config_map(
+                name, _namespace()
+            )
+        except Exception as exc:
+            if not self._is_not_found(exc):
+                raise
+            await self._core_api().create_namespaced_config_map(_namespace(), body)
+            return True
+        existing_data = (existing.data or {}).get("iron-token-broker.yaml")
+        if existing_data == rendered:
+            return False
+        await self._core_api().replace_namespaced_config_map(name, _namespace(), body)
+        return True
+
+    async def _patch_token_broker_config_hash(self, config_hash: str) -> None:
+        """Bump the pod-template config-hash annotation to trigger a rollout.
+
+        The chart-managed Deployment uses ``Recreate`` strategy, so this
+        terminates the running broker, k8s rolls a fresh pod that re-reads
+        the updated ConfigMap. Matches the kubectl ``rollout restart``
+        annotation contract (``kubectl.kubernetes.io/restartedAt``) plus
+        our own hash for traceability.
+        """
+        name = _token_broker_name()
+        patch = {
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "centaur.ai/config-hash": config_hash,
+                        }
+                    }
+                }
+            }
+        }
+        try:
+            await self._apps_api().patch_namespaced_deployment(
+                name, _namespace(), patch
+            )
+        except Exception as exc:
+            if self._is_not_found(exc):
+                # The chart hasn't rolled out the broker Deployment yet (or
+                # tokenBroker.enabled was just flipped on but helm upgrade
+                # hasn't run). Log and move on — the ConfigMap is in place,
+                # so when the Deployment appears it will pick up the latest
+                # rendered config on first start.
+                log.warning(
+                    "token_broker_deployment_not_found",
+                    deployment=name,
+                    hint="run `helm upgrade` to create the broker Deployment",
+                )
+                return
+            raise
 
     async def _apply_proxy_configmap_data(
         self, name: str, sandbox_id: str, rendered: str

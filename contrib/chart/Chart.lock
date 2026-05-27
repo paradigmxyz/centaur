@@ -2,5 +2,8 @@ dependencies:
 - name: connect
   repository: https://1password.github.io/connect-helm-charts
   version: 2.4.1
-digest: sha256:d77b0cc806ebf6c61fe9dd45f7e29717493589ac611d198d79e4e63f40aa39ac
-generated: "2026-05-12T12:48:48.525819-06:00"
+- name: agent-sandbox
+  repository: file://charts/agent-sandbox
+  version: 0.1.0
+digest: sha256:0e9f0aac94b5d72367ccf7e8259b50685595b11aba7d656b6c09b8f1fae4e15c
+generated: "2026-05-23T17:05:36.099275+02:00"

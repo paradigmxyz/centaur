@@ -122,17 +122,21 @@ describe('Slack event HTTP dedupe', () => {
       expect(await first.json()).toEqual({ ok: true })
       expect(second.status).toBe(200)
       expect(await second.json()).toEqual({ ok: true, duplicate: true })
-      expect(console.warn).toHaveBeenCalledWith('slack_duplicate_event_skipped', {
-        dedupe_key: 'event:Ev-duplicate',
-        event_id: 'Ev-duplicate',
-        team_id: 'T123',
-        channel_id: 'C123',
-        message_ts: '1778883099.579529',
-        thread_ts: '1778883099.579529',
-        event_type: 'app_mention',
-        codex_thread_id: undefined,
-        alert_channel_id: undefined
-      })
+      expect(console.warn).toHaveBeenCalledWith(
+        'slack_duplicate_event_skipped',
+        expect.objectContaining({
+          dedupe_key: 'event:Ev-duplicate',
+          event_id: 'Ev-duplicate',
+          team_id: 'T123',
+          channel_id: 'C123',
+          message_ts: '1778883099.579529',
+          thread_ts: '1778883099.579529',
+          event_type: 'app_mention',
+          codex_thread_id: undefined,
+          alert_channel_id: undefined,
+          log_version_uuid: '7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14'
+        })
+      )
       expect(waits).toHaveLength(1)
       await Promise.allSettled(waits)
     } finally {
@@ -190,17 +194,21 @@ describe('Slack event HTTP dedupe', () => {
 
       expect(second.status).toBe(200)
       expect(await second.json()).toEqual({ ok: true, duplicate: true })
-      expect(console.warn).toHaveBeenCalledWith('slack_duplicate_message_skipped', {
-        dedupe_key: 'message:T123:C123:1778883099.579530',
-        event_id: undefined,
-        team_id: 'T123',
-        channel_id: 'C123',
-        message_ts: '1778883099.579530',
-        thread_ts: '1778883099.579530',
-        event_type: 'message',
-        codex_thread_id: 'T-019e28c1-08bb-777d-9a2e-74a393296b28',
-        alert_channel_id: undefined
-      })
+      expect(console.warn).toHaveBeenCalledWith(
+        'slack_duplicate_message_skipped',
+        expect.objectContaining({
+          dedupe_key: 'message:T123:C123:1778883099.579530',
+          event_id: undefined,
+          team_id: 'T123',
+          channel_id: 'C123',
+          message_ts: '1778883099.579530',
+          thread_ts: '1778883099.579530',
+          event_type: 'message',
+          codex_thread_id: 'T-019e28c1-08bb-777d-9a2e-74a393296b28',
+          alert_channel_id: undefined,
+          log_version_uuid: '7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14'
+        })
+      )
       expect(waits).toHaveLength(1)
       await Promise.allSettled(waits)
     } finally {

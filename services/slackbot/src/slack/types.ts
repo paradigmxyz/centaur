@@ -44,6 +44,9 @@ export type NormalizedSlackEvent = {
     enterprise_id?: string
     user_team?: string
     source_team?: string
+    bot_id?: string
+    app_id?: string
+    bot_user_id?: string
   }
 }
 

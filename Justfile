@@ -2,6 +2,7 @@ set dotenv-load := true
 
 namespace := env_var_or_default("CENTAUR_NAMESPACE", "centaur")
 release := env_var_or_default("CENTAUR_RELEASE", "centaur")
+source := env_var_or_default("CENTAUR_IMAGE_SOURCE", "local")
 chart := "contrib/chart"
 dev_values := "contrib/chart/values.dev.yaml"
 
@@ -63,18 +64,41 @@ deploy:
     set -euo pipefail
     helm dependency update {{chart}} >/dev/null
     extra_args=()
+    case "{{source}}" in
+      local) ;;
+      ghcr)
+        extra_args+=(
+          --set api.image.repository=ghcr.io/paradigmxyz/centaur-api
+          --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur-iron-proxy
+          --set slackbot.image.repository=ghcr.io/paradigmxyz/centaur-slackbot
+          --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur-agent
+        )
+        ;;
+      *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
+    esac
     if [[ -n "${OP_CONNECT_CREDENTIALS_FILE:-}" ]]; then
       extra_args+=(
         --set ironProxy.secretSource=onepassword-connect
         --set onepasswordConnect.connect.create=true
       )
     fi
+    if [[ -n "${CODEX_AUTH_MODE:-}" ]]; then
+      extra_args+=(
+        --set sandbox.extraEnv.CODEX_AUTH_MODE=${CODEX_AUTH_MODE}
+      )
+    fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
 up:
+    #!/usr/bin/env bash
+    set -euo pipefail
     just bootstrap-secrets
-    just build
-    just deploy
+    case "{{source}}" in
+      local) just build ;;
+      ghcr) ;;
+      *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
+    esac
+    just source={{source}} deploy
 
 down:
     kubectl delete namespace {{namespace}} --ignore-not-found --wait

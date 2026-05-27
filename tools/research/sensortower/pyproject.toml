@@ -16,4 +16,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "SENSORTOWER_AUTH_TOKEN", match_query = true, hosts = ["api.sensortower.com"]}]
+secrets = [{type = "http", name = "SENSOR_TOWER_AUTH_TOKEN", match_query = true, hosts = ["api.sensortower.com", "app.sensortower.com"]}]

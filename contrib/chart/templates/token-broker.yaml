@@ -1,0 +1,195 @@
+{{- if .Values.tokenBroker.enabled }}
+# iron-token-broker — owns the OAuth refresh-token state machine for any
+# OAuthTokenSecret with grant=refresh_token. Single-writer process; the API
+# reconciles the ConfigMap content (one credentials[] entry per registered
+# refresh-token secret) at startup and triggers a rolling restart via a pod
+# annotation when the rendered content changes. The chart owns the Deployment
+# shape (image, ports, env, security context) so operators tune those via
+# `helm upgrade` without needing to bounce the API.
+{{- $brokerConfigName := printf "%s-config" (include "centaur.tokenBrokerName" .) -}}
+{{- $existingConfig := lookup "v1" "ConfigMap" .Release.Namespace $brokerConfigName -}}
+{{- if not $existingConfig }}
+# Empty-but-valid bootstrap ConfigMap so the broker Pod can start on initial
+# install before the API has reconciled. The API replaces this on first
+# startup; from then on the `lookup` above keeps Helm from clobbering its
+# content on subsequent `helm upgrade` runs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $brokerConfigName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+data:
+  iron-token-broker.yaml: |
+    listen: ":{{ .Values.tokenBroker.service.httpPort }}"
+    metrics_listen: ":{{ .Values.tokenBroker.service.metricsPort }}"
+    bearer_auth_env: IRON_BROKER_TOKEN
+    log:
+      level: info
+      format: json
+    credentials: []
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.tokenBrokerName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.tokenBroker.service.httpPort }}
+      targetPort: {{ .Values.tokenBroker.service.httpPort }}
+    - name: metrics
+      port: {{ .Values.tokenBroker.service.metricsPort }}
+      targetPort: {{ .Values.tokenBroker.service.metricsPort }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.tokenBrokerName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+spec:
+  replicas: 1
+  # Strict Recreate honors the broker's "single writer per credential id"
+  # rule across rollouts. A brief gap is fine — iron-proxy caches the
+  # access tokens.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: iron-token-broker
+          image: {{ printf "%s:%s" .Values.tokenBroker.image.repository .Values.tokenBroker.image.tag | quote }}
+          imagePullPolicy: {{ .Values.tokenBroker.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/iron-token-broker/iron-token-broker.yaml"
+          env:
+            - name: IRON_BROKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_BROKER_TOKEN" .Values.secretManager.envPrefix }}
+{{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
+            - name: OP_CONNECT_HOST
+              value: {{ include "centaur.onepasswordConnectUrl" . | quote }}
+            - name: OP_CONNECT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sOP_CONNECT_TOKEN" .Values.secretManager.envPrefix }}
+{{- else if eq .Values.ironProxy.secretSource "onepassword" }}
+            - name: OP_SERVICE_ACCOUNT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sOP_SERVICE_ACCOUNT_TOKEN" .Values.secretManager.envPrefix }}
+{{- end }}
+          ports:
+            - containerPort: {{ .Values.tokenBroker.service.httpPort }}
+              name: http
+            - containerPort: {{ .Values.tokenBroker.service.metricsPort }}
+              name: metrics
+          volumeMounts:
+            - name: config
+              mountPath: /etc/iron-token-broker
+              readOnly: true
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.tokenBroker.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            # The API process creates this ConfigMap at startup with one
+            # credentials[] entry per registered refresh-token OAuthTokenSecret.
+            # Until then the pod stays Pending — that's intentional: an empty
+            # broker is useless, and ordering resolves itself once the API
+            # reconciles.
+            name: {{ include "centaur.tokenBrokerName" . }}-config
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.tokenBrokerName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only iron-proxy fleet members may fetch access tokens.
+    - from:
+        - podSelector:
+            matchLabels:
+              centaur.ai/iron-proxy: "true"
+      ports:
+        - protocol: TCP
+          port: {{ .Values.tokenBroker.service.httpPort }}
+  egress:
+    # Outbound HTTPS to the IdP token endpoint and the secret backend
+    # (1Password Connect inside-cluster, or my.1password.com over the
+    # internet for the SDK).
+    - ports:
+        - protocol: TCP
+          port: 443
+{{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "centaur.onepasswordConnectAppName" . | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ include "centaur.onepasswordConnectPort" . }}
+{{- end }}
+---
+# Let iron-proxy pods reach the broker. The default-deny policy in this
+# chart denies all egress; the existing api-proxy NetworkPolicy allows port
+# 443 generically, but the broker speaks on a custom port, so we open an
+# explicit hop.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "iron-proxy-to-broker") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/iron-proxy: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.tokenBroker.service.httpPort }}
+{{- end }}
+{{- end }}

@@ -28,7 +28,13 @@ from fastapi.responses import PlainTextResponse
 from toon_format import encode as toon_encode
 
 from api.api_keys import check_scope
-from api.laminar_tracing import set_span_attributes, start_span
+from api.otel import (
+    context_from_serialized,
+    mark_error,
+    record_exception,
+    set_span_attributes,
+    start_span,
+)
 from api.vm_metrics import record_tool_call
 from api.deps import get_key_info, get_sandbox_claims, verify_api_key
 from api import slackbot_client
@@ -212,6 +218,34 @@ class OAuthTokenSecret:
 
 
 @dataclass(frozen=True)
+class BrokeredTokenSecret:
+    """OAuth2 access token minted by iron-token-broker.
+
+    Same shape as ``OAuthTokenSecret`` minus ``grant`` and ``audience`` and
+    minus ``json_key`` on field sources: the broker only handles the
+    refresh-token rotation grant, and its store reads/writes a single JSON
+    credential blob as a whole document. Use this type when the upstream IdP
+    rotates refresh tokens with strict reuse detection (OpenAI Codex,
+    Anthropic Claude Code OAuth, modern Okta / Auth0 / Entra ID); the broker
+    serializes refresh attempts so multiple iron-proxy instances can share the
+    credential without invalidating the token family.
+
+    ``fields`` requires ``client_id`` and ``refresh_token``; ``client_secret``
+    is optional. Each field's value is the secret_ref the broker reads or
+    writes through its configured store: ``client_id`` / ``client_secret`` are
+    read-only credentials; ``refresh_token`` names the writable credential
+    blob the broker rewrites on every rotation.
+    """
+
+    name: str
+    hosts: tuple[str, ...]
+    fields: tuple[tuple[str, OAuthFieldSource], ...]
+    scopes: tuple[str, ...] = ()
+    token_endpoint: str | None = None
+    token_endpoint_headers: tuple[tuple[str, OAuthFieldSource], ...] = ()
+
+
+@dataclass(frozen=True)
 class HmacHeader:
     """One header injected by iron-proxy's ``hmac_sign`` transform.
 
@@ -257,7 +291,24 @@ class HmacSignSecret:
 
 
 SecretDef = (
-    HttpSecret | GcpAuthSecret | PgDsnSecret | OAuthTokenSecret | HmacSignSecret
+    HttpSecret
+    | GcpAuthSecret
+    | PgDsnSecret
+    | OAuthTokenSecret
+    | BrokeredTokenSecret
+    | HmacSignSecret
+)
+
+
+# brokered_token credential fields. Only the refresh-token rotation grant is
+# supported (the broker doesn't speak the other OAuth2 grants), so this is a
+# single tuple instead of the per-grant table the oauth_token transform uses.
+_BROKERED_TOKEN_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {"client_id", "refresh_token"}
+)
+_BROKERED_TOKEN_OPTIONAL_FIELDS: frozenset[str] = frozenset({"client_secret"})
+_BROKERED_TOKEN_FIELDS: frozenset[str] = (
+    _BROKERED_TOKEN_REQUIRED_FIELDS | _BROKERED_TOKEN_OPTIONAL_FIELDS
 )
 
 # Per-grant credential fields: grant -> (required, optional). Field names are
@@ -353,6 +404,121 @@ def _parse_oauth_fields(
         raise ValueError(
             f"oauth_token entry {secret_name!r} grant {grant!r} requires "
             f"fields {sorted(missing)}"
+        )
+    return tuple(sorted(parsed.items()))
+
+
+def _parse_brokered_field_source(
+    secret_name: str,
+    field_name: str,
+    raw: Any,
+    *,
+    allow_json_key: bool,
+) -> OAuthFieldSource:
+    """Parse one ``fields`` entry for a ``brokered_token`` secret.
+
+    Read-side fields (``client_id``, ``client_secret``, and entries under
+    ``token_endpoint_headers``) accept ``json_key`` so an operator can keep a
+    single JSON document in their store and pluck individual values out — the
+    same affordance the ``oauth_token`` transform offers. The store field
+    (``refresh_token``) rejects ``json_key``: the broker reads and rewrites
+    that ref as a whole JSON document, so a key path doesn't apply.
+    """
+    if isinstance(raw, str):
+        if not raw:
+            raise ValueError(
+                f"brokered_token entry {secret_name!r} field {field_name!r} "
+                f"'secret_ref' must be a non-empty string"
+            )
+        return OAuthFieldSource(secret_ref=raw)
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} must be a "
+            f"string or table"
+        )
+    ref = raw.get("secret_ref")
+    if not isinstance(ref, str) or not ref:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} requires a "
+            f"non-empty 'secret_ref'"
+        )
+    json_key = raw.get("json_key")
+    if json_key is None:
+        return OAuthFieldSource(secret_ref=ref)
+    if not allow_json_key:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} does not "
+            f"support 'json_key'; the broker rewrites the whole credential blob"
+        )
+    if not isinstance(json_key, str) or not json_key:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} field {field_name!r} 'json_key' "
+            f"must be a non-empty string"
+        )
+    return OAuthFieldSource(secret_ref=ref, json_key=json_key)
+
+
+# The store field (where the broker writes the rotated blob) cannot pull out
+# a sub-key — its writes target the whole document.
+_BROKERED_STORE_FIELD = "refresh_token"
+
+
+def _parse_brokered_fields(
+    secret_name: str, raw_fields: Any
+) -> tuple[tuple[str, OAuthFieldSource], ...]:
+    """Parse and validate the ``fields`` table for a ``brokered_token`` entry."""
+    if not isinstance(raw_fields, dict) or not raw_fields:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} 'fields' must be a non-empty table"
+        )
+    parsed: dict[str, OAuthFieldSource] = {}
+    for field_name, raw in raw_fields.items():
+        if field_name not in _BROKERED_TOKEN_FIELDS:
+            raise ValueError(
+                f"brokered_token entry {secret_name!r} field {field_name!r} is not "
+                f"valid; allowed: {sorted(_BROKERED_TOKEN_FIELDS)}"
+            )
+        parsed[field_name] = _parse_brokered_field_source(
+            secret_name,
+            field_name,
+            raw,
+            allow_json_key=field_name != _BROKERED_STORE_FIELD,
+        )
+    missing = _BROKERED_TOKEN_REQUIRED_FIELDS - parsed.keys()
+    if missing:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} requires fields {sorted(missing)}"
+        )
+    return tuple(sorted(parsed.items()))
+
+
+def _parse_brokered_token_endpoint_headers(
+    secret_name: str, raw: Any
+) -> tuple[tuple[str, OAuthFieldSource], ...]:
+    """Parse ``token_endpoint_headers`` for a ``brokered_token`` entry.
+
+    These are read-only header values, so ``json_key`` is allowed — same as
+    the read-side fields above.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(
+            f"brokered_token entry {secret_name!r} 'token_endpoint_headers' must "
+            f"be a non-empty table"
+        )
+    parsed: dict[str, OAuthFieldSource] = {}
+    for header_name, value in raw.items():
+        if not isinstance(header_name, str) or not header_name:
+            raise ValueError(
+                f"brokered_token entry {secret_name!r} 'token_endpoint_headers' "
+                f"keys must be non-empty header names"
+            )
+        parsed[header_name] = _parse_brokered_field_source(
+            secret_name,
+            f"token_endpoint_headers.{header_name}",
+            value,
+            allow_json_key=True,
         )
     return tuple(sorted(parsed.items()))
 
@@ -756,6 +922,45 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
             token_endpoint_headers=token_endpoint_headers,
             audience=audience,
         )
+    if secret_type == "brokered_token":
+        hosts = entry.get("hosts", [])
+        if (
+            not isinstance(hosts, list)
+            or not hosts
+            or not all(isinstance(h, str) and h for h in hosts)
+        ):
+            raise ValueError(
+                f"brokered_token entry {name!r} 'hosts' must be a non-empty "
+                f"array of non-empty strings"
+            )
+        scopes = entry.get("scopes", [])
+        if not isinstance(scopes, list) or not all(
+            isinstance(s, str) and s for s in scopes
+        ):
+            raise ValueError(
+                f"brokered_token entry {name!r} 'scopes' must be an array of "
+                f"non-empty strings"
+            )
+        token_endpoint = entry.get("token_endpoint")
+        if token_endpoint is not None and (
+            not isinstance(token_endpoint, str) or not token_endpoint
+        ):
+            raise ValueError(
+                f"brokered_token entry {name!r} 'token_endpoint' must be a "
+                f"non-empty string"
+            )
+        fields = _parse_brokered_fields(name, entry.get("fields"))
+        token_endpoint_headers = _parse_brokered_token_endpoint_headers(
+            name, entry.get("token_endpoint_headers")
+        )
+        return BrokeredTokenSecret(
+            name=name,
+            hosts=tuple(hosts),
+            fields=fields,
+            scopes=tuple(scopes),
+            token_endpoint=token_endpoint,
+            token_endpoint_headers=token_endpoint_headers,
+        )
     if secret_type == "pg_dsn":
         database = entry.get("database")
         if not isinstance(database, str) or not database:
@@ -906,6 +1111,48 @@ def _resolve_timeout_s(tool_conf: dict[str, Any], *, tool: str) -> float | None:
 
 def _timeout_label(timeout_s: float | None) -> str:
     return "no timeout" if timeout_s is None else f"{timeout_s:g}s"
+
+
+def _decode_jsonb(value: Any, fallback: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return fallback
+
+
+async def _active_execution_parent_context(
+    request: Request | None,
+    sandbox_claims: dict[str, Any] | None,
+):
+    if request is None or not sandbox_claims:
+        return None
+    thread_key = str(sandbox_claims.get("thread_key") or "")
+    if not thread_key:
+        return None
+    pool = getattr(getattr(request, "app", None), "state", None)
+    pool = getattr(pool, "db_pool", None) if pool else None
+    if pool is None:
+        return None
+    row = await pool.fetchrow(
+        "SELECT metadata FROM agent_execution_requests "
+        "WHERE thread_key = $1 AND status IN ('running', 'cancel_requested', 'retry_wait') "
+        "ORDER BY started_at DESC NULLS LAST, claimed_at DESC NULLS LAST, created_at DESC "
+        "LIMIT 1",
+        thread_key,
+    )
+    if not row:
+        return None
+    metadata = _decode_jsonb(row["metadata"], {})
+    if not isinstance(metadata, dict):
+        return None
+    otel = _decode_jsonb(metadata.get("_otel"), {})
+    if not isinstance(otel, dict):
+        return None
+    return context_from_serialized(otel.get("execution_span_context"))
 
 
 async def _capture_live_slack_send(
@@ -1914,37 +2161,11 @@ class ToolManager:
 
         token = set_tool_context(ctx)
         try:
-            with start_span(
-                name="centaur.tool.call",
-                span_type="TOOL",
-                metadata={
-                    "service": "api",
-                    "tool_name": tool_name,
-                    "tool_method": method_name,
-                    **(
-                        {"thread_key": sandbox_claims.get("thread_key")}
-                        if sandbox_claims
-                        else {}
-                    ),
-                },
-            ):
-                set_span_attributes(
-                    {
-                        "centaur.tool.name": tool_name,
-                        "centaur.tool.method": method_name,
-                        "centaur.tool.arg_keys": ",".join(sorted(args.keys())),
-                        **(
-                            {"centaur.thread_key": sandbox_claims.get("thread_key")}
-                            if sandbox_claims
-                            else {}
-                        ),
-                    }
-                )
-                if inspect.iscoroutinefunction(method.fn):
-                    coro = method.fn(**args)
-                else:
-                    coro = asyncio.to_thread(method.fn, **args)
-                result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
+            if inspect.iscoroutinefunction(method.fn):
+                coro = method.fn(**args)
+            else:
+                coro = asyncio.to_thread(method.fn, **args)
+            result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
             duration_ms = round((time.monotonic() - t0) * 1000)
             log.info(
                 "tool_call_completed",
@@ -2022,63 +2243,95 @@ class ToolManager:
                 else {}
             ),
         }
-        t0 = time.monotonic()
-        log.info("tool_call_started", **call_fields)
-        captured_slack_send = await _capture_live_slack_send(
-            request=request,
-            sandbox_claims=sandbox_claims,
-            tool_name=tool_name,
-            method_name=method_name,
-            args=args,
-        )
-        if captured_slack_send is not None:
-            duration_ms = round((time.monotonic() - t0) * 1000)
-            log.info(
-                "tool_call_completed",
-                duration_ms=duration_ms,
-                success=True,
-                result_size_bytes=_payload_size_bytes(captured_slack_send),
-                captured=True,
-                **call_fields,
+        parent_context = await _active_execution_parent_context(request, sandbox_claims)
+        with start_span(
+            "centaur.tool.call",
+            parent_context=parent_context,
+            attributes={
+                "centaur.tool.name": tool_name,
+                "centaur.tool.method": method_name,
+                "centaur.thread_key": call_fields.get("thread_key"),
+                "centaur.sandbox_container_id": call_fields.get("sandbox_container_id"),
+                "centaur.tool.arg_keys": call_fields["arg_keys"],
+                "centaur.tool.arg_size_bytes": call_fields["arg_size_bytes"],
+            },
+        ) as span:
+            t0 = time.monotonic()
+            log.info("tool_call_started", **call_fields)
+            captured_slack_send = await _capture_live_slack_send(
+                request=request,
+                sandbox_claims=sandbox_claims,
+                tool_name=tool_name,
+                method_name=method_name,
+                args=args,
             )
-            record_tool_call(tool_name, method_name, True, duration_ms / 1000)
-            if format == "toon":
-                return _to_toon(captured_slack_send)
-            return _normalize_for_serialization(captured_slack_send)
-        validation_error = _tool_arg_validation_error(method, args)
-        if validation_error is not None:
-            log.warning(
-                "tool_argument_validation_failed",
-                error=validation_error["message"],
-                **call_fields,
-            )
-            return json.dumps(validation_error)
-
-        # Resolve placeholder secrets for tools that declare them. Required
-        # secrets gate availability elsewhere; optional secrets should still be
-        # present in ToolContext when declared so tool code can choose to use
-        # them.
-        ctx = lt.ctx
-        all_secrets = lt.all_secrets
-        if all_secrets:
-            resolved = await _resolve_secrets(all_secrets)
-            log.info(
-                "tool_secrets_resolved",
-                tool=tool_name,
-                keys=list(resolved.keys()),
-                declared=[s.name for s in all_secrets],
-            )
-            if resolved:
-                ctx = ToolContext(
-                    name=lt.name,
-                    secrets={**lt.ctx.secrets, **resolved},
-                    thread_key=sandbox_claims.get("thread_key")
-                    if sandbox_claims
-                    else None,
-                    container_id=sandbox_claims.get("container_id")
-                    if sandbox_claims
-                    else None,
+            if captured_slack_send is not None:
+                duration_ms = round((time.monotonic() - t0) * 1000)
+                set_span_attributes(
+                    span,
+                    {
+                        "centaur.tool.duration_ms": duration_ms,
+                        "centaur.tool.success": True,
+                        "centaur.tool.captured": True,
+                        "centaur.tool.result_size_bytes": _payload_size_bytes(
+                            captured_slack_send
+                        ),
+                    },
                 )
+                log.info(
+                    "tool_call_completed",
+                    duration_ms=duration_ms,
+                    success=True,
+                    result_size_bytes=_payload_size_bytes(captured_slack_send),
+                    captured=True,
+                    **call_fields,
+                )
+                record_tool_call(tool_name, method_name, True, duration_ms / 1000)
+                if format == "toon":
+                    return _to_toon(captured_slack_send)
+                return _normalize_for_serialization(captured_slack_send)
+            validation_error = _tool_arg_validation_error(method, args)
+            if validation_error is not None:
+                mark_error(span, validation_error["message"])
+                log.warning(
+                    "tool_argument_validation_failed",
+                    error=validation_error["message"],
+                    **call_fields,
+                )
+                return json.dumps(validation_error)
+
+            # Resolve placeholder secrets for tools that declare them. Required
+            # secrets gate availability elsewhere; optional secrets should still be
+            # present in ToolContext when declared so tool code can choose to use
+            # them.
+            ctx = lt.ctx
+            all_secrets = lt.all_secrets
+            if all_secrets:
+                resolved = await _resolve_secrets(all_secrets)
+                log.info(
+                    "tool_secrets_resolved",
+                    tool=tool_name,
+                    keys=list(resolved.keys()),
+                    declared=[s.name for s in all_secrets],
+                )
+                if resolved:
+                    ctx = ToolContext(
+                        name=lt.name,
+                        secrets={**lt.ctx.secrets, **resolved},
+                        thread_key=sandbox_claims.get("thread_key")
+                        if sandbox_claims
+                        else None,
+                        container_id=sandbox_claims.get("container_id")
+                        if sandbox_claims
+                        else None,
+                    )
+                elif sandbox_claims:
+                    ctx = ToolContext(
+                        name=lt.name,
+                        secrets=dict(lt.ctx.secrets),
+                        thread_key=sandbox_claims.get("thread_key"),
+                        container_id=sandbox_claims.get("container_id"),
+                    )
             elif sandbox_claims:
                 ctx = ToolContext(
                     name=lt.name,
@@ -2086,91 +2339,76 @@ class ToolManager:
                     thread_key=sandbox_claims.get("thread_key"),
                     container_id=sandbox_claims.get("container_id"),
                 )
-        elif sandbox_claims:
-            ctx = ToolContext(
-                name=lt.name,
-                secrets=dict(lt.ctx.secrets),
-                thread_key=sandbox_claims.get("thread_key"),
-                container_id=sandbox_claims.get("container_id"),
-            )
 
-        token = set_tool_context(ctx)
-        try:
-            with start_span(
-                name="centaur.tool.call",
-                span_type="TOOL",
-                metadata={
-                    "service": "api",
-                    "tool_name": tool_name,
-                    "tool_method": method_name,
-                    **(
-                        {"thread_key": sandbox_claims.get("thread_key")}
-                        if sandbox_claims
-                        else {}
-                    ),
-                },
-            ):
-                set_span_attributes(
-                    {
-                        "centaur.tool.name": tool_name,
-                        "centaur.tool.method": method_name,
-                        "centaur.tool.arg_keys": ",".join(sorted(args.keys())),
-                        **(
-                            {"centaur.thread_key": sandbox_claims.get("thread_key")}
-                            if sandbox_claims
-                            else {}
-                        ),
-                    }
-                )
+            token = set_tool_context(ctx)
+            try:
                 if inspect.iscoroutinefunction(method.fn):
                     coro = method.fn(**args)
                 else:
                     coro = asyncio.to_thread(method.fn, **args)
                 result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
-            duration_ms = round((time.monotonic() - t0) * 1000)
-            log.info(
-                "tool_call_completed",
-                duration_ms=duration_ms,
-                success=True,
-                result_size_bytes=_payload_size_bytes(result),
-                **call_fields,
-            )
-            record_tool_call(tool_name, method_name, True, duration_ms / 1000)
-            if isinstance(result, dict):
-                thread_key = (
-                    sandbox_claims.get("thread_key") if sandbox_claims else None
+                duration_ms = round((time.monotonic() - t0) * 1000)
+                result_size_bytes = _payload_size_bytes(result)
+                set_span_attributes(
+                    span,
+                    {
+                        "centaur.tool.duration_ms": duration_ms,
+                        "centaur.tool.success": True,
+                        "centaur.tool.result_size_bytes": result_size_bytes,
+                    },
                 )
-                result = await _extract_tool_attachment(
-                    result,
-                    request=request,
-                    thread_key=thread_key,
-                    tool_name=tool_name,
+                log.info(
+                    "tool_call_completed",
+                    duration_ms=duration_ms,
+                    success=True,
+                    result_size_bytes=result_size_bytes,
+                    **call_fields,
                 )
-            if format == "toon":
-                return result if isinstance(result, str) else _to_toon(result)
-            return _normalize_for_serialization(result)
-        except (SystemExit, Exception) as e:
-            duration_ms = round((time.monotonic() - t0) * 1000)
-            if isinstance(e, asyncio.TimeoutError):
-                error_msg = f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
-            elif isinstance(e, SystemExit):
-                error_msg = f"sys.exit({e.code})"
-            else:
-                error_msg = str(e)
-            log.warning(
-                "tool_call_completed",
-                duration_ms=duration_ms,
-                success=False,
-                error=error_msg,
-                error_type=type(e).__name__,
-                **call_fields,
-            )
-            record_tool_call(tool_name, method_name, False, duration_ms / 1000)
-            return json.dumps(
-                {"error": error_msg, "tool": tool_name, "method": method_name}
-            )
-        finally:
-            reset_tool_context(token)
+                record_tool_call(tool_name, method_name, True, duration_ms / 1000)
+                if isinstance(result, dict):
+                    thread_key = (
+                        sandbox_claims.get("thread_key") if sandbox_claims else None
+                    )
+                    result = await _extract_tool_attachment(
+                        result,
+                        request=request,
+                        thread_key=thread_key,
+                        tool_name=tool_name,
+                    )
+                if format == "toon":
+                    return result if isinstance(result, str) else _to_toon(result)
+                return _normalize_for_serialization(result)
+            except (SystemExit, Exception) as e:
+                duration_ms = round((time.monotonic() - t0) * 1000)
+                if isinstance(e, asyncio.TimeoutError):
+                    error_msg = f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
+                elif isinstance(e, SystemExit):
+                    error_msg = f"sys.exit({e.code})"
+                else:
+                    error_msg = str(e)
+                set_span_attributes(
+                    span,
+                    {
+                        "centaur.tool.duration_ms": duration_ms,
+                        "centaur.tool.success": False,
+                        "error.type": type(e).__name__,
+                    },
+                )
+                record_exception(span, e)
+                log.warning(
+                    "tool_call_completed",
+                    duration_ms=duration_ms,
+                    success=False,
+                    error=error_msg,
+                    error_type=type(e).__name__,
+                    **call_fields,
+                )
+                record_tool_call(tool_name, method_name, False, duration_ms / 1000)
+                return json.dumps(
+                    {"error": error_msg, "tool": tool_name, "method": method_name}
+                )
+            finally:
+                reset_tool_context(token)
 
     def create_rest_router(self) -> APIRouter:
         """Create a stable FastAPI router that dispatches to tools via live lookup.

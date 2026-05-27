@@ -30,9 +30,13 @@ type CodexSessionState = {
   threadId: string
   stepCounter: number
   nextCommandIndex: number
-  commentaryText: string
-  commentaryByItemId: Map<string, string>
+  answerByItemId: Map<string, string>
+  harnessAnswerText: string
   answerText: string
+  commentaryByItemId: Map<string, string>
+  harnessCommentaryText: string
+  commentaryText: string
+  completedItemIds: Set<string>
   firstBufferedTextAt: number | null
   streamedCommentaryText: string
   streamedAnswerText: string
@@ -182,24 +186,14 @@ export class CodexSessionRenderer {
       await this.publishActivitySummary(agentSessionId, state)
     }
 
-    const assistantMessage = assistantText(event)
-    if (assistantMessage) {
+    if (eventCarriesAgentMessageText(event)) {
       const buffer = activeAssistantBuffer(state, event, agentSessionId)
-      const current = buffer === 'answer' ? state.answerText : state.commentaryText
-      const delta = messageDelta(current, assistantMessage)
-      if (delta) {
-        if (buffer === 'answer') {
-          logSuspiciousAnswerDelta(agentSessionId, event, state, {
-            current,
-            incoming: assistantMessage,
-            delta
-          })
-          state.answerText += delta
-        } else {
-          state.commentaryText += delta
-          trackCommentaryText(state, event, delta)
-        }
+      const update = applyAgentMessageUpdate(state, event, buffer, agentSessionId)
+      if (update.bufferChanged) {
         await this.publishPendingAssistantText(agentSessionId, state)
+      }
+      if (update.correction) {
+        logCanonicalCorrection(agentSessionId, event, state, update.correction)
       }
       if (buffer === 'commentary' && event?.type === 'item.completed') {
         upsertThinkingTask(state, event)
@@ -228,7 +222,8 @@ export class CodexSessionRenderer {
         willClose
       })
       if (resultText && !state.answerText.trim()) {
-        state.answerText += resultText
+        state.harnessAnswerText += resultText
+        recomposeBuffers(state)
         await this.publishPendingAssistantText(agentSessionId, state, { force: true })
       }
       if (willClose) {
@@ -360,9 +355,13 @@ function getState(agentSessionId: string): CodexSessionState {
       threadId: '',
       stepCounter: 0,
       nextCommandIndex: 0,
-      commentaryText: '',
-      commentaryByItemId: new Map(),
+      answerByItemId: new Map(),
+      harnessAnswerText: '',
       answerText: '',
+      commentaryByItemId: new Map(),
+      harnessCommentaryText: '',
+      commentaryText: '',
+      completedItemIds: new Set(),
       firstBufferedTextAt: null,
       streamedCommentaryText: '',
       streamedAnswerText: '',
@@ -409,19 +408,30 @@ function agentMessageEventId(event: any): string {
 function ensureCommentarySegmentBreak(event: any, state: CodexSessionState): void {
   if (event?.type !== 'item.started') return
   if (agentMessageItemPhase(event?.item) !== 'commentary') return
-  const current = state.commentaryText
-  if (!current.trim() || current.endsWith('\n\n')) return
-  state.commentaryText = current.endsWith('\n') ? `${current}\n` : `${current}\n\n`
+  const lastId = lastInsertedKey(state.commentaryByItemId)
+  if (lastId) {
+    const prior = state.commentaryByItemId.get(lastId) ?? ''
+    if (prior.trim() && !prior.endsWith('\n\n')) {
+      state.commentaryByItemId.set(lastId, prior.endsWith('\n') ? `${prior}\n` : `${prior}\n\n`)
+    }
+  } else if (state.harnessCommentaryText.trim() && !state.harnessCommentaryText.endsWith('\n\n')) {
+    state.harnessCommentaryText = state.harnessCommentaryText.endsWith('\n')
+      ? `${state.harnessCommentaryText}\n`
+      : `${state.harnessCommentaryText}\n\n`
+  } else {
+    return
+  }
+  recomposeBuffers(state)
+}
+
+function lastInsertedKey<K>(map: Map<K, unknown>): K | undefined {
+  let last: K | undefined
+  for (const key of map.keys()) last = key
+  return last
 }
 
 function commentaryItemId(event: any): string {
   return String(event?.itemId ?? event?.item_id ?? event?.item?.id ?? '')
-}
-
-function trackCommentaryText(state: CodexSessionState, event: any, delta: string): void {
-  const id = commentaryItemId(event)
-  if (!id) return
-  state.commentaryByItemId.set(id, `${state.commentaryByItemId.get(id) ?? ''}${delta}`)
 }
 
 function upsertThinkingTask(state: CodexSessionState, event: any): void {
@@ -429,10 +439,12 @@ function upsertThinkingTask(state: CodexSessionState, event: any): void {
   if (!id) return
   const body = String(event?.item?.text ?? state.commentaryByItemId.get(id) ?? '').trim()
   if (!body) return
-  const taskId = `thinking-${id}`
-  state.commentaryByItemId.set(id, body)
-  state.taskByUseId.set(taskId, {
-    id: taskId,
+  if (state.commentaryByItemId.get(id) !== body) {
+    state.commentaryByItemId.set(id, body)
+    recomposeBuffers(state)
+  }
+  state.taskByUseId.set(`thinking-${id}`, {
+    id: `thinking-${id}`,
     title: 'Thinking',
     status: 'complete',
     details: [section([text(body)])],
@@ -481,60 +493,120 @@ function activeAssistantBuffer(
   return 'answer'
 }
 
-function assistantText(event: any): string {
+function eventCarriesAgentMessageText(event: any): boolean {
+  if (event?.type === 'item.agentMessage.delta') return Boolean(extractDeltaText(event))
+  if (event?.type === 'assistant') return Boolean(assistantTextFromAssistantEvent(event))
+  if (event?.type === 'item.completed') {
+    const itemType = event?.item?.type
+    if (itemType !== 'agentMessage' && itemType !== 'agent_message') return false
+    return Boolean(String(event?.item?.text ?? ''))
+  }
+  return false
+}
+
+type AgentMessageUpdateResult = {
+  bufferChanged: boolean
+  correction?: { previous: string; canonical: string }
+}
+
+function applyAgentMessageUpdate(
+  state: CodexSessionState,
+  event: any,
+  buffer: 'answer' | 'commentary',
+  agentSessionId: string
+): AgentMessageUpdateResult {
+  const itemId = agentMessageEventId(event)
+
   if (event?.type === 'item.agentMessage.delta') {
-    const delta = event.delta ?? event.text ?? event.content ?? ''
-    if (delta && typeof delta === 'object') {
-      return String(delta.text ?? delta.content ?? '')
+    if (!itemId || state.completedItemIds.has(itemId)) return { bufferChanged: false }
+    const delta = extractDeltaText(event)
+    if (!delta) return { bufferChanged: false }
+    const byId = buffer === 'answer' ? state.answerByItemId : state.commentaryByItemId
+    byId.set(itemId, (byId.get(itemId) ?? '') + delta)
+    recomposeBuffers(state)
+    return { bufferChanged: true }
+  }
+
+  if (event?.type === 'item.completed') {
+    const canonical = String(event?.item?.text ?? '')
+    if (!canonical) return { bufferChanged: false }
+    if (!itemId) {
+      // Without an item id we cannot map this canonical text to the per-item buffer it
+      // was meant to replace. Falling back to a flat append would re-introduce the
+      // pre-fix duplication, so we drop and log instead. Codex always emits an id in
+      // observed prod streams; this branch defends against malformed events.
+      logInfo('slack_codex_item_completed_missing_id', {
+        agent_session_id: agentSessionId,
+        centaur_thread_key: event?.centaur_thread_key,
+        execution_id: event?.centaur_execution_id,
+        canonical_text_chars: canonical.length,
+        canonical_hash: textHash(canonical)
+      })
+      return { bufferChanged: false }
     }
-    return String(delta)
+    const byId = buffer === 'answer' ? state.answerByItemId : state.commentaryByItemId
+    const previous = byId.get(itemId) ?? ''
+    state.completedItemIds.add(itemId)
+    if (canonical === previous) return { bufferChanged: false }
+    byId.set(itemId, canonical)
+    recomposeBuffers(state)
+    return {
+      bufferChanged: true,
+      correction: previous ? { previous, canonical } : undefined
+    }
   }
-  if (
-    event?.type === 'item.completed' &&
-    (event?.item?.type === 'agentMessage' || event?.item?.type === 'agent_message')
-  ) {
-    return String(event.item.text ?? '')
+
+  if (event?.type === 'assistant') {
+    const cumulative = assistantTextFromAssistantEvent(event)
+    if (!cumulative) return { bufferChanged: false }
+    const key = buffer === 'answer' ? 'harnessAnswerText' : 'harnessCommentaryText'
+    const before = state[key]
+    if (cumulative === before || before.endsWith(cumulative)) return { bufferChanged: false }
+    state[key] = cumulative.startsWith(before)
+      ? cumulative
+      : before
+        ? `${before}\n${cumulative}`
+        : cumulative
+    recomposeBuffers(state)
+    return { bufferChanged: true }
   }
-  if (event?.type !== 'assistant') return ''
+
+  return { bufferChanged: false }
+}
+
+function recomposeBuffers(state: CodexSessionState): void {
+  state.answerText = compose(state.answerByItemId, state.harnessAnswerText)
+  state.commentaryText = compose(state.commentaryByItemId, state.harnessCommentaryText)
+}
+
+function compose(byItemId: Map<string, string>, trailing: string): string {
+  let out = ''
+  for (const value of byItemId.values()) out += value
+  return trailing ? out + trailing : out
+}
+
+function extractDeltaText(event: any): string {
+  const delta = event?.delta ?? event?.text ?? event?.content ?? ''
+  if (delta && typeof delta === 'object') return String(delta.text ?? delta.content ?? '')
+  return String(delta)
+}
+
+function assistantTextFromAssistantEvent(event: any): string {
   return content(event)
     .map(part => (part?.type === 'text' ? (part.text ?? '') : ''))
     .filter(Boolean)
     .join('')
 }
 
-function messageDelta(current: string, incoming: string): string {
-  if (!current) return incoming
-  if (incoming.startsWith(current)) return incoming.slice(current.length)
-  if (current.endsWith(incoming)) return ''
-  return incoming
-}
-
-function logSuspiciousAnswerDelta(
+function logCanonicalCorrection(
   agentSessionId: string,
   event: any,
   state: CodexSessionState,
-  texts: { current: string; incoming: string; delta: string }
+  correction: { previous: string; canonical: string }
 ): void {
-  const { current, incoming, delta } = texts
-  if (current.length <= 200 || incoming.length <= 200 || delta.length <= 200) return
-
-  const incomingHead = incoming.slice(0, 200)
-  const currentTail = current.slice(-200)
-  const currentContainsIncomingHead = current.includes(incomingHead)
-  const incomingContainsCurrentTail = incoming.includes(currentTail)
-  const largeIncomingRelativeToCurrent = incoming.length > current.length * 0.75
-  const largeDeltaRelativeToCurrent = delta.length > current.length * 0.5
-
-  if (
-    !currentContainsIncomingHead &&
-    !incomingContainsCurrentTail &&
-    !largeIncomingRelativeToCurrent &&
-    !largeDeltaRelativeToCurrent
-  ) {
-    return
-  }
-
-  logInfo('slack_codex_suspicious_answer_delta', {
+  const { previous, canonical } = correction
+  const charsDiff = canonical.length - previous.length
+  logInfo('slack_codex_canonical_answer_correction', {
     agent_session_id: agentSessionId,
     centaur_thread_key: event?.centaur_thread_key,
     execution_id: event?.centaur_execution_id,
@@ -545,18 +617,12 @@ function logSuspiciousAnswerDelta(
     codex_item_type: event?.item?.type,
     codex_item_phase: event?.item?.phase,
     codex_session_id: state.threadId || event?.session_id || event?.thread_id,
-    current_answer_chars: current.length,
-    incoming_chars: incoming.length,
-    delta_chars: delta.length,
-    answer_chars_after: current.length + delta.length,
-    streamed_answer_chars: state.deliveredAnswerChars,
-    current_hash: textHash(current),
-    incoming_hash: textHash(incoming),
-    delta_hash: textHash(delta),
-    current_contains_incoming_head: currentContainsIncomingHead,
-    incoming_contains_current_tail: incomingContainsCurrentTail,
-    large_incoming_relative_to_current: largeIncomingRelativeToCurrent,
-    large_delta_relative_to_current: largeDeltaRelativeToCurrent
+    delta_total_chars: previous.length,
+    canonical_text_chars: canonical.length,
+    chars_diff: charsDiff,
+    delta_hash: textHash(previous),
+    canonical_hash: textHash(canonical),
+    streamed_answer_chars: state.deliveredAnswerChars
   })
 }
 

@@ -7,7 +7,15 @@ import { prettyJSON } from 'hono/pretty-json'
 import { startFinalDeliveryPoller } from './centaur/final-delivery'
 import { CentaurHandoff } from './centaur/handoff'
 import { loadConfig } from './config'
-import { logError, logWarn, sanitizeLogValue } from './logging'
+import { logError, logInfo, logWarn, sanitizeLogValue } from './logging'
+import {
+  clientSpanOptions,
+  configureOtel,
+  internalSpanOptions,
+  serverSpanOptions,
+  spanAttributes,
+  withSpan
+} from './otel'
 import { AgentSessionRenderer, withAgentSessionLock } from './slack/agent-session'
 import { authorizeSlackOrg } from './slack/authorization'
 import { CodexSessionRenderer, hasActiveCodexSession } from './slack/codex-session'
@@ -23,6 +31,7 @@ import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
 
 const config = loadConfig()
+configureOtel()
 // This is the existing deployments/runtime alert channel wired by the Helm
 // chart from slackbot.runtimeErrorAlertChannel.
 const deploymentAlertChannel = config.RUNTIME_ERROR_ALERT_CHANNEL.trim()
@@ -36,6 +45,7 @@ const resolver = new SlackClientResolver(
 const handoff = new CentaurHandoff(config)
 const deduper = new EventDeduper(config.SLACK_EVENT_DEDUP_TTL_MS)
 const CODEX_THREAD_RE = /\b(?:codex|agent|amp)\s+thread\b[^A-Z0-9]*(T-[A-Z0-9-]+)/i
+const HARNESS_EVENT_PATH_RE = /^\/api\/slack\/agent-sessions\/[^/]+\/harness-event$/
 
 void resolver
   .resolve({})
@@ -55,8 +65,31 @@ type WaitUntilContext = {
 export const app = new Hono<{ Variables: Variables }>()
   .use(prettyJSON())
   .use('*', async (c, next) => {
+    if (HARNESS_EVENT_PATH_RE.test(c.req.path)) {
+      await next()
+      return
+    }
+    await withSpan(
+      'centaur.slackbot.http_request',
+      serverSpanOptions({
+        'http.request.method': c.req.method,
+        'url.path': c.req.path
+      }),
+      async span => {
+        await next()
+        spanAttributes(span, {
+          'http.response.status_code': c.res.status
+        })
+      }
+    )
+  })
+  .use('*', async (c, next) => {
     await next()
-    console.log('http_request', c.req.method, c.req.path, c.res.status)
+    logInfo('http_request', {
+      method: c.req.method,
+      path: c.req.path,
+      status: c.res.status
+    })
   })
   .use('*', timeout(5_000))
   .use(
@@ -491,62 +524,128 @@ function codexThreadIdFromUnknown(value: unknown): string | undefined {
 }
 
 async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
-  const authorization = authorizeSlackOrg({
-    envelope,
-    allowedExternalTeamIds: config.SLACKBOT_EXTERNAL_ORG_ALLOWLIST
-  })
-  if (!authorization.ok) {
-    console.warn('slack_event_ignored_external_org_not_allowlisted', {
-      external_team_id: authorization.externalTeamId,
-      team_id: envelope.team_id,
-      event_id: envelope.event_id
-    })
-    return
-  }
+  const rawEvent = envelope.event ?? {}
+  await withSpan(
+    'centaur.slackbot.event',
+    internalSpanOptions({
+      'slack.event_id': envelope.event_id,
+      'slack.team_id': envelope.team_id,
+      'slack.enterprise_id': envelope.enterprise_id,
+      'slack.event_type': typeof rawEvent.type === 'string' ? rawEvent.type : undefined,
+      'slack.channel_id': typeof rawEvent.channel === 'string' ? rawEvent.channel : undefined,
+      'slack.message_ts': typeof rawEvent.ts === 'string' ? rawEvent.ts : undefined,
+      'slack.thread_ts':
+        typeof rawEvent.thread_ts === 'string'
+          ? rawEvent.thread_ts
+          : typeof rawEvent.ts === 'string'
+            ? rawEvent.ts
+            : undefined
+    }),
+    async span => {
+      const authorization = authorizeSlackOrg({
+        envelope,
+        allowedExternalTeamIds: config.SLACKBOT_EXTERNAL_ORG_ALLOWLIST
+      })
+      if (!authorization.ok) {
+        spanAttributes(span, {
+          'centaur.slackbot.event_ignored': true,
+          'centaur.slackbot.ignore_reason': 'external_org_not_allowlisted'
+        })
+        logWarn('slack_event_ignored_external_org_not_allowlisted', {
+          external_team_id: authorization.externalTeamId,
+          team_id: envelope.team_id,
+          event_id: envelope.event_id
+        })
+        return
+      }
 
-  const { client, installation } = await resolver.resolve({
-    teamId: envelope.team_id,
-    enterpriseId: envelope.enterprise_id
-  })
-  const normalized = await normalizeSlackEnvelope({
-    envelope,
-    botUserId: installation.botUserId,
-    client
-  })
-  if (!normalized) return
-  if (!normalized.is_mention) return
+      const { client, installation } = await resolver.resolve({
+        teamId: envelope.team_id,
+        enterpriseId: envelope.enterprise_id
+      })
+      const normalized = await normalizeSlackEnvelope({
+        envelope,
+        botUserId: installation.botUserId,
+        botId: installation.botId,
+        triggerBotAllowlist: config.SLACKBOT_TRIGGER_BOT_ALLOWLIST,
+        client
+      })
+      if (!normalized) {
+        spanAttributes(span, {
+          'centaur.slackbot.event_ignored': true,
+          'centaur.slackbot.ignore_reason': 'normalize_returned_null'
+        })
+        return
+      }
+      spanAttributes(span, {
+        'centaur.thread_key': normalized.thread_key,
+        'slack.channel_id': normalized.channel_id,
+        'slack.thread_ts': normalized.thread_ts,
+        'slack.user_id': normalized.user_id,
+        'centaur.slackbot.is_mention': normalized.is_mention,
+        'centaur.slackbot.part_count': normalized.parts.length
+      })
+      if (!normalized.is_mention) {
+        spanAttributes(span, {
+          'centaur.slackbot.event_ignored': true,
+          'centaur.slackbot.ignore_reason': 'not_mention'
+        })
+        return
+      }
 
-  if (shouldAckWithReaction(normalized)) {
-    await ackWithReaction(client, normalized)
-    return
-  }
+      if (shouldAckWithReaction(normalized)) {
+        spanAttributes(span, {
+          'centaur.slackbot.event_action': 'ack_reaction'
+        })
+        await ackWithReaction(client, normalized)
+        return
+      }
 
-  const result = await handoff.emit(normalized)
-  if (!result.ok) {
-    if (result.status === 409) {
-      logWarn('centaur_slack_handoff_conflict', result.body)
-      return
+      spanAttributes(span, {
+        'centaur.slackbot.event_action': 'handoff'
+      })
+      const result = await handoff.emit(normalized)
+      spanAttributes(span, {
+        'centaur.slackbot.handoff_status': result.status,
+        'centaur.slackbot.handoff_ok': result.ok
+      })
+      if (!result.ok) {
+        if (result.status === 409) {
+          logWarn('centaur_slack_handoff_conflict', result.body)
+          return
+        }
+        throw new Error(`Centaur Slack handoff failed: ${result.status}`)
+      }
     }
-    throw new Error(`Centaur Slack handoff failed: ${result.status}`)
-  }
+  )
 }
 
 const TRIVIAL_ACK_REACTION = 'ok_hand'
 
 async function ackWithReaction(client: WebClient, event: NormalizedSlackEvent): Promise<void> {
-  try {
-    await client.reactions.add({
-      channel: event.channel_id,
-      timestamp: event.slack?.message_ts ?? event.thread_ts,
-      name: TRIVIAL_ACK_REACTION
-    })
-  } catch (error) {
-    logWarn('slack_trivial_ack_reaction_failed', {
-      channel_id: event.channel_id,
-      thread_ts: event.thread_ts,
-      error: error instanceof Error ? error.message : String(error)
-    })
-  }
+  await withSpan(
+    'centaur.slackbot.slack.reactions_add',
+    clientSpanOptions({
+      'slack.channel_id': event.channel_id,
+      'slack.thread_ts': event.thread_ts,
+      'centaur.thread_key': event.thread_key
+    }),
+    async () => {
+      try {
+        await client.reactions.add({
+          channel: event.channel_id,
+          timestamp: event.slack?.message_ts ?? event.thread_ts,
+          name: TRIVIAL_ACK_REACTION
+        })
+      } catch (error) {
+        logWarn('slack_trivial_ack_reaction_failed', {
+          channel_id: event.channel_id,
+          thread_ts: event.thread_ts,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+  )
 }
 
 function slackApiErrorResponse(c: Context, error: unknown) {
