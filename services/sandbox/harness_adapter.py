@@ -15,6 +15,8 @@ class AmpAdapter(HarnessAdapter):
         if not prompt.is_file():
             return
         target = prompt.with_name("AGENT.md")
+        if not target.resolve().is_relative_to(prompt.parent.resolve()):
+            return
         if target.exists() or target.is_symlink():
             target.unlink()
         target.symlink_to(prompt.name)
