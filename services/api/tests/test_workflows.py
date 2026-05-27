@@ -395,6 +395,158 @@ def test_recovery_command_paraphrases_are_recognized():
         )
 
 
+def test_generic_argo_debug_request_builds_workflow_input_from_thread_history():
+    from api.workflow_engine import Delivery
+    from api.workflows.slack_thread_turn import (
+        Input,
+        _generic_argo_debug_workflow_input,
+    )
+
+    inp = Input(
+        thread_key="slack:T123:C456:1779876103.796029",
+        parts=[
+            {
+                "type": "text",
+                "text": "debug this Argo failure with `generic_debug_argo_workflow`.",
+            },
+        ],
+        history_messages=[
+            {
+                "message_id": "slack:T123:C456:1779876103.796029",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            ":rotating_light: txgen failing - main\n\n"
+                            "*Workflow:* txgen-coverage-1779881400 "
+                            "(https://dev-eu-tempo-workflows-ui.tail388b2e.ts.net/"
+                            "?ns=tempo-devnet-stable&wf=txgen-coverage-1779881400)\n"
+                            "*Namespace:* `tempo-devnet-stable`\n"
+                            "*Branch:* `main`\n"
+                            "*Trigger:* Cron\n\n"
+                            "*What failed:*\n"
+                            "`generate-and-send`: Failed\n\n"
+                            "*Error:* pod failed"
+                        ),
+                    },
+                ],
+            },
+        ],
+        delivery=Delivery.slack("C456", "1779876103.796029", user_id="U123"),
+    )
+
+    run_input = _generic_argo_debug_workflow_input(inp, inp.effective_parts)
+
+    assert run_input is not None
+    assert run_input["source"] == "argo-slack-alert"
+    assert run_input["workflow_name"] == "txgen-coverage-1779881400"
+    assert run_input["namespace"] == "tempo-devnet-stable"
+    assert run_input["branch"] == "main"
+    assert run_input["source_thread_key"] == "slack:T123:C456:1779876103.796029"
+    assert run_input["source_thread_ts"] == "1779876103.796029"
+    assert run_input["slack_channel"] == "C456"
+    assert "primary_failed_node=generate-and-send" in run_input["context"]
+    assert "pod failed" in run_input["alert_context"]
+
+
+@pytest.mark.asyncio
+async def test_slack_thread_turn_dispatches_generic_argo_debug_without_agent():
+    from api.workflow_engine import Delivery
+    from api.workflows.slack_thread_turn import Input, handler
+
+    class StubContext:
+        run_id = "wfr_parent"
+
+        def __init__(self):
+            self.started = []
+            self.posts = []
+
+        async def start_workflow(self, name, **kwargs):
+            self.started.append((name, kwargs))
+            return {"run_id": "wfr_child"}
+
+        async def post_to_slack(self, channel, text, *, thread_ts=None):
+            self.posts.append((channel, text, thread_ts))
+            return {"ok": True, "ts": "1779876122.661759"}
+
+    ctx = StubContext()
+    inp = Input(
+        thread_key="slack:T123:C456:1779876103.796029",
+        message_id="slack:T123:C456:1779876122.661759",
+        parts=[
+            {
+                "type": "text",
+                "text": "debug this Argo failure with `generic_debug_argo_workflow`.",
+            },
+        ],
+        history_messages=[
+            {
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "*Workflow:* repro-verify-1779876000 "
+                            "(https://dev-eu-tempo-workflows-ui.tail388b2e.ts.net/"
+                            "?ns=repro-verifier&wf=repro-verify-1779876000)"
+                        ),
+                    },
+                ],
+            },
+        ],
+        delivery=Delivery.slack("C456", "1779876103.796029", user_id="U123"),
+    )
+    do_agent_turn_mock = AsyncMock(return_value={"ok": False})
+
+    with patch("api.workflow_engine.do_agent_turn", new=do_agent_turn_mock):
+        result = await handler(inp, ctx)  # type: ignore[arg-type]
+
+    assert result["ok"] is True
+    assert result["action"] == "started_workflow"
+    assert result["child_run_id"] == "wfr_child"
+    do_agent_turn_mock.assert_not_awaited()
+    assert ctx.started == [
+        (
+            "generic-argo-debug",
+            {
+                "workflow_name": "generic_debug_argo_workflow",
+                "run_input": {
+                    "source": "argo-slack-alert",
+                    "workflow_name": "repro-verify-1779876000",
+                    "namespace": "repro-verifier",
+                    "workflow_url": (
+                        "https://dev-eu-tempo-workflows-ui.tail388b2e.ts.net/"
+                        "?ns=repro-verifier&wf=repro-verify-1779876000"
+                    ),
+                    "state": "Failed",
+                    "context": "triggered_from=slack_argo_alert",
+                    "alert_context": (
+                        "*Workflow:* repro-verify-1779876000 "
+                        "(https://dev-eu-tempo-workflows-ui.tail388b2e.ts.net/"
+                        "?ns=repro-verifier&wf=repro-verify-1779876000)\n\n"
+                        "debug this Argo failure with `generic_debug_argo_workflow`."
+                    ),
+                    "source_thread_key": "slack:T123:C456:1779876103.796029",
+                    "source_thread_ts": "1779876103.796029",
+                    "slack_channel": "C456",
+                },
+                "trigger_key": "slack:T123:C456:1779876122.661759:generic-argo-debug",
+                "eager_start": True,
+            },
+        ),
+    ]
+    assert ctx.posts == [
+        (
+            "C456",
+            (
+                "Started `generic_debug_argo_workflow` for "
+                "`repro-verify-1779876000`. Run: `wfr_child`. "
+                "I will post the investigation here."
+            ),
+            "1779876103.796029",
+        ),
+    ]
+
+
 @pytest.mark.parametrize(
     ("text", "harness", "persona", "cleaned"),
     [

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from api.runtime_control import ControlPlaneError
 from api.workflow_engine import Delivery, WorkflowContext
@@ -59,6 +60,11 @@ _RECOVERY_COMMANDS = frozenset(
 _RECOVERY_NORMALIZE_RE = re.compile(r"[^a-z0-9\s]+")
 _SLACK_ID_MENTION_RE = re.compile(r"^<@[WU][A-Z0-9]+>\s*[:,;-]?\s*(.*)$", re.IGNORECASE)
 _RECOVERY_CONTEXT_PREFIX = "Previous unresolved user request from this thread:\n"
+_GENERIC_ARGO_DEBUG_WORKFLOW = "generic_debug_argo_workflow"
+_ARGO_WORKFLOW_URL_RE = re.compile(
+    r"https?://[^\s<>()`|]*tempo-workflows-ui[^\s<>()`|]*",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -336,6 +342,190 @@ def _is_recovery_turn(parts: list[dict[str, Any]]) -> bool:
     return _normalize_recovery_command(text) in _RECOVERY_COMMANDS
 
 
+def _is_generic_argo_debug_request(parts: list[dict[str, Any]]) -> bool:
+    text = (_extract_text_parts(parts) or "").lower()
+    return (
+        _GENERIC_ARGO_DEBUG_WORKFLOW in text
+        and "argo" in text
+        and ("failure" in text or "failed" in text)
+    )
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}..."
+
+
+def _slack_target_from_thread_key(thread_key: str) -> tuple[str | None, str | None]:
+    parts = thread_key.split(":")
+    if len(parts) >= 4 and parts[0] == "slack":
+        return parts[2] or None, ":".join(parts[3:]) or None
+    return None, None
+
+
+def _delivery_channel_and_thread(inp: Input) -> tuple[str | None, str | None]:
+    channel = inp.delivery.channel if isinstance(inp.delivery, Delivery) else None
+    thread_ts = inp.delivery.thread_ts if isinstance(inp.delivery, Delivery) else None
+    fallback_channel, fallback_thread_ts = _slack_target_from_thread_key(inp.thread_key)
+    return channel or fallback_channel, thread_ts or fallback_thread_ts
+
+
+def _thread_context_text(inp: Input, parts: list[dict[str, Any]]) -> str:
+    snippets: list[str] = []
+    for item in inp.history_messages:
+        if not isinstance(item, dict):
+            continue
+        text = _extract_text_parts(item.get("parts"))
+        if text:
+            snippets.append(text)
+    current = _extract_text_parts(parts)
+    if current:
+        snippets.append(current)
+    return "\n\n".join(snippets)
+
+
+def _first_argo_workflow_url(text: str) -> str:
+    for match in _ARGO_WORKFLOW_URL_RE.finditer(text):
+        return match.group(0).rstrip(".,")
+    return ""
+
+
+def _parse_argo_workflow_url(url: str) -> tuple[str, str]:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    namespace = (query.get("ns") or query.get("namespace") or [""])[0]
+    workflow_name = (query.get("wf") or query.get("workflow") or [""])[0]
+    if not workflow_name:
+        match = re.search(r"/workflows/([^/?#]+)/([^/?#]+)", parsed.path)
+        if match:
+            namespace = namespace or match.group(1)
+            workflow_name = match.group(2)
+    return namespace, workflow_name
+
+
+def _clean_alert_value(value: str) -> str:
+    cleaned = value.strip().strip("`* ")
+    slack_link = re.match(r"<https?://[^>|]+\|([^>]+)>", cleaned)
+    if slack_link:
+        cleaned = slack_link.group(1)
+    cleaned = re.sub(r"\s+\(https?://.*\)\s*$", "", cleaned).strip()
+    return cleaned.strip("`* ")
+
+
+def _extract_alert_field(text: str, label: str) -> str:
+    match = re.search(
+        rf"(?im)^\s*(?:[-*]\s*)?\*?{re.escape(label)}:\*?\s*(.+?)\s*$",
+        text,
+    )
+    return _clean_alert_value(match.group(1)) if match else ""
+
+
+def _extract_primary_failed_node(text: str) -> str:
+    marker = re.search(r"(?im)^\s*\*?(?:What failed|Failed steps):\*?\s*$", text)
+    if not marker:
+        return ""
+    for line in text[marker.end() :].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r"^\*?(?:Error|Info|Workflow|Namespace|Branch|Duration|Trigger):", stripped):
+            break
+        candidate = stripped.lstrip("- ").strip()
+        candidate = re.split(r"\s*[:(]\s*", candidate, maxsplit=1)[0]
+        return _clean_alert_value(candidate)
+    return ""
+
+
+def _parse_argo_alert_context(text: str) -> dict[str, str]:
+    workflow_url = _first_argo_workflow_url(text)
+    namespace, workflow_name = _parse_argo_workflow_url(workflow_url) if workflow_url else ("", "")
+    workflow_name = workflow_name or _extract_alert_field(text, "Workflow")
+    namespace = namespace or _extract_alert_field(text, "Namespace")
+    return {
+        "workflow_url": workflow_url,
+        "workflow_name": workflow_name,
+        "namespace": namespace,
+        "branch": _extract_alert_field(text, "Branch"),
+        "trigger": _extract_alert_field(text, "Trigger"),
+        "primary_failed_node": _extract_primary_failed_node(text),
+    }
+
+
+def _generic_argo_debug_workflow_input(
+    inp: Input,
+    parts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not _is_generic_argo_debug_request(parts):
+        return None
+
+    context_text = _thread_context_text(inp, parts)
+    alert = _parse_argo_alert_context(context_text)
+    if not (alert["workflow_name"] or alert["workflow_url"]):
+        return None
+
+    channel, thread_ts = _delivery_channel_and_thread(inp)
+    context_parts = ["triggered_from=slack_argo_alert"]
+    if alert["trigger"]:
+        context_parts.append(f"trigger={alert['trigger']}")
+    if alert["primary_failed_node"]:
+        context_parts.append(f"primary_failed_node={alert['primary_failed_node']}")
+
+    run_input: dict[str, Any] = {
+        "source": "argo-slack-alert",
+        "workflow_name": alert["workflow_name"],
+        "namespace": alert["namespace"],
+        "workflow_url": alert["workflow_url"],
+        "state": "Failed",
+        "context": "; ".join(context_parts),
+        "alert_context": _clip_text(context_text, 8000),
+        "source_thread_key": inp.thread_key.strip(),
+    }
+    if thread_ts:
+        run_input["source_thread_ts"] = thread_ts
+    if channel:
+        run_input["slack_channel"] = channel
+    if alert["branch"]:
+        run_input["branch"] = alert["branch"]
+    return run_input
+
+
+async def _start_generic_argo_debug_workflow(
+    ctx: WorkflowContext,
+    *,
+    inp: Input,
+    run_input: dict[str, Any],
+) -> dict[str, Any]:
+    child = await ctx.start_workflow(
+        "generic-argo-debug",
+        workflow_name=_GENERIC_ARGO_DEBUG_WORKFLOW,
+        run_input=run_input,
+        trigger_key=f"{inp.message_id or inp.thread_key}:generic-argo-debug",
+        eager_start=True,
+    )
+    run_id = str(child.get("run_id") or "")
+    channel = str(run_input.get("slack_channel") or "")
+    thread_ts = str(run_input.get("source_thread_ts") or "")
+    workflow_name = str(run_input.get("workflow_name") or "this Argo failure")
+    if channel and thread_ts:
+        suffix = f" Run: `{run_id}`." if run_id else ""
+        await ctx.post_to_slack(
+            channel,
+            (
+                f"Started `{_GENERIC_ARGO_DEBUG_WORKFLOW}` for `{workflow_name}`."
+                f"{suffix} I will post the investigation here."
+            ),
+            thread_ts=thread_ts,
+        )
+    return {
+        "ok": True,
+        "action": "started_workflow",
+        "workflow_name": _GENERIC_ARGO_DEBUG_WORKFLOW,
+        "child_run_id": run_id or None,
+        "input": run_input,
+    }
+
+
 def _lookup_last_unresolved_ask_from_history(
     history_messages: list[dict[str, Any]],
     *,
@@ -500,6 +690,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         switched=selection_changed,
         history_messages=inp.history_messages,
     )
+    generic_argo_debug_input = _generic_argo_debug_workflow_input(inp, parts)
+    if generic_argo_debug_input is not None:
+        return await _start_generic_argo_debug_workflow(
+            ctx,
+            inp=inp,
+            run_input=generic_argo_debug_input,
+        )
+
     history_messages = (
         inp.history_messages
         if await _should_backfill_history(
