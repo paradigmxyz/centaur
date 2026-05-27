@@ -12,7 +12,7 @@ goals = true
 fast_mode = true
 memories = true
 hooks = true
-enable_fanout = true
+enable_fanout = false
 runtime_metrics = true
 
 [features.multi_agent_v2]
