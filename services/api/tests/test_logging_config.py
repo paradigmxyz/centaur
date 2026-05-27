@@ -50,4 +50,4 @@ def test_add_log_version_includes_static_uuid():
     enriched = _add_log_version(None, "info", {"event": "execute_completed"})
 
     assert enriched["event"] == "execute_completed"
-    assert enriched["log_version_uuid"] == "7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14"
+    assert enriched["log_version_uuid"] == "013ca634-6a30-4047-8511-8e5483f313ea"
