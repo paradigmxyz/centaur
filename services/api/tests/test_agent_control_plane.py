@@ -61,6 +61,70 @@ async def _insert_assignment(db_pool, thread_key: str, generation: int = 1) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("engine", "stale_agent_thread_id"),
+    [
+        ("codex", "019e69c0-05c3-7841-9340-2cafeec83972"),
+        ("amp", "T-123"),
+        ("claude-code", "session-123"),
+    ],
+)
+async def test_get_or_spawn_does_not_resume_agent_thread_on_cold_spawn(
+    engine: str,
+    stale_agent_thread_id: str,
+):
+    from api.agent import get_or_spawn
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:{engine}-cold-spawn"
+    prior_runtime_id = f"rt-old-{uuid.uuid4().hex[:8]}"
+    fresh_runtime_id = f"rt-new-{uuid.uuid4().hex[:8]}"
+    prior = SandboxSession(
+        sandbox_id=prior_runtime_id,
+        thread_key=thread_key,
+        harness=engine,
+        engine=engine,
+        db_state="stopped",
+        agent_thread_id=stale_agent_thread_id,
+        last_delivered_id="msg-prev",
+        trace_id="trace-prev",
+    )
+    created = SandboxSession(
+        sandbox_id=fresh_runtime_id,
+        thread_key=thread_key,
+        harness=engine,
+        engine=engine,
+    )
+    backend = SimpleNamespace(create=AsyncMock(return_value=created))
+    db_insert = AsyncMock(return_value=True)
+
+    with (
+        patch("api.agent._get_pool", return_value=SimpleNamespace()),
+        patch("api.agent._db_get_session", new=AsyncMock(return_value=prior)),
+        patch("api.agent._db_delete_session", new=AsyncMock()),
+        patch("api.agent._db_insert_session", new=db_insert),
+        patch("api.agent._drop_runtime"),
+        patch("api.agent._get_runtime", return_value=SimpleNamespace()),
+        patch(
+            "api.agent.get_or_create_thread_trace_id",
+            new=AsyncMock(return_value="trace-new"),
+        ),
+        patch(
+            "api.agent._resolve_harness_profile",
+            return_value=(engine, None, None),
+        ),
+        patch("api.agent._evict_idle_sessions_for_capacity", new=AsyncMock()),
+        patch("api.agent.get_backend", return_value=backend),
+    ):
+        session = await get_or_spawn(thread_key, engine)
+
+    assert session.sandbox_id == fresh_runtime_id
+    assert session.agent_thread_id == ""
+    assert backend.create.await_args.kwargs["resume_thread_id"] is None
+    assert db_insert.await_args.kwargs["agent_thread_id"] == ""
+    assert db_insert.await_args.kwargs["last_delivered_id"] == "msg-prev"
+
+
+@pytest.mark.asyncio
 async def test_spawn_assignment_defaults_to_codex_when_no_selector(db_pool, monkeypatch):
     from api.runtime_control import spawn_assignment
 

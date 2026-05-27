@@ -944,18 +944,23 @@ async def get_or_spawn(
     backend = get_backend()
     await _evict_idle_sessions_for_capacity(backend)
     trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
+    if old_agent_thread_id:
+        log.info(
+            "cold_spawn_resume_skipped",
+            thread_key=thread_key,
+            engine=resolved_engine,
+            reason="agent_thread_state_belongs_to_previous_sandbox",
+        )
     session = await backend.create(
         thread_key,
         effective_harness,
         resolved_engine,
         persona=resolved_persona,
         repo=repo,
-        resume_thread_id=old_agent_thread_id or None,
+        resume_thread_id=None,
         trace_id=trace_id,
     )
     session.trace_id = trace_id
-    if old_agent_thread_id:
-        session.agent_thread_id = old_agent_thread_id
     _get_runtime(session.sandbox_id)
     log.info(
         "pipe_session_spawned", thread_key=thread_key, sandbox=session.sandbox_id[:12]
@@ -966,7 +971,7 @@ async def get_or_spawn(
         session,
         harness=session.harness,
         engine=session.engine,
-        agent_thread_id=old_agent_thread_id,
+        agent_thread_id="",
         last_delivered_id=old_last_delivered_id,
         inflight_turn_id=old_inflight_turn_id,
         inflight_turn_input=old_inflight_turn_input,
