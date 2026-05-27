@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import urllib.parse
@@ -16,13 +17,16 @@ from centaur_sdk import secret
 _API_HOST = "api.brightdata.com"
 _API_BASE_URL = f"https://{_API_HOST}"
 _REQUEST_PATH = "/request"
-_STATS_PATH = "/zone/statistic"
+_DISCOVER_PATH = "/discover"
+_STATS_PATH = "/zone/bw"
 
 _DEFAULT_TIMEOUT = httpx.Timeout(300.0, connect=30.0)
 _MAX_RETRY_AFTER_SECONDS = 5
 
 _DEFAULT_SERP_ZONE = "serp_api"
 _DEFAULT_UNLOCKER_ZONE = "unlocker"
+_DEFAULT_DISCOVER_POLL_INTERVAL_S = 2.0
+_DEFAULT_DISCOVER_TIMEOUT_S = 60.0
 
 # Redacts Bearer tokens and the env-var name from log messages. The token now
 # rides in the Authorization header rather than a URL query param, but httpx
@@ -122,6 +126,16 @@ def _parse_body(response: httpx.Response) -> Any:
     return {"text": text}
 
 
+def _env_value(name: str) -> str:
+    """Return an optional non-secret environment value.
+
+    Do not use ``secret(..., default=...)`` for optional config: Centaur's
+    server-mode secret backend intentionally returns stub names for undeclared
+    credentials so iron-proxy can replace them on the wire.
+    """
+    return os.getenv(name, "").strip()  # noqa: TID251 - optional non-secret tool config
+
+
 class BrightDataClient:
     """Client for BrightData's REST API.
 
@@ -153,11 +167,11 @@ class BrightDataClient:
         return token
 
     def _get_serp_zone(self) -> str:
-        return self._serp_zone or secret("BRIGHTDATA_SERP_ZONE", "") or _DEFAULT_SERP_ZONE
+        return self._serp_zone or _env_value("BRIGHTDATA_SERP_ZONE") or _DEFAULT_SERP_ZONE
 
     def _get_unlocker_zone(self) -> str:
         return (
-            self._unlocker_zone or secret("BRIGHTDATA_UNLOCKER_ZONE", "") or _DEFAULT_UNLOCKER_ZONE
+            self._unlocker_zone or _env_value("BRIGHTDATA_UNLOCKER_ZONE") or _DEFAULT_UNLOCKER_ZONE
         )
 
     @property
@@ -239,6 +253,36 @@ class BrightDataClient:
 
         return _parse_body(response)
 
+    def _post_json(self, path: str, body: dict, *, op: str) -> Any:
+        try:
+            response = self.http_client.post(path, json=body, headers=self._auth_headers())
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                f"BrightData request failed (host={_API_HOST}, op={op}): {type(exc).__name__}"
+            ) from None
+        if response.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"BrightData returned {response.status_code} (host={_API_HOST}, op={op})",
+                request=httpx.Request("POST", f"{_API_BASE_URL}{path}"),
+                response=response,
+            )
+        return _parse_body(response)
+
+    def _get_json(self, path: str, params: dict[str, Any], *, op: str) -> Any:
+        try:
+            response = self.http_client.get(path, params=params, headers=self._auth_headers())
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                f"BrightData request failed (host={_API_HOST}, op={op}): {type(exc).__name__}"
+            ) from None
+        if response.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"BrightData returned {response.status_code} (host={_API_HOST}, op={op})",
+                request=httpx.Request("GET", f"{_API_BASE_URL}{path}"),
+                response=response,
+            )
+        return _parse_body(response)
+
     # ----- Public methods (these become Centaur tool methods) -----
 
     def search(self, query: str, engine: str = "google", cursor: str | None = None) -> Any:
@@ -250,8 +294,74 @@ class BrightDataClient:
             cursor: Optional pagination cursor (engine-specific page offset).
         """
         url = _build_search_url(query, engine, cursor)
-        body = {"zone": self._get_serp_zone(), "url": url, "format": "raw"}
+        body = {"zone": self._get_serp_zone(), "url": url, "format": "json", "method": "GET"}
         return self._call(body, op="search")
+
+    def discover(
+        self,
+        query: str,
+        intent: str | None = None,
+        filter_keywords: list[str] | None = None,
+        num_results: int = 10,
+        result_format: str = "json",
+        include_content: bool = False,
+        include_images: bool = False,
+        mode: str = "standard",
+        language: str = "en",
+        country: str = "US",
+        city: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        poll: bool = True,
+        poll_interval_s: float = _DEFAULT_DISCOVER_POLL_INTERVAL_S,
+        timeout_s: float = _DEFAULT_DISCOVER_TIMEOUT_S,
+    ) -> Any:
+        """Run a BrightData Discover search and, by default, wait for results.
+
+        Discover is an async REST API: ``POST /discover`` returns a ``task_id``
+        and ``GET /discover?task_id=...`` retrieves ranked results. This wrapper
+        polls by default so agents get a usable result in one tool call.
+        """
+        body: dict[str, Any] = {
+            "query": query,
+            "num_results": num_results,
+            "format": result_format,
+            "include_content": include_content,
+            "include_images": include_images,
+            "mode": mode,
+            "language": language,
+            "country": country,
+        }
+        if intent is not None:
+            body["intent"] = intent
+        if filter_keywords is not None:
+            body["filter_keywords"] = filter_keywords
+        if city is not None:
+            body["city"] = city
+        if start_date is not None:
+            body["start_date"] = start_date
+        if end_date is not None:
+            body["end_date"] = end_date
+
+        started = self._post_json(_DISCOVER_PATH, body, op="discover")
+        if not poll:
+            return started
+
+        task_id = started.get("task_id") if isinstance(started, dict) else None
+        if not task_id:
+            return started
+
+        deadline = time.monotonic() + max(timeout_s, 0.0)
+        while time.monotonic() <= deadline:
+            result = self.discover_result(str(task_id))
+            if not isinstance(result, dict) or result.get("status") != "processing":
+                return result
+            time.sleep(max(poll_interval_s, 0.0))
+        raise TimeoutError(f"BrightData discover timed out (host={_API_HOST}, task_id={task_id})")
+
+    def discover_result(self, task_id: str) -> Any:
+        """Fetch results for a BrightData Discover ``task_id``."""
+        return self._get_json(_DISCOVER_PATH, {"task_id": task_id}, op="discover_result")
 
     def scrape_markdown(self, url: str) -> Any:
         """Fetch a public page via the Web Unlocker zone, rendered as Markdown."""
@@ -269,7 +379,7 @@ class BrightDataClient:
         return self._call(body, op="scrape_html")
 
     def session_stats(self) -> Any:
-        """Return per-zone usage statistics for the configured SERP and Unlocker zones."""
+        """Return bandwidth stats for the configured SERP and Unlocker zones."""
         stats: dict[str, Any] = {}
         for label, zone in (
             ("serp", self._get_serp_zone()),

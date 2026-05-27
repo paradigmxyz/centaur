@@ -132,7 +132,8 @@ def test_search_posts_to_request_with_serp_zone() -> None:
     assert captured["path"] == "/request"
     body = captured["body"]
     assert body["zone"] == _FAKE_SERP_ZONE
-    assert body["format"] == "raw"
+    assert body["format"] == "json"
+    assert body["method"] == "GET"
     assert body["url"] == "https://www.google.com/search?q=anthropic&brd_json=1"
 
 
@@ -214,7 +215,7 @@ def test_session_stats_queries_both_zones() -> None:
     assert {s["zone"] for s in seen} == {_FAKE_SERP_ZONE, _FAKE_UNLOCKER_ZONE}
     for s in seen:
         assert s["method"] == "GET"
-        assert s["path"] == "/zone/statistic"
+        assert s["path"] == "/zone/bw"
         assert s["auth"] == f"Bearer {_FAKE_TOKEN}"
     assert stats["serp"]["zone"] == _FAKE_SERP_ZONE
     assert stats["unlocker"]["zone"] == _FAKE_UNLOCKER_ZONE
@@ -310,12 +311,13 @@ def test_no_mcp_passthrough_or_raw_call() -> None:
     c = BrightDataClient()
     assert not hasattr(c, "call_tool")
     assert not hasattr(c, "raw_mcp")
-    assert not hasattr(c, "discover")  # dropped — no direct REST equivalent
     public_methods = {name for name in vars(BrightDataClient) if not name.startswith("_")}
     public_methods.discard("close")
     public_methods.discard("http_client")
     assert public_methods == {
         "search",
+        "discover",
+        "discover_result",
         "scrape_markdown",
         "scrape_html",
         "session_stats",
@@ -325,8 +327,9 @@ def test_no_mcp_passthrough_or_raw_call() -> None:
 # ---------- zone defaults ----------
 
 
-def test_zone_falls_back_to_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("tools.research.brightdata.client.secret", lambda _name, _default: "")
+def test_zone_falls_back_to_default_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BRIGHTDATA_SERP_ZONE", raising=False)
+    monkeypatch.delenv("BRIGHTDATA_UNLOCKER_ZONE", raising=False)
     captured, handler = _captured_handler({"ok": True})
     transport = httpx.MockTransport(handler)
     c = BrightDataClient(api_token=_FAKE_TOKEN, transport=transport)
@@ -338,6 +341,104 @@ def test_zone_falls_back_to_default_when_unset(monkeypatch: pytest.MonkeyPatch) 
     c2 = BrightDataClient(api_token=_FAKE_TOKEN, transport=transport2)
     c2.scrape_markdown("https://example.com")
     assert captured2["body"]["zone"] == "unlocker"
+
+
+def test_zone_can_be_overridden_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIGHTDATA_SERP_ZONE", "env_serp")
+    monkeypatch.setenv("BRIGHTDATA_UNLOCKER_ZONE", "env_unlocker")
+
+    captured, handler = _captured_handler({"ok": True})
+    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(handler))
+    c.search("q")
+    assert captured["body"]["zone"] == "env_serp"
+
+    captured2, handler2 = _captured_handler("hi")
+    c2 = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(handler2))
+    c2.scrape_html("https://example.com")
+    assert captured2["body"]["zone"] == "env_unlocker"
+
+
+# ---------- discover API ----------
+
+
+def test_discover_posts_documented_payload_and_returns_task_when_not_polling() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, request=request, json={"status": "ok", "task_id": "task-1"})
+
+    c = _make_client(handler)
+    result = c.discover(
+        "artificial intelligence trends",
+        intent="latest AI technology developments",
+        filter_keywords=["Product Manager", "Roadmap"],
+        num_results=10,
+        include_images=True,
+        poll=False,
+    )
+
+    assert result == {"status": "ok", "task_id": "task-1"}
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/discover"
+    assert captured["headers"]["authorization"] == f"Bearer {_FAKE_TOKEN}"
+    assert captured["body"] == {
+        "query": "artificial intelligence trends",
+        "num_results": 10,
+        "format": "json",
+        "include_content": False,
+        "include_images": True,
+        "mode": "standard",
+        "language": "en",
+        "country": "US",
+        "intent": "latest AI technology developments",
+        "filter_keywords": ["Product Manager", "Roadmap"],
+    }
+
+
+def test_discover_polls_until_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("tools.research.brightdata.client.time.sleep", lambda _s: None)
+    seen: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.url.params)))
+        if request.method == "POST":
+            return httpx.Response(200, request=request, json={"status": "ok", "task_id": "task-1"})
+        if len(seen) == 2:
+            return httpx.Response(200, request=request, json={"status": "processing"})
+        return httpx.Response(
+            200,
+            request=request,
+            json={"status": "done", "results": [{"title": "result"}]},
+        )
+
+    c = _make_client(handler)
+    assert c.discover("q", poll_interval_s=0, timeout_s=1) == {
+        "status": "done",
+        "results": [{"title": "result"}],
+    }
+    assert seen == [
+        ("POST", "/discover", {}),
+        ("GET", "/discover", {"task_id": "task-1"}),
+        ("GET", "/discover", {"task_id": "task-1"}),
+    ]
+
+
+def test_discover_result_fetches_task() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["query"] = dict(request.url.params)
+        return httpx.Response(200, request=request, json={"status": "done", "results": []})
+
+    c = _make_client(handler)
+    assert c.discover_result("task-1") == {"status": "done", "results": []}
+    assert captured == {"method": "GET", "path": "/discover", "query": {"task_id": "task-1"}}
 
 
 # ---------- token redaction: exceptions ----------
