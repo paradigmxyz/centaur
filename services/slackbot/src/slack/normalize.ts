@@ -96,6 +96,7 @@ export async function normalizeSlackEnvelope(opts: {
   }
   const isMention =
     event.type === 'app_mention' ||
+    isDirectMessage(event) ||
     Boolean(opts.botUserId && messageMentionsBot(event, opts.botUserId))
   const historyMessages = isMention
     ? await collectThreadHistorySafely({
@@ -143,6 +144,10 @@ function recipientSlackTeamId(event: SlackMessageEvent): string | undefined {
 
 function isMessageLikeEvent(event: SlackMessageEvent): boolean {
   return event.type === 'message' || event.type === 'app_mention'
+}
+
+function isDirectMessage(event: SlackMessageEvent): boolean {
+  return event.channel_type === 'im' || event.channel_type === 'mpim'
 }
 
 async function collectThreadHistorySafely(opts: {

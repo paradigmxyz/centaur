@@ -106,6 +106,30 @@ describe('normalizeSlackEnvelope', () => {
     }
   })
 
+  it('treats direct message events as actionable without requiring a textual mention', async () => {
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-direct-message',
+        event: {
+          type: 'message',
+          user: 'U123',
+          channel: 'D123',
+          channel_type: 'im',
+          ts: '1778875070.942789',
+          text: 'are you there?'
+        }
+      },
+      botUserId: 'UBOT',
+      client
+    })
+
+    expect(normalized?.is_mention).toBe(true)
+    expect(normalized?.thread_key).toBe('slack:T123:D123:1778875070.942789')
+    expect(normalized?.parts).toEqual([{ type: 'text', text: 'are you there?' }])
+  })
+
   it('normalizes zip uploads as generic file parts', async () => {
     const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3])
     const fetchMock = mock(
