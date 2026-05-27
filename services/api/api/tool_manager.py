@@ -16,7 +16,7 @@ import time
 import tomllib
 import types
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -28,6 +28,13 @@ from fastapi.responses import PlainTextResponse
 from toon_format import encode as toon_encode
 
 from api.api_keys import check_scope
+from api.otel import (
+    context_from_serialized,
+    mark_error,
+    record_exception,
+    set_span_attributes,
+    start_span,
+)
 from api.vm_metrics import record_tool_call
 from api.deps import get_key_info, get_sandbox_claims, verify_api_key
 from api import slackbot_client
@@ -1106,6 +1113,48 @@ def _timeout_label(timeout_s: float | None) -> str:
     return "no timeout" if timeout_s is None else f"{timeout_s:g}s"
 
 
+def _decode_jsonb(value: Any, fallback: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return fallback
+
+
+async def _active_execution_parent_context(
+    request: Request | None,
+    sandbox_claims: dict[str, Any] | None,
+):
+    if request is None or not sandbox_claims:
+        return None
+    thread_key = str(sandbox_claims.get("thread_key") or "")
+    if not thread_key:
+        return None
+    pool = getattr(getattr(request, "app", None), "state", None)
+    pool = getattr(pool, "db_pool", None) if pool else None
+    if pool is None:
+        return None
+    row = await pool.fetchrow(
+        "SELECT metadata FROM agent_execution_requests "
+        "WHERE thread_key = $1 AND status IN ('running', 'cancel_requested', 'retry_wait') "
+        "ORDER BY started_at DESC NULLS LAST, claimed_at DESC NULLS LAST, created_at DESC "
+        "LIMIT 1",
+        thread_key,
+    )
+    if not row:
+        return None
+    metadata = _decode_jsonb(row["metadata"], {})
+    if not isinstance(metadata, dict):
+        return None
+    otel = _decode_jsonb(metadata.get("_otel"), {})
+    if not isinstance(otel, dict):
+        return None
+    return context_from_serialized(otel.get("execution_span_context"))
+
+
 async def _capture_live_slack_send(
     *,
     request: Request | None,
@@ -1787,21 +1836,13 @@ class ToolManager:
         )
         return loaded
 
-    # Hardcoded infrastructure secrets for the injection map. Each ``HttpSecret``
-    # carries the hosts iron-proxy attaches it to.
+    # Base infrastructure secrets — credentials every sandbox's iron-proxy
+    # needs regardless of which harness is running. Each ``HttpSecret``
+    # carries the hosts iron-proxy attaches it to. Harness-specific provider
+    # credentials (Anthropic, OpenAI) live in ``_HARNESS_SECRETS`` below
+    # because the right credential depends on the sandbox's harness and
+    # auth mode.
     _INFRA_SECRETS: ClassVar[list[HttpSecret]] = [
-        HttpSecret(
-            name="ANTHROPIC_API_KEY",
-            secret_ref="ANTHROPIC_API_KEY",
-            hosts=("api.anthropic.com",),
-            match_headers=("X-Api-Key",),
-        ),
-        HttpSecret(
-            name="OPENAI_API_KEY",
-            secret_ref="OPENAI_API_KEY",
-            hosts=("api.openai.com",),
-            match_headers=("Authorization",),
-        ),
         HttpSecret(
             name="XAI_API_KEY",
             secret_ref="XAI_API_KEY",
@@ -1834,15 +1875,115 @@ class ToolManager:
         ),
     ]
 
-    def collect_secrets(self) -> list[SecretDef]:
-        """Return all secrets (infra + tool).
+    # Harness-specific credentials, keyed by ``(engine, auth_mode)``. The
+    # per-sandbox iron-proxy gets exactly the tuple that matches the
+    # sandbox's harness and auth-mode env var; the shared API-side proxy
+    # and the token broker see the union of every tuple so they can manage
+    # the credential set independently of which mode is currently active.
+    #
+    # Bootstrap (per harness OAuth flow): run ``claude login`` / ``codex
+    # login`` locally and copy the refresh token into the matching ``*_BLOB``
+    # secret item. The ``*_CLIENT_ID`` is a fixed public constant baked into
+    # the CLI; store the literal value. The codex flow also needs
+    # ``OPENAI_CODEX_ACCOUNT_ID`` (a ChatGPT account UUID injected as the
+    # ``chatgpt-account-id`` header) so the backend routes to the right
+    # workspace; the Anthropic flow has no equivalent header.
+    _HARNESS_SECRETS: ClassVar[dict[tuple[str, str], tuple[SecretDef, ...]]] = {
+        ("claude-code", "api_key"): (
+            HttpSecret(
+                name="ANTHROPIC_API_KEY",
+                secret_ref="ANTHROPIC_API_KEY",
+                hosts=("api.anthropic.com",),
+                match_headers=("X-Api-Key",),
+            ),
+        ),
+        ("claude-code", "access_token"): (
+            BrokeredTokenSecret(
+                name="anthropic-claude",
+                hosts=("api.anthropic.com",),
+                fields=(
+                    ("client_id", OAuthFieldSource(secret_ref="CLAUDE_CODE_CLIENT_ID")),
+                    ("refresh_token", OAuthFieldSource(secret_ref="CLAUDE_CODE_BLOB")),
+                ),
+                token_endpoint="https://console.anthropic.com/v1/oauth/token",
+            ),
+        ),
+        ("codex", "api_key"): (
+            HttpSecret(
+                name="OPENAI_API_KEY",
+                secret_ref="OPENAI_API_KEY",
+                hosts=("api.openai.com",),
+                match_headers=("Authorization",),
+            ),
+        ),
+        ("codex", "access_token"): (
+            BrokeredTokenSecret(
+                name="openai-codex",
+                hosts=("chatgpt.com",),
+                fields=(
+                    ("client_id", OAuthFieldSource(secret_ref="OPENAI_CODEX_CLIENT_ID")),
+                    ("refresh_token", OAuthFieldSource(secret_ref="OPENAI_CODEX_BLOB")),
+                ),
+                token_endpoint="https://auth.openai.com/oauth/token",
+            ),
+            HttpSecret(
+                name="OPENAI_CODEX_ACCOUNT_ID",
+                secret_ref="OPENAI_CODEX_ACCOUNT_ID",
+                mode=SecretMode.INJECT,
+                hosts=("chatgpt.com",),
+                inject_header="chatgpt-account-id",
+            ),
+        ),
+    }
 
-        Every ``HttpSecret``, ``GcpAuthSecret`` and ``OAuthTokenSecret`` carries
-        its own ``hosts``; ``PgDsnSecret`` is a TCP listener with no host.
+    # Maps an engine to the env-var name (in ``sandbox.extraEnv``) that
+    # selects its auth mode. Engines not in this table use no harness-
+    # specific credentials.
+    _HARNESS_AUTH_MODE_ENV: ClassVar[dict[str, str]] = {
+        "claude-code": "CLAUDE_CODE_AUTH_MODE",
+        "codex": "CODEX_AUTH_MODE",
+    }
+
+    @classmethod
+    def _harness_secrets_for(
+        cls, engine: str, auth_modes: Mapping[str, str]
+    ) -> tuple[SecretDef, ...]:
+        mode_key = cls._HARNESS_AUTH_MODE_ENV.get(engine)
+        if mode_key is None:
+            return ()
+        mode = (auth_modes.get(mode_key) or "api_key").strip() or "api_key"
+        return cls._HARNESS_SECRETS.get((engine, mode), ())
+
+    def secrets_for_sandbox(
+        self, engine: str, auth_modes: Mapping[str, str]
+    ) -> list[SecretDef]:
+        """Return the secrets a sandbox's iron-proxy should see.
+
+        Base infra + every tool's secrets + exactly the harness credentials
+        selected by ``(engine, auth_modes[<engine's mode env>])``. Unknown
+        engines (e.g. ``amp``, ``pi-mono``) get no harness extras — they
+        authenticate through entries that already live in ``_INFRA_SECRETS``.
         """
         out: list[SecretDef] = list(self._INFRA_SECRETS)
         for lt in self.tools.values():
             out.extend(lt.all_secrets)
+        out.extend(self._harness_secrets_for(engine, auth_modes))
+        return out
+
+    def collect_secrets(self) -> list[SecretDef]:
+        """Return all secrets the deployment manages.
+
+        Base infra + every tool's secrets + the union of every harness
+        credential variant. Used by the shared API-side iron-proxy and by
+        iron-token-broker so the broker manages every brokered credential
+        regardless of which sandboxes are currently running. Per-sandbox
+        proxies should call :meth:`secrets_for_sandbox` instead.
+        """
+        out: list[SecretDef] = list(self._INFRA_SECRETS)
+        for lt in self.tools.values():
+            out.extend(lt.all_secrets)
+        for harness_set in self._HARNESS_SECRETS.values():
+            out.extend(harness_set)
         return out
 
     def reload(self) -> dict[str, Any]:
@@ -2194,63 +2335,95 @@ class ToolManager:
                 else {}
             ),
         }
-        t0 = time.monotonic()
-        log.info("tool_call_started", **call_fields)
-        captured_slack_send = await _capture_live_slack_send(
-            request=request,
-            sandbox_claims=sandbox_claims,
-            tool_name=tool_name,
-            method_name=method_name,
-            args=args,
-        )
-        if captured_slack_send is not None:
-            duration_ms = round((time.monotonic() - t0) * 1000)
-            log.info(
-                "tool_call_completed",
-                duration_ms=duration_ms,
-                success=True,
-                result_size_bytes=_payload_size_bytes(captured_slack_send),
-                captured=True,
-                **call_fields,
+        parent_context = await _active_execution_parent_context(request, sandbox_claims)
+        with start_span(
+            "centaur.tool.call",
+            parent_context=parent_context,
+            attributes={
+                "centaur.tool.name": tool_name,
+                "centaur.tool.method": method_name,
+                "centaur.thread_key": call_fields.get("thread_key"),
+                "centaur.sandbox_container_id": call_fields.get("sandbox_container_id"),
+                "centaur.tool.arg_keys": call_fields["arg_keys"],
+                "centaur.tool.arg_size_bytes": call_fields["arg_size_bytes"],
+            },
+        ) as span:
+            t0 = time.monotonic()
+            log.info("tool_call_started", **call_fields)
+            captured_slack_send = await _capture_live_slack_send(
+                request=request,
+                sandbox_claims=sandbox_claims,
+                tool_name=tool_name,
+                method_name=method_name,
+                args=args,
             )
-            record_tool_call(tool_name, method_name, True, duration_ms / 1000)
-            if format == "toon":
-                return _to_toon(captured_slack_send)
-            return _normalize_for_serialization(captured_slack_send)
-        validation_error = _tool_arg_validation_error(method, args)
-        if validation_error is not None:
-            log.warning(
-                "tool_argument_validation_failed",
-                error=validation_error["message"],
-                **call_fields,
-            )
-            return json.dumps(validation_error)
-
-        # Resolve placeholder secrets for tools that declare them. Required
-        # secrets gate availability elsewhere; optional secrets should still be
-        # present in ToolContext when declared so tool code can choose to use
-        # them.
-        ctx = lt.ctx
-        all_secrets = lt.all_secrets
-        if all_secrets:
-            resolved = await _resolve_secrets(all_secrets)
-            log.info(
-                "tool_secrets_resolved",
-                tool=tool_name,
-                keys=list(resolved.keys()),
-                declared=[s.name for s in all_secrets],
-            )
-            if resolved:
-                ctx = ToolContext(
-                    name=lt.name,
-                    secrets={**lt.ctx.secrets, **resolved},
-                    thread_key=sandbox_claims.get("thread_key")
-                    if sandbox_claims
-                    else None,
-                    container_id=sandbox_claims.get("container_id")
-                    if sandbox_claims
-                    else None,
+            if captured_slack_send is not None:
+                duration_ms = round((time.monotonic() - t0) * 1000)
+                set_span_attributes(
+                    span,
+                    {
+                        "centaur.tool.duration_ms": duration_ms,
+                        "centaur.tool.success": True,
+                        "centaur.tool.captured": True,
+                        "centaur.tool.result_size_bytes": _payload_size_bytes(
+                            captured_slack_send
+                        ),
+                    },
                 )
+                log.info(
+                    "tool_call_completed",
+                    duration_ms=duration_ms,
+                    success=True,
+                    result_size_bytes=_payload_size_bytes(captured_slack_send),
+                    captured=True,
+                    **call_fields,
+                )
+                record_tool_call(tool_name, method_name, True, duration_ms / 1000)
+                if format == "toon":
+                    return _to_toon(captured_slack_send)
+                return _normalize_for_serialization(captured_slack_send)
+            validation_error = _tool_arg_validation_error(method, args)
+            if validation_error is not None:
+                mark_error(span, validation_error["message"])
+                log.warning(
+                    "tool_argument_validation_failed",
+                    error=validation_error["message"],
+                    **call_fields,
+                )
+                return json.dumps(validation_error)
+
+            # Resolve placeholder secrets for tools that declare them. Required
+            # secrets gate availability elsewhere; optional secrets should still be
+            # present in ToolContext when declared so tool code can choose to use
+            # them.
+            ctx = lt.ctx
+            all_secrets = lt.all_secrets
+            if all_secrets:
+                resolved = await _resolve_secrets(all_secrets)
+                log.info(
+                    "tool_secrets_resolved",
+                    tool=tool_name,
+                    keys=list(resolved.keys()),
+                    declared=[s.name for s in all_secrets],
+                )
+                if resolved:
+                    ctx = ToolContext(
+                        name=lt.name,
+                        secrets={**lt.ctx.secrets, **resolved},
+                        thread_key=sandbox_claims.get("thread_key")
+                        if sandbox_claims
+                        else None,
+                        container_id=sandbox_claims.get("container_id")
+                        if sandbox_claims
+                        else None,
+                    )
+                elif sandbox_claims:
+                    ctx = ToolContext(
+                        name=lt.name,
+                        secrets=dict(lt.ctx.secrets),
+                        thread_key=sandbox_claims.get("thread_key"),
+                        container_id=sandbox_claims.get("container_id"),
+                    )
             elif sandbox_claims:
                 ctx = ToolContext(
                     name=lt.name,
@@ -2258,65 +2431,76 @@ class ToolManager:
                     thread_key=sandbox_claims.get("thread_key"),
                     container_id=sandbox_claims.get("container_id"),
                 )
-        elif sandbox_claims:
-            ctx = ToolContext(
-                name=lt.name,
-                secrets=dict(lt.ctx.secrets),
-                thread_key=sandbox_claims.get("thread_key"),
-                container_id=sandbox_claims.get("container_id"),
-            )
 
-        token = set_tool_context(ctx)
-        try:
-            if inspect.iscoroutinefunction(method.fn):
-                coro = method.fn(**args)
-            else:
-                coro = asyncio.to_thread(method.fn, **args)
-            result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
-            duration_ms = round((time.monotonic() - t0) * 1000)
-            log.info(
-                "tool_call_completed",
-                duration_ms=duration_ms,
-                success=True,
-                result_size_bytes=_payload_size_bytes(result),
-                **call_fields,
-            )
-            record_tool_call(tool_name, method_name, True, duration_ms / 1000)
-            if isinstance(result, dict):
-                thread_key = (
-                    sandbox_claims.get("thread_key") if sandbox_claims else None
+            token = set_tool_context(ctx)
+            try:
+                if inspect.iscoroutinefunction(method.fn):
+                    coro = method.fn(**args)
+                else:
+                    coro = asyncio.to_thread(method.fn, **args)
+                result = await asyncio.wait_for(coro, timeout=lt.timeout_s)
+                duration_ms = round((time.monotonic() - t0) * 1000)
+                result_size_bytes = _payload_size_bytes(result)
+                set_span_attributes(
+                    span,
+                    {
+                        "centaur.tool.duration_ms": duration_ms,
+                        "centaur.tool.success": True,
+                        "centaur.tool.result_size_bytes": result_size_bytes,
+                    },
                 )
-                result = await _extract_tool_attachment(
-                    result,
-                    request=request,
-                    thread_key=thread_key,
-                    tool_name=tool_name,
+                log.info(
+                    "tool_call_completed",
+                    duration_ms=duration_ms,
+                    success=True,
+                    result_size_bytes=result_size_bytes,
+                    **call_fields,
                 )
-            if format == "toon":
-                return result if isinstance(result, str) else _to_toon(result)
-            return _normalize_for_serialization(result)
-        except (SystemExit, Exception) as e:
-            duration_ms = round((time.monotonic() - t0) * 1000)
-            if isinstance(e, asyncio.TimeoutError):
-                error_msg = f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
-            elif isinstance(e, SystemExit):
-                error_msg = f"sys.exit({e.code})"
-            else:
-                error_msg = str(e)
-            log.warning(
-                "tool_call_completed",
-                duration_ms=duration_ms,
-                success=False,
-                error=error_msg,
-                error_type=type(e).__name__,
-                **call_fields,
-            )
-            record_tool_call(tool_name, method_name, False, duration_ms / 1000)
-            return json.dumps(
-                {"error": error_msg, "tool": tool_name, "method": method_name}
-            )
-        finally:
-            reset_tool_context(token)
+                record_tool_call(tool_name, method_name, True, duration_ms / 1000)
+                if isinstance(result, dict):
+                    thread_key = (
+                        sandbox_claims.get("thread_key") if sandbox_claims else None
+                    )
+                    result = await _extract_tool_attachment(
+                        result,
+                        request=request,
+                        thread_key=thread_key,
+                        tool_name=tool_name,
+                    )
+                if format == "toon":
+                    return result if isinstance(result, str) else _to_toon(result)
+                return _normalize_for_serialization(result)
+            except (SystemExit, Exception) as e:
+                duration_ms = round((time.monotonic() - t0) * 1000)
+                if isinstance(e, asyncio.TimeoutError):
+                    error_msg = f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
+                elif isinstance(e, SystemExit):
+                    error_msg = f"sys.exit({e.code})"
+                else:
+                    error_msg = str(e)
+                set_span_attributes(
+                    span,
+                    {
+                        "centaur.tool.duration_ms": duration_ms,
+                        "centaur.tool.success": False,
+                        "error.type": type(e).__name__,
+                    },
+                )
+                record_exception(span, e)
+                log.warning(
+                    "tool_call_completed",
+                    duration_ms=duration_ms,
+                    success=False,
+                    error=error_msg,
+                    error_type=type(e).__name__,
+                    **call_fields,
+                )
+                record_tool_call(tool_name, method_name, False, duration_ms / 1000)
+                return json.dumps(
+                    {"error": error_msg, "tool": tool_name, "method": method_name}
+                )
+            finally:
+                reset_tool_context(token)
 
     def create_rest_router(self) -> APIRouter:
         """Create a stable FastAPI router that dispatches to tools via live lookup.

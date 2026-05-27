@@ -35,6 +35,13 @@ import structlog
 from api.agent import _insert_system_message
 from api import slackbot_client
 from api.harness_config import default_harness
+from api.otel import (
+    add_span_event,
+    mark_error,
+    record_exception,
+    set_span_attributes,
+    start_span,
+)
 from api.runtime_control import (
     ControlPlaneError,
     append_message,
@@ -352,6 +359,14 @@ class WorkflowContext:
         checkpoint_name = self._resolve_name(name)
         if checkpoint_name in self._checkpoints:
             cached = self._checkpoints[checkpoint_name]
+            add_span_event(
+                "centaur.workflow.step_replayed",
+                {
+                    "centaur.workflow.run_id": self.run_id,
+                    "centaur.workflow.step": checkpoint_name,
+                    "centaur.workflow.step_kind": step_kind,
+                },
+            )
             return cached  # type: ignore[return-value]
 
         self._in_replay = False
@@ -359,42 +374,63 @@ class WorkflowContext:
         max_attempts = 1 + (retry.limit if retry else 0)
         last_err: Exception | None = None
 
-        for attempt in range(max_attempts):
-            try:
-                if timeout is not None:
-                    result = await asyncio.wait_for(
-                        self._call_step_fn(fn), timeout.total_seconds(),
+        with start_span(
+            "centaur.workflow.step",
+            attributes={
+                "centaur.workflow.run_id": self.run_id,
+                "centaur.workflow.step": checkpoint_name,
+                "centaur.workflow.step_kind": step_kind,
+                "centaur.workflow.replay": False,
+                "centaur.workflow.retry_limit": retry.limit if retry else 0,
+            },
+        ) as span:
+            for attempt in range(max_attempts):
+                set_span_attributes(span, {"centaur.workflow.step_attempt": attempt + 1})
+                try:
+                    if timeout is not None:
+                        result = await asyncio.wait_for(
+                            self._call_step_fn(fn), timeout.total_seconds(),
+                        )
+                    else:
+                        result = await self._call_step_fn(fn)
+
+                    eid = execution_id
+                    cid = child_run_id
+                    if eid is None and step_kind == "agent_turn" and isinstance(result, dict):
+                        eid = result.get("execution_id")
+                    if cid is None and step_kind == "child_workflow_start" and isinstance(result, dict):
+                        cid = result.get("run_id")
+
+                    await self._persist_checkpoint(
+                        checkpoint_name, result, step_kind=step_kind,
+                        execution_id=eid,
+                        child_run_id=cid,
                     )
-                else:
-                    result = await self._call_step_fn(fn)
+                    set_span_attributes(
+                        span,
+                        {
+                            "centaur.execution_id": eid,
+                            "centaur.workflow.child_run_id": cid,
+                            "centaur.workflow.step.success": True,
+                        },
+                    )
+                    return result  # type: ignore[return-value]
 
-                eid = execution_id
-                cid = child_run_id
-                if eid is None and step_kind == "agent_turn" and isinstance(result, dict):
-                    eid = result.get("execution_id")
-                if cid is None and step_kind == "child_workflow_start" and isinstance(result, dict):
-                    cid = result.get("run_id")
-
-                await self._persist_checkpoint(
-                    checkpoint_name, result, step_kind=step_kind,
-                    execution_id=eid,
-                    child_run_id=cid,
-                )
-                return result  # type: ignore[return-value]
-
-            except NonRetryableError:
-                raise
-            except CancelledWorkflow:
-                raise
-            except SuspendWorkflow:
-                raise
-            except Exception as err:
-                last_err = err
-                if attempt + 1 >= max_attempts:
-                    break
-                delay = retry.delay_for_attempt(attempt) if retry else 0.0
-                if delay > 0:
-                    await asyncio.sleep(delay)
+                except NonRetryableError as err:
+                    record_exception(span, err)
+                    raise
+                except CancelledWorkflow:
+                    raise
+                except SuspendWorkflow:
+                    raise
+                except Exception as err:
+                    last_err = err
+                    if attempt + 1 >= max_attempts:
+                        record_exception(span, err)
+                        break
+                    delay = retry.delay_for_attempt(attempt) if retry else 0.0
+                    if delay > 0:
+                        await asyncio.sleep(delay)
 
         raise last_err  # type: ignore[misc]
 
@@ -2503,6 +2539,17 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         ),
         name=f"workflow-lease-{run_id}",
     )
+    span_cm = start_span(
+        "centaur.workflow.run",
+        attributes={
+            "centaur.workflow.run_id": run_id,
+            "centaur.workflow.name": workflow_name,
+            "centaur.workflow.worker_id": worker_id,
+            "centaur.workflow.queue_delay_s": round(queue_delay, 3),
+            "centaur.thread_key": run_input.get("thread_key"),
+        },
+    )
+    span = span_cm.__enter__()
 
     try:
         result = await registered.handler(params, ctx)
@@ -2529,6 +2576,13 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
             )
             return
         _duration = time.monotonic() - _start
+        set_span_attributes(
+            span,
+            {
+                "centaur.workflow.status": "completed",
+                "centaur.workflow.duration_s": _duration,
+            },
+        )
         record_workflow_run_terminal(workflow_name, "completed", _duration)
         await notify_workflow_run_terminal(pool, run_id)
         log.info(
@@ -2576,6 +2630,13 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
                 state=exc.status,
             )
             return
+        set_span_attributes(
+            span,
+            {
+                "centaur.workflow.status": exc.status,
+                "centaur.workflow.available_at": available_at.isoformat(),
+            },
+        )
         log.info(
             "workflow_run_suspended",
             run_id=run_id,
@@ -2605,6 +2666,14 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
             )
             return
         _duration = time.monotonic() - _start
+        set_span_attributes(
+            span,
+            {
+                "centaur.workflow.status": "cancelled",
+                "centaur.workflow.duration_s": _duration,
+            },
+        )
+        mark_error(span, "workflow cancelled")
         record_workflow_run_terminal(workflow_name, "cancelled", _duration)
         await notify_workflow_run_terminal(pool, run_id)
         log.info(
@@ -2631,6 +2700,15 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         )
         if _command_updated(updated):
             _duration = time.monotonic() - _start
+            set_span_attributes(
+                span,
+                {
+                    "centaur.workflow.status": "failed",
+                    "centaur.workflow.duration_s": _duration,
+                    "centaur.error.code": exc.code,
+                },
+            )
+            mark_error(span, exc.message)
             record_workflow_run_terminal(workflow_name, "failed", _duration)
             await notify_workflow_run_terminal(pool, run_id)
             log.warning(
@@ -2649,6 +2727,7 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
             )
 
     except Exception as exc:
+        record_exception(span, exc)
         log.warning(
             "workflow_run_failed",
             run_id=run_id,
@@ -2670,6 +2749,13 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         )
         if _command_updated(updated):
             _duration = time.monotonic() - _start
+            set_span_attributes(
+                span,
+                {
+                    "centaur.workflow.status": "failed",
+                    "centaur.workflow.duration_s": _duration,
+                },
+            )
             record_workflow_run_terminal(workflow_name, "failed", _duration)
             await notify_workflow_run_terminal(pool, run_id)
         else:
@@ -2684,6 +2770,7 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
+        span_cm.__exit__(None, None, None)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────

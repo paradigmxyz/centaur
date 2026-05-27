@@ -34,6 +34,7 @@ transforms:
         - "anthropic-beta"
         - "openai-organization"
         - "openai-project"
+        - "chatgpt-account-id"
         - "x-request-id"
         - "x-stainless-arch"
         - "x-stainless-os"
