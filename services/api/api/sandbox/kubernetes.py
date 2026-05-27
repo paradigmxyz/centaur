@@ -11,7 +11,7 @@ import re
 import secrets as _secrets
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlunsplit
@@ -39,6 +39,7 @@ from api.sandbox.config import (
     container_env,
     image,
     runtime_for_session,
+    sandbox_extra_env_map,
 )
 from api.sandbox.prompt_assembly import assemble_prompt
 from api.tool_manager import PgDsnSecret, SecretDef
@@ -631,6 +632,13 @@ class KubernetesExecutorBackend(SandboxBackend):
 
         return get_tool_manager().collect_secrets()
 
+    def _secrets_for_sandbox(
+        self, engine: str, auth_modes: Mapping[str, str]
+    ) -> list[SecretDef]:
+        from api.app import get_tool_manager
+
+        return get_tool_manager().secrets_for_sandbox(engine, auth_modes)
+
     def _resolved_pg_secrets(
         self, secrets: list[SecretDef]
     ) -> list[tuple[PgDsnSecret, str]]:
@@ -1135,7 +1143,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         secret_name = _prompt_secret_name(pod_name)
         firewall_host = _proxy_service_name(pod_name)
 
-        secrets = self._collect_secrets()
+        secrets = self._secrets_for_sandbox(engine, sandbox_extra_env_map())
         pg_listen_ports = assign_pg_listen_ports(secrets)
         pg_secrets = self._resolved_pg_secrets(secrets)
         sandbox_pg_dsns = {

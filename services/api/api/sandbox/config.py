@@ -75,6 +75,20 @@ def _sandbox_extra_env() -> list[tuple[str, str]]:
     return extra
 
 
+def sandbox_extra_env_map() -> dict[str, str]:
+    """Return the sandbox.extraEnv block as a name->value dict.
+
+    Public wrapper over ``_sandbox_extra_env`` for callers (e.g. the
+    kubernetes backend) that need to inspect harness auth-mode env vars at
+    proxy-config render time. Later entries win on duplicate names, matching
+    the in-pod env semantics.
+    """
+    out: dict[str, str] = {}
+    for name, value in _sandbox_extra_env():
+        out[name] = value
+    return out
+
+
 def _sandbox_otel_endpoint_hosts(extra_env: list[tuple[str, str]]) -> list[str]:
     extra = dict(extra_env)
     hosts: list[str] = []

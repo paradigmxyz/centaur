@@ -1785,3 +1785,149 @@ async def test_recover_warm_returns_running_warm_pods_and_cleans_stale(
         "centaur-sandbox",
         "centaur-sandbox-warm-finished-cfg",
     ) in fake_core.deleted_secrets
+
+
+def _stub_create_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: "KubernetesExecutorBackend",
+    *,
+    extra_env: list[dict[str, str]] | None = None,
+    harness_cmd: str = "claude-app-wrapper",
+) -> None:
+    """Common environment setup for create()-flow integration tests."""
+    from api.tool_manager import ToolManager
+
+    monkeypatch.setenv("AGENT_API_URL", "http://api.internal:8000")
+    monkeypatch.delenv("FIREWALL_HOST", raising=False)
+    monkeypatch.setenv("KUBERNETES_FIREWALL_CA_SECRET_NAME", "firewall-ca")
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+    monkeypatch.setenv("KUBERNETES_IRON_PROXY_IMAGE", "centaur-iron-proxy:test")
+    if extra_env is None:
+        monkeypatch.delenv("KUBERNETES_SANDBOX_EXTRA_ENV", raising=False)
+    else:
+        monkeypatch.setenv("KUBERNETES_SANDBOX_EXTRA_ENV", json.dumps(extra_env))
+    monkeypatch.setattr(
+        "api.sandbox.kubernetes._prompt_bundle", lambda persona: "prompt"
+    )
+    monkeypatch.setattr(
+        "api.sandbox.kubernetes.build_harness_cmd", lambda *_args: [harness_cmd]
+    )
+    monkeypatch.setattr("api.sandbox.kubernetes.image", lambda: "centaur-agent:test")
+
+    # Bypass tool discovery (which needs DATABASE_URL) by instantiating a
+    # ToolManager with an empty tool table. The harness-secret selection
+    # logic doesn't depend on loaded tools.
+    bare_tm = ToolManager.__new__(ToolManager)
+    bare_tm.tools = {}
+    fake_app = types.ModuleType("api.app")
+    fake_app.get_tool_manager = lambda: bare_tm
+    monkeypatch.setitem(sys.modules, "api.app", fake_app)
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    async def fake_wait_ready(_pod_name: str) -> float:
+        return 0.01
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+    monkeypatch.setattr(backend, "_wait_pod_ready", fake_wait_ready)
+    monkeypatch.setattr(backend, "_wait_ready", fake_wait_ready)
+
+
+@pytest.mark.asyncio
+async def test_create_uses_brokered_creds_for_claude_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude-code + CLAUDE_CODE_AUTH_MODE=access_token must publish the
+    brokered ``anthropic-claude`` credential into the per-sandbox iron-proxy
+    configmap and must NOT include ``ANTHROPIC_API_KEY``."""
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(
+        monkeypatch,
+        backend,
+        extra_env=[{"name": "CLAUDE_CODE_AUTH_MODE", "value": "access_token"}],
+    )
+
+    await backend.create("slack:C123:123.456", "claude-code", "claude-code")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "anthropic-claude" in proxy_yaml
+    assert "ANTHROPIC_API_KEY" not in proxy_yaml
+    # Wrong-engine harness creds must not leak in.
+    assert "openai-codex" not in proxy_yaml
+    assert "OPENAI_API_KEY" not in proxy_yaml
+
+
+@pytest.mark.asyncio
+async def test_create_uses_brokered_creds_for_codex_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """codex + CODEX_AUTH_MODE=access_token must publish the brokered
+    ``openai-codex`` credential plus the ``OPENAI_CODEX_ACCOUNT_ID`` header
+    inject, and must NOT include ``OPENAI_API_KEY``."""
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(
+        monkeypatch,
+        backend,
+        extra_env=[{"name": "CODEX_AUTH_MODE", "value": "access_token"}],
+        harness_cmd="codex-app-wrapper",
+    )
+
+    await backend.create("slack:C123:123.456", "codex", "codex")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "openai-codex" in proxy_yaml
+    assert "OPENAI_CODEX_ACCOUNT_ID" in proxy_yaml
+    assert "OPENAI_API_KEY" not in proxy_yaml
+    # Wrong-engine harness creds must not leak in.
+    assert "anthropic-claude" not in proxy_yaml
+    assert "ANTHROPIC_API_KEY" not in proxy_yaml
+
+
+@pytest.mark.asyncio
+async def test_create_uses_api_key_in_default_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no AUTH_MODE set, each engine gets its ``api_key`` HttpSecret and
+    no brokered credential — the existing behavior before OAuth modes."""
+    # claude-code default
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(monkeypatch, backend)
+
+    await backend.create("slack:C123:123.456", "claude-code", "claude-code")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "ANTHROPIC_API_KEY" in proxy_yaml
+    assert "anthropic-claude" not in proxy_yaml
+    # The other engine's creds must not leak in.
+    assert "OPENAI_API_KEY" not in proxy_yaml
+    assert "openai-codex" not in proxy_yaml
+
+
+@pytest.mark.asyncio
+async def test_create_isolates_codex_api_key_from_claude_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claude-code sandbox in api_key mode must not see OPENAI_API_KEY; a
+    codex sandbox in api_key mode must not see ANTHROPIC_API_KEY. Each
+    sandbox's iron-proxy holds only the creds its harness uses."""
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(monkeypatch, backend, harness_cmd="codex-app-wrapper")
+
+    await backend.create("slack:C123:123.456", "codex", "codex")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "OPENAI_API_KEY" in proxy_yaml
+    assert "ANTHROPIC_API_KEY" not in proxy_yaml
