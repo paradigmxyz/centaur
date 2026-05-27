@@ -14,7 +14,7 @@ from rich.console import Console
 from .client import BrightDataClient
 
 
-app = typer.Typer(name="brightdata", help="BrightData public web search, discovery, and scraping")
+app = typer.Typer(name="brightdata", help="BrightData public web search and scraping")
 console = Console()
 
 
@@ -36,19 +36,9 @@ def search(
     cursor: str | None = typer.Option(None, "--cursor", help="Pagination cursor"),
     as_json: bool = typer.Option(False, "--json", help="Emit raw JSON"),
 ) -> None:
-    """Run a public web search via BrightData."""
+    """Run a public web search via BrightData's SERP zone."""
     with _client() as c:
         _emit(c.search(query, engine=engine, cursor=cursor), as_json)
-
-
-@app.command()
-def discover(
-    query: str = typer.Argument(..., help="Discovery query"),
-    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON"),
-) -> None:
-    """Discover URLs across the public web for a query."""
-    with _client() as c:
-        _emit(c.discover(query), as_json)
 
 
 @app.command("scrape-markdown")
@@ -56,7 +46,7 @@ def scrape_markdown(
     url: str = typer.Argument(..., help="Public URL to scrape"),
     as_json: bool = typer.Option(False, "--json", help="Emit raw JSON"),
 ) -> None:
-    """Fetch a public page and return Markdown."""
+    """Fetch a public page via Web Unlocker and return Markdown."""
     with _client() as c:
         _emit(c.scrape_markdown(url), as_json)
 
@@ -66,7 +56,7 @@ def scrape_html(
     url: str = typer.Argument(..., help="Public URL to scrape"),
     as_json: bool = typer.Option(False, "--json", help="Emit raw JSON"),
 ) -> None:
-    """Fetch a public page and return HTML."""
+    """Fetch a public page via Web Unlocker and return HTML."""
     with _client() as c:
         _emit(c.scrape_html(url), as_json)
 
@@ -75,7 +65,7 @@ def scrape_html(
 def session_stats(
     as_json: bool = typer.Option(False, "--json", help="Emit raw JSON"),
 ) -> None:
-    """Return BrightData session usage statistics."""
+    """Return per-zone usage statistics for the SERP and Unlocker zones."""
     with _client() as c:
         _emit(c.session_stats(), as_json)
 

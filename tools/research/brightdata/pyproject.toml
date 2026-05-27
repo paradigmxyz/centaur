@@ -1,6 +1,6 @@
 [project]
 name = "brightdata"
-description = "BrightData MCP public web search, discovery, and scraping"
+description = "BrightData public web search and scraping (SERP + Web Unlocker)"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,5 +22,5 @@ build-backend = "hatchling.build"
 module = "client.py"
 timeout_s = 300
 secrets = [
-    {type = "http", name = "BRIGHTDATA_API_TOKEN", match_query = true, hosts = ["mcp.brightdata.com"]},
+    {type = "http", name = "BRIGHTDATA_API_TOKEN", match_headers = ["Authorization"], hosts = ["api.brightdata.com"]},
 ]

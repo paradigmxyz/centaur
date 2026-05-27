@@ -1,4 +1,4 @@
-"""Unit tests for the BrightData MCP client.
+"""Unit tests for the BrightData REST client.
 
 Layout & import path follow the existing ``tools/research/youtube/test_client.py``
 convention — we insert the repo root on ``sys.path`` so the test file can be
@@ -21,196 +21,202 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from tools.research.brightdata.client import (  # noqa: E402
     BrightDataClient,
+    _build_search_url,
     _client as client_factory,
-    _extract_mcp_payload,
-    _parse_sse_events,
+    _parse_body,
     _redact,
 )
 
 
 _FAKE_TOKEN = "fake-token-XYZ123"
-_FAKE_SESSION_ID = "00000000-0000-4000-8000-000000000001"
-
-
-def _wrap_with_session(inner: Callable[[httpx.Request], httpx.Response]) -> Callable[[httpx.Request], httpx.Response]:
-    """Wrap a tool-call handler with the MCP Streamable-HTTP handshake.
-
-    The real BrightData MCP requires:
-      1. POST initialize  → server returns ``Mcp-Session-Id`` header
-      2. POST notifications/initialized (with session header) → 200
-      3. POST tools/call (with session header) → actual handler runs
-
-    This wrapper makes existing tool-call tests work unchanged while still
-    asserting the client follows the protocol.
-    """
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else {}
-        method = body.get("method")
-        if method == "initialize":
-            return httpx.Response(
-                200,
-                request=request,
-                headers={"Mcp-Session-Id": _FAKE_SESSION_ID, "content-type": "application/json"},
-                json={"jsonrpc": "2.0", "id": body.get("id"),
-                      "result": {"protocolVersion": "2024-11-05", "capabilities": {}}},
-            )
-        if method == "notifications/initialized":
-            return httpx.Response(200, request=request, json={})
-        # tools/call (or anything else): defer to inner handler
-        return inner(request)
-
-    return handler
+_FAKE_SERP_ZONE = "test_serp"
+_FAKE_UNLOCKER_ZONE = "test_unlocker"
 
 
 def _make_client(handler: Callable[[httpx.Request], httpx.Response]) -> BrightDataClient:
-    transport = httpx.MockTransport(_wrap_with_session(handler))
-    return BrightDataClient(api_token=_FAKE_TOKEN, transport=transport)
+    transport = httpx.MockTransport(handler)
+    return BrightDataClient(
+        api_token=_FAKE_TOKEN,
+        serp_zone=_FAKE_SERP_ZONE,
+        unlocker_zone=_FAKE_UNLOCKER_ZONE,
+        transport=transport,
+    )
 
 
-# ---------- SSE parser ----------
+# ---------- search URL builder ----------
 
 
-def test_parse_sse_events_single_event() -> None:
-    text = 'event: message\ndata: {"jsonrpc":"2.0","id":"1","result":{"x":1}}\n\n'
-    events = _parse_sse_events(text)
-    assert events == [{"jsonrpc": "2.0", "id": "1", "result": {"x": 1}}]
+def test_build_search_url_google() -> None:
+    url = _build_search_url("anthropic claude", "google", None)
+    assert url == "https://www.google.com/search?q=anthropic+claude&brd_json=1"
 
 
-def test_parse_sse_events_multiline_data() -> None:
-    text = 'data: {"a":\ndata: 1}\n\n'
-    events = _parse_sse_events(text)
-    assert events == [{"a": 1}]
+def test_build_search_url_google_with_cursor() -> None:
+    url = _build_search_url("claude", "google", "20")
+    assert url == "https://www.google.com/search?q=claude&brd_json=1&start=20"
 
 
-def test_parse_sse_events_invalid_json_skipped() -> None:
-    text = 'data: not-json\n\ndata: {"ok":true}\n\n'
-    events = _parse_sse_events(text)
-    assert events == [{"ok": True}]
+def test_build_search_url_bing() -> None:
+    url = _build_search_url("claude", "bing", None)
+    assert url == "https://www.bing.com/search?q=claude&brd_json=1"
 
 
-# ---------- envelope extractor ----------
+def test_build_search_url_yandex() -> None:
+    url = _build_search_url("claude", "yandex", None)
+    assert url == "https://yandex.com/search/?text=claude&brd_json=1"
 
 
-def test_structured_content_takes_precedence() -> None:
-    env = {"result": {"structuredContent": {"foo": "bar"}, "content": [{"text": "ignored"}]}}
-    assert _extract_mcp_payload(env) == {"foo": "bar"}
+def test_build_search_url_unsupported_engine_raises() -> None:
+    with pytest.raises(ValueError, match="unsupported search engine"):
+        _build_search_url("q", "duckduckgo", None)
 
 
-def test_json_in_text_content_is_decoded() -> None:
-    env = {"result": {"content": [{"text": '{"items":["a","b"]}'}]}}
-    assert _extract_mcp_payload(env) == {"items": ["a", "b"]}
+# ---------- body parser ----------
 
 
-def test_plain_text_fallback_in_content_list() -> None:
-    env = {"result": {"content": [{"text": "# markdown body"}]}}
-    assert _extract_mcp_payload(env) == {"text": "# markdown body"}
+def test_parse_body_returns_json_when_object() -> None:
+    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
+                              json={"hits": [1, 2]})
+    assert _parse_body(response) == {"hits": [1, 2]}
 
 
-def test_dict_content_with_text_field() -> None:
-    env = {"result": {"content": {"text": "raw"}}}
-    assert _extract_mcp_payload(env) == {"text": "raw"}
+def test_parse_body_returns_json_when_array() -> None:
+    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
+                              json=[{"a": 1}, {"b": 2}])
+    assert _parse_body(response) == [{"a": 1}, {"b": 2}]
 
 
-# ---------- JSON-RPC payload + method mapping ----------
+def test_parse_body_wraps_text_when_not_json() -> None:
+    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
+                              text="# markdown body")
+    assert _parse_body(response) == {"text": "# markdown body"}
 
 
-def _captured_handler() -> tuple[dict, Callable[[httpx.Request], httpx.Response]]:
+def test_parse_body_wraps_invalid_json_as_text() -> None:
+    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
+                              content=b"{not valid json")
+    assert _parse_body(response) == {"text": "{not valid json"}
+
+
+# ---------- request shape: search ----------
+
+
+def _captured_handler(
+    response_body: dict | str | None = None,
+) -> tuple[dict, Callable[[httpx.Request], httpx.Response]]:
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
         captured["query"] = dict(request.url.params)
-        captured["body"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            request=request,
-            json={"jsonrpc": "2.0", "id": "1", "result": {"structuredContent": {"ok": True}}},
-        )
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content) if request.content else None
+        if response_body is None:
+            return httpx.Response(200, request=request, json={"ok": True})
+        if isinstance(response_body, str):
+            return httpx.Response(200, request=request, text=response_body)
+        return httpx.Response(200, request=request, json=response_body)
 
     return captured, handler
 
 
-@pytest.mark.parametrize(
-    "method_name,kwargs,expected_mcp_name,expected_args",
-    [
-        ("search", {"query": "anthropic", "engine": "google"}, "search_engine",
-            {"query": "anthropic", "engine": "google"}),
-        ("search", {"query": "claude", "engine": "bing", "cursor": "c2"}, "search_engine",
-            {"query": "claude", "engine": "bing", "cursor": "c2"}),
-        ("discover", {"query": "anthropic pricing"}, "discover", {"query": "anthropic pricing"}),
-        ("scrape_markdown", {"url": "https://example.com"}, "scrape_as_markdown",
-            {"url": "https://example.com"}),
-        ("scrape_html", {"url": "https://example.com"}, "scrape_as_html",
-            {"url": "https://example.com"}),
-        ("session_stats", {}, "session_stats", {}),
-    ],
-)
-def test_method_maps_to_mcp_tool(
-    method_name: str,
-    kwargs: dict,
-    expected_mcp_name: str,
-    expected_args: dict,
-) -> None:
-    captured, handler = _captured_handler()
+def test_search_posts_to_request_with_serp_zone() -> None:
+    captured, handler = _captured_handler({"organic": []})
     c = _make_client(handler)
-    getattr(c, method_name)(**kwargs)
-
+    c.search("anthropic")
     assert captured["method"] == "POST"
-    assert captured["path"] == "/mcp"
-    assert captured["query"] == {"token": _FAKE_TOKEN}
+    assert captured["path"] == "/request"
     body = captured["body"]
-    assert body["jsonrpc"] == "2.0"
-    assert body["method"] == "tools/call"
-    assert body["params"]["name"] == expected_mcp_name
-    assert body["params"]["arguments"] == expected_args
+    assert body["zone"] == _FAKE_SERP_ZONE
+    assert body["format"] == "raw"
+    assert body["url"] == "https://www.google.com/search?q=anthropic&brd_json=1"
 
 
-# ---------- response shapes through the public API ----------
+def test_search_passes_cursor_into_url() -> None:
+    captured, handler = _captured_handler({"organic": []})
+    c = _make_client(handler)
+    c.search("claude", engine="bing", cursor="11")
+    assert captured["body"]["url"] == "https://www.bing.com/search?q=claude&brd_json=1&first=11"
 
 
-def test_json_response_parsed() -> None:
+def test_search_sends_bearer_auth_header() -> None:
+    captured, handler = _captured_handler({"organic": []})
+    c = _make_client(handler)
+    c.search("anthropic")
+    assert captured["headers"]["authorization"] == f"Bearer {_FAKE_TOKEN}"
+
+
+def test_search_does_not_put_token_in_query() -> None:
+    captured, handler = _captured_handler({"organic": []})
+    c = _make_client(handler)
+    c.search("anthropic")
+    assert "token" not in captured["query"]
+    assert _FAKE_TOKEN not in str(captured["query"])
+
+
+def test_search_returns_parsed_json() -> None:
+    _, handler = _captured_handler({"organic": [{"title": "x"}]})
+    c = _make_client(handler)
+    assert c.search("q") == {"organic": [{"title": "x"}]}
+
+
+# ---------- request shape: scrape ----------
+
+
+def test_scrape_markdown_uses_unlocker_zone_and_data_format() -> None:
+    captured, handler = _captured_handler("# heading")
+    c = _make_client(handler)
+    result = c.scrape_markdown("https://example.com")
+    body = captured["body"]
+    assert body["zone"] == _FAKE_UNLOCKER_ZONE
+    assert body["url"] == "https://example.com"
+    assert body["format"] == "raw"
+    assert body["data_format"] == "markdown"
+    assert result == {"text": "# heading"}
+
+
+def test_scrape_html_uses_unlocker_zone_without_data_format() -> None:
+    captured, handler = _captured_handler("<html><body>hi</body></html>")
+    c = _make_client(handler)
+    result = c.scrape_html("https://example.com")
+    body = captured["body"]
+    assert body["zone"] == _FAKE_UNLOCKER_ZONE
+    assert body["url"] == "https://example.com"
+    assert body["format"] == "raw"
+    assert "data_format" not in body
+    assert result == {"text": "<html><body>hi</body></html>"}
+
+
+# ---------- request shape: session_stats ----------
+
+
+def test_session_stats_queries_both_zones() -> None:
+    seen: list[dict] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1", "result": {"content": [{"text": '{"hits":[{"u":"x"}]}'}]}},
-        )
+        seen.append({
+            "method": request.method,
+            "path": request.url.path,
+            "zone": request.url.params.get("zone"),
+            "auth": request.headers.get("authorization"),
+        })
+        return httpx.Response(200, request=request, json={"requests": 7})
 
     c = _make_client(handler)
-    assert c.search("q") == {"hits": [{"u": "x"}]}
-
-
-def test_sse_response_parsed() -> None:
-    sse = (
-        "event: message\n"
-        'data: {"jsonrpc":"2.0","id":"1","result":{"content":[{"text":"# hello"}]}}\n\n'
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, request=request,
-            content=sse.encode(),
-            headers={"content-type": "text/event-stream"},
-        )
-
-    c = _make_client(handler)
-    assert c.scrape_markdown("https://example.com") == {"text": "# hello"}
+    stats = c.session_stats()
+    assert len(seen) == 2
+    assert {s["zone"] for s in seen} == {_FAKE_SERP_ZONE, _FAKE_UNLOCKER_ZONE}
+    for s in seen:
+        assert s["method"] == "GET"
+        assert s["path"] == "/zone/statistic"
+        assert s["auth"] == f"Bearer {_FAKE_TOKEN}"
+    assert stats["serp"]["zone"] == _FAKE_SERP_ZONE
+    assert stats["unlocker"]["zone"] == _FAKE_UNLOCKER_ZONE
+    assert stats["serp"]["data"] == {"requests": 7}
 
 
 # ---------- error semantics ----------
-
-
-def test_mcp_error_raises_runtime_with_message_only() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1", "error": {"code": -32000, "message": "upstream blocked"}},
-        )
-
-    c = _make_client(handler)
-    with pytest.raises(RuntimeError, match="upstream blocked"):
-        c.search("q")
 
 
 def test_http_500_raises_http_status_error() -> None:
@@ -220,6 +226,15 @@ def test_http_500_raises_http_status_error() -> None:
     c = _make_client(handler)
     with pytest.raises(httpx.HTTPStatusError):
         c.search("q")
+
+
+def test_http_403_raises_http_status_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request, text="forbidden")
+
+    c = _make_client(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        c.scrape_html("https://example.com")
 
 
 def test_request_error_wrapped_into_runtime() -> None:
@@ -244,10 +259,7 @@ def test_429_with_small_retry_after_retries_once(monkeypatch: pytest.MonkeyPatch
             return httpx.Response(
                 429, request=request, headers={"retry-after": "1"}, text="rate limit"
             )
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1", "result": {"structuredContent": {"ok": True}}},
-        )
+        return httpx.Response(200, request=request, json={"ok": True})
 
     c = _make_client(handler)
     assert c.search("q") == {"ok": True}
@@ -288,19 +300,40 @@ def test_429_retry_still_429_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------- attack-surface guarantees ----------
 
 
-def test_no_generic_call_tool_method() -> None:
-    """PR #1 must NOT expose a raw MCP passthrough."""
+def test_no_mcp_passthrough_or_raw_call() -> None:
+    """Tool must NOT expose raw MCP / passthrough callers."""
     c = BrightDataClient()
     assert not hasattr(c, "call_tool")
     assert not hasattr(c, "raw_mcp")
+    assert not hasattr(c, "discover")  # dropped — no direct REST equivalent
     public_methods = {
         name for name in vars(BrightDataClient) if not name.startswith("_")
     }
     public_methods.discard("close")
     public_methods.discard("http_client")
     assert public_methods == {
-        "search", "discover", "scrape_markdown", "scrape_html", "session_stats",
+        "search", "scrape_markdown", "scrape_html", "session_stats",
     }
+
+
+# ---------- zone defaults ----------
+
+
+def test_zone_falls_back_to_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "tools.research.brightdata.client.secret", lambda _name, _default: ""
+    )
+    captured, handler = _captured_handler({"ok": True})
+    transport = httpx.MockTransport(handler)
+    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=transport)
+    c.search("q")
+    assert captured["body"]["zone"] == "serp_api"
+
+    captured2, handler2 = _captured_handler("hi")
+    transport2 = httpx.MockTransport(handler2)
+    c2 = BrightDataClient(api_token=_FAKE_TOKEN, transport=transport2)
+    c2.scrape_markdown("https://example.com")
+    assert captured2["body"]["zone"] == "unlocker"
 
 
 # ---------- token redaction: exceptions ----------
@@ -316,7 +349,7 @@ def test_exception_message_does_not_contain_token() -> None:
     except httpx.HTTPStatusError as exc:
         text = repr(exc) + str(exc)
         assert _FAKE_TOKEN not in text
-        assert "token=" not in text
+        assert "Bearer " + _FAKE_TOKEN not in text
         assert "BRIGHTDATA_API_TOKEN" not in text
     else:
         pytest.fail("expected HTTPStatusError")
@@ -324,7 +357,9 @@ def test_exception_message_does_not_contain_token() -> None:
 
 def test_request_error_message_does_not_contain_token() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError(f"could not connect to https://mcp.brightdata.com/mcp?token={_FAKE_TOKEN}")
+        raise httpx.ConnectError(
+            f"could not connect; Authorization: Bearer {_FAKE_TOKEN}"
+        )
 
     c = _make_client(handler)
     try:
@@ -332,25 +367,6 @@ def test_request_error_message_does_not_contain_token() -> None:
     except RuntimeError as exc:
         text = repr(exc) + str(exc)
         assert _FAKE_TOKEN not in text
-        assert "token=" not in text
-
-
-def test_mcp_error_message_redacts_token_substring() -> None:
-    """If BrightData ever echoed a token in its error, we still don't leak it."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1",
-                  "error": {"code": -32000, "message": f"bad token=abcdef"}},
-        )
-
-    c = _make_client(handler)
-    try:
-        c.search("q")
-    except RuntimeError as exc:
-        # Our local `_redact` is available for callers that re-stringify the message.
-        assert "token=" not in _redact(str(exc))
 
 
 # ---------- token redaction: logs at DEBUG ----------
@@ -361,7 +377,7 @@ def _assert_clean(records: list[logging.LogRecord]) -> None:
         msg = r.getMessage()
         assert _FAKE_TOKEN not in msg, f"token leaked in log: {msg!r}"
         assert "BRIGHTDATA_API_TOKEN" not in msg, f"env-var name leaked: {msg!r}"
-        assert "token=fake" not in msg.lower(), f"token= leaked: {msg!r}"
+        assert f"Bearer {_FAKE_TOKEN}" not in msg, f"Bearer token leaked: {msg!r}"
 
 
 @pytest.fixture
@@ -375,14 +391,10 @@ def debug_loggers(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
 
 def test_logs_redact_token_on_success(debug_loggers: pytest.LogCaptureFixture) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        # log the URL ourselves to simulate any code path that might do so
         logging.getLogger("tools.research.brightdata.client").debug(
-            "outbound request to %s", request.url
+            "outbound request with header %s", request.headers.get("authorization")
         )
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1", "result": {"structuredContent": {"ok": True}}},
-        )
+        return httpx.Response(200, request=request, json={"ok": True})
 
     c = _make_client(handler)
     c.search("q")
@@ -392,7 +404,7 @@ def test_logs_redact_token_on_success(debug_loggers: pytest.LogCaptureFixture) -
 def test_logs_redact_token_on_http_error(debug_loggers: pytest.LogCaptureFixture) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         logging.getLogger("tools.research.brightdata.client").debug(
-            "outbound failing request to %s", request.url
+            "outbound failing request with header %s", request.headers.get("authorization")
         )
         return httpx.Response(500, request=request, text="boom")
 
@@ -409,7 +421,7 @@ def test_logs_redact_token_on_429(
 
     def handler(request: httpx.Request) -> httpx.Response:
         logging.getLogger("tools.research.brightdata.client").debug(
-            "rate limited request to %s", request.url
+            "rate limited request with header %s", request.headers.get("authorization")
         )
         return httpx.Response(429, request=request, headers={"retry-after": "120"})
 
@@ -417,163 +429,6 @@ def test_logs_redact_token_on_429(
     with pytest.raises(RuntimeError):
         c.search("q")
     _assert_clean(debug_loggers.records)
-
-
-# ---------- MCP Streamable-HTTP handshake ----------
-
-
-def test_initialize_handshake_runs_before_first_tool_call() -> None:
-    calls: list[dict] = []
-
-    def inner(request: httpx.Request) -> httpx.Response:
-        calls.append({
-            "body": json.loads(request.content),
-            "session_header": request.headers.get("Mcp-Session-Id"),
-        })
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1",
-                  "result": {"structuredContent": {"ok": True}}},
-        )
-
-    # Build a transport that records both initialize and tool-call requests
-    seq: list[str] = []
-
-    def transport_handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else {}
-        seq.append(body.get("method", ""))
-        if body.get("method") == "initialize":
-            return httpx.Response(
-                200, request=request,
-                headers={"Mcp-Session-Id": _FAKE_SESSION_ID},
-                json={"jsonrpc": "2.0", "id": body.get("id"),
-                      "result": {"protocolVersion": "2024-11-05", "capabilities": {}}},
-            )
-        if body.get("method") == "notifications/initialized":
-            return httpx.Response(200, request=request, json={})
-        return inner(request)
-
-    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(transport_handler))
-    c.search("q")
-    assert seq == ["initialize", "notifications/initialized", "tools/call"]
-    assert calls[0]["session_header"] == _FAKE_SESSION_ID
-
-
-def test_session_handshake_runs_only_once_across_multiple_calls() -> None:
-    init_count = {"n": 0}
-    tool_calls: list[str] = []
-
-    def transport_handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else {}
-        m = body.get("method", "")
-        if m == "initialize":
-            init_count["n"] += 1
-            return httpx.Response(
-                200, request=request,
-                headers={"Mcp-Session-Id": _FAKE_SESSION_ID},
-                json={"jsonrpc": "2.0", "id": body.get("id"),
-                      "result": {"protocolVersion": "2024-11-05", "capabilities": {}}},
-            )
-        if m == "notifications/initialized":
-            return httpx.Response(200, request=request, json={})
-        # tools/call
-        tool_calls.append(body["params"]["name"])
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1",
-                  "result": {"structuredContent": {"ok": True}}},
-        )
-
-    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(transport_handler))
-    c.search("a")
-    c.discover("b")
-    c.scrape_markdown("https://x")
-    assert init_count["n"] == 1
-    assert tool_calls == ["search_engine", "discover", "scrape_as_markdown"]
-
-
-def test_initialize_failure_raises_http_status_error() -> None:
-    def transport_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, request=request, text="forbidden")
-
-    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(transport_handler))
-    with pytest.raises(httpx.HTTPStatusError, match="initialize"):
-        c.search("q")
-
-
-def test_expired_session_triggers_one_rehandshake() -> None:
-    """If BrightData returns 404 (session expired) on tools/call,
-    the client should clear the cached session, re-initialize, and retry once."""
-
-    state = {"init_count": 0, "session_id": "old-session-id"}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else {}
-        method = body.get("method")
-        if method == "initialize":
-            state["init_count"] += 1
-            state["session_id"] = f"session-{state['init_count']}"
-            return httpx.Response(
-                200, request=request,
-                headers={"Mcp-Session-Id": state["session_id"]},
-                json={"jsonrpc": "2.0", "id": body.get("id"),
-                      "result": {"protocolVersion": "2024-11-05", "capabilities": {}}},
-            )
-        if method == "notifications/initialized":
-            return httpx.Response(200, request=request, json={})
-        # tools/call: first attempt with session-1 → 404 (stale);
-        # retry after re-handshake (session-2) → 200
-        sent_session = request.headers.get("Mcp-Session-Id")
-        if sent_session == "session-1":
-            return httpx.Response(404, request=request, text="No valid session ID provided")
-        return httpx.Response(
-            200, request=request,
-            json={"jsonrpc": "2.0", "id": "1",
-                  "result": {"structuredContent": {"recovered": True}}},
-        )
-
-    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(handler))
-    # First call: succeeds via initialize → 404 → re-initialize → 200
-    assert c.search("q") == {"recovered": True}
-    assert state["init_count"] == 2
-
-
-def test_persistent_404_after_rehandshake_raises() -> None:
-    """If BrightData still 404s after a re-handshake, give up and raise."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else {}
-        method = body.get("method")
-        if method == "initialize":
-            return httpx.Response(
-                200, request=request,
-                headers={"Mcp-Session-Id": _FAKE_SESSION_ID},
-                json={"jsonrpc": "2.0", "id": body.get("id"),
-                      "result": {"protocolVersion": "2024-11-05", "capabilities": {}}},
-            )
-        if method == "notifications/initialized":
-            return httpx.Response(200, request=request, json={})
-        return httpx.Response(404, request=request, text="No valid session ID provided")
-
-    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(httpx.HTTPStatusError):
-        c.search("q")
-
-
-def test_initialize_without_session_header_raises_runtime() -> None:
-    def transport_handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else {}
-        if body.get("method") == "initialize":
-            return httpx.Response(
-                200, request=request,
-                json={"jsonrpc": "2.0", "id": body.get("id"), "result": {}},
-                # no Mcp-Session-Id header!
-            )
-        return httpx.Response(500, request=request)
-
-    c = BrightDataClient(api_token=_FAKE_TOKEN, transport=httpx.MockTransport(transport_handler))
-    with pytest.raises(RuntimeError, match="session id"):
-        c.search("q")
 
 
 # ---------- centaur tool discovery contract ----------
@@ -585,6 +440,8 @@ def test_module_exposes_client_factory() -> None:
 
 
 def test_redact_helper_handles_both_patterns() -> None:
-    assert "[REDACTED]" in _redact("see https://mcp.brightdata.com/mcp?token=abc&x=y")
-    assert "abc" not in _redact("see https://mcp.brightdata.com/mcp?token=abc&x=y")
+    assert "[REDACTED]" in _redact("Authorization: Bearer abc123def")
+    assert "abc123def" not in _redact("Authorization: Bearer abc123def")
+    assert "[REDACTED]" in _redact("see https://x/y?token=abc&z=1")
+    assert "abc" not in _redact("see https://x/y?token=abc&z=1").split("&")[0]
     assert "BRIGHTDATA_API_TOKEN" not in _redact("missing BRIGHTDATA_API_TOKEN env var")
