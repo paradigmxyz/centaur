@@ -49,6 +49,11 @@ _SERVICE_API_KEYS: tuple[ServiceAPIKeySpec, ...] = (
         name="service:local-dev",
         scopes=("admin", "agent", "threads", "tools:*"),
     ),
+    ServiceAPIKeySpec(
+        env_var="MONITORING_OPERATOR_API_KEY",
+        name="service:monitoring-ui",
+        scopes=("admin",),
+    ),
 )
 
 

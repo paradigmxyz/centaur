@@ -1,3 +1,4 @@
 packages:
   - 'packages/*'
+  - 'services/monitoring-ui'
   - 'services/slackbot'

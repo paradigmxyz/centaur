@@ -84,6 +84,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-proxy") | nindent 14 }}
+{{- if .Values.monitoringUi.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "monitoring-ui") | nindent 14 }}
+{{- end }}
         - podSelector:
             matchLabels:
               centaur.ai/managed: "true"
@@ -192,6 +197,40 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+---
+{{- end }}
+{{- if .Values.monitoringUi.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "monitoring-ui") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "monitoring-ui") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "monitoring-ui") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+{{- range .Values.monitoringUi.tailscale.sourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.monitoringUi.service.port }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
 ---
 {{- end }}
 apiVersion: networking.k8s.io/v1

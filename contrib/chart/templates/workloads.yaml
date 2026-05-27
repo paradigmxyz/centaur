@@ -530,3 +530,67 @@ spec:
           secret:
             secretName: {{ include "centaur.trustedCaSecretName" . }}
 {{- end }}
+---
+{{- if .Values.monitoringUi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "monitoring-ui") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "monitoring-ui") | nindent 4 }}
+spec:
+  replicas: {{ .Values.monitoringUi.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "monitoring-ui") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret-env: {{ toJson (dict "secretManager" .Values.secretManager) | sha256sum }}
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "monitoring-ui") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: monitoring-ui
+          image: {{ printf "%s:%s" .Values.monitoringUi.image.repository .Values.monitoringUi.image.tag | quote }}
+          imagePullPolicy: {{ .Values.monitoringUi.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: {{ .Values.monitoringUi.service.port | quote }}
+            - name: MONITORING_API_URL
+              value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
+            - name: MONITORING_OPERATOR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sMONITORING_OPERATOR_API_KEY" .Values.secretManager.envPrefix }}
+            - name: NO_PROXY
+              value: {{ printf "localhost,127.0.0.1,%s" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
+            - name: no_proxy
+              value: {{ printf "localhost,127.0.0.1,%s" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
+{{- range $name, $value := .Values.monitoringUi.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: {{ .Values.monitoringUi.service.port }}
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.monitoringUi.service.port }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.monitoringUi.service.port }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+{{ toYaml .Values.monitoringUi.resources | nindent 12 }}
+{{- end }}

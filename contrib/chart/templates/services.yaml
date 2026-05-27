@@ -44,6 +44,22 @@ spec:
       targetPort: 3001
 ---
 {{- end }}
+{{- if .Values.monitoringUi.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "monitoring-ui") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "monitoring-ui") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "monitoring-ui") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.monitoringUi.service.port }}
+      targetPort: {{ .Values.monitoringUi.service.port }}
+---
+{{- end }}
 {{- if .Values.runnerAccess.enabled }}
 apiVersion: v1
 kind: Service

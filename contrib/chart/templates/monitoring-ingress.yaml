@@ -1,0 +1,30 @@
+{{- if .Values.monitoringUi.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "monitoring-ui") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "monitoring-ui") | nindent 4 }}
+{{- if or .Values.monitoringUi.ingressAnnotations .Values.monitoringUi.tailnetFallbackHost }}
+  annotations:
+{{- with .Values.monitoringUi.ingressAnnotations }}
+{{ toYaml . | nindent 4 }}
+{{- end }}
+{{- with .Values.monitoringUi.tailnetFallbackHost }}
+    centaur.ai/tailnet-fallback-host: {{ . | quote }}
+{{- end }}
+{{- end }}
+spec:
+  ingressClassName: {{ .Values.monitoringUi.ingressClassName | quote }}
+  rules:
+    - host: {{ required "monitoringUi.host is required when monitoringUi.enabled=true" .Values.monitoringUi.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "centaur.componentName" (dict "root" . "component" "monitoring-ui") }}
+                port:
+                  number: {{ .Values.monitoringUi.service.port }}
+{{- end }}

@@ -44,6 +44,7 @@ from api.routers import (
     attachments as attachments_mod,
     deprecated,
     health,
+    monitoring,
     webhooks as webhooks_mod,
 )
 from api.routers import agent as agent_router_mod
@@ -480,6 +481,7 @@ app.include_router(workflow_router_mod.router)
 app.include_router(webhooks_mod.router)
 app.include_router(attachments_mod.router)
 app.include_router(admin.router)
+app.include_router(monitoring.router)
 app.include_router(deprecated.router)
 
 

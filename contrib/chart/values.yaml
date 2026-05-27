@@ -180,6 +180,25 @@ slackbot:
   extraEnv: {}
   resources: {}
 
+monitoringUi:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: centaur-monitoring-ui
+    tag: latest
+    pullPolicy: Always
+  service:
+    port: 3002
+  host: monitoring.centaur.gocommunal.com
+  tailnetFallbackHost: ""
+  ingressClassName: tailscale
+  ingressAnnotations: {}
+  tailscale:
+    sourceNamespaces:
+      - tailscale
+  extraEnv: {}
+  resources: {}
+
 postgres:
   enabled: true
   image:

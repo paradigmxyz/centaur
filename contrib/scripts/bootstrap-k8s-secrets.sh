@@ -11,6 +11,8 @@ Usage: scripts/bootstrap-k8s-secrets.sh [--namespace NAMESPACE] [--force]
 Creates the required local-dev Kubernetes infra Secrets consumed by the Helm chart.
 Requires OP_SERVICE_ACCOUNT_TOKEN, OP_VAULT, SLACK_BOT_TOKEN,
 SLACK_SIGNING_SECRET, and SLACKBOT_API_KEY in the shell environment.
+MONITORING_OPERATOR_API_KEY is optional; a random key is generated for new
+secrets when it is not provided.
 
 Optional 1Password Connect bootstrap (when ironProxy.manager.secretSource is
 set to onepassword-connect in the Helm values):
@@ -114,6 +116,9 @@ if secret_exists centaur-infra-env; then
   if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
     patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
   fi
+  if [[ -n "${MONITORING_OPERATOR_API_KEY:-}" ]]; then
+    patch_data+=("\"MONITORING_OPERATOR_API_KEY\":\"$(printf '%s' "$MONITORING_OPERATOR_API_KEY" | base64 | tr -d '\n')\"")
+  fi
   if [[ "${#patch_data[@]}" -gt 0 ]]; then
     patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
     kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p "$patch_json" >/dev/null
@@ -133,6 +138,7 @@ else
     --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN"
     --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET"
     --from-literal=SLACKBOT_API_KEY="$SLACKBOT_API_KEY"
+    --from-literal=MONITORING_OPERATOR_API_KEY="${MONITORING_OPERATOR_API_KEY:-aiv2_monitoring_$(rand_hex)}"
     --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
     --from-literal=DATABASE_URL="$DATABASE_URL"
   )
