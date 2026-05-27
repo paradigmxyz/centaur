@@ -1126,6 +1126,13 @@ async def _lease_heartbeat(
             return
 
 
+def _ensure_app_state_db_pool(pool) -> None:
+    from api.app import app
+
+    if getattr(app.state, "db_pool", None) is None:
+        app.state.db_pool = pool
+
+
 async def _linked_execution_is_terminal(pool, run_id: str) -> bool:
     row = await pool.fetchrow(
         "SELECT e.status "
@@ -2527,6 +2534,7 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         worker_id=worker_id,
         run_input=run_input if isinstance(run_input, dict) else {},
     )
+    _ensure_app_state_db_pool(pool)
     params = _coerce_input(run_input, registered.input_cls)
     heartbeat_stop = asyncio.Event()
     heartbeat_task = asyncio.create_task(
