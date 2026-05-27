@@ -1411,6 +1411,7 @@ async def inject_stdin(
     user_id: str | None = None,
     trace_id: str | None = None,
     traceparent: str | None = None,
+    trace_metadata: dict | None = None,
 ) -> dict:
     """Flush pending messages + write to stdin. Does not touch stdout.
 
@@ -1444,6 +1445,7 @@ async def inject_stdin(
             thread_key=session.thread_key,
             trace_id=trace_id or session.trace_id,
             traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     elif flushed:
         msgs = _flushed_to_messages(flushed)
@@ -1453,6 +1455,7 @@ async def inject_stdin(
             thread_key=session.thread_key,
             trace_id=trace_id or session.trace_id,
             traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     elif inline_blocks:
         turn_input = build_user_input(
@@ -1460,6 +1463,7 @@ async def inject_stdin(
             thread_key=session.thread_key,
             trace_id=trace_id or session.trace_id,
             traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     else:
         return {"ok": True, "injected": False}

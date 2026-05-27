@@ -30,8 +30,10 @@ from api.otel import (
     add_span_event,
     context_from_serialized,
     current_traceparent,
+    laminar_trace_metadata_attributes,
     mark_error,
     record_exception,
+    set_laminar_trace_metadata,
     set_span_attributes,
     span_context_to_dict,
     start_span,
@@ -396,6 +398,74 @@ def _metadata_platform(metadata: dict[str, Any]) -> str | None:
 def _delivery_platform(delivery: dict[str, Any]) -> str | None:
     platform = delivery.get("platform") if isinstance(delivery, dict) else None
     return platform if isinstance(platform, str) and platform else None
+
+
+def _deployment_environment() -> str:
+    return (
+        os.getenv("CENTAUR_ENVIRONMENT")
+        or os.getenv("DEPLOY_ENV")
+        or os.getenv("ENVIRONMENT")
+        or "local"
+    ).strip() or "local"
+
+
+def _slack_thread_metadata(thread_key: str) -> dict[str, str]:
+    parts = thread_key.split(":", 2)
+    if len(parts) != 3 or parts[0] != "slack":
+        return {}
+    return {
+        "slack_channel_id": parts[1],
+        "slack_thread_ts": parts[2],
+    }
+
+
+def _execution_laminar_metadata(
+    *,
+    thread_key: str,
+    execution_id: str,
+    execute_id: Any = None,
+    assignment_generation: int | None = None,
+    delivery: dict[str, Any] | None = None,
+    execution_metadata: dict[str, Any] | None = None,
+    harness: Any = None,
+    engine: Any = None,
+    persona_id: Any = None,
+    prompt_ref: Any = None,
+    runtime_id: Any = None,
+    user_id: Any = None,
+) -> dict[str, Any]:
+    delivery = delivery if isinstance(delivery, dict) else {}
+    execution_metadata = (
+        execution_metadata if isinstance(execution_metadata, dict) else {}
+    )
+    effective_user_id = (
+        user_id
+        or delivery.get("recipient_user_id")
+        or delivery.get("user_id")
+        or execution_metadata.get("user_id")
+    )
+    metadata: dict[str, Any] = {
+        "app": "centaur",
+        "environment": _deployment_environment(),
+        "thread_key": thread_key,
+        "execution_id": execution_id,
+        "execute_id": execute_id,
+        "assignment_generation": assignment_generation,
+        "platform": _delivery_platform(delivery),
+        "harness": harness,
+        "engine": engine,
+        "persona_id": persona_id,
+        "prompt_ref": prompt_ref,
+        "runtime_id": runtime_id,
+        "user_id": effective_user_id,
+    }
+    metadata.update(_slack_thread_metadata(thread_key))
+    channel = (
+        delivery.get("channel") if isinstance(delivery.get("channel"), str) else None
+    )
+    if channel and not metadata.get("slack_channel_id"):
+        metadata["slack_channel_id"] = channel
+    return metadata
 
 
 async def _write_agents_override(runtime_id: str, agents_md_override: str) -> None:
@@ -2450,6 +2520,17 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
                     exc_info=True,
                 )
         if isinstance(metadata, dict):
+            set_laminar_trace_metadata(
+                span,
+                _execution_laminar_metadata(
+                    thread_key=thread_key,
+                    execution_id=execution_id,
+                    execute_id=row.get("execute_id"),
+                    assignment_generation=assignment_generation,
+                    delivery=delivery,
+                    execution_metadata=metadata,
+                ),
+            )
             set_span_attributes(
                 span,
                 {
@@ -2707,6 +2788,20 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         if isinstance(delivery, dict):
             requester_user_id = delivery.get("recipient_user_id") or delivery.get("user_id")
         requester_user_id = requester_user_id or execution_metadata.get("user_id")
+        trace_metadata = _execution_laminar_metadata(
+            thread_key=thread_key,
+            execution_id=execution_id,
+            execute_id=row.get("execute_id"),
+            assignment_generation=assignment_generation,
+            delivery=delivery,
+            execution_metadata=execution_metadata,
+            harness=harness,
+            engine=engine,
+            persona_id=persona_id,
+            prompt_ref=prompt_ref,
+            runtime_id=session.sandbox_id,
+            user_id=requester_user_id,
+        )
         with start_span(
             "centaur.sandbox.inject",
             attributes={
@@ -2717,6 +2812,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 if isinstance(delivery, dict)
                 else None,
                 "centaur.user_id": requester_user_id,
+                **laminar_trace_metadata_attributes(trace_metadata),
             },
         ) as span:
             inject_span_context = span_context_to_dict(span) or {}
@@ -2727,6 +2823,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 user_id=requester_user_id,
                 trace_id=inject_span_context.get("trace_id"),
                 traceparent=current_traceparent(span),
+                trace_metadata=trace_metadata,
             )
             set_span_attributes(
                 span,
@@ -2912,6 +3009,20 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         event_kind="execution_started",
         event_json=execution_started_payload,
     )
+    execution_trace_metadata = _execution_laminar_metadata(
+        thread_key=thread_key,
+        execution_id=execution_id,
+        execute_id=row.get("execute_id"),
+        assignment_generation=assignment_generation,
+        delivery=delivery,
+        execution_metadata=execution_metadata,
+        harness=harness,
+        engine=engine,
+        persona_id=persona_id,
+        prompt_ref=prompt_ref,
+        runtime_id=session.sandbox_id,
+        user_id=user_id,
+    )
     set_span_attributes(
         trace.get_current_span(),
         {
@@ -2923,6 +3034,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             "centaur.prompt_sha": prompt_sha,
             "centaur.execution_sequence": execution_sequence,
             "centaur.user_id": user_id,
+            **laminar_trace_metadata_attributes(execution_trace_metadata),
         },
     )
     add_span_event("centaur.agent.execution_started", execution_started_payload)

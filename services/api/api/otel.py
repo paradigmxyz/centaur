@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ from opentelemetry.trace import (
 log = structlog.get_logger()
 
 _TRACER_NAME = "centaur.api"
+_LAMINAR_METADATA_PREFIX = "lmnr.association.properties.metadata."
 _configured = False
 _instrumented = False
 
@@ -127,6 +129,39 @@ def clean_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
     return cleaned
 
 
+def _laminar_metadata_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)) and all(
+        isinstance(item, (str, bool, int, float)) for item in value
+    ):
+        return list(value)
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    except TypeError:
+        return str(value)
+
+
+def laminar_trace_metadata_attributes(
+    metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    attributes: dict[str, Any] = {}
+    for key, value in (metadata or {}).items():
+        metadata_key = str(key).strip()
+        if not metadata_key:
+            continue
+        cleaned_value = _laminar_metadata_value(value)
+        if cleaned_value is not None:
+            attributes[f"{_LAMINAR_METADATA_PREFIX}{metadata_key}"] = cleaned_value
+    return attributes
+
+
+def set_laminar_trace_metadata(span: Span, metadata: Mapping[str, Any] | None) -> None:
+    set_span_attributes(span, laminar_trace_metadata_attributes(metadata))
+
+
 @contextmanager
 def start_span(
     name: str,
@@ -138,7 +173,11 @@ def start_span(
     if parent_context is not None:
         current_ctx = trace.get_current_span().get_span_context()
         parent_ctx = trace.get_current_span(parent_context).get_span_context()
-        if current_ctx.is_valid and parent_ctx.is_valid and current_ctx.trace_id == parent_ctx.trace_id:
+        if (
+            current_ctx.is_valid
+            and parent_ctx.is_valid
+            and current_ctx.trace_id == parent_ctx.trace_id
+        ):
             parent_context = None
 
     with tracer().start_as_current_span(

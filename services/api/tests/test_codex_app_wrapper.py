@@ -268,6 +268,14 @@ def test_prefix_otlp_span_names_normalizes_codex_turn_as_gen_ai_span() -> None:
         "turn-123": "Reply with exactly PONG and nothing else."
     }
     wrapper.LLM_OUTPUTS_BY_TURN_ID = {"turn-123": "PONG"}
+    wrapper.CURRENT_TRACE_METADATA = {"environment": "stale"}
+    wrapper.TRACE_METADATA_BY_TURN_ID = {
+        "turn-123": {
+            "environment": "local",
+            "thread_key": "slack:C123:1700000000.000100",
+            "execution_id": "exe_123",
+        }
+    }
 
     rewritten = wrapper._prefix_otlp_span_names(request.SerializeToString(), "codex.")
     parsed = ExportTraceServiceRequest()
@@ -296,6 +304,18 @@ def test_prefix_otlp_span_names_normalizes_codex_turn_as_gen_ai_span() -> None:
     assert attributes["gen_ai.usage.output_tokens"].int_value == 11
     assert attributes["gen_ai.usage.cache_read_input_tokens"].int_value == 20352
     assert attributes["gen_ai.usage.reasoning_tokens"].int_value == 0
+    assert (
+        attributes["lmnr.association.properties.metadata.environment"].string_value
+        == "local"
+    )
+    assert (
+        attributes["lmnr.association.properties.metadata.thread_key"].string_value
+        == "slack:C123:1700000000.000100"
+    )
+    assert (
+        attributes["lmnr.association.properties.metadata.execution_id"].string_value
+        == "exe_123"
+    )
 
 
 def test_emit_notification_collects_agent_message_delta_output(monkeypatch) -> None:

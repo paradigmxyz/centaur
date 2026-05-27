@@ -50,6 +50,10 @@ CURRENT_LLM_INPUT_TEXT = ""
 CURRENT_LLM_OUTPUT_TEXT = ""
 LLM_INPUTS_BY_TURN_ID: dict[str, str] = {}
 LLM_OUTPUTS_BY_TURN_ID: dict[str, str] = {}
+CURRENT_TRACE_METADATA: dict[str, Any] = {}
+TRACE_METADATA_BY_TURN_ID: dict[str, dict[str, Any]] = {}
+
+LAMINAR_METADATA_PREFIX = "lmnr.association.properties.metadata."
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -193,6 +197,11 @@ def input_items(turn_input: dict[str, Any]) -> list[dict[str, Any]]:
         blocks = []
     text = text_from_blocks(blocks)
     return [{"type": "text", "text": text or "continue"}]
+
+
+def trace_metadata_from_input(turn_input: dict[str, Any]) -> dict[str, Any]:
+    metadata = turn_input.get("trace_metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
 
 
 def split_goal(items: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -365,6 +374,46 @@ def _set_attribute_string(span: Any, key: str, value: str) -> None:
     attribute.value.string_value = value
 
 
+def _set_attribute_value(span: Any, key: str, value: Any) -> None:
+    if value is None:
+        return
+    attribute = _attribute(span, key)
+    if attribute is None:
+        attribute = span.attributes.add()
+        attribute.key = key
+    if isinstance(value, bool):
+        attribute.value.bool_value = value
+    elif isinstance(value, int) and not isinstance(value, bool):
+        attribute.value.int_value = value
+    elif isinstance(value, float):
+        attribute.value.double_value = value
+    elif isinstance(value, str):
+        attribute.value.string_value = value
+    elif isinstance(value, (list, tuple)) and all(
+        isinstance(item, (str, bool, int, float)) for item in value
+    ):
+        attribute.value.string_value = json.dumps(
+            list(value), ensure_ascii=False, separators=(",", ":")
+        )
+    else:
+        attribute.value.string_value = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+
+
+def _set_laminar_trace_metadata(span: Any, metadata: dict[str, Any]) -> None:
+    for key, value in metadata.items():
+        metadata_key = str(key).strip()
+        if metadata_key:
+            _set_attribute_value(
+                span, f"{LAMINAR_METADATA_PREFIX}{metadata_key}", value
+            )
+
+
 def _append_current_llm_output(text: Any) -> None:
     global CURRENT_LLM_OUTPUT_TEXT
     if isinstance(text, str) and text:
@@ -408,6 +457,8 @@ def _normalize_codex_llm_span(span: Any, prefix: str) -> None:
     turn_id = _attribute_string(span, "turn.id")
     input_text = LLM_INPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_INPUT_TEXT)
     output_text = LLM_OUTPUTS_BY_TURN_ID.get(turn_id, CURRENT_LLM_OUTPUT_TEXT)
+    trace_metadata = TRACE_METADATA_BY_TURN_ID.get(turn_id, CURRENT_TRACE_METADATA)
+    _set_laminar_trace_metadata(span, trace_metadata)
     _set_attribute_string(span, "gen_ai.operation.name", "chat")
     _set_attribute_string(span, "gen_ai.system", "openai")
     _set_attribute_string(span, "gen_ai.request.model", model)
@@ -742,6 +793,7 @@ def drain_until_turn_done() -> None:
 
 def handle_input(turn_input: dict[str, Any]) -> None:
     global ACTIVE_TURN_ID, CURRENT_LLM_INPUT_TEXT, CURRENT_LLM_OUTPUT_TEXT
+    global CURRENT_TRACE_METADATA
     if turn_input.get("type") == "interrupt":
         interrupt_active_turn()
         return
@@ -755,6 +807,7 @@ def handle_input(turn_input: dict[str, Any]) -> None:
         or turn_input.get("trace_id"),
         turn_input.get("thread_key"),
     )
+    CURRENT_TRACE_METADATA = trace_metadata_from_input(turn_input)
     start_app_server()
     thread_id = start_or_resume_thread()
     items = input_items(turn_input)
@@ -791,6 +844,8 @@ def handle_input(turn_input: dict[str, Any]) -> None:
                 )
                 or None
             )
+            if ACTIVE_TURN_ID and CURRENT_TRACE_METADATA:
+                TRACE_METADATA_BY_TURN_ID[ACTIVE_TURN_ID] = dict(CURRENT_TRACE_METADATA)
             return
         except Exception:
             interrupt_active_turn()
@@ -799,6 +854,8 @@ def handle_input(turn_input: dict[str, Any]) -> None:
     ACTIVE_TURN_ID = str(turn.get("id") or result.get("turnId") or "") or None
     if ACTIVE_TURN_ID and CURRENT_LLM_INPUT_TEXT:
         LLM_INPUTS_BY_TURN_ID[ACTIVE_TURN_ID] = CURRENT_LLM_INPUT_TEXT
+    if ACTIVE_TURN_ID and CURRENT_TRACE_METADATA:
+        TRACE_METADATA_BY_TURN_ID[ACTIVE_TURN_ID] = dict(CURRENT_TRACE_METADATA)
     drain_until_turn_done()
 
 
