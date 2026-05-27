@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto'
 import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { usesShortRequestTimeout } from './request-timeout'
 
 const originalEnv = { ...process.env }
 
@@ -11,6 +12,17 @@ afterEach(() => {
 })
 
 describe('Slack event HTTP dedupe', () => {
+  it('keeps short timeouts off internal delivery endpoints', () => {
+    expect(usesShortRequestTimeout('/api/webhooks/slack')).toBe(true)
+    expect(usesShortRequestTimeout('/api/slack/commands')).toBe(true)
+    expect(usesShortRequestTimeout('/api/slack/agent-sessions')).toBe(false)
+    expect(usesShortRequestTimeout('/api/slack/agent-sessions/session-123/harness-event')).toBe(
+      false
+    )
+    expect(usesShortRequestTimeout('/api/slack/agent-sessions/session-123/done')).toBe(false)
+    expect(usesShortRequestTimeout('/api/slack/assistant/status')).toBe(false)
+  })
+
   it('creates Linear issues from configured feedback slash commands', async () => {
     process.env.SLACK_SIGNING_SECRET = 'test-signing-secret'
     process.env.LINEAR_API_KEY = 'lin-test-key'

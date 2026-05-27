@@ -29,6 +29,7 @@ import { shouldAckWithReaction } from './slack/trivial-ack'
 import type { NormalizedSlackEvent, SlackEnvelope } from './slack/types'
 import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
+import { usesShortRequestTimeout } from './request-timeout'
 
 const config = loadConfig()
 configureOtel()
@@ -46,6 +47,7 @@ const handoff = new CentaurHandoff(config)
 const deduper = new EventDeduper(config.SLACK_EVENT_DEDUP_TTL_MS)
 const CODEX_THREAD_RE = /\b(?:codex|agent|amp)\s+thread\b[^A-Z0-9]*(T-[A-Z0-9-]+)/i
 const HARNESS_EVENT_PATH_RE = /^\/api\/slack\/agent-sessions\/[^/]+\/harness-event$/
+const slackFacingRequestTimeout = timeout(5_000)
 
 void resolver
   .resolve({})
@@ -91,7 +93,10 @@ export const app = new Hono<{ Variables: Variables }>()
       status: c.res.status
     })
   })
-  .use('*', timeout(5_000))
+  .use('*', (c, next) => {
+    if (!usesShortRequestTimeout(c.req.path)) return next()
+    return slackFacingRequestTimeout(c, next)
+  })
   .use(
     requestId({
       headerName: 'X-Slackbot-Request-ID',
