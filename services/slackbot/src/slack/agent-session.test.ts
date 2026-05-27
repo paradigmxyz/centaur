@@ -174,58 +174,6 @@ describe('AgentSessionRenderer', () => {
     expect(calls.filter(call => call.method === 'assistant.threads.setStatus')).toHaveLength(3)
   })
 
-  it('strips context blocks from streamed block chunks', async () => {
-    const calls: Array<{ method: string; params: any }> = []
-    const client = {
-      assistant: {
-        threads: {
-          setStatus: async () => ({ ok: true })
-        }
-      },
-      chat: {
-        startStream: async (params: any) => {
-          calls.push({ method: 'chat.startStream', params })
-          return { ok: true, ts: '1778866940.295499' }
-        },
-        appendStream: async (params: any) => {
-          calls.push({ method: 'chat.appendStream', params })
-          return { ok: true }
-        },
-        stopStream: async (params: any) => {
-          calls.push({ method: 'chat.stopStream', params })
-          return { ok: true }
-        },
-        update: async () => ({ ok: true })
-      }
-    }
-
-    const renderer = new AgentSessionRenderer(client as any)
-    const { sessionId } = await renderer.open({
-      channel: 'C123',
-      parentTs: '1778866921.505479',
-      recipientTeamId: 'T123',
-      recipientUserId: 'U123',
-      title: 'Centaur execution'
-    })
-
-    await renderer.blocks(
-      sessionId,
-      [
-        { type: 'context', elements: [{ type: 'mrkdwn', text: 'Hidden context' }] },
-        { type: 'markdown', text: 'Visible body' }
-      ] as any,
-      { planPrefix: false }
-    )
-    await renderer.done(sessionId)
-
-    const chunks = calls.flatMap(call => call.params.chunks ?? [])
-    const blocks = chunks
-      .filter((chunk: any) => chunk.type === 'blocks')
-      .flatMap((chunk: any) => chunk.blocks ?? [])
-    expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
-    expect(blocks.some((block: any) => block.type === 'markdown')).toBe(true)
-  })
-
   it('streams task updates with accumulated details and output', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {

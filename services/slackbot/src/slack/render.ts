@@ -60,11 +60,7 @@ export function renderStatusBlock(metadata: StatusMetadata): RichTextBlock | nul
 }
 
 export function enforceBlockLimits(blocks: AnyBlock[]): AnyBlock[] {
-  return stripContextBlocks(blocks).slice(0, MAX_BLOCKS)
-}
-
-export function stripContextBlocks(blocks: AnyBlock[]): AnyBlock[] {
-  return blocks.filter(block => block.type !== 'context')
+  return blocks.slice(0, MAX_BLOCKS)
 }
 
 export function fallbackText(input: {

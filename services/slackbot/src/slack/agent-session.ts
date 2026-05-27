@@ -17,8 +17,7 @@ import {
 import { buildFinalFallbackText, sanitizeFinalMessagePayload } from './final-message'
 import {
   markdownToStreamChunks,
-  renderMarkdownBlocks,
-  stripContextBlocks
+  renderMarkdownBlocks
 } from './render'
 import { clipLines } from './streaming'
 
@@ -179,13 +178,12 @@ export class AgentSessionRenderer {
     blocks: AnyBlock[],
     opts: { planPrefix?: boolean } = {}
   ): Promise<void> {
-    const visibleBlocks = stripContextBlocks(blocks)
-    if (!visibleBlocks.length) return
+    if (!blocks.length) return
     const state = requireSession(sessionId)
     const segment = currentSegment(state)
     await this.streamChunks(state, segment, [
       ...(opts.planPrefix === false ? [] : this.planPrefix(state, segment)),
-      { type: 'blocks', blocks: visibleBlocks }
+      { type: 'blocks', blocks }
     ])
   }
 
@@ -333,9 +331,8 @@ export class AgentSessionRenderer {
     chunks: SlackStreamChunk[]
   ): Promise<void> {
     raiseStreamError(segment)
-    const visibleChunks = stripContextBlockChunks(chunks)
-    if (!visibleChunks.length || segment.closed) return
-    const effectiveChunks = this.withHeaderPrefix(state, segment, visibleChunks)
+    if (!chunks.length || segment.closed) return
+    const effectiveChunks = this.withHeaderPrefix(state, segment, chunks)
     if (!segment.streamTs) {
       const initialChunksUsed = await this.ensureStream(state, segment, effectiveChunks)
       if (initialChunksUsed) return
@@ -717,19 +714,6 @@ function requireSession(id: string): AgentSessionState {
 
 function raiseStreamError(segment: Segment): void {
   if (segment.streamError) throw segment.streamError
-}
-
-function stripContextBlockChunks(chunks: SlackStreamChunk[]): SlackStreamChunk[] {
-  const visibleChunks: SlackStreamChunk[] = []
-  for (const chunk of chunks) {
-    if (chunk.type !== 'blocks') {
-      visibleChunks.push(chunk)
-      continue
-    }
-    const blocks = stripContextBlocks((chunk as BlocksChunk).blocks)
-    if (blocks.length) visibleChunks.push({ type: 'blocks', blocks })
-  }
-  return visibleChunks
 }
 
 function hasVisibleStreamChunks(chunks: SlackStreamChunk[]): boolean {
