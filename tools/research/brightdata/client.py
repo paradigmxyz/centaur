@@ -13,7 +13,6 @@ import httpx
 
 from centaur_sdk import secret
 
-
 _API_HOST = "api.brightdata.com"
 _API_BASE_URL = f"https://{_API_HOST}"
 _REQUEST_PATH = "/request"
@@ -158,9 +157,7 @@ class BrightDataClient:
 
     def _get_unlocker_zone(self) -> str:
         return (
-            self._unlocker_zone
-            or secret("BRIGHTDATA_UNLOCKER_ZONE", "")
-            or _DEFAULT_UNLOCKER_ZONE
+            self._unlocker_zone or secret("BRIGHTDATA_UNLOCKER_ZONE", "") or _DEFAULT_UNLOCKER_ZONE
         )
 
     @property
@@ -180,7 +177,7 @@ class BrightDataClient:
             self._client.close()
             self._client = None
 
-    def __enter__(self) -> "BrightDataClient":
+    def __enter__(self) -> BrightDataClient:
         return self
 
     def __exit__(self, *args: Any) -> None:
@@ -221,9 +218,7 @@ class BrightDataClient:
             headers=self._auth_headers(),
         )
         if retry.status_code == 429:
-            raise RuntimeError(
-                f"BrightData rate limited after retry (host={_API_HOST}, op={op})"
-            )
+            raise RuntimeError(f"BrightData rate limited after retry (host={_API_HOST}, op={op})")
         return retry
 
     def _call(self, body: dict, *, op: str) -> Any:
@@ -276,7 +271,10 @@ class BrightDataClient:
     def session_stats(self) -> Any:
         """Return per-zone usage statistics for the configured SERP and Unlocker zones."""
         stats: dict[str, Any] = {}
-        for label, zone in (("serp", self._get_serp_zone()), ("unlocker", self._get_unlocker_zone())):
+        for label, zone in (
+            ("serp", self._get_serp_zone()),
+            ("unlocker", self._get_unlocker_zone()),
+        ):
             try:
                 response = self.http_client.get(
                     _STATS_PATH,

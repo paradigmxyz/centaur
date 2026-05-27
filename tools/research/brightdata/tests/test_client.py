@@ -11,22 +11,23 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
-from tools.research.brightdata.client import (  # noqa: E402
+from tools.research.brightdata.client import (
     BrightDataClient,
     _build_search_url,
-    _client as client_factory,
     _parse_body,
     _redact,
 )
-
+from tools.research.brightdata.client import (
+    _client as client_factory,
+)
 
 _FAKE_TOKEN = "fake-token-XYZ123"
 _FAKE_SERP_ZONE = "test_serp"
@@ -75,26 +76,28 @@ def test_build_search_url_unsupported_engine_raises() -> None:
 
 
 def test_parse_body_returns_json_when_object() -> None:
-    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
-                              json={"hits": [1, 2]})
+    response = httpx.Response(200, request=httpx.Request("GET", "https://x"), json={"hits": [1, 2]})
     assert _parse_body(response) == {"hits": [1, 2]}
 
 
 def test_parse_body_returns_json_when_array() -> None:
-    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
-                              json=[{"a": 1}, {"b": 2}])
+    response = httpx.Response(
+        200, request=httpx.Request("GET", "https://x"), json=[{"a": 1}, {"b": 2}]
+    )
     assert _parse_body(response) == [{"a": 1}, {"b": 2}]
 
 
 def test_parse_body_wraps_text_when_not_json() -> None:
-    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
-                              text="# markdown body")
+    response = httpx.Response(
+        200, request=httpx.Request("GET", "https://x"), text="# markdown body"
+    )
     assert _parse_body(response) == {"text": "# markdown body"}
 
 
 def test_parse_body_wraps_invalid_json_as_text() -> None:
-    response = httpx.Response(200, request=httpx.Request("GET", "https://x"),
-                              content=b"{not valid json")
+    response = httpx.Response(
+        200, request=httpx.Request("GET", "https://x"), content=b"{not valid json"
+    )
     assert _parse_body(response) == {"text": "{not valid json"}
 
 
@@ -195,12 +198,14 @@ def test_session_stats_queries_both_zones() -> None:
     seen: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append({
-            "method": request.method,
-            "path": request.url.path,
-            "zone": request.url.params.get("zone"),
-            "auth": request.headers.get("authorization"),
-        })
+        seen.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "zone": request.url.params.get("zone"),
+                "auth": request.headers.get("authorization"),
+            }
+        )
         return httpx.Response(200, request=request, json={"requests": 7})
 
     c = _make_client(handler)
@@ -306,13 +311,14 @@ def test_no_mcp_passthrough_or_raw_call() -> None:
     assert not hasattr(c, "call_tool")
     assert not hasattr(c, "raw_mcp")
     assert not hasattr(c, "discover")  # dropped — no direct REST equivalent
-    public_methods = {
-        name for name in vars(BrightDataClient) if not name.startswith("_")
-    }
+    public_methods = {name for name in vars(BrightDataClient) if not name.startswith("_")}
     public_methods.discard("close")
     public_methods.discard("http_client")
     assert public_methods == {
-        "search", "scrape_markdown", "scrape_html", "session_stats",
+        "search",
+        "scrape_markdown",
+        "scrape_html",
+        "session_stats",
     }
 
 
@@ -320,9 +326,7 @@ def test_no_mcp_passthrough_or_raw_call() -> None:
 
 
 def test_zone_falls_back_to_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "tools.research.brightdata.client.secret", lambda _name, _default: ""
-    )
+    monkeypatch.setattr("tools.research.brightdata.client.secret", lambda _name, _default: "")
     captured, handler = _captured_handler({"ok": True})
     transport = httpx.MockTransport(handler)
     c = BrightDataClient(api_token=_FAKE_TOKEN, transport=transport)
@@ -357,9 +361,7 @@ def test_exception_message_does_not_contain_token() -> None:
 
 def test_request_error_message_does_not_contain_token() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError(
-            f"could not connect; Authorization: Bearer {_FAKE_TOKEN}"
-        )
+        raise httpx.ConnectError(f"could not connect; Authorization: Bearer {_FAKE_TOKEN}")
 
     c = _make_client(handler)
     try:

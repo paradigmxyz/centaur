@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 import json
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 
 from .client import BrightDataClient
 
+load_dotenv()
 
 app = typer.Typer(name="brightdata", help="BrightData public web search and scraping")
 console = Console()
