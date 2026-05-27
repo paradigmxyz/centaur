@@ -15,7 +15,7 @@ const SECRET_FIELD_NAMES = new Set([
 const EMAIL_FIELD_NAMES = new Set(['email', 'useremail', 'authoremail'])
 const PHONE_FIELD_NAMES = new Set(['phone', 'phonenumber', 'userphone'])
 const SSN_FIELD_NAMES = new Set(['ssn', 'socialsecuritynumber'])
-const LOG_VERSION_UUID = '7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14'
+const LOG_VERSION_UUID = '013ca634-6a30-4047-8511-8e5483f313ea'
 
 function logVersionFields(): Record<string, string> {
   return {

@@ -49,7 +49,7 @@ describe('Slackbot log sanitization', () => {
       logInfo('slack_test_event', { thread_key: 'slack:C123:1' })
 
       expect(console.log).toHaveBeenCalledWith('slack_test_event', {
-        log_version_uuid: '7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14',
+        log_version_uuid: '013ca634-6a30-4047-8511-8e5483f313ea',
         thread_key: 'slack:C123:1'
       })
     } finally {
