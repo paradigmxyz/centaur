@@ -516,7 +516,7 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
     client
   })
   if (!normalized) return
-  if (!normalized.is_mention) return
+  if (!shouldHandoffToCentaur(normalized)) return
 
   if (shouldAckWithReaction(normalized)) {
     await ackWithReaction(client, normalized)
@@ -531,6 +531,11 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
     }
     throw new Error(`Centaur Slack handoff failed: ${result.status}`)
   }
+}
+
+function shouldHandoffToCentaur(event: NormalizedSlackEvent): boolean {
+  if (event.is_mention) return true
+  return event.is_thread_reply && event.bot_in_thread
 }
 
 const TRIVIAL_ACK_REACTION = 'ok_hand'

@@ -29,6 +29,8 @@ export type NormalizedSlackEvent = {
   channel_id: string
   thread_ts: string
   is_mention: boolean
+  is_thread_reply: boolean
+  bot_in_thread: boolean
   parts: NormalizedPart[]
   history_messages?: Array<{
     message_id: string
