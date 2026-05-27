@@ -21,5 +21,5 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "LINEAR_API_KEY", match_headers = ["Authorization"], hosts = ["api.linear.app"]},
+    {type = "http", name = "LINEAR_API_KEY", match_headers = ["Authorization"], hosts = ["api.linear.app", "uploads.linear.app"]},
 ]
