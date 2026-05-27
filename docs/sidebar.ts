@@ -43,6 +43,7 @@ export const sidebar = [
     text: 'Reference',
     items: [
       { text: 'Configuration', link: '/reference/configuration' },
+      { text: 'Tool Directory', link: '/reference/tool-directory' },
     ],
   },
   {
