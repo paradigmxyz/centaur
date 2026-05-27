@@ -52,7 +52,7 @@ describe('sanitizeFinalMessagePayload', () => {
     expect(total).toBeLessThanOrEqual(slackReplyLimits.stream.markdownChunkChars)
   })
 
-  it('shrinks oversized plan + markdown + context compositions toward the byte budget', () => {
+  it('shrinks oversized plan + markdown compositions and drops context blocks', () => {
     const tasks = Array.from({ length: 12 }, (_, index) => ({
       id: `cmd-${index}`,
       title: `Run command ${index}`,
@@ -94,5 +94,6 @@ describe('sanitizeFinalMessagePayload', () => {
       slackReplyLimits.mixedBodyAndPlan.maxPayloadBytes
     )
     expect(blocks.length).toBeLessThanOrEqual(slackReplyLimits.message.maxBlocks)
+    expect(blocks.some(block => block.type === 'context')).toBe(false)
   })
 })
