@@ -246,14 +246,10 @@ function slackMessageText(
 }
 
 function messageMentionsBot(
-  message: Pick<SlackMessageEvent, 'text' | 'blocks' | 'attachments'>,
+  message: Pick<SlackMessageEvent, 'text'>,
   botUserId: string
 ): boolean {
-  return uniqueNonEmpty([
-    normalizeSlackText(message.text ?? ''),
-    normalizeRichTextBlocks(message.blocks),
-    normalizeSlackAttachments(message.attachments)
-  ]).some(text => text.includes(`@${botUserId}`))
+  return typeof message.text === 'string' && message.text.includes(`<@${botUserId}>`)
 }
 
 function slackActorId(
