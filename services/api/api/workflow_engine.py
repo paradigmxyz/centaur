@@ -2358,6 +2358,22 @@ async def _load_checkpoints(
     }
 
 
+def _bind_app_db_pool(pool) -> None:
+    """Expose the workflow worker pool to shared API helpers.
+
+    The out-of-process workflow executor does not run FastAPI lifespan, so
+    ``api.app.state.db_pool`` is otherwise missing for workflow handlers that
+    call shared API helpers.
+    """
+    try:
+        from api.app import app as api_app
+    except Exception:
+        log.debug("workflow_app_db_pool_bind_skipped", exc_info=True)
+        return
+    if not hasattr(api_app.state, "db_pool"):
+        api_app.state.db_pool = pool
+
+
 async def _execute_run(pool, run_id: str) -> None:
     """Claim a specific run by ID and execute it."""
     worker_id = _new_worker_id()
@@ -2475,6 +2491,7 @@ async def _mark_run_failed_on_sandbox_crash(pool, run_id: str, pod_name: str) ->
 
 async def _run_handler(pool, run_row: dict[str, Any]) -> None:
     """Execute the handler for a claimed run."""
+    _bind_app_db_pool(pool)
     _start = time.monotonic()
     run_id = str(run_row["run_id"])
     workflow_name = str(run_row["workflow_name"])
