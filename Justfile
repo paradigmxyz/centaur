@@ -68,10 +68,10 @@ deploy:
       local) ;;
       ghcr)
         extra_args+=(
-          --set api.image.repository=ghcr.io/paradigmxyz/centaur-api
-          --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur-iron-proxy
-          --set slackbot.image.repository=ghcr.io/paradigmxyz/centaur-slackbot
-          --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur-agent
+          --set api.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api
+          --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
+          --set slackbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbot
+          --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
         )
         ;;
       *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
