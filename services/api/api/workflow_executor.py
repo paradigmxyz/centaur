@@ -21,6 +21,7 @@ import sys
 
 import structlog
 
+from api.app import app
 from api.config import settings
 from api.db import close_pool, create_pool
 from api.logging_config import configure_structlog
@@ -36,6 +37,9 @@ log = structlog.get_logger().bind(service="workflow-executor")
 async def _run(run_id: str) -> int:
     pool = await create_pool(settings.database_url)
     try:
+        # Workflow executor pods do not run the FastAPI lifespan, but some
+        # legacy agent helpers still read the pool from app.state.
+        app.state.db_pool = pool
         discover_workflow_handlers()
         row = await pool.fetchrow(
             "SELECT run_id, workflow_name, input_json, status, "
