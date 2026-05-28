@@ -1,13 +1,14 @@
-"""One-shot workflow handler entrypoint — runs inside a per-run sandbox Pod.
+"""One-shot workflow handler entrypoint — runs inside a per-run executor Pod.
 
 Invoked as ``python -m api.workflow_executor --run-id <id>`` by the API's
-worker when it claims a pending row from ``workflow_runs``. The sandbox
-container fetches the (already-claimed) run row, drives the existing
-``_run_handler`` to completion, and exits. All checkpoint / status
-bookkeeping happens in the DB exactly as it did when the worker ran the
-handler in-process.
+worker when it claims a pending row from ``workflow_runs``. The executor
+pod clones the API container's env (workflows are trusted, so no per-run
+iron-proxy is involved), fetches the (already-claimed) run row, drives
+the existing ``_run_handler`` to completion, and exits. All checkpoint /
+status bookkeeping happens in the DB exactly as it did when the worker
+ran the handler in-process.
 
-The sandbox terminates with exit code 0 on a clean handler return (the
+The pod terminates with exit code 0 on a clean handler return (the
 handler itself wrote terminal state to the DB) and a non-zero code if
 the executor never got to ``_run_handler`` (e.g. DB unreachable, run row
 gone, handler module missing).
@@ -21,6 +22,7 @@ import sys
 
 import structlog
 
+from api.app import app as _api_app
 from api.config import settings
 from api.db import close_pool, create_pool
 from api.logging_config import configure_structlog
@@ -35,6 +37,10 @@ log = structlog.get_logger().bind(service="workflow-executor")
 
 async def _run(run_id: str) -> int:
     pool = await create_pool(settings.database_url)
+    # Handlers reach into the API's FastAPI app for the pool (api.agent._get_pool
+    # reads ``app.state.db_pool``). The app's lifespan never runs in this pod,
+    # so populate ``state`` ourselves before invoking the handler.
+    _api_app.state.db_pool = pool
     try:
         discover_workflow_handlers()
         row = await pool.fetchrow(

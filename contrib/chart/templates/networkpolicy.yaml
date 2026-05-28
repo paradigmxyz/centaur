@@ -56,6 +56,9 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
 {{- end }}
+        - podSelector:
+            matchLabels:
+              centaur.ai/component: workflow-run
       ports:
         - protocol: TCP
           port: 5432
@@ -155,6 +158,9 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              centaur.ai/component: workflow-run
 {{- range $ingressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -218,6 +224,9 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
 {{- end }}
+        - podSelector:
+            matchLabels:
+              centaur.ai/component: workflow-run
 {{- range .Values.runnerAccess.allowedCidrs }}
         - ipBlock:
             cidr: {{ . | quote }}
@@ -309,6 +318,57 @@ spec:
 {{- end }}
 ---
 {{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-workflow-run
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/component: workflow-run
+  policyTypes:
+    - Egress
+  egress:
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+{{- if .Values.slackbot.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3001
+{{- end }}
+    - to:
+        - podSelector:
+            matchLabels:
+              centaur.ai/iron-proxy: "true"
+              centaur.ai/sandbox-id: api
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ironProxy.service.proxyPort }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Trusted workflow code may make direct outbound calls (mirrors the API).
+    - ports:
+        - protocol: TCP
+          port: 443
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
