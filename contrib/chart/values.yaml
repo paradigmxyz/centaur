@@ -39,7 +39,7 @@ ironProxy:
 # sidecar — currently the API still serves /tools so this is a no-op
 # until the API drops its router (Phase 5).
 toolServer:
-  enabled: false
+  enabled: true
   port: 8001
 
 # iron-token-broker — race-free OAuth refresh-token coordinator. Enable when

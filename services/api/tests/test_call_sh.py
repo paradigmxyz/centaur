@@ -265,3 +265,30 @@ def test_call_uses_trace_id_header_and_separate_thread_key_header():
     headers = _AgentHandler.headers_seen[0]
     assert headers["X-Trace-Id"] == "00000000-0000-0000-0000-000000000123"
     assert headers["X-Centaur-Thread-Key"] == "slack:C123:1700000000.000100"
+
+
+def test_call_bypasses_proxy_for_centaur_internal_hosts():
+    _AgentHandler.requests = []
+    _AgentHandler.headers_seen = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        result = _run_call_args(
+            ["agent", "runtime", "?key=task:legal-review-123"],
+            server,
+            extra_env={
+                "http_proxy": "http://127.0.0.1:9",
+                "https_proxy": "http://127.0.0.1:9",
+            },
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert [(method, path) for method, path, _ in _AgentHandler.requests] == [
+        ("GET", "/agent/runtime?key=task:legal-review-123"),
+    ]

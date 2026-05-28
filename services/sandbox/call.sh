@@ -10,13 +10,27 @@ U="${CENTAUR_API_URL:-http://api:8000}"
 TU="${CENTAUR_TOOLS_URL:-$U}"
 T="Accept: text/plain"
 J="Content-Type: application/json"
+
+_host_from_url() {
+  printf '%s\n' "$1" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:]+).*#\1#'
+}
+
+_append_no_proxy() {
+  local additions="$1"
+  export no_proxy="${no_proxy:+$no_proxy,}${additions}"
+  export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${additions}"
+}
+
+_api_host="$(_host_from_url "$U")"
+_tools_host="$(_host_from_url "$TU")"
+_append_no_proxy "localhost,127.0.0.1,api,centaur-api,centaur-centaur-api,centaur-api-proxy,.centaur.svc.cluster.local,${_api_host},${_tools_host}"
 # Prefer refreshed token (written on warm-pool claim) over original env var
 _KEY="${CENTAUR_API_KEY:-}"
 if [ -f /home/agent/.api_key ]; then
   _KEY="$(cat /home/agent/.api_key)"
 fi
 _TRACE_ID="${CENTAUR_TRACE_ID:-}"
-if [ -f /home/agent/.trace_id ]; then
+if [ -z "${_TRACE_ID:-}" ] && [ -f /home/agent/.trace_id ]; then
   _TRACE_ID="$(cat /home/agent/.trace_id)"
 fi
 A="Authorization: Bearer ${_KEY}"
