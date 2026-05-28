@@ -31,6 +31,7 @@ import structlog
 from api.broker_config import render_broker_yaml
 from api.proxy_config import (
     assign_pg_listen_ports,
+    core_pg_listen_port,
     render_proxy_yaml,
 )
 from api.sandbox.base import SandboxBackend, SandboxSession
@@ -244,6 +245,7 @@ def _secret_env_key(name: str) -> str:
 def _proxy_iron_env(
     secret_name: str,
     pg_secrets: list[tuple[PgDsnSecret, str]],
+    core: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Env block for the iron-proxy container.
 
@@ -299,6 +301,8 @@ def _proxy_iron_env(
         env.append(
             {"name": f"PG_PROXY_PASSWORD_{secret.name}", "value": proxy_password}
         )
+    if core is not None:
+        env.append({"name": core["password_env"], "value": core["password"]})
     return env
 
 
@@ -311,6 +315,42 @@ def _build_proxied_pg_url(host: str, port: int, password: str, database: str) ->
     """
     netloc = f"app_user:{password}@{host}:{port}"
     return urlunsplit(("postgresql", netloc, f"/{database}", "", ""))
+
+
+_CORE_PG_PASSWORD_ENV = "PG_PROXY_PASSWORD_CENTAUR_CORE"
+
+
+def _core_db_name() -> str:
+    """Database name of the core Centaur DB, parsed from the API's own DSN.
+
+    iron-proxy forwards the client's startup-packet database to the upstream,
+    so the sidecar's proxied DSN must declare the same dbname.
+    """
+    from api.config import settings
+
+    return urlsplit(settings.database_url).path.lstrip("/") or "centaur"
+
+
+def _build_core_pg(
+    firewall_host: str, pg_listen_ports: dict[str, int]
+) -> dict[str, Any]:
+    """Wiring for the per-sandbox proxy's core-DB listener (sidecar use only).
+
+    The tool-server sidecar reaches the core DB through the proxy because the
+    sandbox is denied direct Postgres egress. Returns the fields needed to
+    render the listener, inject the proxy-side password, open the sidecar's
+    pool, and allow egress to the listener port. Never injected into the agent
+    container, so no DB credential lives in the sandbox.
+    """
+    port = core_pg_listen_port(pg_listen_ports)
+    password = _secrets.token_urlsafe(24)
+    return {
+        "port": port,
+        "password": password,
+        "password_env": _CORE_PG_PASSWORD_ENV,
+        "dsn_env_var": _secret_env_key("DATABASE_URL"),
+        "dsn": _build_proxied_pg_url(firewall_host, port, password, _core_db_name()),
+    }
 
 
 def _api_pod_match_labels() -> dict[str, str]:
@@ -386,12 +426,16 @@ def _build_tool_server_container(
     firewall_host: str,
     api_url: str,
     overlay_mount: str | None,
+    database_url: str,
 ) -> dict[str, Any]:
     """Build the tool-server sidecar container spec.
 
     The sidecar listens on loopback inside the sandbox Pod and routes its own
-    HTTP egress through the per-sandbox iron-proxy. Caller is responsible for
-    only invoking this when ``_tool_server_image()`` is set.
+    HTTP egress through the per-sandbox iron-proxy. ``database_url`` points at
+    the proxy's core-DB listener (not the raw DSN) so the pool respects the
+    sandbox's NetworkPolicy; the real credentials stay in the proxy pod.
+    Caller is responsible for only invoking this when ``_tool_server_image()``
+    is set.
     """
     image_ref = _tool_server_image()
     if not image_ref:
@@ -406,15 +450,7 @@ def _build_tool_server_container(
     no_proxy = ",".join(dict.fromkeys(no_proxy_hosts))
 
     env: list[dict[str, Any]] = [
-        {
-            "name": "DATABASE_URL",
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": secret_name,
-                    "key": _secret_env_key("DATABASE_URL"),
-                }
-            },
-        },
+        {"name": "DATABASE_URL", "value": database_url},
         {
             "name": "SANDBOX_SIGNING_KEY",
             "valueFrom": {
@@ -827,9 +863,18 @@ class KubernetesExecutorBackend(SandboxBackend):
         sandbox_id: str,
         secrets: list[SecretDef],
         pg_listen_ports: dict[str, int],
+        core: dict[str, Any] | None = None,
     ) -> None:
+        core_pg = (
+            {k: core[k] for k in ("port", "dsn_env_var", "password_env")}
+            if core is not None
+            else None
+        )
         rendered = render_proxy_yaml(
-            secrets, base_config=None, pg_listen_ports=pg_listen_ports
+            secrets,
+            base_config=None,
+            pg_listen_ports=pg_listen_ports,
+            core_pg=core_pg,
         )
         name = _proxy_configmap_name(sandbox_id)
         await self._delete_configmap(name)
@@ -872,7 +917,10 @@ class KubernetesExecutorBackend(SandboxBackend):
         )
 
     async def _create_proxy_service(
-        self, sandbox_id: str, pg_listen_ports: dict[str, int]
+        self,
+        sandbox_id: str,
+        pg_listen_ports: dict[str, int],
+        core: dict[str, Any] | None = None,
     ) -> None:
         service_name = _proxy_service_name(sandbox_id)
         await self._delete_service(service_name)
@@ -890,6 +938,15 @@ class KubernetesExecutorBackend(SandboxBackend):
                     "name": f"pg-{name[:11].lower().replace('_', '-')}",
                     "port": port,
                     "targetPort": port,
+                    "protocol": "TCP",
+                }
+            )
+        if core is not None:
+            ports.append(
+                {
+                    "name": "pg-core",
+                    "port": core["port"],
+                    "targetPort": core["port"],
                     "protocol": "TCP",
                 }
             )
@@ -916,7 +973,10 @@ class KubernetesExecutorBackend(SandboxBackend):
         )
 
     async def _create_proxy_network_policies(
-        self, sandbox_id: str, pg_listen_ports: dict[str, int]
+        self,
+        sandbox_id: str,
+        pg_listen_ports: dict[str, int],
+        core_port: int | None = None,
     ) -> None:
         await self._delete_network_policy(_sandbox_egress_policy_name(sandbox_id))
         await self._delete_network_policy(_proxy_policy_name(sandbox_id))
@@ -924,6 +984,9 @@ class KubernetesExecutorBackend(SandboxBackend):
         sandbox_to_proxy_ports = [{"protocol": "TCP", "port": _proxy_port()}]
         for _, port in sorted(pg_listen_ports.items(), key=lambda item: item[1]):
             sandbox_to_proxy_ports.append({"protocol": "TCP", "port": port})
+        if core_port is not None:
+            # Lets the tool-server sidecar reach the proxy's core-DB listener.
+            sandbox_to_proxy_ports.append({"protocol": "TCP", "port": core_port})
 
         proxy_egress = [
             {
@@ -1044,6 +1107,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         pg_listen_ports: dict[str, int],
         *,
         restart_policy: str,
+        core: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the pod.spec dict shared by the sandbox bare Pod and the api-self Deployment."""
         configmap_name = _proxy_configmap_name(sandbox_id)
@@ -1068,6 +1132,8 @@ class KubernetesExecutorBackend(SandboxBackend):
                     "name": f"pg-{name[:11].lower().replace('_', '-')}",
                 }
             )
+        if core is not None:
+            proxy_ports.append({"containerPort": core["port"], "name": "pg-core"})
         return {
             "automountServiceAccountToken": False,
             "restartPolicy": restart_policy,
@@ -1077,7 +1143,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                     "name": "iron-proxy",
                     "image": _proxy_image(),
                     "imagePullPolicy": _proxy_image_pull_policy(),
-                    "env": _proxy_iron_env(secret_name, pg_secrets),
+                    "env": _proxy_iron_env(secret_name, pg_secrets, core=core),
                     "envFrom": env_from,
                     "ports": proxy_ports,
                     "readinessProbe": {
@@ -1145,10 +1211,11 @@ class KubernetesExecutorBackend(SandboxBackend):
         sandbox_id: str,
         pg_secrets: list[tuple[PgDsnSecret, str]],
         pg_listen_ports: dict[str, int],
+        core: dict[str, Any] | None = None,
     ) -> str:
         proxy_pod_name = _new_proxy_pod_name(sandbox_id)
         spec = self._build_proxy_pod_spec(
-            sandbox_id, pg_secrets, pg_listen_ports, restart_policy="Never"
+            sandbox_id, pg_secrets, pg_listen_ports, restart_policy="Never", core=core
         )
         await self._core_api().create_namespaced_pod(
             _namespace(),
@@ -1320,6 +1387,13 @@ class KubernetesExecutorBackend(SandboxBackend):
             )
             for secret, proxy_password in pg_secrets
         }
+        # Core-DB listener for the tool-server sidecar (sidecar-only; never put
+        # into sandbox_pg_dsns / the agent env). None when no sidecar runs.
+        core_pg = (
+            _build_core_pg(firewall_host, pg_listen_ports)
+            if _tool_server_image()
+            else None
+        )
 
         env = container_env(
             thread_key,
@@ -1472,6 +1546,7 @@ class KubernetesExecutorBackend(SandboxBackend):
             }
         ]
         if _tool_server_image():
+            assert core_pg is not None  # set under the same guard above
             containers.append(
                 _build_tool_server_container(
                     firewall_host=firewall_host,
@@ -1479,6 +1554,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                     overlay_mount=(
                         _SANDBOX_OVERLAY_ROOT if overlay_image else None
                     ),
+                    database_url=core_pg["dsn"],
                 )
             )
 
@@ -1517,11 +1593,17 @@ class KubernetesExecutorBackend(SandboxBackend):
         await self._delete_proxy_resources(pod_name)
         try:
             await self._create_prompt_secret(secret_name, persona)
-            await self._create_proxy_configmap(pod_name, secrets, pg_listen_ports)
-            await self._create_proxy_service(pod_name, pg_listen_ports)
-            await self._create_proxy_network_policies(pod_name, pg_listen_ports)
+            await self._create_proxy_configmap(
+                pod_name, secrets, pg_listen_ports, core=core_pg
+            )
+            await self._create_proxy_service(pod_name, pg_listen_ports, core=core_pg)
+            await self._create_proxy_network_policies(
+                pod_name,
+                pg_listen_ports,
+                core_port=core_pg["port"] if core_pg else None,
+            )
             proxy_pod_name = await self._create_proxy_pod(
-                pod_name, pg_secrets, pg_listen_ports
+                pod_name, pg_secrets, pg_listen_ports, core=core_pg
             )
             await self._wait_pod_ready(proxy_pod_name)
             await self._create_workload(pod_spec)

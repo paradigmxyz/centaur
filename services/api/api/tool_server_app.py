@@ -75,7 +75,11 @@ def _resolve_tool_dirs() -> list[Path]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.db_pool = await create_pool(settings.database_url)
+    # The tool-server is never a schema owner: the per-sandbox sidecar reaches
+    # the core DB through the iron-proxy (DATABASE_URL points at the proxy's
+    # core listener) and the shared tool-server Deployment runs alongside the
+    # API. Open the pool without running migrations; the API owns migrations.
+    app.state.db_pool = await create_pool(settings.database_url, apply_migrations=False)
     watcher_task = asyncio.create_task(_watch_tools(app.state.tool_manager))
     try:
         yield

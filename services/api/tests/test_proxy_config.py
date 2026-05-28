@@ -4,8 +4,10 @@ import pytest
 import yaml
 
 from api.proxy_config import (
+    CENTAUR_CORE_PG_LISTENER,
     PG_LISTEN_PORT_BASE,
     assign_pg_listen_ports,
+    core_pg_listen_port,
     render_proxy_yaml,
 )
 from api.tool_manager import (
@@ -790,6 +792,57 @@ def test_pg_listen_ports_are_sequential_and_sorted_by_name() -> None:
         "MIKE": PG_LISTEN_PORT_BASE + 1,
         "ZEBRA": PG_LISTEN_PORT_BASE + 2,
     }
+
+
+def test_core_pg_listen_port_is_after_tool_listeners() -> None:
+    ports = {"ALPHA": PG_LISTEN_PORT_BASE, "ZEBRA": PG_LISTEN_PORT_BASE + 1}
+    assert core_pg_listen_port(ports) == PG_LISTEN_PORT_BASE + 2
+    assert core_pg_listen_port({}) == PG_LISTEN_PORT_BASE
+
+
+def test_render_core_listener_uses_forced_env_upstream() -> None:
+    # No tool pg_dsn secrets; core listener still rendered when core_pg given.
+    core_pg = {
+        "port": PG_LISTEN_PORT_BASE,
+        "dsn_env_var": "CENTAUR_DATABASE_URL",
+        "password_env": "PG_PROXY_PASSWORD_CENTAUR_CORE",
+    }
+    cfg = yaml.safe_load(render_proxy_yaml([], core_pg=core_pg))
+    listeners = cfg["postgres"]
+    assert len(listeners) == 1
+    core = listeners[0]
+    assert core["name"] == CENTAUR_CORE_PG_LISTENER
+    assert core["listen"] == f"0.0.0.0:{PG_LISTEN_PORT_BASE}"
+    # forced env source (not 1Password) since the proxy always has the DSN env
+    assert core["upstream"]["dsn"] == {"type": "env", "var": "CENTAUR_DATABASE_URL"}
+    assert core["client"] == {
+        "user": "app_user",
+        "password_env": "PG_PROXY_PASSWORD_CENTAUR_CORE",
+    }
+
+
+def test_render_core_listener_appended_after_tool_listeners() -> None:
+    secrets = [PgDsnSecret("TOOLDB", "TOOLDB", "tooldb")]
+    pg_listen_ports = assign_pg_listen_ports(secrets)
+    core_pg = {
+        "port": core_pg_listen_port(pg_listen_ports),
+        "dsn_env_var": "CENTAUR_DATABASE_URL",
+        "password_env": "PG_PROXY_PASSWORD_CENTAUR_CORE",
+    }
+    cfg = yaml.safe_load(
+        render_proxy_yaml(secrets, pg_listen_ports=pg_listen_ports, core_pg=core_pg)
+    )
+    names = [listener["name"] for listener in cfg["postgres"]]
+    assert names == ["tooldb", CENTAUR_CORE_PG_LISTENER]
+    # core port does not collide with the tool listener's port
+    ports = {listener["name"]: listener["listen"] for listener in cfg["postgres"]}
+    assert ports["tooldb"] == f"0.0.0.0:{PG_LISTEN_PORT_BASE}"
+    assert ports[CENTAUR_CORE_PG_LISTENER] == f"0.0.0.0:{PG_LISTEN_PORT_BASE + 1}"
+
+
+def test_render_without_core_pg_emits_no_core_listener() -> None:
+    cfg = yaml.safe_load(render_proxy_yaml([]))
+    assert "postgres" not in cfg
 
 
 def test_pg_listen_ports_deduplicates() -> None:
