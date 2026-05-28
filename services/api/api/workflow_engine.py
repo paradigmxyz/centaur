@@ -1295,7 +1295,6 @@ async def do_agent_turn(
                 effective_thread_key,
                 effective_platform or "slack",
                 user_id=requester_user_id,
-                pool=ctx._pool,
             )
 
         if isinstance(effective_history, list):
