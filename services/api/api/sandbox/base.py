@@ -61,6 +61,11 @@ class SandboxBackend(abc.ABC):
         """Whether this backend supports pre-warming sandboxes."""
         return False
 
+    @property
+    def supports_stateful_pause(self) -> bool:
+        """Whether pause_by_id retains filesystem state for later resume."""
+        return False
+
     @abc.abstractmethod
     async def create(
         self,

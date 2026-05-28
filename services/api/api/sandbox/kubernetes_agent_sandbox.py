@@ -41,6 +41,10 @@ class KubernetesAgentSandboxBackend(KubernetesExecutorBackend):
         super().__init__()
         self._custom: client.CustomObjectsApi | None = None
 
+    @property
+    def supports_stateful_pause(self) -> bool:
+        return True
+
     async def _ensure_clients(self) -> None:
         await super()._ensure_clients()
         if self._custom is None:

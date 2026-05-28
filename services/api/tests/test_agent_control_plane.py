@@ -1890,6 +1890,84 @@ async def test_worker_requeues_raw_harness_auth_error_once_on_fresh_runtime(db_p
 
 
 @pytest.mark.asyncio
+async def test_worker_finalizes_reclaimed_execution_from_completed_session_result(db_pool):
+    from api.runtime_control import _process_execution
+
+    thread_key = f"slack:C-reclaim:{uuid.uuid4().hex}"
+    execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+    runtime_id = f"rt-reclaim-{uuid.uuid4().hex[:8]}"
+    durable_turn_id = f"turn-{uuid.uuid4().hex[:12]}"
+
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions ("
+        "thread_key, sandbox_id, harness, engine, state, started_at, updated_at, "
+        "inflight_turn_id, last_result"
+        ") VALUES ($1, $2, 'codex', 'codex', 'idle', NOW(), NOW(), NULL, $3)",
+        thread_key,
+        runtime_id,
+        "recovered answer",
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'codex', 'codex', NULL, 'harness:codex', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, durable_turn_id, started_at, claimed_at, hard_deadline_at"
+        ") VALUES ($1, $2, 1, 'exec-reclaim', 'hash-reclaim', 'running', "
+        "'{\"platform\":\"dev\"}'::jsonb, '{}'::jsonb, $3, NOW() - INTERVAL '2 minutes', "
+        "NOW() - INTERVAL '2 minutes', NOW() + INTERVAL '10 minutes')",
+        execution_id,
+        thread_key,
+        durable_turn_id,
+    )
+
+    row = {
+        "execution_id": execution_id,
+        "thread_key": thread_key,
+        "assignment_generation": 1,
+        "status": "running",
+        "delivery": {"platform": "dev"},
+        "metadata": {},
+        "durable_turn_id": durable_turn_id,
+        "hard_deadline_at": dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10),
+        "silence_deadline_at": dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10),
+        "created_at": dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=2),
+        "claimed_at": dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=2),
+    }
+    session = SandboxSession(
+        sandbox_id=runtime_id,
+        thread_key=thread_key,
+        harness="codex",
+        engine="codex",
+    )
+    stream_mock = AsyncMock()
+
+    with (
+        patch("api.runtime_control.get_or_spawn", new=AsyncMock(return_value=session)),
+        patch("api.runtime_control._stream_stdout", stream_mock),
+    ):
+        await _process_execution(db_pool, row)
+
+    execution = await db_pool.fetchrow(
+        "SELECT status, terminal_reason, result_text, error_text "
+        "FROM agent_execution_requests WHERE execution_id = $1",
+        execution_id,
+    )
+    assert execution is not None
+    assert execution["status"] == "completed"
+    assert execution["terminal_reason"] == "completed_reclaimed_session_result"
+    assert execution["result_text"] == "recovered answer"
+    assert execution["error_text"] is None
+    stream_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_worker_sanitizes_raw_harness_auth_failure_after_retry(db_pool):
     from api.runtime_control import _process_execution
 
@@ -3051,7 +3129,7 @@ async def test_release_stale_runtime_assignments_preserves_undelivered_messages(
 
 
 @pytest.mark.asyncio
-async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool):
+async def test_worker_marks_silence_deadline_exceeded_and_pauses_session(db_pool):
     from api.runtime_control import _process_execution
 
     thread_key = f"slack:C-test:{uuid.uuid4().hex}"
@@ -3066,6 +3144,13 @@ async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool)
         ") VALUES ($1, 1, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
         thread_key,
         prior_runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions ("
+        "thread_key, sandbox_id, harness, engine, state, started_at"
+        ") VALUES ($1, $2, 'amp', 'amp', 'running', NOW())",
+        thread_key,
+        resumed_runtime_id,
     )
     await db_pool.execute(
         "INSERT INTO agent_execution_requests ("
@@ -3102,7 +3187,12 @@ async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool)
             yield {}
 
     stop_session_mock = AsyncMock()
-    backend = SimpleNamespace(attach=AsyncMock())
+    backend = SimpleNamespace(
+        attach=AsyncMock(),
+        pause_by_id=AsyncMock(),
+        supports_stateful_pause=True,
+        name="kubernetes",
+    )
     with (
         patch("api.runtime_control.get_or_spawn", new=AsyncMock(return_value=session)),
         patch(
@@ -3131,7 +3221,13 @@ async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool)
     assert execution["status"] == "failed_permanent"
     assert execution["terminal_reason"] == "silence_deadline_exceeded"
     assert "no progress" in (execution["error_text"] or "")
-    stop_session_mock.assert_awaited_once_with(thread_key)
+    stop_session_mock.assert_not_awaited()
+    backend.pause_by_id.assert_awaited_once_with(resumed_runtime_id)
+    session_state = await db_pool.fetchval(
+        "SELECT state FROM sandbox_sessions WHERE thread_key = $1",
+        thread_key,
+    )
+    assert session_state == "suspended"
 
 
 @pytest.mark.asyncio
@@ -3690,7 +3786,7 @@ async def test_worker_reuses_durable_turn_id_without_reinjecting(db_pool):
     ):
         await _process_execution(db_pool, row)
 
-    backend.attach.assert_awaited_once_with(session)
+    backend.attach.assert_awaited_once_with(session, logs=True)
     inject_stdin_mock.assert_not_awaited()
 
     execution = await db_pool.fetchrow(
@@ -3913,7 +4009,7 @@ async def test_worker_refreshes_silence_deadline_when_resuming_existing_turn(db_
     ):
         await _process_execution(db_pool, row)
 
-    backend.attach.assert_awaited_once_with(session)
+    backend.attach.assert_awaited_once_with(session, logs=True)
     inject_stdin_mock.assert_not_awaited()
 
     execution = await db_pool.fetchrow(
