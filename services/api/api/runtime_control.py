@@ -17,7 +17,6 @@ import structlog
 from opentelemetry import trace
 
 from api.agent import (
-    _drop_runtime,
     _get_runtime,
     _stream_stdout,
     get_or_spawn,
@@ -1264,30 +1263,6 @@ async def get_execution_terminal_snapshot(
     }
 
 
-async def _completed_session_result_for_reclaimed_turn(
-    pool,
-    *,
-    thread_key: str,
-    durable_turn_id: str,
-) -> str | None:
-    """Return the persisted result for a reclaimed turn that already completed."""
-    if not durable_turn_id:
-        return None
-    row = await pool.fetchrow(
-        "SELECT inflight_turn_id, last_result FROM sandbox_sessions "
-        "WHERE thread_key = $1",
-        thread_key,
-    )
-    if row is None:
-        return None
-    if row["inflight_turn_id"]:
-        return None
-    last_result = row["last_result"]
-    if last_result is None:
-        return None
-    return str(last_result)
-
-
 async def enqueue_execution(
     pool,
     *,
@@ -2328,57 +2303,6 @@ async def _stop_execution_session(thread_key: str, *, reason: str) -> None:
         )
 
 
-async def _pause_execution_session(pool, thread_key: str, *, reason: str) -> bool:
-    row = await pool.fetchrow(
-        "SELECT sandbox_id FROM sandbox_sessions WHERE thread_key = $1",
-        thread_key,
-    )
-    if row is None:
-        log.info(
-            "execution_session_pause_skipped_missing",
-            thread_key=thread_key,
-            reason=reason,
-        )
-        return False
-
-    sandbox_id = str(row["sandbox_id"])
-    backend = get_backend()
-    if not getattr(backend, "supports_stateful_pause", False):
-        log.warning(
-            "execution_session_pause_skipped_unsupported_backend",
-            thread_key=thread_key,
-            sandbox=sandbox_id[:12],
-            reason=reason,
-            backend=getattr(backend, "name", ""),
-        )
-        return False
-
-    try:
-        await backend.pause_by_id(sandbox_id)
-        _drop_runtime(sandbox_id)
-        await pool.execute(
-            "UPDATE sandbox_sessions SET state = 'suspended', updated_at = NOW() "
-            "WHERE sandbox_id = $1",
-            sandbox_id,
-        )
-        log.info(
-            "execution_session_paused",
-            thread_key=thread_key,
-            sandbox=sandbox_id[:12],
-            reason=reason,
-        )
-        return True
-    except Exception:
-        log.warning(
-            "execution_session_pause_failed",
-            thread_key=thread_key,
-            sandbox=sandbox_id[:12],
-            reason=reason,
-            exc_info=True,
-        )
-        return False
-
-
 async def _requeue_execution_after_raw_harness_auth_failure(
     pool,
     *,
@@ -2802,7 +2726,6 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         silence_deadline = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
             seconds=EXECUTION_SILENCE_TIMEOUT_S
         )
-    reclaiming_existing_turn = bool(durable_turn_id)
     now = dt.datetime.now(dt.timezone.utc)
     if now >= hard_deadline:
         await _mark_execution_terminal(
@@ -2830,8 +2753,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             result_text="",
             error_text="execution made no progress before silence deadline",
         )
-        await _pause_execution_session(
-            pool,
+        await _stop_execution_session(
             thread_key,
             reason="silence_deadline_exceeded",
         )
@@ -2859,29 +2781,6 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
 
     if durable_turn_id:
         await _heartbeat_execution_lease(pool, execution_id)
-        completed_result = await _completed_session_result_for_reclaimed_turn(
-            pool,
-            thread_key=thread_key,
-            durable_turn_id=durable_turn_id,
-        )
-        if completed_result is not None:
-            log.info(
-                "execution_reclaimed_completed_session_result",
-                execution_id=execution_id,
-                thread_key=thread_key,
-                durable_turn_id=durable_turn_id,
-                result_size_bytes=payload_size_bytes(completed_result),
-            )
-            await _mark_execution_terminal(
-                pool,
-                execution_id=execution_id,
-                thread_key=thread_key,
-                status="completed",
-                terminal_reason="completed_reclaimed_session_result",
-                result_text=completed_result,
-                error_text=None,
-            )
-            return
         if silence_deadline <= dt.datetime.now(dt.timezone.utc):
             silence_deadline = await _touch_execution_progress(pool, execution_id)
     else:
@@ -2968,7 +2867,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     user_id: str | None = str(user_id_row) if user_id_row else None
 
     backend = get_backend()
-    await backend.attach(session, logs=reclaiming_existing_turn)
+    await backend.attach(session)
     rt = _get_runtime(session.sandbox_id)
     observations = ExecutionObservationAccumulator()
     started_at = claimed_at or row.get("created_at")
@@ -3177,8 +3076,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                     result_text="",
                     error_text="execution made no progress before silence deadline",
                 )
-                await _pause_execution_session(
-                    pool,
+                await _stop_execution_session(
                     thread_key,
                     reason="silence_deadline_exceeded",
                 )
@@ -3469,26 +3367,6 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             await backend.close_streams(session)
 
     if turn_done_event is None:
-        completed_result = await _completed_session_result_for_reclaimed_turn(
-            pool,
-            thread_key=thread_key,
-            durable_turn_id=durable_turn_id,
-        )
-        if completed_result is not None:
-            log.info(
-                "execution_stream_recovered_completed_session_result",
-                execution_id=execution_id,
-                thread_key=thread_key,
-                durable_turn_id=durable_turn_id,
-                result_size_bytes=payload_size_bytes(completed_result),
-            )
-            await _finalize_execution(
-                status="completed",
-                terminal_reason="completed_reclaimed_session_result",
-                result_text=completed_result,
-                error_text=None,
-            )
-            return
         status_row = await pool.fetchrow(
             "SELECT status FROM agent_execution_requests WHERE execution_id = $1",
             execution_id,
