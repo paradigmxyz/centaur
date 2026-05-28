@@ -68,10 +68,10 @@ deploy:
       local) ;;
       ghcr)
         extra_args+=(
-          --set api.image.repository=ghcr.io/paradigmxyz/centaur-api
-          --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur-iron-proxy
-          --set slackbot.image.repository=ghcr.io/paradigmxyz/centaur-slackbot
-          --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur-agent
+          --set api.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api
+          --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
+          --set slackbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbot
+          --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
         )
         ;;
       *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
@@ -85,6 +85,11 @@ deploy:
     if [[ -n "${CODEX_AUTH_MODE:-}" ]]; then
       extra_args+=(
         --set sandbox.extraEnv.CODEX_AUTH_MODE=${CODEX_AUTH_MODE}
+      )
+    fi
+    if [[ -n "${CLAUDE_CODE_AUTH_MODE:-}" ]]; then
+      extra_args+=(
+        --set sandbox.extraEnv.CLAUDE_CODE_AUTH_MODE=${CLAUDE_CODE_AUTH_MODE}
       )
     fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}

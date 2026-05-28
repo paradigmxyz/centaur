@@ -183,6 +183,7 @@ RUN rm -f /etc/sudoers.d/agent
 # Pre-create it as 0755 so the agent user can traverse into it at runtime.
 RUN install -d -m 0755 /etc/centaur
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
+COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/claude-credentials.default.json
 COPY --link --chmod=755 services/sandbox/call.sh /usr/local/bin/call
 COPY --link --chmod=755 services/sandbox/slack-upload.sh /usr/local/bin/slack-upload
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx

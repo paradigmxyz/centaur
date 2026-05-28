@@ -5,15 +5,32 @@
 #   call tools                          → GET /tools (list all)
 #   call discover <tool>               → GET /tools/<tool>
 U="${CENTAUR_API_URL:-http://api:8000}"
+# Tools are served by an in-pod sidecar when CENTAUR_TOOLS_URL is set; otherwise
+# fall back to the API server. Agent and workflow calls always go to the API.
+TU="${CENTAUR_TOOLS_URL:-$U}"
 T="Accept: text/plain"
 J="Content-Type: application/json"
+
+_host_from_url() {
+  printf '%s\n' "$1" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:]+).*#\1#'
+}
+
+_append_no_proxy() {
+  local additions="$1"
+  export no_proxy="${no_proxy:+$no_proxy,}${additions}"
+  export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${additions}"
+}
+
+_api_host="$(_host_from_url "$U")"
+_tools_host="$(_host_from_url "$TU")"
+_append_no_proxy "localhost,127.0.0.1,api,centaur-api,centaur-centaur-api,centaur-api-proxy,.centaur.svc.cluster.local,${_api_host},${_tools_host}"
 # Prefer refreshed token (written on warm-pool claim) over original env var
 _KEY="${CENTAUR_API_KEY:-}"
 if [ -f /home/agent/.api_key ]; then
   _KEY="$(cat /home/agent/.api_key)"
 fi
 _TRACE_ID="${CENTAUR_TRACE_ID:-}"
-if [ -f /home/agent/.trace_id ]; then
+if [ -z "${_TRACE_ID:-}" ] && [ -f /home/agent/.trace_id ]; then
   _TRACE_ID="$(cat /home/agent/.trace_id)"
 fi
 A="Authorization: Bearer ${_KEY}"
@@ -185,7 +202,7 @@ case "$tool" in
     ;;
   tools)
     # Inject the built-in agent sub-command into the tool listing
-    response="$(request "GET" "$U/tools")" || { printf '%s\n' "$response"; exit 1; }
+    response="$(request "GET" "$TU/tools")" || { printf '%s\n' "$response"; exit 1; }
     printf '%s' "$response" | jq -c '. + {"agent":{"description":"Sub-agent dispatch (built-in). Use: call agent execute, call agent status, call agent runtime, call agent stop","methods":["execute","status","runtime","stop"]}}'
     printf '\n'
     ;;
@@ -193,7 +210,7 @@ case "$tool" in
     if [ "$2" = "agent" ]; then
       printf '%s\n' '{"tool":"agent","description":"Sub-agent dispatch (built-in, not a tool plugin)","methods":[{"name":"execute","description":"Spawn a sub-agent. Body: {\"thread_key\":\"task:<purpose>-<id>\",\"message\":\"...\",\"harness\":\"<persona>\"}. Returns {execution_id, status}."},{"name":"status","description":"Poll sub-agent. Usage: call agent status '\''?key=<thread_key>'\''"},{"name":"runtime","description":"Inspect active persona/overlay/available personas for a thread. Usage: call agent runtime '\''?key=<thread_key>'\''"},{"name":"stop","description":"Stop sub-agent. Body: {\"thread_key\":\"...\"}"}]}'
     else
-      request "GET" "$U/tools/$2"
+      request "GET" "$TU/tools/$2"
     fi
     ;;
   agent)
@@ -234,9 +251,9 @@ case "$tool" in
     ;;
   *)
     if [ -z "$body" ]; then
-      request "POST" "$U/tools/$tool/$method"
+      request "POST" "$TU/tools/$tool/$method"
     else
-      request "POST" "$U/tools/$tool/$method" "$body"
+      request "POST" "$TU/tools/$tool/$method" "$body"
     fi
     ;;
 esac

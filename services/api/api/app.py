@@ -528,7 +528,9 @@ except ImportError:
 tool_manager = ToolManager(_tools_dirs)
 tool_manager.discover()
 app.state.tool_manager = tool_manager
-app.include_router(tool_manager.create_rest_router())
+# /tools/* is served by the dedicated tool-server entrypoint
+# (``api.tool_server_app``). The API keeps its in-process ToolManager only
+# for identity (Slack profile) and persona metadata lookups.
 
 
 def get_tool_manager() -> ToolManager:

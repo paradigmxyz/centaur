@@ -1072,14 +1072,9 @@ def _build_session_context(
                 "- Markdown tables are allowed and may render as native Slack tables when the structure is clean",
                 "- NEVER put links/URLs inside code blocks (``` ```) — they won't be clickable. Use markdown tables or plain text with `[text](url)` links instead",
                 "- For links to Slack threads or messages, always use the canonical `https://slack.com/archives/{CHANNEL_ID}/p{TS_WITHOUT_DOT}` form. Slack redirects this to the correct workspace. Do not invent or hardcode a `<workspace>.slack.com` subdomain.",
+                "- Do not @-mention or tag the requester when replying; reply naturally in the thread.",
             ]
         )
-        if user_id and user_id.startswith(("U", "W")):
-            lines.append(
-                "- For Slack replies after completing a long task, tag the requester with "
-                f"their real Slack mention: <@{user_id}>. This Slack reply rule does not "
-                "replace GitHub PR attribution requirements."
-            )
 
     lines.extend(["", "---", ""])
     return "\n".join(lines)
@@ -1411,6 +1406,7 @@ async def inject_stdin(
     user_id: str | None = None,
     trace_id: str | None = None,
     traceparent: str | None = None,
+    trace_metadata: dict | None = None,
 ) -> dict:
     """Flush pending messages + write to stdin. Does not touch stdout.
 
@@ -1444,6 +1440,7 @@ async def inject_stdin(
             thread_key=session.thread_key,
             trace_id=trace_id or session.trace_id,
             traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     elif flushed:
         msgs = _flushed_to_messages(flushed)
@@ -1453,6 +1450,7 @@ async def inject_stdin(
             thread_key=session.thread_key,
             trace_id=trace_id or session.trace_id,
             traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     elif inline_blocks:
         turn_input = build_user_input(
@@ -1460,6 +1458,7 @@ async def inject_stdin(
             thread_key=session.thread_key,
             trace_id=trace_id or session.trace_id,
             traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     else:
         return {"ok": True, "injected": False}

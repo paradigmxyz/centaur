@@ -249,7 +249,6 @@ export class CodexSessionRenderer {
     await this.publishPendingAssistantText(agentSessionId, state, { force: true })
     const { streamedTextChars } = await this.renderer.done(agentSessionId, {
       streamFinalUpdates: true,
-      commentaryMarkdown: state.commentaryText,
       answerMarkdown: state.answerText
     })
     state.deliveredAnswerChars = streamedTextChars

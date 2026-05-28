@@ -134,7 +134,7 @@ describe('Slack event HTTP dedupe', () => {
           event_type: 'app_mention',
           codex_thread_id: undefined,
           alert_channel_id: undefined,
-          log_version_uuid: '7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14'
+          log_version_uuid: '013ca634-6a30-4047-8511-8e5483f313ea'
         })
       )
       expect(waits).toHaveLength(1)
@@ -206,7 +206,7 @@ describe('Slack event HTTP dedupe', () => {
           event_type: 'message',
           codex_thread_id: 'T-019e28c1-08bb-777d-9a2e-74a393296b28',
           alert_channel_id: undefined,
-          log_version_uuid: '7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14'
+          log_version_uuid: '013ca634-6a30-4047-8511-8e5483f313ea'
         })
       )
       expect(waits).toHaveLength(1)

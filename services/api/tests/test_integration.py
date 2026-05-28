@@ -540,7 +540,8 @@ class TestBuildSessionContext:
 
         ctx = _build_session_context("test:1", platform="slack", user_id="U123")
         assert "Slack Formatting Rules" in ctx
-        assert "<@U123>" in ctx
+        assert "<@U123>" not in ctx
+        assert "Do not @-mention or tag the requester" in ctx
         assert "test:1" in ctx
 
     def test_no_platform(self):
@@ -555,7 +556,8 @@ class TestBuildSessionContext:
 
         ctx = _build_session_context("test:1", platform="slack")
         assert "Slack Formatting Rules" in ctx
-        assert "tag the requester" not in ctx
+        assert "their real Slack mention" not in ctx
+        assert "Do not @-mention or tag the requester" in ctx
 
     def test_slack_bot_user_id_not_mentioned(self):
         from api.agent import _build_session_context
@@ -563,7 +565,7 @@ class TestBuildSessionContext:
         ctx = _build_session_context("test:1", platform="slack", user_id="B123")
         assert "Slack Formatting Rules" in ctx
         assert "<@B123>" not in ctx
-        assert "tag the requester" not in ctx
+        assert "Do not @-mention or tag the requester" in ctx
 
     def test_contains_timestamp(self):
         from api.agent import _build_session_context

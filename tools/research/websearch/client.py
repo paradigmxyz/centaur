@@ -1,65 +1,112 @@
-"""Websearch client powered by Exa and Claude."""
+"""Websearch client.
+
+Powered by Parallel Web Systems (https://docs.parallel.ai). Search runs
+through the free hosted Parallel Search MCP when no `PARALLEL_API_KEY` is
+configured, and through the Parallel Search REST API when one is. Deep
+research always goes through the Parallel Task API and requires a key.
+
+`search(synthesize=True)` runs the original tool's Claude pipeline
+(reviewer → writer → citation-repair) against the Parallel results
+when `ANTHROPIC_API_KEY` is set. The synthesis prompts and repair loop
+are byte-identical to centaur main, so output quality and failure
+modes mirror that pipeline. Without an Anthropic key, the call still
+returns raw Parallel results and records the skipped synthesis in
+`meta.partial_failures`.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-import time
+import warnings
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlparse
 
-import httpx
+from anthropic import AsyncAnthropic, AuthenticationError
 
-try:
-    from anthropic import AsyncAnthropic
-except ImportError:  # pragma: no cover - optional until tool deps are installed
-    AsyncAnthropic = None  # type: ignore[assignment]
+from centaur_sdk import get_tool_context, secret
 
-from centaur_sdk import secret
+from ._parallel import API_BASE_URL, MCP_URL, ParallelBackend
+from .models import SourceDocument
+from .prompts import EVIDENCE_REVIEWER_SYSTEM, REPORT_REPAIR_SYSTEM, REPORT_WRITER_SYSTEM
 
-from .models import (
-    DeepResearchIteration,
-    DeepResearchResponse,
-    ResponseMeta,
-    SearchResponse,
-    SourceDocument,
-)
-from .prompts import (
-    EVIDENCE_REVIEWER_SYSTEM,
-    QUERY_PLANNER_SYSTEM,
-    REPORT_REPAIR_SYSTEM,
-    REPORT_WRITER_SYSTEM,
-)
+REVIEW_SOURCE_CHAR_LIMIT = 3500
+REVIEW_TOTAL_CHAR_BUDGET = 120000
+WRITE_SOURCE_CHAR_LIMIT = 7000
+WRITE_TOTAL_CHAR_BUDGET = 220000
+
+
+def _is_configured(key: str) -> bool:
+    """Authoritative check for whether a secret was explicitly configured.
+
+    `secret(key)` is unsafe for routing decisions: under centaur's default
+    StubBackend it returns the literal key name as a placeholder for
+    un-configured secrets (the stub goes in outbound HTTP headers where
+    the firewall swaps it in-flight). Both signals are needed to cover
+    server and CLI use:
+
+    - Server / tool-runtime: ToolManager populates ``ctx.secrets[key]``
+      only for secrets it actually resolved, so dict membership is the
+      authoritative signal.
+    - CLI / direct-invoke: no ToolContext is bound; fall through to
+      ``secret(key)`` and treat the value-equals-key stub case as
+      "not configured" (the firewall has nothing to swap into).
+    """
+    try:
+        ctx = get_tool_context()
+        return bool(ctx.secrets.get(key))
+    except LookupError:
+        try:
+            val = secret(key)
+        except KeyError:
+            return False
+        return bool(val) and val != key
 
 
 class WebSearchClient:
-    """Web search and deep research via Exa and Claude."""
-
-    EXA_MAX_PARALLEL_CALLS = 6
-    REVIEW_SOURCE_CHAR_LIMIT = 3500
-    REVIEW_TOTAL_CHAR_BUDGET = 120000
-    WRITE_SOURCE_CHAR_LIMIT = 7000
-    WRITE_TOTAL_CHAR_BUDGET = 220000
-    SNIPPET_CHAR_LIMIT = 7000
+    """Web search and deep research via Parallel."""
 
     def __init__(
         self,
-        exa_api_key: str | None = None,
+        parallel_api_key: str | None = None,
+        parallel_api_base_url: str | None = None,
+        parallel_mcp_url: str | None = None,
+        parallel_deep_research_processor: str | None = None,
         anthropic_api_key: str | None = None,
-        deep_research_model: str | None = None,
-        exa_base_url: str = "https://api.exa.ai",
+        synthesis_model: str | None = None,
         max_retries: int = 3,
-    ):
-        self._exa_api_key = exa_api_key or self._optional_secret("EXA_API_KEY")
-        self._anthropic_api_key = anthropic_api_key or self._optional_secret("ANTHROPIC_API_KEY")
-        self._deep_research_model = deep_research_model or self._optional_secret(
-            "DEEP_RESEARCH_MODEL", "claude-opus-4-6"
+    ) -> None:
+        # PARALLEL_API_KEY / ANTHROPIC_API_KEY: read via secret() so the
+        # firewall (StubBackend → mitmproxy) can swap in real values for
+        # outbound headers. _is_configured() is the routing signal — it
+        # checks ctx.secrets membership rather than relying on secret()'s
+        # stub-as-placeholder fallback.
+        self._has_parallel_key = parallel_api_key is not None or _is_configured("PARALLEL_API_KEY")
+        self._has_anthropic_key = anthropic_api_key is not None or _is_configured(
+            "ANTHROPIC_API_KEY"
         )
-        self._exa_base_url = exa_base_url.rstrip("/")
+        self._parallel_api_key = parallel_api_key or (
+            secret("PARALLEL_API_KEY") if self._has_parallel_key else None
+        )
+        self._anthropic_api_key = anthropic_api_key or (
+            secret("ANTHROPIC_API_KEY") if self._has_anthropic_key else None
+        )
+        # Non-secret config: hardcoded defaults, overridable via constructor
+        # args. We deliberately do NOT route these through secret() — under
+        # StubBackend that would return the literal key name as a value.
+        self._api_base_url = parallel_api_base_url or API_BASE_URL
+        self._mcp_url = parallel_mcp_url or MCP_URL
+        self._deep_research_processor = parallel_deep_research_processor or "ultra-fast"
+        self._synthesis_model = synthesis_model or "claude-opus-4-6"
         self._max_retries = max_retries
         self._progress_callback: Callable[[str], None] | None = None
+        self._backend = ParallelBackend(
+            api_key=self._parallel_api_key if self._has_parallel_key else None,
+            api_base_url=self._api_base_url,
+            mcp_url=self._mcp_url,
+            deep_research_processor=self._deep_research_processor,
+            max_retries=self._max_retries,
+        )
 
     def _set_progress_callback(self, callback: Callable[[str], None] | None) -> None:
         self._progress_callback = callback
@@ -68,569 +115,224 @@ class WebSearchClient:
         if self._progress_callback is not None:
             self._progress_callback(stage)
 
-    def _optional_secret(self, key: str, default: str | None = None) -> str | None:
-        try:
-            return secret(key)
-        except KeyError:
-            return default
+    @property
+    def search_mode(self) -> str:
+        return self._backend.search_mode
 
-    def _require_exa_api_key(self) -> str:
-        if not self._exa_api_key:
-            raise RuntimeError("EXA_API_KEY not set.")
-        return self._exa_api_key
+    @property
+    def has_api_key(self) -> bool:
+        return self._backend.has_api_key
 
-    def _require_anthropic_api_key(self) -> str:
-        if not self._anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY not set.")
-        return self._anthropic_api_key
+    @property
+    def has_synthesis(self) -> bool:
+        return self._has_anthropic_key
 
-    def _require_deep_research_model(self) -> str:
-        if not self._deep_research_model:
-            raise RuntimeError("DEEP_RESEARCH_MODEL not set.")
-        return self._deep_research_model
+    def _build_synthesis_pipeline(self) -> ClaudeSynthesisPipeline | None:
+        if not self._has_anthropic_key or not self._synthesis_model:
+            return None
+        return ClaudeSynthesisPipeline(
+            api_key=self._anthropic_api_key or "",
+            model=self._synthesis_model,
+        )
 
-    def _is_retryable_status(self, status_code: int) -> bool:
-        return status_code == 429 or status_code >= 500
-
-    def _backoff_seconds(self, attempt: int) -> float:
-        # Small bounded backoff keeps CLI responsive while handling transient API failures.
-        return min(8.0, 2**attempt)
-
-    def _exa_headers(self) -> dict[str, str]:
-        return {
-            "x-api-key": self._require_exa_api_key(),
-            "Content-Type": "application/json",
-        }
-
-    def _build_search_payload(
+    async def search(
         self,
         query: str,
-        num_results: int,
-        search_type: str,
-        include_domains: list[str] | None,
-        exclude_domains: list[str] | None,
-        max_age_hours: int | None,
-        text_chars: int | None,
-        highlights_chars: int | None,
-        additional_queries: list[str] | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "query": query,
-            "numResults": num_results,
-            "type": search_type,
-        }
-        contents: dict[str, Any] = {}
-        if text_chars is not None:
-            contents["text"] = {"maxCharacters": text_chars}
-        if highlights_chars is not None:
-            contents["highlights"] = {"maxCharacters": highlights_chars}
-        if contents:
-            payload["contents"] = contents
-        if include_domains:
-            payload["includeDomains"] = include_domains
-        if exclude_domains:
-            payload["excludeDomains"] = exclude_domains
-        if max_age_hours is not None:
-            payload["maxAgeHours"] = max_age_hours
-        if additional_queries:
-            payload["additionalQueries"] = additional_queries
-        return payload
+        *,
+        num_results: int = 10,
+        timeout_seconds: float = 60.0,
+        synthesize: bool = True,
+        mode: str | None = None,
+        client_model: str | None = None,
+        max_chars_total: int | None = None,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+        max_age_hours: int | None = None,
+        session_id: str | None = None,
+        thread_context: list[str] | None = None,
+        max_report_chars: int = 12000,
+        search_type: str | None = None,
+    ) -> dict:
+        """Search the web via Parallel.
 
-    def _extract_cost(self, payload: dict[str, Any]) -> float:
-        cost = payload.get("costDollars")
-        if isinstance(cost, (int, float)):
-            return float(cost)
-        if isinstance(cost, dict):
-            total = cost.get("total")
-            if isinstance(total, (int, float)):
-                return float(total)
-            subtotal = 0.0
-            found = False
-            for value in cost.values():
-                if isinstance(value, (int, float)):
-                    found = True
-                    subtotal += float(value)
-            if found:
-                return subtotal
-        return 0.0
-
-    def _extract_snippet(self, item: dict[str, Any], max_chars: int | None = None) -> str:
-        char_limit = max_chars or self.SNIPPET_CHAR_LIMIT
-        highlights = item.get("highlights")
-        if isinstance(highlights, list) and highlights:
-            joined = "\n".join(str(part) for part in highlights if part)
-            return joined[:char_limit]
-        text = item.get("text")
-        if isinstance(text, str) and text:
-            return text[:char_limit]
-        summary = item.get("summary")
-        if isinstance(summary, str):
-            return summary[:char_limit]
-        return ""
-
-    def _normalize_source(
-        self,
-        item: dict[str, Any],
-        source_id: int,
-        snippet_chars: int | None = None,
-    ) -> SourceDocument | None:
-        url = str(item.get("url", "")).strip()
-        if not url:
-            return None
-        parsed = urlparse(url)
-        title = str(item.get("title", "")).strip() or url
-        published_date = item.get("publishedDate")
-        if published_date is not None:
-            published_date = str(published_date)
-        return SourceDocument(
-            source_id=source_id,
-            title=title,
-            url=url,
-            snippet=self._extract_snippet(item, max_chars=snippet_chars),
-            published_date=published_date,
-            domain=parsed.netloc or None,
+        Args:
+          query: Required. The user's question or topic. Used as the search
+            objective (and as a single-query fallback per Parallel best
+            practices).
+          synthesize: When true, runs the Claude reviewer + writer pipeline
+            on top of Parallel results (matches the prior Exa+Claude
+            behavior). Requires `ANTHROPIC_API_KEY`; without one the call
+            still returns raw results and records the skipped synthesis in
+            `meta.partial_failures`.
+          mode: `basic` (lower latency, 2-3 queries) or `advanced` (default,
+            higher quality). REST path only.
+          client_model: Identifier of the LLM that will consume the
+            excerpts. Enables per-model optimization. Forwarded to MCP as
+            `model_name`.
+          max_chars_total: Hard cap on total excerpt characters. REST only.
+          include_domains / exclude_domains / max_age_hours: Source filters
+            for the REST path. Not honored by the free MCP — surfaced in
+            `meta.partial_failures` when used without a key. `max_age_hours`
+            is rounded down to a UTC calendar-date cutoff (Parallel's
+            source policy is date-granular, not hour-precise).
+          session_id: Stable identifier (UUID recommended) reused across
+            related Search/Extract calls. Required for free-tier rate
+            limiting when called over MCP.
+          thread_context: Optional prior-turn context strings passed to the
+            synthesis reviewer/writer for disambiguation. Synthesis only.
+          search_type: Accepted for backward compatibility with the original
+            Exa-backed tool; ignored under Parallel retrieval. Pass `None`.
+        """
+        if search_type is not None:
+            warnings.warn(
+                "search_type is ignored — the Parallel retrieval backend does "
+                "not expose Exa's neural/keyword/auto modes.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        synthesis_pipeline = self._build_synthesis_pipeline() if synthesize else None
+        return await self._backend.search(
+            objective=query,
+            search_queries=[query],
+            num_results=num_results,
+            timeout_seconds=timeout_seconds,
+            synthesize=synthesize,
+            mode=mode,
+            client_model=client_model,
+            max_chars_total=max_chars_total,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            max_age_hours=max_age_hours,
+            session_id=session_id,
+            max_report_chars=max_report_chars,
+            synthesis_pipeline=synthesis_pipeline,
+            thread_context=thread_context,
         )
 
-    def _dedupe_queries(self, queries: list[str], limit: int) -> list[str]:
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for query in queries:
-            normalized = query.strip()
-            key = normalized.casefold()
-            if not normalized or key in seen:
-                continue
-            seen.add(key)
-            deduped.append(normalized)
-            if len(deduped) >= limit:
-                break
-        return deduped
-
-    def _trim_sources_for_budget(
+    async def deep_research(
         self,
-        sources: list[SourceDocument],
+        question: str,
         *,
-        per_source_chars: int,
-        total_chars: int,
-    ) -> list[dict[str, Any]]:
-        selected: list[dict[str, Any]] = []
-        consumed = 0
-        ranked_sources = sorted(sources, key=self._source_quality_score, reverse=True)
-        for source in ranked_sources:
-            snippet = source.snippet[:per_source_chars]
-            if not snippet:
-                snippet = source.title
-            projected = consumed + len(snippet)
-            if selected and projected > total_chars:
-                break
-            selected.append(
-                {
-                    "source_id": source.source_id,
-                    "title": source.title,
-                    "url": source.url,
-                    "snippet": snippet,
-                    "published_date": source.published_date,
-                    "domain": source.domain,
-                }
-            )
-            consumed = projected
-        return selected
+        processor: str | None = None,
+        timeout_seconds: float | None = None,
+        max_report_chars: int = 50000,
+        max_iterations: int | None = None,
+        num_queries_per_iteration: int | None = None,
+        num_results_per_query: int | None = None,
+        thread_context: list[str] | None = None,
+    ) -> dict:
+        """Run deep research and return a cited markdown report.
 
-    def _normalize_thread_context(
-        self,
-        thread_context: list[str] | None,
-        *,
-        max_items: int = 20,
-        max_chars_per_item: int = 1200,
-    ) -> list[str]:
-        if not thread_context:
-            return []
-        normalized: list[str] = []
-        for item in thread_context:
-            text = str(item).strip()
-            if not text:
-                continue
-            normalized.append(text[:max_chars_per_item])
-            if len(normalized) >= max_items:
-                break
-        return normalized
+        Args:
+          processor: Task API processor (pro/ultra family). Defaults to
+            the value passed to `WebSearchClient(parallel_deep_research_processor=...)`,
+            or `"ultra-fast"` if neither is set.
+          timeout_seconds: Override the request timeout. When omitted, a
+            processor-appropriate default is used (e.g. `ultra4x` waits up
+            to ~2h).
+          max_iterations / num_queries_per_iteration / num_results_per_query /
+          thread_context: Accepted for backward compatibility with the
+            original Exa+Claude iterative pipeline; ignored under Parallel
+            Task API (a single multi-source run replaces the iterative
+            planner→search→reviewer→writer loop).
 
-    def _source_quality_score(self, source: SourceDocument) -> int:
-        score = 0
-        snippet_lower = source.snippet.lower()
-        domain = (source.domain or "").lower()
-
-        if source.published_date:
-            score += 1
-        if len(source.snippet) > 600:
-            score += 1
-        if domain.endswith(".gov") or domain.endswith(".edu"):
-            score += 3
-        if any(token in domain for token in ("nist", "pci", "fidelity", "iacr")):
-            score += 2
-
-        low_signal_tokens = [
-            "book now",
-            "free 30-min",
-            "cookie policy",
-            "skip to content",
-            "all protocols",
+        Requires `PARALLEL_API_KEY`.
+        """
+        deprecated = [
+            ("max_iterations", max_iterations),
+            ("num_queries_per_iteration", num_queries_per_iteration),
+            ("num_results_per_query", num_results_per_query),
+            ("thread_context", thread_context),
         ]
-        if any(token in snippet_lower for token in low_signal_tokens):
-            score -= 2
-        if "linkedin.com" in domain:
-            score -= 2
-        return score
-
-    def _extract_sources_section_ids(self, text: str) -> set[int]:
-        match = re.search(r"##\s*Sources\s*(.*)$", text, flags=re.IGNORECASE | re.DOTALL)
-        if not match:
-            return set()
-        ids: set[int] = set()
-        for source_id in re.findall(r"^\s*\[\s*(\d+)\s*\]\s+", match.group(1), flags=re.MULTILINE):
-            ids.add(int(source_id))
-        return ids
-
-    def _normalize_claims(
-        self,
-        claims: list[Any],
-        valid_source_ids: set[int],
-    ) -> list[dict[str, Any]]:
-        normalized_claims: list[dict[str, Any]] = []
-        seen_claims: set[str] = set()
-        for claim in claims:
-            if not isinstance(claim, dict):
-                continue
-            claim_text = str(claim.get("claim", "")).strip()
-            if not claim_text:
-                continue
-            claim_key = claim_text.casefold()
-            if claim_key in seen_claims:
-                continue
-
-            source_ids_raw = claim.get("source_ids", [])
-            source_ids: list[int] = []
-            if isinstance(source_ids_raw, list):
-                for raw_id in source_ids_raw:
-                    if isinstance(raw_id, int) and raw_id in valid_source_ids:
-                        source_ids.append(raw_id)
-            source_ids = sorted(set(source_ids))
-            support_level = str(claim.get("support_level", "none")).strip().lower()
-            if support_level not in {"strong", "partial", "weak", "none"}:
-                support_level = "none"
-
-            normalized_claims.append(
-                {
-                    "claim": claim_text,
-                    "source_ids": source_ids,
-                    "support_level": support_level,
-                }
+        used = [name for name, value in deprecated if value is not None]
+        if used:
+            warnings.warn(
+                f"deep_research kwargs ignored under Parallel Task API: {used}. "
+                "The new backend is single-call; iteration knobs no longer apply.",
+                DeprecationWarning,
+                stacklevel=2,
             )
-            seen_claims.add(claim_key)
-        return normalized_claims
-
-    def _normalize_contradictions(
-        self,
-        contradictions: list[Any],
-        valid_source_ids: set[int],
-    ) -> list[dict[str, Any]]:
-        normalized_items: list[dict[str, Any]] = []
-        seen_summaries: set[str] = set()
-        for contradiction in contradictions:
-            if not isinstance(contradiction, dict):
-                continue
-            summary = str(contradiction.get("summary", "")).strip()
-            if not summary:
-                continue
-            summary_key = summary.casefold()
-            if summary_key in seen_summaries:
-                continue
-
-            source_ids_raw = contradiction.get("source_ids", [])
-            source_ids: list[int] = []
-            if isinstance(source_ids_raw, list):
-                for raw_id in source_ids_raw:
-                    if isinstance(raw_id, int) and raw_id in valid_source_ids:
-                        source_ids.append(raw_id)
-            normalized_items.append(
-                {"summary": summary, "source_ids": sorted(set(source_ids))}
-            )
-            seen_summaries.add(summary_key)
-        return normalized_items
-
-    def _extract_text_content(self, response: Any) -> str:
-        blocks = getattr(response, "content", None)
-        if not isinstance(blocks, list):
-            return ""
-        parts: list[str] = []
-        for block in blocks:
-            text = getattr(block, "text", None)
-            if isinstance(text, str):
-                parts.append(text)
-        return "".join(parts).strip()
-
-    def _coerce_json(self, raw_text: str) -> Any:
-        stripped = raw_text.strip()
-        if stripped.startswith("```"):
-            stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
-            stripped = re.sub(r"\s*```$", "", stripped)
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
-            pass
-
-        object_match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-        if object_match:
-            return json.loads(object_match.group(0))
-        array_match = re.search(r"\[.*\]", stripped, flags=re.DOTALL)
-        if array_match:
-            return json.loads(array_match.group(0))
-        raise ValueError("Model response did not contain valid JSON.")
-
-    def _extract_citation_ids(self, text: str) -> set[int]:
-        ids: set[int] = set()
-        for match in re.findall(r"\[\s*(\d+)\s*\]", text):
-            ids.add(int(match))
-        return ids
-
-    def _invalid_citation_ids(self, text: str, sources: list[SourceDocument]) -> set[int]:
-        valid = {source.source_id for source in sources}
-        citations = self._extract_citation_ids(text)
-        return {citation for citation in citations if citation not in valid}
-
-    def _exa_search_sync(self, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
-        with httpx.Client(base_url=self._exa_base_url, timeout=timeout_seconds) as client:
-            for attempt in range(self._max_retries):
-                response: httpx.Response | None = None
-                try:
-                    response = client.post("/search", headers=self._exa_headers(), json=payload)
-                    if (
-                        self._is_retryable_status(response.status_code)
-                        and attempt < self._max_retries - 1
-                    ):
-                        time.sleep(self._backoff_seconds(attempt))
-                        continue
-                    response.raise_for_status()
-                    return response.json()
-                except httpx.HTTPStatusError as exc:
-                    if (
-                        response is not None
-                        and self._is_retryable_status(response.status_code)
-                        and attempt < self._max_retries - 1
-                    ):
-                        time.sleep(self._backoff_seconds(attempt))
-                        continue
-                    body = exc.response.text if exc.response is not None else ""
-                    raise RuntimeError(
-                        f"Exa search failed ({exc.response.status_code}): {body}"
-                    ) from exc
-                except httpx.RequestError as exc:
-                    if attempt < self._max_retries - 1:
-                        time.sleep(self._backoff_seconds(attempt))
-                        continue
-                    raise RuntimeError(f"Exa request failed: {exc}") from exc
-        raise RuntimeError("Exa search failed after retries.")
-
-    async def _exa_search_async(
-        self, payload: dict[str, Any], timeout_seconds: float
-    ) -> dict[str, Any]:
-        async with httpx.AsyncClient(
-            base_url=self._exa_base_url, timeout=timeout_seconds
-        ) as client:
-            for attempt in range(self._max_retries):
-                response: httpx.Response | None = None
-                try:
-                    response = await client.post(
-                        "/search", headers=self._exa_headers(), json=payload
-                    )
-                    if (
-                        self._is_retryable_status(response.status_code)
-                        and attempt < self._max_retries - 1
-                    ):
-                        await asyncio.sleep(self._backoff_seconds(attempt))
-                        continue
-                    response.raise_for_status()
-                    return response.json()
-                except httpx.HTTPStatusError as exc:
-                    if (
-                        response is not None
-                        and self._is_retryable_status(response.status_code)
-                        and attempt < self._max_retries - 1
-                    ):
-                        await asyncio.sleep(self._backoff_seconds(attempt))
-                        continue
-                    body = exc.response.text if exc.response is not None else ""
-                    raise RuntimeError(
-                        f"Exa search failed ({exc.response.status_code}): {body}"
-                    ) from exc
-                except httpx.RequestError as exc:
-                    if attempt < self._max_retries - 1:
-                        await asyncio.sleep(self._backoff_seconds(attempt))
-                        continue
-                    raise RuntimeError(f"Exa request failed: {exc}") from exc
-        raise RuntimeError("Exa search failed after retries.")
-
-    async def _run_iteration_search(
-        self,
-        *,
-        queries: list[str],
-        num_results_per_query: int,
-        timeout_seconds: float,
-    ) -> dict[str, Any]:
-        deduped_queries = self._dedupe_queries(queries, limit=16)
-        if not deduped_queries:
-            return {
-                "results": [],
-                "requestIds": [],
-                "partialFailures": [],
-                "costDollars": {"total": 0.0},
-            }
-
-        max_parallel = max(1, min(self.EXA_MAX_PARALLEL_CALLS, len(deduped_queries)))
-        semaphore = asyncio.Semaphore(max_parallel)
-
-        async def run_query(query: str) -> dict[str, Any]:
-            async with semaphore:
-                payload = self._build_search_payload(
-                    query=query,
-                    num_results=min(20, max(num_results_per_query, 1)),
-                    search_type="deep",
-                    include_domains=None,
-                    exclude_domains=None,
-                    max_age_hours=None,
-                    text_chars=12000,
-                    highlights_chars=4000,
-                    additional_queries=None,
-                )
-                return await self._exa_search_async(payload=payload, timeout_seconds=timeout_seconds)
-
-        batch_results = await asyncio.gather(
-            *(run_query(query) for query in deduped_queries), return_exceptions=True
+        return await self._backend.deep_research(
+            question=question,
+            progress=self._emit_progress,
+            processor=processor,
+            timeout_seconds=timeout_seconds,
+            max_report_chars=max_report_chars,
         )
 
-        merged_results: list[dict[str, Any]] = []
-        request_ids: list[str] = []
-        partial_failures: list[dict[str, str]] = []
-        total_cost = 0.0
-        for query, result in zip(deduped_queries, batch_results, strict=True):
-            if isinstance(result, Exception):
-                partial_failures.append({"query": query, "error": str(result)})
-                continue
-            request_id = result.get("requestId")
-            if request_id:
-                request_ids.append(str(request_id))
-            total_cost += self._extract_cost(result)
-            for item in result.get("results", []):
-                if isinstance(item, dict):
-                    merged_results.append(item)
 
-        return {
-            "results": merged_results,
-            "requestIds": request_ids,
-            "partialFailures": partial_failures,
-            "costDollars": {"total": total_cost},
-        }
+class ClaudeSynthesisPipeline:
+    """Reviewer + writer + LLM-driven citation repair.
 
-    async def _call_claude_text(
-        self,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        max_tokens: int = 4096,
-    ) -> str:
-        if AsyncAnthropic is None:
-            raise RuntimeError("anthropic dependency is not installed.")
-        client = AsyncAnthropic(api_key=self._require_anthropic_api_key())
-        try:
-            message = await client.messages.create(
-                model=self._require_deep_research_model(),
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-        except Exception as exc:
-            message = str(exc).lower()
-            if "authentication_error" in message or "invalid x-api-key" in message:
-                raise RuntimeError(
-                    "Anthropic authentication failed. Check ANTHROPIC_API_KEY in .env or env injection."
-                ) from exc
-            raise
-        text = self._extract_text_content(message)
-        if not text:
-            raise RuntimeError("Claude returned empty content.")
-        return text
+    Byte-identical to the synthesis pipeline in centaur main: the
+    reviewer extracts claims and contradictions, the writer drafts a
+    cited report, and `_validate_and_repair_citations` invokes the
+    repair prompt up to two times to fix any citation IDs that aren't
+    grounded in the source list before raising. `synthesize()` returns
+    a dict so that callers can mirror the original tool's "partial
+    failure flagged but writer output retained" behavior when the
+    repair loop ultimately throws.
+    """
 
-    async def _call_claude_json(
-        self,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        max_tokens: int = 2048,
-    ) -> Any:
-        raw = await self._call_claude_text(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=max_tokens,
-        )
-        return self._coerce_json(raw)
+    def __init__(self, *, api_key: str, model: str) -> None:
+        self._client = AsyncAnthropic(api_key=api_key)
+        self._model = model
 
-    async def _plan_queries(
+    async def synthesize(
         self,
         *,
         question: str,
-        prior_queries: list[str],
-        prior_gaps: list[str],
-        thread_context: list[str],
-        query_limit: int,
+        sources: list[SourceDocument],
+        thread_context: list[str] | None = None,
+        max_report_chars: int = 12000,
     ) -> dict[str, Any]:
-        user_prompt = json.dumps(
-            {
-                "question": question,
-                "prior_queries": prior_queries,
-                "prior_gaps": prior_gaps,
-                "thread_context": thread_context,
-            },
-            indent=2,
-        )
-        payload = await self._call_claude_json(
-            system_prompt=QUERY_PLANNER_SYSTEM,
-            user_prompt=user_prompt,
-            max_tokens=1600,
-        )
-        if not isinstance(payload, dict):
-            raise RuntimeError("Planner output must be a JSON object.")
+        """Run reviewer → writer → validate-and-repair-citations.
 
-        raw_queries = payload.get("queries", [])
-        raw_queries = [str(query) for query in raw_queries] if isinstance(raw_queries, list) else []
-        queries = self._dedupe_queries(raw_queries, limit=query_limit)
-        decision = str(payload.get("decision", "continue")).strip().lower()
-        if decision not in {"continue", "stop"}:
-            decision = "continue"
-        return {
-            "decision": decision,
-            "reason": str(payload.get("reason", "")).strip(),
-            "queries": queries,
-            "gaps": [str(gap).strip() for gap in payload.get("gaps", []) if str(gap).strip()],
-        }
+        Returns a dict with 'report' (the markdown — writer output retained
+        even when citation validation throws, matching the original tool's
+        behavior) and 'validation_error' (str | None when repair could not
+        produce a valid Sources section).
+        """
+        normalized_context = _normalize_thread_context(thread_context)
+        reviewer = await self._review_evidence(
+            question=question,
+            sources=sources,
+            thread_context=normalized_context,
+        )
+        report = await self._write_report(
+            question=question,
+            sources=sources,
+            claims=reviewer["claims"],
+            contradictions=reviewer["contradictions"],
+            thread_context=normalized_context,
+            max_report_chars=max_report_chars,
+        )
+        validation_error: str | None = None
+        try:
+            report = await self._validate_and_repair_citations(
+                report=report, sources=sources, max_report_chars=max_report_chars
+            )
+        except Exception as exc:
+            validation_error = str(exc)
+        return {"report": report, "validation_error": validation_error}
 
     async def _review_evidence(
         self,
         *,
         question: str,
         sources: list[SourceDocument],
-        iteration: int,
-        max_iterations: int,
         thread_context: list[str],
     ) -> dict[str, Any]:
-        compact_sources = self._trim_sources_for_budget(
+        compact_sources = _trim_sources_for_budget(
             sources,
-            per_source_chars=self.REVIEW_SOURCE_CHAR_LIMIT,
-            total_chars=self.REVIEW_TOTAL_CHAR_BUDGET,
+            per_source_chars=REVIEW_SOURCE_CHAR_LIMIT,
+            total_chars=REVIEW_TOTAL_CHAR_BUDGET,
         )
         user_prompt = json.dumps(
             {
                 "question": question,
-                "iteration": iteration,
-                "max_iterations": max_iterations,
+                "iteration": 1,
+                "max_iterations": 1,
                 "thread_context": thread_context,
                 "sources": compact_sources,
             },
@@ -643,32 +345,18 @@ class WebSearchClient:
         )
         if not isinstance(payload, dict):
             raise RuntimeError("Evidence reviewer output must be a JSON object.")
-
-        followup_raw = payload.get("followup_queries", [])
-        if isinstance(followup_raw, list):
-            followup_raw = [str(query) for query in followup_raw]
-        else:
-            followup_raw = []
-        followup = self._dedupe_queries(followup_raw, limit=8)
-
         valid_source_ids = {source.source_id for source in sources}
-        claims = self._normalize_claims(
-            claims=payload.get("claims", []) if isinstance(payload.get("claims"), list) else [],
-            valid_source_ids=valid_source_ids,
+        claims = _normalize_claims(
+            payload.get("claims", []) if isinstance(payload.get("claims"), list) else [],
+            valid_source_ids,
         )
-        contradictions = self._normalize_contradictions(
-            contradictions=payload.get("contradictions", [])
+        contradictions = _normalize_contradictions(
+            payload.get("contradictions", [])
             if isinstance(payload.get("contradictions"), list)
             else [],
-            valid_source_ids=valid_source_ids,
+            valid_source_ids,
         )
-        continue_research = bool(payload.get("continue_research", False))
-        return {
-            "claims": claims,
-            "contradictions": contradictions,
-            "continue_research": continue_research,
-            "followup_queries": followup,
-        }
+        return {"claims": claims, "contradictions": contradictions}
 
     async def _write_report(
         self,
@@ -680,10 +368,10 @@ class WebSearchClient:
         thread_context: list[str],
         max_report_chars: int,
     ) -> str:
-        selected_sources = self._trim_sources_for_budget(
+        selected_sources = _trim_sources_for_budget(
             sources,
-            per_source_chars=self.WRITE_SOURCE_CHAR_LIMIT,
-            total_chars=self.WRITE_TOTAL_CHAR_BUDGET,
+            per_source_chars=WRITE_SOURCE_CHAR_LIMIT,
+            total_chars=WRITE_TOTAL_CHAR_BUDGET,
         )
         source_map = {source["source_id"]: source for source in selected_sources}
         user_prompt = json.dumps(
@@ -716,7 +404,7 @@ class WebSearchClient:
             source.source_id: {
                 "title": source.title,
                 "url": source.url,
-                "snippet": source.snippet[: self.REVIEW_SOURCE_CHAR_LIMIT],
+                "snippet": source.snippet[:REVIEW_SOURCE_CHAR_LIMIT],
             }
             for source in sources
         }
@@ -744,10 +432,10 @@ class WebSearchClient:
         max_report_chars: int,
     ) -> str:
         max_repair_attempts = 2
-        invalid_ids = sorted(self._invalid_citation_ids(report, sources))
-        cited_ids = self._extract_citation_ids(report)
-        source_section_ids = self._extract_sources_section_ids(report)
-        missing_sources_ids = sorted(cited_ids - source_section_ids)
+        invalid_ids = sorted(_invalid_citation_ids(report, sources))
+        cited_ids = _extract_citation_ids(report)
+        sources_section_ids = _extract_sources_section_ids(report)
+        missing_sources_ids = sorted(cited_ids - sources_section_ids)
         attempt = 0
         while (invalid_ids or missing_sources_ids) and attempt < max_repair_attempts:
             attempt += 1
@@ -758,297 +446,235 @@ class WebSearchClient:
                 sources=sources,
                 max_report_chars=max_report_chars,
             )
-            invalid_ids = sorted(self._invalid_citation_ids(report, sources))
-            cited_ids = self._extract_citation_ids(report)
-            source_section_ids = self._extract_sources_section_ids(report)
-            missing_sources_ids = sorted(cited_ids - source_section_ids)
+            invalid_ids = sorted(_invalid_citation_ids(report, sources))
+            cited_ids = _extract_citation_ids(report)
+            sources_section_ids = _extract_sources_section_ids(report)
+            missing_sources_ids = sorted(cited_ids - sources_section_ids)
         if invalid_ids:
-            raise RuntimeError(f"Citation validation failed. Invalid source IDs in report: {invalid_ids}")
+            raise RuntimeError(
+                f"Citation validation failed. Invalid source IDs in report: {invalid_ids}"
+            )
         if missing_sources_ids:
             raise RuntimeError(
                 "Citation validation failed. Sources section missing cited IDs: "
                 f"{missing_sources_ids}"
             )
-        if not self._extract_citation_ids(report):
-            raise RuntimeError("Citation validation failed. Report did not include source citations.")
+        if not _extract_citation_ids(report):
+            raise RuntimeError(
+                "Citation validation failed. Report did not include source citations."
+            )
         return report
 
-    async def search(
+    async def _call_claude_text(
         self,
-        query: str,
         *,
-        num_results: int = 10,
-        search_type: str = "auto",
-        include_domains: list[str] | None = None,
-        exclude_domains: list[str] | None = None,
-        max_age_hours: int | None = None,
-        timeout_seconds: float = 30.0,
-        synthesize: bool = True,
-        thread_context: list[str] | None = None,
-        max_report_chars: int = 12000,
-    ) -> dict:
-        """Search the web via Exa and optionally synthesize a cited answer."""
-        self._require_exa_api_key()
-        started = time.perf_counter()
-        normalized_query = query.strip()
-        normalized_thread_context = self._normalize_thread_context(thread_context)
-        if not normalized_query:
-            raise RuntimeError("query cannot be empty.")
-        payload = self._build_search_payload(
-            query=normalized_query,
-            num_results=num_results,
-            search_type=search_type,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
-            max_age_hours=max_age_hours,
-            text_chars=None,
-            highlights_chars=2000,
-        )
-        response = await self._exa_search_async(payload, timeout_seconds=timeout_seconds)
-        results: list[SourceDocument] = []
-        seen_urls: set[str] = set()
-        for item in response.get("results", []):
-            if not isinstance(item, dict):
-                continue
-            source = self._normalize_source(item, len(results))
-            if source is None or source.url in seen_urls:
-                continue
-            seen_urls.add(source.url)
-            results.append(source)
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+    ) -> str:
+        try:
+            message = await self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+        except AuthenticationError as exc:
+            raise RuntimeError(
+                "Anthropic authentication failed. Check ANTHROPIC_API_KEY."
+            ) from exc
+        body = _extract_text_content(message)
+        if not body:
+            raise RuntimeError("Claude returned empty content.")
+        return body
 
-        partial_failures: list[dict[str, str]] = []
-        answer_markdown: str | None = None
-        if synthesize and results:
-            try:
-                self._require_anthropic_api_key()
-                self._require_deep_research_model()
-                reviewer = await self._review_evidence(
-                    question=normalized_query,
-                    sources=results,
-                    iteration=1,
-                    max_iterations=1,
-                    thread_context=normalized_thread_context,
-                )
-                answer_markdown = await self._write_report(
-                    question=normalized_query,
-                    sources=results,
-                    claims=reviewer["claims"],
-                    contradictions=reviewer["contradictions"],
-                    thread_context=normalized_thread_context,
-                    max_report_chars=max_report_chars,
-                )
-                answer_markdown = await self._validate_and_repair_citations(
-                    report=answer_markdown,
-                    sources=results,
-                    max_report_chars=max_report_chars,
-                )
-            except Exception as exc:
-                partial_failures.append({"query": normalized_query, "error": f"synthesis failed: {exc}"})
-
-        meta = ResponseMeta(
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            exa_request_ids=[str(response.get("requestId", ""))]
-            if response.get("requestId")
-            else [],
-            partial_failures=partial_failures,
-            estimated_cost_usd=self._extract_cost(response) or None,
-        )
-        return SearchResponse(
-            query=normalized_query,
-            results=results,
-            answer_markdown=answer_markdown,
-            meta=meta,
-        ).model_dump()
-
-    async def deep_research(
+    async def _call_claude_json(
         self,
-        question: str,
         *,
-        max_iterations: int = 1,
-        num_queries_per_iteration: int = 4,
-        num_results_per_query: int = 5,
-        thread_context: list[str] | None = None,
-        max_report_chars: int = 50000,
-        timeout_seconds: float = 300.0,
-    ) -> dict:
-        """Run iterative deep research with citation validation."""
-        self._require_exa_api_key()
-        self._require_anthropic_api_key()
-        self._require_deep_research_model()
-        if max_iterations < 1:
-            raise RuntimeError("max_iterations must be >= 1.")
-        if num_queries_per_iteration < 1:
-            raise RuntimeError("num_queries_per_iteration must be >= 1.")
-        if num_results_per_query < 1:
-            raise RuntimeError("num_results_per_query must be >= 1.")
-        started = time.perf_counter()
-
-        normalized_question = question.strip()
-        normalized_thread_context = self._normalize_thread_context(thread_context)
-        if not normalized_question:
-            raise RuntimeError("question cannot be empty.")
-
-        all_sources: list[SourceDocument] = []
-        seen_urls: set[str] = set()
-        iteration_summaries: list[DeepResearchIteration] = []
-        request_ids: list[str] = []
-        partial_failures: list[dict[str, str]] = []
-        estimated_cost_usd = 0.0
-
-        self._emit_progress("planning")
-        planner = await self._plan_queries(
-            question=normalized_question,
-            prior_queries=[],
-            prior_gaps=[],
-            thread_context=normalized_thread_context,
-            query_limit=num_queries_per_iteration,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+    ) -> Any:
+        raw = await self._call_claude_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
         )
-        current_queries = planner["queries"]
-        if planner["decision"] == "stop":
-            current_queries = []
-        if not current_queries:
-            current_queries = [normalized_question]
+        return _coerce_json(raw)
 
-        reviewer_claims: list[dict[str, Any]] = []
-        reviewer_contradictions: list[dict[str, Any]] = []
 
-        for iteration_index in range(1, max_iterations + 1):
-            self._emit_progress(f"searching iteration {iteration_index}")
-            deduped_current_queries = self._dedupe_queries(
-                current_queries, limit=num_queries_per_iteration
-            )
-            try:
-                batch_result = await self._run_iteration_search(
-                    queries=deduped_current_queries,
-                    num_results_per_query=num_results_per_query,
-                    timeout_seconds=timeout_seconds / max_iterations,
-                )
-                batch_results: list[Any] = [batch_result]
-            except Exception as exc:  # pragma: no cover - network path
-                batch_results = [exc]
+def _normalize_thread_context(
+    thread_context: list[str] | None,
+    *,
+    max_items: int = 20,
+    max_chars_per_item: int = 1200,
+) -> list[str]:
+    if not thread_context:
+        return []
+    normalized: list[str] = []
+    for item in thread_context:
+        text = str(item).strip()
+        if not text:
+            continue
+        normalized.append(text[:max_chars_per_item])
+        if len(normalized) >= max_items:
+            break
+    return normalized
 
-            added_in_iteration = 0
-            for query, result in zip(["; ".join(deduped_current_queries)], batch_results, strict=True):
-                if isinstance(result, Exception):
-                    partial_failures.append({"query": query, "error": str(result)})
-                    continue
-                request_id_list = result.get("requestIds")
-                if isinstance(request_id_list, list):
-                    request_ids.extend(str(request_id) for request_id in request_id_list if request_id)
-                elif result.get("requestId"):
-                    request_ids.append(str(result.get("requestId")))
-                result_partial_failures = result.get("partialFailures", [])
-                if isinstance(result_partial_failures, list):
-                    for failure in result_partial_failures:
-                        if (
-                            isinstance(failure, dict)
-                            and isinstance(failure.get("query"), str)
-                            and isinstance(failure.get("error"), str)
-                        ):
-                            partial_failures.append(
-                                {"query": failure["query"], "error": failure["error"]}
-                            )
-                estimated_cost_usd += self._extract_cost(result)
 
-                for item in result.get("results", []):
-                    if not isinstance(item, dict):
-                        continue
-                    source = self._normalize_source(
-                        item,
-                        len(all_sources),
-                        snippet_chars=self.SNIPPET_CHAR_LIMIT,
-                    )
-                    if source is None or source.url in seen_urls:
-                        continue
-                    seen_urls.add(source.url)
-                    all_sources.append(source)
-                    added_in_iteration += 1
-
-            if not all_sources:
-                partial_failures.append(
-                    {
-                        "query": "; ".join(deduped_current_queries),
-                        "error": "No evidence retrieved from Exa in this iteration.",
-                    }
-                )
-                continue
-
-            self._emit_progress(f"reviewing iteration {iteration_index}")
-            reviewer = await self._review_evidence(
-                question=normalized_question,
-                sources=all_sources,
-                iteration=iteration_index,
-                max_iterations=max_iterations,
-                thread_context=normalized_thread_context,
-            )
-            reviewer_claims = self._normalize_claims(
-                claims=reviewer_claims + reviewer["claims"],
-                valid_source_ids={source.source_id for source in all_sources},
-            )
-            reviewer_contradictions = self._normalize_contradictions(
-                contradictions=reviewer_contradictions + reviewer["contradictions"],
-                valid_source_ids={source.source_id for source in all_sources},
-            )
-
-            continue_reason = planner.get("reason", "") if iteration_index == 1 else ""
-            if reviewer["continue_research"]:
-                continue_reason = "reviewer requested follow-up queries"
-            iteration_summaries.append(
-                DeepResearchIteration(
-                    iteration=iteration_index,
-                    queries=deduped_current_queries,
-                    results_count=added_in_iteration,
-                    continue_reason=continue_reason,
-                )
-            )
-
-            should_continue = (
-                reviewer["continue_research"]
-                and iteration_index < max_iterations
-                and len(reviewer["followup_queries"]) > 0
-            )
-            if not should_continue:
-                break
-            current_queries = self._dedupe_queries(
-                reviewer["followup_queries"], limit=num_queries_per_iteration
-            )
-
-        if not all_sources:
-            detail = "; ".join(item["error"] for item in partial_failures) or "No sources found."
-            raise RuntimeError(f"Unable to produce grounded synthesis. {detail}")
-
-        self._emit_progress("writing report")
-        report = await self._write_report(
-            question=normalized_question,
-            sources=all_sources,
-            claims=reviewer_claims,
-            contradictions=reviewer_contradictions,
-            thread_context=normalized_thread_context,
-            max_report_chars=max_report_chars,
+def _trim_sources_for_budget(
+    sources: list[SourceDocument],
+    *,
+    per_source_chars: int,
+    total_chars: int,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    consumed = 0
+    ranked = sorted(sources, key=_source_quality_score, reverse=True)
+    for source in ranked:
+        snippet = source.snippet[:per_source_chars] or source.title
+        projected = consumed + len(snippet)
+        if selected and projected > total_chars:
+            break
+        selected.append(
+            {
+                "source_id": source.source_id,
+                "title": source.title,
+                "url": source.url,
+                "snippet": snippet,
+                "published_date": source.published_date,
+                "domain": source.domain,
+            }
         )
-        self._emit_progress("validating citations")
-        report = await self._validate_and_repair_citations(
-            report=report,
-            sources=all_sources,
-            max_report_chars=max_report_chars,
-        )
+        consumed = projected
+    return selected
 
-        meta = ResponseMeta(
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            exa_request_ids=request_ids,
-            partial_failures=partial_failures,
-            estimated_cost_usd=estimated_cost_usd if estimated_cost_usd > 0 else None,
+
+def _source_quality_score(source: SourceDocument) -> int:
+    score = 0
+    snippet_lower = source.snippet.lower()
+    domain = (source.domain or "").lower()
+    if source.published_date:
+        score += 1
+    if len(source.snippet) > 600:
+        score += 1
+    if domain.endswith(".gov") or domain.endswith(".edu"):
+        score += 3
+    low_signal_tokens = [
+        "book now",
+        "free 30-min",
+        "cookie policy",
+        "skip to content",
+    ]
+    if any(token in snippet_lower for token in low_signal_tokens):
+        score -= 2
+    if "linkedin.com" in domain:
+        score -= 2
+    return score
+
+
+def _normalize_claims(claims: list[Any], valid_ids: set[int]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        text = str(claim.get("claim", "")).strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        raw_ids = claim.get("source_ids", [])
+        ids: list[int] = []
+        if isinstance(raw_ids, list):
+            for raw_id in raw_ids:
+                if isinstance(raw_id, int) and raw_id in valid_ids:
+                    ids.append(raw_id)
+        support = str(claim.get("support_level", "none")).strip().lower()
+        if support not in {"strong", "partial", "weak", "none"}:
+            support = "none"
+        out.append({"claim": text, "source_ids": sorted(set(ids)), "support_level": support})
+        seen.add(key)
+    return out
+
+
+def _normalize_contradictions(
+    contradictions: list[Any], valid_ids: set[int]
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in contradictions:
+        if not isinstance(entry, dict):
+            continue
+        summary = str(entry.get("summary", "")).strip()
+        if not summary:
+            continue
+        key = summary.casefold()
+        if key in seen:
+            continue
+        raw_ids = entry.get("source_ids", [])
+        ids: list[int] = []
+        if isinstance(raw_ids, list):
+            for raw_id in raw_ids:
+                if isinstance(raw_id, int) and raw_id in valid_ids:
+                    ids.append(raw_id)
+        out.append({"summary": summary, "source_ids": sorted(set(ids))})
+        seen.add(key)
+    return out
+
+
+def _extract_citation_ids(text: str) -> set[int]:
+    return {int(m) for m in re.findall(r"\[\s*(\d+)\s*\]", text)}
+
+
+def _extract_sources_section_ids(text: str) -> set[int]:
+    match = re.search(r"##\s*Sources\s*(.*)$", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return set()
+    return {
+        int(source_id)
+        for source_id in re.findall(
+            r"^\s*(?:[-*]\s+)?\[\s*(\d+)\s*\]\s+", match.group(1), flags=re.MULTILINE
         )
-        payload = DeepResearchResponse(
-            question=normalized_question,
-            answer_markdown=report,
-            sources=all_sources,
-            iterations=iteration_summaries,
-            meta=meta,
-        )
-        return payload.model_dump()
+    }
+
+
+def _invalid_citation_ids(text: str, sources: list[SourceDocument]) -> set[int]:
+    valid = {source.source_id for source in sources}
+    return {cid for cid in _extract_citation_ids(text) if cid not in valid}
+
+
+def _extract_text_content(message: Any) -> str:
+    blocks = getattr(message, "content", None)
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts).strip()
+
+
+def _coerce_json(raw_text: str) -> Any:
+    stripped = raw_text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    object_match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+    if object_match:
+        return json.loads(object_match.group(0))
+    array_match = re.search(r"\[.*\]", stripped, flags=re.DOTALL)
+    if array_match:
+        return json.loads(array_match.group(0))
+    raise ValueError("Model response did not contain valid JSON.")
 
 
 def _client() -> WebSearchClient:
-    """Factory for tool loader."""
+    """Factory for the centaur tool loader."""
     return WebSearchClient()

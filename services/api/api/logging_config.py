@@ -26,7 +26,7 @@ _PHONE_FIELD_NAMES = {"phone", "phonenumber", "userphone"}
 _SSN_FIELD_NAMES = {"ssn", "socialsecuritynumber"}
 # This can drift over time, but it is less disruptive than reading image refs
 # through Helm chart changes while we need a quick production log marker.
-_LOG_VERSION_UUID = "7f3b4a2e-9d7c-4f2a-8b91-3e6d2c0a5f14"
+_LOG_VERSION_UUID = "013ca634-6a30-4047-8511-8e5483f313ea"
 
 
 def _normalize_field_name(field_name: str | None) -> str:
