@@ -2386,15 +2386,15 @@ async def _execute_run(pool, run_id: str) -> None:
 
 
 def _workflow_sandbox_enabled() -> bool:
-    """Whether claimed runs should execute in a one-shot sandbox Pod.
+    """Whether claimed runs should execute in a one-shot per-run Pod.
 
-    On by default. Set ``WORKFLOW_RUN_SANDBOX_ENABLED=0`` to fall back to
-    in-process execution (e.g. local dev where there's no K8s backend).
+    Off by default. Set ``WORKFLOW_RUN_SANDBOX_ENABLED=1`` to opt in to the
+    per-run pod path; otherwise runs execute in-process inside the API.
     """
-    return os.getenv("WORKFLOW_RUN_SANDBOX_ENABLED", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
+    return os.getenv("WORKFLOW_RUN_SANDBOX_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
     }
 
 
