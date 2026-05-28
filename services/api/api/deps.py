@@ -140,8 +140,12 @@ async def verify_api_key(
         )
         raise HTTPException(status_code=401, detail="Invalid or expired sandbox token")
 
-    # DB key lookup — all external callers use DB-backed aiv2_* keys
+    # DB key lookup — all external callers use DB-backed aiv2_* keys. The
+    # tool-server sidecar runs without a DB pool (sandbox tokens only), so a
+    # non-sandbox key reaching it is simply unauthenticated rather than a crash.
     pool = request.app.state.db_pool
+    if pool is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
     key_info = await lookup_key(pool, token)
     if key_info is not None:
         request.state.api_key_info = key_info

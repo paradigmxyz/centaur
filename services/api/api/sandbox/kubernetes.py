@@ -436,6 +436,9 @@ def _build_tool_server_container(
         {"name": "CENTAUR_API_URL", "value": api_url},
         {"name": "TOOL_DIRS", "value": _tool_server_tool_dirs()},
         {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
+        # Sidecar auths HMAC sandbox tokens only and has no Postgres egress,
+        # so it runs without a DB pool. See tool_server_app._skip_db.
+        {"name": "TOOL_SERVER_SKIP_DB", "value": "1"},
     ]
 
     volume_mounts: list[dict[str, Any]] = [

@@ -38,6 +38,21 @@ def _plugin_watcher_enabled() -> bool:
     }
 
 
+def _skip_db() -> bool:
+    """Run without a Postgres pool (sandbox-sidecar mode).
+
+    As a per-sandbox sidecar the tool-server only ever authenticates HMAC
+    sandbox tokens, which need no DB, and the sandbox NetworkPolicy denies it
+    Postgres egress anyway. The shared tool-server Deployment leaves this unset
+    and keeps its pool for aiv2_* key auth.
+    """
+    return (os.getenv("TOOL_SERVER_SKIP_DB") or "0").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
 async def _watch_tools(pm: ToolManager) -> None:
     if not _plugin_watcher_enabled():
         log.info("tool_watcher_disabled")
@@ -75,7 +90,11 @@ def _resolve_tool_dirs() -> list[Path]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.db_pool = await create_pool(settings.database_url)
+    if _skip_db():
+        app.state.db_pool = None
+        log.info("tool_server_db_skipped")
+    else:
+        app.state.db_pool = await create_pool(settings.database_url)
     watcher_task = asyncio.create_task(_watch_tools(app.state.tool_manager))
     try:
         yield
@@ -83,7 +102,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         watcher_task.cancel()
         with suppress(asyncio.CancelledError):
             await watcher_task
-        await close_pool(app.state.db_pool)
+        if app.state.db_pool is not None:
+            await close_pool(app.state.db_pool)
 
 
 app = FastAPI(
