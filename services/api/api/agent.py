@@ -544,7 +544,7 @@ async def _get_last_delivered_id(thread_key: str) -> str | None:
     return row["last_delivered_id"] if row else None
 
 
-async def _get_latest_thread_user_id(thread_key: str) -> str | None:
+async def _get_latest_thread_user_id(thread_key: str, *, pool=None) -> str | None:
     """Return the most recent user id recorded for this thread.
 
     Slack turns can surface the requester in several durable rows depending on
@@ -552,7 +552,7 @@ async def _get_latest_thread_user_id(thread_key: str) -> str | None:
     across those sources so the session context does not depend on one caller
     preserving one specific delivery field.
     """
-    pool = _get_pool()
+    pool = pool or _get_pool()
     row = await pool.fetchrow(
         "WITH candidates AS ("
         "  SELECT COALESCE(user_id, metadata->>'user_id') AS user_id, created_at, 1 AS source_rank "
@@ -712,12 +712,13 @@ async def _insert_system_message(
     platform: str | None,
     *,
     user_id: str | None = None,
+    pool=None,
 ) -> None:
     """Insert a static system message with platform formatting rules (idempotent)."""
-    pool = _get_pool()
+    pool = pool or _get_pool()
     effective_platform = platform or ("slack" if thread_key.startswith("slack:") else None)
     msg_id = f"system-{thread_key}-{effective_platform or 'generic'}"
-    effective_user_id = user_id or await _get_latest_thread_user_id(thread_key)
+    effective_user_id = user_id or await _get_latest_thread_user_id(thread_key, pool=pool)
     requester_identity = await _resolve_requester_identity(
         platform=effective_platform,
         user_id=effective_user_id,

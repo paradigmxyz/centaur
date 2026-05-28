@@ -75,11 +75,12 @@ async def test_create_slack_thread_turn_workflow_eager_start(
     )
     calls: list[str] = []
 
-    async def fake_insert_system_message(thread_key_arg, platform, *, user_id=None):
+    async def fake_insert_system_message(thread_key_arg, platform, *, user_id=None, pool=None):
         calls.append("system")
         assert thread_key_arg == thread_key
         assert platform == "slack"
         assert user_id == "U123"
+        assert pool is db_pool
 
     async def fake_append_message(*args, **kwargs):
         calls.append("message")
