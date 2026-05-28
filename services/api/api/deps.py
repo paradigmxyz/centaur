@@ -140,8 +140,13 @@ async def verify_api_key(
         )
         raise HTTPException(status_code=401, detail="Invalid or expired sandbox token")
 
-    # DB key lookup — all external callers use DB-backed aiv2_* keys
-    pool = request.app.state.db_pool
+    # DB key lookup — all external callers use DB-backed aiv2_* keys. Some
+    # sandbox-local apps only accept sbx1 tokens and deliberately do not keep a
+    # DB pool.
+    pool = getattr(request.app.state, "db_pool", None)
+    if pool is None:
+        log.warning("db_api_key_lookup_unavailable", path=str(request.url.path))
+        raise HTTPException(status_code=401, detail="Invalid API key")
     key_info = await lookup_key(pool, token)
     if key_info is not None:
         request.state.api_key_info = key_info

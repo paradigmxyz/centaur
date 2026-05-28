@@ -2,12 +2,19 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+from fastapi import HTTPException
 
-from api.deps import mint_sandbox_token, sandbox_thread_in_scope, verify_sandbox_token
+from api.deps import (
+    mint_sandbox_token,
+    sandbox_thread_in_scope,
+    verify_api_key,
+    verify_sandbox_token,
+)
 
 _TEST_SECRET = "test-secret-key-for-unit-tests"
 
@@ -97,3 +104,34 @@ class TestSandboxThreadScope:
         assert sandbox_thread_in_scope("thread:1", "thread:1")
         assert not sandbox_thread_in_scope("thread:1", "thread:2")
         assert not sandbox_thread_in_scope("thread:1", "thread:1:child")
+
+
+class TestVerifyApiKeyWithoutDbPool:
+    @pytest.mark.asyncio
+    async def test_sandbox_token_does_not_require_db_pool(self):
+        token = mint_sandbox_token("thread:1", "ctr-abc")
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(db_pool=None)),
+            client=SimpleNamespace(host="127.0.0.1"),
+            headers={"authorization": f"Bearer {token}"},
+            state=SimpleNamespace(),
+            url=SimpleNamespace(path="/tools/demo/ping"),
+        )
+
+        assert await verify_api_key(request) == "sandbox:ctr-abc"
+        assert request.state.sandbox_claims["thread_key"] == "thread:1"
+
+    @pytest.mark.asyncio
+    async def test_db_key_fails_closed_without_db_pool(self):
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(db_pool=None)),
+            client=SimpleNamespace(host="127.0.0.1"),
+            headers={"authorization": "Bearer aiv2_test"},
+            state=SimpleNamespace(),
+            url=SimpleNamespace(path="/tools/demo/ping"),
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            await verify_api_key(request)
+
+        assert exc.value.status_code == 401

@@ -21,8 +21,6 @@ from pathlib import Path
 import structlog
 from fastapi import FastAPI
 
-from api.config import settings
-from api.db import close_pool, create_pool
 from api.logging_config import configure_structlog
 from api.tool_manager import ToolManager, load_plugins_config
 
@@ -75,7 +73,11 @@ def _resolve_tool_dirs() -> list[Path]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.db_pool = await create_pool(settings.database_url)
+    # Sandbox-local tool servers authenticate with HMAC sandbox tokens and do
+    # not need direct database access. Keeping them DB-free avoids giving every
+    # sandbox pod Postgres network reachability just to serve /tools.
+    app.state.db_pool = None
+    log.info("tool_server_db_disabled")
     watcher_task = asyncio.create_task(_watch_tools(app.state.tool_manager))
     try:
         yield
@@ -83,7 +85,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         watcher_task.cancel()
         with suppress(asyncio.CancelledError):
             await watcher_task
-        await close_pool(app.state.db_pool)
 
 
 app = FastAPI(
