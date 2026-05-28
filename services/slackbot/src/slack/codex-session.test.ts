@@ -1515,6 +1515,49 @@ describe('CodexSessionRenderer', () => {
     expect(countOccurrences(visible, 'Hello.')).toBe(1)
   })
 
+  it('streams claude-code delta assistant text and ignores the canonical duplicate', async () => {
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+    const finalText = "I'm centaur, Tempo's AI assistant. I help with engineering and ops."
+
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: "I'm" }] }
+    })
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: " centaur, Tempo's AI assistant." }] }
+    })
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: ' I help with engineering and ops.' }] }
+    })
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      uuid: 'msg-uuid',
+      request_id: 'req-123',
+      session_id: 'claude-session',
+      message: {
+        id: 'msg_123',
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: finalText }]
+      }
+    })
+    await renderer.event(sessionId, { type: 'result', result: finalText })
+
+    const visible = visibleMarkdown(calls)
+    expect(countOccurrences(visible, finalText)).toBe(1)
+    expect(visible).not.toContain("I'm\n centaur")
+  })
+
   it('does not log a canonical correction for plain delta streams without item.completed', async () => {
     const logCalls: unknown[][] = []
     const originalLog = console.log

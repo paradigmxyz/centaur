@@ -66,7 +66,7 @@ export type OpenAgentSessionInput = {
   title?: string
   /**
    * Italic one-line identifier rendered at the top of every assistant message (e.g. "base ·
-   * claude-opus-4-7", "legal · codex-gpt-5").
+   * claude-opus-4-8", "legal · codex-gpt-5").
    */
   header?: string
 }

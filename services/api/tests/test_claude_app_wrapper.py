@@ -40,7 +40,7 @@ def test_build_claude_cmd_defaults(monkeypatch) -> None:
     assert "--include-hook-events" not in cmd
     assert "--append-system-prompt-file" not in cmd
     assert "--model" in cmd
-    assert cmd[cmd.index("--model") + 1] == "opus"
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
     assert "--resume" not in cmd
 
 
@@ -57,14 +57,14 @@ def test_build_claude_cmd_appends_agents_prompt(monkeypatch, tmp_path) -> None:
 
 def test_build_claude_cmd_model_and_resume(monkeypatch) -> None:
     wrapper = _load_wrapper()
-    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-7")
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-8")
     monkeypatch.setenv("CLAUDE_CONTINUE_SESSION_ID", "abc-123")
 
     cmd = wrapper._build_claude_cmd()
 
     assert "--model" in cmd
     model_idx = cmd.index("--model")
-    assert cmd[model_idx + 1] == "claude-opus-4-7"
+    assert cmd[model_idx + 1] == "claude-opus-4-8"
     assert "--resume" in cmd
     resume_idx = cmd.index("--resume")
     assert cmd[resume_idx + 1] == "abc-123"
