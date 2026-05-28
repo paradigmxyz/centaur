@@ -2106,7 +2106,8 @@ async def _mark_execution_terminal(
     delivery_platform = _delivery_platform(
         decode_jsonb(row["delivery"], {}) if row else {}
     )
-    if delivery_platform == "dev" or suppress_legacy_delivery:
+    suppress_no_input_delivery = terminal_reason == "no_input"
+    if delivery_platform == "dev" or suppress_legacy_delivery or suppress_no_input_delivery:
         slackbot_agent_session_id = str(metadata.get("slackbot_agent_session_id") or "")
         result_size = payload_size_bytes(result_text)
         if suppress_legacy_delivery and result_size > 0 and slackbot_streamed_answer_chars <= 0:
@@ -2124,17 +2125,21 @@ async def _mark_execution_terminal(
                     metadata.get("slackbot_live_delivery_failed")
                 ),
             )
+        if suppress_no_input_delivery:
+            reason = "no_input"
+        elif suppress_legacy_delivery:
+            reason = "slackbot_live_delivery"
+        else:
+            reason = "dev_delivery"
         log.info(
             "final_delivery_skipped"
-            if suppress_legacy_delivery
+            if suppress_legacy_delivery or suppress_no_input_delivery
             else "final_delivery_skipped_dev",
             execution_id=execution_id,
             thread_key=thread_key,
             status=status,
             terminal_reason=terminal_reason,
-            reason="slackbot_live_delivery"
-            if suppress_legacy_delivery
-            else "dev_delivery",
+            reason=reason,
             agent_thread_id=agent_thread_id or None,
             slackbot_agent_session_id=slackbot_agent_session_id or None,
             slackbot_streamed_answer_chars=slackbot_streamed_answer_chars,
@@ -2782,6 +2787,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         await _write_agents_override(session.sandbox_id, str(assignment_override))
 
     if durable_turn_id:
+        injected_for_execution = True
         await _heartbeat_execution_lease(pool, execution_id)
         if silence_deadline <= dt.datetime.now(dt.timezone.utc):
             silence_deadline = await _touch_execution_progress(pool, execution_id)
@@ -2835,6 +2841,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 },
             )
         durable_turn_id = str(inject_result.get("durable_turn_id") or "")
+        injected_for_execution = bool(inject_result.get("injected"))
         await pool.execute(
             "UPDATE agent_execution_requests SET durable_turn_id = $1, updated_at = NOW() "
             "WHERE execution_id = $2",
@@ -2868,9 +2875,6 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     )
     user_id: str | None = str(user_id_row) if user_id_row else None
 
-    backend = get_backend()
-    await backend.attach(session)
-    rt = _get_runtime(session.sandbox_id)
     observations = ExecutionObservationAccumulator()
     started_at = claimed_at or row.get("created_at")
     first_token_at: dt.datetime | None = None
@@ -2883,6 +2887,8 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     # to the outbox path; the streak resets on the next success.
     slackbot_live_failure_streak = 0
     slackbot_live_failure_limit = 5
+    latest_terminal_result_text = ""
+    slackbot_streamed_answer_chars = 0
 
     async def _finalize_execution(
         *,
@@ -2988,6 +2994,42 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             slackbot_streamed_answer_chars_override=slackbot_streamed_answer_chars,
         )
 
+    if not injected_for_execution:
+        log.info(
+            "execution_no_input_skipped",
+            execution_id=execution_id,
+            thread_key=thread_key,
+            assignment_generation=assignment_generation,
+            runtime_id=session.sandbox_id,
+            queue_delay_s=round(queue_delay_s, 3),
+        )
+        add_span_event(
+            "centaur.agent.execution_no_input",
+            {
+                "execution_id": execution_id,
+                "thread_key": thread_key,
+                "assignment_generation": assignment_generation,
+                "runtime_id": session.sandbox_id,
+            },
+        )
+        set_span_attributes(
+            trace.get_current_span(),
+            {
+                "centaur.execution.no_input": True,
+            },
+        )
+        await _finalize_execution(
+            status="completed",
+            terminal_reason="no_input",
+            result_text="",
+            error_text=None,
+        )
+        return
+
+    backend = get_backend()
+    await backend.attach(session)
+    rt = _get_runtime(session.sandbox_id)
+
     execution_started_payload = {
         "type": "obs.execution_started",
         "execution_id": execution_id,
@@ -3044,8 +3086,6 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     await _touch_execution_progress(pool, execution_id)
 
     turn_done_event: dict[str, Any] | None = None
-    latest_terminal_result_text = ""
-    slackbot_streamed_answer_chars = 0
     pending_event: asyncio.Task | None = None
     stream = _stream_stdout(
         session,
