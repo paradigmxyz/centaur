@@ -127,6 +127,18 @@ class TestCodex:
         )
         assert result == [event]
 
+    def test_openrouter_uses_codex_normalizer(self):
+        result = normalize_harness_event(
+            "openrouter",
+            {
+                "type": "thread.started",
+                "thread_id": "thread-or",
+            },
+        )
+        assert result == [
+            {"type": "system", "subtype": "init", "session_id": "thread-or"}
+        ]
+
     def test_agent_message_delta_passthrough(self):
         event = {
             "type": "item.agentMessage.delta",

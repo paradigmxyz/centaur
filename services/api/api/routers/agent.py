@@ -78,6 +78,7 @@ _HARNESS_FLAGS: dict[str, str] = {
     "claude": "claude-code",
     "claude-code": "claude-code",
     "codex": "codex",
+    "openrouter": "openrouter",
     "pi": "pi-mono",
     "pi-mono": "pi-mono",
 }

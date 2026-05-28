@@ -271,6 +271,7 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     # iron-proxy rewrites the placeholder mid-flight.
     assert env_map["AMP_API_KEY"] == "AMP_API_KEY"
     assert env_map["OPENAI_API_KEY"] == "OPENAI_API_KEY"
+    assert env_map["OPENROUTER_API_KEY"] == "OPENROUTER_API_KEY"
     assert env_map["CENTAUR_TRACE_ID"] == "00000000-0000-0000-0000-000000000123"
     assert env_map["NO_PROXY"] == "localhost,127.0.0.1,firewall.internal,api.internal"
     assert env_map["no_proxy"] == env_map["NO_PROXY"]

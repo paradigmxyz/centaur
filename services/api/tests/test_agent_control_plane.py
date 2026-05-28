@@ -27,6 +27,21 @@ def test_agent_session_title_formats_base_and_persona_runs():
     )
 
 
+def test_agent_session_header_formats_openrouter_default_model(monkeypatch):
+    from api.runtime_control import _agent_session_header
+
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+
+    assert (
+        _agent_session_header(
+            persona_id=None,
+            engine="openrouter",
+            harness="openrouter",
+        )
+        == "base · openrouter/auto"
+    )
+
+
 def test_slackbot_streamed_answer_chars_requires_positive_integer_offset():
     from api.runtime_control import (
         _slackbot_live_delivery_covers_result,

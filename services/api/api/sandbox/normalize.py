@@ -844,7 +844,7 @@ def _normalize_pi_event(event: dict) -> list[dict]:
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
-_ENGINE_HARNESSES = {"amp", "claude-code", "codex", "pi-mono"}
+_ENGINE_HARNESSES = {"amp", "claude-code", "codex", "openrouter", "pi-mono"}
 
 
 def normalize_harness_event(engine: str, event: dict) -> list[dict]:
@@ -853,7 +853,8 @@ def normalize_harness_event(engine: str, event: dict) -> list[dict]:
     Parameters
     ----------
     engine:
-        The engine name (``amp``, ``claude-code``, ``codex``, ``pi-mono``).
+        The engine name (``amp``, ``claude-code``, ``codex``, ``openrouter``,
+        ``pi-mono``).
         Persona names (e.g. ``legal``, ``eng``) are treated as amp-like.
     event:
         A single raw JSON dict from harness stdout.
@@ -888,7 +889,7 @@ def normalize_harness_event(engine: str, event: dict) -> list[dict]:
         else:
             normalized = "amp"
 
-    if normalized == "codex":
+    if normalized in {"codex", "openrouter"}:
         return _normalize_codex_event(event)
     if normalized == "pi-mono":
         return _normalize_pi_event(event)

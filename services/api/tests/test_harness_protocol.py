@@ -82,6 +82,9 @@ class TestIsTurnDone:
     def test_codex_turn_completed(self):
         assert is_turn_done("codex", {"type": "turn.completed"}) is True
 
+    def test_openrouter_turn_completed(self):
+        assert is_turn_done("openrouter", {"type": "turn.completed"}) is True
+
     def test_codex_turn_failed(self):
         assert is_turn_done("codex", {"type": "turn.failed"}) is True
 
@@ -163,6 +166,13 @@ class TestExtractResult:
         }
         assert extract_result("codex", event) == "codex says"
 
+    def test_openrouter_item_completed(self):
+        event = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "openrouter says"},
+        }
+        assert extract_result("openrouter", event) == "openrouter says"
+
     def test_codex_item_completed_camel_case(self):
         event = {
             "type": "item.completed",
@@ -211,6 +221,10 @@ class TestExtractThreadId:
         event = {"type": "thread.started", "thread_id": "T-abc"}
         assert extract_thread_id("codex", event) == "T-abc"
 
+    def test_openrouter_thread_started(self):
+        event = {"type": "thread.started", "thread_id": "T-or"}
+        assert extract_thread_id("openrouter", event) == "T-or"
+
     def test_pi_mono_session(self):
         event = {"type": "session", "id": "sess-42"}
         assert extract_thread_id("pi-mono", event) == "sess-42"
@@ -218,6 +232,7 @@ class TestExtractThreadId:
     def test_unrelated_event_returns_none(self):
         assert extract_thread_id("amp", {"type": "assistant"}) is None
         assert extract_thread_id("codex", {"type": "item.completed"}) is None
+        assert extract_thread_id("openrouter", {"type": "item.completed"}) is None
         assert extract_thread_id("pi-mono", {"type": "message_end"}) is None
 
 

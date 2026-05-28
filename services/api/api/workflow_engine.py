@@ -942,7 +942,7 @@ class _ToolProxy:
 # ── Agent-turn helper (domain logic, NOT on the context) ──────────────
 
 
-_EXECUTION_HARNESSES = frozenset({"amp", "claude-code", "codex", "pi-mono"})
+_EXECUTION_HARNESSES = frozenset({"amp", "claude-code", "codex", "openrouter", "pi-mono"})
 
 
 async def _compute_agent_session_title(

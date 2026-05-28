@@ -12,6 +12,14 @@
 import { asString, asRecord } from './parse-utils'
 import type { CanonicalEvent, SubagentActivity } from './types'
 
+type NodeCrypto = {
+  createHash: (algorithm: string) => {
+    update: (input: string, encoding: string) => { digest: (encoding: string) => string }
+  }
+}
+
+declare const require: ((name: string) => NodeCrypto) | undefined
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -94,7 +102,10 @@ function stableSortedStringify(value: unknown): string {
  */
 function sha1Hex(input: string): string {
   // In Next.js / Node.js environment, use the built-in crypto module
-  const crypto = require('crypto') as typeof import('crypto')
+  const crypto = require?.('crypto')
+  if (!crypto) {
+    throw new Error('SHA-1 hashing requires Node.js crypto')
+  }
   return crypto.createHash('sha1').update(input, 'utf-8').digest('hex')
 }
 
@@ -639,7 +650,7 @@ function normalizeCodexEvent(event: Record<string, unknown>): CanonicalEvent[] {
   }
 
   if (eventType === 'assistant') {
-    return [event]
+    return [event as CanonicalEvent]
   }
 
   if (eventType === 'error') {
@@ -872,7 +883,7 @@ export function normalizeHarnessEvent(
     }
   }
 
-  if (normalizedHarness === 'codex') {
+  if (normalizedHarness === 'codex' || normalizedHarness === 'openrouter') {
     return normalizeCodexEvent(event)
   }
   if (normalizedHarness === 'pi-mono') {

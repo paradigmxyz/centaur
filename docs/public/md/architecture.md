@@ -74,6 +74,9 @@ mounting, and network policies all assume Kubernetes sandboxes.
 | Claude Code | Passes the Anthropic-shaped content through directly. |
 | Codex / pi-mono | Extracts text blocks for CLIs that accept a plain prompt. |
 
+The OpenRouter selector uses the Codex adapter with an OpenRouter provider
+configuration, so clients still see the same durable execution protocol.
+
 The pod receives the prompt files, CLI command, internal API URL, proxy CA, and
 proxy settings. It does not need Kubernetes credentials or long-lived
 third-party API keys.

@@ -231,11 +231,11 @@ fi
 # signaling readiness, otherwise warm pods can be claimed with no auth loaded.
 # Skipped under access_token mode — that path relies on the chatgpt auth.json
 # installed above plus iron-proxy injecting the real Bearer at request time.
-if [ "$CODEX_AUTH_MODE" != "access_token" ]; then
-    CODEX_KEY="${CODEX_API_KEY:-${OPENAI_API_KEY:-}}"
-    if [ -n "$CODEX_KEY" ]; then
-        echo "$CODEX_KEY" | codex login --with-api-key 2>/dev/null || true
-    fi
+CODEX_KEY="${CODEX_API_KEY:-${OPENAI_API_KEY:-}}"
+if [ "$CODEX_AUTH_MODE" != "access_token" ] &&
+    [ "${CODEX_MODEL_PROVIDER:-}" != "openrouter" ] &&
+    [ -n "$CODEX_KEY" ]; then
+    echo "$CODEX_KEY" | codex login --with-api-key 2>/dev/null || true
 fi
 
 # Signal readiness

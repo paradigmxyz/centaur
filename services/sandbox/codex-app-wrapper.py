@@ -103,6 +103,19 @@ def notify(method: str, params: dict[str, Any] | None = None) -> None:
     send_raw({"method": method, "params": params or {}})
 
 
+def _codex_config_overrides() -> list[str]:
+    overrides: list[str] = []
+    for env_key, config_key in (
+        ("CODEX_MODEL_PROVIDER", "model_provider"),
+        ("CODEX_MODEL", "model"),
+        ("CODEX_SERVICE_TIER", "service_tier"),
+    ):
+        value = (os.environ.get(env_key) or "").strip()
+        if value:
+            overrides.extend(["-c", f"{config_key}={json.dumps(value)}"])
+    return overrides
+
+
 def start_app_server() -> None:
     global APP, APP_INITIALIZED
     if APP is not None and APP.poll() is None and APP_INITIALIZED:
@@ -114,6 +127,7 @@ def start_app_server() -> None:
     APP = subprocess.Popen(
         [
             "codex",
+            *_codex_config_overrides(),
             "app-server",
             "--listen",
             "stdio://",

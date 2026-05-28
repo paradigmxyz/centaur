@@ -72,14 +72,16 @@ enabled in `values.dev.yaml`; use a real token if you want to test Slack.
 Postgres on startup, so it must exist before `just up`.
 
 Application-level model and tool secrets, such as `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `AMP_API_KEY`, and `GITHUB_TOKEN`, should live in
+`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `AMP_API_KEY`, and `GITHUB_TOKEN`,
+should live in
 1Password or the configured [iron-proxy](https://docs.iron.sh) secret source. Sandboxes receive
 placeholder values and [iron-proxy](https://docs.iron.sh) injects the real credentials only on approved
 outbound requests.
 
 The default harness is `codex`, so `OPENAI_API_KEY` must exist in the configured
 secret source before Slack agent turns can complete. Use explicit harness
-selectors only when you want a non-default harness such as Amp or Claude Code.
+selectors only when you want a non-default harness such as Amp, Claude Code, or
+OpenRouter.
 
 ## 3. Boot the stack
 
@@ -156,7 +158,8 @@ Mention the bot in a test channel where the Slack app is installed:
 ```
 
 Slack messages without a harness flag use Codex. Add a selector such as
-`--amp`, `--claude`, or `--pi` only when you want to override the default.
+`--amp`, `--claude`, `--openrouter`, or `--pi` only when you want to override
+the default.
 
 If Slack receives the mention but no agent runs, inspect Slackbot logs:
 

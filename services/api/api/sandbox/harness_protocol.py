@@ -21,6 +21,10 @@ def _extract_error_message(event: dict) -> str:
     return msg if isinstance(msg, str) else ""
 
 
+def _is_codex_like(engine: str) -> bool:
+    return engine in ("codex", "openrouter")
+
+
 def is_turn_done(engine: str, event: dict) -> bool:
     """Return True when *event* signals the end of a main-agent turn.
 
@@ -58,7 +62,7 @@ def is_turn_done(engine: str, event: dict) -> bool:
                 return False
             return msg.get("stop_reason") == "end_turn"
         return False
-    if engine == "codex":
+    if _is_codex_like(engine):
         return t in ("turn.completed", "turn.failed")
     return t == "agent_end"  # pi-mono
 
@@ -91,7 +95,7 @@ def extract_result(engine: str, event: dict) -> str | None:
             if texts:
                 return texts[-1]
         return None
-    if engine == "codex":
+    if _is_codex_like(engine):
         if t == "assistant":
             msg = event.get("message", {})
             content = msg.get("content", [])
@@ -120,7 +124,7 @@ def extract_thread_id(engine: str, event: dict) -> str | None:
             return event.get("session_id") or None
         if t == "assistant":
             return event.get("session_id") or None
-    elif engine == "codex":
+    elif _is_codex_like(engine):
         if t == "thread.started":
             return event.get("thread_id") or None
     elif engine == "pi-mono" and t == "session":

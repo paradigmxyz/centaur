@@ -344,6 +344,20 @@ def test_emit_notification_collects_agent_message_delta_output(monkeypatch) -> N
     assert emitted[0]["type"] == "item.agentMessage.delta"
 
 
+def test_codex_config_overrides_from_environment(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+
+    monkeypatch.setenv("CODEX_MODEL_PROVIDER", "openrouter")
+    monkeypatch.setenv("CODEX_MODEL", "openrouter/auto")
+
+    assert wrapper._codex_config_overrides() == [
+        "-c",
+        'model_provider="openrouter"',
+        "-c",
+        'model="openrouter/auto"',
+    ]
+
+
 def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     wrapper = _load_wrapper()
     requests: list[tuple[str, dict]] = []

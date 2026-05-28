@@ -1934,6 +1934,14 @@ class ToolManager:
                 inject_header="chatgpt-account-id",
             ),
         ),
+        ("openrouter", "api_key"): (
+            HttpSecret(
+                name="OPENROUTER_API_KEY",
+                secret_ref="OPENROUTER_API_KEY",
+                hosts=("openrouter.ai", "*.openrouter.ai"),
+                match_headers=("Authorization",),
+            ),
+        ),
     }
 
     # Maps an engine to the env-var name (in ``sandbox.extraEnv``) that
@@ -1942,6 +1950,7 @@ class ToolManager:
     _HARNESS_AUTH_MODE_ENV: ClassVar[dict[str, str]] = {
         "claude-code": "CLAUDE_CODE_AUTH_MODE",
         "codex": "CODEX_AUTH_MODE",
+        "openrouter": "OPENROUTER_AUTH_MODE",
     }
 
     @classmethod

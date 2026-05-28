@@ -1406,6 +1406,12 @@ class KubernetesExecutorBackend(SandboxBackend):
         overlay_image = _overlay_image()
         if overlay_image:
             env.append(f"CENTAUR_OVERLAY_DIR={_SANDBOX_OVERLAY_DIR}")
+        if engine == "openrouter":
+            env.append("CODEX_MODEL_PROVIDER=openrouter")
+            openrouter_model = (
+                model or os.getenv("OPENROUTER_MODEL") or "openrouter/auto"
+            )
+            env.append(f"CODEX_MODEL={openrouter_model}")
         if engine == "claude-code" and model:
             env.append(f"CLAUDE_MODEL={model}")
         if engine == "claude-code" and resume_thread_id:

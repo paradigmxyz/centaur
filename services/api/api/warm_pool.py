@@ -94,7 +94,9 @@ async def _spawn_warm_container() -> WarmContainer | None:
     if not backend.supports_warm_pool:
         return None
     engine = (
-        POOL_HARNESS if POOL_HARNESS in {"amp", "claude-code", "codex"} else "codex"
+        POOL_HARNESS
+        if POOL_HARNESS in {"amp", "claude-code", "codex", "openrouter"}
+        else "codex"
     )
 
     placeholder_key = f"warm-{int(time.time() * 1000)}-{id(asyncio.current_task())}"

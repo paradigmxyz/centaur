@@ -21,6 +21,7 @@ def image() -> str:
 _HARNESS_STUB_KEYS = (
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
     "AMP_API_KEY",
     "GITHUB_TOKEN",
 )
@@ -155,7 +156,7 @@ def build_harness_cmd(engine: str, model: str | None = None) -> list[str]:
     """Build the container CMD for a given harness engine."""
     if engine == "amp":
         return ["amp-wrapper"]
-    if engine == "codex":
+    if engine in {"codex", "openrouter"}:
         return ["codex-app-wrapper"]
     if engine == "claude-code":
         return ["claude-app-wrapper"]

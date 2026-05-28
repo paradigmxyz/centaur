@@ -711,6 +711,14 @@ class TestHarnessSecretSelection:
         assert "OPENAI_CODEX_ACCOUNT_ID" in names
         assert "OPENAI_API_KEY" not in names
 
+    def test_openrouter_includes_only_openrouter_provider_secret(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(tm.secrets_for_sandbox("openrouter", {}))
+        assert "OPENROUTER_API_KEY" in names
+        assert "OPENAI_API_KEY" not in names
+        assert "ANTHROPIC_API_KEY" not in names
+
     def test_unset_auth_mode_defaults_to_api_key(self) -> None:
         tm = ToolManager.__new__(ToolManager)
         tm.tools = {}
@@ -738,6 +746,7 @@ class TestHarnessSecretSelection:
         names = self._names(tm.collect_secrets())
         assert "ANTHROPIC_API_KEY" in names
         assert "OPENAI_API_KEY" in names
+        assert "OPENROUTER_API_KEY" in names
         assert "anthropic-claude" in names
         assert "openai-codex" in names
         assert "OPENAI_CODEX_ACCOUNT_ID" in names

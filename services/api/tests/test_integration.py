@@ -341,6 +341,12 @@ class TestBuildHarnessCmd:
         cmd = build_harness_cmd("codex")
         assert cmd == ["codex-app-wrapper"]
 
+    def test_openrouter_uses_codex_wrapper(self):
+        from api.sandbox.config import build_harness_cmd
+
+        cmd = build_harness_cmd("openrouter")
+        assert cmd == ["codex-app-wrapper"]
+
     def test_claude_code(self):
         from api.sandbox.config import build_harness_cmd
 
@@ -389,6 +395,7 @@ class TestBuildHarnessCmd:
         env = container_env("thread-key", "sandbox-id", "firewall.internal")
 
         assert "ANTHROPIC_API_KEY=ANTHROPIC_API_KEY" in env
+        assert "OPENROUTER_API_KEY=OPENROUTER_API_KEY" in env
         assert "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1" in env
         assert "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1" in env
         assert "DISABLE_ERROR_REPORTING=1" in env

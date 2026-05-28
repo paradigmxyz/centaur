@@ -241,6 +241,11 @@ def _resolve_codex_model_label(model: str | None) -> str:
     return f"codex-{raw}"
 
 
+def _resolve_openrouter_model_label(model: str | None) -> str:
+    raw = (model or os.getenv("OPENROUTER_MODEL") or "openrouter/auto").strip().lower()
+    return raw or "openrouter/auto"
+
+
 def _engine_model_label(
     *,
     engine: str | None,
@@ -258,6 +263,8 @@ def _engine_model_label(
         return _resolve_claude_model_label(explicit or None)
     if engine_name == "codex":
         return _resolve_codex_model_label(explicit or None)
+    if engine_name == "openrouter":
+        return _resolve_openrouter_model_label(explicit or None)
     if engine_name == "amp":
         return f"amp-{explicit}" if explicit else "amp"
     if explicit:

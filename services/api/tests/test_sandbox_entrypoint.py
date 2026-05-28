@@ -135,3 +135,39 @@ def test_sandbox_entrypoint_installs_codex_harness_config(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout == (harness_dir / "codex" / "config.toml").read_text()
+
+
+def test_sandbox_entrypoint_skips_codex_login_for_openrouter(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    harness_dir = _write_codex_harness_config(home)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex_calls = tmp_path / "codex-calls"
+    codex_bin = bin_dir / "codex"
+    codex_bin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {codex_calls}\n"
+        "exit 0\n"
+    )
+    codex_bin.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ENTRYPOINT_SH),
+            "true",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "CENTAUR_HARNESS_CONFIG_DIR": str(harness_dir),
+            "CODEX_MODEL_PROVIDER": "openrouter",
+            "OPENAI_API_KEY": "placeholder-openai-key",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert not codex_calls.exists()
