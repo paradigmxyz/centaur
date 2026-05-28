@@ -302,11 +302,11 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
             [
                 {
                     "name": "NO_PROXY",
-                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
+                    "value": "localhost,127.0.0.1,metrics.internal",
                 },
                 {
                     "name": "no_proxy",
-                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
+                    "value": "localhost,127.0.0.1,metrics.internal",
                 },
                 {
                     "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -319,11 +319,66 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
-    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,api.internal,metrics.internal"
-    assert env_map["no_proxy"] == "localhost,127.0.0.1,api.internal,metrics.internal"
+    # The operator's extra host is added, but the critical computed hosts (the
+    # firewall proxy and the API host) are retained — extraEnv merges, never
+    # replaces, so it can't break sandbox egress.
+    no_proxy_hosts = env_map["NO_PROXY"].split(",")
+    assert "firewall.internal" in no_proxy_hosts
+    assert "api.internal" in no_proxy_hosts
+    assert "metrics.internal" in no_proxy_hosts
+    assert env_map["no_proxy"] == env_map["NO_PROXY"]
     assert env_map["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.orb.internal:8000"
     assert len([item for item in env if item.startswith("NO_PROXY=")]) == 1
     assert len([item for item in env if item.startswith("no_proxy=")]) == 1
+
+
+def test_container_env_extra_env_cannot_drop_critical_no_proxy_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: an operator NO_PROXY override that omits the API host used to
+    # clobber the computed value, routing API calls through iron-proxy (405).
+    monkeypatch.setenv("AGENT_API_URL", "http://centaur-centaur-api:8000")
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {"name": "NO_PROXY", "value": "localhost,127.0.0.1,centaur-api"},
+                {"name": "no_proxy", "value": "localhost,127.0.0.1,centaur-api"},
+            ]
+        ),
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    no_proxy_hosts = env_map["NO_PROXY"].split(",")
+    assert "centaur-centaur-api" in no_proxy_hosts  # real API host survives
+    assert "firewall.internal" in no_proxy_hosts
+    assert "centaur-api" in no_proxy_hosts  # operator's extra is still honored
+
+
+def test_container_env_extra_env_cannot_override_pinned_proxy_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {"name": "HTTPS_PROXY", "value": "http://evil:9999"},
+                {"name": "http_proxy", "value": "http://evil:9999"},
+                {"name": "REQUESTS_CA_BUNDLE", "value": "/tmp/attacker.pem"},
+                {"name": "FIREWALL_HOST", "value": "elsewhere"},
+            ]
+        ),
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    assert env_map["HTTPS_PROXY"] == "http://firewall.internal:8080"
+    assert env_map["http_proxy"] == "http://firewall.internal:8080"
+    assert env_map["REQUESTS_CA_BUNDLE"] == "/firewall-certs/ca-cert.pem"
+    assert env_map["FIREWALL_HOST"] == "firewall.internal"
 
 
 def test_container_env_adds_extra_otel_endpoint_host_to_no_proxy(
