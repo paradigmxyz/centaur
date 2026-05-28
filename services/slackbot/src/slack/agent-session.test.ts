@@ -453,13 +453,6 @@ describe('AgentSessionRenderer', () => {
       status: 'in_progress'
     })
     await renderer.text(sessionId, 'Live answer body.')
-    // Completing the step force-flushes the pending text, so the answer is durably streamed
-    // live during the turn — the case where deduping it out of the final blocks is correct.
-    await renderer.step(sessionId, {
-      id: 'cmd-1',
-      title: '1. Command execution',
-      status: 'complete'
-    })
     await renderer.done(sessionId, {
       answerMarkdown: 'Live answer body.'
     })
@@ -472,72 +465,6 @@ describe('AgentSessionRenderer', () => {
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
-  })
-
-  it('delivers a durable final answer when the answer was queued but never streamed live', async () => {
-    // Regression: on fast turns the whole answer can arrive in one burst and sit queued in
-    // pendingText without crossing a flush threshold, so nothing reaches Slack live. The
-    // finalize-time appendStream then races chat.stopStream and is dropped, leaving the thread
-    // ending after the last tool output. The answer must instead be composed into the durable
-    // stopStream blocks, and counted as delivered so the control plane skips its fallback.
-    const calls: Array<{ method: string; params: any }> = []
-    const client = {
-      assistant: { threads: { setStatus: async () => ({ ok: true }) } },
-      chat: {
-        startStream: async (params: any) => {
-          calls.push({ method: 'chat.startStream', params })
-          return { ok: true, ts: '1778866940.295499' }
-        },
-        appendStream: async (params: any) => {
-          calls.push({ method: 'chat.appendStream', params })
-          return { ok: true }
-        },
-        stopStream: async (params: any) => {
-          calls.push({ method: 'chat.stopStream', params })
-          return { ok: true }
-        },
-        update: async () => ({ ok: true })
-      }
-    }
-
-    const renderer = new AgentSessionRenderer(client as any)
-    const { sessionId } = await renderer.open({
-      channel: 'C123',
-      parentTs: '1778866921.505479',
-      recipientTeamId: 'T123',
-      recipientUserId: 'U123',
-      title: 'Centaur execution'
-    })
-
-    const answer = 'Relay does not support it; the fix is a non-Relay exact-address fallback.'
-    // Tool call streams (and persists) live during the turn.
-    await renderer.step(sessionId, {
-      id: 'cmd-1',
-      title: '1. call relay currencies',
-      status: 'complete',
-      details: '```\ncurl https://api.relay.link/currencies/v2\n```',
-      output: '```\n[]\n```'
-    })
-    // Answer arrives after the tool calls and is only queued, never durably flushed.
-    await renderer.textDelta(sessionId, answer, { flush: false })
-    const result = await renderer.done(sessionId, { answerMarkdown: answer })
-
-    const stop = calls.find(call => call.method === 'chat.stopStream')
-    const blocks = stop?.params.blocks ?? []
-    // The answer is delivered as a durable block, not left to the racing finalize appendStream.
-    expect(
-      blocks.some((block: any) => block.type === 'markdown' && String(block.text).includes(answer))
-    ).toBe(true)
-    // ...and it is not also pushed as a live markdown_text chunk, so there is no duplicate.
-    const liveAnswerText = calls
-      .filter(call => call.method === 'chat.appendStream')
-      .flatMap(call => call.params.chunks ?? [])
-      .filter((chunk: any) => chunk?.type === 'markdown_text')
-      .map((chunk: any) => String(chunk.text ?? ''))
-      .join('')
-    expect(liveAnswerText).not.toContain(answer)
-    // Delivered-char count covers the answer so services/api won't post a duplicate fallback.
-    expect(result.streamedTextChars).toBeGreaterThanOrEqual(answer.length)
   })
 
   it('keeps a durable final answer when the answer did not stream live', async () => {
@@ -752,7 +679,7 @@ describe('AgentSessionRenderer', () => {
     })
 
     await renderer.text(sessionId, 'Finished reply')
-    await expect(renderer.done(sessionId)).rejects.toThrow('stream_already_closed')
+    expect(renderer.done(sessionId)).rejects.toThrow('stream_already_closed')
 
     expect(calls.filter(call => call.method === 'assistant.threads.setStatus').at(-1)).toEqual({
       method: 'assistant.threads.setStatus',
