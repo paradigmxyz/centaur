@@ -37,6 +37,7 @@ from api.proxy_config import (
 )
 from api.sandbox.base import SandboxBackend, SandboxSession
 from api.sandbox.config import (
+    OBSERVABILITY_NO_PROXY_HOSTS,
     build_harness_cmd,
     container_env,
     image,
@@ -453,7 +454,12 @@ def _build_tool_server_container(
     secret_name = _secret_env_name()
     proxy_url = f"http://{firewall_host}:{_proxy_port()}"
     api_host = urlsplit(api_url).hostname or ""
-    no_proxy_hosts = ["localhost", "127.0.0.1", firewall_host]
+    no_proxy_hosts = [
+        "localhost",
+        "127.0.0.1",
+        firewall_host,
+        *OBSERVABILITY_NO_PROXY_HOSTS,
+    ]
     if api_host:
         no_proxy_hosts.append(api_host)
     no_proxy = ",".join(dict.fromkeys(no_proxy_hosts))

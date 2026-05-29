@@ -273,7 +273,15 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     assert env_map["AMP_API_KEY"] == "AMP_API_KEY"
     assert env_map["OPENAI_API_KEY"] == "OPENAI_API_KEY"
     assert env_map["CENTAUR_TRACE_ID"] == "00000000-0000-0000-0000-000000000123"
-    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,firewall.internal,api.internal"
+    no_proxy_hosts = env_map["NO_PROXY"].split(",")
+    assert no_proxy_hosts[:6] == [
+        "localhost",
+        "127.0.0.1",
+        "firewall.internal",
+        "victoriametrics",
+        "victorialogs",
+        "api.internal",
+    ]
     assert env_map["no_proxy"] == env_map["NO_PROXY"]
 
 
@@ -325,6 +333,8 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
     # replaces, so it can't break sandbox egress.
     no_proxy_hosts = env_map["NO_PROXY"].split(",")
     assert "firewall.internal" in no_proxy_hosts
+    assert "victoriametrics" in no_proxy_hosts
+    assert "victorialogs" in no_proxy_hosts
     assert "api.internal" in no_proxy_hosts
     assert "metrics.internal" in no_proxy_hosts
     assert env_map["no_proxy"] == env_map["NO_PROXY"]
@@ -355,6 +365,8 @@ def test_container_env_extra_env_cannot_drop_critical_no_proxy_hosts(
     no_proxy_hosts = env_map["NO_PROXY"].split(",")
     assert "centaur-centaur-api" in no_proxy_hosts  # real API host survives
     assert "firewall.internal" in no_proxy_hosts
+    assert "victoriametrics" in no_proxy_hosts
+    assert "victorialogs" in no_proxy_hosts
     assert "centaur-api" in no_proxy_hosts  # operator's extra is still honored
 
 
@@ -591,6 +603,9 @@ def test_tool_server_container_has_verifiable_api_key(
     assert claims is not None
     assert claims["thread_key"] == "slack:C123:123.456"
     assert claims["container_id"] == "centaur-sandbox-pod-abc"
+    no_proxy_hosts = env["NO_PROXY"].split(",")
+    assert "victoriametrics" in no_proxy_hosts
+    assert "victorialogs" in no_proxy_hosts
 
 
 @pytest.mark.asyncio
@@ -788,10 +803,15 @@ async def test_create_builds_per_sandbox_proxy_resources(
     )
     assert sandbox_env["FIREWALL_HOST"] == proxy_service_name
     assert sandbox_env["HTTPS_PROXY"] == f"http://{proxy_service_name}:8080"
-    assert (
-        sandbox_env["NO_PROXY"]
-        == f"localhost,127.0.0.1,{proxy_service_name},api.internal"
-    )
+    no_proxy_hosts = sandbox_env["NO_PROXY"].split(",")
+    assert no_proxy_hosts[:6] == [
+        "localhost",
+        "127.0.0.1",
+        proxy_service_name,
+        "victoriametrics",
+        "victorialogs",
+        "api.internal",
+    ]
     assert proxy_pod["metadata"]["labels"] == {
         "centaur.ai/iron-proxy": "true",
         "centaur.ai/sandbox-id": session.sandbox_id,

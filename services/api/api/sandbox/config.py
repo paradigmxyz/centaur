@@ -66,6 +66,8 @@ _PINNED_PROXY_ENV_KEYS = frozenset(
 
 _NO_PROXY_ENV_KEYS = frozenset({"NO_PROXY", "no_proxy"})
 
+OBSERVABILITY_NO_PROXY_HOSTS = ("victoriametrics", "victorialogs")
+
 
 def _set_env(env: list[str], name: str, value: str) -> None:
     prefix = f"{name}="
@@ -198,7 +200,12 @@ def container_env(
     if resume_thread_id:
         env.append(f"AMP_CONTINUE_THREAD_ID={resume_thread_id}")
 
-    no_proxy_hosts = ["localhost", "127.0.0.1", firewall_host]
+    no_proxy_hosts = [
+        "localhost",
+        "127.0.0.1",
+        firewall_host,
+        *OBSERVABILITY_NO_PROXY_HOSTS,
+    ]
     api_host = urlsplit(api_url).hostname
     if api_host:
         no_proxy_hosts.append(api_host)
