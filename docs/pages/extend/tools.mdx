@@ -85,6 +85,24 @@ Each entry in `secrets` declares one credential the tool can request with
 
 Use `optional_secrets` for credentials the tool can run without.
 
+### Required secrets gate discovery
+
+Under the `env` secret source (`FIREWALL_MANAGER_SECRET_SOURCE=env`, the default),
+a tool is only discovered when **every** credential in its `secrets` list resolves
+to a non-empty environment variable. A tool whose required secret is unset is
+skipped at discovery — it never appears in `GET /tools` and contributes no secrets
+to iron-proxy — and the API logs `tool_skipped_missing_secrets`. This keeps the
+agent from being offered a tool whose calls would only fail later at the network
+boundary.
+
+Tools with no required secrets (`secrets = []`, e.g. public APIs) always load, and
+`optional_secrets` never gate discovery.
+
+Under the 1Password sources (`onepassword`, `onepassword-connect`) the values live
+at `op://…` rather than environment variables, so env-presence can't prove a
+credential exists: the gate is a no-op there and every tool is discovered (the API
+logs `tool_secret_gate_inactive`).
+
 ## Write the client
 
 `client.py` exports a `_client()` factory. Public methods on the returned object

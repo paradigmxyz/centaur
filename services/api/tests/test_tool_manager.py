@@ -16,9 +16,16 @@ from api.tool_manager import (  # noqa: E402
     _LIFECYCLE_METHODS,
     _describe_method_docstring,
     _friendly_type_name,
+    _missing_required_secret_env,
     _normalize_for_serialization,
+    _secret_env_refs,
     _tool_arg_validation_error,
     _to_toon,
+    HmacHeader,
+    HmacSignSecret,
+    HttpSecret,
+    OAuthFieldSource,
+    OAuthTokenSecret,
     ToolManager,
     ToolMethod,
 )
@@ -39,7 +46,10 @@ class TestDescribeMethodDocstring:
         assert _describe_method_docstring("   \n  \n") == ""
 
     def test_single_line_docstring_returned_verbatim(self):
-        assert _describe_method_docstring("Search Slack for messages.") == "Search Slack for messages."
+        assert (
+            _describe_method_docstring("Search Slack for messages.")
+            == "Search Slack for messages."
+        )
 
     def test_multi_paragraph_description_preserved(self):
         doc = """Hybrid research engine.
@@ -462,7 +472,12 @@ OVERLAY_TOOL_CLIENT = FAKE_TOOL_CLIENT.replace(
 )
 
 
-def test_discover_loads_fake_tools_with_shadowing_personas_and_failures(tmp_path: Path):
+def test_discover_loads_fake_tools_with_shadowing_personas_and_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The discovery gate is active under the default env secret source, so the
+    # alpha overlay's required secret must be present for it to load.
+    monkeypatch.setenv("REQ_TOKEN", "tok")
     base_tools = tmp_path / "base"
     overlay_tools = tmp_path / "overlay"
 
@@ -509,6 +524,145 @@ def test_discover_loads_fake_tools_with_shadowing_personas_and_failures(tmp_path
     assert "code-reviewer" not in manager.tools
 
 
+class TestSecretDiscoveryGate:
+    """Discovery gating on required-secret env-var availability."""
+
+    def test_tool_skipped_when_required_secret_env_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("NEEDS_KEY", raising=False)
+        tools_dir = tmp_path / "tools"
+        _write_tool(tools_dir, "gated", FAKE_TOOL_CLIENT, secrets=["NEEDS_KEY"])
+
+        manager = ToolManager(tools_dir)
+        loaded = manager.discover()
+
+        assert [t.name for t in loaded] == []
+        assert "gated" not in manager.tools
+        assert [g["name"] for g in manager.gated_tools] == ["gated"]
+        assert manager.gated_tools[0]["missing_secrets"] == ["NEEDS_KEY"]
+
+    def test_tool_loaded_when_required_secret_env_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("NEEDS_KEY", "value")
+        tools_dir = tmp_path / "tools"
+        _write_tool(tools_dir, "gated", FAKE_TOOL_CLIENT, secrets=["NEEDS_KEY"])
+
+        manager = ToolManager(tools_dir)
+        loaded = manager.discover()
+
+        assert [t.name for t in loaded] == ["gated"]
+        assert manager.gated_tools == []
+
+    def test_empty_required_secret_env_counts_as_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("NEEDS_KEY", "")
+        tools_dir = tmp_path / "tools"
+        _write_tool(tools_dir, "gated", FAKE_TOOL_CLIENT, secrets=["NEEDS_KEY"])
+
+        manager = ToolManager(tools_dir)
+        loaded = manager.discover()
+
+        assert [t.name for t in loaded] == []
+        assert [g["name"] for g in manager.gated_tools] == ["gated"]
+
+    def test_tool_with_no_required_secrets_always_loads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("OPT_ONLY", raising=False)
+        tools_dir = tmp_path / "tools"
+        # No required secrets; an unset optional secret must not gate.
+        _write_tool(
+            tools_dir, "public", FAKE_TOOL_CLIENT, optional_secrets=["OPT_ONLY"]
+        )
+
+        manager = ToolManager(tools_dir)
+        loaded = manager.discover()
+
+        assert [t.name for t in loaded] == ["public"]
+        assert manager.gated_tools == []
+
+    def test_gate_is_noop_under_onepassword_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+        monkeypatch.delenv("NEEDS_KEY", raising=False)
+        tools_dir = tmp_path / "tools"
+        _write_tool(tools_dir, "gated", FAKE_TOOL_CLIENT, secrets=["NEEDS_KEY"])
+
+        manager = ToolManager(tools_dir)
+        loaded = manager.discover()
+
+        assert [t.name for t in loaded] == ["gated"]
+        assert manager.gated_tools == []
+
+
+class TestSecretEnvRefHelpers:
+    """Env-ref enumeration and missing-secret detection for compound secrets."""
+
+    def test_http_secret_refs_use_secret_ref(self):
+        secret = HttpSecret(
+            name="API_KEY",
+            secret_ref="API_KEY",
+            match_headers=("Authorization",),
+        )
+        assert _secret_env_refs(secret) == {"API_KEY"}
+
+    def test_oauth_token_refs_span_fields_and_endpoint_headers(self):
+        secret = OAuthTokenSecret(
+            name="oauth",
+            grant="client_credentials",
+            hosts=("api.example.com",),
+            fields=(
+                ("client_id", OAuthFieldSource(secret_ref="OA_CLIENT_ID")),
+                ("client_secret", OAuthFieldSource(secret_ref="OA_CLIENT_SECRET")),
+            ),
+            token_endpoint_headers=(
+                ("X-Extra", OAuthFieldSource(secret_ref="OA_EXTRA")),
+            ),
+        )
+        assert _secret_env_refs(secret) == {
+            "OA_CLIENT_ID",
+            "OA_CLIENT_SECRET",
+            "OA_EXTRA",
+        }
+
+    def test_hmac_secret_refs_span_credentials(self):
+        secret = HmacSignSecret(
+            name="hmac",
+            hosts=("api.example.com",),
+            credentials=(
+                ("secret", OAuthFieldSource(secret_ref="HMAC_SECRET")),
+                ("key_id", OAuthFieldSource(secret_ref="HMAC_KEY_ID")),
+            ),
+            headers=(HmacHeader(name="X-Sig", value="{{.Signature}}"),),
+            algorithm="sha256",
+            key_encoding="hex",
+            output_encoding="hex",
+            message="{{.Timestamp}}",
+            timestamp_format="unix_seconds",
+        )
+        assert _secret_env_refs(secret) == {"HMAC_SECRET", "HMAC_KEY_ID"}
+
+    def test_missing_required_secret_env_reports_unset_compound_refs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("OA_CLIENT_ID", "present")
+        monkeypatch.delenv("OA_CLIENT_SECRET", raising=False)
+        secret = OAuthTokenSecret(
+            name="oauth",
+            grant="client_credentials",
+            hosts=("api.example.com",),
+            fields=(
+                ("client_id", OAuthFieldSource(secret_ref="OA_CLIENT_ID")),
+                ("client_secret", OAuthFieldSource(secret_ref="OA_CLIENT_SECRET")),
+            ),
+        )
+        assert _missing_required_secret_env([secret]) == ["OA_CLIENT_SECRET"]
+
+
 @pytest.mark.asyncio
 async def test_call_tool_invokes_sync_and_async_methods_with_secret_placeholders(
     tmp_path: Path,
@@ -517,6 +671,9 @@ async def test_call_tool_invokes_sync_and_async_methods_with_secret_placeholders
     from centaur_sdk.backends import registry
 
     monkeypatch.setattr(registry, "_backend", _NullBackend())
+    # Required secret must be present for the alpha tool to pass the discovery
+    # gate under the default env secret source.
+    monkeypatch.setenv("REQ_TOKEN", "tok")
     tools_dir = tmp_path / "tools"
     _write_tool(
         tools_dir,
@@ -599,6 +756,9 @@ async def test_tool_rest_router_lists_describes_and_invokes_tools(
     from centaur_sdk.backends import registry
 
     monkeypatch.setattr(registry, "_backend", _NullBackend())
+    # Required secret must be present for the alpha tool to pass the discovery
+    # gate under the default env secret source.
+    monkeypatch.setenv("REQ_TOKEN", "tok")
     tools_dir = tmp_path / "tools"
     _write_tool(
         tools_dir,
@@ -657,7 +817,7 @@ async def test_tool_rest_router_lists_describes_and_invokes_tools(
         missing_response = await client.post("/tools/alpha/missing", json={})
         assert missing_response.status_code == 200
         assert missing_response.json()["result"] == (
-            '{"error": "Method \'missing\' not found in tool \'alpha\'", '
+            "{\"error\": \"Method 'missing' not found in tool 'alpha'\", "
             '"available_methods": ["async_echo", "secret_values", "sync_echo"]}'
         )
 

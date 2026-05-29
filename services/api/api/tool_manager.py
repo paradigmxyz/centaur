@@ -396,9 +396,7 @@ def _parse_oauth_fields(
                 f"oauth_token entry {secret_name!r} field {field_name!r} is not "
                 f"valid for grant {grant!r}; allowed: {sorted(allowed)}"
             )
-        parsed[field_name] = _parse_oauth_field_source(
-            secret_name, field_name, raw
-        )
+        parsed[field_name] = _parse_oauth_field_source(secret_name, field_name, raw)
     missing = required - parsed.keys()
     if missing:
         raise ValueError(
@@ -597,8 +595,7 @@ def _parse_hmac_credentials(
     """Parse ``credentials`` for an ``hmac_sign`` entry; require ``secret``."""
     if not isinstance(raw, dict) or not raw:
         raise ValueError(
-            f"hmac_sign entry {secret_name!r} 'credentials' must be a non-empty "
-            f"table"
+            f"hmac_sign entry {secret_name!r} 'credentials' must be a non-empty table"
         )
     parsed: dict[str, OAuthFieldSource] = {}
     for field_name, value in raw.items():
@@ -829,7 +826,9 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
             replacer=entry,
         )
     if not isinstance(entry, dict):
-        raise ValueError(f"secret entry must be a string or table, got {type(entry).__name__}")
+        raise ValueError(
+            f"secret entry must be a string or table, got {type(entry).__name__}"
+        )
     name = entry.get("name")
     if not isinstance(name, str) or not name:
         raise ValueError(f"secret entry missing 'name': {entry!r}")
@@ -1055,6 +1054,52 @@ async def _resolve_secrets(secrets: list[SecretDef]) -> dict[str, str]:
     return {s.name: s.replacer for s in secrets if _is_replace_secret(s)}
 
 
+# Secret sources whose values live in 1Password rather than env vars. Under
+# these, env-var presence can't prove a credential exists, so the discovery
+# gate below (``_missing_required_secret_env``) is a no-op. Mirrors
+# ``proxy_config._secret_source_kind`` without importing it — ``proxy_config``
+# imports from this module, so the dependency must not run the other way.
+_OP_SECRET_SOURCES: frozenset[str] = frozenset({"onepassword", "onepassword-connect"})
+
+
+def _secret_source_is_env() -> bool:
+    """True when iron-proxy resolves secrets from env vars (the default).
+
+    Read live (not cached) so reloads and tests reflect the current value.
+    Unknown sources count as env-like, matching ``_build_source`` in
+    ``proxy_config`` which falls back to an env source for anything outside
+    ``_OP_SECRET_SOURCES``.
+    """
+    source = os.getenv("FIREWALL_MANAGER_SECRET_SOURCE", "env").strip().lower()
+    return source not in _OP_SECRET_SOURCES
+
+
+def _secret_env_refs(secret: SecretDef) -> set[str]:
+    """Env-var names a secret depends on under env secret-source resolution.
+
+    Compound secrets (oauth/brokered tokens, hmac signing) draw from several
+    refs; flat secrets resolve a single ``secret_ref``.
+    """
+    if isinstance(secret, (OAuthTokenSecret, BrokeredTokenSecret)):
+        refs = {src.secret_ref for _, src in secret.fields}
+        refs.update(src.secret_ref for _, src in secret.token_endpoint_headers)
+        return refs
+    if isinstance(secret, HmacSignSecret):
+        return {src.secret_ref for _, src in secret.credentials}
+    # HttpSecret / GcpAuthSecret / PgDsnSecret each resolve one ref.
+    return {secret.secret_ref}
+
+
+def _missing_required_secret_env(secrets: list[SecretDef]) -> list[str]:
+    """Required-secret env refs that are unset or empty, sorted and de-duped."""
+    missing: set[str] = set()
+    for secret in secrets:
+        for ref in _secret_env_refs(secret):
+            if not os.getenv(ref):
+                missing.add(ref)
+    return sorted(missing)
+
+
 _MAX_INLINE_TOOL_BINARY_BYTES = max(
     1024, int(os.getenv("TOOL_BINARY_INLINE_MAX_BYTES", str(1 * 1024 * 1024)))
 )
@@ -1174,7 +1219,9 @@ async def _capture_live_slack_send(
         return None
     active_channel = parts[2]
     active_thread_ts = parts[3]
-    requested_channel = str(args.get("channel") or args.get("channel_id") or "").lstrip("#")
+    requested_channel = str(args.get("channel") or args.get("channel_id") or "").lstrip(
+        "#"
+    )
     requested_thread_ts = str(args.get("thread_ts") or "")
     channel_is_id = bool(re.match(r"^[CDG][A-Z0-9]+$", requested_channel))
     if channel_is_id and requested_channel != active_channel:
@@ -1618,6 +1665,9 @@ class ToolManager:
         self.tools: dict[str, LoadedTool] = {}
         self.personas: dict[str, LoadedPersona] = {}
         self.load_failures: list[dict[str, str]] = []
+        # Tools skipped at discovery because required secret env vars are unset
+        # (env secret source only). Each: {"name", "missing_secrets": [...]}.
+        self.gated_tools: list[dict[str, Any]] = []
         self._reload_lock = threading.Lock()
 
     def _collect_tools(self) -> list[tuple[Path, dict]]:
@@ -1633,6 +1683,8 @@ class ToolManager:
         """
         seen: dict[str, int] = {}
         tools: list[tuple[Path, dict]] = []
+        self.gated_tools = []
+        gate_on_env = _secret_source_is_env()
         for dir_idx, base_dir in enumerate(self.tools_dirs):
             if not base_dir.exists():
                 continue
@@ -1704,6 +1756,26 @@ class ToolManager:
                 # Skip persona entries — they are loaded separately
                 if tool_conf.get("type") == "persona":
                     continue
+
+                # Discovery gate: under the env secret source, a tool whose
+                # required secret env vars aren't set can't actually work — the
+                # call would only fail later at the iron-proxy boundary — so
+                # don't advertise it. No-op under 1Password sources, where the
+                # values aren't env vars. ``optional_secrets`` never gate. If an
+                # overlay tool is gated out, the earlier base tool of the same
+                # name (already collected) remains as a sane fallback.
+                if gate_on_env:
+                    missing = _missing_required_secret_env(secrets)
+                    if missing:
+                        self.gated_tools.append(
+                            {"name": name, "missing_secrets": missing}
+                        )
+                        log.info(
+                            "tool_skipped_missing_secrets",
+                            tool=name,
+                            missing_secrets=missing,
+                        )
+                        continue
 
                 meta = {
                     "name": name,
@@ -1789,8 +1861,15 @@ class ToolManager:
         existing = [d for d in self.tools_dirs if d.exists()]
         if not existing:
             self.load_failures = []
+            self.gated_tools = []
             log.info("tools_dirs_missing", paths=[str(d) for d in self.tools_dirs])
             return []
+
+        if not _secret_source_is_env():
+            log.info(
+                "tool_secret_gate_inactive",
+                secret_source=os.getenv("FIREWALL_MANAGER_SECRET_SOURCE", "env"),
+            )
 
         tool_entries = self._collect_tools()
 
@@ -1832,6 +1911,8 @@ class ToolManager:
             loaded=len(loaded),
             failed=len(load_failures),
             failed_tools=[f["name"] for f in load_failures],
+            gated=len(self.gated_tools),
+            gated_tools=[g["name"] for g in self.gated_tools],
             personas=list(personas.keys()),
         )
         return loaded
@@ -1921,7 +2002,10 @@ class ToolManager:
                 name="openai-codex",
                 hosts=("chatgpt.com",),
                 fields=(
-                    ("client_id", OAuthFieldSource(secret_ref="OPENAI_CODEX_CLIENT_ID")),
+                    (
+                        "client_id",
+                        OAuthFieldSource(secret_ref="OPENAI_CODEX_CLIENT_ID"),
+                    ),
                     ("refresh_token", OAuthFieldSource(secret_ref="OPENAI_CODEX_BLOB")),
                 ),
                 token_endpoint="https://auth.openai.com/oauth/token",
@@ -2473,7 +2557,9 @@ class ToolManager:
             except (SystemExit, Exception) as e:
                 duration_ms = round((time.monotonic() - t0) * 1000)
                 if isinstance(e, asyncio.TimeoutError):
-                    error_msg = f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
+                    error_msg = (
+                        f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
+                    )
                 elif isinstance(e, SystemExit):
                     error_msg = f"sys.exit({e.code})"
                 else:

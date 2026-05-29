@@ -61,6 +61,7 @@ Optional required-by-mode variables:
 | `WARM_POOL_ENABLED` | `api.warmPoolEnabled`. | Starts warm sandbox replenishment. |
 | `PLUGIN_WATCHER_ENABLED` | `api.pluginWatcherEnabled`. | Enables tool and workflow hot-reload watchers. |
 | `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from base tools and overlay; fallback to `PLUGINS_DIR`. | Tool discovery paths. |
+| `FIREWALL_MANAGER_SECRET_SOURCE` (discovery gate) | `ironProxy.secretSource`. | Under `env`, a tool is discovered only when all of its required `secrets` resolve to non-empty env vars; missing ones are skipped (`tool_skipped_missing_secrets`). No-op under `onepassword`/`onepassword-connect`. See [Tools](/extend/tools). |
 | `WORKFLOW_DIRS` | Chart-rendered from base workflows and overlay. | Workflow discovery paths. |
 | `CENTAUR_OVERLAY_DIR` | `overlay.mountPath`. | Mounted overlay root for tools, workflows, prompts, migrations, and skills. |
 | `CENTAUR_OVERLAY_IMAGE`, `CENTAUR_OVERLAY_IMAGE_PULL_POLICY`, `CENTAUR_OVERLAY_IMAGE_SOURCE_PATH` | `overlay.image.*`. | Overlay image copied into sandbox pods. |
