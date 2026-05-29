@@ -1,1 +1,1 @@
-"""Web search and deep research via Exa and Claude."""
+"""Web search and deep research via Parallel Web Systems."""

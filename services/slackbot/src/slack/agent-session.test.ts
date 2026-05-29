@@ -454,7 +454,6 @@ describe('AgentSessionRenderer', () => {
     })
     await renderer.text(sessionId, 'Live answer body.')
     await renderer.done(sessionId, {
-      commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Live answer body.'
     })
 
@@ -508,7 +507,6 @@ describe('AgentSessionRenderer', () => {
       status: 'in_progress'
     })
     await renderer.done(sessionId, {
-      commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Final answer body.'
     })
 
@@ -523,7 +521,7 @@ describe('AgentSessionRenderer', () => {
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')
   })
 
-  it('shows thinking text by default and renders the answer in markdown on finalize', async () => {
+  it('does not render a context block on finalize', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -561,19 +559,12 @@ describe('AgentSessionRenderer', () => {
     })
 
     await renderer.done(sessionId, {
-      commentaryMarkdown: 'Planning the tool calls.',
       answerMarkdown: 'Done: five tools called.'
     })
 
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []
-    expect(
-      blocks.some(
-        (block: any) =>
-          block.type === 'context' &&
-          String(block.elements?.[0]?.text ?? '').includes('Planning the tool calls.')
-      )
-    ).toBe(true)
+    expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(
       blocks.some(
         (block: any) =>
@@ -833,7 +824,7 @@ describe('AgentSessionRenderer', () => {
       recipientTeamId: 'T123',
       recipientUserId: 'U123',
       title: 'Centaur execution',
-      header: 'base · claude-opus-4-7'
+      header: 'base · claude-opus-4-8'
     })
 
     await renderer.step(sessionId, {
@@ -848,7 +839,7 @@ describe('AgentSessionRenderer', () => {
     const chunks = start?.params.chunks ?? []
     expect(chunks[0]).toEqual({
       type: 'markdown_text',
-      text: '_base · claude-opus-4-7_\n'
+      text: '_base · claude-opus-4-8_\n'
     })
     const planUpdateIdx = chunks.findIndex((chunk: any) => chunk.type === 'plan_update')
     expect(planUpdateIdx).toBeGreaterThan(0)

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'bun:test'
-import { sanitizeLogString, sanitizeLogValue } from './logging'
+import { describe, expect, it, mock } from 'bun:test'
+import { logInfo, sanitizeLogString, sanitizeLogValue } from './logging'
 
 describe('Slackbot log sanitization', () => {
   it('redacts nested PII and secrets', () => {
@@ -40,5 +40,20 @@ describe('Slackbot log sanitization', () => {
     expect(sanitizeLogString('Processed channel C123 at 2026-05-15T10:00:00Z')).toBe(
       'Processed channel C123 at 2026-05-15T10:00:00Z'
     )
+  })
+
+  it('adds log version metadata to structured log helper calls', () => {
+    const originalLog = console.log
+    console.log = mock(() => {}) as typeof console.log
+    try {
+      logInfo('slack_test_event', { thread_key: 'slack:C123:1' })
+
+      expect(console.log).toHaveBeenCalledWith('slack_test_event', {
+        log_version_uuid: '013ca634-6a30-4047-8511-8e5483f313ea',
+        thread_key: 'slack:C123:1'
+      })
+    } finally {
+      console.log = originalLog
+    }
   })
 })

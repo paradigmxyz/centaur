@@ -71,8 +71,20 @@ PYEOF
 fi
 
 # ── Codex settings ──────────────────────────────────────────────────────────
+# CODEX_AUTH_MODE selects how codex authenticates with the upstream:
+#   - api_key (default): codex uses an OPENAI_API_KEY against api.openai.com.
+#     The entrypoint runs `codex login --with-api-key` below, which overwrites
+#     auth.json.
+#   - access_token: codex uses a ChatGPT-style access token against
+#     chatgpt.com. The default auth.json (auth_mode: chatgpt) is always
+#     installed and the api-key login step is skipped so iron-proxy can
+#     inject the brokered Bearer + chatgpt-account-id headers.
+CODEX_AUTH_MODE="${CODEX_AUTH_MODE:-api_key}"
 mkdir -p "$HOME_DIR/.codex"
-if [ ! -f "$HOME_DIR/.codex/auth.json" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
+if [ "$CODEX_AUTH_MODE" = "access_token" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
+    cp /etc/centaur/codex-auth.default.json "$HOME_DIR/.codex/auth.json"
+    chmod 600 "$HOME_DIR/.codex/auth.json"
+elif [ ! -f "$HOME_DIR/.codex/auth.json" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
     cp /etc/centaur/codex-auth.default.json "$HOME_DIR/.codex/auth.json"
     chmod 600 "$HOME_DIR/.codex/auth.json"
 fi
@@ -93,6 +105,34 @@ mkdir -p "$HOME_DIR/.claude"
 if [ -f "$HARNESS_CONFIG_DIR/claude/settings.json" ]; then
     cp "$HARNESS_CONFIG_DIR/claude/settings.json" "$HOME_DIR/.claude/settings.json"
 fi
+
+# CLAUDE_CODE_AUTH_MODE selects how Claude Code authenticates with the upstream
+# (mirrors CODEX_AUTH_MODE):
+#   - api_key (default): Claude Code uses ANTHROPIC_API_KEY against
+#     api.anthropic.com. The harness stub key is left in the env; iron-proxy's
+#     ANTHROPIC_API_KEY HttpSecret rewrites the X-Api-Key header on the wire.
+#   - access_token: Claude Code runs as a Claude.ai Pro or Max subscription
+#     user. We install a dummy ~/.claude/.credentials.json so the CLI emits
+#     OAuth-shaped requests, unset the API-key stub so it does not fall back
+#     to X-Api-Key, and let iron-token-broker mint a real Bearer at request
+#     time via the anthropic-claude brokered_token secret.
+CLAUDE_CODE_AUTH_MODE="${CLAUDE_CODE_AUTH_MODE:-api_key}"
+case "$CLAUDE_CODE_AUTH_MODE" in
+    api_key)
+        :
+        ;;
+    access_token)
+        unset ANTHROPIC_API_KEY
+        if [ -f /etc/centaur/claude-credentials.default.json ]; then
+            cp /etc/centaur/claude-credentials.default.json "$HOME_DIR/.claude/.credentials.json"
+            chmod 600 "$HOME_DIR/.claude/.credentials.json"
+        fi
+        ;;
+    *)
+        echo "unknown CLAUDE_CODE_AUTH_MODE: $CLAUDE_CODE_AUTH_MODE (expected api_key or access_token)" >&2
+        exit 1
+        ;;
+esac
 
 # ── Pi-mono settings ─────────────────────────────────────────────────────────
 mkdir -p "$HOME_DIR/.pi/agent/extensions"
@@ -189,9 +229,13 @@ fi
 
 # Codex reads its auth file when the app server starts. Complete this before
 # signaling readiness, otherwise warm pods can be claimed with no auth loaded.
-CODEX_KEY="${CODEX_API_KEY:-${OPENAI_API_KEY:-}}"
-if [ -n "$CODEX_KEY" ]; then
-    echo "$CODEX_KEY" | codex login --with-api-key 2>/dev/null || true
+# Skipped under access_token mode — that path relies on the chatgpt auth.json
+# installed above plus iron-proxy injecting the real Bearer at request time.
+if [ "$CODEX_AUTH_MODE" != "access_token" ]; then
+    CODEX_KEY="${CODEX_API_KEY:-${OPENAI_API_KEY:-}}"
+    if [ -n "$CODEX_KEY" ]; then
+        echo "$CODEX_KEY" | codex login --with-api-key 2>/dev/null || true
+    fi
 fi
 
 # Signal readiness

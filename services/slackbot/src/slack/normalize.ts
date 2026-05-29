@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api'
+import { logWarn } from '../logging'
 import type { NormalizedPart, NormalizedSlackEvent, SlackEnvelope, SlackMessageFile } from './types'
 
 type SlackMessageEvent = {
@@ -156,7 +157,7 @@ async function collectThreadHistorySafely(opts: {
   try {
     return await collectThreadHistory(opts)
   } catch (error) {
-    console.warn('slack_thread_history_collect_failed', {
+    logWarn('slack_thread_history_collect_failed', {
       channel: opts.channel,
       thread_ts: opts.threadTs,
       error: error instanceof Error ? error.message : String(error)
@@ -245,14 +246,10 @@ function slackMessageText(
 }
 
 function messageMentionsBot(
-  message: Pick<SlackMessageEvent, 'text' | 'blocks' | 'attachments'>,
+  message: Pick<SlackMessageEvent, 'text'>,
   botUserId: string
 ): boolean {
-  return uniqueNonEmpty([
-    normalizeSlackText(message.text ?? ''),
-    normalizeRichTextBlocks(message.blocks),
-    normalizeSlackAttachments(message.attachments)
-  ]).some(text => text.includes(`@${botUserId}`))
+  return typeof message.text === 'string' && message.text.includes(`<@${botUserId}>`)
 }
 
 function slackActorId(

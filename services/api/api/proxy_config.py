@@ -99,6 +99,30 @@ def _build_source(secret_ref: str) -> dict[str, str]:
     return {"type": "env", "var": secret_ref}
 
 
+# Per-sandbox listener that lets a co-located tool-server sidecar reach the
+# core Centaur DB through the proxy (sandboxes are denied direct Postgres
+# egress). Unlike tool ``pg_dsn`` listeners, its upstream is always resolved
+# from an env var: the proxy already has the core DSN via ``envFrom`` the infra
+# secret, so this is robust regardless of the configured secret source.
+CENTAUR_CORE_PG_LISTENER = "centaur_core"
+
+
+def core_pg_listen_port(pg_listen_ports: dict[str, int]) -> int:
+    """Port for the core-DB listener: just past the tool ``pg_dsn`` listeners."""
+    return PG_LISTEN_PORT_BASE + len(pg_listen_ports)
+
+
+def _build_core_pg_listener(
+    *, port: int, dsn_env_var: str, password_env: str
+) -> dict[str, Any]:
+    return {
+        "name": CENTAUR_CORE_PG_LISTENER,
+        "listen": f"0.0.0.0:{port}",
+        "upstream": {"dsn": {"type": "env", "var": dsn_env_var}},
+        "client": {"user": "app_user", "password_env": password_env},
+    }
+
+
 def assign_pg_listen_ports(secrets: list[SecretDef]) -> dict[str, int]:
     """Allocate listen ports for ``PgDsnSecret`` entries.
 
@@ -449,6 +473,7 @@ def render_proxy_yaml(
     base_config: str | None = None,
     *,
     pg_listen_ports: dict[str, int] | None = None,
+    core_pg: dict[str, Any] | None = None,
 ) -> str:
     """Splice managed transforms + postgres listeners into ``base_config`` YAML.
 
@@ -485,6 +510,8 @@ def render_proxy_yaml(
     cfg["transforms"] = transforms
 
     listeners = _build_postgres_listeners(secrets, pg_listen_ports)
+    if core_pg is not None:
+        listeners.append(_build_core_pg_listener(**core_pg))
     if listeners:
         cfg["postgres"] = listeners
     else:

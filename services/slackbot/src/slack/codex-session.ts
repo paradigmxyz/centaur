@@ -249,7 +249,6 @@ export class CodexSessionRenderer {
     await this.publishPendingAssistantText(agentSessionId, state, { force: true })
     const { streamedTextChars } = await this.renderer.done(agentSessionId, {
       streamFinalUpdates: true,
-      commentaryMarkdown: state.commentaryText,
       answerMarkdown: state.answerText
     })
     state.deliveredAnswerChars = streamedTextChars
@@ -557,16 +556,18 @@ function applyAgentMessageUpdate(
   }
 
   if (event?.type === 'assistant') {
-    const cumulative = assistantTextFromAssistantEvent(event)
-    if (!cumulative) return { bufferChanged: false }
+    const text = assistantTextFromAssistantEvent(event)
+    if (!text) return { bufferChanged: false }
     const key = buffer === 'answer' ? 'harnessAnswerText' : 'harnessCommentaryText'
     const before = state[key]
-    if (cumulative === before || before.endsWith(cumulative)) return { bufferChanged: false }
-    state[key] = cumulative.startsWith(before)
-      ? cumulative
-      : before
-        ? `${before}\n${cumulative}`
-        : cumulative
+    if (text === before || before.endsWith(text)) return { bufferChanged: false }
+    if (assistantEventLooksCanonical(event)) {
+      state[key] = text
+    } else if (text.startsWith(before)) {
+      state[key] = text
+    } else {
+      state[key] = before + text
+    }
     recomposeBuffers(state)
     return { bufferChanged: true }
   }
@@ -596,6 +597,18 @@ function assistantTextFromAssistantEvent(event: any): string {
     .map(part => (part?.type === 'text' ? (part.text ?? '') : ''))
     .filter(Boolean)
     .join('')
+}
+
+function assistantEventLooksCanonical(event: any): boolean {
+  const message = event?.message
+  return Boolean(
+    event?.uuid ||
+    event?.request_id ||
+    event?.session_id ||
+    message?.id ||
+    message?.model ||
+    message?.usage
+  )
 }
 
 function logCanonicalCorrection(

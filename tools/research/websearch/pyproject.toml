@@ -1,11 +1,12 @@
 [project]
 name = "websearch"
-description = "Web search and deep research via Exa and Claude"
-version = "0.1.0"
+description = "Web search and deep research via Parallel (free MCP or paid REST); optional Claude synthesis"
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.54.0",
     "httpx>=0.28.0",
+    "parallel-web>=0.6.0",
     "pydantic>=2.10.0",
     "python-dotenv>=1.0.0",
     "rich>=13.0.0",
@@ -19,7 +20,12 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [
-    {type = "http", name = "EXA_API_KEY", match_headers = ["x-api-key"], hosts = ["api.exa.ai"]},
+# `search` works anonymously through the hosted Parallel Search MCP. Set
+# PARALLEL_API_KEY to use the paid REST path and unlock `deep_research`.
+# Set ANTHROPIC_API_KEY to enable the Claude-backed synthesis pipeline on
+# top of search results (reviewer → writer → citation repair).
+optional_secrets = [
+    {type = "http", name = "PARALLEL_API_KEY", match_headers = ["x-api-key", "Authorization"], hosts = ["api.parallel.ai", "search.parallel.ai"]},
     {type = "http", name = "ANTHROPIC_API_KEY", match_headers = ["x-api-key"], hosts = ["api.anthropic.com"]},
 ]
+hosts = ["api.parallel.ai", "search.parallel.ai"]

@@ -374,10 +374,6 @@ class SimilarWebClient:
         params = {"term": query}
         return self._request(f"/v1/app/{store}/search", params=params)
 
-    def get_credits(self) -> dict:
-        """Get remaining API credits."""
-        return self._request("/v3/batch/credits")
-
     def get_categories(self) -> dict:
         """Get list of available industry categories."""
         return self._request("/v1/TopSites/categories")

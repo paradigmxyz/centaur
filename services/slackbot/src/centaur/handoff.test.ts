@@ -50,6 +50,10 @@ describe('CentaurHandoff', () => {
       await handoff.emit(event)
 
       expect(capturedInit).toBeDefined()
+      expect(capturedInit?.headers).toMatchObject({
+        'Content-Type': 'application/json',
+        'X-Centaur-Thread-Key': event.thread_key
+      })
       const bodyText = capturedInit?.body
       expect(typeof bodyText).toBe('string')
       if (typeof bodyText !== 'string') throw new Error('expected JSON request body')

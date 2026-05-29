@@ -34,8 +34,6 @@ export const slackReplyLimits = {
     maxVisibleChars: 6_250
   },
   message: {
-    maxBlocks: 50,
-    /** Max mrkdwn chars for the thinking context block on finalized replies. */
-    thinkingContextChars: 2_800
+    maxBlocks: 50
   }
 } as const

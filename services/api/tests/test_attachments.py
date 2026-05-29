@@ -74,10 +74,11 @@ class TestAttachmentRefConversion:
 # ── Unit: attachment extraction pipeline ────────────────────────────────────
 #
 # The slackbot buffers messages with attachments via POST /agent/messages,
-# which calls _extract_attachments() to store base64 blobs in the attachments
-# table and replace them with lightweight attachment_ref parts.  On flush,
-# messages_to_content_blocks converts attachment_ref → text (curl download
-# instructions) so the sandbox agent can download the files.
+# which calls extract_inline_attachments() (api.runtime_control) to store
+# base64 blobs in the attachments table and replace them with lightweight
+# attachment_ref parts.  On flush, messages_to_content_blocks converts
+# attachment_ref → text (curl download instructions) so the sandbox agent
+# can download the files.
 
 
 class TestAttachmentExtractionPipeline:
@@ -205,7 +206,7 @@ class TestAttachmentExtractionPipeline:
 
     def test_mixed_text_and_document_extraction_flow(self):
         """End-to-end: text + document → after extraction, all blocks are text."""
-        # Simulate the state AFTER _extract_attachments has run:
+        # Simulate the state AFTER extract_inline_attachments has run:
         # the original document part has been replaced with attachment_ref.
         messages = [
             {

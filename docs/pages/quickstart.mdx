@@ -5,9 +5,13 @@ description: Boot Centaur locally and verify the control plane.
 
 # Quickstart
 
-This guide gets you from a fresh checkout to a working local Centaur stack. The
-happy path is: point `kubectl` at a local cluster, bootstrap the required infra
-Secret, run `just up`, verify the API, then run one agent turn without Slack.
+This guide gets you from a fresh checkout to a working local Centaur stack. You
+do not need a full production Kubernetes installation for local setup: a
+lightweight k3s-based cluster is enough. The happy path is: point `kubectl` at
+that cluster, bootstrap the required infra Secret, run `just up`, verify the
+API, then run one agent turn without Slack. If you want the easiest small-host
+path first, start with [Running Centaur on a Mac Mini-style
+setup](/mac-mini-setup).
 
 If you want an agent to drive setup with you, point it at these docs: every page
 is available through `/llms.txt`, `/llms-full.txt`, and static Markdown files
@@ -21,10 +25,11 @@ From the repo root:
 brew install just kubectl helm jq
 ```
 
-You also need Docker and a local Kubernetes cluster. The most direct path on
-macOS is Docker Desktop with Kubernetes enabled, but kind, minikube, and k3d are
-fine as long as `kubectl` points at that local cluster and it can run the Helm
-chart.
+You also need Docker and a local Kubernetes cluster. This can be lightweight:
+k3s works on a small VPS, DigitalOcean droplet, Linux box, or Mac Mini-style
+host. Docker Desktop with Kubernetes enabled, kind, and minikube are also fine
+as long as `kubectl` points at that local cluster and it can run the Helm chart.
+The [Mac Mini-style setup guide](/mac-mini-setup) walks through the k3s path.
 
 Check the target before booting Centaur:
 

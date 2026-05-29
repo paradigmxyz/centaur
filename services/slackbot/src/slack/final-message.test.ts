@@ -52,7 +52,7 @@ describe('sanitizeFinalMessagePayload', () => {
     expect(total).toBeLessThanOrEqual(slackReplyLimits.stream.markdownChunkChars)
   })
 
-  it('shrinks oversized plan + markdown + context compositions toward the byte budget', () => {
+  it('shrinks oversized plan + markdown compositions toward the byte budget', () => {
     const tasks = Array.from({ length: 12 }, (_, index) => ({
       id: `cmd-${index}`,
       title: `Run command ${index}`,
@@ -84,11 +84,7 @@ describe('sanitizeFinalMessagePayload', () => {
     }))
     const blocks = sanitizeFinalMessagePayload([
       planBlock('Centaur execution', tasks, 'plan-1') as AnyBlock,
-      { type: 'markdown', text: 'Final answer ' + 'w'.repeat(8_000) },
-      {
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: 'Streamed thinking summary.' }]
-      }
+      { type: 'markdown', text: 'Final answer ' + 'w'.repeat(8_000) }
     ])
     expect(estimatePayloadBytes(blocks)).toBeLessThanOrEqual(
       slackReplyLimits.mixedBodyAndPlan.maxPayloadBytes

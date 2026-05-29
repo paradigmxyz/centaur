@@ -193,6 +193,44 @@ describe('normalizeSlackEnvelope', () => {
     expect(normalized?.slack.user_team).toBe('TEXTERNAL')
   })
 
+  it('does not treat a mention inside quoted rich text as an actionable mention', async () => {
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-quoted-mention',
+        event: {
+          type: 'message',
+          user: 'U123',
+          channel: 'C123',
+          channel_type: 'channel',
+          ts: '1778875070.942789',
+          text: 'Following up',
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_quote',
+                  elements: [{ type: 'user', user_id: 'UBOT' }, { type: 'text', text: ' help' }]
+                },
+                {
+                  type: 'rich_text_section',
+                  elements: [{ type: 'text', text: 'Following up' }]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      botUserId: 'UBOT',
+      client
+    })
+
+    expect(normalized?.is_mention).toBe(false)
+    expect(normalized?.parts).toEqual([{ type: 'text', text: 'help\nFollowing up' }])
+  })
+
   it('keeps non-self bot-authored alert mentions actionable', async () => {
     const normalized = await normalizeSlackEnvelope({
       envelope: {

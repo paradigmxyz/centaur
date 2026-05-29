@@ -27,6 +27,8 @@ import sys
 import threading
 from typing import Any
 
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+
 APP: subprocess.Popen[str] | None = None
 WRITE_LOCK = threading.Lock()
 SHUTTING_DOWN = False
@@ -203,7 +205,8 @@ def _build_claude_cmd() -> list[str]:
     ]
     if os.path.isfile("AGENTS.md"):
         cmd.extend(["--append-system-prompt-file", "AGENTS.md"])
-    model = (os.environ.get("CLAUDE_MODEL") or "opus").strip() or "opus"
+    model = (os.environ.get("CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL).strip()
+    model = model or DEFAULT_CLAUDE_MODEL
     cmd.extend(["--model", model])
     resume = _resume_session_id()
     if resume:
