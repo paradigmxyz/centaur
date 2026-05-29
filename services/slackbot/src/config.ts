@@ -50,6 +50,15 @@ const EnvSchema = z.object({
         .split(/[\s,]+/)
         .map(part => part.trim())
         .filter(Boolean)
+    ),
+  SLACKBOT_TRIGGER_BOT_ALLOWLIST: z
+    .string()
+    .default('')
+    .transform(value =>
+      value
+        .split(/[\s,]+/)
+        .map(part => part.trim())
+        .filter(Boolean)
     )
 })
 

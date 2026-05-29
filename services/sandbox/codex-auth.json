@@ -1,0 +1,11 @@
+{
+  "OPENAI_API_KEY": null,
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImR1bW15In0.eyJzdWIiOiJhdXRoMHxkdW1teSIsImVtYWlsIjoiZHVtbXlAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaXNzIjoiaHR0cHM6Ly9hdXRoLm9wZW5haS5jb20vIiwiYXVkIjoiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS92MSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsidXNlcl9pZCI6InVzZXItZHVtbXkiLCJjaGF0Z3B0X2FjY291bnRfaWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InBsdXMifSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9wcm9maWxlIjp7ImVtYWlsIjoiZHVtbXlAZXhhbXBsZS5jb20ifX0.ZHVtbXktc2lnbmF0dXJlLWJ5dGVzLW5vdC1yZWFs",
+    "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImR1bW15In0.eyJzdWIiOiJhdXRoMHxkdW1teSIsImlzcyI6Imh0dHBzOi8vYXV0aC5vcGVuYWkuY29tLyIsImF1ZCI6WyJodHRwczovL2FwaS5vcGVuYWkuY29tL3YxIiwiaHR0cHM6Ly9jaGF0Z3B0LmNvbS9iYWNrZW5kLWFwaSJdLCJhenAiOiJjb2RleC1jbGkiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6NDEwMjQ0NDgwMCwic2NvcGUiOiJvcGVuaWQgZW1haWwgcHJvZmlsZSBvZmZsaW5lX2FjY2VzcyJ9.ZHVtbXktc2lnbmF0dXJlLWJ5dGVzLW5vdC1yZWFs",
+    "refresh_token": "dummy-refresh-token-replaced-by-iron-proxy-broker",
+    "account_id": "00000000-0000-0000-0000-000000000000"
+  },
+  "last_refresh": "2025-01-01T00:00:00.000Z"
+}

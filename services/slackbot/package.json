@@ -17,7 +17,12 @@
     "check:types": "bun tsgo --project tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@lmnr-ai/lmnr": "^0.8.23",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.218.0",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@opentelemetry/sdk-trace-node": "^2.7.1",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
     "@slack/types": "^2.19.0",
     "@slack/web-api": "^7.15.2",
     "@std/ulid": "npm:@jsr/std__ulid",

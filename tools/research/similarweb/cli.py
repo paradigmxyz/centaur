@@ -465,37 +465,6 @@ def app_ranking(
 
 
 @app.command()
-def credits(
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
-):
-    """Check remaining API credits."""
-    client = get_client()
-
-    try:
-        data = client.get_credits()
-    except RuntimeError as e:
-        console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1)
-
-    if json_output:
-        print(json.dumps(data, indent=2))
-        return
-
-    remaining = data.get("remaining_credits", data.get("credits", "N/A"))
-    total = data.get("total_credits", "")
-
-    console.print(
-        f"\n[bold]API Credits:[/] {remaining:,}"
-        if isinstance(remaining, int)
-        else f"\n[bold]API Credits:[/] {remaining}"
-    )
-    if total:
-        console.print(
-            f"[dim]Total: {total:,}[/]" if isinstance(total, int) else f"[dim]Total: {total}[/]"
-        )
-
-
-@app.command()
 def raw(
     endpoint: str = typer.Argument(
         ..., help="API endpoint (e.g., /v1/website/google.com/global-rank/global-rank)"

@@ -175,26 +175,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSANDBOX_SIGNING_KEY" .Values.secretManager.envPrefix }}
-            - name: LMNR_PROJECT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_PROJECT_API_KEY" .Values.secretManager.envPrefix }}
-                  optional: true
-            - name: LMNR_BASE_URL
-{{- if .Values.laminar.enabled }}
-              value: {{ include "centaur.laminarBaseUrl" . | quote }}
-{{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_BASE_URL" .Values.secretManager.envPrefix }}
-                  optional: true
-{{- end }}
-            - name: LMNR_HTTP_PORT
-              value: {{ .Values.laminar.appServer.service.httpPort | quote }}
-            - name: LMNR_GRPC_PORT
-              value: {{ .Values.laminar.appServer.service.grpcPort | quote }}
             - name: HTTPS_PROXY
               value: {{ include "centaur.firewallProxyUrl" . | quote }}
             - name: REQUESTS_CA_BUNDLE
@@ -202,11 +182,13 @@ spec:
             - name: SSL_CERT_FILE
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: CENTAUR_LOG_LEVEL
               value: info
+            - name: CENTAUR_DEFAULT_HARNESS
+              value: {{ .Values.api.defaultHarness | quote }}
             - name: TOOL_DIRS
 {{- if .Values.overlay.image.repository }}
               value: {{ printf "/app/tools:%s/tools" .Values.overlay.mountPath | quote }}
@@ -249,6 +231,8 @@ spec:
               value: {{ ternary "1" "0" .Values.api.workflowWorkerEnabled | quote }}
             - name: WARM_POOL_ENABLED
               value: {{ ternary "1" "0" .Values.api.warmPoolEnabled | quote }}
+            - name: PLUGIN_WATCHER_ENABLED
+              value: {{ ternary "1" "0" .Values.api.pluginWatcherEnabled | quote }}
 {{- if not (hasKey $apiExtraEnv "SLACK_ETL_ENABLED") }}
             - name: SLACK_ETL_ENABLED
               value: {{ ternary "1" "0" .Values.api.slackEtlEnabled | quote }}
@@ -309,10 +293,33 @@ spec:
               value: {{ .Values.ironProxy.service.managementPort | quote }}
             - name: KUBERNETES_IRON_PROXY_HEALTH_PORT
               value: {{ .Values.ironProxy.service.healthPort | quote }}
+{{- if .Values.toolServer.enabled }}
+            # Tool-server runs as a sidecar against the API image; uvicorn
+            # target is overridden to api.tool_server_app.
+            - name: KUBERNETES_TOOL_SERVER_IMAGE
+              value: {{ printf "%s:%s" .Values.api.image.repository .Values.api.image.tag | quote }}
+            - name: KUBERNETES_TOOL_SERVER_IMAGE_PULL_POLICY
+              value: {{ .Values.api.image.pullPolicy | quote }}
+            - name: KUBERNETES_TOOL_SERVER_PORT
+              value: {{ .Values.toolServer.port | quote }}
+{{- end }}
+            # Workflow-run pods reuse the API image and run python -m api.workflow_executor.
+            - name: KUBERNETES_WORKFLOW_RUN_IMAGE
+              value: {{ printf "%s:%s" .Values.api.image.repository .Values.api.image.tag | quote }}
+            - name: KUBERNETES_WORKFLOW_RUN_IMAGE_PULL_POLICY
+              value: {{ .Values.api.image.pullPolicy | quote }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
               value: {{ .Values.ironProxy.secretTtl | quote }}
+{{- if .Values.tokenBroker.enabled }}
+            - name: FIREWALL_MANAGER_TOKEN_BROKER_TTL
+              value: {{ .Values.tokenBroker.ttl | quote }}
+            - name: KUBERNETES_TOKEN_BROKER_NAME
+              value: {{ include "centaur.tokenBrokerName" . | quote }}
+            - name: KUBERNETES_TOKEN_BROKER_URL
+              value: {{ include "centaur.tokenBrokerUrl" . | quote }}
+{{- end }}
 {{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
             - name: KUBERNETES_OP_CONNECT_HOST
               value: {{ include "centaur.onepasswordConnectUrl" . | quote }}
@@ -321,6 +328,16 @@ spec:
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: KUBERNETES_API_POD_LABEL_SELECTOR
               value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=api" (include "centaur.name" .) .Release.Name | quote }}
+            - name: KUBERNETES_SANDBOX_CONTROLLER
+              value: {{ .Values.sandbox.controller | quote }}
+            - name: KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED
+              value: {{ ternary "1" "0" .Values.sandbox.stateVolume.enabled | quote }}
+            - name: KUBERNETES_SANDBOX_STATE_VOLUME_SIZE
+              value: {{ .Values.sandbox.stateVolume.size | quote }}
+{{- if .Values.sandbox.stateVolume.storageClassName }}
+            - name: KUBERNETES_SANDBOX_STATE_VOLUME_STORAGE_CLASS
+              value: {{ .Values.sandbox.stateVolume.storageClassName | quote }}
+{{- end }}
 {{- with .Values.sandbox.resources.limits }}
 {{- if and .cpu (not (hasKey $apiExtraEnv "KUBERNETES_SANDBOX_CPU_LIMIT")) }}
             - name: KUBERNETES_SANDBOX_CPU_LIMIT
@@ -486,26 +503,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
-            - name: LMNR_PROJECT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_PROJECT_API_KEY" .Values.secretManager.envPrefix }}
-                  optional: true
-            - name: LMNR_BASE_URL
-{{- if .Values.laminar.enabled }}
-              value: {{ include "centaur.laminarBaseUrl" . | quote }}
-{{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sLMNR_BASE_URL" .Values.secretManager.envPrefix }}
-                  optional: true
-{{- end }}
-            - name: LMNR_HTTP_PORT
-              value: {{ .Values.laminar.appServer.service.httpPort | quote }}
-            - name: LMNR_GRPC_PORT
-              value: {{ .Values.laminar.appServer.service.grpcPort | quote }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
             - name: HTTPS_PROXY
@@ -513,9 +510,9 @@ spec:
             - name: NODE_EXTRA_CA_CERTS
               value: /firewall-certs/ca-cert.pem
             - name: NO_PROXY
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) | quote }}
             - name: no_proxy
-              value: {{ printf "localhost,127.0.0.1,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
+              value: {{ printf "localhost,127.0.0.1,%s,%s,%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.firewallNoProxyHosts" .) | quote }}
 {{- if .Values.slackbot.runtimeErrorAlertChannel }}
             - name: RUNTIME_ERROR_ALERT_CHANNEL
               value: {{ .Values.slackbot.runtimeErrorAlertChannel | quote }}
@@ -524,6 +521,9 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
 {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "centaur.secretEnvName" . }}
           ports:
             - containerPort: 3001
               name: http

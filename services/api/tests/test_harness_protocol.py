@@ -272,6 +272,21 @@ class TestBuildUserInput:
         )
         assert result["trace_id"] == "00000000-0000-0000-0000-000000000123"
 
+    def test_traceparent_is_included_when_provided(self):
+        blocks = [{"type": "text", "text": "hi"}]
+        traceparent = "00-00000000000040008000000000000123-1111111122223333-01"
+        result = build_user_input(blocks, traceparent=traceparent)
+        assert result["traceparent"] == traceparent
+
+    def test_trace_metadata_is_included_when_provided(self):
+        blocks = [{"type": "text", "text": "hi"}]
+        metadata = {
+            "environment": "local",
+            "thread_key": "slack:C123:1700000000.000100",
+        }
+        result = build_user_input(blocks, trace_metadata=metadata)
+        assert result["trace_metadata"] == metadata
+
 
 class TestMessagesToContentBlocks:
     def test_simple_text_message(self):

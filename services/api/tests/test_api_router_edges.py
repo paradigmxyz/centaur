@@ -104,13 +104,15 @@ async def test_final_delivery_lease_heartbeat_reclaim_and_retry_backoff(
     )
     assert claim.status_code == 200
     assert claim.json()["deliveries"] == [
-        {
-            "execution_id": reclaim_execution_id,
-            "thread_key": thread_key,
-            "attempt_count": 3,
-            "delivery": {"platform": platform},
-            "final_payload": {"result_text": "reclaim me"},
-        }
+            {
+                "execution_id": reclaim_execution_id,
+                "thread_key": thread_key,
+                "trace_id": None,
+                "traceparent": None,
+                "attempt_count": 3,
+                "delivery": {"platform": platform},
+                "final_payload": {"result_text": "reclaim me"},
+            }
     ]
 
     reclaim_row = await db_pool.fetchrow(
@@ -189,6 +191,38 @@ async def test_admin_api_key_create_list_revoke_and_revoked_auth_failure(
     )
     assert relisted_key["active"] is False
     assert relisted_key["revoked_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_threads_list_caps_message_previews(
+    client,
+    db_pool,
+    api_key: str,
+):
+    thread_key = f"slack:C-preview:{uuid.uuid4().hex}"
+    long_text = "x" * 10_000
+
+    await db_pool.execute(
+        "INSERT INTO chat_messages (id, thread_key, role, parts, created_at) "
+        "VALUES ($1, $2, 'user', $3::jsonb, NOW() - INTERVAL '1 minute')",
+        f"msg-{uuid.uuid4().hex[:12]}",
+        thread_key,
+        json.dumps([{"type": "text", "text": long_text}]),
+    )
+
+    response = await client.get(
+        "/agent/threads",
+        headers=_auth(api_key),
+        params={"limit": 1},
+    )
+
+    assert response.status_code == 200
+    rows = response.json()["threads"]
+    assert len(rows) == 1
+    assert rows[0]["slack_thread_key"] == thread_key
+    assert rows[0]["first_message"] == "x" * 500
+    assert rows[0]["last_user_message"] == "x" * 500
+    assert len(response.content) < 2_000
 
 
 @pytest.mark.asyncio

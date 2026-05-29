@@ -1,0 +1,153 @@
+---
+title: Tool Directory
+description: Browse the tool integrations that ship with Centaur and learn how to inspect enabled tools in a running deployment.
+---
+
+# Tool Directory
+
+Centaur ships with a set of tool integrations under `tools/`. Deployments can enable those tools by configuring the required credentials, and overlays can add or replace tools without forking the base repo.
+
+## Inspect a deployment
+
+The repo inventory is not the same as a live deployment. To see what an agent can use in a running sandbox, ask it to run:
+
+```bash
+call tools
+```
+
+To inspect a specific tool's methods and parameters:
+
+```bash
+call discover linear
+```
+
+The `API key / credential` column uses the secret names declared by each tool's `[tool.centaur]` config. `None` means the base tool declares no required tool-specific credential; optional credentials are called out separately.
+
+## Common out-of-box tools
+
+These are broadly useful across most deployments and are good candidates to configure first:
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `linear` | Search, create, update, and comment on Linear issues, projects, cycles, teams, and labels | `LINEAR_API_KEY` |
+| `notion` | Search and update Notion pages, databases, blocks, and comments | `NOTION_API_KEY` |
+| `slack` | Search Slack, read threads, inspect channels/users, and send or upload messages | `SLACK_BOT_TOKEN`; optional: `SLACK_SEARCH_TOKEN`, `SLACK_ETL_TOKEN` |
+| `gsuite` | Use Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
+| `websearch` | Run web search and deeper research | `EXA_API_KEY`, `ANTHROPIC_API_KEY` |
+| `company_context` | Search indexed company history across internal sources | None |
+| `grafana` | Query dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
+| `posthog` | Query product analytics, events, pageviews, breakdowns, and user agents | `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` |
+| `attio` | Work with CRM objects, records, lists, notes, tasks, calls, and meetings | `ATTIO_API_KEY` |
+| `pylon` | Read and manage support issues, accounts, contacts, teams, tags, and users | `PYLON_API_KEY` |
+
+## Business
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `ashby` | ATS candidates, jobs, applications, interviews, feedback, stages, and users | `ASHBY_API_KEY` |
+| `attio` | CRM objects, records, lists, notes, tasks, calls, and meetings | `ATTIO_API_KEY` |
+| `pylon` | Support issues, accounts, contacts, teams, tags, and users | `PYLON_API_KEY` |
+
+## Communications
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `telegram` | Telegram bot messages, chats, webhooks, and forwarding | `TELEGRAM_BOT_TOKEN` |
+| `twitter` | X/Twitter users, timelines, followers, tweets, articles, and search | `SYNOPTIC_API_KEY` |
+
+## Infrastructure and Observability
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `chart` | Render charts as PNG images for Slack or reports | None |
+| `demo` | Test tool hot-reload and basic tool plumbing | None |
+| `grafana` | Grafana dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
+| `posthog` | Product analytics through HogQL, events, pageviews, and breakdowns | `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` |
+| `profslice` | Extract Firefox Profiler data for analysis | None |
+| `reth` | Reth execution timing and performance metrics | None |
+| `reth-log-analyzer` | Parse Reth logs and generate performance graphs | None |
+| `vlogs` | VictoriaLogs queries, fields, streams, and log analytics | None |
+| `vmetrics` | VictoriaMetrics PromQL/MetricsQL queries and metric discovery | None |
+
+## Productivity
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `airtable` | Bases, schemas, tables, records, views, and URL parsing | `AIRTABLE_API_KEY` |
+| `company_context` | Search indexed company history across internal sources | None |
+| `composio` | Execute tools from third-party services exposed through Composio | `COMPOSIO_API_KEY` |
+| `figma` | Extract Figma files, nodes, components, styles, and variables | `FIGMA_ACCESS_TOKEN` |
+| `granola` | Search and read Granola notes and transcripts | `GRANOLA_API_KEY` |
+| `gsuite` | Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
+| `linear` | Linear issues, projects, cycles, teams, workflow states, and labels | `LINEAR_API_KEY` |
+| `notion` | Notion pages, databases, blocks, comments, and users | `NOTION_API_KEY` |
+| `opentable` | Search OpenTable restaurant reservations | None |
+| `slack` | Slack messages, files, channels, threads, users, and usergroups | `SLACK_BOT_TOKEN`; optional: `SLACK_SEARCH_TOKEN`, `SLACK_ETL_TOKEN` |
+
+## Research
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `archiver` | Extract and download investment documents through Reducto | `REDUCTO_API_KEY`, `BROWSER_USE_API_KEY` |
+| `congress` | Congress.gov bills, members, committees, hearings, and votes | `DATAGOV_API_KEY` |
+| `crunchbase` | Company, person, funding, acquisition, IPO, and search data | `CRUNCHBASE_API_KEY` |
+| `docsend` | Download DocSend documents through browser automation | `BROWSER_USE_API_KEY` |
+| `fedreg` | Federal Register agencies, articles, public inspection, and open comments | None |
+| `googlenews` | Google News headlines, topics, and search | None |
+| `harmonic` | Startup discovery, company enrichment, people search, and saved searches | `HARMONIC_API_KEY` |
+| `invest_intake` | Normalize raw investment inputs into context packs | None |
+| `investmemos` | Search and read indexed investment memos | None |
+| `legistorm` | Congressional staff, offices, hearings, town halls, trips, and issue portfolios | `LEGISTORM_API_KEY`; optional: `LEGISTORM_ISSUES_ENDPOINT` |
+| `listennotes` | Podcast and episode search and metadata | `LISTENNOTES_KEY` |
+| `newsapi` | News headlines, article search, and source lists | `NEWSAPI_KEY` |
+| `openfec` | Federal election candidates, committees, contributions, filings, and totals | `DATAGOV_API_KEY` |
+| `plural` | State legislation, legislators, committees, events, and jurisdictions | `PLURAL_API_KEY` |
+| `sensortower` | Mobile app analytics, publisher data, charts, and sales estimates | `SENSOR_TOWER_AUTH_TOKEN` |
+| `similarweb` | Web traffic, rankings, referrals, keywords, geography, and app data | `SIMILARWEB_API_KEY` |
+| `websearch` | Web search and deep research | `EXA_API_KEY`, `ANTHROPIC_API_KEY` |
+| `youtube` | YouTube video, channel, transcript, and search data | `YOUTUBE_API_KEY`, `GOOGLE_API_KEY` |
+
+## Media
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `nano-banana` | Google Gemini image generation and editing | `GOOGLE_API_KEY` |
+| `transcriber` | Local-first Whisper transcription and recording helpers | None |
+| `veo3` | Google Veo 3 video generation and extension | `GOOGLE_API_KEY` |
+
+## Blockchain, Crypto, and Markets
+
+These tools ship in the base repo because many Centaur users need onchain or market-data workflows. They are optional; deployments that do not configure their credentials will not expose useful access.
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `alchemy` | Blockchain data, token balances, transfers, prices, and transaction receipts | `ALCHEMY_API_KEY` |
+| `allium` | Onchain analytics, SQL queries, schema search, and stablecoin analysis | `ALLIUM_API_KEY` |
+| `arkham` | Blockchain intelligence, entities, wallets, transfers, balances, and flows | `ARKHAM_API_KEY` |
+| `coindesk` | Crypto news | None |
+| `coingecko` | Token prices, markets, charts, trending coins, and exchanges | `COINGECKO_API_KEY` |
+| `coinmetrics` | Asset metrics, market data, candles, trades, exchanges, and catalogs | `COINMETRICS_API_KEY` |
+| `databento` | Historical stock market OHLCV data | `DATABENTO_API_KEY` |
+| `debank` | DeFi wallet balances, protocols, positions, chains, tokens, and NFTs | `DEBANK_API_KEY` |
+| `defillama` | TVL, stablecoins, DEX volumes, bridges, fees, and protocol data | `DEFILLAMA_API_KEY` |
+| `dune` | Dune query execution, result fetching, status checks, and cancellation | `DUNE_API_KEY` |
+| `eodhd` | Real-time quotes and historical end-of-day prices | `EODHD_API_KEY` |
+| `etherscan` | Ethereum balances, contracts, logs, gas, transactions, and token transfers | `ETHERSCAN_API_KEY` |
+| `kalshi` | Prediction market events, markets, trades, and candlesticks | None |
+| `karma` | DAO delegate reputation, activity, scores, and governance analytics | None |
+| `messari` | Crypto asset prices, metrics, profiles, markets, news, and timeseries | `MESSARI_API_KEY` |
+| `mpp` | Paid market-data and web-search requests through Machine Payments Protocol | None |
+| `nansen` | Wallet labels, smart-money activity, token flows, holders, and PnL | `NANSEN_API_KEY` |
+| `polymarket` | Prediction market events, markets, prices, books, and trades | None |
+| `snapshot` | Offchain governance spaces, proposals, votes, and voting power | `SNAPSHOT_API_KEY` |
+| `standard-metrics` | Portfolio company metrics, documents, notes, funds, and budgets | `STANDARD_METRICS_CLIENT_ID`, `STANDARD_METRICS_CLIENT_SECRET` |
+| `tally` | Onchain governance organizations, governors, proposals, delegates, and votes | `TALLY_API_KEY` |
+| `theblock` | Crypto news | None |
+| `token-terminal` | Protocol revenue, fees, financial statements, sectors, and project metrics | `TOKEN_TERMINAL_API_KEY` |
+| `tokenomist` | Token unlocks, vesting, emissions, allocations, and fundraising | `TOKENOMIST_API_KEY` |
+
+## Persona tools
+
+| Tool | Use | API key / credential |
+|---|---|---|
+| `eng` | Engineering persona for code review, debugging, and repository work | None |

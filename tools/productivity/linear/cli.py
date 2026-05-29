@@ -1,5 +1,6 @@
 """CLI for Linear issue tracking."""
 
+import base64
 import json
 import sys
 
@@ -176,6 +177,31 @@ def issue(
             )
 
     console.print(f"\n[dim]{result.get('url')}[/]")
+
+
+@app.command("fetch-asset")
+def fetch_asset(
+    url: str = typer.Argument(..., help="A https://uploads.linear.app/... asset URL"),
+    output: str = typer.Option(
+        None, "--output", "-o", help="Write the bytes here instead of printing metadata"
+    ),
+):
+    """Download a Linear-hosted asset (e.g. an embedded screenshot)."""
+    client = get_client()
+    result = client.fetch_asset(url)
+
+    if output:
+        from pathlib import Path
+
+        Path(output).write_bytes(base64.b64decode(result["data"]))
+        console.print(
+            f"[green]Wrote {result['byte_length']} bytes[/] to {output} "
+            f"({result['mime_type']})"
+        )
+        raise typer.Exit()
+
+    meta = {k: v for k, v in result.items() if k != "data"}
+    console.print(json.dumps(meta, indent=2))
 
 
 @app.command()
@@ -531,6 +557,46 @@ def list_labels(
         table.add_row(team_key, label.get("name", ""))
 
     console.print(table)
+
+
+@app.command("add-label")
+def add_label(
+    issue_id: str = typer.Argument(..., help="Issue ID or identifier (e.g., ENG-123)"),
+    label: str = typer.Argument(..., help="Label name to add"),
+    team: str = typer.Option(
+        None, "--team", "-t", help="Team key, to bind a team-scoped label"
+    ),
+):
+    """Add a single label to an issue (leaves other labels untouched)."""
+    client = get_client()
+    result = client.add_label(issue_id, label, team_key=team)
+    ok = result.get("success")
+    console.print(
+        f"[green]Added[/] '{label}' to {issue_id}." if ok
+        else f"[red]Failed[/] to add '{label}' to {issue_id}."
+    )
+    if not ok:
+        raise typer.Exit(1)
+
+
+@app.command("remove-label")
+def remove_label(
+    issue_id: str = typer.Argument(..., help="Issue ID or identifier (e.g., ENG-123)"),
+    label: str = typer.Argument(..., help="Label name to remove"),
+    team: str = typer.Option(
+        None, "--team", "-t", help="Team key, to bind a team-scoped label"
+    ),
+):
+    """Remove a single label from an issue (leaves other labels untouched)."""
+    client = get_client()
+    result = client.remove_label(issue_id, label, team_key=team)
+    ok = result.get("success")
+    console.print(
+        f"[green]Removed[/] '{label}' from {issue_id}." if ok
+        else f"[red]Failed[/] to remove '{label}' from {issue_id}."
+    )
+    if not ok:
+        raise typer.Exit(1)
 
 
 @app.command()

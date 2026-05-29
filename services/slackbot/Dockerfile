@@ -1,12 +1,16 @@
 FROM oven/bun:1.3.13-slim
 
-WORKDIR /app
+WORKDIR /repo
 ENV NODE_ENV=production
 
-COPY services/slackbot/package.json services/slackbot/bun.lock ./
-RUN bun install --frozen-lockfile
+RUN bun install -g pnpm@10.28.1
 
-COPY services/slackbot/ ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY services/slackbot/package.json services/slackbot/package.json
+RUN pnpm install --filter slackbot --prod --frozen-lockfile
+
+COPY services/slackbot/ services/slackbot/
+WORKDIR /repo/services/slackbot
 
 EXPOSE 3001
 ENV PORT=3001

@@ -9,13 +9,8 @@ const MAX_FALLBACK_CHARS = slackReplyLimits.text.maxFallbackChars
 export function buildFinalFallbackText(opts: {
   title: string
   answerMarkdown: string
-  commentaryMarkdown?: string
 }): string {
-  const parts = [
-    opts.title.trim(),
-    opts.commentaryMarkdown?.trim(),
-    opts.answerMarkdown.trim()
-  ].filter(Boolean)
+  const parts = [opts.title.trim(), opts.answerMarkdown.trim()].filter(Boolean)
   const text = parts.join('\n')
   if (!text) return opts.title.trim() || 'Centaur update'
   if (text.length <= MAX_FALLBACK_CHARS) return text

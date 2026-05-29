@@ -134,6 +134,8 @@ def build_user_input(
     steer: bool = False,
     thread_key: str | None = None,
     trace_id: str | None = None,
+    traceparent: str | None = None,
+    trace_metadata: dict | None = None,
 ) -> dict:
     """Build a harness-native user input envelope from content blocks."""
     envelope = {
@@ -149,6 +151,10 @@ def build_user_input(
         envelope["thread_key"] = thread_key
     if trace_id:
         envelope["trace_id"] = trace_id
+    if traceparent:
+        envelope["traceparent"] = traceparent
+    if trace_metadata:
+        envelope["trace_metadata"] = trace_metadata
     return envelope
 
 

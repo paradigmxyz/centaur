@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -19,16 +20,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.api_keys import bootstrap_service_api_keys
 from api.config import settings
 from api.db import close_pool, create_pool
-from api.laminar_tracing import (
-    initialize_laminar,
-    install_laminar_compat,
+from api.logging_config import configure_structlog
+from api.otel import (
+    configure_otel,
+    context_from_serialized,
+    context_from_headers,
+    current_traceparent,
+    mark_error,
+    record_exception,
     set_span_attributes,
-    set_trace_context,
+    span_context_to_dict,
     start_span,
 )
-from api.logging_config import configure_structlog
 from api.retention import start_retention_sweeper, stop_retention_sweeper
-from api.trace_context import get_or_create_thread_trace_id, traceparent_from_trace_id
 from api.vm_metrics import (
     HTTP_REQUESTS_IN_PROGRESS,
     observe_http_request,
@@ -40,10 +44,12 @@ from api.routers import (
     attachments as attachments_mod,
     deprecated,
     health,
+    webhooks as webhooks_mod,
 )
 from api.routers import agent as agent_router_mod
 from api.routers import workflows as workflow_router_mod
 from api.tool_manager import ToolManager, load_plugins_config
+from api.trace_context import normalize_trace_id
 from api.agent import reconcile_tick
 from api.runtime_control import (
     recover_interrupted_executions_on_startup,
@@ -60,8 +66,7 @@ from api.workflow_engine import (
 from api.warm_pool import start_replenish_loop, stop_replenish_loop
 
 configure_structlog()
-install_laminar_compat()
-initialize_laminar(service="api")
+configure_otel()
 
 log = structlog.get_logger().bind(service="api")
 
@@ -111,8 +116,19 @@ for _uvi_name in ("uvicorn.access",):
     logging.getLogger(_uvi_name).propagate = False
 
 
+def _plugin_watcher_enabled() -> bool:
+    return os.getenv("PLUGIN_WATCHER_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
 async def _watch_tools(pm: ToolManager) -> None:
     """Watch all plugin directories and auto-reload when files change."""
+    if not _plugin_watcher_enabled():
+        log.info("tool_watcher_disabled", reason="plugin_watcher_disabled")
+        return
     from starlette.concurrency import run_in_threadpool
     from watchfiles import awatch
 
@@ -130,6 +146,9 @@ async def _watch_tools(pm: ToolManager) -> None:
 
 async def _watch_workflows() -> None:
     """Watch external workflow directories and auto-reload when files change."""
+    if not _plugin_watcher_enabled():
+        log.info("workflow_watcher_disabled", reason="plugin_watcher_disabled")
+        return
     from watchfiles import awatch
 
     watch_dirs = [d for d in get_workflow_dirs() if d.exists()]
@@ -277,10 +296,24 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=settings.cors_allow_origin_regex,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _trace_id_from_traceparent(value: str | None) -> str | None:
+    parts = (value or "").strip().split("-")
+    if len(parts) < 4 or len(parts[1]) != 32:
+        return None
+    try:
+        trace_id = uuid.UUID(hex=parts[1])
+    except ValueError:
+        return None
+    if trace_id.int == 0:
+        return None
+    return str(trace_id)
 
 
 @app.middleware("http")
@@ -290,7 +323,11 @@ async def instrument_requests(request, call_next):
 
     structlog.contextvars.clear_contextvars()
 
-    trace_id = request.headers.get("x-trace-id")
+    incoming_traceparent = request.headers.get("traceparent")
+    traceparent_trace_id = _trace_id_from_traceparent(incoming_traceparent)
+    trace_id = (
+        normalize_trace_id(request.headers.get("x-trace-id")) or traceparent_trace_id
+    )
     thread_key = request.headers.get("x-centaur-thread-key")
 
     if trace_id:
@@ -317,58 +354,101 @@ async def instrument_requests(request, call_next):
         except Exception:
             pass
 
-    if not trace_id and thread_key:
+    thread_trace_root_span_id = None
+    if thread_key:
         try:
-            trace_id = await get_or_create_thread_trace_id(request.app.state.db_pool, thread_key)
-            if trace_id:
-                structlog.contextvars.bind_contextvars(trace_id=trace_id)
+            row = await request.app.state.db_pool.fetchrow(
+                "SELECT trace_id::text AS trace_id, root_span_id FROM thread_traces "
+                "WHERE thread_key = $1",
+                thread_key,
+            )
+            if row:
+                stored_trace_id = normalize_trace_id(row["trace_id"])
+                if stored_trace_id:
+                    trace_id = stored_trace_id
+                thread_trace_root_span_id = row["root_span_id"]
+                if trace_id:
+                    structlog.contextvars.bind_contextvars(trace_id=trace_id)
         except Exception:
-            log.debug("thread_trace_lookup_failed", thread_key=thread_key, exc_info=True)
+            log.debug(
+                "thread_trace_lookup_failed", thread_key=thread_key, exc_info=True
+            )
+
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or request.url.path
+    parent_context = context_from_headers(request.headers)
+    if (
+        trace_id
+        and traceparent_trace_id != trace_id
+        and (thread_trace_root_span_id or thread_key)
+    ):
+        parent_context = context_from_serialized(
+            {
+                "trace_id": trace_id.replace("-", ""),
+                "span_id": thread_trace_root_span_id or "0000000000000001",
+                "trace_flags": 1,
+            }
+        )
 
     start = time.perf_counter()
     status_code = 500
     HTTP_REQUESTS_IN_PROGRESS.inc()
     try:
-        route = request.scope.get("route")
-        path = getattr(route, "path", None) or request.url.path
         with start_span(
-            name="centaur.api.http_request",
-            span_type="DEFAULT",
-            metadata={
-                "service": "api",
-                "trace_id": trace_id,
-                "thread_key": thread_key,
-                "http_method": request.method,
-                "http_path": path,
+            "centaur.api.http_request",
+            parent_context=parent_context,
+            attributes={
+                "http.request.method": request.method,
+                "url.path": path,
+                "centaur.thread_key": thread_key,
+                "centaur.trace_id": trace_id,
+                "client.address": request.client.host if request.client else None,
             },
-            trace_id=trace_id,
-        ):
-            set_trace_context(
-                session_id=trace_id or thread_key,
-                metadata={
-                    "service": "api",
-                    "environment": os.getenv("CENTAUR_ENVIRONMENT", "local"),
-                    "trace_id": trace_id,
-                    "thread_key": thread_key,
-                    "http_path": path,
+        ) as span:
+            span_context = span_context_to_dict(span)
+            if thread_key and span_context and not thread_trace_root_span_id:
+                trace_id = span_context["trace_id"]
+                try:
+                    await request.app.state.db_pool.execute(
+                        "INSERT INTO thread_traces (thread_key, trace_id, root_span_id) "
+                        "VALUES ($1, $2, $3) "
+                        "ON CONFLICT (thread_key) DO UPDATE SET "
+                        "trace_id = COALESCE(thread_traces.trace_id, EXCLUDED.trace_id), "
+                        "root_span_id = COALESCE(thread_traces.root_span_id, EXCLUDED.root_span_id), "
+                        "updated_at = NOW()",
+                        thread_key,
+                        trace_id,
+                        span_context["span_id"],
+                    )
+                    thread_trace_root_span_id = span_context["span_id"]
+                    structlog.contextvars.bind_contextvars(trace_id=trace_id)
+                except Exception:
+                    log.debug(
+                        "thread_trace_root_store_failed",
+                        thread_key=thread_key,
+                        exc_info=True,
+                    )
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                record_exception(span, exc)
+                raise
+            status_code = response.status_code
+            set_span_attributes(
+                span,
+                {
+                    "http.response.status_code": status_code,
+                    "centaur.thread_key": thread_key,
+                    "centaur.trace_id": trace_id,
                 },
             )
-            response = await call_next(request)
-            status_code = response.status_code
+            if status_code >= 500:
+                mark_error(span, f"HTTP {status_code}")
             if trace_id:
                 response.headers["X-Trace-Id"] = trace_id
-                traceparent = traceparent_from_trace_id(trace_id)
+                traceparent = current_traceparent(span)
                 if traceparent:
                     response.headers["traceparent"] = traceparent
-            set_span_attributes(
-                {
-                    "http.method": request.method,
-                    "http.route": path,
-                    "http.status_code": status_code,
-                    **({"centaur.trace_id": trace_id} if trace_id else {}),
-                    **({"centaur.thread_key": thread_key} if thread_key else {}),
-                }
-            )
             return response
     finally:
         HTTP_REQUESTS_IN_PROGRESS.dec()
@@ -398,6 +478,7 @@ async def instrument_requests(request, call_next):
 app.include_router(health.router)
 app.include_router(agent_router_mod.router)
 app.include_router(workflow_router_mod.router)
+app.include_router(webhooks_mod.router)
 app.include_router(attachments_mod.router)
 app.include_router(admin.router)
 app.include_router(deprecated.router)
@@ -448,7 +529,9 @@ except ImportError:
 tool_manager = ToolManager(_tools_dirs)
 tool_manager.discover()
 app.state.tool_manager = tool_manager
-app.include_router(tool_manager.create_rest_router())
+# /tools/* is served by the dedicated tool-server entrypoint
+# (``api.tool_server_app``). The API keeps its in-process ToolManager only
+# for identity (Slack profile) and persona metadata lookups.
 
 
 def get_tool_manager() -> ToolManager:

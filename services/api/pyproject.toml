@@ -24,7 +24,12 @@ dependencies = [
     "sse-starlette>=3.2.0",
     "croniter>=6.2.2",
     "feedparser>=6.0.0",
-    "lmnr[anthropic,openai]>=0.5.2,<0.5.3",
+    "opentelemetry-api>=1.42.1",
+    "opentelemetry-sdk>=1.42.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.42.1",
+    "opentelemetry-instrumentation-fastapi>=0.63b1",
+    "opentelemetry-instrumentation-httpx>=0.63b1",
+    "opentelemetry-instrumentation-asyncpg>=0.63b1",
 ]
 
 [tool.uv]

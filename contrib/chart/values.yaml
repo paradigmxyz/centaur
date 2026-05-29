@@ -32,6 +32,37 @@ ironProxy:
   secretSource: onepassword
   secretTtl: 10m
 
+# Tool-server sidecar — runs alongside the sandbox container in each sandbox
+# Pod and exposes the same /tools/* surface the API used to. Same image as
+# the API; the sidecar runs uvicorn against api.tool_server_app.
+# When toolServer.enabled is false (default), the sandbox pod has no
+# sidecar — currently the API still serves /tools so this is a no-op
+# until the API drops its router (Phase 5).
+toolServer:
+  enabled: true
+  port: 8001
+
+# iron-token-broker — race-free OAuth refresh-token coordinator. Enable when
+# any tool's `oauth_token` secret uses `grant=refresh_token` against an IdP
+# that rotates refresh tokens with strict reuse detection (OpenAI Codex,
+# Anthropic Claude Code OAuth). Requires ironProxy.secretSource to be a
+# writable backend (onepassword or onepassword-connect) because the broker
+# rewrites the refresh-token blob on every rotation.
+tokenBroker:
+  enabled: false
+  image:
+    repository: ironsh/iron-token-broker
+    tag: 0.0.1-rc.2
+    pullPolicy: IfNotPresent
+  service:
+    httpPort: 8181
+    metricsPort: 9091
+  # iron-proxy caches each broker-issued access token for this long before
+  # re-fetching. Must be strictly less than the IdP's token lifetime or the
+  # broker resolver rejects the response.
+  ttl: 1m
+  resources: {}
+
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
 # Deployment is gated on onepasswordConnect.connect.create AND on
@@ -54,8 +85,12 @@ api:
     tag: latest
     pullPolicy: Always
   executionWorkerEnabled: false
+  defaultHarness: codex
+  # The API's worker claims workflow_runs and spawns a per-run sandbox to
+  # execute each handler. Disable only if you're running your own claimer.
   workflowWorkerEnabled: true
   warmPoolEnabled: false
+  pluginWatcherEnabled: false
   slackEtlEnabled: false
   slackSyncIntervalSeconds: 3600
   slackBackfillIntervalSeconds: 3600
@@ -96,6 +131,7 @@ overlay:
     sourcePath: /overlay
 
 sandbox:
+  controller: pod
   image:
     repository: centaur-agent
     tag: latest
@@ -103,6 +139,10 @@ sandbox:
   runtimeClassName: ""
   reposPath: ""
   extraEnv: {}
+  stateVolume:
+    enabled: false
+    size: 10Gi
+    storageClassName: ""
   resources:
     limits: {}
     requests:
@@ -128,6 +168,18 @@ repoCache:
   tolerations: []
   affinity: {}
   resources: {}
+
+agentSandbox:
+  enabled: false
+  namespace:
+    create: true
+    name: agent-sandbox-system
+  image:
+    repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
+    tag: v0.4.6
+    pullPolicy: IfNotPresent
+  controller:
+    extensions: false
 
 slackbot:
   enabled: true
@@ -162,84 +214,6 @@ postgres:
     subPath: ""
   resources: {}
 
-laminar:
-  enabled: false
-  imagePullPolicy: IfNotPresent
-  waitImage:
-    repository: busybox
-    tag: "1.36"
-    pullPolicy: IfNotPresent
-  frontend:
-    image:
-      repository: ghcr.io/lmnr-ai/frontend
-      tag: latest
-    service:
-      port: 5667
-    resources: {}
-  appServer:
-    image:
-      repository: ghcr.io/lmnr-ai/app-server
-      tag: latest
-    service:
-      httpPort: 8000
-      grpcPort: 8001
-      realtimePort: 8002
-    resources: {}
-  queryEngine:
-    image:
-      repository: ghcr.io/lmnr-ai/query-engine
-      tag: latest
-    service:
-      port: 8903
-    resources: {}
-  quickwit:
-    image:
-      repository: quickwit/quickwit
-      tag: v0.8.2
-    service:
-      httpPort: 7280
-      grpcPort: 7281
-    persistence:
-      enabled: true
-      size: 10Gi
-      storageClassName: ""
-    resources: {}
-  clickhouse:
-    image:
-      repository: clickhouse/clickhouse-server
-      tag: latest
-    service:
-      httpPort: 8123
-      nativePort: 9000
-    auth:
-      user: ch_user
-      password: ch_passwd
-      readOnlyUser: ch_user
-      readOnlyPassword: ch_passwd
-    persistence:
-      enabled: true
-      size: 20Gi
-      storageClassName: ""
-    resources: {}
-  postgres:
-    image:
-      repository: postgres
-      tag: "16"
-    auth:
-      username: postgres
-      password: postgres_passwordabc
-      database: postgres
-    persistence:
-      enabled: true
-      size: 10Gi
-      storageClassName: ""
-    resources: {}
-  sharedSecretToken: some_secret
-  nextAuthSecret: 0123456789abcdef0123456789abcdef
-  aeadSecretKey: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  publicUrl: http://localhost:5667
-  extraEnv: {}
-
 ingress:
   enabled: false
   className: ""
@@ -265,6 +239,12 @@ networkPolicy:
   apiIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
+  # Port the kubernetes.default ClusterIP forwards to for the API server. The
+  # API needs egress to the control plane to manage sandboxes/proxies; under an
+  # enforcing CNI the ClusterIP (:443) is DNAT'd to this real endpoint port, so
+  # the egress rule must allow it. Defaults to 6443 (k3s, kubeadm). Set to 443
+  # on clusters whose API server endpoint already listens on 443.
+  apiServerPort: 6443
 
 podSecurityContext:
   fsGroupChangePolicy: OnRootMismatch

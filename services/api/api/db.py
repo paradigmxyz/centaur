@@ -96,8 +96,12 @@ def _dbmate_url(database_url: str) -> str:
     return f"{database_url}{sep}sslmode=disable"
 
 
-async def create_pool(database_url: str) -> asyncpg.Pool:
-    run_migrations(database_url)
+async def create_pool(database_url: str, *, apply_migrations: bool = True) -> asyncpg.Pool:
+    # The sandbox tool-server sidecar reaches the DB through the per-sandbox
+    # iron-proxy and is not a schema owner, so it opens a pool with
+    # apply_migrations=False. The API (and shared tool-server) own migrations.
+    if apply_migrations:
+        run_migrations(database_url)
     pool = await asyncpg.create_pool(
         database_url,
         min_size=2,

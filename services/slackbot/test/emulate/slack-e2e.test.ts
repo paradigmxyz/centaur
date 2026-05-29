@@ -89,6 +89,7 @@ beforeAll(async () => {
     SLACKBOT_API_KEY: API_KEY,
     CENTAUR_API_URL: centaur.url,
     SLACK_EVENT_DEDUP_TTL_MS: '600000',
+    SLACKBOT_TRIGGER_BOT_ALLOWLIST: 'app:AALERTMANAGER',
     RUNTIME_ERROR_ALERT_CHANNEL: ''
   })
 
@@ -132,6 +133,7 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
 
     const run = onlyRun()
     expect(run.workflow_name).toBe('slack_thread_turn')
+    expect('eager_start' in run).toBe(false)
     expect(run.trigger_key).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
     expect(run.input.thread_key).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
     expect(run.input.message_id).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
@@ -184,7 +186,72 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
     )
   })
 
-  it('ignores bot-originated events and duplicate Slack event IDs', async () => {
+  it('dispatches an Alertmanager-style bot-authored mention into a Slack workflow', async () => {
+    const waits: Promise<unknown>[] = []
+    const response = await app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-emulate-alertmanager-bot',
+        event: {
+          type: 'message',
+          subtype: 'bot_message',
+          bot_id: 'BALERTMANAGER',
+          app_id: 'AALERTMANAGER',
+          bot_profile: {
+            user_id: 'UALERTMANAGER',
+            app_id: 'AALERTMANAGER',
+            name: 'Alertmanager'
+          },
+          channel: CHANNEL_ID,
+          ts: '1779620985.044779',
+          text: `<@${BOT_USER_ID}>`,
+          attachments: [
+            {
+              title: 'ValidatorConsensusFailure',
+              text: 'consensus test is failing on prd-nae',
+              fields: [
+                { title: 'cluster', value: 'prd-nae' },
+                { title: 'severity', value: 'critical' }
+              ]
+            }
+          ]
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const run = onlyRun()
+    expect(run.workflow_name).toBe('slack_thread_turn')
+    expect(run.trigger_key).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:1779620985.044779`)
+    expect(run.input.parts).toEqual([
+      {
+        type: 'text',
+        text: [
+          'ValidatorConsensusFailure',
+          'consensus test is failing on prd-nae',
+          'cluster: prd-nae',
+          'severity: critical'
+        ].join('\n')
+      }
+    ])
+    expect(run.input.user_id).toBe('UALERTMANAGER')
+    expect(run.input.metadata.is_mention).toBe(true)
+    expect(run.input.metadata.slack?.bot_id).toBe('BALERTMANAGER')
+    expect(run.input.metadata.slack?.app_id).toBe('AALERTMANAGER')
+    expect(run.input.delivery).toMatchObject({
+      platform: 'slack',
+      channel: CHANNEL_ID,
+      thread_ts: '1779620985.044779',
+      recipient_user_id: 'UALERTMANAGER',
+      recipient_team_id: TEAM_ID
+    })
+  })
+
+  it('ignores self bot-originated events and duplicate Slack event IDs', async () => {
     const botMessage = await postBotMessage(`<@${BOT_USER_ID}> bot echo`)
     const waits: Promise<unknown>[] = []
     await app.request(
@@ -218,7 +285,12 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
       }
     })
     const firstWaits: Promise<unknown>[] = []
-    const first = await app.request('/api/webhooks/slack', payload, {}, waitUntilContext(firstWaits))
+    const first = await app.request(
+      '/api/webhooks/slack',
+      payload,
+      {},
+      waitUntilContext(firstWaits)
+    )
     await Promise.all(firstWaits)
     const second = await app.request('/api/webhooks/slack', payload)
 
@@ -278,9 +350,9 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
       { headers: apiHeaders() }
     )
     expect(replies.status).toBe(200)
-    expect(((await replies.json()) as { messages: Array<{ text: string }> }).messages[0]?.text).toBe(
-      'route-updated'
-    )
+    expect(
+      ((await replies.json()) as { messages: Array<{ text: string }> }).messages[0]?.text
+    ).toBe('route-updated')
 
     const deleted = await app.request('/api/slack/messages', {
       method: 'DELETE',

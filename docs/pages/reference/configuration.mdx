@@ -1,0 +1,195 @@
+---
+title: Configuration
+description: Centaur environment variables grouped by requirement and service.
+---
+
+# Configuration
+
+Most Centaur settings come from Helm values and are rendered into service
+environment variables by `contrib/chart/templates/workloads.yaml`.
+
+Use these as the main extension points:
+
+| Source | Use |
+| --- | --- |
+| `secretManager.existingSecretName` | Required runtime secrets such as database, Slack, sandbox signing, and 1Password credentials. |
+| `api.extraEnv` | API feature flags, worker tuning, retention, observability, and deployment-specific overrides. |
+| `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
+| `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
+| `overlay.*` | Overlay mount path and overlay image passed to the API and sandboxes. |
+
+Tool credentials are not listed here. Tool plugins declare their own secrets in
+`tools/**/pyproject.toml`; Centaur resolves them through `secret(...)` and
+iron-proxy instead of treating them as global platform configuration.
+
+## Required
+
+These must exist for the normal Helm deployment. For local development,
+`just bootstrap-secrets` creates `centaur-infra-env` from your shell.
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap generates it. | API and Slackbot Postgres connection. |
+| `SLACK_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack request signature verification. |
+| `SLACKBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Static API key bootstrapped for Slackbot. |
+| `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot. |
+| `SANDBOX_SIGNING_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Signing key for short-lived sandbox API tokens. |
+| `IRON_MANAGEMENT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Management key for API-created iron-proxy pods. |
+| `IRON_BROKER_TOKEN` | `secretManager.existingSecretName`; required when `tokenBroker.enabled=true`. | Bearer token iron-proxy presents to iron-token-broker and the broker enforces on its HTTP API. |
+| `OP_SERVICE_ACCOUNT_TOKEN` | Local shell, then `centaur-infra-env`; production Secret. | 1Password service-account auth when using `onepassword` secret source. |
+| `OP_VAULT` | Local shell, then `centaur-infra-env`; defaults to `ai-agents` in code. | 1Password vault used for `op://...` secret refs. |
+
+Optional required-by-mode variables:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `OP_CONNECT_CREDENTIALS_FILE` | Local shell before `just deploy`. | Enables the 1Password Connect subchart and creates its credentials Secret. |
+| `OP_CONNECT_TOKEN` | Secret or local bootstrap shell env. | Token used by iron-proxy when `ironProxy.secretSource=onepassword-connect`. |
+| `LOCAL_DEV_API_KEY` | API env. | Static local admin/dev key bootstrapped into Postgres. |
+
+## API
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `CENTAUR_DEFAULT_HARNESS` | `api.defaultHarness`. | Default harness for new executions. |
+| `CENTAUR_ENVIRONMENT` | `api.extraEnv` or deployment env. | Environment label in traces and telemetry. |
+| `CENTAUR_LOG_LEVEL`, `LOG_LEVEL` | Helm sets `CENTAUR_LOG_LEVEL=info`; override in `api.extraEnv`. | API log level. |
+| `CENTAUR_SERVICE_NAME` | `api.extraEnv`. | Default API log `service` field. |
+| `SHUTDOWN_DRAIN_TIMEOUT_S` | `api.extraEnv`. | Graceful shutdown wait for in-flight HTTP requests. |
+| `EXECUTION_WORKER_ENABLED` | `api.executionWorkerEnabled`. | Starts the durable agent execution worker. |
+| `WORKFLOW_WORKER_ENABLED` | `api.workflowWorkerEnabled`. | Starts the durable workflow worker. |
+| `WARM_POOL_ENABLED` | `api.warmPoolEnabled`. | Starts warm sandbox replenishment. |
+| `PLUGIN_WATCHER_ENABLED` | `api.pluginWatcherEnabled`. | Enables tool and workflow hot-reload watchers. |
+| `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from base tools and overlay; fallback to `PLUGINS_DIR`. | Tool discovery paths. |
+| `WORKFLOW_DIRS` | Chart-rendered from base workflows and overlay. | Workflow discovery paths. |
+| `CENTAUR_OVERLAY_DIR` | `overlay.mountPath`. | Mounted overlay root for tools, workflows, prompts, migrations, and skills. |
+| `CENTAUR_OVERLAY_IMAGE`, `CENTAUR_OVERLAY_IMAGE_PULL_POLICY`, `CENTAUR_OVERLAY_IMAGE_SOURCE_PATH` | `overlay.image.*`. | Overlay image copied into sandbox pods. |
+| `SLACKBOT_URL` | Chart-rendered Slackbot service URL. | API callback target for Slack delivery. |
+| `FINAL_DELIVERY_MAX_ATTEMPTS`, `FINAL_DELIVERY_READY_GRACE_S` | `api.extraEnv`. | Final-delivery retry and claim timing. |
+| `CENTAUR_ENABLE_GCLOUD_BOOTSTRAP`, `GCP_GCLOUD_CREDENTIAL`, `GCLOUD_PROJECT` | `api.extraEnv` or Secret. | Optional gcloud ADC bootstrap in the API container. |
+| `CLAUDE_MODEL`, `CODEX_MODEL` | `api.extraEnv` or request model override. | Harness model selection defaults. |
+
+Execution tuning:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `EXECUTION_WORKER_CONCURRENCY` | `api.extraEnv`. | Max concurrent execution claims. |
+| `EXECUTION_RESERVED_USER_SLOTS` | `api.extraEnv`. | Worker slots reserved for user-facing requests. |
+| `EXECUTION_WORKER_LEASE_S` | `api.extraEnv`. | Execution claim lease duration. |
+| `EXECUTION_SILENCE_TIMEOUT_S`, `EXECUTION_TOOL_SILENCE_TIMEOUT_S`, `EXECUTION_HARD_TIMEOUT_S` | `api.extraEnv`. | Execution watchdog and absolute timeouts. |
+| `EXECUTION_WATCHDOG_POLL_S`, `EXECUTION_RECONCILE_INTERVAL_S`, `EXECUTION_STALE_RECOVERY_INTERVAL_S` | `api.extraEnv`. | Execution watchdog and reconciliation cadence. |
+| `EXECUTION_RECONCILE_STARTUP_LIMIT` | `api.extraEnv`. | Max interrupted executions recovered at startup. |
+| `EXECUTION_STREAM_EOF_RETRY_DELAY_S` | `api.extraEnv`. | Delay before retrying interrupted sandbox streams. |
+| `THREAD_FAILURE_LOOP_WINDOW_S`, `THREAD_FAILURE_LOOP_THRESHOLD` | `api.extraEnv`. | Repeated thread failure detection. |
+| `IDLE_TTL_S`, `SUSPENDED_RETENTION_S`, `MAX_ACTIVE_SANDBOX_SESSIONS` | `api.extraEnv`. | Sandbox cleanup limits. |
+| `STREAM_EOF_REATTACH_MAX`, `STREAM_EOF_REATTACH_BACKOFF_S` | `api.extraEnv`. | Stream reattach retry behavior. |
+
+## Slackbot
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `NODE_ENV` | Runtime env. | Development route listing and telemetry environment fallback. |
+| `PORT` | Runtime env. | Slackbot HTTP port. |
+| `SLACK_API_URL` | `slackbot.extraEnv`. | Optional Slack Web API base URL override. |
+| `CENTAUR_API_URL` | Chart-rendered API service URL. | API base URL used by Slackbot. |
+| `CENTAUR_API_KEY` | Secret/env fallback. | Used only when `SLACKBOT_API_KEY` is unset. |
+| `CENTAUR_SLACK_EVENTS_PATH` | `slackbot.extraEnv`. | Slack Events API route; defaults to `/api/webhooks/slack`. |
+| `RUNTIME_ERROR_ALERT_CHANNEL` | `slackbot.runtimeErrorAlertChannel`. | Slack channel for runtime error alerts. |
+| `SLACK_EVENT_DEDUP_TTL_MS` | `slackbot.extraEnv`. | Slack event dedupe window. |
+| `SLACK_SIGNATURE_MAX_AGE_SECONDS` | `slackbot.extraEnv`. | Maximum accepted Slack signature age. |
+| `LINEAR_API_KEY` | Secret or `slackbot.extraEnv`. | Enables Slack feedback commands to create Linear issues. |
+| `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
+| `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
+| `SLACKBOT_EXTERNAL_ORG_ALLOWLIST` | `slackbot.extraEnv`. | Slack team ids allowed for external org handoff. |
+| `COMMIT_SHA` | Build/deploy env. | Commit shown in Slackbot metadata. |
+
+## Sandbox
+
+API-set variables:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `AGENT_IMAGE` | `sandbox.image.*`. | Sandbox image used by the Kubernetes backend. |
+| `AGENT_API_URL` | Chart-rendered API service URL. | Source for sandbox `CENTAUR_API_URL`; required by Kubernetes backend. |
+| `CENTAUR_API_URL`, `CENTAUR_API_KEY`, `CENTAUR_THREAD_KEY`, `CENTAUR_TRACE_ID` | API sandbox creation. | API callback, short-lived sandbox token, thread key, and trace id. |
+| `AMP_MODE`, `AMP_THREAD_VISIBILITY`, `AMP_CONTINUE_THREAD_ID` | API env or resume path. | Amp mode and resume behavior. |
+| `FIREWALL_HOST`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase variants | API sandbox creation. | Routes sandbox egress through per-sandbox iron-proxy. |
+| `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | API sandbox creation. | Trust bundle for proxied TLS. |
+| `PG_PROXY_PASSWORD_<SECRET_NAME>`, `<PG_DSN_SECRET_NAME>` | API per-sandbox proxy creation. | Proxied Postgres credentials for tools that declare `pg_dsn` secrets. |
+
+Kubernetes backend:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `KUBERNETES_NAMESPACE`, `POD_NAMESPACE`, `KUBERNETES_KUBECONFIG` | Chart namespace, downward API, or `api.extraEnv`. | Kubernetes client namespace/config. |
+| `KUBERNETES_AGENT_IMAGE_PULL_POLICY`, `KUBERNETES_SANDBOX_IMAGE_PULL_SECRETS` | `sandbox.image.pullPolicy`, `global.imagePullSecrets`. | Sandbox image pull behavior. |
+| `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
+| `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
+| `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
+| `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |
+| `KUBERNETES_FIREWALL_CA_SECRET_NAME`, `KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME` | `firewall.existingCa*` or generated CA Secrets. | CA material for sandbox/proxy TLS interception. |
+| `KUBERNETES_SECRET_ENV_NAME`, `KUBERNETES_SECRET_ENV_PREFIX`, `KUBERNETES_BOOTSTRAP_SECRET_NAME` | `secretManager.*`, `secrets.bootstrapSecretName`. | Secrets read by API-created proxy/sandbox pods. |
+| `KUBERNETES_IRON_PROXY_IMAGE`, `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY`, `KUBERNETES_IRON_PROXY_PORT`, `KUBERNETES_IRON_PROXY_MANAGEMENT_PORT`, `KUBERNETES_IRON_PROXY_HEALTH_PORT` | `ironProxy.*`. | Per-sandbox iron-proxy image and ports. |
+| `FIREWALL_MANAGER_SECRET_SOURCE`, `FIREWALL_MANAGER_SECRET_TTL`, `KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE` | `ironProxy.secretSource`, `ironProxy.secretTtl`. | Secret source and cache TTL for rendered proxy config. |
+| `FIREWALL_MANAGER_TOKEN_BROKER_TTL` | `tokenBroker.ttl`. | Proxy-side cache TTL for access tokens minted by iron-token-broker. Applied to every `brokered_token` secret. |
+| `KUBERNETES_TOKEN_BROKER_NAME`, `KUBERNETES_TOKEN_BROKER_URL` | `tokenBroker.*`. | iron-token-broker Deployment name and ClusterIP URL. The chart owns the broker Deployment, Service, and NetworkPolicies; the API reconciles its ConfigMap and triggers a rolling restart when the rendered content changes. |
+| `KUBERNETES_OP_CONNECT_HOST`, `KUBERNETES_OP_CONNECT_APP_NAME`, `KUBERNETES_OP_CONNECT_PORT` | Chart helper or `api.extraEnv`. | 1Password Connect endpoint details. |
+| `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
+| `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |
+| `REPOS_PATH` | `sandbox.reposPath`. | Repo cache path mounted into sandboxes. |
+
+Sandbox entrypoint and wrappers:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
+| `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
+| `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
+| `CODEX_AUTH_MODE` | `sandbox.extraEnv`. | Codex auth flow: `api_key` (default, hits `api.openai.com`) or `access_token` (hits `chatgpt.com` via the brokered ChatGPT login). See [Codex Auth Modes](/deploying-in-production#codex-auth-modes). |
+| `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
+| `CLAUDE_CODE_AUTH_MODE` | `sandbox.extraEnv`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
+| `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
+| `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
+| `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |
+
+## Workflows
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `WORKFLOW_WORKER_CONCURRENCY`, `WORKFLOW_WORKER_LEASE_S` | `api.extraEnv`. | Workflow worker pool size and lease duration. |
+| `WORKFLOW_RECONCILE_INTERVAL_S`, `WORKFLOW_RESUSPEND_BACKOFF_S` | `api.extraEnv`. | Workflow claim/reclaim cadence. |
+| `WORKFLOW_SCHEDULE_TICK_INTERVAL_S`, `WORKFLOW_SCHEDULE_CATCHUP_LIMIT`, `WORKFLOW_SCHEDULE_MISFIRE_GRACE_S` | `api.extraEnv`. | Scheduled workflow timing and catch-up behavior. |
+| `MY_THREAD_KEY`, `<WORKFLOW_NAME>_THREAD_KEY`, `<WORKFLOW_NAME>_SLACK_CHANNEL` | Workflow-specific env. | Fallback thread/channel targets for workflow agent steps. |
+| `<WEBHOOK_SECRET_REF>` | API env or Secret named by a workflow `WebhookSpec`. | HMAC secret for public workflow webhooks, for example `GITHUB_WEBHOOK_SECRET`. |
+
+Slack ETL workflows:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `SLACK_ETL_ENABLED` | `api.slackEtlEnabled`. | Master switch for Slack sync/backfill/context schedules. |
+| `SLACK_SYNC_INTERVAL_SECONDS`, `SLACK_BACKFILL_INTERVAL_SECONDS`, `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `api.*IntervalSeconds`. | Slack ETL schedule intervals. |
+| `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS`, `SLACK_SYNC_THREAD_LOOKBACK_DAYS` | `api.slackSync*LookbackDays`. | Slack history/thread lookback windows. |
+| `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `api.slackEtlExcludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
+| `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `api.extraEnv` or chart batch limit. | Backfill enablement and batch sizing. |
+| `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `api.extraEnv`. | Enables company-context projection when Slack ETL is on. |
+
+## Observability and Retention
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `VICTORIAMETRICS_URL`, `VICTORIAMETRICS_PUSH_ENABLED` | `api.extraEnv`, `api.victoriaMetricsPushEnabled`. | Push-based API metrics. |
+| `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
+| `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
+| `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |
+
+## Local Scripts
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `CENTAUR_NAMESPACE`, `CENTAUR_RELEASE` | Local shell or `.env`. | Namespace/release used by `just`, dbmate, and debug scripts. |
+| `JUST_BUILD_SEQUENTIAL` | Local shell. | Builds service images sequentially. |
+| `CENTAUR_MIGRATIONS_DEPLOYMENT`, `CENTAUR_MIGRATIONS_HOST_DIR`, `CENTAUR_MIGRATIONS_CONTAINER_DIR` | Local shell. | Core migration wrapper targets. |
+| `CENTAUR_OVERLAY_HOST_DIR`, `CENTAUR_OVERLAY_DIR` | Local shell. | Overlay migration wrapper targets. |
+| `CENTAUR_API_URL`, `CENTAUR_API_KEY` | Local shell. | API target/key for contrib scripts. |
+| `MUESLI_CLI`, `MUESLI_HOST`, `MUESLI_PUSH_LOG`, `MUESLI_SLACK_CHANNEL` | Local shell. | Muesli meeting ingest helper behavior. |

@@ -443,7 +443,7 @@ class TestResolveHarnessProfile:
             1. engine_override
             2. harness (when DIFFERENT from persona's declared engine)
             3. persona.engine
-            4. system default ("codex")
+            4. deployment default (CENTAUR_DEFAULT_HARNESS, falling back to "codex")
 
         Regression-locked: the previous resolver hardcoded engine="codex"
         for harness=="amp" regardless of persona, silently dropping the
@@ -487,7 +487,10 @@ class TestResolveHarnessProfile:
         # Rule 4: no override, no persona → harness if given, else system default.
         assert resolve("amp", persona=None)[0] == "amp"
         assert resolve("claude-code", persona=None)[0] == "claude-code"
+        monkeypatch.delenv("CENTAUR_DEFAULT_HARNESS", raising=False)
         assert resolve(None, persona=None)[0] == "codex"
+        monkeypatch.setenv("CENTAUR_DEFAULT_HARNESS", "claude")
+        assert resolve(None, persona=None)[0] == "claude-code"
 
     def test_unknown_harness_or_persona_is_rejected(self, monkeypatch):
         import sys
@@ -537,7 +540,8 @@ class TestBuildSessionContext:
 
         ctx = _build_session_context("test:1", platform="slack", user_id="U123")
         assert "Slack Formatting Rules" in ctx
-        assert "<@U123>" in ctx
+        assert "<@U123>" not in ctx
+        assert "Do not @-mention or tag the requester" in ctx
         assert "test:1" in ctx
 
     def test_no_platform(self):
@@ -552,7 +556,16 @@ class TestBuildSessionContext:
 
         ctx = _build_session_context("test:1", platform="slack")
         assert "Slack Formatting Rules" in ctx
-        assert "tag the requester" not in ctx
+        assert "their real Slack mention" not in ctx
+        assert "Do not @-mention or tag the requester" in ctx
+
+    def test_slack_bot_user_id_not_mentioned(self):
+        from api.agent import _build_session_context
+
+        ctx = _build_session_context("test:1", platform="slack", user_id="B123")
+        assert "Slack Formatting Rules" in ctx
+        assert "<@B123>" not in ctx
+        assert "Do not @-mention or tag the requester" in ctx
 
     def test_contains_timestamp(self):
         from api.agent import _build_session_context

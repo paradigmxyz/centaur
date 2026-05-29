@@ -16,6 +16,9 @@ rules:
     resources: ["pods"]
     verbs: ["create", "delete", "get", "list", "watch"]
   - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["delete", "get", "list", "watch"]
+  - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "delete", "get", "list", "watch"]
   - apiGroups: [""]
@@ -36,6 +39,9 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

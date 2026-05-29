@@ -35,6 +35,7 @@ from api.sandbox.harness_protocol import (
     messages_to_content_blocks,
 )
 from api.deps import mint_sandbox_token
+from api.harness_config import default_harness
 from api.sandbox.normalize import normalize_harness_event
 from api.sandbox.registry import get_backend
 from api.trace_context import get_or_create_thread_trace_id
@@ -389,7 +390,7 @@ async def _evict_idle_sessions_for_capacity(backend) -> int:
                 max_active=MAX_ACTIVE_SANDBOX_SESSIONS,
             )
             with contextlib.suppress(Exception):
-                await backend.stop_by_id(sandbox_id)
+                await backend.pause_by_id(sandbox_id)
             await pool.execute(
                 "UPDATE sandbox_sessions SET state = 'suspended', updated_at = NOW() "
                 "WHERE thread_key = $1 AND state = 'idle'",
@@ -764,7 +765,7 @@ def _resolve_harness_profile(
     ``harness`` is the legacy caller-facing name for what is now treated as
     the sandbox engine. Precedence is:
     explicit ``engine_override`` > explicit differing ``harness`` >
-    persona-declared engine > ``codex`` default.
+    persona-declared engine > deployment default.
     """
     from api.app import get_tool_manager
 
@@ -804,7 +805,7 @@ def _resolve_harness_profile(
     elif normalized_harness:
         engine = normalized_harness
     else:
-        engine = "codex"
+        engine = default_harness()
 
     if persona_info:
         return engine, persona_info.name, persona_info.default_repo
@@ -816,7 +817,7 @@ def _resolve_harness_profile(
 
 async def get_or_spawn(
     thread_key: str,
-    harness: str = "codex",
+    harness: str | None = None,
     *,
     engine: str | None = None,
     persona: str | None = None,
@@ -833,6 +834,7 @@ async def get_or_spawn(
     old_inflight_attempts: int = 0
     old_last_result: str = ""
     old_trace_id: str = ""
+    pool = _get_pool()
     session = await _db_get_session(thread_key)
     if session:
         if session.db_state in _REUSABLE_DB_STATES:
@@ -841,6 +843,34 @@ async def get_or_spawn(
             if st == "running":
                 _get_runtime(session.sandbox_id)
                 return session
+            if session.db_state == "suspended":
+                try:
+                    await backend.resume_by_id(session.sandbox_id)
+                    resumed_status = await backend.status(session)
+                    if resumed_status != "running":
+                        raise RuntimeError(
+                            f"suspended sandbox did not resume: {resumed_status}"
+                        )
+                    await pool.execute(
+                        "UPDATE sandbox_sessions SET state = 'idle', updated_at = NOW() "
+                        "WHERE thread_key = $1 AND sandbox_id = $2",
+                        thread_key,
+                        session.sandbox_id,
+                    )
+                    session.db_state = "idle"
+                    _get_runtime(session.sandbox_id)
+                    return session
+                except Exception as exc:
+                    log.warning(
+                        "suspended_session_resume_failed",
+                        thread_key=thread_key,
+                        sandbox=session.sandbox_id[:12],
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    raise RuntimeError(
+                        f"failed to resume suspended sandbox: {session.sandbox_id}"
+                    ) from exc
             # Container is gone — save agent_thread_id and cursor for resume, clean up row
             old_agent_thread_id = session.agent_thread_id
             old_last_delivered_id = session.last_delivered_id
@@ -849,6 +879,9 @@ async def get_or_spawn(
             old_inflight_attempts = session.inflight_attempts
             old_last_result = session.last_result
             old_trace_id = session.trace_id
+            if session.db_state == "suspended":
+                with contextlib.suppress(Exception):
+                    await backend.stop_by_id(session.sandbox_id)
             await _db_delete_session(thread_key)
             _drop_runtime(session.sandbox_id)
         else:
@@ -863,12 +896,13 @@ async def get_or_spawn(
             await _db_delete_session(thread_key)
             _drop_runtime(session.sandbox_id)
 
-    pool = _get_pool()
     thread_trace_id = await get_or_create_thread_trace_id(pool, thread_key)
+
+    effective_harness = harness or default_harness()
 
     # Resolve harness profile (engine, persona, repo) once for both warm and cold paths
     resolved_engine, resolved_persona, repo = _resolve_harness_profile(
-        harness, persona=persona, engine_override=engine
+        effective_harness, persona=persona, engine_override=engine
     )
 
     # Try warm pool first
@@ -876,14 +910,14 @@ async def get_or_spawn(
         not engine
         and not old_agent_thread_id
         and not old_inflight_turn_id
-        and not (harness == "amp" and resolved_engine == "codex")
+        and not (effective_harness == "amp" and resolved_engine == "codex")
     )
     if should_try_warm:
         from api.warm_pool import claim_container
 
         trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
         claimed = await claim_container(
-            thread_key, harness, persona=resolved_persona, repo=repo, trace_id=trace_id
+            thread_key, effective_harness, persona=resolved_persona, repo=repo, trace_id=trace_id
         )
         if claimed:
             if old_agent_thread_id:
@@ -905,14 +939,14 @@ async def get_or_spawn(
 
     # Cold spawn
     resolved_engine, resolved_persona, repo = _resolve_harness_profile(
-        harness, persona=persona, engine_override=engine
+        effective_harness, persona=persona, engine_override=engine
     )
     backend = get_backend()
     await _evict_idle_sessions_for_capacity(backend)
     trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
     session = await backend.create(
         thread_key,
-        harness,
+        effective_harness,
         resolved_engine,
         persona=resolved_persona,
         repo=repo,
@@ -1038,14 +1072,9 @@ def _build_session_context(
                 "- Markdown tables are allowed and may render as native Slack tables when the structure is clean",
                 "- NEVER put links/URLs inside code blocks (``` ```) — they won't be clickable. Use markdown tables or plain text with `[text](url)` links instead",
                 "- For links to Slack threads or messages, always use the canonical `https://slack.com/archives/{CHANNEL_ID}/p{TS_WITHOUT_DOT}` form. Slack redirects this to the correct workspace. Do not invent or hardcode a `<workspace>.slack.com` subdomain.",
+                "- Do not @-mention or tag the requester when replying; reply naturally in the thread.",
             ]
         )
-        if user_id:
-            lines.append(
-                "- For Slack replies after completing a long task, tag the requester with "
-                f"their real Slack mention: <@{user_id}>. This Slack reply rule does not "
-                "replace GitHub PR attribution requirements."
-            )
 
     lines.extend(["", "---", ""])
     return "\n".join(lines)
@@ -1375,6 +1404,9 @@ async def inject_stdin(
     *,
     platform: str | None = None,
     user_id: str | None = None,
+    trace_id: str | None = None,
+    traceparent: str | None = None,
+    trace_metadata: dict | None = None,
 ) -> dict:
     """Flush pending messages + write to stdin. Does not touch stdout.
 
@@ -1404,17 +1436,29 @@ async def inject_stdin(
         msgs = _flushed_to_messages(flushed)
         content_blocks = messages_to_content_blocks(msgs) + inline_blocks
         turn_input = build_user_input(
-            content_blocks, thread_key=session.thread_key, trace_id=session.trace_id
+            content_blocks,
+            thread_key=session.thread_key,
+            trace_id=trace_id or session.trace_id,
+            traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     elif flushed:
         msgs = _flushed_to_messages(flushed)
         content_blocks = messages_to_content_blocks(msgs)
         turn_input = build_user_input(
-            content_blocks, thread_key=session.thread_key, trace_id=session.trace_id
+            content_blocks,
+            thread_key=session.thread_key,
+            trace_id=trace_id or session.trace_id,
+            traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     elif inline_blocks:
         turn_input = build_user_input(
-            inline_blocks, thread_key=session.thread_key, trace_id=session.trace_id
+            inline_blocks,
+            thread_key=session.thread_key,
+            trace_id=trace_id or session.trace_id,
+            traceparent=traceparent,
+            trace_metadata=trace_metadata,
         )
     else:
         return {"ok": True, "injected": False}
@@ -1865,14 +1909,8 @@ async def reconcile_tick() -> None:
                 log.info(
                     "idle_ttl_expired", thread_key=thread_key, sandbox=sandbox_id[:12]
                 )
-                session = SandboxSession(
-                    sandbox_id=sandbox_id,
-                    thread_key=thread_key,
-                    harness="",
-                    engine="",
-                )
                 with contextlib.suppress(Exception):
-                    await backend.stop(session)
+                    await backend.pause_by_id(sandbox_id)
                 await _mark_inactive(thread_key)
                 _drop_runtime(sandbox_id)
             except Exception:
@@ -1909,14 +1947,8 @@ async def reconcile_tick() -> None:
                     sandbox=sandbox_id[:12],
                     state=row["state"],
                 )
-                session = SandboxSession(
-                    sandbox_id=sandbox_id,
-                    thread_key=thread_key,
-                    harness="",
-                    engine="",
-                )
                 with contextlib.suppress(Exception):
-                    await backend.stop(session)
+                    await backend.pause_by_id(sandbox_id)
                 await _mark_inactive(thread_key)
                 _drop_runtime(sandbox_id)
             except Exception:
@@ -1955,14 +1987,8 @@ async def reconcile_tick() -> None:
                     state=row["state"],
                     inflight_turn_id=row["inflight_turn_id"],
                 )
-                session = SandboxSession(
-                    sandbox_id=sandbox_id,
-                    thread_key=thread_key,
-                    harness="",
-                    engine="",
-                )
                 with contextlib.suppress(Exception):
-                    await backend.stop(session)
+                    await backend.pause_by_id(sandbox_id)
                 await _mark_inactive(thread_key)
                 _drop_runtime(sandbox_id)
             except Exception:
@@ -1979,6 +2005,17 @@ async def reconcile_tick() -> None:
             "WHERE state IN ('gone', 'stopped') "
             "AND updated_at < NOW() - INTERVAL '1 hour'"
         )
+        expired_suspended_rows = await pool.fetch(
+            "SELECT thread_key, sandbox_id FROM sandbox_sessions "
+            "WHERE state = 'suspended' "
+            "AND updated_at < NOW() - make_interval(secs => $1::double precision)",
+            float(SUSPENDED_RETENTION_S),
+        )
+        for row in expired_suspended_rows:
+            sandbox_id = row["sandbox_id"]
+            with contextlib.suppress(Exception):
+                await backend.stop_by_id(sandbox_id)
+            _drop_runtime(sandbox_id)
         await pool.execute(
             "DELETE FROM sandbox_sessions "
             "WHERE state = 'suspended' "

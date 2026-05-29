@@ -41,6 +41,13 @@
         "secretTtl": { "type": "string" }
       }
     },
+    "toolServer": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer" }
+      }
+    },
     "secrets": {
       "type": "object",
       "properties": {
@@ -124,6 +131,33 @@
         "tolerations": { "type": "array" },
         "affinity": { "type": "object" },
         "resources": { "type": "object" }
+      }
+    },
+    "agentSandbox": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "namespace": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" },
+            "name": { "type": "string" }
+          }
+        },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "controller": {
+          "type": "object",
+          "properties": {
+            "extensions": { "type": "boolean" }
+          }
+        }
       }
     },
     "slackbot": {

@@ -15,7 +15,8 @@ const config: AppConfig = {
   SLACK_FEEDBACK_LINEAR_TEAM_ID: 'team-test',
   SLACK_FEEDBACK_LINEAR_PROJECT_ID: 'project-test',
   SLACK_FEEDBACK_ALLOWED_CHANNELS: [],
-  SLACKBOT_EXTERNAL_ORG_ALLOWLIST: []
+  SLACKBOT_EXTERNAL_ORG_ALLOWLIST: [],
+  SLACKBOT_TRIGGER_BOT_ALLOWLIST: []
 }
 
 describe('CentaurHandoff', () => {
@@ -49,6 +50,10 @@ describe('CentaurHandoff', () => {
       await handoff.emit(event)
 
       expect(capturedInit).toBeDefined()
+      expect(capturedInit?.headers).toMatchObject({
+        'Content-Type': 'application/json',
+        'X-Centaur-Thread-Key': event.thread_key
+      })
       const bodyText = capturedInit?.body
       expect(typeof bodyText).toBe('string')
       if (typeof bodyText !== 'string') throw new Error('expected JSON request body')

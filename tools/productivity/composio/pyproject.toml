@@ -1,0 +1,21 @@
+[project]
+name = "centaur-composio-tool"
+version = "0.1.0"
+description = "Execute tools from 1000+ services via Composio (GitHub, Gmail, Slack, Notion, etc.)"
+requires-python = ">=3.11"
+dependencies = [
+    "composio>=0.13.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.centaur]
+module = "client.py"
+secrets = [
+    {type = "http", name = "COMPOSIO_API_KEY", match_headers = ["x-api-key"], hosts = ["backend.composio.dev"]},
+]

@@ -10,7 +10,7 @@ from centaur_sdk import secret
 class SensorTowerClient:
     """Client for SensorTower API.
 
-    API docs: https://app.sensortower.com/api/docs (requires login)
+    API docs: https://app.sensortower.com/api/docs/app_analysis (requires login)
     Base URL: https://api.sensortower.com
     """
 
@@ -30,10 +30,10 @@ class SensorTowerClient:
         """Get auth token from instance or env var."""
         if self._auth_token:
             return self._auth_token
-        token = secret("SENSORTOWER_AUTH_TOKEN", "")
+        token = secret("SENSOR_TOWER_AUTH_TOKEN", "") or secret("SENSORTOWER_AUTH_TOKEN", "")
         if not token:
             raise RuntimeError(
-                "SENSORTOWER_AUTH_TOKEN not set. "
+                "SENSOR_TOWER_AUTH_TOKEN not set. "
                 "Get your token from https://sensortower.com/users/edit"
             )
         return token
