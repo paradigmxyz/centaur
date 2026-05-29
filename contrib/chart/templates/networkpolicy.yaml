@@ -59,6 +59,12 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/component: workflow-run
+        # iron-proxy pods forward the tool-server sidecar's pool to Postgres
+        # (the sidecar reaches the core DB through the per-sandbox proxy, not
+        # directly), so the proxy must be allowed to connect.
+        - podSelector:
+            matchLabels:
+              centaur.ai/iron-proxy: "true"
       ports:
         - protocol: TCP
           port: 5432
