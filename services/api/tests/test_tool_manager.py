@@ -8,7 +8,7 @@ from typing import Optional, Union
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -22,6 +22,8 @@ from api.tool_manager import (  # noqa: E402
     ToolManager,
     ToolMethod,
 )
+from api.api_keys import APIKeyInfo  # noqa: E402
+from api.deps import verify_api_key  # noqa: E402
 
 
 class TestDescribeMethodDocstring:
@@ -39,7 +41,10 @@ class TestDescribeMethodDocstring:
         assert _describe_method_docstring("   \n  \n") == ""
 
     def test_single_line_docstring_returned_verbatim(self):
-        assert _describe_method_docstring("Search Slack for messages.") == "Search Slack for messages."
+        assert (
+            _describe_method_docstring("Search Slack for messages.")
+            == "Search Slack for messages."
+        )
 
     def test_multi_paragraph_description_preserved(self):
         doc = """Hybrid research engine.
@@ -611,6 +616,19 @@ async def test_tool_rest_router_lists_describes_and_invokes_tools(
     manager = ToolManager(tools_dir)
     manager.discover()
     app = FastAPI()
+
+    async def allow_tools(request: Request) -> str:
+        request.state.api_key_info = APIKeyInfo(
+            id="test-key",
+            name="test",
+            key_prefix="test",
+            scopes=["tools:*"],
+            created_by="test",
+            source="test",
+        )
+        return "key:test"
+
+    app.dependency_overrides[verify_api_key] = allow_tools
     app.include_router(manager.create_rest_router())
 
     transport = httpx.ASGITransport(app=app)
@@ -657,7 +675,7 @@ async def test_tool_rest_router_lists_describes_and_invokes_tools(
         missing_response = await client.post("/tools/alpha/missing", json={})
         assert missing_response.status_code == 200
         assert missing_response.json()["result"] == (
-            '{"error": "Method \'missing\' not found in tool \'alpha\'", '
+            "{\"error\": \"Method 'missing' not found in tool 'alpha'\", "
             '"available_methods": ["async_echo", "secret_values", "sync_echo"]}'
         )
 

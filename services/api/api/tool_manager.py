@@ -396,9 +396,7 @@ def _parse_oauth_fields(
                 f"oauth_token entry {secret_name!r} field {field_name!r} is not "
                 f"valid for grant {grant!r}; allowed: {sorted(allowed)}"
             )
-        parsed[field_name] = _parse_oauth_field_source(
-            secret_name, field_name, raw
-        )
+        parsed[field_name] = _parse_oauth_field_source(secret_name, field_name, raw)
     missing = required - parsed.keys()
     if missing:
         raise ValueError(
@@ -597,8 +595,7 @@ def _parse_hmac_credentials(
     """Parse ``credentials`` for an ``hmac_sign`` entry; require ``secret``."""
     if not isinstance(raw, dict) or not raw:
         raise ValueError(
-            f"hmac_sign entry {secret_name!r} 'credentials' must be a non-empty "
-            f"table"
+            f"hmac_sign entry {secret_name!r} 'credentials' must be a non-empty table"
         )
     parsed: dict[str, OAuthFieldSource] = {}
     for field_name, value in raw.items():
@@ -829,7 +826,9 @@ def _parse_secret(entry: Any, *, default_hosts: tuple[str, ...] = ()) -> SecretD
             replacer=entry,
         )
     if not isinstance(entry, dict):
-        raise ValueError(f"secret entry must be a string or table, got {type(entry).__name__}")
+        raise ValueError(
+            f"secret entry must be a string or table, got {type(entry).__name__}"
+        )
     name = entry.get("name")
     if not isinstance(name, str) or not name:
         raise ValueError(f"secret entry missing 'name': {entry!r}")
@@ -1174,7 +1173,9 @@ async def _capture_live_slack_send(
         return None
     active_channel = parts[2]
     active_thread_ts = parts[3]
-    requested_channel = str(args.get("channel") or args.get("channel_id") or "").lstrip("#")
+    requested_channel = str(args.get("channel") or args.get("channel_id") or "").lstrip(
+        "#"
+    )
     requested_thread_ts = str(args.get("thread_ts") or "")
     channel_is_id = bool(re.match(r"^[CDG][A-Z0-9]+$", requested_channel))
     if channel_is_id and requested_channel != active_channel:
@@ -1921,7 +1922,10 @@ class ToolManager:
                 name="openai-codex",
                 hosts=("chatgpt.com",),
                 fields=(
-                    ("client_id", OAuthFieldSource(secret_ref="OPENAI_CODEX_CLIENT_ID")),
+                    (
+                        "client_id",
+                        OAuthFieldSource(secret_ref="OPENAI_CODEX_CLIENT_ID"),
+                    ),
                     ("refresh_token", OAuthFieldSource(secret_ref="OPENAI_CODEX_BLOB")),
                 ),
                 token_endpoint="https://auth.openai.com/oauth/token",
@@ -2482,7 +2486,9 @@ class ToolManager:
             except (SystemExit, Exception) as e:
                 duration_ms = round((time.monotonic() - t0) * 1000)
                 if isinstance(e, asyncio.TimeoutError):
-                    error_msg = f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
+                    error_msg = (
+                        f"Tool call timed out after {_timeout_label(lt.timeout_s)}"
+                    )
                 elif isinstance(e, SystemExit):
                     error_msg = f"sys.exit({e.code})"
                 else:

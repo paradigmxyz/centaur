@@ -734,7 +734,9 @@ async def _insert_system_message(
 ) -> None:
     """Insert a static system message with platform formatting rules (idempotent)."""
     pool = _get_pool()
-    effective_platform = platform or ("slack" if thread_key.startswith("slack:") else None)
+    effective_platform = platform or (
+        "slack" if thread_key.startswith("slack:") else None
+    )
     msg_id = f"system-{thread_key}-{effective_platform or 'generic'}"
     effective_user_id = user_id or await _get_latest_thread_user_id(thread_key)
     requester_identity = await _resolve_requester_identity(
@@ -799,9 +801,7 @@ def _resolve_harness_profile(
     if normalized_harness and normalized_harness not in _ENGINE_HARNESSES:
         raise ValueError(f"Unknown harness: {normalized_harness}")
 
-    persona_info = (
-        get_tool_manager().get_persona(persona) if persona else None
-    )
+    persona_info = get_tool_manager().get_persona(persona) if persona else None
     if persona and persona_info is None:
         raise ValueError(f"Unknown persona: {persona}")
 
@@ -942,7 +942,11 @@ async def get_or_spawn(
 
         trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
         claimed = await claim_container(
-            thread_key, effective_harness, persona=resolved_persona, repo=repo, trace_id=trace_id
+            thread_key,
+            effective_harness,
+            persona=resolved_persona,
+            repo=repo,
+            trace_id=trace_id,
         )
         if claimed:
             if old_agent_thread_id:
@@ -1051,8 +1055,7 @@ def _build_session_context(
             github_login = github_handle.removeprefix("@")
             lines.extend(
                 [
-                    "- GitHub handle from Slack profile: "
-                    f"{github_handle}",
+                    f"- GitHub handle from Slack profile: {github_handle}",
                     "- GitHub handle source: "
                     f"{requester_identity['github_handle_source']}",
                     "- GitHub handle verified: yes",
@@ -1062,8 +1065,7 @@ def _build_session_context(
                     "- If you create a GitHub PR for this Slack request, "
                     f"the PR body MUST contain this standalone line: `Prompted by: {github_handle}`",
                     "- This is a GitHub PR body requirement, not a Slack response mention rule.",
-                    "- Assign the PR to the requester when possible: "
-                    f"`{github_login}`",
+                    f"- Assign the PR to the requester when possible: `{github_login}`",
                 ]
             )
         else:
@@ -1342,7 +1344,9 @@ async def stream_connect(
     """
     rt = _get_runtime(session.sandbox_id)
 
-    effective_platform = platform or ("slack" if session.thread_key.startswith("slack:") else None)
+    effective_platform = platform or (
+        "slack" if session.thread_key.startswith("slack:") else None
+    )
     if effective_platform:
         await _insert_system_message(
             session.thread_key,
@@ -1438,7 +1442,9 @@ async def inject_stdin(
     """
     rt = _get_runtime(session.sandbox_id)
 
-    effective_platform = platform or ("slack" if session.thread_key.startswith("slack:") else None)
+    effective_platform = platform or (
+        "slack" if session.thread_key.startswith("slack:") else None
+    )
     if effective_platform:
         await _insert_system_message(
             session.thread_key,

@@ -144,11 +144,7 @@ def test_sandbox_entrypoint_skips_codex_login_for_openrouter(tmp_path: Path) -> 
     bin_dir.mkdir()
     codex_calls = tmp_path / "codex-calls"
     codex_bin = bin_dir / "codex"
-    codex_bin.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" >> {codex_calls}\n"
-        "exit 0\n"
-    )
+    codex_bin.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {codex_calls}\nexit 0\n")
     codex_bin.chmod(0o755)
 
     result = subprocess.run(

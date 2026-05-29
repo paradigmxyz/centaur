@@ -1200,7 +1200,9 @@ def _slackbot_streamed_answer_chars(value: Any) -> int:
     return 0
 
 
-def _slackbot_live_delivery_covers_result(result_text: str, streamed_chars: int) -> bool:
+def _slackbot_live_delivery_covers_result(
+    result_text: str, streamed_chars: int
+) -> bool:
     text = result_text.strip()
     if not text:
         return True
@@ -2197,7 +2199,11 @@ async def _mark_execution_terminal(
     if delivery_platform == "dev" or suppress_legacy_delivery:
         slackbot_agent_session_id = str(metadata.get("slackbot_agent_session_id") or "")
         result_size = payload_size_bytes(result_text)
-        if suppress_legacy_delivery and result_size > 0 and slackbot_streamed_answer_chars <= 0:
+        if (
+            suppress_legacy_delivery
+            and result_size > 0
+            and slackbot_streamed_answer_chars <= 0
+        ):
             log.warning(
                 "final_delivery_skipped_without_live_answer",
                 execution_id=execution_id,
@@ -2283,7 +2289,9 @@ async def _mark_execution_terminal(
                     "result_text": result_text,
                     **({"error_text": error_text} if error_text else {}),
                     **(
-                        {"slackbot_streamed_answer_chars": slackbot_streamed_answer_chars}
+                        {
+                            "slackbot_streamed_answer_chars": slackbot_streamed_answer_chars
+                        }
                         if slackbot_streamed_answer_chars
                         else {}
                     ),
@@ -2672,7 +2680,9 @@ async def _process_execution(pool, row: dict[str, Any]) -> None:
                         },
                     )
                 if status in {"failed_permanent", "cancelled"}:
-                    mark_error(span, str(terminal_reason or terminal["error_text"] or status))
+                    mark_error(
+                        span, str(terminal_reason or terminal["error_text"] or status)
+                    )
 
 
 async def _execution_input_text(
@@ -2714,7 +2724,9 @@ async def _store_execution_span_context(
         "UPDATE agent_execution_requests "
         "SET metadata = metadata || $1::jsonb, updated_at = NOW() "
         "WHERE execution_id = $2",
-        canonical_json({_OTEL_METADATA_KEY: {_OTEL_EXECUTION_SPAN_CONTEXT_KEY: span_context}}),
+        canonical_json(
+            {_OTEL_METADATA_KEY: {_OTEL_EXECUTION_SPAN_CONTEXT_KEY: span_context}}
+        ),
         execution_id,
     )
 
@@ -2880,7 +2892,9 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     else:
         requester_user_id = None
         if isinstance(delivery, dict):
-            requester_user_id = delivery.get("recipient_user_id") or delivery.get("user_id")
+            requester_user_id = delivery.get("recipient_user_id") or delivery.get(
+                "user_id"
+            )
         requester_user_id = requester_user_id or execution_metadata.get("user_id")
         trace_metadata = _execution_laminar_metadata(
             thread_key=thread_key,
@@ -2913,7 +2927,9 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
             inject_result = await inject_stdin(
                 session,
                 "",
-                platform=delivery.get("platform") if isinstance(delivery, dict) else None,
+                platform=delivery.get("platform")
+                if isinstance(delivery, dict)
+                else None,
                 user_id=requester_user_id,
                 trace_id=inject_span_context.get("trace_id"),
                 traceparent=current_traceparent(span),
