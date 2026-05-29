@@ -28,8 +28,8 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAMESPACE: paradigmxyz/centaur
-  IMAGE_SOURCE: https://github.com/paradigmxyz/centaur
+  IMAGE_NAMESPACE: rwa-xyz/centaur
+  IMAGE_SOURCE: https://github.com/rwa-xyz/centaur
 
 jobs:
   publish:
