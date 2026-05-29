@@ -191,11 +191,22 @@ def _workflow_run_pod_name(run_id: str) -> str:
 
 
 def _tool_server_tool_dirs() -> str:
-    """TOOL_DIRS the sidecar uses. Mirrors the API's TOOL_DIRS by default."""
+    """TOOL_DIRS the sidecar uses.
+
+    The API fully controls both of the sidecar's mounts, so it constructs the
+    path directly rather than inheriting (and rewriting) its own ``TOOL_DIRS``.
+    Base tools live at ``/app/tools`` in the shared image. The overlay, when
+    present, is mounted at ``_SANDBOX_OVERLAY_DIR`` — not the API's overlay
+    mount — so its tools are at ``<_SANDBOX_OVERLAY_DIR>/tools``. An explicit
+    ``KUBERNETES_TOOL_SERVER_TOOL_DIRS`` still wins as an escape hatch.
+    """
     value = (os.getenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS") or "").strip()
     if value:
         return value
-    return (os.getenv("TOOL_DIRS") or "/app/tools").strip() or "/app/tools"
+    dirs = ["/app/tools"]
+    if _overlay_image():
+        dirs.append(f"{_SANDBOX_OVERLAY_DIR}/tools")
+    return ":".join(dirs)
 
 
 def _token_broker_name() -> str:

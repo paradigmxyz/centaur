@@ -15,6 +15,7 @@ from api.sandbox.kubernetes import (
     KubernetesExecutorBackend,
     STDOUT_CHANNEL,
     _build_tool_server_container,
+    _tool_server_tool_dirs,
 )
 from api.sandbox.kubernetes_agent_sandbox import KubernetesAgentSandboxBackend
 from api.sandbox.registry import auto_configure
@@ -650,6 +651,42 @@ def test_tool_server_container_inherits_sandbox_extra_env(
     assert "firewall.internal" in env["NO_PROXY"]
     assert "api.internal" in env["NO_PROXY"]
     assert "stg-laminar-app-server" in env["NO_PROXY"]
+
+
+def test_tool_server_tool_dirs_points_overlay_at_sandbox_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar mounts the overlay at /home/agent/overlay/org, not the API's
+    overlay mount. Its TOOL_DIRS must point there or every overlay tool silently
+    disappears."""
+    monkeypatch.delenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS", raising=False)
+    monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test")
+
+    assert (
+        _tool_server_tool_dirs()
+        == "/app/tools:/home/agent/overlay/org/tools"
+    )
+
+
+def test_tool_server_tool_dirs_without_overlay_is_base_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS", raising=False)
+    monkeypatch.delenv("CENTAUR_OVERLAY_IMAGE", raising=False)
+
+    assert _tool_server_tool_dirs() == "/app/tools"
+
+
+def test_tool_server_tool_dirs_explicit_override_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_TOOL_SERVER_TOOL_DIRS",
+        "/custom/tools",
+    )
+    monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test")
+
+    assert _tool_server_tool_dirs() == "/custom/tools"
 
 
 @pytest.mark.asyncio
