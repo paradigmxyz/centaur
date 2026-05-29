@@ -1840,6 +1840,65 @@ describe('CodexSessionRenderer', () => {
       task_count: 1
     })
   })
+
+  it('does not splice-corrupt or duplicate when a canonical snapshot diverges from streamed text (#268)', async () => {
+    // #268: live answer streaming uses a raw length-offset slice
+    // (state.answerText.slice(state.streamedAnswerText.length)). That assumes
+    // answerText only ever GROWS BY APPEND. But recomposeBuffers() rebuilds
+    // answerText from scratch each event, and the assistant-event merge can
+    // REPLACE the harness buffer (canonical branch). When the recomposed answer
+    // no longer extends what we already streamed, slicing by length splices at
+    // the wrong byte boundary -> the observed character corruption
+    // ("loops" -> "loours"), and the stale streamed prefix then defeats the
+    // renderer's startsWith()-based final-block dedup, duplicating the body.
+    const calls: Array<{ method: string; params: any }> = []
+    const client = makeFakeSlackClient(calls)
+    const { sessionId } = await new AgentSessionRenderer(client as any).open({
+      channel: 'C123',
+      parentTs: '1778866921.505479',
+      recipientTeamId: 'T123',
+      recipientUserId: 'U123',
+      title: 'Centaur execution'
+    })
+    const renderer = new CodexSessionRenderer(client as any)
+
+    // A running command creates a plan, which enables live answer streaming
+    // immediately (no 500ms pre-stream grace) — matching a turn that ran tools.
+    await renderer.event(sessionId, {
+      type: 'item.started',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'echo hi' }
+    })
+
+    // Opus-4-8 emits an interim (non-canonical) answer snapshot, streamed live.
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'I run durable loops. ' }] }
+    })
+    // The canonical snapshot (carries message.model/usage) does NOT extend the
+    // interim text — the harness re-tokenized/normalized it. This is the event
+    // that triggers the buggy offset slice.
+    const canonical = 'I run resilient loops that survive restarts and catch CI failures.'
+    await renderer.event(sessionId, {
+      type: 'assistant',
+      uuid: 'u1',
+      request_id: 'r1',
+      session_id: 's1',
+      message: {
+        id: 'm1',
+        model: 'claude-opus-4-8',
+        usage: { input_tokens: 1, output_tokens: 1 },
+        content: [{ type: 'text', text: canonical }]
+      }
+    })
+    await renderer.event(sessionId, { type: 'result', result: canonical })
+
+    const visible = visibleMarkdown(calls)
+    // The canonical answer must appear verbatim, exactly once, with no
+    // mid-word splice from the superseded interim snapshot.
+    expect(visible).toContain(canonical)
+    expect(countOccurrences(visible, 'I run')).toBe(1)
+    expect(visible).not.toContain('durable loops.  that')
+  })
 })
 
 function planTasksFromCalls(calls: Array<{ method: string; params: any }>): any[] {

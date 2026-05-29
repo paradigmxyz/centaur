@@ -304,8 +304,27 @@ export class CodexSessionRenderer {
     if (!canStream) return
 
     if (state.commentaryText.length > state.streamedCommentaryText.length) return
-    if (state.answerText.length <= state.streamedAnswerText.length) return
-    const delta = state.answerText.slice(state.streamedAnswerText.length)
+    // #268: the live answer delta was sliced off state.answerText by raw length
+    // (answerText.slice(streamedAnswerText.length)), which assumes answerText
+    // only ever grows by append. recomposeBuffers() rebuilds answerText every
+    // event, and the harness answer buffer (claude-code `assistant` snapshots)
+    // can be REPLACED wholesale by a later canonical snapshot. Slicing a
+    // replaced buffer by the previously-streamed length splices at the wrong
+    // byte boundary ("loops" -> "loours"); the stale streamed prefix then no
+    // longer matches the canonical answer, so the renderer's startsWith()
+    // final-block dedup falls back to its own offset slice and duplicates the
+    // body too.
+    //
+    // Mid-turn we therefore stream only the codex per-item answer: each
+    // per-item buffer gets a clean canonical replacement on item.completed, so
+    // the composed item text only ever grows by append. The replaceable harness
+    // answer is held back until done() (opts.force), when it is final and
+    // nothing can contradict it. A startsWith guard keeps the slice honest in
+    // both cases — if the text we're about to stream does not extend what we
+    // already streamed, we skip rather than splice at a bad offset.
+    const streamableAnswer = opts.force ? state.answerText : compose(state.answerByItemId, '')
+    if (!streamableAnswer.startsWith(state.streamedAnswerText)) return
+    const delta = streamableAnswer.slice(state.streamedAnswerText.length)
     if (!delta) return
     const acceptedChars = await this.renderer.textDelta(agentSessionId, delta, {
       force: opts.force ?? false,
