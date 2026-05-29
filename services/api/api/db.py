@@ -96,18 +96,56 @@ def _dbmate_url(database_url: str) -> str:
     return f"{database_url}{sep}sslmode=disable"
 
 
+class _SingleStmtResetConnection(asyncpg.Connection):
+    """Connection that runs the pool-release reset as single-statement queries.
+
+    asyncpg's default ``Connection.reset`` joins ``SELECT
+    pg_advisory_unlock_all()``, ``CLOSE ALL``, ``UNLISTEN *`` and
+    ``RESET ALL`` into a single multi-statement query. The per-sandbox
+    iron-proxy added in #286 blocks multi-statement SQL by policy, so every
+    ``pool.release()`` from the tool-server sidecar raises
+    ``asyncpg.exceptions.PostgresSyntaxError: blocked by iron-proxy policy:
+    multi-statement queries not permitted`` and the sidecar returns HTTP 500
+    on every tool call.
+
+    This subclass keeps asyncpg's reset semantics (rollback open txn, clear
+    listeners, then run the reset query) but executes each reset statement
+    individually so iron-proxy accepts them.
+    """
+
+    async def reset(self, *, timeout=None):
+        # Defer the asyncpg.compat import to avoid touching internals at module
+        # load time; this is the same import the upstream method uses.
+        from asyncpg import compat  # type: ignore[attr-defined]
+
+        async with compat.timeout(timeout):
+            await self._reset()  # rollback open txn + drop listener callbacks
+            reset_query = self.get_reset_query()
+            if not reset_query:
+                return
+            for stmt in (s.strip() for s in reset_query.split("\n")):
+                if stmt:
+                    await self.execute(stmt)
+
+
 async def create_pool(database_url: str, *, apply_migrations: bool = True) -> asyncpg.Pool:
     # The sandbox tool-server sidecar reaches the DB through the per-sandbox
     # iron-proxy and is not a schema owner, so it opens a pool with
     # apply_migrations=False. The API (and shared tool-server) own migrations.
     if apply_migrations:
         run_migrations(database_url)
-    pool = await asyncpg.create_pool(
-        database_url,
-        min_size=2,
-        max_size=10,
-        command_timeout=60,
-    )
+    pool_kwargs: dict[str, object] = {
+        "min_size": 2,
+        "max_size": 10,
+        "command_timeout": 60,
+    }
+    if not apply_migrations:
+        # Sandbox tool-server path: the pool talks to Postgres through the
+        # per-sandbox iron-proxy, which forbids multi-statement SQL. Override
+        # the connection class so the pool's release-time reset is split into
+        # single statements.
+        pool_kwargs["connection_class"] = _SingleStmtResetConnection
+    pool = await asyncpg.create_pool(database_url, **pool_kwargs)
     assert pool is not None
     return pool
 
