@@ -138,6 +138,12 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+    # API server egress. The kubernetes.default ClusterIP (:443) is DNAT'd to
+    # the real endpoint port (6443 on k3s/kubeadm); enforcing CNIs match egress
+    # post-DNAT, so allow that port or the API can't manage sandboxes.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.apiServerPort }}
 ---
 {{- if .Values.slackbot.enabled }}
 apiVersion: networking.k8s.io/v1

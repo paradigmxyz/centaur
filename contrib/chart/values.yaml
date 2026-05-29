@@ -239,6 +239,12 @@ networkPolicy:
   apiIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
+  # Port the kubernetes.default ClusterIP forwards to for the API server. The
+  # API needs egress to the control plane to manage sandboxes/proxies; under an
+  # enforcing CNI the ClusterIP (:443) is DNAT'd to this real endpoint port, so
+  # the egress rule must allow it. Defaults to 6443 (k3s, kubeadm). Set to 443
+  # on clusters whose API server endpoint already listens on 443.
+  apiServerPort: 6443
 
 podSecurityContext:
   fsGroupChangePolicy: OnRootMismatch
