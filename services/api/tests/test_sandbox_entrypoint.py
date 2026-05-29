@@ -7,6 +7,9 @@ from pathlib import Path
 
 
 ENTRYPOINT_SH = Path(__file__).resolve().parents[2] / "sandbox" / "entrypoint.sh"
+GIT_CACHE_WRAPPER_SH = (
+    Path(__file__).resolve().parents[2] / "sandbox" / "git-cache-wrapper.sh"
+)
 
 
 def _write_codex_harness_config(home: Path) -> Path:
@@ -135,3 +138,82 @@ def test_sandbox_entrypoint_installs_codex_harness_config(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout == (harness_dir / "codex" / "config.toml").read_text()
+
+
+def test_sandbox_entrypoint_does_not_install_global_git_cache_rewrites(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    harness_dir = _write_codex_harness_config(home)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ENTRYPOINT_SH),
+            "sh",
+            "-lc",
+            "git config --global --get-all url.http://repo-cache:8080/repos/github.com/.insteadOf",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CENTAUR_GIT_CACHE_URL": "http://repo-cache:8080/repos/",
+            "CENTAUR_HARNESS_CONFIG_DIR": str(harness_dir),
+        },
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+
+
+def test_git_cache_wrapper_does_not_rewrite_push(tmp_path: Path) -> None:
+    real_git = tmp_path / "git"
+    calls = tmp_path / "calls"
+    real_git.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$GIT_WRAPPER_CALLS\"\n"
+    )
+    real_git.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "CENTAUR_REAL_GIT": str(real_git),
+        "CENTAUR_GIT_CACHE_URL": "http://repo-cache:8080/repos/",
+        "GIT_WRAPPER_CALLS": str(calls),
+    }
+
+    clone = subprocess.run(
+        [
+            "bash",
+            str(GIT_CACHE_WRAPPER_SH),
+            "clone",
+            "https://github.com/tarrencev/centaur.git",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    push = subprocess.run(
+        [
+            "bash",
+            str(GIT_CACHE_WRAPPER_SH),
+            "push",
+            "origin",
+            "test-branch",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert clone.returncode == 0, clone.stderr or clone.stdout
+    assert push.returncode == 0, push.stderr or push.stdout
+    clone_call, push_call = calls.read_text().splitlines()
+    assert "url.http://repo-cache:8080/repos/github.com/.insteadOf=https://github.com/" in clone_call
+    assert "url.http://repo-cache:8080/repos/github.com/.insteadOf" not in push_call
+    assert push_call == "push origin test-branch"
