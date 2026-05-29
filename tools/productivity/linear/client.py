@@ -1,10 +1,15 @@
 """Linear GraphQL API client."""
 
+import base64
+import mimetypes
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from centaur_sdk import secret
+
+UPLOADS_PREFIX = "https://uploads.linear.app/"
 
 GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
 
@@ -145,6 +150,61 @@ class LinearClient:
         }
         """
         return self._query(query, {"id": issue_id}).get("issue", {})
+
+    def fetch_asset(self, url: str, filename: str | None = None) -> dict[str, Any]:
+        """Download a Linear-hosted asset (e.g. a screenshot embedded in an
+        issue description or comment) so it can be viewed.
+
+        Inline images in Linear render as bare ``https://uploads.linear.app/...``
+        URLs that require the same ``Authorization`` header as the GraphQL API,
+        so an unauthenticated ``curl`` from a sandbox gets a 401. This fetches
+        the bytes with the API key and returns them as an attachment: assets
+        larger than ~64 KB come back as a ``download_url`` you pull locally
+        (``curl http://api:8000<download_url> -o shot.png``) and open with
+        ``look_at``; smaller ones are inlined as base64 in ``data``.
+
+        Args:
+            url: A ``https://uploads.linear.app/...`` asset URL.
+            filename: Optional name for the saved attachment; derived from the
+                URL and content type when omitted.
+        """
+        if not url.startswith(UPLOADS_PREFIX):
+            raise ValueError(
+                f"fetch_asset only retrieves {UPLOADS_PREFIX}... URLs; got {url!r}"
+            )
+
+        # uploads.linear.app gates on the API key, then may 302 to a
+        # self-authorizing CDN URL. Follow that hop WITHOUT the auth header so
+        # it doesn't collide with the signed-URL credentials — this mirrors
+        # curl -L, which drops the Authorization header on cross-host redirects.
+        resp = httpx.get(
+            url,
+            headers={"Authorization": self.api_key},
+            follow_redirects=False,
+            timeout=30.0,
+        )
+        location = resp.headers.get("location")
+        if resp.is_redirect and location:
+            resp = httpx.get(location, follow_redirects=True, timeout=30.0)
+        resp.raise_for_status()
+
+        content = resp.content
+        mime_type = (
+            resp.headers.get("content-type", "application/octet-stream")
+            .split(";")[0]
+            .strip()
+        )
+        if not filename:
+            stem = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1] or "asset"
+            ext = mimetypes.guess_extension(mime_type) or ""
+            filename = f"linear-{stem[:16]}{ext}"
+
+        return {
+            "data": base64.b64encode(content).decode(),
+            "mime_type": mime_type,
+            "filename": filename,
+            "byte_length": len(content),
+        }
 
     def create_issue(
         self,
@@ -360,6 +420,98 @@ class LinearClient:
         }}
         """
         return self._query(query).get("issueLabels", {}).get("nodes", [])
+
+    def _resolve_label_ids(
+        self, names: list[str], team_key: str | None = None
+    ) -> dict[str, str]:
+        """Resolve label names to IDs, preferring a team-scoped label over a
+        workspace label of the same name. Raises if any requested name is
+        missing, or is ambiguous within its chosen scope.
+        """
+        if not names:
+            return {}
+        query = """
+        query Labels($names: [String!]) {
+            issueLabels(filter: { name: { in: $names } }, first: 250) {
+                nodes { id name team { key } }
+            }
+        }
+        """
+        nodes = (
+            self._query(query, {"names": names}).get("issueLabels", {}).get("nodes", [])
+        )
+
+        team_hits: dict[str, list[str]] = {n: [] for n in names}
+        workspace_hits: dict[str, list[str]] = {n: [] for n in names}
+        for node in nodes:
+            name = node.get("name")
+            if name not in team_hits:
+                continue
+            node_team = node.get("team")
+            if not node_team:
+                workspace_hits[name].append(node["id"])
+            elif team_key and node_team.get("key") == team_key:
+                team_hits[name].append(node["id"])
+
+        resolved: dict[str, str] = {}
+        missing: list[str] = []
+        dup: list[str] = []
+        for name in names:
+            source = team_hits[name] if team_hits[name] else workspace_hits[name]
+            if not source:
+                missing.append(name)
+            elif len(source) > 1:
+                scope = f"team {team_key}" if team_hits[name] else "workspace"
+                dup.append(f"{name} ({scope})")
+            else:
+                resolved[name] = source[0]
+
+        if missing:
+            raise RuntimeError(
+                f"missing label(s): {', '.join(missing)}. "
+                f"Create them in team {team_key or '<workspace>'} or at the workspace level."
+            )
+        if dup:
+            raise RuntimeError(
+                f"ambiguous label(s): {', '.join(dup)}. "
+                "Each must exist exactly once in its scope."
+            )
+        return resolved
+
+    def add_label(
+        self, issue_id: str, label_name: str, team_key: str | None = None
+    ) -> dict[str, Any]:
+        """Add a single label (by name) to an issue, leaving its other labels
+        untouched. Prefer this over ``update_issue(label_ids=...)`` for
+        incremental changes, since ``issueUpdate`` replaces the full label set.
+
+        Pass ``team_key`` to bind to a team-scoped label when a workspace label
+        of the same name also exists.
+        """
+        label_id = self._resolve_label_ids([label_name], team_key)[label_name]
+        mutation = """
+        mutation AddLabel($id: String!, $labelId: String!) {
+            issueAddLabel(id: $id, labelId: $labelId) { success }
+        }
+        """
+        result = self._query(mutation, {"id": issue_id, "labelId": label_id})
+        return {"success": result.get("issueAddLabel", {}).get("success", False)}
+
+    def remove_label(
+        self, issue_id: str, label_name: str, team_key: str | None = None
+    ) -> dict[str, Any]:
+        """Remove a single label (by name) from an issue, leaving its other
+        labels untouched. Succeeds even if the label isn't currently applied;
+        raises only if no label by that name exists in the chosen scope.
+        """
+        label_id = self._resolve_label_ids([label_name], team_key)[label_name]
+        mutation = """
+        mutation RemoveLabel($id: String!, $labelId: String!) {
+            issueRemoveLabel(id: $id, labelId: $labelId) { success }
+        }
+        """
+        result = self._query(mutation, {"id": issue_id, "labelId": label_id})
+        return {"success": result.get("issueRemoveLabel", {}).get("success", False)}
 
     def users(self, limit: int = 100) -> list[dict[str, Any]]:
         """List workspace users."""

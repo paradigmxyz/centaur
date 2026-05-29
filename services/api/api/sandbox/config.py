@@ -6,8 +6,12 @@ import os
 import json
 from urllib.parse import urlsplit
 
+import structlog
+
 from api.deps import mint_sandbox_token
 from api.sandbox.base import SandboxSession
+
+log = structlog.get_logger()
 
 
 def image() -> str:
@@ -27,6 +31,10 @@ _SANDBOX_PASSTHROUGH_ENV_KEYS = (
     "CODEX_OTEL_LAMINAR_BASE_URL",
     "LMNR_BASE_URL",
     "LMNR_PROJECT_API_KEY",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
     # Hermes harness model selection. Defaults to Anthropic/Claude inside the
     # wrapper; deployers can override the provider/model fleet-wide here.
     "HERMES_PROVIDER",
@@ -46,6 +54,27 @@ _CLAUDE_HARDENING_ENV = (
     ("DISABLE_UPDATES", "1"),
 )
 
+# Env vars that wire the sandbox to its per-sandbox iron-proxy. A stray
+# ``sandbox.extraEnv`` entry overriding one of these silently breaks all
+# sandbox egress, so they are pinned: operator extraEnv cannot replace them.
+# ``NO_PROXY``/``no_proxy`` are handled separately (merged, not pinned) so
+# operators can still add bypass hosts without dropping the firewall/API host.
+_PINNED_PROXY_ENV_KEYS = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "FIREWALL_HOST",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "GIT_SSL_CAINFO",
+    }
+)
+
+_NO_PROXY_ENV_KEYS = frozenset({"NO_PROXY", "no_proxy"})
+
 
 def _set_env(env: list[str], name: str, value: str) -> None:
     prefix = f"{name}="
@@ -55,6 +84,20 @@ def _set_env(env: list[str], name: str, value: str) -> None:
             env[index] = entry
             return
     env.append(entry)
+
+
+def _merge_no_proxy(computed: str, operator_supplied: str) -> str:
+    """Union the computed no_proxy hosts with operator-supplied extras.
+
+    Operators may *add* bypass hosts via ``sandbox.extraEnv`` but must never
+    drop the ones the sandbox needs to reach directly (the firewall proxy and
+    the Centaur API host); dropping those routes that traffic through iron-proxy,
+    which rejects the plain-HTTP forward with a 405. Computed hosts come first so
+    they are always present; duplicates are removed while preserving order.
+    """
+    hosts = [h.strip() for h in computed.split(",") if h.strip()]
+    hosts.extend(h.strip() for h in operator_supplied.split(",") if h.strip())
+    return ",".join(dict.fromkeys(hosts))
 
 
 def _sandbox_extra_env() -> list[tuple[str, str]]:
@@ -78,6 +121,34 @@ def _sandbox_extra_env() -> list[tuple[str, str]]:
         value = item.get("value")
         extra.append((name, "" if value is None else str(value)))
     return extra
+
+
+def sandbox_extra_env_map() -> dict[str, str]:
+    """Return the sandbox.extraEnv block as a name->value dict.
+
+    Public wrapper over ``_sandbox_extra_env`` for callers (e.g. the
+    kubernetes backend) that need to inspect harness auth-mode env vars at
+    proxy-config render time. Later entries win on duplicate names, matching
+    the in-pod env semantics.
+    """
+    out: dict[str, str] = {}
+    for name, value in _sandbox_extra_env():
+        out[name] = value
+    return out
+
+
+def _sandbox_otel_endpoint_hosts(extra_env: list[tuple[str, str]]) -> list[str]:
+    extra = dict(extra_env)
+    hosts: list[str] = []
+    for key in (
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ):
+        value = (os.getenv(key) or extra.get(key) or "").strip()
+        host = urlsplit(value).hostname
+        if host:
+            hosts.append(host)
+    return hosts
 
 
 def amp_mode() -> str:
@@ -120,6 +191,7 @@ def container_env(
     """
     api_key = mint_sandbox_token(thread_key, container_name)
     api_url = os.getenv("AGENT_API_URL", "http://api:8000")
+    extra_env = _sandbox_extra_env()
 
     env = [
         f"CENTAUR_API_URL={api_url}",
@@ -128,6 +200,9 @@ def container_env(
         f"CENTAUR_TRACE_ID={trace_id or ''}",
         f"AMP_MODE={amp_mode()}",
     ]
+    if (os.getenv("KUBERNETES_TOOL_SERVER_IMAGE") or "").strip():
+        tools_port = (os.getenv("KUBERNETES_TOOL_SERVER_PORT") or "8001").strip()
+        env.append(f"CENTAUR_TOOLS_URL=http://localhost:{tools_port}")
     visibility = amp_thread_visibility()
     if visibility:
         env.append(f"AMP_THREAD_VISIBILITY={visibility}")
@@ -138,6 +213,7 @@ def container_env(
     api_host = urlsplit(api_url).hostname
     if api_host:
         no_proxy_hosts.append(api_host)
+    no_proxy_hosts.extend(_sandbox_otel_endpoint_hosts(extra_env))
     no_proxy = ",".join(dict.fromkeys(no_proxy_hosts))
     # Placeholder values for harness infra secrets. iron-proxy MITMs the
     # outbound TLS connection and rewrites these strings in auth headers
@@ -170,7 +246,15 @@ def container_env(
         for name, dsn in pg_dsns.items():
             env.append(f"{name}={dsn}")
 
-    for name, value in _sandbox_extra_env():
+    for name, value in extra_env:
+        if name in _PINNED_PROXY_ENV_KEYS:
+            # Operator extraEnv must not break the sandbox's egress wiring.
+            log.warning("sandbox_extra_env_ignored_pinned_proxy_var", key=name)
+            continue
+        if name in _NO_PROXY_ENV_KEYS:
+            # Merge rather than replace so the firewall/API host always survive.
+            _set_env(env, name, _merge_no_proxy(no_proxy, value))
+            continue
         _set_env(env, name, value)
 
     return env

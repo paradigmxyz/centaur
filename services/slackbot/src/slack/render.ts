@@ -1,4 +1,4 @@
-import type { AnyBlock, AnyChunk, ContextBlock, MarkdownBlock, RichTextBlock } from '@slack/types'
+import type { AnyBlock, AnyChunk, MarkdownBlock, RichTextBlock } from '@slack/types'
 import { slackReplyLimits } from '../constants'
 
 const MAX_BLOCKS = slackReplyLimits.message.maxBlocks
@@ -17,32 +17,6 @@ export function blockquoteMarkdown(text: string): string {
     .split('\n')
     .map(line => `> ${line}`)
     .join('\n')
-}
-
-/** Skip Thinking when Codex repeated the same prose in commentary and final_answer. */
-export function shouldShowThinkingBlock(commentary: string, answer: string): boolean {
-  const trimmedCommentary = commentary.trim()
-  const trimmedAnswer = answer.trim()
-  if (!trimmedCommentary) return false
-  if (!trimmedAnswer) return true
-  if (trimmedCommentary === trimmedAnswer) return false
-  if (trimmedAnswer.includes(trimmedCommentary)) return false
-  return true
-}
-
-export function thinkingContextBlock(
-  commentary: string,
-  opts: { heading?: boolean } = {}
-): ContextBlock | null {
-  const trimmed = commentary.trim()
-  if (!trimmed) return null
-  const maxChars = slackReplyLimits.message.thinkingContextChars
-  const body =
-    trimmed.length > maxChars ? `${trimmed.slice(0, maxChars - 13)}\n// truncated` : trimmed
-  return {
-    type: 'context',
-    elements: [{ type: 'mrkdwn', text: opts.heading === false ? body : `*Thinking*\n${body}` }]
-  }
 }
 
 export function renderMarkdownBlocks(markdown: string): MarkdownBlock[] {

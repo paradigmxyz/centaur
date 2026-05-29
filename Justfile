@@ -2,8 +2,12 @@ set dotenv-load := true
 
 namespace := env_var_or_default("CENTAUR_NAMESPACE", "centaur")
 release := env_var_or_default("CENTAUR_RELEASE", "centaur")
+source := env_var_or_default("CENTAUR_IMAGE_SOURCE", "local")
 chart := "contrib/chart"
 dev_values := "contrib/chart/values.dev.yaml"
+# Command used to import images into k3s's containerd. Override for rootless or
+# remote setups, e.g. CENTAUR_K3S_CTR="k3s ctr" or "ssh host sudo k3s ctr".
+k3s_ctr := env_var_or_default("CENTAUR_K3S_CTR", "sudo k3s ctr")
 
 default:
     just --list
@@ -55,6 +59,17 @@ _build-slackbot:
 _build-agent:
     docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .
 
+# Import locally-built images into k3s's containerd. k3s uses containerd, not
+# the Docker daemon, so `docker build` images are otherwise invisible to it
+# (pods ImagePullBackOff on the :latest tags). Used by `just up k3s`.
+_import-k3s:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for img in centaur-api centaur-iron-proxy centaur-slackbot centaur-agent; do
+      echo "importing ${img}:latest into k3s containerd..."
+      docker save "${img}:latest" | {{k3s_ctr}} images import -
+    done
+
 bootstrap-secrets *args:
     contrib/scripts/bootstrap-k8s-secrets.sh --namespace {{namespace}} {{args}}
 
@@ -63,18 +78,55 @@ deploy:
     set -euo pipefail
     helm dependency update {{chart}} >/dev/null
     extra_args=()
+    case "{{source}}" in
+      local) ;;
+      ghcr)
+        extra_args+=(
+          --set api.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api
+          --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
+          --set slackbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbot
+          --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
+        )
+        ;;
+      *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
+    esac
     if [[ -n "${OP_CONNECT_CREDENTIALS_FILE:-}" ]]; then
       extra_args+=(
         --set ironProxy.secretSource=onepassword-connect
         --set onepasswordConnect.connect.create=true
       )
     fi
+    if [[ -n "${CODEX_AUTH_MODE:-}" ]]; then
+      extra_args+=(
+        --set sandbox.extraEnv.CODEX_AUTH_MODE=${CODEX_AUTH_MODE}
+      )
+    fi
+    if [[ -n "${CLAUDE_CODE_AUTH_MODE:-}" ]]; then
+      extra_args+=(
+        --set sandbox.extraEnv.CLAUDE_CODE_AUTH_MODE=${CLAUDE_CODE_AUTH_MODE}
+      )
+    fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
-up:
+# Bring up the dev stack; pass `k3s` (just up k3s) to import local images into k3s's containerd.
+up import="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{import}}" && "{{import}}" != "k3s" ]]; then
+      echo "unknown argument: {{import}} (expected nothing or 'k3s')" >&2; exit 2
+    fi
     just bootstrap-secrets
-    just build
-    just deploy
+    case "{{source}}" in
+      local)
+        just build
+        if [[ "{{import}}" == "k3s" ]]; then
+          just _import-k3s
+        fi
+        ;;
+      ghcr) ;;
+      *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
+    esac
+    just source={{source}} deploy
 
 down:
     kubectl delete namespace {{namespace}} --ignore-not-found --wait

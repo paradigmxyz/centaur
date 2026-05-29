@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from api.logging_config import _scrub_sensitive_fields
+from api.logging_config import _add_log_version, _scrub_sensitive_fields
 
 
 def test_scrub_sensitive_fields_redacts_nested_pii_and_secrets():
@@ -44,3 +44,10 @@ def test_scrub_sensitive_fields_keeps_non_sensitive_values_readable():
     redacted = _scrub_sensitive_fields(None, "info", payload)
 
     assert redacted == payload
+
+
+def test_add_log_version_includes_static_uuid():
+    enriched = _add_log_version(None, "info", {"event": "execute_completed"})
+
+    assert enriched["event"] == "execute_completed"
+    assert enriched["log_version_uuid"] == "013ca634-6a30-4047-8511-8e5483f313ea"

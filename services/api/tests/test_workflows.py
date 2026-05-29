@@ -104,6 +104,7 @@ async def test_create_slack_thread_turn_workflow_eager_start(
             "api.workflow_engine._insert_system_message",
             new=AsyncMock(side_effect=fake_insert_system_message),
         ),
+        patch("api.workflow_engine._execute_run", new=AsyncMock()) as execute_run,
     ):
         response = await client.post(
             "/workflows/runs", headers=_auth(api_key), json=payload,
@@ -112,8 +113,8 @@ async def test_create_slack_thread_turn_workflow_eager_start(
     assert response.status_code == 200
     body = response.json()
     assert body["workflow_name"] == "slack_thread_turn"
-    assert body["status"] == "waiting"
-    assert body["execution_id"] == "exe-workflow-1"
+    assert body["status"] == "queued"
+    assert body["execution_id"] is None
 
     run_row = await db_pool.fetchrow(
         "SELECT workflow_name, status "
@@ -122,25 +123,18 @@ async def test_create_slack_thread_turn_workflow_eager_start(
     )
     assert run_row is not None
     assert run_row["workflow_name"] == "slack_thread_turn"
-    assert run_row["status"] == "waiting"
+    assert run_row["status"] == "queued"
 
     cp_row = await db_pool.fetchrow(
         "SELECT checkpoint_name, execution_id "
         "FROM workflow_checkpoints WHERE run_id = $1",
         body["run_id"],
     )
-    assert cp_row is not None
-    assert cp_row["execution_id"] == "exe-workflow-1"
-    assert append_message_mock.await_count == 3
-    assert append_message_mock.await_args_list[0].kwargs["message_id"] == "slack:prior"
-    assert append_message_mock.await_args_list[0].kwargs["metadata"]["history_backfill"] is True
-    assert append_message_mock.await_args_list[0].kwargs["event"]["message"]["role"] == "user"
-    assert calls[:2] == ["system", "message"]
-    assert append_message_mock.await_args_list[1].kwargs["message_id"] == "slack:assistant-prior"
-    assert append_message_mock.await_args_list[1].kwargs["event"]["message"]["role"] == "assistant"
-    assert append_message_mock.await_args_list[2].kwargs["message_id"] == "slack:current"
-    assert append_message_mock.await_args_list[2].kwargs["metadata"]["user_id"] == "U123"
-    assert enqueue_execution_mock.await_args.kwargs["metadata"]["user_id"] == "U123"
+    assert cp_row is None
+    append_message_mock.assert_not_awaited()
+    enqueue_execution_mock.assert_not_awaited()
+    execute_run.assert_not_awaited()
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -282,7 +276,11 @@ async def test_slack_thread_turn_attachment_roundtrip_to_agent(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "waiting"
+    assert body["status"] == "queued"
+
+    from api.workflow_engine import _execute_run
+
+    await _execute_run(db_pool, body["run_id"])
 
     attachment = await db_pool.fetchrow(
         "SELECT id, message_id, name, mime_type, data "

@@ -6,6 +6,7 @@ export const sidebar = [
     items: [
       { text: 'What is Centaur?', link: '/what-is-centaur' },
       { text: 'Quickstart', link: '/quickstart' },
+      { text: 'Mac Mini-style setup', link: '/mac-mini-setup' },
       { text: 'Deploying in Production', link: '/deploying-in-production' },
       { text: 'Architecture', link: '/architecture' },
     ],
@@ -42,6 +43,7 @@ export const sidebar = [
     text: 'Reference',
     items: [
       { text: 'Configuration', link: '/reference/configuration' },
+      { text: 'Tool Directory', link: '/reference/tool-directory' },
     ],
   },
   {

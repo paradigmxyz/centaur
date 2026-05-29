@@ -32,6 +32,37 @@ ironProxy:
   secretSource: onepassword
   secretTtl: 10m
 
+# Tool-server sidecar — runs alongside the sandbox container in each sandbox
+# Pod and exposes the same /tools/* surface the API used to. Same image as
+# the API; the sidecar runs uvicorn against api.tool_server_app.
+# When toolServer.enabled is false (default), the sandbox pod has no
+# sidecar — currently the API still serves /tools so this is a no-op
+# until the API drops its router (Phase 5).
+toolServer:
+  enabled: true
+  port: 8001
+
+# iron-token-broker — race-free OAuth refresh-token coordinator. Enable when
+# any tool's `oauth_token` secret uses `grant=refresh_token` against an IdP
+# that rotates refresh tokens with strict reuse detection (OpenAI Codex,
+# Anthropic Claude Code OAuth). Requires ironProxy.secretSource to be a
+# writable backend (onepassword or onepassword-connect) because the broker
+# rewrites the refresh-token blob on every rotation.
+tokenBroker:
+  enabled: false
+  image:
+    repository: ironsh/iron-token-broker
+    tag: 0.0.1-rc.2
+    pullPolicy: IfNotPresent
+  service:
+    httpPort: 8181
+    metricsPort: 9091
+  # iron-proxy caches each broker-issued access token for this long before
+  # re-fetching. Must be strictly less than the IdP's token lifetime or the
+  # broker resolver rejects the response.
+  ttl: 1m
+  resources: {}
+
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
 # Deployment is gated on onepasswordConnect.connect.create AND on
@@ -55,6 +86,8 @@ api:
     pullPolicy: Always
   executionWorkerEnabled: false
   defaultHarness: codex
+  # The API's worker claims workflow_runs and spawns a per-run sandbox to
+  # execute each handler. Disable only if you're running your own claimer.
   workflowWorkerEnabled: true
   warmPoolEnabled: false
   pluginWatcherEnabled: false
@@ -206,6 +239,12 @@ networkPolicy:
   apiIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
+  # Port the kubernetes.default ClusterIP forwards to for the API server. The
+  # API needs egress to the control plane to manage sandboxes/proxies; under an
+  # enforcing CNI the ClusterIP (:443) is DNAT'd to this real endpoint port, so
+  # the egress rule must allow it. Defaults to 6443 (k3s, kubeadm). Set to 443
+  # on clusters whose API server endpoint already listens on 443.
+  apiServerPort: 6443
 
 podSecurityContext:
   fsGroupChangePolicy: OnRootMismatch
