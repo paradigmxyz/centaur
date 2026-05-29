@@ -31,6 +31,8 @@ async def test_schema_compatibility_ok() -> None:
                 {"column_name": "inflight_attempts"},
                 {"column_name": "last_result"},
                 {"column_name": "last_result_at"},
+                {"column_name": "model"},
+                {"column_name": "trace_id"},
             ],
             [
                 {"version": "005"},
@@ -40,7 +42,8 @@ async def test_schema_compatibility_ok() -> None:
                 {"version": "009"},
                 {"version": "010"},
                 {"version": "011"},
-                {"version": "016"},
+                {"version": "035"},
+                {"version": "037"},
             ],
         ]
     )
@@ -80,10 +83,12 @@ async def test_schema_compatibility_detects_missing_state_column_and_migration()
                 {"column_name": "inflight_attempts"},
                 {"column_name": "last_result"},
                 # last_result_at intentionally missing
+                # model intentionally missing
+                # trace_id intentionally missing
             ],
             [
                 {"version": "005"},
-                # 006/007/008/009/010/011/016 intentionally missing
+                # 006/007/008/009/010/011/035/037 intentionally missing
             ],
         ]
     )
@@ -93,13 +98,16 @@ async def test_schema_compatibility_detects_missing_state_column_and_migration()
     assert report["compatible"] is False
     assert "suspended" in report["required_states_missing"]
     assert "last_result_at" in report["required_columns_missing"]
+    assert "model" in report["required_columns_missing"]
+    assert "trace_id" in report["required_columns_missing"]
     assert "006" in report["required_migrations_missing"]
     assert "007" in report["required_migrations_missing"]
     assert "008" in report["required_migrations_missing"]
     assert "009" in report["required_migrations_missing"]
     assert "010" in report["required_migrations_missing"]
     assert "011" in report["required_migrations_missing"]
-    assert "016" in report["required_migrations_missing"]
+    assert "035" in report["required_migrations_missing"]
+    assert "037" in report["required_migrations_missing"]
 
 
 @pytest.mark.asyncio

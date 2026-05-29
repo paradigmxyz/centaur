@@ -89,13 +89,14 @@ _KNOWN_FLAGS = {
 }
 
 
-def parse_harness_from_message(text: str) -> tuple[str | None, str, bool]:
+def parse_harness_from_message(text: str) -> tuple[str | None, str | None, str, bool]:
     """Parse harness directives from message text.
 
-    Returns (harness_or_None, cleaned_text, harness_was_explicit).
+    Returns (harness_or_None, model_or_None, cleaned_text, harness_was_explicit).
     """
     cleaned = text
     harness: str | None = None
+    model: str | None = None
     explicit = False
 
     # 1. key=value syntax: harness=X
@@ -105,6 +106,11 @@ def parse_harness_from_message(text: str) -> tuple[str | None, str, bool]:
         explicit = True
         cleaned = (cleaned[: kv_match.start()] + cleaned[kv_match.end() :]).strip()
 
+    model_match = re.search(r"\bmodel\s*=\s*([^\s`]+)", cleaned, re.IGNORECASE)
+    if model_match:
+        model = model_match.group(1)
+        cleaned = (cleaned[: model_match.start()] + cleaned[model_match.end() :]).strip()
+
     # 2. Known harness flags: --amp, --claude, etc.
     for flag, value in _HARNESS_FLAGS.items():
         pattern = re.compile(r"(^|\s)--" + re.escape(flag) + r"(?=\s|$)", re.IGNORECASE)
@@ -113,12 +119,21 @@ def parse_harness_from_message(text: str) -> tuple[str | None, str, bool]:
             explicit = True
             cleaned = pattern.sub(" ", cleaned)
 
+    model_flag = re.search(
+        r"(^|\s)--model(?:=|\s+)([^\s`]+)(?=\s|`|$)",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if model_flag:
+        model = model_flag.group(2)
+        cleaned = (cleaned[: model_flag.start()] + cleaned[model_flag.end() :]).strip()
+
     # 3. Strip legacy engine/model flags (no harness effect)
     cleaned = re.sub(
-        r"(^|\s)--(engine|model)\s+[A-Za-z0-9._-]+(?=\s|$)", " ", cleaned, flags=re.IGNORECASE
+        r"(^|\s)--(engine|model)\s+[^\s`]+(?=\s|`|$)", " ", cleaned, flags=re.IGNORECASE
     )
     cleaned = re.sub(r"(^|\s)--(opus|sonnet|haiku)(?=\s|$)", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\bmodel\s*=\s*[A-Za-z0-9._-]+\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bmodel\s*=\s*[^\s`]+", "", cleaned, flags=re.IGNORECASE)
 
     # 4. Generic --flag → persona/harness name (any unknown flag)
     generic_re = re.compile(r"(^|\s)--([a-z][a-z0-9-]*)(?=\s|$)", re.IGNORECASE)
@@ -133,7 +148,7 @@ def parse_harness_from_message(text: str) -> tuple[str | None, str, bool]:
     # Normalise whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    return harness, cleaned, explicit
+    return harness, model, cleaned, explicit
 
 
 class ExecuteRequest(BaseModel):
@@ -149,6 +164,7 @@ class ExecuteRequest(BaseModel):
     # the server auto-orchestrates spawn → message → execute.
     message: str | None = None
     engine: str | None = None
+    model: str | None = None
     persona_id: str | None = None
 
 
@@ -157,6 +173,7 @@ class SpawnRequest(BaseModel):
     spawn_id: str | None = None
     harness: str | None = None
     engine: str | None = None
+    model: str | None = None
     persona_id: str | None = None
     agents_md_override: str | None = None
 
@@ -269,6 +286,13 @@ async def execute(request: Request):
         except ControlPlaneError as exc:
             return _json_error(exc.code, exc.message, exc.status_code)
 
+    if body.model:
+        return _json_error(
+            "MODEL_REQUIRES_SPAWN",
+            "model can only be set when spawning a runtime",
+            422,
+        )
+
     execute_id = body.execute_id or f"exec-{uuid.uuid4().hex[:16]}"
     delivery = body.delivery or {
         "channel": "slack",
@@ -311,6 +335,7 @@ async def _auto_execute(pool, body: ExecuteRequest) -> JSONResponse:
         spawn_id=f"{nonce}:spawn",
         harness=body.harness,
         engine=body.engine,
+        model=body.model,
         persona_id=body.persona_id,
         agents_md_override=None,
     )
@@ -370,6 +395,7 @@ async def spawn(req: SpawnRequest, request: Request):
             spawn_id=spawn_id,
             harness=req.harness,
             engine=req.engine,
+            model=req.model,
             persona_id=req.persona_id,
             agents_md_override=req.agents_md_override,
         )
@@ -567,6 +593,7 @@ async def status(request: Request, key: str):
                 "assignment_generation": int(active["assignment_generation"]),
                 "runtime_id": active["runtime_id"],
                 "harness": active["harness"],
+                "model": active["model"],
                 "persona_id": active["persona_id"],
                 "prompt_ref": active["prompt_ref"],
                 "effective_agents_md_sha256": active["effective_agents_md_sha256"],
@@ -588,6 +615,7 @@ async def runtime(request: Request, key: str):
         "runtime_id": active["runtime_id"] if active else None,
         "harness": active["harness"] if active else None,
         "engine": active["engine"] if active else None,
+        "model": active["model"] if active else None,
         "persona_id": persona_id,
         "persona": _persona_payload(persona_id),
         "overlay": _overlay_runtime_payload(),

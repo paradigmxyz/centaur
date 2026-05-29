@@ -158,7 +158,8 @@ Mention the bot in a test channel where the Slack app is installed:
 
 Slack messages without a harness flag use Codex. Add a selector such as
 `--amp`, `--claude`, `--openrouter`, or `--pi` only when you want to override
-the default.
+the default. For OpenRouter, add `--model <provider/model>` when you want the
+new runtime to use a specific model instead of `openrouter/auto`.
 
 If Slack receives the mention but no agent runs, inspect Slackbot logs:
 

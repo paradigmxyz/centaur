@@ -993,6 +993,7 @@ async def _compute_agent_session_header(
 
     persona = selector.get("persona_id")
     harness = selector.get("harness")
+    model = selector.get("model")
     engine: str | None = None
     if not persona or not harness:
         active = await get_active_assignment(pool, thread_key)
@@ -1000,12 +1001,14 @@ async def _compute_agent_session_header(
             persona = persona or _nonempty(active.get("persona_id"))
             harness = harness or _nonempty(active.get("harness"))
             engine = _nonempty(active.get("engine"))
+            model = model or _nonempty(active.get("model"))
     if persona and not engine:
         engine = _persona_default_engine(persona)
     return _agent_session_header(
         persona_id=persona,
         engine=engine,
         harness=harness,
+        model=model,
     )
 
 
@@ -1169,6 +1172,7 @@ async def do_agent_turn(
     metadata: dict[str, Any] | None = None,
     delivery: Delivery | dict[str, Any] | None = None,
     harness: str | None = None,
+    model: str | None = None,
     persona: str | None = None,
     agents_md_override: str | None = None,
 ) -> dict[str, Any]:
@@ -1215,7 +1219,7 @@ async def do_agent_turn(
         else:
             effective_delivery = dict(run_in.get("delivery") or {})
         effective_history = history_messages or run_in.get("history_messages") or []
-        selector = {"persona_id": persona, "harness": harness}
+        selector = {"persona_id": persona, "harness": harness, "model": model}
         slackbot_session_id: str | None = None
 
         try:
@@ -1225,6 +1229,7 @@ async def do_agent_turn(
                 spawn_id=f"{step_id}:spawn",
                 harness=harness,
                 engine=None,
+                model=model,
                 persona_id=persona,
                 agents_md_override=agents_md_override,
             )

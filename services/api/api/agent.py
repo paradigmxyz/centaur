@@ -124,6 +124,23 @@ def _drop_runtime(sandbox_id: str) -> None:
     _runtime.pop(sandbox_id, None)
 
 
+def _normalize_model(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def _resolve_runtime_model(engine: str, model: str | None) -> str:
+    requested = _normalize_model(model)
+    if requested:
+        return requested
+    if engine == "openrouter":
+        return _normalize_model(os.getenv("OPENROUTER_MODEL")) or "openrouter/auto"
+    if engine == "codex":
+        return _normalize_model(os.getenv("CODEX_MODEL"))
+    if engine == "claude-code":
+        return _normalize_model(os.getenv("CLAUDE_MODEL"))
+    return ""
+
+
 def _elapsed_since(start_s: float) -> float:
     """Return a non-negative elapsed duration for logging.
 
@@ -201,7 +218,7 @@ async def _db_get_session(thread_key: str) -> SandboxSession | None:
     row = await pool.fetchrow(
         "SELECT thread_key, sandbox_id, harness, engine, state, started_at, "
         "agent_thread_id, last_delivered_id, inflight_turn_id, inflight_turn_input, "
-        "inflight_attempts, last_result, trace_id "
+        "inflight_attempts, last_result, model, trace_id "
         "FROM sandbox_sessions WHERE thread_key = $1",
         thread_key,
     )
@@ -212,6 +229,7 @@ async def _db_get_session(thread_key: str) -> SandboxSession | None:
         thread_key=row["thread_key"],
         harness=row["harness"],
         engine=row["engine"],
+        model=row["model"] or "",
         started_at=row["started_at"].timestamp() if row["started_at"] else 0.0,
         backend_name="kubernetes",
         db_state=row["state"],
@@ -254,18 +272,19 @@ async def _db_insert_session(
     session.trace_id = trace_id
     row = await pool.fetchrow(
         "INSERT INTO sandbox_sessions ("
-        "thread_key, sandbox_id, harness, engine, state, started_at, "
+        "thread_key, sandbox_id, harness, engine, model, state, started_at, "
         "agent_thread_id, last_delivered_id, inflight_turn_id, inflight_turn_input, "
         "inflight_started_at, inflight_attempts, last_result, last_result_at, trace_id"
-        ") VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8::text, $9::jsonb, "
-        "CASE WHEN $8::text IS NULL THEN NULL ELSE NOW() END, $10, $11, "
-        "CASE WHEN $11::text = '' THEN NULL ELSE NOW() END, $12::uuid) "
+        ") VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9::text, $10::jsonb, "
+        "CASE WHEN $9::text IS NULL THEN NULL ELSE NOW() END, $11, $12, "
+        "CASE WHEN $12::text = '' THEN NULL ELSE NOW() END, $13::uuid) "
         "ON CONFLICT (thread_key) DO NOTHING "
         "RETURNING thread_key",
         session.thread_key,
         session.sandbox_id,
         harness,
         engine,
+        _normalize_model(session.model) or None,
         initial_state,
         agent_thread_id or None,
         last_delivered_id or None,
@@ -820,6 +839,7 @@ async def get_or_spawn(
     harness: str | None = None,
     *,
     engine: str | None = None,
+    model: str | None = None,
     persona: str | None = None,
 ) -> SandboxSession:
     """Get existing session or spawn a new sandbox.
@@ -835,15 +855,21 @@ async def get_or_spawn(
     old_last_result: str = ""
     old_trace_id: str = ""
     pool = _get_pool()
+    effective_harness = harness or default_harness()
+    resolved_engine, resolved_persona, repo = _resolve_harness_profile(
+        effective_harness, persona=persona, engine_override=engine
+    )
+    resolved_model = _resolve_runtime_model(resolved_engine, model)
     session = await _db_get_session(thread_key)
     if session:
         if session.db_state in _REUSABLE_DB_STATES:
             backend = get_backend()
             st = await backend.status(session)
-            if st == "running":
+            model_matches = _normalize_model(session.model) == resolved_model
+            if st == "running" and model_matches:
                 _get_runtime(session.sandbox_id)
                 return session
-            if session.db_state == "suspended":
+            if session.db_state == "suspended" and model_matches:
                 try:
                     await backend.resume_by_id(session.sandbox_id)
                     resumed_status = await backend.status(session)
@@ -872,13 +898,17 @@ async def get_or_spawn(
                         f"failed to resume suspended sandbox: {session.sandbox_id}"
                     ) from exc
             # Container is gone — save agent_thread_id and cursor for resume, clean up row
-            old_agent_thread_id = session.agent_thread_id
-            old_last_delivered_id = session.last_delivered_id
-            old_inflight_turn_id = session.inflight_turn_id
-            old_inflight_turn_input = session.inflight_turn_input
-            old_inflight_attempts = session.inflight_attempts
-            old_last_result = session.last_result
-            old_trace_id = session.trace_id
+            if model_matches:
+                old_agent_thread_id = session.agent_thread_id
+                old_last_delivered_id = session.last_delivered_id
+                old_inflight_turn_id = session.inflight_turn_id
+                old_inflight_turn_input = session.inflight_turn_input
+                old_inflight_attempts = session.inflight_attempts
+                old_last_result = session.last_result
+                old_trace_id = session.trace_id
+            elif st == "running":
+                with contextlib.suppress(Exception):
+                    await backend.stop(session)
             if session.db_state == "suspended":
                 with contextlib.suppress(Exception):
                     await backend.stop_by_id(session.sandbox_id)
@@ -886,28 +916,23 @@ async def get_or_spawn(
             _drop_runtime(session.sandbox_id)
         else:
             # state is stopped/gone — clean up stale row
-            old_agent_thread_id = session.agent_thread_id
-            old_last_delivered_id = session.last_delivered_id
-            old_inflight_turn_id = session.inflight_turn_id
-            old_inflight_turn_input = session.inflight_turn_input
-            old_inflight_attempts = session.inflight_attempts
-            old_last_result = session.last_result
-            old_trace_id = session.trace_id
+            if _normalize_model(session.model) == resolved_model:
+                old_agent_thread_id = session.agent_thread_id
+                old_last_delivered_id = session.last_delivered_id
+                old_inflight_turn_id = session.inflight_turn_id
+                old_inflight_turn_input = session.inflight_turn_input
+                old_inflight_attempts = session.inflight_attempts
+                old_last_result = session.last_result
+                old_trace_id = session.trace_id
             await _db_delete_session(thread_key)
             _drop_runtime(session.sandbox_id)
 
     thread_trace_id = await get_or_create_thread_trace_id(pool, thread_key)
 
-    effective_harness = harness or default_harness()
-
-    # Resolve harness profile (engine, persona, repo) once for both warm and cold paths
-    resolved_engine, resolved_persona, repo = _resolve_harness_profile(
-        effective_harness, persona=persona, engine_override=engine
-    )
-
     # Try warm pool first
     should_try_warm = (
         not engine
+        and not resolved_model
         and not old_agent_thread_id
         and not old_inflight_turn_id
         and not (effective_harness == "amp" and resolved_engine == "codex")
@@ -938,9 +963,6 @@ async def get_or_spawn(
                 return claimed
 
     # Cold spawn
-    resolved_engine, resolved_persona, repo = _resolve_harness_profile(
-        effective_harness, persona=persona, engine_override=engine
-    )
     backend = get_backend()
     await _evict_idle_sessions_for_capacity(backend)
     trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
@@ -950,9 +972,11 @@ async def get_or_spawn(
         resolved_engine,
         persona=resolved_persona,
         repo=repo,
+        model=resolved_model or None,
         resume_thread_id=old_agent_thread_id or None,
         trace_id=trace_id,
     )
+    session.model = resolved_model
     session.trace_id = trace_id
     if old_agent_thread_id:
         session.agent_thread_id = old_agent_thread_id
@@ -2147,6 +2171,7 @@ async def get_status(thread_key: str) -> dict[str, Any]:
         "sandbox_id": session.sandbox_id[:12],
         "harness": session.harness,
         "engine": session.engine,
+        "model": session.model or None,
         "started_at": session.started_at,
     }
     if session.inflight_turn_id:

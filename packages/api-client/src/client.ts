@@ -19,6 +19,7 @@ export interface SpawnOptions {
   spawnId?: string;
   harness?: string;
   engine?: string;
+  model?: string;
   personaId?: string;
   agentsMdOverride?: string;
 }
@@ -30,6 +31,7 @@ export interface SpawnResult {
   trace_id?: string;
   assignment_state: string;
   assignment_generation: number;
+  model?: string | null;
   persona_id?: string | null;
   prompt_ref?: string | null;
   effective_agents_md_sha256?: string | null;
@@ -46,9 +48,8 @@ export interface MessageOptions {
   metadata?: Record<string, unknown>;
 }
 
-export interface ExecuteOptions {
+interface ExecuteBaseOptions {
   threadKey: string;
-  assignmentGeneration: number;
   executeId?: string;
   harness?: string;
   platform?: string;
@@ -56,6 +57,22 @@ export interface ExecuteOptions {
   metadata?: Record<string, unknown>;
   delivery?: Record<string, unknown>;
 }
+
+export type ExecuteOptions =
+  | (ExecuteBaseOptions & {
+      assignmentGeneration: number;
+      message?: never;
+      engine?: never;
+      model?: never;
+      personaId?: never;
+    })
+  | (ExecuteBaseOptions & {
+      assignmentGeneration?: undefined;
+      message: string;
+      engine?: string;
+      model?: string;
+      personaId?: string;
+    });
 
 export interface ExecutionAccepted {
   ok: boolean;
@@ -143,6 +160,7 @@ export class CentaurClient {
       spawn_id: opts.spawnId,
       harness: opts.harness,
       engine: opts.engine,
+      model: opts.model,
       persona_id: opts.personaId,
       agents_md_override: opts.agentsMdOverride,
     });
@@ -175,6 +193,10 @@ export class CentaurClient {
       assignment_generation: opts.assignmentGeneration,
       execute_id: opts.executeId,
       harness: opts.harness,
+      message: opts.message,
+      engine: opts.engine,
+      model: opts.model,
+      persona_id: opts.personaId,
       platform: opts.platform,
       user_id: opts.userId,
       metadata: opts.metadata,

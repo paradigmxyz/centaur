@@ -124,6 +124,46 @@ describe("CentaurClient", () => {
     );
   });
 
+  it("posts model selectors for spawn and one-shot execute", async () => {
+    const client = new CentaurClient({
+      apiUrl: "http://api.local",
+      apiKey: "test-key",
+    });
+    const postMock = vi.spyOn(client.http, "post").mockResolvedValue({ data: { ok: true } });
+
+    await client.spawn({
+      threadKey: "thread-1",
+      harness: "openrouter",
+      model: "anthropic/claude-sonnet-4.5",
+    });
+    await client.execute({
+      threadKey: "thread-2",
+      harness: "openrouter",
+      model: "google/gemini-2.5-pro",
+      message: "review this",
+    });
+
+    expect(postMock).toHaveBeenNthCalledWith(
+      1,
+      "/agent/spawn",
+      expect.objectContaining({
+        thread_key: "thread-1",
+        harness: "openrouter",
+        model: "anthropic/claude-sonnet-4.5",
+      }),
+    );
+    expect(postMock).toHaveBeenNthCalledWith(
+      2,
+      "/agent/execute",
+      expect.objectContaining({
+        thread_key: "thread-2",
+        harness: "openrouter",
+        model: "google/gemini-2.5-pro",
+        message: "review this",
+      }),
+    );
+  });
+
   it("throws useful errors for non-OK event stream responses", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       "upstream unavailable",

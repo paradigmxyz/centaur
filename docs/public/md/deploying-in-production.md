@@ -98,7 +98,11 @@ enable the `--openrouter` selector.
 
 The OpenRouter selector runs the Codex harness against the configured
 OpenRouter provider. It defaults to `openrouter/auto`; set `OPENROUTER_MODEL`
-on the API deployment if you want a fixed OpenRouter model slug.
+on the API deployment if you want a fixed default slug, or choose a model for a
+new runtime with `--openrouter --model anthropic/claude-sonnet-4.5` in Slack.
+API clients can pass the same model slug as `model` on `/agent/spawn` or on the
+single-call `/agent/execute` convenience path when no `assignment_generation`
+is supplied.
 
 Whatever source you pick, the vault is shared across the whole deployment,
 so any thread can use any configured credential. Per-user and per-channel
@@ -241,7 +245,8 @@ reply with exactly PONG
 
 Slack messages without a harness flag use Codex. Use `--amp`, `--claude`,
 `--codex`, `--openrouter`, or `--pi` only when you want to select a specific
-harness.
+harness. Add `--model <provider/model>` with `--openrouter` to pin the new
+runtime to a specific OpenRouter model.
 
 Inspect sandbox pods with the labels Centaur actually sets:
 

@@ -36,6 +36,7 @@ class SandboxSession:
     thread_key: str
     harness: str
     engine: str
+    model: str = ""
     started_at: float = 0.0
     backend_name: str = ""  # "kubernetes", etc.
     db_state: str = ""

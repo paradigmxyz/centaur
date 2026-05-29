@@ -1403,17 +1403,19 @@ class KubernetesExecutorBackend(SandboxBackend):
             resume_thread_id=resume_thread_id,
             pg_dsns=sandbox_pg_dsns,
         )
+        effective_model = (model or "").strip()
         overlay_image = _overlay_image()
         if overlay_image:
             env.append(f"CENTAUR_OVERLAY_DIR={_SANDBOX_OVERLAY_DIR}")
         if engine == "openrouter":
             env.append("CODEX_MODEL_PROVIDER=openrouter")
-            openrouter_model = (
-                model or os.getenv("OPENROUTER_MODEL") or "openrouter/auto"
+            effective_model = effective_model or (
+                os.getenv("OPENROUTER_MODEL") or "openrouter/auto"
             )
-            env.append(f"CODEX_MODEL={openrouter_model}")
-        if engine == "claude-code" and model:
-            env.append(f"CLAUDE_MODEL={model}")
+        if engine in {"codex", "openrouter"} and effective_model:
+            env.append(f"CODEX_MODEL={effective_model}")
+        if engine == "claude-code" and effective_model:
+            env.append(f"CLAUDE_MODEL={effective_model}")
         if engine == "claude-code" and resume_thread_id:
             env.append(f"CLAUDE_CONTINUE_SESSION_ID={resume_thread_id}")
         if persona:
@@ -1632,6 +1634,7 @@ class KubernetesExecutorBackend(SandboxBackend):
             thread_key=thread_key,
             harness=harness,
             engine=engine,
+            model=effective_model,
             started_at=time.time(),
             backend_name=self.name,
             trace_id=trace_id or "",

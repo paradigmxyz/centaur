@@ -396,37 +396,58 @@ def test_recovery_command_paraphrases_are_recognized():
 
 
 @pytest.mark.parametrize(
-    ("text", "harness", "persona", "cleaned"),
+    ("text", "harness", "model", "persona", "cleaned"),
     [
-        ("--invest hyperliquid miqs", None, "invest", "hyperliquid miqs"),
-        ("--INVEST hyperliquid miqs", None, "invest", "hyperliquid miqs"),
-        ("\u2014invest hyperliquid miqs", None, "invest", "hyperliquid miqs"),
-        ("\u2013invest hyperliquid miqs", None, "invest", "hyperliquid miqs"),
-        ("`--invest` hyperliquid miqs", None, "invest", "hyperliquid miqs"),
-        ("`--invest hyperliquid miqs`", None, "invest", "hyperliquid miqs"),
-        ("--claude review this", "claude-code", None, "review this"),
-        ("--openrouter review this", "openrouter", None, "review this"),
-        ("--pi analyze this", "pi-mono", None, "analyze this"),
+        ("--invest hyperliquid miqs", None, None, "invest", "hyperliquid miqs"),
+        ("--INVEST hyperliquid miqs", None, None, "invest", "hyperliquid miqs"),
+        ("\u2014invest hyperliquid miqs", None, None, "invest", "hyperliquid miqs"),
+        ("\u2013invest hyperliquid miqs", None, None, "invest", "hyperliquid miqs"),
+        ("`--invest` hyperliquid miqs", None, None, "invest", "hyperliquid miqs"),
+        ("`--invest hyperliquid miqs`", None, None, "invest", "hyperliquid miqs"),
+        ("--claude review this", "claude-code", None, None, "review this"),
+        ("--openrouter review this", "openrouter", None, None, "review this"),
+        ("--pi analyze this", "pi-mono", None, None, "analyze this"),
         # Persona + harness compose orthogonally.
-        ("--invest --claude review this", "claude-code", "invest", "review this"),
-        ("--claude --invest review this", "claude-code", "invest", "review this"),
-        ("--invest --amp review this", "amp", "invest", "review this"),
-        ("--invest --codex review this", "codex", "invest", "review this"),
-        ("--invest --openrouter review this", "openrouter", "invest", "review this"),
-        ("please use --opus and review this", None, None, "please use and review this"),
-        ("please use --model opus and review this", None, None, "please use and review this"),
-        ("please use `--model opus` and review this", None, None, "please use and review this"),
+        ("--invest --claude review this", "claude-code", None, "invest", "review this"),
+        ("--claude --invest review this", "claude-code", None, "invest", "review this"),
+        ("--invest --amp review this", "amp", None, "invest", "review this"),
+        ("--invest --codex review this", "codex", None, "invest", "review this"),
+        ("--invest --openrouter review this", "openrouter", None, "invest", "review this"),
+        (
+            "--openrouter --model anthropic/claude-sonnet-4.5 review",
+            "openrouter",
+            "anthropic/claude-sonnet-4.5",
+            None,
+            "review",
+        ),
+        (
+            "--openrouter --model=google/gemini-2.5-pro review",
+            "openrouter",
+            "google/gemini-2.5-pro",
+            None,
+            "review",
+        ),
+        (
+            "--openrouter model=anthropic/claude-3.5-sonnet:beta review",
+            "openrouter",
+            "anthropic/claude-3.5-sonnet:beta",
+            None,
+            "review",
+        ),
+        ("please use --opus and review this", None, None, None, "please use and review this"),
+        ("please use --model opus and review this", None, "opus", None, "please use and review this"),
+        ("please use `--model opus` and review this", None, "opus", None, "please use and review this"),
     ],
 )
 def test_prompt_selection_extraction_handles_slack_flag_shapes(
-    text, harness, persona, cleaned
+    text, harness, model, persona, cleaned
 ):
     from api.workflows.slack_thread_turn import _extract_prompt_selection_from_text
 
     assert _extract_prompt_selection_from_text(
         text,
         personas={"invest"},
-    ) == (harness, persona, cleaned)
+    ) == (harness, model, persona, cleaned)
 
 
 def test_prompt_selection_extraction_preserves_unknown_flags():
@@ -436,7 +457,7 @@ def test_prompt_selection_extraction_preserves_unknown_flags():
     assert _extract_prompt_selection_from_text(
         text,
         personas={"invest"},
-    ) == (None, None, text)
+    ) == (None, None, None, text)
 
 
 def test_bare_persona_flag_gets_intro_prompt():
@@ -962,6 +983,93 @@ async def test_slack_thread_turn_without_flag_keeps_default_harness_path(db_pool
     assert do_agent_turn_mock.await_args.kwargs["parts"] == [
         {"type": "text", "text": "Summarize this thread"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_slack_thread_turn_model_only_inherits_active_runtime(db_pool):
+    from api.workflow_engine import WorkflowContext
+    from api.workflows.slack_thread_turn import Input, handler
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    do_agent_turn_mock = AsyncMock(return_value={"ok": True, "execution_id": "exe-1"})
+    release_assignment_mock = AsyncMock(return_value={"ok": True, "released": True})
+    active_assignment = {
+        "assignment_generation": 1,
+        "harness": "openrouter",
+        "engine": "openrouter",
+        "persona_id": None,
+    }
+
+    with (
+        patch("api.workflow_engine.do_agent_turn", new=do_agent_turn_mock),
+        patch(
+            "api.runtime_control.get_active_assignment",
+            new=AsyncMock(return_value=active_assignment),
+        ),
+        patch("api.runtime_control.release_assignment", new=release_assignment_mock),
+    ):
+        await handler(
+            Input(
+                thread_key=thread_key,
+                parts=[
+                    {
+                        "type": "text",
+                        "text": "--model google/gemini-2.5-pro summarize this thread",
+                    }
+                ],
+                message_id="slack:current",
+            ),
+            ctx,
+        )
+
+    release_assignment_mock.assert_awaited_once()
+    assert do_agent_turn_mock.await_args.kwargs["harness"] == "openrouter"
+    assert do_agent_turn_mock.await_args.kwargs["model"] == "google/gemini-2.5-pro"
+    assert do_agent_turn_mock.await_args.kwargs["parts"] == [
+        {"type": "text", "text": "summarize this thread"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_slack_thread_turn_rejects_unsupported_model_before_release(db_pool):
+    from api.runtime_control import ControlPlaneError
+    from api.workflow_engine import WorkflowContext
+    from api.workflows.slack_thread_turn import Input, handler
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    release_assignment_mock = AsyncMock(return_value={"ok": True, "released": True})
+
+    with (
+        patch("api.runtime_control.release_assignment", new=release_assignment_mock),
+        pytest.raises(ControlPlaneError) as exc_info,
+    ):
+        await handler(
+            Input(
+                thread_key=thread_key,
+                parts=[{"type": "text", "text": "--amp --model opus summarize"}],
+                message_id="slack:current",
+            ),
+            ctx,
+        )
+
+    assert exc_info.value.code == "MODEL_UNSUPPORTED_FOR_HARNESS"
+    release_assignment_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -96,11 +96,18 @@ async def test_spawn_assignment_defaults_to_codex_when_no_selector(db_pool, monk
             spawn_id="spawn-default",
             harness=None,
             engine=None,
+            model=None,
             persona_id=None,
             agents_md_override=None,
         )
 
-    get_or_spawn.assert_awaited_once_with(thread_key, "codex", engine=None)
+    get_or_spawn.assert_awaited_once_with(
+        thread_key,
+        "codex",
+        engine=None,
+        model=None,
+        persona=None,
+    )
     assert result["persona_id"] is None
     assignment = await db_pool.fetchrow(
         "SELECT harness, engine, persona_id FROM agent_runtime_assignments WHERE thread_key = $1",
@@ -182,12 +189,17 @@ async def test_spawn_assignment_treats_harness_persona_selector_as_persona(db_po
             spawn_id="spawn-legal",
             harness="legal",
             engine=None,
+            model=None,
             persona_id=None,
             agents_md_override=None,
         )
 
     get_or_spawn.assert_awaited_once_with(
-        thread_key, "codex", engine=None, persona="legal"
+        thread_key,
+        "codex",
+        engine=None,
+        model=None,
+        persona="legal",
     )
     assert result["persona_id"] == "legal"
     assert result["prompt_ref"] == "persona:legal"
@@ -200,6 +212,165 @@ async def test_spawn_assignment_treats_harness_persona_selector_as_persona(db_po
     assert assignment["engine"] == "codex"
     assert assignment["persona_id"] == "legal"
     assert assignment["prompt_ref"] == "persona:legal"
+
+
+@pytest.mark.asyncio
+async def test_spawn_assignment_persists_requested_model(db_pool):
+    from api.runtime_control import spawn_assignment
+
+    model = "anthropic/claude-sonnet-4.5"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:openrouter-model"
+    session = SandboxSession(
+        sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
+        thread_key=thread_key,
+        harness="openrouter",
+        engine="openrouter",
+        model=model,
+    )
+    get_or_spawn = AsyncMock(return_value=session)
+
+    with patch("api.runtime_control.get_or_spawn", new=get_or_spawn):
+        result = await spawn_assignment(
+            db_pool,
+            thread_key=thread_key,
+            spawn_id="spawn-openrouter-model",
+            harness="openrouter",
+            engine=None,
+            model=model,
+            persona_id=None,
+            agents_md_override=None,
+        )
+
+    get_or_spawn.assert_awaited_once_with(
+        thread_key,
+        "openrouter",
+        engine=None,
+        model=model,
+        persona=None,
+    )
+    assert result["model"] == model
+    assignment = await db_pool.fetchrow(
+        "SELECT harness, engine, model FROM agent_runtime_assignments WHERE thread_key = $1",
+        thread_key,
+    )
+    assert assignment is not None
+    assert assignment["harness"] == "openrouter"
+    assert assignment["engine"] == "openrouter"
+    assert assignment["model"] == model
+
+
+@pytest.mark.asyncio
+async def test_spawn_assignment_model_change_creates_new_generation(db_pool):
+    from api.runtime_control import prompt_identity, spawn_assignment
+
+    old_model = "openrouter/auto"
+    new_model = "google/gemini-2.5-pro"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:openrouter-model-switch"
+    prompt_ref, prompt_sha = prompt_identity(
+        harness="openrouter",
+        persona_id=None,
+        agents_md_override=None,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, model, state"
+        ") VALUES ($1, 1, 'rt-old', 'openrouter', 'openrouter', NULL, $2, $3, $4, 'active')",
+        thread_key,
+        prompt_ref,
+        prompt_sha,
+        old_model,
+    )
+    session = SandboxSession(
+        sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
+        thread_key=thread_key,
+        harness="openrouter",
+        engine="openrouter",
+        model=new_model,
+    )
+
+    get_or_spawn = AsyncMock(return_value=session)
+    with patch("api.runtime_control.get_or_spawn", new=get_or_spawn):
+        result = await spawn_assignment(
+            db_pool,
+            thread_key=thread_key,
+            spawn_id="spawn-openrouter-model-switch",
+            harness=None,
+            engine=None,
+            model=new_model,
+            persona_id=None,
+            agents_md_override=None,
+        )
+
+    get_or_spawn.assert_awaited_once_with(
+        thread_key,
+        "openrouter",
+        engine="openrouter",
+        model=new_model,
+        persona=None,
+    )
+    assert result["assignment_generation"] == 2
+    assert result["model"] == new_model
+    rows = await db_pool.fetch(
+        "SELECT assignment_generation, runtime_id, model, state "
+        "FROM agent_runtime_assignments WHERE thread_key = $1 "
+        "ORDER BY assignment_generation",
+        thread_key,
+    )
+    assert [
+        (r["assignment_generation"], r["runtime_id"], r["model"], r["state"])
+        for r in rows
+    ] == [
+        (1, "rt-old", old_model, "released"),
+        (2, session.sandbox_id, new_model, "active"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_spawn_assignment_prompt_mismatch_does_not_spawn(db_pool):
+    from api.runtime_control import ControlPlaneError, prompt_identity, spawn_assignment
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:openrouter-mismatch"
+    prompt_ref, prompt_sha = prompt_identity(
+        harness="amp",
+        persona_id=None,
+        agents_md_override=None,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, 'rt-old', 'amp', 'amp', NULL, $2, $3, 'active')",
+        thread_key,
+        prompt_ref,
+        prompt_sha,
+    )
+    get_or_spawn = AsyncMock()
+
+    with (
+        patch("api.runtime_control.get_or_spawn", new=get_or_spawn),
+        pytest.raises(ControlPlaneError) as exc_info,
+    ):
+        await spawn_assignment(
+            db_pool,
+            thread_key=thread_key,
+            spawn_id="spawn-openrouter-mismatch",
+            harness="openrouter",
+            engine=None,
+            model="google/gemini-2.5-pro",
+            persona_id=None,
+            agents_md_override=None,
+        )
+
+    assert exc_info.value.code == "ACTIVE_ASSIGNMENT_PROMPT_MISMATCH"
+    get_or_spawn.assert_not_awaited()
+    active = await db_pool.fetchrow(
+        "SELECT runtime_id, state FROM agent_runtime_assignments WHERE thread_key = $1",
+        thread_key,
+    )
+    assert active is not None
+    assert active["runtime_id"] == "rt-old"
+    assert active["state"] == "active"
 
 
 @pytest.mark.asyncio
@@ -1485,14 +1656,17 @@ async def test_worker_marks_turn_done_error_as_failed_and_updates_runtime(db_poo
     execution_id = f"exe-{uuid.uuid4().hex[:12]}"
     prior_runtime_id = f"rt-old-{uuid.uuid4().hex[:8]}"
     resumed_runtime_id = f"rt-new-{uuid.uuid4().hex[:8]}"
+    model = "anthropic/claude-sonnet-4.5"
 
     await db_pool.execute(
         "INSERT INTO agent_runtime_assignments ("
         "thread_key, assignment_generation, runtime_id, harness, engine, "
-        "persona_id, prompt_ref, effective_agents_md_sha256, state"
-        ") VALUES ($1, 1, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+        "persona_id, prompt_ref, effective_agents_md_sha256, model, state"
+        ") VALUES ($1, 1, $2, 'openrouter', 'openrouter', NULL, "
+        "'harness:openrouter', 'sha', $3, 'active')",
         thread_key,
         prior_runtime_id,
+        model,
     )
     await db_pool.execute(
         "INSERT INTO agent_execution_requests ("
@@ -1519,8 +1693,9 @@ async def test_worker_marks_turn_done_error_as_failed_and_updates_runtime(db_poo
     session = SandboxSession(
         sandbox_id=resumed_runtime_id,
         thread_key=thread_key,
-        harness="amp",
-        engine="amp",
+        harness="openrouter",
+        engine="openrouter",
+        model=model,
     )
 
     async def _fake_stream(*_args, **_kwargs):
@@ -1536,8 +1711,9 @@ async def test_worker_marks_turn_done_error_as_failed_and_updates_runtime(db_poo
         }
 
     backend = SimpleNamespace(attach=AsyncMock(), close_streams=AsyncMock())
+    get_or_spawn = AsyncMock(return_value=session)
     with (
-        patch("api.runtime_control.get_or_spawn", new=AsyncMock(return_value=session)),
+        patch("api.runtime_control.get_or_spawn", new=get_or_spawn),
         patch(
             "api.runtime_control.inject_stdin",
             new=AsyncMock(
@@ -1568,6 +1744,13 @@ async def test_worker_marks_turn_done_error_as_failed_and_updates_runtime(db_poo
     )
     assert assignment is not None
     assert assignment["runtime_id"] == resumed_runtime_id
+    get_or_spawn.assert_awaited_once_with(
+        thread_key,
+        "openrouter",
+        engine="openrouter",
+        model=model,
+        persona=None,
+    )
     backend.close_streams.assert_awaited_once_with(session)
 
 

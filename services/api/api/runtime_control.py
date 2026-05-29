@@ -18,6 +18,7 @@ from opentelemetry import trace
 
 from api.agent import (
     _get_runtime,
+    _resolve_harness_profile,
     _stream_stdout,
     get_or_spawn,
     inject_stdin,
@@ -115,6 +116,7 @@ FINAL_DELIVERY_READY_GRACE_S = max(
     0.0,
 )
 WORKER_INSTANCE_ID = f"{os.getenv('HOSTNAME') or 'api'}:{uuid.uuid4().hex[:8]}"
+_MODEL_CAPABLE_ENGINES = frozenset({"claude-code", "codex", "openrouter"})
 
 _worker_tasks: list[asyncio.Task] = []
 _worker_wake = asyncio.Event()
@@ -244,6 +246,22 @@ def _resolve_codex_model_label(model: str | None) -> str:
 def _resolve_openrouter_model_label(model: str | None) -> str:
     raw = (model or os.getenv("OPENROUTER_MODEL") or "openrouter/auto").strip().lower()
     return raw or "openrouter/auto"
+
+
+def _clean_model(model: str | None) -> str | None:
+    value = (model or "").strip()
+    return value or None
+
+
+def _ensure_model_supported(*, engine: str | None, harness: str | None) -> None:
+    resolved = (engine or harness or "").strip()
+    if resolved in _MODEL_CAPABLE_ENGINES:
+        return
+    raise ControlPlaneError(
+        "MODEL_UNSUPPORTED_FOR_HARNESS",
+        f"model is not supported for harness {harness or engine or 'unknown'}",
+        422,
+    )
 
 
 def _engine_model_label(
@@ -500,7 +518,7 @@ async def _write_agents_override(runtime_id: str, agents_md_override: str) -> No
 async def get_active_assignment(pool, thread_key: str) -> dict[str, Any] | None:
     row = await pool.fetchrow(
         "SELECT thread_key, assignment_generation, runtime_id, harness, engine, persona_id, "
-        "prompt_ref, effective_agents_md_sha256, agents_md_override, state "
+        "prompt_ref, effective_agents_md_sha256, agents_md_override, model, state "
         "FROM agent_runtime_assignments "
         "WHERE thread_key = $1 AND state = 'active' "
         "ORDER BY assignment_generation DESC LIMIT 1",
@@ -516,6 +534,7 @@ async def spawn_assignment(
     spawn_id: str,
     harness: str | None,
     engine: str | None,
+    model: str | None,
     persona_id: str | None,
     agents_md_override: str | None,
 ) -> dict[str, Any]:
@@ -541,7 +560,7 @@ async def spawn_assignment(
                 422,
             )
 
-    attach_active_assignment = (
+    inherit_active_assignment = (
         harness is None
         and engine is None
         and persona_id is None
@@ -549,7 +568,7 @@ async def spawn_assignment(
     )
     active_assignment = (
         await get_active_assignment(pool, thread_key)
-        if attach_active_assignment
+        if inherit_active_assignment
         else None
     )
 
@@ -558,6 +577,9 @@ async def spawn_assignment(
         effective_engine = active_assignment.get("engine")
         effective_persona_id = active_assignment.get("persona_id")
         effective_agents_md_override = active_assignment.get("agents_md_override")
+        effective_model = _clean_model(model) or _clean_model(
+            active_assignment.get("model")
+        )
     else:
         # Explicit harness wins; otherwise inherit from the persona's declared
         # engine; otherwise use the deployment default.
@@ -570,12 +592,14 @@ async def spawn_assignment(
         effective_engine = engine
         effective_persona_id = persona_id
         effective_agents_md_override = agents_md_override
+        effective_model = _clean_model(model)
 
     payload = {
         "thread_key": thread_key,
         "spawn_id": spawn_id,
         "harness": effective_harness,
         "engine": effective_engine,
+        "model": effective_model,
         "persona_id": effective_persona_id,
         "agents_md_override": effective_agents_md_override,
     }
@@ -596,24 +620,51 @@ async def spawn_assignment(
             )
         return decode_jsonb(existing_idem["response_json"], {})
 
+    resolved_engine, _, _ = _resolve_harness_profile(
+        str(effective_harness),
+        persona=str(effective_persona_id) if effective_persona_id else None,
+        engine_override=str(effective_engine) if effective_engine else None,
+    )
+    if effective_model:
+        _ensure_model_supported(engine=resolved_engine, harness=str(effective_harness))
+
+    active_for_precheck = await get_active_assignment(pool, thread_key)
+    if active_for_precheck:
+        _, precheck_prompt_sha = prompt_identity(
+            harness=str(effective_harness),
+            persona_id=str(effective_persona_id) if effective_persona_id else None,
+            agents_md_override=effective_agents_md_override,
+        )
+        same_prompt_identity = (
+            active_for_precheck["effective_agents_md_sha256"] == precheck_prompt_sha
+            and active_for_precheck["harness"] == effective_harness
+            and active_for_precheck["engine"] == resolved_engine
+        )
+        if not same_prompt_identity:
+            raise ControlPlaneError(
+                "ACTIVE_ASSIGNMENT_PROMPT_MISMATCH",
+                "active assignment exists with different prompt identity",
+                409,
+            )
+
     with start_span(
         "centaur.agent.spawn",
         attributes={
             "centaur.thread_key": thread_key,
             "centaur.harness": effective_harness,
             "centaur.engine": effective_engine,
+            "centaur.model": effective_model,
             "centaur.persona_id": effective_persona_id,
             "centaur.spawn_id": spawn_id,
-            "centaur.assignment.attach_active": attach_active_assignment,
+            "centaur.assignment.attach_active": inherit_active_assignment,
         },
     ) as span:
-        spawn_kwargs: dict[str, Any] = {"engine": effective_engine}
-        if effective_persona_id is not None:
-            spawn_kwargs["persona"] = effective_persona_id
         session = await get_or_spawn(
             thread_key,
             effective_harness,
-            **spawn_kwargs,
+            engine=effective_engine,
+            model=effective_model,
+            persona=effective_persona_id,
         )
         set_span_attributes(
             span,
@@ -622,8 +673,10 @@ async def spawn_assignment(
                 "centaur.trace_id": session.trace_id,
                 "centaur.engine": session.engine,
                 "centaur.harness": session.harness,
+                "centaur.model": session.model,
             },
         )
+    resolved_model = _clean_model(session.model) or effective_model
     if effective_agents_md_override is not None:
         await _write_agents_override(session.sandbox_id, effective_agents_md_override)
 
@@ -654,12 +707,36 @@ async def spawn_assignment(
 
             active = await conn.fetchrow(
                 "SELECT assignment_generation, runtime_id, harness, engine, persona_id, "
-                "prompt_ref, effective_agents_md_sha256, agents_md_override "
+                "prompt_ref, effective_agents_md_sha256, agents_md_override, model "
                 "FROM agent_runtime_assignments "
                 "WHERE thread_key = $1 AND state = 'active' "
                 "ORDER BY assignment_generation DESC LIMIT 1",
                 thread_key,
             )
+
+            if active:
+                same_prompt_identity = (
+                    active["effective_agents_md_sha256"] == prompt_sha
+                    and active["harness"] == session.harness
+                    and active["engine"] == session.engine
+                )
+                same_model = _clean_model(active["model"]) == resolved_model
+                if not same_prompt_identity or not same_model:
+                    if same_prompt_identity and not same_model:
+                        await conn.execute(
+                            "UPDATE agent_runtime_assignments "
+                            "SET state = 'released', released_at = NOW(), updated_at = NOW() "
+                            "WHERE thread_key = $1 AND assignment_generation = $2",
+                            thread_key,
+                            active["assignment_generation"],
+                        )
+                        active = None
+                    else:
+                        raise ControlPlaneError(
+                            "ACTIVE_ASSIGNMENT_PROMPT_MISMATCH",
+                            "active assignment exists with different prompt identity",
+                            409,
+                        )
 
             if active:
                 if (
@@ -686,6 +763,7 @@ async def spawn_assignment(
                 resolved_persona = active["persona_id"]
                 resolved_prompt_ref = active["prompt_ref"]
                 resolved_prompt_sha = active["effective_agents_md_sha256"]
+                resolved_model = _clean_model(active["model"])
             else:
                 generation = (
                     int(
@@ -700,8 +778,8 @@ async def spawn_assignment(
                 await conn.execute(
                     "INSERT INTO agent_runtime_assignments ("
                     "thread_key, assignment_generation, runtime_id, harness, engine, "
-                    "persona_id, prompt_ref, effective_agents_md_sha256, agents_md_override, state"
-                    ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active')",
+                    "persona_id, prompt_ref, effective_agents_md_sha256, agents_md_override, model, state"
+                    ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active')",
                     thread_key,
                     generation,
                     session.sandbox_id,
@@ -711,6 +789,7 @@ async def spawn_assignment(
                     prompt_ref,
                     prompt_sha,
                     effective_agents_md_override,
+                    resolved_model,
                 )
                 runtime_id = session.sandbox_id
                 assignment_state = "assigned_idle"
@@ -725,6 +804,7 @@ async def spawn_assignment(
                 "trace_id": session.trace_id,
                 "assignment_state": assignment_state,
                 "assignment_generation": generation,
+                "model": resolved_model,
                 "persona_id": resolved_persona,
                 "prompt_ref": resolved_prompt_ref,
                 "effective_agents_md_sha256": resolved_prompt_sha,
@@ -746,6 +826,7 @@ async def spawn_assignment(
                 assignment_generation=generation,
                 harness=session.harness,
                 engine=session.engine,
+                model=resolved_model,
                 persona_id=resolved_persona,
                 prompt_ref=resolved_prompt_ref,
                 prompt_sha=resolved_prompt_sha,
@@ -2681,7 +2762,8 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     )
 
     assignment = await pool.fetchrow(
-        "SELECT harness, engine, runtime_id, agents_md_override, persona_id, prompt_ref, effective_agents_md_sha256 "
+        "SELECT harness, engine, model, runtime_id, agents_md_override, persona_id, "
+        "prompt_ref, effective_agents_md_sha256 "
         "FROM agent_runtime_assignments "
         "WHERE thread_key = $1 AND assignment_generation = $2",
         thread_key,
@@ -2701,6 +2783,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
 
     harness = str(assignment["harness"])
     engine = str(assignment["engine"] or harness)
+    model = _clean_model(assignment["model"])
     persona_id = assignment["persona_id"]
     prompt_ref = assignment["prompt_ref"]
     prompt_sha = assignment["effective_agents_md_sha256"]
@@ -2716,6 +2799,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         thread_key=thread_key,
         harness=harness,
         engine=engine,
+        model=model,
         persona_id=persona_id,
         prompt_ref=prompt_ref,
         prompt_sha=prompt_sha,
@@ -2773,6 +2857,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
         thread_key,
         assignment["harness"],
         engine=assignment["engine"],
+        model=model,
         persona=assignment["persona_id"],
     )
     if session.sandbox_id != assignment["runtime_id"]:

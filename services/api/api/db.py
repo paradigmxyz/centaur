@@ -38,6 +38,7 @@ REQUIRED_SANDBOX_SESSION_COLUMNS = frozenset(
         "inflight_attempts",
         "last_result",
         "last_result_at",
+        "model",
         "trace_id",
     }
 )
@@ -52,6 +53,7 @@ REQUIRED_MIGRATIONS = frozenset(
         "010",
         "011",
         "035",
+        "037",
     }
 )
 
