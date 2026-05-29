@@ -513,6 +513,13 @@ class SlackClient:
         as the fallback when native search lacks ``search:read``, and
         ``gather_context``'s Slack grab walks the bot's member channels).
 
+        Uses ``users.conversations``, which returns only the conversations the
+        bot is a member of. ``conversations.list`` would instead page through
+        every channel in the workspace and filter ``is_member`` client-side —
+        an O(workspace) scan that, on large workspaces, never finishes inside
+        the tool-call budget (so the cache below never warms and every call
+        re-scans the whole workspace from scratch).
+
         Args:
             limit: Maximum channels to return
             force_refresh: Ignore cache and fetch fresh data
@@ -533,7 +540,7 @@ class SlackClient:
         while True:
             try:
                 response = self._retry_on_ratelimit(
-                    self._client.conversations_list,
+                    self._client.users_conversations,
                     types="public_channel,private_channel",
                     limit=min(limit - len(channels), 200),
                     cursor=cursor,
@@ -542,22 +549,24 @@ class SlackClient:
             except SlackApiError as e:
                 self._raise_slack_api_error(
                     e,
-                    slack_method="conversations.list",
+                    slack_method="users.conversations",
                     access_path="bot_token",
                 )
 
+            # users.conversations only returns conversations the bot belongs
+            # to, so membership is implied — no client-side is_member filter
+            # (and no whole-workspace pagination) needed.
             for channel in response.get("channels", []):
-                if channel.get("is_member", False):
-                    channels.append(
-                        {
-                            "id": channel.get("id", ""),
-                            "name": channel.get("name", ""),
-                            "purpose": channel.get("purpose", {}).get("value", ""),
-                            "topic": channel.get("topic", {}).get("value", ""),
-                            "member_count": channel.get("num_members", 0),
-                            "is_private": channel.get("is_private", False),
-                        }
-                    )
+                channels.append(
+                    {
+                        "id": channel.get("id", ""),
+                        "name": channel.get("name", ""),
+                        "purpose": channel.get("purpose", {}).get("value", ""),
+                        "topic": channel.get("topic", {}).get("value", ""),
+                        "member_count": channel.get("num_members", 0),
+                        "is_private": channel.get("is_private", False),
+                    }
+                )
 
             cursor = response.get("response_metadata", {}).get("next_cursor")
             if not cursor or len(channels) >= limit:

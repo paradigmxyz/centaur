@@ -29,6 +29,8 @@ class _FakeWebClient:
         self.users_pages: list[dict] = []
         self.list_calls: list[dict] = []
         self.list_pages: list[dict] = []
+        self.user_conversations_calls: list[dict] = []
+        self.user_conversations_pages: list[dict] = []
         self.api_calls: list[tuple[str, dict]] = []
         self.user_info_response: dict | None = None
         self.user_profile_response: dict | None = None
@@ -62,6 +64,10 @@ class _FakeWebClient:
     def conversations_list(self, **kwargs):
         self.list_calls.append(kwargs)
         return self.list_pages.pop(0)
+
+    def users_conversations(self, **kwargs):
+        self.user_conversations_calls.append(kwargs)
+        return self.user_conversations_pages.pop(0)
 
     def files_upload_v2(self, **kwargs):
         self.last_kwargs = kwargs
@@ -460,6 +466,40 @@ def test_list_channels_returns_cache_when_slack_rate_limited() -> None:
     fake_web_client.conversations_list = rate_limited_list  # type: ignore[method-assign]
 
     assert client.list_channels(limit=10) == cached_channels
+
+
+def test_list_bot_channels_uses_users_conversations() -> None:
+    client, fake_web_client = _make_client()
+    saved: list[list[dict]] = []
+    client._save_channel_cache = lambda result: saved.append(result)  # type: ignore[method-assign]
+
+    fake_web_client.user_conversations_pages = [
+        {
+            "channels": [
+                {"id": "C1", "name": "zeta", "is_private": False, "num_members": 3},
+                {"id": "C2", "name": "alpha", "is_private": True, "num_members": 5},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    ]
+
+    # Call the real implementation (the fixture stubs list_bot_channels out).
+    result = SlackClient.list_bot_channels(client, force_refresh=True)
+
+    # Membership is scoped via users.conversations rather than a whole-workspace
+    # conversations.list scan + client-side is_member filter.
+    assert len(fake_web_client.user_conversations_calls) == 1
+    call = fake_web_client.user_conversations_calls[0]
+    assert call["types"] == "public_channel,private_channel"
+    assert call["exclude_archived"] is True
+    assert fake_web_client.list_calls == []
+
+    # Every conversation returned by the API is kept (membership is implied),
+    # sorted by name, with the expected fields preserved.
+    assert [c["id"] for c in result] == ["C2", "C1"]
+    assert [c["name"] for c in result] == ["alpha", "zeta"]
+    assert result[0]["is_private"] is True
+    assert result[1]["member_count"] == 3
 
 
 def test_get_thread_replies_page_uses_bounded_default() -> None:
