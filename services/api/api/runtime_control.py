@@ -412,13 +412,23 @@ def _deployment_environment() -> str:
 
 
 def _slack_thread_metadata(thread_key: str) -> dict[str, str]:
-    parts = thread_key.split(":", 2)
-    if len(parts) != 3 or parts[0] != "slack":
+    # Slack thread keys are slack:<team>:<channel>:<thread_ts>; the older
+    # slack:<channel>:<thread_ts> form is still accepted for compatibility.
+    parts = thread_key.split(":")
+    if parts[0] != "slack":
         return {}
-    return {
-        "slack_channel_id": parts[1],
-        "slack_thread_ts": parts[2],
-    }
+    if len(parts) == 4:
+        return {
+            "slack_team_id": parts[1],
+            "slack_channel_id": parts[2],
+            "slack_thread_ts": parts[3],
+        }
+    if len(parts) == 3:
+        return {
+            "slack_channel_id": parts[1],
+            "slack_thread_ts": parts[2],
+        }
+    return {}
 
 
 def _execution_laminar_metadata(

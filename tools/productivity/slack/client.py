@@ -1587,14 +1587,27 @@ class SlackClient:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e
 
     def _current_slack_destination(self) -> tuple[str | None, str | None]:
-        """Return the active Slack channel/thread from the tool context, if any."""
+        """Return the active Slack channel/thread from the tool context, if any.
+
+        Slack thread keys are ``slack:<team>:<channel>:<thread_ts>`` (the format
+        the slackbot emits). The older ``slack:<channel>:<thread_ts>`` form is
+        still accepted for backwards compatibility.
+        """
         try:
             thread_key = get_tool_context().thread_key or ""
         except LookupError:
             return None, None
         parts = thread_key.split(":")
-        if len(parts) == 3 and parts[0] == "slack" and parts[1] and parts[2]:
-            return parts[1], parts[2]
+        if parts[0] != "slack":
+            return None, None
+        if len(parts) == 4:
+            channel, thread_ts = parts[2], parts[3]
+        elif len(parts) == 3:
+            channel, thread_ts = parts[1], parts[2]
+        else:
+            return None, None
+        if channel and thread_ts:
+            return channel, thread_ts
         return None, None
 
     @staticmethod

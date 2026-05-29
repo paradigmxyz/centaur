@@ -499,6 +499,28 @@ def test_upload_file_infers_slack_thread_from_tool_context() -> None:
     assert fake_web_client.last_kwargs["initial_comment"] == "Uploaded `chart.png`."
 
 
+def test_upload_file_infers_destination_from_team_scoped_thread_key() -> None:
+    """The slackbot emits slack:<team>:<channel>:<thread_ts>; upload_file must
+    infer the channel and thread from that 4-part key, not just the legacy
+    3-part form. Otherwise an agent that omits channel/thread_ts gets a
+    'channel is required' error and files never land in the thread."""
+    client, fake_web_client = _make_client()
+    token = set_tool_context(
+        ToolContext(
+            name="slack",
+            thread_key="slack:T0AQQ46PL4C:C0B0XS7BLA3:1780035646.228899",
+        ),
+    )
+    try:
+        client.upload_file(content_base64="dGVzdA==", filename="random_data.csv")
+    finally:
+        reset_tool_context(token)
+
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["channel"] == "C123"
+    assert fake_web_client.last_kwargs["thread_ts"] == "1780035646.228899"
+
+
 def test_upload_file_rejects_local_path_argument() -> None:
     """upload_file must not accept a local path: it runs server-side, so a
     caller path would read the API host's filesystem."""
