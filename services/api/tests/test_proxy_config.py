@@ -1431,6 +1431,15 @@ def test_render_omits_managed_transforms_when_no_matching_secrets() -> None:
     assert "postgres" not in cfg
 
 
+def test_render_preserves_content_encoding_header_allowlist() -> None:
+    cfg = yaml.safe_load(render_proxy_yaml([]))
+    header_allowlist = next(
+        t for t in cfg["transforms"] if t["name"] == "header_allowlist"
+    )
+
+    assert "content-encoding" in header_allowlist["config"]["headers"]
+
+
 def test_render_emits_postgres_listeners_with_env_refs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1441,7 +1450,10 @@ def test_render_emits_postgres_listeners_with_env_refs(
     ]
     cfg = yaml.safe_load(render_proxy_yaml(secrets))
     listeners = cfg["postgres"]
-    assert [l["name"] for l in listeners] == ["analytics_pg", "database_url"]
+    assert [listener["name"] for listener in listeners] == [
+        "analytics_pg",
+        "database_url",
+    ]
     assert listeners[0]["listen"] == "0.0.0.0:5432"
     assert listeners[1]["listen"] == "0.0.0.0:5433"
     # upstream.dsn uses the secret_ref directly so iron-proxy can resolve it

@@ -223,6 +223,7 @@ def _default_per_sandbox_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME", "firewall-ca-key")
     monkeypatch.setenv("KUBERNETES_SECRET_ENV_NAME", "centaur-infra-env")
     monkeypatch.delenv("KUBERNETES_BOOTSTRAP_SECRET_NAME", raising=False)
+    monkeypatch.delenv("CENTAUR_GIT_CACHE_URL", raising=False)
 
 
 def test_pod_resources_uses_default_limits_when_unset(
@@ -273,6 +274,24 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     assert env_map["OPENAI_API_KEY"] == "OPENAI_API_KEY"
     assert env_map["CENTAUR_TRACE_ID"] == "00000000-0000-0000-0000-000000000123"
     assert env_map["NO_PROXY"] == "localhost,127.0.0.1,firewall.internal,api.internal"
+    assert env_map["no_proxy"] == env_map["NO_PROXY"]
+
+
+def test_container_env_bypasses_proxy_for_git_cache_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_API_URL", "http://api.internal:8000")
+    monkeypatch.setenv(
+        "CENTAUR_GIT_CACHE_URL",
+        "http://centaur-repo-cache.centaur.svc.cluster.local:8080/repos/",
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    assert "centaur-repo-cache.centaur.svc.cluster.local" in env_map[
+        "NO_PROXY"
+    ].split(",")
     assert env_map["no_proxy"] == env_map["NO_PROXY"]
 
 

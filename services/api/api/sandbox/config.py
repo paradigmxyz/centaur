@@ -103,6 +103,11 @@ def _sandbox_otel_endpoint_hosts(extra_env: list[tuple[str, str]]) -> list[str]:
     return hosts
 
 
+def _git_cache_host() -> str | None:
+    value = (os.getenv("CENTAUR_GIT_CACHE_URL") or "").strip()
+    return urlsplit(value).hostname or None
+
+
 def amp_mode() -> str:
     return (os.getenv("AMP_MODE") or "deep").strip() or "deep"
 
@@ -163,6 +168,9 @@ def container_env(
     api_host = urlsplit(api_url).hostname
     if api_host:
         no_proxy_hosts.append(api_host)
+    git_cache_host = _git_cache_host()
+    if git_cache_host:
+        no_proxy_hosts.append(git_cache_host)
     no_proxy_hosts.extend(_sandbox_otel_endpoint_hosts(extra_env))
     no_proxy = ",".join(dict.fromkeys(no_proxy_hosts))
     # Placeholder values for harness infra secrets. iron-proxy MITMs the
