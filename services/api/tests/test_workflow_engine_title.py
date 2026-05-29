@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from api import workflow_engine
+
+
+def _fake_api_app(monkeypatch, state: types.SimpleNamespace):
+    app_module = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
+    monkeypatch.setitem(sys.modules, "api.app", app_module)
+    return app_module.app
+
+
+def test_ensure_app_state_db_pool_sets_missing_pool(monkeypatch):
+    sentinel = object()
+    app = _fake_api_app(monkeypatch, types.SimpleNamespace())
+
+    workflow_engine._ensure_app_state_db_pool(sentinel)
+
+    assert app.state.db_pool is sentinel
+
+
+def test_ensure_app_state_db_pool_preserves_existing_pool(monkeypatch):
+    existing = object()
+    replacement = object()
+    app = _fake_api_app(monkeypatch, types.SimpleNamespace(db_pool=existing))
+
+    workflow_engine._ensure_app_state_db_pool(replacement)
+
+    assert app.state.db_pool is existing
 
 
 @pytest.mark.asyncio

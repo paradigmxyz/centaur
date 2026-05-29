@@ -7,6 +7,13 @@ import httpx
 from centaur_sdk import secret
 
 
+def _validate_project_id(project_id: str) -> str:
+    value = project_id.strip()
+    if not value.isdigit():
+        raise RuntimeError("--project-id must be a numeric PostHog project ID")
+    return value
+
+
 class PostHogClient:
 
     """Client for PostHog API.
@@ -56,7 +63,7 @@ class PostHogClient:
     def project_id(self) -> str:
         """Get project ID from instance or env var."""
         if self._project_id:
-            return self._project_id
+            return _validate_project_id(self._project_id)
         pid = secret("POSTHOG_PROJECT_ID", "")
         if pid:
             return pid
@@ -136,7 +143,7 @@ class PostHogClient:
         limit: int = 100,
         after: str | None = None,
         before: str | None = None,
-    ) -> list[dict]:
+    ) -> dict:
         """Query events using HogQL.
 
         Args:

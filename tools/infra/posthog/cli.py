@@ -11,10 +11,10 @@ app = typer.Typer(name="posthog", help="PostHog CLI for product analytics and Ho
 console = Console()
 
 
-def get_client():
+def get_client(project_id: str | None = None):
     from .client import PostHogClient
 
-    return PostHogClient()
+    return PostHogClient(project_id=project_id)
 
 
 def print_markdown_table(headers: list[str], rows: list[list[str]]) -> None:
@@ -29,11 +29,12 @@ def print_markdown_table(headers: list[str], rows: list[list[str]]) -> None:
 def query(
     sql: str = typer.Argument(..., help="HogQL SQL query"),
     name: str = typer.Option(None, "--name", "-n", help="Query name for logging"),
+    project_id: str | None = typer.Option(None, "--project-id", help="PostHog project ID"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     markdown: bool = typer.Option(False, "--markdown", "-m", help="Output as markdown table"),
 ):
     """Execute a HogQL query."""
-    client = get_client()
+    client = get_client(project_id=project_id)
 
     try:
         result = client.query(sql, name=name)
@@ -70,13 +71,14 @@ def query(
 def breakdown(
     property: str = typer.Argument("$browser", help="Property to breakdown by"),
     event: str = typer.Option(None, "--event", "-e", help="Filter by event name"),
+    project_id: str | None = typer.Option(None, "--project-id", help="PostHog project ID"),
     days: int = typer.Option(7, "--days", "-d", help="Number of days to look back"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     markdown: bool = typer.Option(False, "--markdown", "-m", help="Output as markdown table"),
 ):
     """Get event breakdown by a property (e.g., $browser, $os, $pathname)."""
-    client = get_client()
+    client = get_client(project_id=project_id)
 
     try:
         result = client.breakdown(event=event, property=property, days=days, limit=limit)
@@ -119,13 +121,14 @@ def breakdown(
 @app.command()
 def pageviews(
     url: str = typer.Option(None, "--url", "-u", help="Filter URLs containing this pattern"),
+    project_id: str | None = typer.Option(None, "--project-id", help="PostHog project ID"),
     days: int = typer.Option(7, "--days", "-d", help="Number of days to look back"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     markdown: bool = typer.Option(False, "--markdown", "-m", help="Output as markdown table"),
 ):
     """Get pageview analytics."""
-    client = get_client()
+    client = get_client(project_id=project_id)
 
     try:
         result = client.pageviews(url_pattern=url, days=days, limit=limit)
@@ -164,13 +167,14 @@ def pageviews(
 def user_agents(
     url: str = typer.Option(None, "--url", "-u", help="Filter URLs containing this pattern"),
     event: str = typer.Option("$pageview", "--event", "-e", help="Event type"),
+    project_id: str | None = typer.Option(None, "--project-id", help="PostHog project ID"),
     days: int = typer.Option(7, "--days", "-d", help="Number of days to look back"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     markdown: bool = typer.Option(False, "--markdown", "-m", help="Output as markdown table"),
 ):
     """Get user-agent breakdown (browser + OS)."""
-    client = get_client()
+    client = get_client(project_id=project_id)
 
     try:
         result = client.user_agents(url_pattern=url, event=event, days=days, limit=limit)
@@ -220,13 +224,14 @@ def user_agents(
 @app.command()
 def events(
     event: str = typer.Option(None, "--event", "-e", help="Filter by event name"),
+    project_id: str | None = typer.Option(None, "--project-id", help="PostHog project ID"),
     after: str = typer.Option(None, "--after", "-a", help="Events after (YYYY-MM-DD)"),
     before: str = typer.Option(None, "--before", "-b", help="Events before (YYYY-MM-DD)"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List recent events."""
-    client = get_client()
+    client = get_client(project_id=project_id)
 
     try:
         result = client.events(event=event, after=after, before=before, limit=limit)
