@@ -593,6 +593,50 @@ def test_tool_server_container_has_verifiable_api_key(
     assert claims["container_id"] == "centaur-sandbox-pod-abc"
 
 
+def test_tool_server_container_inherits_sandbox_extra_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {
+                    "name": "LAMINAR_BASE_URL",
+                    "value": "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000",
+                },
+                {"name": "LAMINAR_PROJECT_ID", "value": "project-staging"},
+                {
+                    "name": "NO_PROXY",
+                    "value": "stg-laminar-app-server,.stg-laminar.svc.cluster.local",
+                },
+                {"name": "HTTPS_PROXY", "value": "http://operator-proxy:8080"},
+            ]
+        ),
+    )
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount=None,
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+    )
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert (
+        env["LAMINAR_BASE_URL"]
+        == "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000"
+    )
+    assert env["LAMINAR_PROJECT_ID"] == "project-staging"
+    assert env["HTTPS_PROXY"] == "http://firewall.internal:8080"
+    assert "firewall.internal" in env["NO_PROXY"]
+    assert "api.internal" in env["NO_PROXY"]
+    assert "stg-laminar-app-server" in env["NO_PROXY"]
+
+
 @pytest.mark.asyncio
 async def test_create_builds_pod_and_prompt_secret(
     monkeypatch: pytest.MonkeyPatch,

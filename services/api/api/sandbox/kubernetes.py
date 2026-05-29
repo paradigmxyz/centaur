@@ -483,6 +483,7 @@ def _build_tool_server_container(
         {"name": "TOOL_DIRS", "value": _tool_server_tool_dirs()},
         {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
     ]
+    _apply_tool_server_extra_env(env, no_proxy)
 
     volume_mounts: list[dict[str, Any]] = [
         {
@@ -542,6 +543,48 @@ def _build_tool_server_container(
         },
         "volumeMounts": volume_mounts,
     }
+
+
+def _apply_tool_server_extra_env(env: list[dict[str, Any]], computed_no_proxy: str) -> None:
+    """Let the sidecar see operator sandbox env without breaking its wiring."""
+    pinned = {
+        "DATABASE_URL",
+        "SANDBOX_SIGNING_KEY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "NODE_EXTRA_CA_CERTS",
+        "CENTAUR_API_URL",
+        "CENTAUR_API_KEY",
+        "TOOL_DIRS",
+        "PLUGIN_WATCHER_ENABLED",
+    }
+    no_proxy_keys = {"NO_PROXY", "no_proxy"}
+    for name, value in sandbox_extra_env_map().items():
+        if name in pinned:
+            log.warning("tool_server_extra_env_ignored_pinned_var", key=name)
+            continue
+        if name in no_proxy_keys:
+            value = _merge_csv_env(computed_no_proxy, value)
+        _upsert_env_value(env, name, value)
+
+
+def _upsert_env_value(env: list[dict[str, Any]], name: str, value: str) -> None:
+    for item in env:
+        if item.get("name") == name:
+            item["value"] = value
+            item.pop("valueFrom", None)
+            return
+    env.append({"name": name, "value": value})
+
+
+def _merge_csv_env(base: str, extra: str) -> str:
+    values = [item.strip() for item in base.split(",") if item.strip()]
+    values.extend(item.strip() for item in extra.split(",") if item.strip())
+    return ",".join(dict.fromkeys(values))
 
 
 def _resource_name(prefix: str, raw: str, *, max_length: int = 63) -> str:
