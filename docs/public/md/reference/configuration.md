@@ -82,6 +82,7 @@ Execution tuning:
 | `THREAD_FAILURE_LOOP_WINDOW_S`, `THREAD_FAILURE_LOOP_THRESHOLD` | `api.extraEnv`. | Repeated thread failure detection. |
 | `IDLE_TTL_S`, `SUSPENDED_RETENTION_S`, `MAX_ACTIVE_SANDBOX_SESSIONS` | `api.extraEnv`. | Sandbox cleanup limits. |
 | `STREAM_EOF_REATTACH_MAX`, `STREAM_EOF_REATTACH_BACKOFF_S` | `api.extraEnv`. | Stream reattach retry behavior. |
+| `SANDBOX_CROSS_THREAD_READS` | `api.extraEnv`. | Lets a sandbox token read any thread it has the key for (messages, status, attachments). Defaults to enabled. Set to `0` to confine reads to the token's own thread. Writes are always confined regardless. |
 
 ## Slackbot
 

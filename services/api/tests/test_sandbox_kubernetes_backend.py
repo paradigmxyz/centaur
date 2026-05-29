@@ -14,6 +14,7 @@ from api.sandbox.config import container_env as sandbox_container_env
 from api.sandbox.kubernetes import (
     KubernetesExecutorBackend,
     STDOUT_CHANNEL,
+    _build_tool_server_container,
 )
 from api.sandbox.kubernetes_agent_sandbox import KubernetesAgentSandboxBackend
 from api.sandbox.registry import auto_configure
@@ -563,6 +564,33 @@ async def test_create_requires_repo_cache_volume_for_repo(
             "amp",
             repo="paradigmxyz/centaur",
         )
+
+
+def test_tool_server_container_has_verifiable_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar runs tool code that calls back into the API (e.g. the slack
+    tool offloading a download to /agent/attachments/upload), so it must carry
+    a CENTAUR_API_KEY the API accepts — otherwise the callback 401s."""
+    from api.deps import verify_sandbox_token
+
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount=None,
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+    )
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    claims = verify_sandbox_token(env["CENTAUR_API_KEY"])
+    assert claims is not None
+    assert claims["thread_key"] == "slack:C123:123.456"
+    assert claims["container_id"] == "centaur-sandbox-pod-abc"
 
 
 @pytest.mark.asyncio

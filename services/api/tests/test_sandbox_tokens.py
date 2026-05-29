@@ -7,7 +7,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-from api.deps import mint_sandbox_token, sandbox_thread_in_scope, verify_sandbox_token
+import types
+
+from fastapi import HTTPException
+
+from api.deps import (
+    enforce_sandbox_thread_scope,
+    mint_sandbox_token,
+    sandbox_thread_in_scope,
+    verify_sandbox_token,
+)
 
 _TEST_SECRET = "test-secret-key-for-unit-tests"
 
@@ -97,3 +106,41 @@ class TestSandboxThreadScope:
         assert sandbox_thread_in_scope("thread:1", "thread:1")
         assert not sandbox_thread_in_scope("thread:1", "thread:2")
         assert not sandbox_thread_in_scope("thread:1", "thread:1:child")
+
+
+def _request(sandbox_claims):
+    return types.SimpleNamespace(
+        state=types.SimpleNamespace(sandbox_claims=sandbox_claims)
+    )
+
+
+class TestEnforceSandboxThreadScope:
+    def test_non_sandbox_caller_is_never_restricted(self):
+        # No claims → service key; reads and writes to any thread are allowed.
+        enforce_sandbox_thread_scope(_request(None), "thread:other", write=True)
+        enforce_sandbox_thread_scope(_request(None), "thread:other", write=False)
+
+    def test_own_thread_allowed_for_reads_and_writes(self):
+        req = _request({"thread_key": "thread:1"})
+        enforce_sandbox_thread_scope(req, "thread:1", write=True)
+        enforce_sandbox_thread_scope(req, "thread:1", write=False)
+
+    def test_cross_thread_write_always_rejected(self, monkeypatch):
+        # Even with reads relaxed, writes stay confined to the token's thread.
+        monkeypatch.setenv("SANDBOX_CROSS_THREAD_READS", "1")
+        req = _request({"thread_key": "thread:1"})
+        with pytest.raises(HTTPException) as excinfo:
+            enforce_sandbox_thread_scope(req, "thread:2", write=True)
+        assert excinfo.value.status_code == 403
+
+    def test_cross_thread_read_allowed_by_default(self, monkeypatch):
+        monkeypatch.delenv("SANDBOX_CROSS_THREAD_READS", raising=False)
+        req = _request({"thread_key": "thread:1"})
+        enforce_sandbox_thread_scope(req, "thread:2", write=False)
+
+    def test_cross_thread_read_rejected_when_locked(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_CROSS_THREAD_READS", "0")
+        req = _request({"thread_key": "thread:1"})
+        with pytest.raises(HTTPException) as excinfo:
+            enforce_sandbox_thread_scope(req, "thread:2", write=False)
+        assert excinfo.value.status_code == 403

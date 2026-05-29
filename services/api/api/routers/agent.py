@@ -22,9 +22,9 @@ from api.agent import (
     stop_session,
 )
 from api.deps import (
+    enforce_sandbox_thread_scope,
     get_sandbox_claims,
     require_scope,
-    sandbox_thread_in_scope,
     verify_api_key,
 )
 from api.final_delivery import (
@@ -59,16 +59,6 @@ router = APIRouter(
     tags=["agent"],
     dependencies=[Depends(verify_api_key)],
 )
-
-
-def _enforce_sandbox_thread_scope(request: Request, thread_key: str) -> None:
-    """Reject if a sandbox token is trying to access a different thread."""
-    claims = get_sandbox_claims(request)
-    if claims is None:
-        return
-    allowed = claims.get("thread_key")
-    if not sandbox_thread_in_scope(allowed, thread_key):
-        raise HTTPException(status_code=403, detail="Sandbox token is scoped to a different thread")
 
 
 # ── Known harness flags ─────────────────────────────────────────────────────
@@ -250,7 +240,7 @@ def _overlay_runtime_payload() -> dict[str, Any]:
 @router.post("/execute", dependencies=[Depends(require_scope("agent:execute"))])
 async def execute(request: Request):
     body = ExecuteRequest.model_validate(await request.json())
-    _enforce_sandbox_thread_scope(request, body.thread_key)
+    enforce_sandbox_thread_scope(request, body.thread_key, write=True)
     pool = request.app.state.db_pool
 
     # Auto-orchestrate spawn → message → execute when assignment_generation
@@ -359,7 +349,7 @@ async def _auto_execute(pool, body: ExecuteRequest) -> JSONResponse:
 
 @router.post("/spawn", dependencies=[Depends(require_scope("agent:execute"))])
 async def spawn(req: SpawnRequest, request: Request):
-    _enforce_sandbox_thread_scope(request, req.thread_key)
+    enforce_sandbox_thread_scope(request, req.thread_key, write=True)
     pool = request.app.state.db_pool
     spawn_id = req.spawn_id or f"spawn-{uuid.uuid4().hex[:16]}"
     try:
@@ -379,7 +369,7 @@ async def spawn(req: SpawnRequest, request: Request):
 @router.post("/message", dependencies=[Depends(require_scope("agent:execute"))])
 async def post_message(request: Request):
     body = MessageRequest.model_validate(await request.json())
-    _enforce_sandbox_thread_scope(request, body.thread_key)
+    enforce_sandbox_thread_scope(request, body.thread_key, write=True)
     event, metadata = _normalize_message_event(body.model_dump(exclude_none=True))
     message_id = body.message_id or f"msg-{uuid.uuid4().hex[:16]}"
     pool = request.app.state.db_pool
@@ -447,7 +437,7 @@ async def post_messages(request: Request):
 @router.get("/messages", dependencies=[Depends(require_scope("agent:execute"))])
 async def get_messages(request: Request, thread_key: str, cursor: str | None = None, limit: int = 50):
     """Paginated chat_messages for a thread."""
-    _enforce_sandbox_thread_scope(request, thread_key)
+    enforce_sandbox_thread_scope(request, thread_key, write=False)
     pool = request.app.state.db_pool
     limit = min(limit, 200)
 
@@ -506,7 +496,7 @@ class StopRequest(BaseModel):
 
 @router.post("/stop", dependencies=[Depends(require_scope("agent:stop"))])
 async def stop(req: StopRequest, request: Request):
-    _enforce_sandbox_thread_scope(request, req.thread_key)
+    enforce_sandbox_thread_scope(request, req.thread_key, write=True)
     ok = await stop_session(req.thread_key)
     return {"ok": ok}
 
@@ -518,7 +508,7 @@ class TitleRequest(BaseModel):
 
 @router.post("/title", dependencies=[Depends(require_scope("agent:execute"))])
 async def set_title(req: TitleRequest, request: Request):
-    _enforce_sandbox_thread_scope(request, req.thread_key)
+    enforce_sandbox_thread_scope(request, req.thread_key, write=True)
     pool = request.app.state.db_pool
     await pool.execute(
         "UPDATE sandbox_sessions SET thread_name = $1, updated_at = NOW() WHERE thread_key = $2",
@@ -530,7 +520,7 @@ async def set_title(req: TitleRequest, request: Request):
 
 @router.get("/status", dependencies=[Depends(require_scope("agent:status"))])
 async def status(request: Request, key: str):
-    _enforce_sandbox_thread_scope(request, key)
+    enforce_sandbox_thread_scope(request, key, write=False)
     result = await get_status(key)
     # Add pending message count
     try:
@@ -578,7 +568,7 @@ async def status(request: Request, key: str):
 
 @router.get("/runtime", dependencies=[Depends(require_scope("agent:status"))])
 async def runtime(request: Request, key: str):
-    _enforce_sandbox_thread_scope(request, key)
+    enforce_sandbox_thread_scope(request, key, write=False)
     active = await get_active_assignment(request.app.state.db_pool, key)
     persona_id = active["persona_id"] if active else None
     return {
@@ -600,13 +590,13 @@ async def execution_status(request: Request, execution_id: str):
     result = await get_execution(pool, execution_id)
     if not result:
         raise HTTPException(status_code=404, detail="execution not found")
-    _enforce_sandbox_thread_scope(request, result["thread_key"])
+    enforce_sandbox_thread_scope(request, result["thread_key"], write=False)
     return result
 
 
 @router.get("/threads/{thread_key}/executions", dependencies=[Depends(require_scope("agent:execute"))])
 async def thread_executions(request: Request, thread_key: str, limit: int = 20):
-    _enforce_sandbox_thread_scope(request, thread_key)
+    enforce_sandbox_thread_scope(request, thread_key, write=False)
     pool = request.app.state.db_pool
     return {
         "thread_key": thread_key,
@@ -622,7 +612,7 @@ async def thread_events(
     execution_id: str | None = None,
     poll_ms: int = 500,
 ):
-    _enforce_sandbox_thread_scope(request, thread_key)
+    enforce_sandbox_thread_scope(request, thread_key, write=False)
     pool = request.app.state.db_pool
     poll_s = max(0.05, min(poll_ms / 1000.0, 5.0))
 
@@ -697,7 +687,7 @@ class ReleaseRequest(BaseModel):
 
 @router.post("/threads/{thread_key}/release", dependencies=[Depends(require_scope("agent:execute"))])
 async def release_thread(request: Request, thread_key: str, body: ReleaseRequest):
-    _enforce_sandbox_thread_scope(request, thread_key)
+    enforce_sandbox_thread_scope(request, thread_key, write=True)
     pool = request.app.state.db_pool
     release_id = body.release_id or f"rel-{uuid.uuid4().hex[:16]}"
     try:
@@ -719,7 +709,7 @@ async def execution_cancel(request: Request, execution_id: str):
     existing = await get_execution(pool, execution_id)
     if not existing:
         raise HTTPException(status_code=404, detail="execution not found")
-    _enforce_sandbox_thread_scope(request, existing["thread_key"])
+    enforce_sandbox_thread_scope(request, existing["thread_key"], write=True)
     result = await cancel_execution(pool, execution_id)
     if not result:
         raise HTTPException(status_code=404, detail="execution not found")
@@ -746,7 +736,7 @@ async def steer_execution_endpoint(execution_id: str, request: Request):
     existing = await get_execution(pool, execution_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Execution not found")
-    _enforce_sandbox_thread_scope(request, existing["thread_key"])
+    enforce_sandbox_thread_scope(request, existing["thread_key"], write=True)
     raw_bytes = await request.body()
     raw_body = _json.loads(raw_bytes) if raw_bytes else {}
     body = SteerExecutionRequest.model_validate(raw_body)
@@ -1125,7 +1115,7 @@ async def list_threads(request: Request, limit: int = 200):
 @router.get("/threads/detail", dependencies=[Depends(require_scope("agent:status"))])
 async def thread_detail(request: Request, key: str):
     """Get detailed info for a single thread."""
-    _enforce_sandbox_thread_scope(request, key)
+    enforce_sandbox_thread_scope(request, key, write=False)
     pool = request.app.state.db_pool
 
     rows = await pool.fetch(

@@ -181,6 +181,37 @@ def sandbox_thread_in_scope(allowed_thread_key: str | None, requested_thread_key
     return False
 
 
+def sandbox_cross_thread_reads_allowed() -> bool:
+    """Whether a sandbox token may READ threads other than the one it is scoped to.
+
+    Reads are relaxed by default so that anyone holding a thread link can view
+    its contents and attachments. Writes are always confined to the token's own
+    thread regardless of this setting. Set ``SANDBOX_CROSS_THREAD_READS`` to a
+    falsey value (``0``/``false``/``no``/``off``) to lock reads back down.
+    """
+    val = os.environ.get("SANDBOX_CROSS_THREAD_READS", "1").strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
+def enforce_sandbox_thread_scope(request: Request, thread_key: str, *, write: bool) -> None:
+    """Reject if a sandbox token is accessing a thread it is not allowed to.
+
+    Non-sandbox callers (service keys) are never restricted here. For sandbox
+    tokens, writes are always confined to the token's own thread; reads are
+    allowed across threads when ``sandbox_cross_thread_reads_allowed`` is true
+    (the default).
+    """
+    claims = get_sandbox_claims(request)
+    if claims is None:
+        return
+    allowed = claims.get("thread_key")
+    if sandbox_thread_in_scope(allowed, thread_key):
+        return
+    if not write and sandbox_cross_thread_reads_allowed():
+        return
+    raise HTTPException(status_code=403, detail="Sandbox token is scoped to a different thread")
+
+
 def require_scope(scope: str) -> Callable:
     """Return a FastAPI dependency that checks the caller has the given scope.
 

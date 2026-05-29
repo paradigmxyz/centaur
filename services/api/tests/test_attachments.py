@@ -660,18 +660,80 @@ async def test_nonexistent_attachment_404(client, api_key):
 
 
 @pytest.mark.asyncio
-async def test_download_attachment_enforces_sandbox_thread_scope():
-    """download_attachment refuses a sandbox token scoped to another thread.
+async def test_download_attachment_allows_cross_thread_reads_by_default(monkeypatch):
+    """A sandbox token may download another thread's attachment by default.
 
-    Exercises the handler directly: the HTTP path can't be used because
-    verify_api_key bypasses auth for loopback clients, so a test client never
-    carries sandbox claims.
+    Cross-thread reads are relaxed so anyone holding a thread link can view its
+    attachments. Exercises the handler directly: the HTTP path can't be used
+    because a test client never carries sandbox claims.
     """
     import types
 
     from fastapi import HTTPException
 
     from api.routers.attachments import download_attachment
+
+    monkeypatch.delenv("SANDBOX_CROSS_THREAD_READS", raising=False)
+
+    row = {
+        "data": SAMPLE_PNG,
+        "mime_type": "image/png",
+        "name": "secret.png",
+        "thread_key": "test:owner-thread",
+    }
+
+    class _Pool:
+        async def fetchrow(self, _sql, _attachment_id):
+            return row
+
+    def _request(sandbox_claims):
+        return types.SimpleNamespace(
+            app=types.SimpleNamespace(state=types.SimpleNamespace(db_pool=_Pool())),
+            state=types.SimpleNamespace(sandbox_claims=sandbox_claims),
+        )
+
+    # Sandbox token scoped to a different thread → still serves the bytes
+    resp = await download_attachment(
+        _request({"thread_key": "test:other-thread"}), "att-x"
+    )
+    assert resp.status_code == 200
+    assert resp.body == SAMPLE_PNG
+
+    # Sandbox token scoped to the owning thread → serves the bytes
+    resp = await download_attachment(
+        _request({"thread_key": "test:owner-thread"}), "att-x"
+    )
+    assert resp.status_code == 200
+    assert resp.body == SAMPLE_PNG
+
+    # Non-sandbox caller (no claims) → unaffected
+    resp = await download_attachment(_request(None), "att-x")
+    assert resp.status_code == 200
+
+    # Explicit thread_key must match the attachment's thread, regardless of
+    # token type (used by privileged callers acting for an agent).
+    with pytest.raises(HTTPException) as excinfo:
+        await download_attachment(
+            _request(None), "att-x", thread_key="test:other-thread"
+        )
+    assert excinfo.value.status_code == 403
+
+    resp = await download_attachment(
+        _request(None), "att-x", thread_key="test:owner-thread"
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_download_attachment_enforces_thread_scope_when_reads_locked(monkeypatch):
+    """With SANDBOX_CROSS_THREAD_READS disabled, a sandbox token is confined."""
+    import types
+
+    from fastapi import HTTPException
+
+    from api.routers.attachments import download_attachment
+
+    monkeypatch.setenv("SANDBOX_CROSS_THREAD_READS", "0")
 
     row = {
         "data": SAMPLE_PNG,
@@ -703,23 +765,6 @@ async def test_download_attachment_enforces_sandbox_thread_scope():
     )
     assert resp.status_code == 200
     assert resp.body == SAMPLE_PNG
-
-    # Non-sandbox caller (no claims) → unaffected
-    resp = await download_attachment(_request(None), "att-x")
-    assert resp.status_code == 200
-
-    # Explicit thread_key must match the attachment's thread, regardless of
-    # token type (used by privileged callers acting for an agent).
-    with pytest.raises(HTTPException) as excinfo:
-        await download_attachment(
-            _request(None), "att-x", thread_key="test:other-thread"
-        )
-    assert excinfo.value.status_code == 403
-
-    resp = await download_attachment(
-        _request(None), "att-x", thread_key="test:owner-thread"
-    )
-    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio

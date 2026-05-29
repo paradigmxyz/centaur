@@ -29,6 +29,7 @@ from kubernetes_asyncio.stream.ws_client import (
 import structlog
 
 from api.broker_config import render_broker_yaml
+from api.deps import mint_sandbox_token
 from api.proxy_config import (
     assign_pg_listen_ports,
     core_pg_listen_port,
@@ -423,6 +424,8 @@ def _firewall_ca_key_secret_name() -> str:
 
 def _build_tool_server_container(
     *,
+    thread_key: str,
+    container_name: str,
     firewall_host: str,
     api_url: str,
     overlay_mount: str | None,
@@ -436,6 +439,12 @@ def _build_tool_server_container(
     sandbox's NetworkPolicy; the real credentials stay in the proxy pod.
     Caller is responsible for only invoking this when ``_tool_server_image()``
     is set.
+
+    The sidecar runs tool code that calls back into the API (e.g. the slack
+    tool offloading a downloaded file to ``/agent/attachments/upload``), so it
+    needs its own ``CENTAUR_API_KEY``. Mint a sandbox token scoped to this
+    thread, mirroring the agent container; without it the callback is
+    unauthenticated and the API rejects it with 401.
     """
     image_ref = _tool_server_image()
     if not image_ref:
@@ -470,6 +479,7 @@ def _build_tool_server_container(
         {"name": "SSL_CERT_FILE", "value": "/firewall-certs/ca-cert.pem"},
         {"name": "NODE_EXTRA_CA_CERTS", "value": "/firewall-certs/ca-cert.pem"},
         {"name": "CENTAUR_API_URL", "value": api_url},
+        {"name": "CENTAUR_API_KEY", "value": mint_sandbox_token(thread_key, container_name)},
         {"name": "TOOL_DIRS", "value": _tool_server_tool_dirs()},
         {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
     ]
@@ -1549,6 +1559,8 @@ class KubernetesExecutorBackend(SandboxBackend):
             assert core_pg is not None  # set under the same guard above
             containers.append(
                 _build_tool_server_container(
+                    thread_key=thread_key,
+                    container_name=pod_name,
                     firewall_host=firewall_host,
                     api_url=os.getenv("AGENT_API_URL", "http://api:8000"),
                     overlay_mount=(
