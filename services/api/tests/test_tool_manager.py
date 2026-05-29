@@ -598,6 +598,23 @@ class TestSecretDiscoveryGate:
         assert [t.name for t in loaded] == ["gated"]
         assert manager.gated_tools == []
 
+    def test_gate_disabled_by_caller_loads_secretless_tools(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The tool-server sidecar runs discovery with gate_on_missing_secrets
+        # =False: it never holds secrets (iron-proxy does), so the env gate must
+        # not hide secret-backed tools even under the env source.
+        monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+        monkeypatch.delenv("NEEDS_KEY", raising=False)
+        tools_dir = tmp_path / "tools"
+        _write_tool(tools_dir, "gated", FAKE_TOOL_CLIENT, secrets=["NEEDS_KEY"])
+
+        manager = ToolManager(tools_dir, gate_on_missing_secrets=False)
+        loaded = manager.discover()
+
+        assert [t.name for t in loaded] == ["gated"]
+        assert manager.gated_tools == []
+
 
 class TestSecretEnvRefHelpers:
     """Env-ref enumeration and missing-secret detection for compound secrets."""

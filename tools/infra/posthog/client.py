@@ -289,6 +289,10 @@ class PostHogClient:
 
 
 def _client() -> PostHogClient:
-    api_key = secret("POSTHOG_API_KEY", "")
-    project_id = secret("POSTHOG_PROJECT_ID", "")
-    return PostHogClient(api_key=api_key, project_id=project_id)
+    # Resolve credentials lazily via the ``api_key`` / ``project_id`` properties.
+    # Under iron-proxy these are replace-mode placeholders (e.g. the literal
+    # ``"POSTHOG_PROJECT_ID"``, which the proxy swaps for the real numeric id on
+    # the wire) — so the project-id placeholder must NOT go through the
+    # constructor, where ``_validate_project_id`` would reject it as non-numeric.
+    # ``_validate_project_id`` is reserved for genuine CLI ``--project-id`` input.
+    return PostHogClient()

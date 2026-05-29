@@ -1657,6 +1657,8 @@ class ToolManager:
     def __init__(
         self,
         tools_dir: Path | list[Path],
+        *,
+        gate_on_missing_secrets: bool = True,
     ):
         if isinstance(tools_dir, list):
             self.tools_dirs: list[Path] = list(tools_dir)
@@ -1668,6 +1670,14 @@ class ToolManager:
         # Tools skipped at discovery because required secret env vars are unset
         # (env secret source only). Each: {"name", "missing_secrets": [...]}.
         self.gated_tools: list[dict[str, Any]] = []
+        # Whether discovery applies the required-secret env gate. The gate's
+        # premise — "env var unset ⇒ tool unusable" — only holds where the
+        # secret env vars actually live (the central API, which also builds the
+        # iron-proxy config). The per-sandbox tool-server sidecar runs the same
+        # discovery but never holds secrets (they live in its iron-proxy peer),
+        # so it must NOT gate or it would hide every secret-backed tool from the
+        # agent. Such callers pass ``gate_on_missing_secrets=False``.
+        self._gate_on_missing_secrets = gate_on_missing_secrets
         self._reload_lock = threading.Lock()
 
     def _collect_tools(self) -> list[tuple[Path, dict]]:
@@ -1684,7 +1694,7 @@ class ToolManager:
         seen: dict[str, int] = {}
         tools: list[tuple[Path, dict]] = []
         self.gated_tools = []
-        gate_on_env = _secret_source_is_env()
+        gate_on_env = self._gate_on_missing_secrets and _secret_source_is_env()
         for dir_idx, base_dir in enumerate(self.tools_dirs):
             if not base_dir.exists():
                 continue
@@ -1865,7 +1875,9 @@ class ToolManager:
             log.info("tools_dirs_missing", paths=[str(d) for d in self.tools_dirs])
             return []
 
-        if not _secret_source_is_env():
+        if not self._gate_on_missing_secrets:
+            log.info("tool_secret_gate_inactive", reason="disabled_by_caller")
+        elif not _secret_source_is_env():
             log.info(
                 "tool_secret_gate_inactive",
                 secret_source=os.getenv("FIREWALL_MANAGER_SECRET_SOURCE", "env"),
