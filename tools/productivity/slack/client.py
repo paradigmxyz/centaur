@@ -49,6 +49,21 @@ class SlackAuthError(RuntimeError):
         super().__init__(json.dumps(payload, sort_keys=True))
 
 
+class SlackRateLimitError(RuntimeError):
+    """Structured Slack rate-limit failure that does not sleep through tool timeouts."""
+
+    def __init__(self, *, slack_method: str, retry_after: float, access_path: str) -> None:
+        payload = {
+            "error": "slack_rate_limited",
+            "message": f"Slack rate limited {slack_method}; retry after {retry_after:.2f}s",
+            "slack_method": slack_method,
+            "access_path": access_path,
+            "retry_after_seconds": retry_after,
+        }
+        self.payload = payload
+        super().__init__(json.dumps(payload, sort_keys=True))
+
+
 class SlackClient:
     """Slack API client.
 
@@ -67,8 +82,11 @@ class SlackClient:
     _DEFAULT_THREAD_REPLY_LIMIT = 50
     _DEFAULT_DUMP_MESSAGE_LIMIT = 100
     _DEFAULT_DUMP_THREAD_LIMIT = 25
+    _DEFAULT_API_TIMEOUT_SECONDS = 8
+    _MAX_RATE_LIMIT_SLEEP_SECONDS = 0.0
     _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
+    _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
     _AUTH_ERROR_CODES: ClassVar[frozenset[str]] = frozenset(
         {
             "account_inactive",
@@ -96,11 +114,14 @@ class SlackClient:
         self.token = token
         self.search_token = (search_token or secret("SLACK_SEARCH_TOKEN", default="")).strip()
         self.etl_token = (etl_token or secret("SLACK_ETL_TOKEN", default="")).strip()
-        self._client = WebClient(token=token)
+        timeout = self._api_timeout_seconds()
+        self._client = WebClient(token=token, timeout=timeout)
         self._search_client = (
-            WebClient(token=self.search_token) if self.search_token else self._client
+            WebClient(token=self.search_token, timeout=timeout)
+            if self.search_token
+            else self._client
         )
-        self._etl_client = WebClient(token=self.etl_token)
+        self._etl_client = WebClient(token=self.etl_token, timeout=timeout)
         self._user_cache: dict[str, str] = {}
         self._ratelimit_deadlines: dict[str, float] = {}
 
@@ -121,6 +142,31 @@ class SlackClient:
         """Classify auth and scope failures so callers can choose better fallbacks."""
         status_code = getattr(error.response, "status_code", None)
         return status_code in {401, 403} or self._slack_error_code(error) in self._AUTH_ERROR_CODES
+
+    @classmethod
+    def _api_timeout_seconds(cls) -> int:
+        """Return Slack SDK request timeout in seconds."""
+        raw = secret("SLACK_API_TIMEOUT_SECONDS", default="")
+        if raw is None:
+            return cls._DEFAULT_API_TIMEOUT_SECONDS
+        raw = str(raw).strip()
+        if not raw:
+            return cls._DEFAULT_API_TIMEOUT_SECONDS
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return cls._DEFAULT_API_TIMEOUT_SECONDS
+
+    def _clean_channel_ref(self, channel: str) -> str:
+        """Normalize #name, ID, and <#ID|name> Slack channel references."""
+        raw = str(channel).strip()
+        if raw.startswith("<#") and raw.endswith(">"):
+            raw = raw[2:-1].split("|", 1)[0]
+        return raw.lstrip("#").strip()
+
+    def _looks_like_channel_id(self, channel: str) -> bool:
+        """Return whether a channel reference is already a Slack conversation ID."""
+        return bool(self._CHANNEL_ID_RE.fullmatch(self._clean_channel_ref(channel).upper()))
 
     def _raise_slack_api_error(
         self,
@@ -151,14 +197,26 @@ class SlackClient:
         *args,
         method_key: str | None = None,
         max_retries: int = 6,
+        max_retry_sleep_s: float | None = None,
         **kwargs,
     ):
-        """Retry a function on rate limit errors while honoring Retry-After."""
+        """Retry short Slack rate limits; fail fast on long Retry-After windows."""
         key = method_key or getattr(func, "__name__", "slack_api_call")
+        max_sleep = (
+            self._MAX_RATE_LIMIT_SLEEP_SECONDS
+            if max_retry_sleep_s is None
+            else max(0.0, max_retry_sleep_s)
+        )
         for attempt in range(max_retries):
             blocked_until = self._ratelimit_deadlines.get(key, 0.0)
             remaining = blocked_until - time.time()
             if remaining > 0:
+                if remaining > max_sleep:
+                    raise SlackRateLimitError(
+                        slack_method=key,
+                        retry_after=round(remaining, 3),
+                        access_path="slack_api",
+                    )
                 time.sleep(remaining)
 
             try:
@@ -170,9 +228,14 @@ class SlackClient:
                         default=max(1, 2**attempt),
                     )
                     self._ratelimit_deadlines[key] = time.time() + retry_after
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries - 1 and retry_after <= max_sleep:
                         time.sleep(retry_after)
                         continue
+                    raise SlackRateLimitError(
+                        slack_method=key,
+                        retry_after=retry_after,
+                        access_path="slack_api",
+                    ) from e
                 raise
         raise RuntimeError("Max retries exceeded")
 
@@ -230,9 +293,11 @@ class SlackClient:
 
     def _resolve_channel_name(self, channel: str, channel_id: str) -> str:
         """Resolve a human-readable channel name when callers passed an ID."""
-        normalized = channel.lstrip("#")
+        normalized = self._clean_channel_ref(channel)
         if normalized != channel_id:
             return normalized
+        if self._looks_like_channel_id(normalized):
+            return channel_id
 
         for item in self.list_bot_channels(limit=1000):
             if item["id"] == channel_id:
@@ -304,9 +369,9 @@ class SlackClient:
 
     def _resolve_channel(self, channel: str) -> str:
         """Resolve a channel name to its ID using cached channel list."""
-        normalized = channel.lstrip("#")
-        if normalized.startswith("C") or normalized.startswith("G"):
-            return normalized
+        normalized = self._clean_channel_ref(channel)
+        if self._looks_like_channel_id(normalized):
+            return normalized.upper()
         channels = self.list_bot_channels()
         name = normalized
         for ch in channels:
@@ -316,9 +381,9 @@ class SlackClient:
 
     def _resolve_etl_channel(self, channel: str) -> str:
         """Resolve a public channel name using the configured ETL user token."""
-        normalized = channel.lstrip("#")
-        if normalized.startswith("C") or normalized.startswith("G"):
-            return normalized
+        normalized = self._clean_channel_ref(channel)
+        if self._looks_like_channel_id(normalized):
+            return normalized.upper()
 
         for item in self._list_etl_channels(limit=10_000):
             if item["name"] == normalized:
@@ -412,7 +477,7 @@ class SlackClient:
             for user in users_response.get("members", []):
                 user_cache[user.get("id", "")] = user.get("name", "")
             self._save_user_cache(user_cache)
-        except SlackApiError:
+        except (SlackApiError, SlackRateLimitError):
             pass
         return user_cache
 
@@ -432,7 +497,7 @@ class SlackClient:
             for user in users_response.get("members", []):
                 user_cache[user.get("id", "")] = user.get("name", "")
             self._save_user_cache(user_cache)
-        except SlackApiError:
+        except (SlackApiError, SlackRateLimitError):
             pass
         return user_cache
 
@@ -557,12 +622,12 @@ class SlackClient:
         """Fetch history for a single channel (used by search)."""
         try:
             response = self._retry_on_ratelimit(
-                self._client.conversations_history,
+                client.conversations_history,
                 method_key="conversations.history",
                 channel=channel_id,
                 limit=limit,
             )
-        except SlackApiError:
+        except (SlackApiError, SlackRateLimitError):
             return []
 
         messages = []
@@ -651,20 +716,29 @@ class SlackClient:
         Returns:
             List of matching message dicts, sorted by relevance
         """
+        local_query, local_channels, local_from_user = self._extract_local_search_filters(
+            query, channels, from_user
+        )
+        if local_channels:
+            return self._search_messages_local(
+                local_query,
+                max_results,
+                local_channels,
+                local_from_user,
+                messages_per_channel,
+            )
+
         # Build the search query with modifiers
         search_query = query
-        if channels:
-            for ch in channels:
-                search_query += f" in:#{ch.lstrip('#')}"
         if from_user:
             search_query += f" from:@{from_user.lstrip('@')}"
 
         try:
             return self._search_messages_native(search_query, max_results)
-        except (SlackApiError, RuntimeError):
+        except (SlackApiError, RuntimeError, SlackRateLimitError):
             # Fall back to local scanning if native search fails
             return self._search_messages_local(
-                query, max_results, channels, from_user, messages_per_channel
+                local_query, max_results, local_channels, local_from_user, messages_per_channel
             )
 
     def _search_messages_native(
@@ -712,6 +786,80 @@ class SlackClient:
 
         return results
 
+    def _extract_local_search_filters(
+        self,
+        query: str,
+        channels: list[str] | None,
+        from_user: str | None,
+    ) -> tuple[str, list[str] | None, str | None]:
+        """Extract common Slack search modifiers for the local history scanner."""
+        local_channels = list(channels or [])
+        local_from_user = from_user
+
+        def channel_repl(match: re.Match) -> str:
+            local_channels.append(match.group("id") or match.group("name") or "")
+            return " "
+
+        query = re.sub(
+            r"(?<!\S)in:(?:<#(?P<id>[CGD][A-Z0-9]+)(?:\|[^>]+)?>|#?(?P<name>[A-Za-z0-9_-]+))",
+            channel_repl,
+            query,
+        )
+
+        def from_repl(match: re.Match) -> str:
+            nonlocal local_from_user
+            local_from_user = match.group("uid") or match.group("uname") or local_from_user
+            return " "
+
+        query = re.sub(
+            r"(?<!\S)from:(?:<@(?P<uid>[A-Z0-9]+)>|@?(?P<uname>[A-Za-z0-9._-]+))",
+            from_repl,
+            query,
+        )
+
+        deduped_channels = []
+        seen = set()
+        for channel in local_channels:
+            normalized = self._clean_channel_ref(channel)
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped_channels.append(normalized)
+
+        return " ".join(query.split()), deduped_channels or None, local_from_user
+
+    def _channel_refs_for_search(self, channels: list[str]) -> list[dict]:
+        """Resolve channel filters without listing channels when IDs are provided."""
+        resolved: dict[str, dict] = {}
+        unresolved_names: set[str] = set()
+
+        for channel in channels:
+            normalized = self._clean_channel_ref(channel)
+            if not normalized:
+                continue
+            if self._looks_like_channel_id(normalized):
+                channel_id = normalized.upper()
+                resolved[channel_id] = {
+                    "id": channel_id,
+                    "name": channel_id,
+                    "purpose": "",
+                    "topic": "",
+                    "member_count": 0,
+                    "is_private": channel_id.startswith("G"),
+                }
+            else:
+                unresolved_names.add(normalized.lower())
+
+        if unresolved_names:
+            for channel in self.list_bot_channels():
+                if channel["name"].lower() in unresolved_names:
+                    resolved[channel["id"]] = channel
+
+        return list(resolved.values())
+
     def _search_messages_local(
         self,
         query: str,
@@ -721,13 +869,12 @@ class SlackClient:
         messages_per_channel: int = 200,
     ) -> list[dict]:
         """Search messages by scanning channel histories locally (fallback)."""
-        bot_channels = self.list_bot_channels()
         query_terms = [t.strip().lower() for t in query.split() if t.strip()]
 
         if channels:
-            channel_names = {c.lstrip("#").lower() for c in channels}
-            bot_channels = [c for c in bot_channels if c["name"].lower() in channel_names]
+            bot_channels = self._channel_refs_for_search(channels)
         else:
+            bot_channels = self.list_bot_channels()
             bot_channels = self._rank_channels_for_query(bot_channels, query_terms)
             bot_channels = bot_channels[: self._MAX_SEARCH_CHANNELS]
 
@@ -735,12 +882,12 @@ class SlackClient:
             return []
 
         user_cache = self._get_user_cache()
-        effective_limit = messages_per_channel
+        effective_limit = max(1, min(int(messages_per_channel), self._MAX_PAGE_SIZE))
         if len(bot_channels) > 30 and messages_per_channel > 100:
             effective_limit = 100
 
         all_messages = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=min(6, len(bot_channels))) as executor:
             futures = {
                 executor.submit(
                     self._fetch_channel_history,
@@ -763,12 +910,13 @@ class SlackClient:
         scored_results = []
         for msg in all_messages:
             text_lower = msg["text"].lower()
-            if not any(term in text_lower for term in query_terms):
+            if query_terms and not any(term in text_lower for term in query_terms):
                 continue
 
             if from_user:
                 username = user_cache.get(msg["user_id"], msg["user_id"])
-                if from_user.lower().lstrip("@") != username.lower():
+                normalized_user = from_user.lower().lstrip("@")
+                if normalized_user not in {username.lower(), msg["user_id"].lower()}:
                     continue
 
             score = self._score_match(query_terms, msg["text"])
@@ -1243,7 +1391,9 @@ class SlackClient:
 
         while True:
             try:
-                response = self._client.conversations_list(
+                response = self._retry_on_ratelimit(
+                    self._client.conversations_list,
+                    method_key="conversations.list",
                     types="public_channel,private_channel",
                     limit=min(limit - len(channels), 200),
                     cursor=cursor,
@@ -1255,6 +1405,12 @@ class SlackClient:
                     slack_method="conversations.list",
                     access_path="bot_token",
                 )
+            except SlackRateLimitError:
+                cached = self._load_channel_cache()
+                if cached:
+                    cached_channels, _ = cached
+                    return cached_channels[:limit]
+                raise
 
             for channel in response.get("channels", []):
                 channels.append(
@@ -1693,9 +1849,7 @@ class SlackClient:
         with urllib.request.urlopen(request, timeout=30) as response:
             body = response.read(self._MAX_DOWNLOAD_BYTES + 1)
         if len(body) > self._MAX_DOWNLOAD_BYTES:
-            raise ValueError(
-                f"Attachment exceeds the {self._MAX_DOWNLOAD_BYTES}-byte limit"
-            )
+            raise ValueError(f"Attachment exceeds the {self._MAX_DOWNLOAD_BYTES}-byte limit")
         return body
 
     def upload_file(
@@ -1925,8 +2079,7 @@ class SlackClient:
         parsed = urlparse(url)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() != "files.slack.com":
             raise ValueError(
-                "Slack file downloads only accept https://files.slack.com/ URLs; "
-                f"refusing {url!r}"
+                f"Slack file downloads only accept https://files.slack.com/ URLs; refusing {url!r}"
             )
 
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
@@ -1942,9 +2095,7 @@ class SlackClient:
 
         return Path(parsed.path).name or "slack-file", mime_type, body
 
-    def _store_attachment(
-        self, *, name: str, mime_type: str, data: bytes, source_url: str
-    ) -> str:
+    def _store_attachment(self, *, name: str, mime_type: str, data: bytes, source_url: str) -> str:
         """Persist bytes as a Centaur attachment; returns the attachment id.
 
         The attachment is scoped to the thread the tool is running in, read

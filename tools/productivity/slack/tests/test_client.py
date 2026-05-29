@@ -3,7 +3,7 @@ import email.message
 import json
 
 import pytest
-from slack.client import SlackAuthError, SlackClient
+from slack.client import SlackAuthError, SlackClient, SlackRateLimitError
 from slack_sdk.errors import SlackApiError
 
 from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
@@ -148,9 +148,36 @@ def test_retry_on_ratelimit_honors_retry_after(monkeypatch: pytest.MonkeyPatch) 
             )
         return "ok"
 
-    assert client._retry_on_ratelimit(flaky_call, method_key="conversations.history") == "ok"
+    assert (
+        client._retry_on_ratelimit(
+            flaky_call,
+            method_key="conversations.history",
+            max_retry_sleep_s=10,
+        )
+        == "ok"
+    )
     assert attempts["count"] == 2
     assert sleeps == [7.25]
+
+
+def test_retry_on_ratelimit_fails_fast_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _make_client()
+    sleeps: list[float] = []
+    monkeypatch.setattr("slack.client.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    def rate_limited_call() -> str:
+        raise SlackApiError(
+            message="rate limited",
+            response=_FakeSlackResponse(headers={"Retry-After": "30"}),
+        )
+
+    with pytest.raises(SlackRateLimitError) as excinfo:
+        client._retry_on_ratelimit(rate_limited_call, method_key="conversations.history")
+
+    payload = json.loads(str(excinfo.value))
+    assert payload["error"] == "slack_rate_limited"
+    assert payload["retry_after_seconds"] == 30.25
+    assert sleeps == []
 
 
 def test_get_channel_history_page_paginates_with_date_window() -> None:
@@ -291,9 +318,7 @@ def test_get_user_profile_reads_labeled_custom_fields() -> None:
     profile = client.get_user_profile("U123")
 
     assert fake_web_client.users_calls == [{"user": "U123"}]
-    assert fake_web_client.user_profile_calls == [
-        {"user": "U123", "include_labels": True}
-    ]
+    assert fake_web_client.user_profile_calls == [{"user": "U123", "include_labels": True}]
     assert profile["custom_fields"] == {"Affiliations": "GitHub: test-user"}
     assert profile["raw_custom_fields"] == {
         "Xf123": {"label": "Affiliations", "value": "GitHub: test-user", "alt": ""}
@@ -350,6 +375,91 @@ def test_get_channel_history_page_preserves_non_auth_error_shape() -> None:
 
     with pytest.raises(RuntimeError, match="Slack API error: channel_not_found"):
         client.get_channel_history_page("paradigm-pulse")
+
+
+def test_search_messages_with_channel_ids_scans_history_without_listing() -> None:
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]
+    history_by_channel = {
+        "C05HUE4KLF2": {
+            "messages": [
+                {"user": "UGZCSQTPE", "text": "Matt note about inference", "ts": "300.000000"},
+                {"user": "U1", "text": "unrelated", "ts": "299.000000"},
+            ]
+        },
+        "C042WDDP89Y": {
+            "messages": [{"user": "U1", "text": "Matt mentioned here", "ts": "200.000000"}]
+        },
+        "C0A174PPJDS": {
+            "messages": [{"user": "UGZCSQTPE", "text": "nothing relevant", "ts": "100.000000"}]
+        },
+    }
+
+    def history(**kwargs):
+        fake_web_client.history_calls.append(kwargs)
+        return history_by_channel[kwargs["channel"]]
+
+    fake_web_client.conversations_history = history  # type: ignore[method-assign]
+
+    results = client.search_messages(
+        "Matt",
+        max_results=10,
+        channels=["C05HUE4KLF2", "C042WDDP89Y", "C0A174PPJDS"],
+        messages_per_channel=25,
+    )
+
+    assert fake_web_client.api_calls == []
+    assert fake_web_client.list_calls == []
+    assert sorted(call["channel"] for call in fake_web_client.history_calls) == sorted(
+        [
+            "C05HUE4KLF2",
+            "C042WDDP89Y",
+            "C0A174PPJDS",
+        ]
+    )
+    assert sorted(call["limit"] for call in fake_web_client.history_calls) == [25, 25, 25]
+    assert sorted(item["channel_id"] for item in results) == ["C042WDDP89Y", "C05HUE4KLF2"]
+
+
+def test_search_messages_parses_channel_and_user_modifiers_locally() -> None:
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]
+    fake_web_client.history_pages = [
+        {
+            "messages": [
+                {"user": "UGZCSQTPE", "text": "Scott Wu on inference", "ts": "300.000000"},
+                {"user": "U1", "text": "also about inference", "ts": "301.000000"},
+            ]
+        }
+    ]
+
+    results = client.search_messages(
+        "from:<@UGZCSQTPE> in:<#C042WDDP89Y>",
+        max_results=5,
+        messages_per_channel=25,
+    )
+
+    assert fake_web_client.api_calls == []
+    assert fake_web_client.list_calls == []
+    assert fake_web_client.history_calls == [{"channel": "C042WDDP89Y", "limit": 25}]
+    assert len(results) == 1
+    assert results[0]["user_id"] == "UGZCSQTPE"
+
+
+def test_list_channels_returns_cache_when_slack_rate_limited() -> None:
+    client, fake_web_client = _make_client()
+    cached_channels = [{"id": "C123", "name": "cached", "is_private": False}]
+    client._load_channel_cache = lambda: (cached_channels, 100.0)  # type: ignore[method-assign]
+
+    def rate_limited_list(**kwargs):
+        raise SlackApiError(
+            message="rate limited",
+            response=_FakeSlackResponse(headers={"Retry-After": "30"}),
+        )
+
+    fake_web_client.conversations_list = rate_limited_list  # type: ignore[method-assign]
+
+    assert client.list_channels(limit=10) == cached_channels
 
 
 def test_get_thread_replies_page_uses_bounded_default() -> None:
