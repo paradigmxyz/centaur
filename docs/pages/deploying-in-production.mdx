@@ -246,6 +246,37 @@ sandbox:
   runtimeClassName: gvisor
 ```
 
+### Repo Cache Mirror
+
+For clusters that should not grant sandbox pods node filesystem access, use the
+network repo-cache mode instead of mounting a shared repo directory:
+
+```yaml
+repoCache:
+  enabled: true
+  mode: mirror
+  persistence:
+    size: 20Gi
+    accessModes:
+      - ReadWriteOnce
+  githubToken:
+    existingSecretName: centaur-infra-env
+    secretKey: GITHUB_TOKEN
+```
+
+Mirror mode runs a PVC-backed repo-cache service that stores bare Git mirrors
+and exposes them over in-cluster HTTP. Sandboxes still run normal `git`
+commands: the sandbox image installs `/usr/local/bin/git` as a wrapper around
+the real `/usr/bin/git`. When `CENTAUR_GIT_CACHE_URL` is present, the wrapper
+adds temporary `url.*.insteadOf` config for read operations such as `clone`,
+`fetch`, `pull`, `ls-remote`, and `submodule`. Pushes and other commands bypass
+the cache and use the repository's configured remote.
+
+The chart sets `CENTAUR_GIT_CACHE_URL` and opens the sandbox-to-repo-cache
+NetworkPolicy path when `repoCache.enabled=true` and `repoCache.mode=mirror`.
+The repo-cache service uses `repoCache.githubToken` for upstream GitHub reads;
+do not put GitHub credentials directly into sandbox pods.
+
 The Kubernetes sandbox backend is the active runtime backend; there is no chart
 switch named `api.sandboxBackend`.
 

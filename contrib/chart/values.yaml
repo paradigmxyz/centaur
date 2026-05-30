@@ -152,7 +152,9 @@ sandbox:
 repoCache:
   enabled: false
   # Select how sandboxes get faster Git checkouts.
-  # hostPath mounts a per-node cache; mirror serves a PVC-backed HTTP Git cache.
+  # hostPath mounts a per-node cache.
+  # mirror serves a PVC-backed HTTP Git cache and injects CENTAUR_GIT_CACHE_URL
+  # so the sandbox git wrapper accelerates reads while pushes use the origin.
   mode: hostPath # hostPath | mirror
   hostPath: /var/lib/centaur/repos
   service:

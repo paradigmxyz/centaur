@@ -134,6 +134,7 @@ Kubernetes backend:
 | `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
 | `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |
 | `REPOS_PATH` | `sandbox.reposPath`. | Repo cache path mounted into sandboxes. |
+| `CENTAUR_GIT_CACHE_URL` | `repoCache.mode=mirror`. | In-cluster Git mirror URL injected into sandboxes; the sandbox `git` wrapper uses it for read operations and leaves pushes on the original remote. |
 
 Sandbox entrypoint and wrappers:
 
