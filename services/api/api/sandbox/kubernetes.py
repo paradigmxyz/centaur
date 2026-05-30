@@ -55,6 +55,11 @@ _CONTAINER_NAME = "sandbox"
 _AGENT_UID = 1001
 _SANDBOX_OVERLAY_ROOT = "/home/agent/overlay"
 _SANDBOX_OVERLAY_DIR = f"{_SANDBOX_OVERLAY_ROOT}/org"
+# Writable dir the tool-server sidecar installs overlay tool deps into. The
+# sidecar runs as a non-root user and cannot write the root-owned /app/.venv,
+# so install-tool-deps.sh installs here with `uv pip install --target` and the
+# sidecar puts it on PYTHONPATH. /tmp is writable regardless of the run-as user.
+_OVERLAY_TOOL_DEPS_DIR = "/tmp/overlay-tool-deps"
 _PROXY_LABEL = "centaur.ai/iron-proxy"
 _API_PROXY_POD_NAME = "centaur-api-proxy"
 _API_PROXY_SANDBOX_ID = "api"
@@ -529,15 +534,14 @@ def _build_tool_server_container(
         "name": "tool-server",
         "image": image_ref,
         "imagePullPolicy": _tool_server_image_pull_policy(),
-        # Same image as the API; different uvicorn target.
-        "command": ["/app/.venv/bin/uvicorn"],
-        "args": [
-            "api.tool_server_app:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(port),
-        ],
+        # Same image as the API, but the sidecar overrides the image ENTRYPOINT,
+        # so the overlay tool-dep install the API gets via entrypoint.sh would be
+        # skipped. tool-server-startup.sh installs overlay deps into the writable
+        # _OVERLAY_TOOL_DEPS_DIR (passed as an arg) since this container is
+        # non-root and cannot write the venv, puts it on PYTHONPATH, then execs
+        # uvicorn.
+        "command": ["/app/tool-server-startup.sh"],
+        "args": [str(port), _OVERLAY_TOOL_DEPS_DIR],
         "env": env,
         "ports": [{"containerPort": port, "name": "tools"}],
         "readinessProbe": {

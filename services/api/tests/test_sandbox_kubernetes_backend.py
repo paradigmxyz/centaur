@@ -14,6 +14,7 @@ from api.sandbox.config import container_env as sandbox_container_env
 from api.sandbox.kubernetes import (
     KubernetesExecutorBackend,
     STDOUT_CHANNEL,
+    _OVERLAY_TOOL_DEPS_DIR,
     _build_tool_server_container,
     _tool_server_tool_dirs,
 )
@@ -651,6 +652,36 @@ def test_tool_server_container_inherits_sandbox_extra_env(
     assert "firewall.internal" in env["NO_PROXY"]
     assert "api.internal" in env["NO_PROXY"]
     assert "stg-laminar-app-server" in env["NO_PROXY"]
+
+
+def test_tool_server_container_installs_overlay_deps_before_uvicorn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar overrides the image ENTRYPOINT, so it must run the overlay
+    tool-dep install itself. It runs as non-root, so deps go to a writable
+    --target dir — never the root-owned venv. tool-server-startup.sh puts that
+    dir on PYTHONPATH at runtime, so it is not set on the container spec."""
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount="/home/agent/overlay",
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+    )
+
+    # The startup script installs overlay deps (best-effort) then execs uvicorn.
+    # It gets the listen port and the writable deps target as args; the script
+    # exports PYTHONPATH itself, so it must not appear on the container spec.
+    assert container["command"] == ["/app/tool-server-startup.sh"]
+    port, target = container["args"]
+    assert target == _OVERLAY_TOOL_DEPS_DIR
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert "PYTHONPATH" not in env
 
 
 def test_tool_server_tool_dirs_points_overlay_at_sandbox_mount(
