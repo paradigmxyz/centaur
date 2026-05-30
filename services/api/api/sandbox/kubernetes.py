@@ -447,6 +447,7 @@ def _build_tool_server_container(
     api_url: str,
     overlay_mount: str | None,
     database_url: str,
+    pg_dsns: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the tool-server sidecar container spec.
 
@@ -456,6 +457,15 @@ def _build_tool_server_container(
     sandbox's NetworkPolicy; the real credentials stay in the proxy pod.
     Caller is responsible for only invoking this when ``_tool_server_image()``
     is set.
+
+    ``pg_dsns`` maps each ``PgDsnSecret`` name to the local proxied DSN the
+    sandbox should see (same dict wired into the agent container). Tool code
+    runs in this sidecar, so a ``pg_dsn`` secret must reach it as an env var:
+    ``_resolve_secrets`` returns nothing for ``PgDsnSecret`` (it is delivered
+    via the environment, not ``ToolContext``), and the SDK's ``secret()`` reads
+    it from ``os.environ``. Without these, ``secret("<PG_DSN_NAME>")`` falls
+    through to the placeholder. The agent container alone having them is why a
+    tool like ``paradigmdb`` got the stub DSN.
 
     The sidecar runs tool code that calls back into the API (e.g. the slack
     tool offloading a downloaded file to ``/agent/attachments/upload``), so it
@@ -505,6 +515,11 @@ def _build_tool_server_container(
         {"name": "TOOL_DIRS", "value": _tool_server_tool_dirs()},
         {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
     ]
+    # pg_dsn secrets reach tool code as env vars (see docstring). Add them
+    # before operator extra-env so an operator override still wins, matching
+    # the agent container's ordering in ``container_env``.
+    for name, dsn in (pg_dsns or {}).items():
+        env.append({"name": name, "value": dsn})
     _apply_tool_server_extra_env(env, no_proxy)
 
     volume_mounts: list[dict[str, Any]] = [
@@ -1631,6 +1646,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                         _SANDBOX_OVERLAY_ROOT if overlay_image else None
                     ),
                     database_url=core_pg["dsn"],
+                    pg_dsns=sandbox_pg_dsns,
                 )
             )
 
