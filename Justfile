@@ -186,28 +186,33 @@ cleanup-orphan-proxy-services mode="dry-run":
 shell component:
     kubectl exec -it -n {{namespace}} deploy/{{release}}-centaur-{{component}} -- sh
 
-smoke:
+smoke harness="codex":
     #!/usr/bin/env bash
     set -euo pipefail
     THREAD_KEY="smoke-$(date +%s)"
     API_DEPLOY="deploy/{{release}}-centaur-api"
+    SMOKE_HARNESS="{{harness}}"
+    api_curl() {
+      kubectl exec -n {{namespace}} "$API_DEPLOY" -c api -- \
+        sh -lc 'curl -s -H "x-api-key: ${SLACKBOT_API_KEY:?SLACKBOT_API_KEY is not set}" "$@"' sh "$@"
+    }
 
-    SPAWN=$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s -X POST http://localhost:8000/agent/spawn \
+    SPAWN=$(api_curl -X POST http://localhost:8000/agent/spawn \
       -H "Content-Type: application/json" \
-      -d "{\"thread_key\":\"${THREAD_KEY}\"}")
+      -d "{\"thread_key\":\"${THREAD_KEY}\",\"harness\":\"${SMOKE_HARNESS}\"}")
     ASSIGNMENT_GENERATION=$(printf '%s' "$SPAWN" | jq -r '.assignment_generation')
 
-    kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s -X POST http://localhost:8000/agent/message \
+    api_curl -X POST http://localhost:8000/agent/message \
       -H "Content-Type: application/json" \
       -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG and nothing else.\"}]}" >/dev/null
 
-    EXECUTE=$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s -X POST http://localhost:8000/agent/execute \
+    EXECUTE=$(api_curl -X POST http://localhost:8000/agent/execute \
       -H "Content-Type: application/json" \
       -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"delivery\":{\"platform\":\"dev\"}}")
     EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
 
     for _ in $(seq 1 60); do
-      STATE=$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s "http://localhost:8000/agent/executions/${EXECUTION_ID}")
+      STATE=$(api_curl "http://localhost:8000/agent/executions/${EXECUTION_ID}")
       STATUS=$(printf '%s' "$STATE" | jq -r '.status // empty')
       case "$STATUS" in
         completed)
@@ -223,6 +228,6 @@ smoke:
       sleep 2
     done
 
-    kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
+    api_curl "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
     echo "smoke timed out waiting for execution ${EXECUTION_ID}" >&2
     exit 1
