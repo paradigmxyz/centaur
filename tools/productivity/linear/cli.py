@@ -471,6 +471,86 @@ def project_detail(
     console.print(f"\n[dim]{result.get('url')}[/]")
 
 
+_PRIORITY_BY_NAME = {"urgent": 1, "high": 2, "medium": 3, "low": 4, "none": 0}
+
+
+@app.command("create-project")
+def create_project(
+    name: str = typer.Argument(..., help="Project name"),
+    team: list[str] = typer.Option(
+        ..., "--team", "-t", help="Team key (repeatable, e.g. -t DAR)"
+    ),
+    content_file: str = typer.Option(
+        None, "--content-file", help="Path to a markdown file for the project overview"
+    ),
+    description: str = typer.Option(None, "--description", "-d", help="Short summary"),
+    lead: str = typer.Option(None, "--lead", "-l", help="Lead name (partial match)"),
+    priority: str = typer.Option(
+        None, "--priority", "-p", help="urgent|high|medium|low|none"
+    ),
+    start_date: str = typer.Option(None, "--start", help="Start date YYYY-MM-DD"),
+    target_date: str = typer.Option(None, "--target", help="Target date YYYY-MM-DD"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Create a new project.
+
+    Examples:
+        linear create-project "Reduce p95 latency" -t DAR --priority high
+        linear create-project "New bet" -t DAR --content-file intake.md --lead Kydo
+    """
+    client = get_client()
+
+    teams = {t.get("key"): t.get("id") for t in client.teams()}
+    team_ids = []
+    for key in team:
+        if key not in teams:
+            console.print(f"[red]Unknown team key '{key}'.[/]")
+            raise typer.Exit(1)
+        team_ids.append(teams[key])
+
+    lead_id = None
+    if lead:
+        match = next(
+            (u for u in client.users() if lead.lower() in (u.get("name") or "").lower()),
+            None,
+        )
+        if not match:
+            console.print(f"[red]No user matching '{lead}'.[/]")
+            raise typer.Exit(1)
+        lead_id = match["id"]
+
+    priority_int = None
+    if priority:
+        priority_int = _PRIORITY_BY_NAME.get(priority.lower())
+        if priority_int is None:
+            console.print(f"[red]Invalid priority '{priority}'.[/]")
+            raise typer.Exit(1)
+
+    content = None
+    if content_file:
+        from pathlib import Path
+
+        content = Path(content_file).read_text()
+
+    result = client.create_project(
+        name=name,
+        team_ids=team_ids,
+        content=content,
+        description=description,
+        lead_id=lead_id,
+        priority=priority_int,
+        start_date=start_date,
+        target_date=target_date,
+    )
+
+    if json_output:
+        print(json.dumps(result, indent=2, default=str), file=sys.stdout)
+        raise typer.Exit()
+
+    console.print(f"[green]Created project:[/] [bold cyan]{result.get('name')}[/]")
+    console.print(f"[dim]{result.get('url')}[/]")
+
+
 @app.command()
 def cycles(
     team: str = typer.Option(None, "--team", "-t", help="Filter by team key"),

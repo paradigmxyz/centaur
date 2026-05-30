@@ -355,6 +355,69 @@ class LinearClient:
         """
         return self._query(query, {"id": project_id}).get("project", {})
 
+    def create_project(
+        self,
+        name: str,
+        team_ids: list[str],
+        content: str | None = None,
+        description: str | None = None,
+        lead_id: str | None = None,
+        priority: int | None = None,
+        start_date: str | None = None,
+        target_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a new project.
+
+        Args:
+            name: Project name.
+            team_ids: Team IDs the project belongs to (at least one required).
+            content: Markdown body for the project overview document. Use this
+                for the structured intake (hypothesis, metrics, evidence, etc.).
+            description: Short one-line summary (Linear caps this at 255 chars).
+            lead_id: User ID of the project lead. Resolve names via ``users()``.
+            priority: 0=none, 1=urgent, 2=high, 3=medium, 4=low.
+            start_date: Start date as YYYY-MM-DD.
+            target_date: Target date as YYYY-MM-DD.
+        """
+        if not team_ids:
+            raise ValueError("create_project requires at least one team id")
+
+        mutation = """
+        mutation ProjectCreate($input: ProjectCreateInput!) {
+            projectCreate(input: $input) {
+                success
+                project {
+                    id
+                    name
+                    description
+                    state
+                    priority
+                    startDate
+                    targetDate
+                    lead { id name }
+                    teams { nodes { id name key } }
+                    url
+                }
+            }
+        }
+        """
+        input_data: dict[str, Any] = {"name": name, "teamIds": team_ids}
+        if content:
+            input_data["content"] = content
+        if description:
+            input_data["description"] = description
+        if lead_id:
+            input_data["leadId"] = lead_id
+        if priority is not None:
+            input_data["priority"] = priority
+        if start_date:
+            input_data["startDate"] = start_date
+        if target_date:
+            input_data["targetDate"] = target_date
+
+        result = self._query(mutation, {"input": input_data})
+        return result.get("projectCreate", {}).get("project", {})
+
     def cycles(self, team_key: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """List cycles, optionally filtered by team."""
         filter_str = ""
