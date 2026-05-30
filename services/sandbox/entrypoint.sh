@@ -238,15 +238,8 @@ if [ "$CODEX_AUTH_MODE" != "access_token" ]; then
     fi
 fi
 
-# ── Wait for the tool-server sidecar ────────────────────────────────────────
-# When a tool-server sidecar runs, the harness reaches it on loopback via
-# CENTAUR_TOOLS_URL. The sidecar boots independently of this container (and
-# installs overlay tool deps first), so without a gate the harness can issue
-# its first tool call before the server is listening. The API's readiness check
-# treats the pod as ready as soon as .ready exists, which would otherwise race
-# ahead of the sidecar — so poll /healthz before signalling readiness. Loopback
-# is in NO_PROXY, but pass --noproxy defensively. Bound the wait so a broken
-# sidecar degrades to failing tool calls rather than hanging the agent forever.
+# Wait for the tool-server sidecar before signalling readiness, so the harness
+# doesn't issue its first tool call before the server is listening.
 if [ -n "${CENTAUR_TOOLS_URL:-}" ]; then
     _tools_deadline=$(( $(date +%s) + ${CENTAUR_TOOLS_WAIT_SECONDS:-10} ))
     until curl -fsS --noproxy '*' --max-time 2 "${CENTAUR_TOOLS_URL}/healthz" >/dev/null 2>&1; do
