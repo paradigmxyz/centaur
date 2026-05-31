@@ -1,0 +1,1101 @@
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use codex_app_server_protocol::{JSONRPCMessage, ServerNotification};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+const LONG_PROMPT: &str = "Write exactly 24 lines. Each line must be 'LONG_STREAM_DELTA_LINE_N: abcdefghijklmnopqrstuvwxyz 0123456789' where N is 01 through 24. Do not use markdown, bullets, tools, or extra text.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Harness {
+    ClaudeCode,
+    Amp,
+    Codex,
+}
+
+impl Harness {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Amp => "amp",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => &["claude-code"],
+            Self::Amp => &["amp"],
+            Self::Codex => &["codex"],
+        }
+    }
+
+    fn command_override_env(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("CENTAUR_CLAUDE_APP_BRIDGE_COMMAND"),
+            Self::Amp => Some("CENTAUR_AMP_APP_BRIDGE_COMMAND"),
+            Self::Codex => None,
+        }
+    }
+
+    fn thread_start_params(self) -> Value {
+        match self {
+            Self::ClaudeCode => {
+                let model = std::env::var("CENTAUR_REAL_CLAUDE_MODEL")
+                    .or_else(|_| std::env::var("CLAUDE_MODEL"))
+                    .unwrap_or_else(|_| "sonnet".to_string());
+                json!({ "model": model })
+            }
+            Self::Amp => {
+                let model = std::env::var("AMP_MODE").unwrap_or_else(|_| "deep".to_string());
+                json!({ "model": model })
+            }
+            Self::Codex => {
+                let mut params = json!({
+                    "approvalPolicy": "never",
+                    "sandbox": "danger-full-access",
+                });
+                let model = std::env::var("CODEX_SMOKE_MODEL")
+                    .or_else(|_| std::env::var("CODEX_MODEL"))
+                    .ok();
+                if let Some(model) = model {
+                    params["model"] = Value::String(model);
+                }
+                params
+            }
+        }
+    }
+}
+
+#[test]
+fn fake_claude_app_server_streams_codex_v2_notifications() {
+    let fake_claude = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"hel\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"hello\"}'"
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude.to_string()),
+        prompt: "say hello".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "hello");
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
+fn fake_amp_app_server_streams_codex_v2_notifications() {
+    let fake_amp = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"T-amp-session\"}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"am\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"amp\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"amp\"}]}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"amp\"}'"
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::Amp,
+        command_override: Some(fake_amp.to_string()),
+        prompt: "say amp".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "amp");
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
+fn fake_harness_process_is_started_once_across_two_turns() {
+    let start_log = temp_path("harness-starts.log");
+    let command = format!(
+        "printf 'start\\n' >> {}; \
+         printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"fake-session\"}}'; \
+         while IFS= read -r _; do \
+           printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"content\":[{{\"type\":\"text\",\"text\":\"turn\"}}]}}}}'; \
+           printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"turn\"}}'; \
+         done",
+        shell_quote(start_log.as_path())
+    );
+
+    let run = run_bridge_two_turns(BridgeTwoTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(command),
+        first_prompt: "first".to_string(),
+        second_prompt: "second".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turns[0]);
+    assert_completed_turn(&run.turns[1]);
+    assert_eq!(run.turns[0].text_from_deltas, "turn");
+    assert_eq!(run.turns[1].text_from_deltas, "turn");
+
+    let starts = std::fs::read_to_string(&start_log).expect("read start log");
+    assert_eq!(
+        starts.lines().count(),
+        1,
+        "underlying harness process should be spawned once per thread"
+    );
+    let _ = std::fs::remove_file(start_log);
+}
+
+#[test]
+#[ignore = "runs real Claude Code and Codex/Amp-style networked binaries"]
+fn real_claude_code_long_streaming_is_anchored_to_native_cli() {
+    require_command("claude", &["--version"]);
+    let expected = expected_long_text();
+    let native = run_native_anthropic(Harness::ClaudeCode, LONG_PROMPT, Duration::from_secs(240));
+    eprintln!(
+        "native claude summary: stream_text_delta_count={} assistant_events={} final_bytes={}",
+        native.stream_text_delta_count,
+        native.assistant_event_count,
+        native.final_text().len()
+    );
+    assert_eq!(native.final_text().trim(), expected);
+    assert!(
+        native.stream_text_delta_count > 1,
+        "native Claude Code did not stream multiple text deltas; raw stdout={:?}",
+        native.stdout_lines
+    );
+
+    let wrapped = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: None,
+        prompt: LONG_PROMPT.to_string(),
+        timeout: Duration::from_secs(240),
+    });
+    assert_completed_turn(&wrapped.turn);
+    assert_eq!(wrapped.turn.text_from_deltas.trim(), expected);
+    assert!(
+        wrapped.turn.agent_delta_count > 1,
+        "wrapper collapsed native Claude Code streaming into one delta; stdout={:?}",
+        wrapped.stdout_lines
+    );
+    assert_delta_reconstruction(&wrapped.turn);
+}
+
+#[test]
+#[ignore = "runs real Amp and may make network/auth calls"]
+fn real_amp_long_streaming_is_anchored_to_native_cli() {
+    require_command("amp", &["--version"]);
+    let expected = expected_long_text();
+    let native = run_native_anthropic(Harness::Amp, LONG_PROMPT, Duration::from_secs(240));
+    eprintln!(
+        "native amp summary: stream_text_delta_count={} assistant_events={} final_bytes={}",
+        native.stream_text_delta_count,
+        native.assistant_event_count,
+        native.final_text().len()
+    );
+    assert_eq!(native.final_text().trim(), expected);
+
+    let wrapped = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::Amp,
+        command_override: None,
+        prompt: LONG_PROMPT.to_string(),
+        timeout: Duration::from_secs(240),
+    });
+    assert_completed_turn(&wrapped.turn);
+    assert_eq!(wrapped.turn.text_from_deltas.trim(), expected);
+    assert_delta_reconstruction(&wrapped.turn);
+
+    if native.stream_text_delta_count == 0 {
+        assert_eq!(
+            wrapped.turn.agent_delta_count, 1,
+            "Amp native CLI emitted only a final assistant message, so wrapper should emit exactly one final-text delta"
+        );
+    } else {
+        assert!(
+            wrapped.turn.agent_delta_count > 1,
+            "Amp native CLI streamed multiple chunks but wrapper did not"
+        );
+    }
+}
+
+#[test]
+#[ignore = "runs real Codex app-server and may make network/auth calls"]
+fn real_codex_long_streaming_uses_native_app_server_chunks() {
+    let expected = expected_long_text();
+    let direct = run_direct_codex_app_server_turn(LONG_PROMPT, Duration::from_secs(240));
+    assert_completed_turn(&direct.turn);
+    assert_eq!(direct.turn.text_from_deltas.trim(), expected);
+    assert!(
+        direct.turn.agent_delta_count > 10,
+        "native Codex app-server did not stream the long reply in many chunks"
+    );
+    assert_delta_reconstruction(&direct.turn);
+
+    let wrapped = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::Codex,
+        command_override: None,
+        prompt: LONG_PROMPT.to_string(),
+        timeout: Duration::from_secs(240),
+    });
+    assert_completed_turn(&wrapped.turn);
+    assert_eq!(wrapped.turn.text_from_deltas.trim(), expected);
+    assert!(
+        wrapped.turn.agent_delta_count > 10,
+        "Codex wrapper should preserve upstream app-server chunking"
+    );
+    assert_delta_reconstruction(&wrapped.turn);
+}
+
+#[test]
+#[ignore = "runs real harness binaries and may make network/auth calls"]
+fn real_harnesses_basic_steer_and_resume() {
+    for harness in [Harness::ClaudeCode, Harness::Amp, Harness::Codex] {
+        let marker = format!("REAL_STEER_{}", Uuid::new_v4().simple());
+        let run = run_bridge_steered_turn(BridgeSteerConfig {
+            harness,
+            command_override: None,
+            start_prompt:
+                "If a steering update arrives, follow it. Otherwise reply exactly INITIAL."
+                    .to_string(),
+            steer_prompt: format!("Steering update: reply exactly {marker} and nothing else."),
+            timeout: Duration::from_secs(240),
+        });
+        assert_completed_turn(&run.turn);
+        assert_eq!(run.steer_response, Some(run.turn.turn_id.clone()));
+        assert!(
+            run.turn.text_from_deltas.contains(&marker),
+            "{} did not apply steering; text={:?}",
+            harness.name(),
+            run.turn.text_from_deltas
+        );
+        assert_delta_reconstruction(&run.turn);
+
+        let marker = format!("REAL_CTX_{}", Uuid::new_v4().simple());
+        let turns = run_bridge_two_turns(BridgeTwoTurnConfig {
+            harness,
+            command_override: None,
+            first_prompt: format!(
+                "Remember this exact marker for the next turn: {marker}. Do not use tools. Reply exactly TURN1_OK."
+            ),
+            second_prompt: format!(
+                "Without using tools, what exact marker did I ask you to remember in the previous turn? Reply exactly TURN2_MARKER_{marker}."
+            ),
+            timeout: Duration::from_secs(300),
+        });
+        assert_completed_turn(&turns.turns[0]);
+        assert_completed_turn(&turns.turns[1]);
+        assert!(
+            turns.turns[1].text_from_deltas.contains(&marker),
+            "{} did not preserve context across resume; turn2={:?}",
+            harness.name(),
+            turns.turns[1].text_from_deltas
+        );
+        assert_delta_reconstruction(&turns.turns[0]);
+        assert_delta_reconstruction(&turns.turns[1]);
+    }
+}
+
+#[derive(Debug)]
+struct BridgeTurnConfig {
+    harness: Harness,
+    command_override: Option<String>,
+    prompt: String,
+    timeout: Duration,
+}
+
+#[derive(Debug)]
+struct BridgeTwoTurnConfig {
+    harness: Harness,
+    command_override: Option<String>,
+    first_prompt: String,
+    second_prompt: String,
+    timeout: Duration,
+}
+
+#[derive(Debug)]
+struct BridgeSteerConfig {
+    harness: Harness,
+    command_override: Option<String>,
+    start_prompt: String,
+    steer_prompt: String,
+    timeout: Duration,
+}
+
+#[derive(Debug)]
+struct BridgeRun {
+    stdout_lines: Vec<String>,
+    turn: TurnCapture,
+}
+
+#[derive(Debug)]
+struct BridgeTwoTurnRun {
+    turns: Vec<TurnCapture>,
+}
+
+#[derive(Debug)]
+struct BridgeSteerRun {
+    turn: TurnCapture,
+    steer_response: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct TurnCapture {
+    turn_id: String,
+    methods: Vec<String>,
+    text_from_deltas: String,
+    agent_delta_count: usize,
+    reasoning_delta_count: usize,
+    completed_agent_items: HashMap<String, String>,
+    delta_text_by_item: HashMap<String, String>,
+    terminal_status: Option<String>,
+    terminal_error: Option<String>,
+}
+
+fn run_bridge_turn(config: BridgeTurnConfig) -> BridgeRun {
+    let mut bridge = BridgeProcess::spawn_harness(config.harness, config.command_override, None);
+    let thread_id = bridge.initialize_and_start_thread(config.harness, config.timeout);
+    let turn = bridge.run_turn(&thread_id, 3, &config.prompt, None, config.timeout);
+    let stdout_lines = bridge.finish_successfully();
+    BridgeRun { stdout_lines, turn }
+}
+
+fn run_bridge_two_turns(config: BridgeTwoTurnConfig) -> BridgeTwoTurnRun {
+    let mut bridge = BridgeProcess::spawn_harness(config.harness, config.command_override, None);
+    let thread_id = bridge.initialize_and_start_thread(config.harness, config.timeout);
+    let first = bridge.run_turn(&thread_id, 3, &config.first_prompt, None, config.timeout);
+    bridge.resume_thread(&thread_id, 4, config.timeout);
+    let second = bridge.run_turn(&thread_id, 5, &config.second_prompt, None, config.timeout);
+    bridge.finish_successfully();
+    BridgeTwoTurnRun {
+        turns: vec![first, second],
+    }
+}
+
+fn run_bridge_steered_turn(config: BridgeSteerConfig) -> BridgeSteerRun {
+    let mut bridge = BridgeProcess::spawn_harness(config.harness, config.command_override, None);
+    let thread_id = bridge.initialize_and_start_thread(config.harness, config.timeout);
+    let mut steer_response = None;
+    let turn = bridge.run_turn(
+        &thread_id,
+        3,
+        &config.start_prompt,
+        Some(SteerPlan {
+            request_id: 4,
+            prompt: config.steer_prompt,
+            response_turn_id: &mut steer_response,
+        }),
+        config.timeout,
+    );
+    bridge.finish_successfully();
+    BridgeSteerRun {
+        turn,
+        steer_response,
+    }
+}
+
+fn run_direct_codex_app_server_turn(prompt: &str, timeout: Duration) -> BridgeRun {
+    let bin = codex_bin();
+    let mut command = Command::new(bin);
+    command
+        .args(["app-server", "--listen", "stdio://"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut bridge = BridgeProcess::spawn_command(command);
+    let thread_id = bridge.initialize_and_start_thread(Harness::Codex, timeout);
+    let turn = bridge.run_turn(&thread_id, 3, prompt, None, timeout);
+    let stdout_lines = bridge.finish_successfully();
+    BridgeRun { stdout_lines, turn }
+}
+
+struct SteerPlan<'a> {
+    request_id: i64,
+    prompt: String,
+    response_turn_id: &'a mut Option<String>,
+}
+
+struct BridgeProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    line_rx: Receiver<std::io::Result<String>>,
+    stdout_reader: JoinHandle<()>,
+    stderr_reader: JoinHandle<String>,
+    stdout_lines: Vec<String>,
+}
+
+impl BridgeProcess {
+    fn spawn_harness(
+        harness: Harness,
+        command_override: Option<String>,
+        extra_env: Option<(&str, &str)>,
+    ) -> Self {
+        let bin = env!("CARGO_BIN_EXE_harness-server");
+        let mut command = Command::new(bin);
+        command
+            .args(harness.args())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        for env_key in [
+            "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
+            "CENTAUR_AMP_APP_BRIDGE_COMMAND",
+        ] {
+            command.env_remove(env_key);
+        }
+        if let Some(env_key) = harness.command_override_env()
+            && let Some(raw) = command_override
+        {
+            command.env(env_key, raw);
+        }
+        if let Some((key, value)) = extra_env {
+            command.env(key, value);
+        }
+
+        Self::spawn_command(command)
+    }
+
+    fn spawn_command(mut command: Command) -> Self {
+        let mut child = command.spawn().expect("spawn app server process");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
+        let (line_tx, line_rx) = mpsc::channel();
+        let stdout_reader = thread::spawn(move || {
+            for raw in BufReader::new(stdout).lines() {
+                let should_stop = raw.is_err();
+                if line_tx.send(raw).is_err() || should_stop {
+                    break;
+                }
+            }
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = BufReader::new(stderr).read_to_string(&mut buf);
+            buf
+        });
+
+        Self {
+            child,
+            stdin: Some(stdin),
+            line_rx,
+            stdout_reader,
+            stderr_reader,
+            stdout_lines: Vec::new(),
+        }
+    }
+
+    fn initialize_and_start_thread(&mut self, harness: Harness, timeout: Duration) -> String {
+        self.send(json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "cargo-test", "title": null, "version": "0"},
+                "capabilities": null,
+            },
+        }));
+        self.send(json!({
+            "id": 2,
+            "method": "thread/start",
+            "params": harness.thread_start_params(),
+        }));
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let value = self.read_json(deadline);
+            if response_id(&value) == Some(2) {
+                return value
+                    .pointer("/result/thread/id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("thread/start did not return thread id: {value}"))
+                    .to_string();
+            }
+        }
+    }
+
+    fn resume_thread(&mut self, thread_id: &str, request_id: i64, timeout: Duration) {
+        self.send(json!({
+            "id": request_id,
+            "method": "thread/resume",
+            "params": {
+                "threadId": thread_id,
+                "excludeTurns": false,
+            },
+        }));
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let value = self.read_json(deadline);
+            if response_id(&value) == Some(request_id) {
+                let resumed = value
+                    .pointer("/result/thread/id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("thread/resume did not return thread id: {value}"));
+                assert_eq!(resumed, thread_id, "thread/resume returned wrong thread");
+                return;
+            }
+        }
+    }
+
+    fn run_turn(
+        &mut self,
+        thread_id: &str,
+        request_id: i64,
+        prompt: &str,
+        mut steer: Option<SteerPlan<'_>>,
+        timeout: Duration,
+    ) -> TurnCapture {
+        self.send(json!({
+            "id": request_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt, "text_elements": []}],
+            },
+        }));
+
+        let deadline = Instant::now() + timeout;
+        let mut capture = TurnCapture::default();
+        let mut steer_sent = false;
+
+        loop {
+            let value = self.read_json(deadline);
+            if let Some(id) = response_id(&value) {
+                if id == request_id {
+                    capture.turn_id = value
+                        .pointer("/result/turn/id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| panic!("turn/start did not return turn id: {value}"))
+                        .to_string();
+                    if let Some(plan) = steer.as_ref()
+                        && !steer_sent
+                    {
+                        self.send(json!({
+                            "id": plan.request_id,
+                            "method": "turn/steer",
+                            "params": {
+                                "threadId": thread_id,
+                                "expectedTurnId": capture.turn_id,
+                                "input": [{"type": "text", "text": plan.prompt, "text_elements": []}],
+                            },
+                        }));
+                        steer_sent = true;
+                    }
+                } else if let Some(plan) = steer.as_mut()
+                    && id == plan.request_id
+                {
+                    *plan.response_turn_id = value
+                        .pointer("/result/turnId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                continue;
+            }
+
+            if let Some(method) = value.get("method").and_then(Value::as_str) {
+                assert_notification_thread_id(&value, thread_id);
+                capture.consume_notification(method, &value);
+                if method == "turn/started"
+                    && capture.turn_id.is_empty()
+                    && let Some(turn_id) = value.pointer("/params/turn/id").and_then(Value::as_str)
+                {
+                    capture.turn_id = turn_id.to_string();
+                }
+                if method == "turn/completed" {
+                    break;
+                }
+            }
+        }
+
+        capture
+    }
+
+    fn send(&mut self, value: Value) {
+        eprintln!("stdin JSON: {value}");
+        let stdin = self.stdin.as_mut().expect("stdin still open");
+        serde_json::to_writer(&mut *stdin, &value).expect("write JSON");
+        stdin.write_all(b"\n").expect("write newline");
+        stdin.flush().expect("flush");
+    }
+
+    fn read_json(&mut self, deadline: Instant) -> Value {
+        loop {
+            let now = Instant::now();
+            assert!(now < deadline, "timed out waiting for app-server stdout");
+            let wait_for = deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_secs(1));
+            match self.line_rx.recv_timeout(wait_for) {
+                Ok(Ok(line)) => {
+                    eprintln!("stdout JSON: {line}");
+                    self.stdout_lines.push(line.clone());
+                    let value: Value =
+                        serde_json::from_str(line.trim()).expect("valid JSON stdout line");
+                    validate_jsonrpc_value(&value);
+                    return value;
+                }
+                Ok(Err(error)) => panic!("read app-server stdout: {error}"),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("app-server stdout disconnected before expected response")
+                }
+            }
+        }
+    }
+
+    fn finish_successfully(mut self) -> Vec<String> {
+        let _ = self.stdin.take();
+        let status = self.child.wait().expect("wait app-server process");
+        self.stdout_reader.join().expect("join stdout reader");
+        let stderr = self.stderr_reader.join().expect("join stderr reader");
+        assert!(
+            status.success(),
+            "app-server exited with {status}; stderr={stderr}; stdout={:?}",
+            self.stdout_lines
+        );
+        if !stderr.trim().is_empty() {
+            eprintln!("stderr:\n{stderr}");
+        }
+        self.stdout_lines
+    }
+}
+
+impl TurnCapture {
+    fn consume_notification(&mut self, method: &str, value: &Value) {
+        self.methods.push(method.to_string());
+        match method {
+            "item/agentMessage/delta" => {
+                let params = value.get("params").expect("delta params");
+                let item_id = params
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .expect("delta itemId");
+                let delta = params
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .expect("delta text");
+                self.agent_delta_count += 1;
+                self.text_from_deltas.push_str(delta);
+                self.delta_text_by_item
+                    .entry(item_id.to_string())
+                    .and_modify(|text| text.push_str(delta))
+                    .or_insert_with(|| delta.to_string());
+            }
+            method if method.starts_with("item/reasoning/") => {
+                self.reasoning_delta_count += 1;
+            }
+            "item/completed" => {
+                let item = value
+                    .get("params")
+                    .and_then(|params| params.get("item"))
+                    .expect("completed item");
+                if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+                    let item_id = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .expect("agent item id");
+                    let text = item
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .expect("agent item text");
+                    self.completed_agent_items
+                        .insert(item_id.to_string(), text.to_string());
+                }
+            }
+            "turn/completed" => {
+                self.terminal_status = value
+                    .pointer("/params/turn/status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.terminal_error = value
+                    .pointer("/params/turn/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NativeRun {
+    stdout_lines: Vec<String>,
+    stderr: String,
+    stream_text_delta_count: usize,
+    text_from_stream_deltas: String,
+    final_assistant_text: String,
+    assistant_event_count: usize,
+}
+
+impl NativeRun {
+    fn final_text(&self) -> &str {
+        if self.text_from_stream_deltas.is_empty() {
+            &self.final_assistant_text
+        } else {
+            &self.text_from_stream_deltas
+        }
+    }
+}
+
+fn run_native_anthropic(harness: Harness, prompt: &str, timeout: Duration) -> NativeRun {
+    let mut command = match harness {
+        Harness::ClaudeCode => {
+            let bin = std::env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+            let mut command = Command::new(bin);
+            let model =
+                std::env::var("CENTAUR_REAL_CLAUDE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
+            command.args([
+                "--print",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--dangerously-skip-permissions",
+                "--permission-mode",
+                "bypassPermissions",
+                "--model",
+                &model,
+                "--session-id",
+                &Uuid::new_v4().to_string(),
+            ]);
+            command
+        }
+        Harness::Amp => {
+            let bin = std::env::var("AMP_BIN").unwrap_or_else(|_| "amp".to_string());
+            let mut command = Command::new(bin);
+            let mode = std::env::var("AMP_MODE").unwrap_or_else(|_| "deep".to_string());
+            command.args([
+                "--no-ide",
+                "--no-notifications",
+                "--no-color",
+                "--dangerously-allow-all",
+                "--execute",
+                "--stream-json",
+                "--stream-json-input",
+                "--stream-json-thinking",
+                "--mode",
+                &mode,
+            ]);
+            command
+        }
+        Harness::Codex => panic!("native anthropic runner does not support Codex"),
+    };
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut process = RawProcess::spawn(command);
+    process.send(json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": prompt}],
+        },
+    }));
+    let output = process.collect_until_exit(timeout);
+    assert!(
+        output.status.success(),
+        "native {} failed with {}; stderr={}; stdout={:?}",
+        harness.name(),
+        output.status,
+        output.stderr,
+        output.stdout_lines
+    );
+
+    let mut run = NativeRun {
+        stdout_lines: output.stdout_lines,
+        stderr: output.stderr,
+        stream_text_delta_count: 0,
+        text_from_stream_deltas: String::new(),
+        final_assistant_text: String::new(),
+        assistant_event_count: 0,
+    };
+    for line in &run.stdout_lines {
+        eprintln!("native {} stdout JSON: {line}", harness.name());
+        let value: Value = serde_json::from_str(line).expect("native JSON stdout");
+        match value.get("type").and_then(Value::as_str) {
+            Some("stream_event") => {
+                let event = value.get("event").unwrap_or(&Value::Null);
+                if event.get("type").and_then(Value::as_str) == Some("content_block_delta") {
+                    let delta = event.get("delta").unwrap_or(&Value::Null);
+                    if delta.get("type").and_then(Value::as_str) == Some("text_delta")
+                        && let Some(text) = delta.get("text").and_then(Value::as_str)
+                    {
+                        run.stream_text_delta_count += 1;
+                        run.text_from_stream_deltas.push_str(text);
+                    }
+                }
+            }
+            Some("assistant") => {
+                run.assistant_event_count += 1;
+                if value
+                    .get("is_partial")
+                    .and_then(Value::as_bool)
+                    .is_some_and(|partial| !partial)
+                    || !value.get("is_partial").is_some()
+                {
+                    run.final_assistant_text = assistant_text_from_message(&value["message"]);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !run.stderr.trim().is_empty() {
+        eprintln!("native {} stderr:\n{}", harness.name(), run.stderr);
+    }
+    run
+}
+
+struct RawProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    line_rx: Receiver<std::io::Result<String>>,
+    stdout_reader: JoinHandle<()>,
+    stderr_reader: JoinHandle<String>,
+}
+
+struct RawOutput {
+    status: ExitStatus,
+    stdout_lines: Vec<String>,
+    stderr: String,
+}
+
+impl RawProcess {
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command.spawn().expect("spawn native process");
+        let stdin = child.stdin.take().expect("native stdin");
+        let stdout = child.stdout.take().expect("native stdout");
+        let stderr = child.stderr.take().expect("native stderr");
+        let (line_tx, line_rx) = mpsc::channel();
+        let stdout_reader = thread::spawn(move || {
+            for raw in BufReader::new(stdout).lines() {
+                let should_stop = raw.is_err();
+                if line_tx.send(raw).is_err() || should_stop {
+                    break;
+                }
+            }
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = BufReader::new(stderr).read_to_string(&mut buf);
+            buf
+        });
+        Self {
+            child,
+            stdin: Some(stdin),
+            line_rx,
+            stdout_reader,
+            stderr_reader,
+        }
+    }
+
+    fn send(&mut self, value: Value) {
+        let stdin = self.stdin.as_mut().expect("native stdin still open");
+        serde_json::to_writer(&mut *stdin, &value).expect("write native stdin JSON");
+        stdin.write_all(b"\n").expect("write native stdin newline");
+        stdin.flush().expect("flush native stdin");
+    }
+
+    fn collect_until_exit(mut self, timeout: Duration) -> RawOutput {
+        let _ = self.stdin.take();
+        let deadline = Instant::now() + timeout;
+        let mut stdout_lines = Vec::new();
+        let status = loop {
+            while let Ok(line) = self.line_rx.try_recv() {
+                stdout_lines.push(line.expect("native stdout line"));
+            }
+            if let Some(status) = self.child.try_wait().expect("poll native process") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let status = self.child.wait().expect("wait killed native process");
+                panic!(
+                    "native process timed out after {timeout:?}; status={status}; stdout={stdout_lines:?}"
+                );
+            }
+            match self.line_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(line) => stdout_lines.push(line.expect("native stdout line")),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {}
+            }
+        };
+        self.stdout_reader
+            .join()
+            .expect("join native stdout reader");
+        while let Ok(line) = self.line_rx.try_recv() {
+            stdout_lines.push(line.expect("native stdout line"));
+        }
+        let stderr = self
+            .stderr_reader
+            .join()
+            .expect("join native stderr reader");
+        RawOutput {
+            status,
+            stdout_lines,
+            stderr,
+        }
+    }
+}
+
+fn validate_jsonrpc_value(value: &Value) {
+    let message: JSONRPCMessage =
+        serde_json::from_value(value.clone()).expect("valid JSON-RPC message");
+    match message {
+        JSONRPCMessage::Notification(notification) => {
+            ServerNotification::try_from(notification).unwrap_or_else(|error| {
+                panic!(
+                    "notification is not a typed Codex App Server V2 notification: {error}; value={value}"
+                )
+            });
+        }
+        JSONRPCMessage::Response(_) => {}
+        JSONRPCMessage::Error(error) => panic!("app-server returned JSON-RPC error: {error:?}"),
+        JSONRPCMessage::Request(request) => {
+            panic!("app-server emitted unexpected request: {request:?}")
+        }
+    }
+}
+
+fn response_id(value: &Value) -> Option<i64> {
+    value.get("id").and_then(Value::as_i64)
+}
+
+fn assert_notification_thread_id(value: &Value, expected_thread_id: &str) {
+    if let Some(actual) = value.pointer("/params/threadId").and_then(Value::as_str) {
+        assert_eq!(actual, expected_thread_id, "notification threadId mismatch");
+    }
+    if value.get("method").and_then(Value::as_str) == Some("thread/started")
+        && let Some(actual) = value.pointer("/params/thread/id").and_then(Value::as_str)
+    {
+        assert_eq!(
+            actual, expected_thread_id,
+            "thread/started thread.id mismatch"
+        );
+    }
+}
+
+fn assert_codex_v2_turn(turn: &TurnCapture) {
+    assert!(
+        turn.methods
+            .contains(&"item/agentMessage/delta".to_string()),
+        "missing text delta; got {:?}",
+        turn.methods
+    );
+    assert!(
+        turn.methods.contains(&"item/completed".to_string()),
+        "missing item/completed; got {:?}",
+        turn.methods
+    );
+    assert!(
+        turn.methods.contains(&"turn/completed".to_string()),
+        "missing turn/completed; got {:?}",
+        turn.methods
+    );
+    assert_delta_reconstruction(turn);
+}
+
+fn assert_completed_turn(turn: &TurnCapture) {
+    assert_eq!(
+        turn.terminal_status.as_deref(),
+        Some("completed"),
+        "terminal error: {:?}; methods={:?}",
+        turn.terminal_error,
+        turn.methods
+    );
+}
+
+fn assert_delta_reconstruction(turn: &TurnCapture) {
+    assert!(
+        !turn.delta_text_by_item.is_empty(),
+        "turn emitted no agent text deltas; methods={:?}",
+        turn.methods
+    );
+    for (item_id, delta_text) in &turn.delta_text_by_item {
+        let completed = turn
+            .completed_agent_items
+            .get(item_id)
+            .unwrap_or_else(|| panic!("agent item {item_id} emitted deltas but never completed"));
+        assert_eq!(
+            completed, delta_text,
+            "agent item {item_id} completed text does not equal concatenated deltas"
+        );
+    }
+}
+
+fn assistant_text_from_message(message: &Value) -> String {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+fn expected_long_text() -> String {
+    (1..=24)
+        .map(|line| {
+            format!("LONG_STREAM_DELTA_LINE_{line:02}: abcdefghijklmnopqrstuvwxyz 0123456789")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn require_command(bin: &str, args: &[&str]) {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("{bin} must be installed and on PATH: {error}"));
+    assert!(
+        output.status.success(),
+        "{bin} version check failed: status={}; stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn codex_bin() -> String {
+    if let Ok(bin) = std::env::var("CODEX_BIN") {
+        return bin;
+    }
+    for bin in ["codex", "/Applications/Codex.app/Contents/Resources/codex"] {
+        let Ok(output) = Command::new(bin).args(["app-server", "--help"]).output() else {
+            continue;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() && (stdout.contains("--listen") || stderr.contains("--listen")) {
+            return bin.to_string();
+        }
+    }
+    "codex".to_string()
+}
+
+fn temp_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "harness-server-{name}-{}-{}",
+        std::process::id(),
+        Uuid::new_v4().simple()
+    ))
+}
+
+fn shell_quote(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    format!("'{}'", raw.replace('\'', "'\\''"))
+}

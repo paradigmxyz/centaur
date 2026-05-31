@@ -18,7 +18,7 @@ The target wire protocol is OpenAI Codex App Server V2. Prefer the pinned `codex
 3. Add one module under `src/` for the backend, such as `src/<harness>.rs`, and implement `HarnessServer` from `src/traits.rs`.
 4. Keep conversions inside that harness implementation. Prefer typed `serde` event enums plus explicit `From`/conversion helpers into `NormalizedEvent`; avoid generic `serde_json::Value` plumbing unless it is only at the parser boundary.
 5. Wire the subcommand in `src/main.rs` and the dispatch in `src/lib.rs`/`src/server.rs`. The public CLI shape should stay `harness-server codex|claude-code|amp|<new-harness>`.
-6. Add unit tests for stdin generation, steering generation, parser behavior, and representative event conversion. Add or extend a real-harness script when native behavior can only be proven with the CLI.
+6. Add unit tests for stdin generation, steering generation, parser behavior, and representative event conversion. Add or extend ignored real-binary cargo tests when native behavior can only be proven with the CLI.
 
 ## Protocol Invariants
 
@@ -72,40 +72,42 @@ Run Rust tests first:
 cargo test --manifest-path crates/harness-server/Cargo.toml
 ```
 
-Run real-harness comparisons from the repo root. Set `BUILD=0` after building once if you are iterating on scripts or prompts only.
+Run real-harness comparisons through ignored cargo tests from the repo root. These tests spawn the actual harness binaries and may make network/auth calls.
 
 ```bash
-BUILD=0 HARNESSES='claude-code amp codex' \
-  TIMEOUT_S=240 READ_TIMEOUT_S=10 \
-  crates/harness-server/scripts/compare-real-harnesses.sh
+cargo test --manifest-path crates/harness-server/Cargo.toml \
+  real_claude_code_long_streaming_is_anchored_to_native_cli \
+  -- --ignored --nocapture
 ```
 
 ```bash
-BUILD=0 HARNESSES='claude-code amp codex' \
-  TIMEOUT_S=300 READ_TIMEOUT_S=10 \
-  crates/harness-server/scripts/compare-steer-real-harnesses.sh
+cargo test --manifest-path crates/harness-server/Cargo.toml \
+  real_amp_long_streaming_is_anchored_to_native_cli \
+  -- --ignored --nocapture
 ```
 
 ```bash
-BUILD=0 HARNESSES='claude-code amp codex' \
-  TIMEOUT_S=300 READ_TIMEOUT_S=10 \
-  crates/harness-server/scripts/compare-multiturn-real-harnesses.sh
+cargo test --manifest-path crates/harness-server/Cargo.toml \
+  real_codex_long_streaming_uses_native_app_server_chunks \
+  -- --ignored --nocapture
 ```
 
-Validate captured wrapper stdout with:
+Run steering and resume coverage across all real harnesses with:
 
 ```bash
-target/debug/harness-server validate-jsonrpc < /path/to/stdout.log
+cargo test --manifest-path crates/harness-server/Cargo.toml \
+  real_harnesses_basic_steer_and_resume \
+  -- --ignored --nocapture
 ```
 
-Inspect the raw logs, not only script summaries. Look for non-JSON stdout, missing `item/completed`, stale final answers after steering, wrong thread or turn ids, lost session continuity on resume, duplicate assistant text, queued steer messages, and process restarts between turns.
+Inspect the `--nocapture` stdout, not only the cargo summary. Look for non-JSON stdout, missing `item/completed`, stale final answers after steering, wrong thread or turn ids, lost session continuity on resume, duplicate assistant text, queued steer messages, and process restarts between turns.
 
 ## Done Criteria
 
 Consider a harness change done only when:
 
 - Unit tests pass.
-- Real Claude Code, Amp, and Codex pass basic, steering, and multi-turn/resume differential scripts unless the change is explicitly scoped to fewer harnesses.
+- Real Claude Code, Amp, and Codex pass the ignored real-binary cargo tests for long streaming, steering, and multi-turn/resume unless the change is explicitly scoped to fewer harnesses.
 - The logs show the exact stdout JSON-RPC stream and the native harness stderr/stdout observations explain any harness-specific branch.
 - Python and TypeScript contain no custom harness output normalization for the changed path.
 - Any native quirk is captured in the harness module or tests, not as tribal knowledge in the final response.
