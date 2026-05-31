@@ -5,9 +5,15 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
+    "generate:app-server-types": "codex app-server generate-ts --out src/app-server --experimental",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "^4.1.0"
+  },
+  "dependencies": {
+    "chat": "^4.29.0"
   }
 }
