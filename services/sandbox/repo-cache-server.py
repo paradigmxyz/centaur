@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import gzip
 import os
 import re
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -174,6 +176,25 @@ def _is_receive_pack(path: str, query: str) -> bool:
     return "git-receive-pack" in services or path.endswith("/git-receive-pack")
 
 
+def _decode_request_body(body: bytes, content_encoding: str | None) -> bytes:
+    encodings = [
+        encoding.strip().lower()
+        for encoding in (content_encoding or "").split(",")
+        if encoding.strip()
+    ]
+    for encoding in reversed(encodings):
+        if encoding in {"identity"}:
+            continue
+        if encoding in {"gzip", "x-gzip"}:
+            body = gzip.decompress(body)
+            continue
+        if encoding == "deflate":
+            body = zlib.decompress(body)
+            continue
+        raise ValueError(f"unsupported content encoding: {encoding}")
+    return body
+
+
 def _prewarm_loop() -> None:
     while True:
         for repo in REPOSITORIES:
@@ -220,6 +241,13 @@ class RepoCacheHandler(BaseHTTPRequestHandler):
 
         content_length = int(self.headers.get("Content-Length") or "0")
         request_body = self.rfile.read(content_length) if content_length else b""
+        try:
+            request_body = _decode_request_body(
+                request_body, self.headers.get("Content-Encoding")
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.send_error(415, f"unsupported request content encoding: {exc}")
+            return
         env = os.environ.copy()
         env.update(
             {
@@ -230,7 +258,7 @@ class RepoCacheHandler(BaseHTTPRequestHandler):
                 "REQUEST_METHOD": self.command,
                 "REMOTE_ADDR": self.client_address[0],
                 "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": str(content_length),
+                "CONTENT_LENGTH": str(len(request_body)),
             }
         )
         proc = subprocess.run(

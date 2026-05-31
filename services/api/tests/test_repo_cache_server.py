@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 from types import ModuleType
 
@@ -70,6 +72,27 @@ def test_is_receive_pack_detects_push_requests() -> None:
     assert not server._is_receive_pack(
         "/repos/github.com/org/repo.git/info/refs", "service=git-upload-pack"
     )
+
+
+def test_decode_request_body_accepts_git_http_content_encoding() -> None:
+    server = _load_repo_cache_server()
+    body = b"0032want abcdef\n0000"
+
+    assert server._decode_request_body(gzip.compress(body), "gzip") == body
+    assert server._decode_request_body(zlib.compress(body), "deflate") == body
+    assert server._decode_request_body(body, "identity") == body
+    assert server._decode_request_body(body, "") == body
+
+
+def test_decode_request_body_rejects_unknown_content_encoding() -> None:
+    server = _load_repo_cache_server()
+
+    try:
+        server._decode_request_body(b"body", "br")
+    except ValueError as exc:
+        assert "unsupported content encoding: br" in str(exc)
+    else:
+        raise AssertionError("expected unsupported encoding to raise")
 
 
 def test_ensure_mirror_clones_bare_repo_from_upstream(tmp_path, monkeypatch) -> None:
