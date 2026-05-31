@@ -53,6 +53,11 @@ export type SlackbotV2AppendMessagesRequest = {
   messages: SlackbotV2SessionMessage[]
 }
 
+export type SlackbotV2CreateSessionRequest = {
+  harness_type: string
+  metadata: Record<string, unknown>
+}
+
 export type SlackbotV2ExecuteSessionRequest = {
   idle_timeout_ms?: number
   input_lines: string[]
@@ -585,6 +590,7 @@ async function forwardToSessionApi(
     threadId: string
   }
 ): Promise<AsyncIterable<ServerNotification> | null> {
+  await createSession(options, input.threadId)
   await appendSessionMessages(options, input.threadId, input.messages)
   if (!input.executeMessage) return null
 
@@ -592,6 +598,24 @@ async function forwardToSessionApi(
   if (!input.openStream) return null
 
   return streamSessionNotifications(options, input.threadId, input.afterEventId, input.onEventId)
+}
+
+async function createSession(options: SlackbotV2Options, threadId: string): Promise<void> {
+  const fetchFn = options.fetch ?? fetch
+  const body: SlackbotV2CreateSessionRequest = {
+    harness_type: 'codex',
+    metadata: {
+      source: 'slackbotv2',
+      platform: 'slack',
+      thread_id: threadId
+    }
+  }
+  const response = await fetchFn(apiSessionUrl(options.apiUrl, threadId), {
+    method: 'POST',
+    headers: apiHeaders(options),
+    body: JSON.stringify(body)
+  })
+  await ensureApiOk(response, 'create session')
 }
 
 async function appendSessionMessages(
@@ -662,7 +686,11 @@ async function streamSessionNotifications(
   return parseSessionEventStream(response.body, onEventId)
 }
 
-function apiSessionUrl(apiUrl: string, threadId: string, suffix?: 'messages' | 'execute' | 'events'): string {
+function apiSessionUrl(
+  apiUrl: string,
+  threadId: string,
+  suffix?: 'messages' | 'execute' | 'events'
+): string {
   const path = `/api/session/${encodeURIComponent(threadId)}${suffix ? `/${suffix}` : ''}`
   return new URL(path, ensureTrailingSlash(apiUrl)).toString()
 }

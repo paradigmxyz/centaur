@@ -15,6 +15,7 @@ import {
   createSlackbotV2,
   type SlackbotV2,
   type SlackbotV2AppendMessagesRequest,
+  type SlackbotV2CreateSessionRequest,
   type SlackbotV2ExecuteSessionRequest,
   type SlackbotV2SessionMessage
 } from '../src/index'
@@ -165,6 +166,11 @@ describe('slackbotv2', () => {
     await Promise.all(secondMentionWaits)
 
     expect(codexApi.appends).toHaveLength(3)
+    expect(codexApi.creates.map(create => create.threadKey)).toEqual([
+      threadKey(parent.ts),
+      threadKey(parent.ts),
+      threadKey(parent.ts)
+    ])
     expect(codexApi.executes).toHaveLength(2)
 
     const firstAppend = codexApi.appends[0]!
@@ -766,6 +772,7 @@ type MockSessionApi = {
   appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
   autoRespond: boolean
   close(): Promise<void>
+  creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
   emitOutputLine(threadKey: string, line: string): void
   emitOutputLines(threadKey: string, lines: string[]): void
   eventRequests: MockSessionEventRequest[]
@@ -777,6 +784,7 @@ type MockSessionApi = {
 
 async function startMockCodexApi(): Promise<MockSessionApi> {
   const appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[] = []
+  const creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[] = []
   const eventRequests: MockSessionEventRequest[] = []
   const events: MockSessionEvent[] = []
   const executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[] = []
@@ -788,6 +796,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const server = createServer((req, res) => {
     void handleMockCodexRequest(req, res, {
       appends,
+      creates,
       events,
       eventRequests,
       executes,
@@ -815,10 +824,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
 
   const api: MockSessionApi = {
     appends,
+    creates,
     eventRequests,
     executes,
     reset() {
       appends.length = 0
+      creates.length = 0
       eventRequests.length = 0
       events.length = 0
       executes.length = 0
@@ -869,6 +880,7 @@ async function handleMockCodexRequest(
   input: {
     appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
     autoRespond: boolean
+    creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
     events: MockSessionEvent[]
     eventRequests: MockSessionEventRequest[]
     executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
@@ -880,13 +892,30 @@ async function handleMockCodexRequest(
   }
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${input.port}`)
-  const match = /^\/api\/session\/([^/]+)\/(messages|execute|events)$/.exec(url.pathname)
-  if (!match?.[1] || !match[2]) {
+  const match = /^\/api\/session\/([^/]+)(?:\/(messages|execute|events))?$/.exec(url.pathname)
+  if (!match?.[1]) {
     await sendWebResponse(res, new Response('not found', { status: 404 }))
     return
   }
   const threadKey = decodeURIComponent(match[1])
-  const endpoint = match[2]
+  const endpoint = match[2] ?? 'session'
+
+  if (endpoint === 'session') {
+    const request = await nodeRequestToWebRequest(req, url)
+    const body = (await request.json()) as SlackbotV2CreateSessionRequest
+    input.creates.push({ threadKey, body })
+    await sendWebResponse(
+      res,
+      Response.json({
+        thread_key: threadKey,
+        sandbox_id: null,
+        harness_type: body.harness_type,
+        harness_thread_id: null,
+        status: 'active'
+      })
+    )
+    return
+  }
 
   if (endpoint === 'events') {
     const afterEventId = Number.parseInt(url.searchParams.get('after_event_id') ?? '0', 10) || 0
