@@ -14,10 +14,15 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote, urljoin, urlparse
 
+import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from centaur_sdk.tool_sdk import get_tool_context, save_attachment, secret
+
+# structlog so these lines render as JSON through the tool-server's
+# configure_structlog() pipeline, like the rest of the service's logs.
+logger = structlog.get_logger()
 
 # Cache for channel list to avoid repeated API calls
 
@@ -1861,6 +1866,33 @@ class SlackClient:
             raise ValueError(f"Attachment exceeds the {self._MAX_DOWNLOAD_BYTES}-byte limit")
         return body
 
+    @staticmethod
+    def _file_shared_in_thread(
+        shares: dict, channel: str, thread_ts: str | None
+    ) -> bool:
+        """Whether files.info `shares` shows the file landed in the target.
+
+        Slack's schema is ``shares.{public,private}[channel_id] -> [entries]``,
+        where each entry has the share-message ``ts`` and (for a threaded
+        share) ``thread_ts`` of the parent. The file is in our thread if any
+        entry for the channel matches our ``thread_ts`` (on either field, since
+        a root-level share reports ``ts == thread_ts``). With no thread
+        requested, any share into the channel counts.
+        """
+        entries: list = []
+        for scope in ("public", "private"):
+            by_channel = shares.get(scope) if isinstance(shares, dict) else None
+            if isinstance(by_channel, dict):
+                entries.extend(by_channel.get(channel) or [])
+        if not entries:
+            return False
+        if thread_ts is None:
+            return True
+        return any(
+            isinstance(e, dict) and thread_ts in (e.get("thread_ts"), e.get("ts"))
+            for e in entries
+        )
+
     def upload_file(
         self,
         channel: str | None = None,
@@ -1885,9 +1917,9 @@ class SlackClient:
         If channel/thread_ts are omitted and the tool runs in an active Slack
         thread, the destination is inferred from tool context.
 
-        alt_text: accessibility description for screen readers (max 1000 chars).
-            Strongly recommended for chart images so users with visual
-            impairments and indexers can understand what the image shows.
+        alt_text: accepted for backwards compatibility but currently NOT sent
+            to Slack, because slack_sdk's files_upload_v2 mishandles alt_txt
+            (https://github.com/slackapi/python-slack-sdk/issues/1818).
         """
         inferred_channel, inferred_thread_ts = self._current_slack_destination()
         requested_channel = channel or channel_id or inferred_channel
@@ -1917,7 +1949,9 @@ class SlackClient:
                 raise ValueError(
                     "One of content_base64, attachment_id, or attachment_url is required"
                 )
-            kwargs["content"] = upload_bytes
+            # Pass bytes via `file=` (binary upload) rather than `content=`,
+            # which slack_sdk treats as snippet text.
+            kwargs["file"] = upload_bytes
             kwargs["filename"] = effective_filename
             if title:
                 kwargs["title"] = title
@@ -1932,16 +1966,54 @@ class SlackClient:
                 kwargs["initial_comment"] = f"Uploaded `{effective_filename}`."
             if effective_thread_ts:
                 kwargs["thread_ts"] = effective_thread_ts
-            if alt_text:
-                # Slack's files.completeUploadExternal accepts alt_txt per file.
-                # slack_sdk's files_upload_v2 forwards top-level alt_txt onto the
-                # single-file upload payload.
-                kwargs["alt_txt"] = alt_text[:1000]
+            # We intentionally do NOT forward alt_text to Slack. Passing alt_txt
+            # through slack_sdk's files_upload_v2 is broken and can cause the
+            # upload/share to misbehave — see
+            # https://github.com/slackapi/python-slack-sdk/issues/1818. The
+            # parameter is kept on the signature for backwards compatibility but
+            # is deliberately ignored until the SDK bug is resolved.
+            _ = alt_text
 
+            # Upload once, then poll files.info with an exponential backoff
+            # (0/1/2/4/8s) to let the async share propagate. On a suspected
+            # drop, log the full files.info file object so the share state is
+            # visible.
             response = self._client.files_upload_v2(**kwargs)
             file_info = response.get("file", {})
+            file_id = file_info.get("id", "")
+
+            landed = False
+            verify_failed = False
+            info_file: dict = {}
+            for delay in (0, 1, 2, 4, 8):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    info = self._client.files_info(file=file_id)
+                except Exception:
+                    # Verification unavailable (e.g. missing files:read scope).
+                    verify_failed = True
+                    break
+                info_file = info.get("file", {}) if info else {}
+                landed = self._file_shared_in_thread(
+                    info_file.get("shares") or {},
+                    resolved_channel,
+                    effective_thread_ts,
+                )
+                if landed:
+                    break
+
+            if not landed and not verify_failed:
+                logger.warning(
+                    "slack_upload_file_share_dropped",
+                    file_id=file_id,
+                    channel=resolved_channel,
+                    thread_ts=effective_thread_ts,
+                    files_info=info_file,
+                )
+
             return {
-                "id": file_info.get("id", ""),
+                "id": file_id,
                 "name": file_info.get("name", ""),
                 "permalink": file_info.get("permalink", ""),
                 "url": file_info.get("url_private", ""),

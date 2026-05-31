@@ -36,6 +36,14 @@ class _FakeWebClient:
         self.user_profile_response: dict | None = None
         self.user_profile_calls: list[dict] = []
         self.upload_exception: Exception | None = None
+        self.upload_count = 0
+        # Per-upload-attempt share outcomes consumed by files_upload_v2.
+        # True = Slack shares the file; False = silent drop (ok but no share).
+        # Empty list defaults every attempt to a successful share.
+        self.share_outcomes: list[bool] = []
+        self.files_info_calls: list[dict] = []
+        self.files_delete_calls: list[dict] = []
+        self._shares_by_file: dict[str, dict] = {}
 
     def chat_postMessage(self, **kwargs):
         self.last_kwargs = kwargs
@@ -73,7 +81,35 @@ class _FakeWebClient:
         self.last_kwargs = kwargs
         if self.upload_exception is not None:
             raise self.upload_exception
-        return {"file": {"id": "F123", "name": "upload.png"}}
+        self.upload_count += 1
+        file_id = f"F{self.upload_count}"
+        lands = self.share_outcomes.pop(0) if self.share_outcomes else True
+        if lands:
+            entry: dict = {"ts": "1.1", "channel_name": "paradigm-pulse"}
+            if kwargs.get("thread_ts"):
+                entry["thread_ts"] = kwargs["thread_ts"]
+            self._shares_by_file[file_id] = {
+                "public": {kwargs.get("channel", "C123"): [entry]}
+            }
+        else:
+            self._shares_by_file[file_id] = {}
+        return {
+            "file": {
+                "id": file_id,
+                "name": kwargs.get("filename", "upload.png"),
+                "permalink": f"https://slack.example/files/{file_id}",
+                "url_private": f"https://files.example/{file_id}",
+            }
+        }
+
+    def files_info(self, **kwargs):
+        self.files_info_calls.append(kwargs)
+        file_id = kwargs.get("file")
+        return {"file": {"id": file_id, "shares": self._shares_by_file.get(file_id, {})}}
+
+    def files_delete(self, **kwargs):
+        self.files_delete_calls.append(kwargs)
+        return {"ok": True}
 
     def api_call(self, method: str, *, params: dict):
         self.api_calls.append((method, params))
@@ -620,7 +656,7 @@ def test_upload_file_accepts_channel_id_alias_and_returns_preview() -> None:
     assert fake_web_client.last_kwargs is not None
     assert fake_web_client.last_kwargs["channel"] == "C123"
     assert fake_web_client.last_kwargs["filename"] == "data.csv"
-    assert fake_web_client.last_kwargs["content"] == b"a,b\n1,2\n"
+    assert fake_web_client.last_kwargs["file"] == b"a,b\n1,2\n"
     assert result["preview"] == {
         "size_bytes": 8,
         "mime_type": "text/csv",
@@ -669,6 +705,93 @@ def test_upload_file_infers_destination_from_team_scoped_thread_key() -> None:
     assert fake_web_client.last_kwargs is not None
     assert fake_web_client.last_kwargs["channel"] == "C123"
     assert fake_web_client.last_kwargs["thread_ts"] == "1780035646.228899"
+
+
+def test_upload_file_uploads_once_and_returns_when_share_lands(monkeypatch) -> None:
+    """The stripped path does a single upload and verifies via files.info; no
+    retry, no orphan deletion."""
+    import slack.client as slack_client_module
+
+    monkeypatch.setattr(slack_client_module.time, "sleep", lambda *a, **k: None)
+
+    client, fake_web_client = _make_client()
+
+    result = client.upload_file(
+        channel_id="C123",
+        thread_ts="1780035646.228899",
+        content_base64="dGVzdA==",
+        filename="random.csv",
+    )
+
+    assert fake_web_client.upload_count == 1
+    assert fake_web_client.files_delete_calls == []
+    assert result["id"] == "F1"
+
+
+def test_upload_file_returns_dropped_result_without_retry(monkeypatch) -> None:
+    """A silent share drop is logged but not retried or deleted; the (phantom)
+    result is returned so we can observe the raw rate."""
+    import slack.client as slack_client_module
+
+    monkeypatch.setattr(slack_client_module.time, "sleep", lambda *a, **k: None)
+
+    client, fake_web_client = _make_client()
+    fake_web_client.share_outcomes = [False]  # share never lands
+
+    result = client.upload_file(
+        channel_id="C123",
+        thread_ts="1780035646.228899",
+        content_base64="dGVzdA==",
+        filename="random.csv",
+    )
+
+    assert fake_web_client.upload_count == 1
+    assert fake_web_client.files_delete_calls == []
+    assert result["id"] == "F1"
+
+
+def test_upload_file_returns_result_when_verification_unavailable(monkeypatch) -> None:
+    """When files.info cannot confirm the share (e.g. missing files:read scope),
+    upload_file returns the result as-is."""
+    import slack.client as slack_client_module
+
+    monkeypatch.setattr(slack_client_module.time, "sleep", lambda *a, **k: None)
+
+    client, fake_web_client = _make_client()
+
+    def _boom(**_kwargs):
+        raise _make_slack_error(error="missing_scope", status_code=403)
+
+    fake_web_client.files_info = _boom  # type: ignore[method-assign]
+
+    result = client.upload_file(
+        channel_id="C123",
+        thread_ts="1780035646.228899",
+        content_base64="dGVzdA==",
+        filename="random.csv",
+    )
+
+    assert fake_web_client.upload_count == 1
+    assert fake_web_client.files_delete_calls == []
+    assert result["id"] == "F1"
+
+
+def test_upload_file_never_sends_alt_txt(monkeypatch) -> None:
+    """alt_text is accepted for compatibility but never forwarded to Slack,
+    because slack_sdk's files_upload_v2 mishandles alt_txt
+    (slackapi/python-slack-sdk#1818)."""
+    import slack.client as slack_client_module
+
+    monkeypatch.setattr(slack_client_module.time, "sleep", lambda *a, **k: None)
+
+    client, fake_web_client = _make_client()
+    client.upload_file(
+        channel_id="C123",
+        content_base64="dGVzdA==",
+        filename="chart.png",
+        alt_text="a bar chart",
+    )
+    assert "alt_txt" not in fake_web_client.last_kwargs
 
 
 def test_upload_file_rejects_local_path_argument() -> None:
