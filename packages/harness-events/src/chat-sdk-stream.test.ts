@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ServerNotification } from "./app-server/ServerNotification";
-import type { ThreadItem } from "./app-server/v2/ThreadItem";
+import type { ServerNotification, ThreadItem } from "./index";
 import {
   CodexAppServerChatStreamMapper,
   type ChatSdkStreamChunk,

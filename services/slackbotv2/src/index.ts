@@ -5,7 +5,8 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import {
   codexAppServerToChatSdkStream,
   type CodexAppServerToChatStreamOptions,
-  type ServerNotification
+  type ServerNotification,
+  type Turn
 } from '@centaur/harness-events'
 
 export type SlackbotV2ApiAuthor = {
@@ -962,17 +963,17 @@ function dotTypePayloadToNotification(type: string, payload: Record<string, unkn
   return { method, params } as unknown as ServerNotification
 }
 
-function normalizeTurn(value: unknown, status: 'completed' | 'inProgress'): Record<string, unknown> {
+function normalizeTurn(value: unknown, status: 'completed' | 'inProgress'): Turn {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return {
       ...emptyTurn(stringValue((value as Record<string, unknown>).id) ?? 'turn', status),
       ...(value as Record<string, unknown>)
-    }
+    } as Turn
   }
   return emptyTurn('turn', status)
 }
 
-function emptyTurn(id: string, status: 'completed' | 'inProgress'): Record<string, unknown> {
+function emptyTurn(id: string, status: 'completed' | 'inProgress'): Turn {
   return {
     id,
     items: [],

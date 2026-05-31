@@ -1,8 +1,5 @@
 import type { StreamChunk } from "chat";
-import type { ServerNotification } from "./app-server/ServerNotification";
-import type { ThreadItem } from "./app-server/v2/ThreadItem";
-import type { Turn } from "./app-server/v2/Turn";
-import type { TurnPlanStepStatus } from "./app-server/v2/TurnPlanStepStatus";
+import type { ServerNotification, ThreadItem, Turn, TurnPlanStepStatus } from "./index";
 
 export type ChatSdkStreamValue = string | ChatSdkStreamChunk;
 export type ChatSdkStreamChunk = StreamChunk;
