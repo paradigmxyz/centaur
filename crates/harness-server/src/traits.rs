@@ -59,11 +59,11 @@ pub trait HarnessServer {
         self.stdin_for_turn(input)
     }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
-    fn normalize_event(
+    fn normalize_events(
         &self,
         normalizer: &mut Self::EventNormalizer,
         event: Self::Event,
-    ) -> Result<NormalizedEvent>;
+    ) -> Result<Vec<NormalizedEvent>>;
     fn finish_turn_on_assistant_end_turn(&self) -> bool {
         false
     }

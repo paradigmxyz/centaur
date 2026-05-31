@@ -467,16 +467,20 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
             continue;
         }
         let event = harness.parse_stdout_line(trimmed)?;
-        let normalized = harness.normalize_event(&mut event_normalizer, event)?;
-        if let Some(session_id) = normalized.session_id() {
-            last_session_id = Some(session_id.to_string());
-            state.harness_session_id = Some(session_id.to_string());
+        let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
+        let mut terminal = false;
+        for normalized in normalized_events {
+            if let Some(session_id) = normalized.session_id() {
+                last_session_id = Some(session_id.to_string());
+                state.harness_session_id = Some(session_id.to_string());
+            }
+            for notification in normalizer.process_event(&normalized)? {
+                write_value(stdout, &notification_to_wire_value(&notification)?)?;
+            }
+            terminal |= normalized.is_terminal()
+                || (harness.finish_turn_on_assistant_end_turn()
+                    && normalized.is_assistant_end_turn());
         }
-        for notification in normalizer.process_event(&normalized)? {
-            write_value(stdout, &notification_to_wire_value(&notification)?)?;
-        }
-        let terminal = normalized.is_terminal()
-            || (harness.finish_turn_on_assistant_end_turn() && normalized.is_assistant_end_turn());
         if terminal {
             if let Some(notification) = normalizer.finish_turn(None)? {
                 if let ServerNotification::TurnCompleted(completed) = &notification {

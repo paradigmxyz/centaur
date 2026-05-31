@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::process::Command as ProcessCommand;
 
@@ -5,17 +6,93 @@ use codex_app_server_protocol::UserInput;
 use serde_json::json;
 
 use crate::{
-    HarnessKind, HarnessServer, NormalizedEvent, Result, ThreadState,
+    HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, Result, ThreadState,
     anthropic::{AnthropicEventNormalizer, AnthropicStreamEvent},
     command_from_override, user_input_to_anthropic_content,
 };
 
+const FINAL_TEXT_DELTA_BYTES: usize = 96;
+
 #[derive(Debug, Default)]
 pub struct AmpHarness;
 
+#[derive(Debug, Default)]
+pub struct AmpEventNormalizer {
+    anthropic: AnthropicEventNormalizer,
+    pre_final_text_items: HashSet<String>,
+}
+
+impl AmpEventNormalizer {
+    fn normalize(&mut self, event: AnthropicStreamEvent) -> Vec<NormalizedEvent> {
+        let normalized = self.anthropic.normalize(event);
+        match normalized {
+            NormalizedEvent::AgentTextDelta { ref item_id, delta } => {
+                if !delta.is_empty() {
+                    self.pre_final_text_items.insert(item_id.clone());
+                }
+                vec![NormalizedEvent::AgentTextDelta {
+                    item_id: item_id.clone(),
+                    delta,
+                }]
+            }
+            NormalizedEvent::AssistantMessage {
+                partial: true,
+                ref content,
+                ..
+            } => {
+                self.record_pre_final_text_items(content);
+                vec![normalized]
+            }
+            NormalizedEvent::AssistantMessage {
+                partial: false,
+                stop_reason,
+                content,
+            } => self.chunk_final_assistant_message(stop_reason, content),
+            event => vec![event],
+        }
+    }
+
+    fn chunk_final_assistant_message(
+        &self,
+        stop_reason: Option<String>,
+        content: Vec<NormalizedContent>,
+    ) -> Vec<NormalizedEvent> {
+        let mut out = Vec::new();
+        for item in &content {
+            if let NormalizedContent::AgentText { item_id, text } = item {
+                if self.pre_final_text_items.contains(item_id) {
+                    continue;
+                }
+                out.extend(
+                    text_chunks(text).map(|delta| NormalizedEvent::AgentTextDelta {
+                        item_id: item_id.clone(),
+                        delta,
+                    }),
+                );
+            }
+        }
+        out.push(NormalizedEvent::AssistantMessage {
+            partial: false,
+            stop_reason,
+            content,
+        });
+        out
+    }
+
+    fn record_pre_final_text_items(&mut self, content: &[NormalizedContent]) {
+        for item in content {
+            if let NormalizedContent::AgentText { item_id, text } = item
+                && !text.is_empty()
+            {
+                self.pre_final_text_items.insert(item_id.clone());
+            }
+        }
+    }
+}
+
 impl HarnessServer for AmpHarness {
     type Event = AnthropicStreamEvent;
-    type EventNormalizer = AnthropicEventNormalizer;
+    type EventNormalizer = AmpEventNormalizer;
 
     fn kind(&self) -> HarnessKind {
         HarnessKind::Amp
@@ -75,17 +152,32 @@ impl HarnessServer for AmpHarness {
         AnthropicStreamEvent::parse_json_line(line)
     }
 
-    fn normalize_event(
+    fn normalize_events(
         &self,
         normalizer: &mut Self::EventNormalizer,
         event: Self::Event,
-    ) -> Result<NormalizedEvent> {
+    ) -> Result<Vec<NormalizedEvent>> {
         Ok(normalizer.normalize(event))
     }
 
     fn finish_turn_on_assistant_end_turn(&self) -> bool {
         true
     }
+}
+
+fn text_chunks(text: &str) -> impl Iterator<Item = String> + '_ {
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    for ch in text.chars() {
+        chunk.push(ch);
+        if chunk.len() >= FINAL_TEXT_DELTA_BYTES {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks.into_iter()
 }
 
 fn amp_user_stdin(input: &[UserInput], steer: bool) -> Result<Vec<u8>> {

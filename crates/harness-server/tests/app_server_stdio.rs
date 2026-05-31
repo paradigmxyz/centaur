@@ -120,6 +120,52 @@ fn fake_amp_app_server_streams_codex_v2_notifications() {
 }
 
 #[test]
+fn fake_amp_final_only_assistant_message_is_chunked_into_codex_deltas() {
+    let expected = expected_long_text();
+    let system = json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": "T-amp-session",
+    })
+    .to_string();
+    let assistant = json!({
+        "type": "assistant",
+        "message": {
+            "id": "msg_1",
+            "content": [{"type": "text", "text": expected}],
+        },
+    })
+    .to_string();
+    let result = json!({
+        "type": "result",
+        "subtype": "success",
+        "result": expected,
+    })
+    .to_string();
+    let fake_amp = format!(
+        "printf '%s\\n' {} {} {}",
+        shell_quote_str(&system),
+        shell_quote_str(&assistant),
+        shell_quote_str(&result)
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::Amp,
+        command_override: Some(fake_amp),
+        prompt: "write long text".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, expected);
+    assert!(
+        run.turn.agent_delta_count > 1,
+        "Amp final-only assistant text should be expanded into multiple Codex deltas"
+    );
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
 fn fake_harness_process_is_started_once_across_two_turns() {
     let start_log = temp_path("harness-starts.log");
     let command = format!(
@@ -213,17 +259,11 @@ fn real_amp_long_streaming_is_anchored_to_native_cli() {
     assert_eq!(wrapped.turn.text_from_deltas.trim(), expected);
     assert_delta_reconstruction(&wrapped.turn);
 
-    if native.stream_text_delta_count == 0 {
-        assert_eq!(
-            wrapped.turn.agent_delta_count, 1,
-            "Amp native CLI emitted only a final assistant message, so wrapper should emit exactly one final-text delta"
-        );
-    } else {
-        assert!(
-            wrapped.turn.agent_delta_count > 1,
-            "Amp native CLI streamed multiple chunks but wrapper did not"
-        );
-    }
+    assert!(
+        wrapped.turn.agent_delta_count > 1,
+        "Amp wrapper should expose Codex text deltas even when native Amp emits final assistant text; native_stream_text_delta_count={}",
+        native.stream_text_delta_count
+    );
 }
 
 #[test]
@@ -1097,5 +1137,9 @@ fn temp_path(name: &str) -> PathBuf {
 
 fn shell_quote(path: &Path) -> String {
     let raw = path.to_string_lossy();
+    shell_quote_str(&raw)
+}
+
+fn shell_quote_str(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
 }

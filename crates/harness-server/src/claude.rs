@@ -85,12 +85,12 @@ impl HarnessServer for ClaudeCodeHarness {
         AnthropicStreamEvent::parse_json_line(line)
     }
 
-    fn normalize_event(
+    fn normalize_events(
         &self,
         normalizer: &mut Self::EventNormalizer,
         event: Self::Event,
-    ) -> Result<NormalizedEvent> {
-        Ok(normalizer.normalize(event))
+    ) -> Result<Vec<NormalizedEvent>> {
+        Ok(vec![normalizer.normalize(event)])
     }
 }
 
