@@ -99,6 +99,27 @@ else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
     exit 1
 fi
+if [ -n "${CODEX_MODEL_REASONING_EFFORT:-}" ]; then
+    python3 - "$HOME_DIR/.codex/config.toml" <<'PYEOF'
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = "model_reasoning_effort"
+value = os.environ["CODEX_MODEL_REASONING_EFFORT"].strip()
+if not value:
+    raise SystemExit("CODEX_MODEL_REASONING_EFFORT must not be empty")
+line = f"{key} = {json.dumps(value)}"
+text = path.read_text()
+updated = re.sub(rf"(?m)^{key}\s*=.*$", line, text, count=1)
+if updated == text:
+    updated = text.rstrip() + "\n" + line + "\n"
+path.write_text(updated)
+PYEOF
+fi
 
 # ── Claude Code settings ────────────────────────────────────────────────────
 mkdir -p "$HOME_DIR/.claude"

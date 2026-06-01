@@ -135,3 +135,33 @@ def test_sandbox_entrypoint_installs_codex_harness_config(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout == (harness_dir / "codex" / "config.toml").read_text()
+
+
+def test_sandbox_entrypoint_overrides_codex_reasoning_effort(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    harness_dir = _write_codex_harness_config(home)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ENTRYPOINT_SH),
+            "sh",
+            "-lc",
+            'cat "$HOME/.codex/config.toml"',
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CENTAUR_HARNESS_CONFIG_DIR": str(harness_dir),
+            "CODEX_MODEL_REASONING_EFFORT": "medium",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert 'model_reasoning_effort = "medium"' in result.stdout
+    assert 'model_reasoning_effort = "low"' not in result.stdout
+    assert 'model = "gpt-5.5"' in result.stdout
+    assert 'service_tier = "fast"' in result.stdout
