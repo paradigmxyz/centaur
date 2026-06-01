@@ -85,7 +85,7 @@ export async function pollFinalDeliveriesOnce(
         }),
         async (span) => {
           try {
-            await deliver(client, delivery);
+            await deliver(client, delivery, config);
             await centaur(
               config,
               `/agent/final-deliveries/${executionId}/delivered`,
@@ -124,13 +124,16 @@ export async function pollFinalDeliveriesOnce(
   }
 }
 
-async function deliver(client: WebClient, delivery: any): Promise<void> {
+async function deliver(
+  client: WebClient,
+  delivery: any,
+  config: AppConfig,
+): Promise<void> {
   const meta = delivery.delivery ?? {};
   const payload = delivery.final_payload ?? {};
   const target = targetFromDelivery(delivery);
   const channel = meta.channel_id ?? meta.channel ?? target.channel;
   const threadTs = meta.thread_ts ?? target.threadTs;
-  const teamId = meta.recipient_team_id ?? meta.team_id ?? target.teamId;
   if (!channel || !threadTs) throw new Error("missing_slack_delivery_target");
   const text = extractText(payload);
   const textToPost = continuationText(payload, text) ?? text;
@@ -144,7 +147,7 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
     channel,
     threadTs,
     executionId(delivery),
-    teamId,
+    config.SLACK_TEAM_ID,
     chunks,
   );
 }
