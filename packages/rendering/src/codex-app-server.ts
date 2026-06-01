@@ -715,7 +715,7 @@ function trackAgentMessageLifecycle(event: any, state: CodexMapperState): void {
 }
 
 function agentMessageEventId(event: any): string {
-  return String(event?.itemId ?? event?.item_id ?? event?.item?.id ?? '')
+  return String(event?.itemId ?? event?.item_id ?? event?.item?.id ?? event?.turnId ?? event?.turn_id ?? '')
 }
 
 function ensureCommentarySegmentBreak(event: any, state: CodexMapperState): void {
