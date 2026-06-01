@@ -13,9 +13,9 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import {
   codexAppServerToChatSdkStream,
   type CodexAppServerToChatStreamOptions,
-  type ServerNotification,
-  type Turn
-} from '@centaur/harness-events'
+  type RendererEvent
+} from '@centaur/rendering'
+import type { RustSessionStreamEvent } from '@centaur/harness-events'
 
 export type SlackbotV2ApiAuthor = {
   fullName: string
@@ -122,6 +122,8 @@ type SlackAssistantAdapter = {
   ): Promise<void>
   setAssistantTitle?(channelId: string, threadTs: string, title: string): Promise<void>
 }
+
+type SlackbotV2RendererSource = RustSessionStreamEvent | Record<string, unknown>
 
 const noopLogger: Logger = {
   debug: () => undefined,
@@ -423,7 +425,7 @@ async function forwardAndMaybeRender(
 
 async function renderExecutionStream(
   thread: Thread,
-  stream: AsyncIterable<ServerNotification>,
+  stream: AsyncIterable<SlackbotV2RendererSource>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options
 ): Promise<void> {
@@ -432,10 +434,7 @@ async function renderExecutionStream(
   try {
     await thread.post(
       new StreamingPlan(
-        codexAppServerToChatSdkStream(
-          withAssistantTitleUpdates(thread, stream),
-          options.mapper
-        ),
+        codexAppServerToChatSdkStream(stream, rendererOptions(thread, options)),
         { groupTasks: options.streamTaskDisplayMode ?? 'plan' }
       )
     )
@@ -444,15 +443,16 @@ async function renderExecutionStream(
   }
 }
 
-async function* withAssistantTitleUpdates(
-  thread: Thread,
-  stream: AsyncIterable<ServerNotification>
-): AsyncIterable<ServerNotification> {
-  for await (const notification of stream) {
-    if (notification.method === 'thread/name/updated') {
-      await setAssistantTitle(thread, notification.params.threadName)
+function rendererOptions(thread: Thread, options: SlackbotV2Options): CodexAppServerToChatStreamOptions {
+  const mapper = options.mapper
+  return {
+    ...mapper,
+    async onRendererEvent(event: RendererEvent) {
+      await mapper?.onRendererEvent?.(event)
+      if (event.type === 'renderer.title.update') {
+        await setAssistantTitle(thread, event.title)
+      }
     }
-    yield notification
   }
 }
 
@@ -601,7 +601,7 @@ async function forwardToSessionApi(
     openStream: boolean
     threadId: string
   }
-): Promise<AsyncIterable<ServerNotification> | null> {
+): Promise<AsyncIterable<SlackbotV2RendererSource> | null> {
   await createSession(options, input.threadId)
   await appendSessionMessages(options, input.threadId, input.messages)
   if (!input.executeMessage) return null
@@ -684,7 +684,7 @@ async function streamSessionNotifications(
   threadId: string,
   afterEventId: number,
   onEventId: (eventId: number) => void
-): Promise<AsyncIterable<ServerNotification>> {
+): Promise<AsyncIterable<SlackbotV2RendererSource>> {
   const fetchFn = options.fetch ?? fetch
   const response = await fetchFn(
     `${apiSessionUrl(options.apiUrl, threadId, 'events')}?after_event_id=${afterEventId}`,
@@ -818,17 +818,26 @@ type ParsedSessionEvent = {
 async function* parseSessionEventStream(
   stream: ReadableStream<Uint8Array>,
   onEventId: (eventId: number) => void
-): AsyncIterable<ServerNotification> {
+): AsyncIterable<SlackbotV2RendererSource> {
   for await (const event of parseSseEvents(stream)) {
     if (typeof event.id === 'number') onEventId(event.id)
     if (event.event === 'session.output.line') {
-      const output = notificationFromCodexOutputLine(event.data)
-      if (output.notification) yield output.notification
-      if (output.terminal) return
+      yield {
+        data: event.data,
+        event: event.event,
+        eventId: event.id,
+        eventKind: event.event
+      } satisfies RustSessionStreamEvent
+      if (isTerminalCodexOutputLine(event.data)) return
       continue
     }
     if (event.event === 'session.execution_failed' || event.event === 'session.stream_error') {
-      yield sessionErrorNotification(event)
+      yield {
+        data: { error: sessionErrorMessage(event) },
+        event: event.event,
+        eventId: event.id,
+        eventKind: event.event
+      } satisfies RustSessionStreamEvent
       return
     }
   }
@@ -906,131 +915,26 @@ function parseSseLine(
   return { state }
 }
 
-function notificationFromCodexOutputLine(line: string): {
-  notification?: ServerNotification
-  terminal: boolean
-} {
+function isTerminalCodexOutputLine(line: string): boolean {
   let payload: unknown
   try {
     payload = JSON.parse(line)
   } catch {
-    return {
-      notification: {
-        method: 'error',
-        params: { error: { message: `invalid Codex output line: ${line}` } }
-      } as ServerNotification,
-      terminal: true
-    }
+    return true
   }
-
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return { terminal: false }
-  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
 
   const object = payload as Record<string, unknown>
-  if (typeof object.method === 'string') {
-    return {
-      notification: object as unknown as ServerNotification,
-      terminal: isTerminalCodexPayload(object)
-    }
-  }
-
-  const type = stringValue(object.type)
-  if (!type) return { terminal: false }
-  return {
-    notification: dotTypePayloadToNotification(type, object),
-    terminal: isTerminalCodexPayload(object)
-  }
+  return (
+    object.type === 'turn.completed' ||
+    object.type === 'turn.failed' ||
+    object.type === 'turn.done' ||
+    object.method === 'error' ||
+    object.method === 'turn/completed'
+  )
 }
 
-function dotTypePayloadToNotification(type: string, payload: Record<string, unknown>): ServerNotification {
-  const params = { ...payload }
-  delete params.type
-
-  if (type === 'thread.name.updated') {
-    return {
-      method: 'thread/name/updated',
-      params: {
-        threadId: stringValue(params.threadId) ?? stringValue(params.thread_id) ?? '',
-        threadName:
-          stringValue(params.threadName) ??
-          stringValue(params.thread_name) ??
-          stringValue(params.name) ??
-          'Centaur task'
-      }
-    } as ServerNotification
-  }
-
-  if (type === 'turn.started') {
-    const turnId = stringValue(params.turnId) ?? stringValue(params.turn_id) ?? 'turn'
-    return {
-      method: 'turn/started',
-      params: {
-        threadId: stringValue(params.threadId) ?? stringValue(params.thread_id) ?? '',
-        turn: emptyTurn(turnId, 'inProgress')
-      }
-    } as ServerNotification
-  }
-
-  if (type === 'turn.completed') {
-    return {
-      method: 'turn/completed',
-      params: {
-        threadId: stringValue(params.threadId) ?? stringValue(params.thread_id) ?? '',
-        turn: normalizeTurn(params.turn, 'completed')
-      }
-    } as ServerNotification
-  }
-
-  if (type === 'turn.failed' || type === 'error') {
-    const error = params.error
-    const message =
-      typeof error === 'string'
-        ? error
-        : error && typeof error === 'object' && 'message' in error
-          ? String((error as { message?: unknown }).message ?? 'Codex turn failed')
-          : stringValue(params.message) ?? 'Codex turn failed'
-    return {
-      method: 'error',
-      params: { error: { message } }
-    } as ServerNotification
-  }
-
-  const method =
-    type === 'item.reasoning.summaryPartAdded'
-      ? 'item/reasoning/summaryTextDelta'
-      : type.replace(/\./g, '/')
-  return { method, params } as unknown as ServerNotification
-}
-
-function normalizeTurn(value: unknown, status: 'completed' | 'inProgress'): Turn {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return {
-      ...emptyTurn(stringValue((value as Record<string, unknown>).id) ?? 'turn', status),
-      ...(value as Record<string, unknown>)
-    } as Turn
-  }
-  return emptyTurn('turn', status)
-}
-
-function emptyTurn(id: string, status: 'completed' | 'inProgress'): Turn {
-  return {
-    id,
-    items: [],
-    itemsView: 'full',
-    status,
-    error: null,
-    startedAt: null,
-    completedAt: status === 'completed' ? Date.now() : null,
-    durationMs: null
-  }
-}
-
-function isTerminalCodexPayload(payload: Record<string, unknown>): boolean {
-  return payload.type === 'turn.completed' || payload.type === 'turn.failed' || payload.method === 'error'
-}
-
-function sessionErrorNotification(event: ParsedSessionEvent): ServerNotification {
+function sessionErrorMessage(event: ParsedSessionEvent): string {
   let message = `${event.event ?? 'session error'}`
   try {
     const payload = JSON.parse(event.data) as Record<string, unknown>
@@ -1038,10 +942,7 @@ function sessionErrorNotification(event: ParsedSessionEvent): ServerNotification
   } catch {
     if (event.data.trim()) message = event.data.trim()
   }
-  return {
-    method: 'error',
-    params: { error: { message } }
-  } as ServerNotification
+  return message
 }
 
 async function* toAsyncIterable<T>(source: Iterable<T>): AsyncIterable<T> {

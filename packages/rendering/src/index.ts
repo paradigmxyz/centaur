@@ -1,10 +1,12 @@
 export {
   CodexAppServerRendererEventMapper,
+  codexAppServerToChatSdkStream,
   codexAppServerToRendererEvents,
   isTerminalCodexAppServerEvent,
   rustSessionEventToServerNotification
 } from './codex-app-server'
 export { ChatSDKRenderer } from './chat-sdk'
+export type { CodexAppServerToChatStreamOptions } from './codex-app-server'
 export type { RendererInterface, RendererSession } from './interface'
 export { rendererEventTypes } from './schema'
 export type { RendererEventType, RendererSessionOpenInput } from './schema'

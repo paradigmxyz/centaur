@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { CodexAppServerRendererEventMapper } from './codex-app-server'
+import { CodexAppServerRendererEventMapper, codexAppServerToChatSdkStream } from './codex-app-server'
 import type { RendererTaskBlock } from './types'
 
 describe('CodexAppServerRendererEventMapper', () => {
@@ -153,6 +153,77 @@ describe('CodexAppServerRendererEventMapper', () => {
     ).toEqual([{ type: 'renderer.title.update', title: 'Investigate staging deploy' }])
   })
 
+  it('accepts App Server slash-method notifications from Slackbotv2 streams', async () => {
+    const titles: string[] = []
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'thread/name/updated',
+            params: { threadId: 'thread-1', threadName: 'Investigate staging deploy' }
+          },
+          {
+            method: 'turn/plan/updated',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              explanation: 'Implementation plan',
+              plan: [{ step: 'Inspect App Server events', status: 'completed' }]
+            }
+          },
+          {
+            method: 'item/reasoning/summaryTextDelta',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'reasoning-1',
+              summaryIndex: 0,
+              delta: 'Inspecting the event stream'
+            }
+          },
+          {
+            method: 'item/agentMessage/delta',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'answer-1',
+              delta: 'Done.'
+            }
+          },
+          {
+            method: 'turn/completed',
+            params: {
+              threadId: 'thread-1',
+              turn: { id: 'turn-1', items: [], status: 'completed' }
+            }
+          }
+        ]),
+        {
+          onRendererEvent(event) {
+            if (event.type === 'renderer.title.update') titles.push(event.title)
+          }
+        }
+      )
+    )
+
+    expect(titles).toEqual(['Investigate staging deploy'])
+    expect(chunks).toContainEqual({ type: 'plan_update', title: 'Implementation plan' })
+    expect(chunks).toContainEqual({
+      type: 'task_update',
+      id: 'plan-1',
+      title: 'Inspect App Server events',
+      status: 'complete'
+    })
+    expect(chunks).toContainEqual({
+      type: 'task_update',
+      id: 'reasoning-1',
+      title: 'Thinking',
+      status: 'complete',
+      details: 'Inspecting the event stream'
+    })
+    expect(chunks).toContainEqual({ type: 'markdown_text', text: 'Done.' })
+  })
+
   it('marks open tasks as errors on Rust session failures and emits done', () => {
     const mapper = new CodexAppServerRendererEventMapper()
     mapper.process({
@@ -171,7 +242,13 @@ describe('CodexAppServerRendererEventMapper', () => {
         id: 'cmd-1',
         title: '1. Command execution',
         status: 'error',
-        details: undefined,
+        details: [
+          {
+            type: 'code',
+            language: 'sh',
+            text: 'kubectl get pods'
+          }
+        ],
         output: undefined
       },
       flush: true
@@ -187,4 +264,14 @@ function plain(elements: RendererTaskBlock[] | undefined): string {
   return (elements ?? [])
     .map(element => element.text)
     .join('')
+}
+
+async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
+  const out: T[] = []
+  for await (const item of source) out.push(item)
+  return out
+}
+
+async function* toAsyncIterable<T>(source: Iterable<T>): AsyncIterable<T> {
+  for (const item of source) yield item
 }

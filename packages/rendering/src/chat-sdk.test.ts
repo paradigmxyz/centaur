@@ -41,6 +41,23 @@ describe('ChatSDKRenderer', () => {
     expect(rendererEventTypes).toContain('renderer.message.delta')
     expect(rendererEventTypes).toContain('renderer.message.snapshot')
     expect(rendererEventTypes).toContain('renderer.task.update')
+    expect(rendererEventTypes).toContain('renderer.plan.update')
     expect(rendererEventTypes).toContain('renderer.done')
+  })
+
+  it('maps generic plan updates to Chat SDK plan chunks', () => {
+    const renderer = new ChatSDKRenderer()
+
+    expect(
+      renderer.render('session-1', {
+        type: 'renderer.plan.update',
+        title: 'Implementation plan'
+      })
+    ).toEqual([
+      {
+        type: 'chat.stream.append',
+        chunks: [{ type: 'plan_update', title: 'Implementation plan' }]
+      }
+    ])
   })
 })

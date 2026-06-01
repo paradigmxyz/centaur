@@ -1,4 +1,4 @@
-import type { RendererEvent, RendererTaskBlock, RendererTaskUpdate } from './types'
+import type { RendererEvent, RendererTaskBlock, RendererTaskStatus, RendererTaskUpdate } from './types'
 import type { RendererInterface } from './interface'
 
 export type ChatSDKStreamChunk =
@@ -7,7 +7,7 @@ export type ChatSDKStreamChunk =
       type: 'task_update'
       id: string
       title: string
-      status: string
+      status: RendererTaskStatus
       details?: string
       output?: string
     }
@@ -74,6 +74,9 @@ export class ChatSDKRenderer implements RendererInterface<ChatSDKOutput> {
     }
     if (event.type === 'renderer.task.update') {
       return [{ type: 'chat.stream.append', chunks: [taskChunk(event.task)] }]
+    }
+    if (event.type === 'renderer.plan.update') {
+      return [{ type: 'chat.stream.append', chunks: [{ type: 'plan_update', title: event.title }] }]
     }
     if (event.type === 'renderer.title.update') {
       return [{ type: 'chat.message.upsert', message: { title: event.title } }]

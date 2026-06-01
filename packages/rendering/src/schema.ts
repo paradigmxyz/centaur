@@ -14,6 +14,7 @@ export const rendererEventTypes = [
   'renderer.message.delta',
   'renderer.message.snapshot',
   'renderer.task.update',
+  'renderer.plan.update',
   'renderer.title.update',
   'renderer.done'
 ] as const

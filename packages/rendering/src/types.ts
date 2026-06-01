@@ -47,6 +47,10 @@ export type RendererEvent =
       flush?: boolean
     }
   | {
+      type: 'renderer.plan.update'
+      title: string
+    }
+  | {
       type: 'renderer.title.update'
       title: string
     }

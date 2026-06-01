@@ -1,4 +1,5 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
+import { ChatSDKRenderer, type ChatSDKOutput, type ChatSDKStreamChunk } from './chat-sdk'
 import { elementsToPlainText, preformatted as pre, section, text } from './rich-text'
 import type {
   RendererEvent,
@@ -25,7 +26,7 @@ const limits = {
 
 type AgentMessagePhase = 'commentary' | 'final_answer'
 
-type ServerNotification = { type?: string } & Record<string, any>
+type ServerNotification = { method?: string; params?: any; type?: string } & Record<string, any>
 
 type HarnessTask = {
   id: string
@@ -40,6 +41,7 @@ type CodexMapperState = {
   threadId: string
   stepCounter: number
   nextCommandIndex: number
+  lastPlanTitle: string
   answerByItemId: Map<string, string>
   harnessAnswerText: string
   answerText: string
@@ -57,12 +59,19 @@ type CodexMapperState = {
   commandOutputById: Map<string, string>
   emittedActivityRunByTaskId: Set<string>
   emittedActivityOutputByTaskId: Set<string>
+  emittedActivitySignatureByTaskId: Map<string, string>
   done: boolean
 }
 
 export type CodexAppServerRendererEventMapperOptions = {
   sessionId?: string
   logInfo?: RendererLogInfo
+  unknownAgentMessagePhase?: AgentMessagePhase
+}
+
+export type CodexAppServerToChatStreamOptions = CodexAppServerRendererEventMapperOptions & {
+  onOutput?(output: ChatSDKOutput, event: RendererEvent): Promise<void> | void
+  onRendererEvent?(event: RendererEvent): Promise<void> | void
 }
 
 export class CodexAppServerRendererEventMapper
@@ -71,10 +80,12 @@ export class CodexAppServerRendererEventMapper
   private readonly state: CodexMapperState = newState()
   private readonly sessionId: string
   private readonly logInfo?: RendererLogInfo
+  private readonly unknownAgentMessagePhase: AgentMessagePhase
 
   constructor(options: CodexAppServerRendererEventMapperOptions = {}) {
     this.sessionId = options.sessionId ?? ''
     this.logInfo = options.logInfo
+    this.unknownAgentMessagePhase = options.unknownAgentMessagePhase ?? 'final_answer'
   }
 
   process(source: ServerNotification | RustSessionStreamEvent | unknown): RendererEvent[] {
@@ -86,7 +97,8 @@ export class CodexAppServerRendererEventMapper
     if (rustMapped?.kind === 'notification') return this.processNotification(rustMapped.notification)
 
     if (!isRecord(source)) return []
-    return this.processNotification(source as ServerNotification)
+    const notification = normalizeServerNotification(source)
+    return notification ? this.processNotification(notification) : []
   }
 
   flush(): RendererEvent[] {
@@ -118,19 +130,34 @@ export class CodexAppServerRendererEventMapper
     return this.state.answerText
   }
 
-  private processNotification(event: ServerNotification): RendererEvent[] {
+  private processNotification(rawEvent: ServerNotification): RendererEvent[] {
+    const event = normalizeServerNotification(rawEvent)
+    if (!event) return []
+
     const out: RendererEvent[] = []
     if (event?.session_id) this.state.threadId = String(event.session_id)
     if (event?.thread_id) this.state.threadId = String(event.thread_id)
+    if (event?.threadId) this.state.threadId = String(event.threadId)
+
+    const error = errorMessage(event)
+    if (error) return this.fail(error)
 
     const title = threadTitleUpdate(event)
     if (title) out.push({ type: 'renderer.title.update', title })
 
     trackAgentMessageLifecycle(event, this.state)
     ensureCommentarySegmentBreak(event, this.state)
+    if (startThinkingTask(this.state, event)) {
+      this.emitActivitySummary(out)
+    }
 
     const structuredPlan = structuredPlanUpdate(event)
     if (structuredPlan) {
+      const planTitle = structuredPlanTitle(event)
+      if (planTitle && planTitle !== this.state.lastPlanTitle) {
+        this.state.lastPlanTitle = planTitle
+        out.push({ type: 'renderer.plan.update', title: planTitle })
+      }
       for (const [index, item] of structuredPlan.entries()) {
         setPlanTask(this.state, index, String(item.step ?? ''), planStatus(item.status))
       }
@@ -252,7 +279,7 @@ export class CodexAppServerRendererEventMapper
       const task: HarnessTask = {
         id: `reasoning-${++this.state.stepCounter}`,
         title: 'Thinking',
-        status: 'complete',
+        status: isReasoningDeltaEvent(event) ? 'in_progress' : 'complete',
         details: [section([text(reasoningMessage)])],
         output: []
       }
@@ -387,7 +414,10 @@ export class CodexAppServerRendererEventMapper
         })
         return 'answer'
       }
-      return this.state.agentMessagePhase === 'final_answer' ? 'answer' : 'commentary'
+      if (codexId) return this.unknownAgentMessagePhase === 'final_answer' ? 'answer' : 'commentary'
+      return (this.state.agentMessagePhase ?? this.unknownAgentMessagePhase) === 'final_answer'
+        ? 'answer'
+        : 'commentary'
     }
     return 'answer'
   }
@@ -512,6 +542,40 @@ export function codexAppServerToRendererEvents(
   return sources.flatMap(source => mapper.process(source))
 }
 
+export async function* codexAppServerToChatSdkStream(
+  sources: AsyncIterable<ServerNotification | RustSessionStreamEvent | unknown>,
+  options: CodexAppServerToChatStreamOptions = {}
+): AsyncIterable<ChatSDKStreamChunk> {
+  const mapper = new CodexAppServerRendererEventMapper(options)
+  const renderer = new ChatSDKRenderer()
+
+  for await (const source of sources) {
+    for (const event of mapper.process(source)) {
+      yield* renderChatSdkChunks(renderer, mapper.threadId(), event, options)
+    }
+    if (mapper.isDone()) return
+  }
+
+  for (const event of mapper.flush()) {
+    yield* renderChatSdkChunks(renderer, mapper.threadId(), event, options)
+  }
+}
+
+async function* renderChatSdkChunks(
+  renderer: ChatSDKRenderer,
+  sessionId: string,
+  event: RendererEvent,
+  options: CodexAppServerToChatStreamOptions
+): AsyncIterable<ChatSDKStreamChunk> {
+  await options.onRendererEvent?.(event)
+  const outputs = renderer.render(sessionId, event)
+  for (const output of outputs) {
+    await options.onOutput?.(output, event)
+    if (output.type !== 'chat.stream.append') continue
+    for (const chunk of output.chunks) yield chunk
+  }
+}
+
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
@@ -525,8 +589,9 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
 
   if (eventKind === 'session.output.line') {
     const data = source.data
-    if (isRecord(data) && typeof data.type === 'string') {
-      return { kind: 'notification', notification: data as ServerNotification }
+    if (isRecord(data)) {
+      const notification = normalizeServerNotification(data)
+      if (notification) return { kind: 'notification', notification }
     }
     const line = typeof data === 'string' ? data : isRecord(data) ? String(data.raw ?? '') : ''
     const notification = parseServerNotificationLine(line)
@@ -573,6 +638,7 @@ function newState(): CodexMapperState {
     threadId: '',
     stepCounter: 0,
     nextCommandIndex: 0,
+    lastPlanTitle: '',
     answerByItemId: new Map(),
     harnessAnswerText: '',
     answerText: '',
@@ -590,6 +656,7 @@ function newState(): CodexMapperState {
     commandOutputById: new Map(),
     emittedActivityRunByTaskId: new Set(),
     emittedActivityOutputByTaskId: new Set(),
+    emittedActivitySignatureByTaskId: new Map(),
     done: false
   }
 }
@@ -598,13 +665,33 @@ function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+function normalizeServerNotification(source: unknown): ServerNotification | null {
+  if (!isRecord(source)) return null
+  if (typeof source.type === 'string') return source as ServerNotification
+  if (typeof source.method !== 'string') return null
+
+  const params = isRecord(source.params) ? source.params : {}
+  return {
+    ...params,
+    type: source.method.replace(/\//g, '.')
+  }
+}
+
 function parseServerNotificationLine(line: string): ServerNotification | null {
   if (!line.trim()) return null
   try {
     const parsed = JSON.parse(line) as unknown
-    if (isRecord(parsed) && typeof parsed.type === 'string') return parsed as ServerNotification
+    return normalizeServerNotification(parsed)
   } catch {}
   return null
+}
+
+function errorMessage(event: any): string {
+  if (String(event?.type ?? '') !== 'error') return ''
+  const error = event?.error
+  if (typeof error === 'string') return error
+  if (isRecord(error) && typeof error.message === 'string') return error.message
+  return String(event?.message ?? 'Execution failed')
 }
 
 function content(event: any): any[] {
@@ -658,6 +745,21 @@ function lastInsertedKey<K>(map: Map<K, unknown>): K | undefined {
 
 function commentaryItemId(event: any): string {
   return String(event?.itemId ?? event?.item_id ?? event?.item?.id ?? '')
+}
+
+function startThinkingTask(state: CodexMapperState, event: any): boolean {
+  if (event?.type !== 'item.started') return false
+  if (agentMessageItemPhase(event?.item) !== 'commentary') return false
+  const id = commentaryItemId(event)
+  if (!id || state.taskByUseId.has(`thinking-${id}`)) return false
+  state.taskByUseId.set(`thinking-${id}`, {
+    id: `thinking-${id}`,
+    title: 'Thinking',
+    status: 'in_progress',
+    details: [],
+    output: []
+  })
+  return true
 }
 
 function upsertThinkingTask(state: CodexMapperState, event: any): void {
@@ -741,8 +843,21 @@ function textHash(value: string): string {
 }
 
 function reasoningText(event: any): string {
+  if (
+    event?.type === 'item.reasoning.summaryTextDelta' ||
+    event?.type === 'item.reasoning.textDelta'
+  ) {
+    return String(event.delta ?? '')
+  }
   if (event?.type !== 'reasoning') return ''
   return String(event.text ?? event.thinking ?? '')
+}
+
+function isReasoningDeltaEvent(event: any): boolean {
+  return (
+    event?.type === 'item.reasoning.summaryTextDelta' ||
+    event?.type === 'item.reasoning.textDelta'
+  )
 }
 
 function terminalResultText(event: any): string {
@@ -797,6 +912,10 @@ function structuredPlanUpdate(event: any): Array<{ step: string; status?: string
   return Array.isArray(event.plan) ? event.plan : null
 }
 
+function structuredPlanTitle(event: any): string {
+  return String(event?.explanation ?? event?.title ?? '').trim()
+}
+
 function planTextUpdate(event: any): string {
   if (event?.type === 'item.plan.delta') {
     return String(event.delta ?? event.text ?? '')
@@ -816,7 +935,9 @@ function threadTitleUpdate(event: any): string {
   ) {
     return ''
   }
-  return String(event?.name ?? event?.title ?? event?.thread?.name ?? '').trim()
+  return String(
+    event?.name ?? event?.title ?? event?.threadName ?? event?.thread_name ?? event?.thread?.name ?? ''
+  ).trim()
 }
 
 function parsePlanText(value: string): Array<{ step: string; status: RendererTaskStatus }> {
@@ -894,36 +1015,25 @@ function changedActivityTaskUpdates(
   for (const task of tasks) {
     let details: RendererTaskBlock[] | undefined
     let output: RendererTaskBlock[] | undefined
-    if (opts.final) {
-      if (task.details.length && !state.emittedActivityRunByTaskId.has(task.id)) {
-        state.emittedActivityRunByTaskId.add(task.id)
-        details = activityRunBlock(task)
-      }
-      if (task.output.length && !state.emittedActivityOutputByTaskId.has(task.id)) {
-        state.emittedActivityOutputByTaskId.add(task.id)
-        output = activityOutputBlock(task)
-      }
-    } else if (task.details.length && !state.emittedActivityRunByTaskId.has(task.id)) {
+    if (task.details.length) {
       state.emittedActivityRunByTaskId.add(task.id)
       details = activityRunBlock(task)
     }
-    if (
-      !opts.final &&
-      task.status === 'complete' &&
-      task.output.length &&
-      !state.emittedActivityOutputByTaskId.has(task.id)
-    ) {
+    if (task.output.length) {
       state.emittedActivityOutputByTaskId.add(task.id)
       output = activityOutputBlock(task)
     }
-    if (!details && !output && !opts.final) continue
-    updates.push({
+    const update = {
       id: task.id,
       title: task.title,
       status: task.status,
       details,
       output
-    })
+    }
+    const signature = JSON.stringify(update)
+    if (state.emittedActivitySignatureByTaskId.get(task.id) === signature) continue
+    state.emittedActivitySignatureByTaskId.set(task.id, signature)
+    updates.push(update)
   }
   return updates
 }

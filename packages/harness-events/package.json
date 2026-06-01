@@ -5,15 +5,12 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^25.7.0",
     "typescript": "5.9.3",
     "vitest": "^4.1.0"
-  },
-  "dependencies": {
-    "chat": "^4.29.0"
   }
 }
