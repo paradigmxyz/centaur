@@ -1037,6 +1037,7 @@ def _build_session_context(
                     "",
                     "- If you create a GitHub PR for this Slack request, "
                     f"the PR body MUST contain this standalone line: `Prompted by: {github_handle}`",
+                    "- The credited prompter is the requester in this section, not the Slack thread OP/root author.",
                     "- This is a GitHub PR body requirement, not a Slack response mention rule.",
                     "- Assign the PR to the requester when possible: "
                     f"`{github_login}`",

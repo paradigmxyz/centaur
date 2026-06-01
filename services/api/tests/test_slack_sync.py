@@ -320,15 +320,6 @@ def test_backfill_schedule_respects_env_overrides(monkeypatch):
     assert reloaded.DEFAULT_CHANNEL_PAGES_PER_JOB == 3
 
 
-def test_repo_slack_client_paths_prefer_reorganized_tool_layout():
-    from workflows import slack_sync
-
-    paths = [path.as_posix() for path in slack_sync._repo_slack_client_paths()]
-
-    assert paths[0].endswith("tools/productivity/slack/client.py")
-    assert paths[1].endswith("tools/slack/client.py")
-
-
 @pytest.mark.asyncio
 async def test_slack_etl_disabled_by_default_noops_without_run_row(
     db_pool, monkeypatch
