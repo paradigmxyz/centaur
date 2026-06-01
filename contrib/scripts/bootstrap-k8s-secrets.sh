@@ -22,6 +22,15 @@ Optional local-dev admin key:
   LOCAL_DEV_API_KEY            seeded as the admin bearer for the API service
                                (envFrom centaur-infra-env). Re-run with --force
                                or kubectl patch to rotate.
+
+Optional iron-control bootstrap (consumed when ironControl.enabled=true):
+  IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
+                               bundled Postgres server with no database path, so
+                               Rails resolves db names from its database.yml)
+  IRON_CONTROL_INITIAL_USER_EMAIL
+                               initial admin email (default admin@centaur.local)
+  The initial password, API key, the three ActiveRecord encryption keys, and
+  SECRET_KEY_BASE are auto-generated when absent (never rotated in place).
 EOF
 }
 
@@ -114,6 +123,44 @@ if secret_exists centaur-infra-env; then
   if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
     patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
   fi
+  # iron-control keys: top up only when absent so we never rotate them out from
+  # under a running pod (its ActiveRecord-encrypted data would become
+  # undecryptable). Generated values mirror the create path.
+  if ! secret_key_present IRON_CONTROL_DATABASE_URL; then
+    if [[ -n "${IRON_CONTROL_DATABASE_URL:-}" ]]; then
+      ic_db_url="$IRON_CONTROL_DATABASE_URL"
+    else
+      # Reuse the same Postgres host/credentials as the API's DATABASE_URL but
+      # strip the database path, so Rails resolves the database name from the
+      # image's database.yml. Avoids decoding the password ourselves.
+      existing_db_url="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env \
+        -o 'jsonpath={.data.DATABASE_URL}' | openssl base64 -d -A)"
+      ic_db_url="${existing_db_url%/ai_v2}"
+    fi
+    patch_data+=("\"IRON_CONTROL_DATABASE_URL\":\"$(printf '%s' "$ic_db_url" | base64 | tr -d '\n')\"")
+  fi
+  if ! secret_key_present IRON_CONTROL_INITIAL_USER_EMAIL; then
+    ic_email="${IRON_CONTROL_INITIAL_USER_EMAIL:-admin@centaur.local}"
+    patch_data+=("\"IRON_CONTROL_INITIAL_USER_EMAIL\":\"$(printf '%s' "$ic_email" | base64 | tr -d '\n')\"")
+  fi
+  if ! secret_key_present IRON_CONTROL_INITIAL_USER_PASSWORD; then
+    patch_data+=("\"IRON_CONTROL_INITIAL_USER_PASSWORD\":\"$(rand_hex | base64 | tr -d '\n')\"")
+  fi
+  if ! secret_key_present IRON_CONTROL_INITIAL_API_KEY; then
+    patch_data+=("\"IRON_CONTROL_INITIAL_API_KEY\":\"$(printf 'iak_%s' "$(rand_hex)" | base64 | tr -d '\n')\"")
+  fi
+  if ! secret_key_present IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY; then
+    patch_data+=("\"IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
+  fi
+  if ! secret_key_present IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY; then
+    patch_data+=("\"IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
+  fi
+  if ! secret_key_present IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT; then
+    patch_data+=("\"IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT\":\"$(rand_hex | base64 | tr -d '\n')\"")
+  fi
+  if ! secret_key_present IRON_CONTROL_SECRET_KEY_BASE; then
+    patch_data+=("\"IRON_CONTROL_SECRET_KEY_BASE\":\"$(printf '%s%s' "$(rand_hex)" "$(rand_hex)" | base64 | tr -d '\n')\"")
+  fi
   if [[ "${#patch_data[@]}" -gt 0 ]]; then
     patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
     kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p "$patch_json" >/dev/null
@@ -123,6 +170,12 @@ if secret_exists centaur-infra-env; then
 else
   POSTGRES_PASSWORD="$(rand_hex)"
   DATABASE_URL="postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432/ai_v2"
+  # iron-control runs against a dedicated logical DB on the same Postgres. The
+  # URL carries connection info only (no database path) so Rails resolves each
+  # connection's database name from the image's database.yml. Override via the
+  # IRON_CONTROL_DATABASE_URL env var to point at an external server.
+  IRON_CONTROL_DATABASE_URL="${IRON_CONTROL_DATABASE_URL:-postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432}"
+  IRON_CONTROL_INITIAL_USER_EMAIL="${IRON_CONTROL_INITIAL_USER_EMAIL:-admin@centaur.local}"
   secret_args=(
     -n "$NAMESPACE" create secret generic centaur-infra-env
     --from-literal=IRON_MANAGEMENT_API_KEY="$(rand_hex)"
@@ -135,6 +188,14 @@ else
     --from-literal=SLACKBOT_API_KEY="$SLACKBOT_API_KEY"
     --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
     --from-literal=DATABASE_URL="$DATABASE_URL"
+    --from-literal=IRON_CONTROL_DATABASE_URL="$IRON_CONTROL_DATABASE_URL"
+    --from-literal=IRON_CONTROL_INITIAL_USER_EMAIL="$IRON_CONTROL_INITIAL_USER_EMAIL"
+    --from-literal=IRON_CONTROL_INITIAL_USER_PASSWORD="$(rand_hex)"
+    --from-literal=IRON_CONTROL_INITIAL_API_KEY="iak_$(rand_hex)"
+    --from-literal=IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY="$(rand_hex)"
+    --from-literal=IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY="$(rand_hex)"
+    --from-literal=IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT="$(rand_hex)"
+    --from-literal=IRON_CONTROL_SECRET_KEY_BASE="$(rand_hex)$(rand_hex)"
   )
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")

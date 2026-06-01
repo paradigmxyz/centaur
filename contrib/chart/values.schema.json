@@ -48,6 +48,35 @@
         "port": { "type": "integer" }
       }
     },
+    "ironControl": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer" },
+        "railsEnv": { "type": "string" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "database": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "httpPort": { "type": "integer" }
+          }
+        },
+        "resources": { "type": "object" }
+      }
+    },
     "secrets": {
       "type": "object",
       "properties": {

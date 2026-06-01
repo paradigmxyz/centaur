@@ -63,6 +63,32 @@ tokenBroker:
   ttl: 1m
   resources: {}
 
+# iron-control — Rails control plane for authenticated API access + encrypted
+# secret storage. Off by default; enable per-environment. Uses a dedicated
+# `iron_control_production` database on the bundled Postgres (its own logical DB so its
+# Rails schema_migrations table never collides with the API's dbmate table); an
+# init container creates the DB idempotently. DATABASE_URL, bootstrap
+# user/API-key, and the three ActiveRecord encryption keys are injected from the
+# shared infra Secret. Point IRON_CONTROL_DATABASE_URL elsewhere to use an
+# external DB.
+ironControl:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: ironsh/iron-control
+    tag: latest
+    pullPolicy: IfNotPresent
+  railsEnv: production
+  database:
+    # Logical DB created on the bundled Postgres by the create-db init
+    # container. Must match the primary connection's `database:` in the image's
+    # database.yml — the connection URL carries no database path, so Rails
+    # resolves the name from there.
+    name: iron_control_production
+  service:
+    httpPort: 3000
+  resources: {}
+
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
 # Deployment is gated on onepasswordConnect.connect.create AND on

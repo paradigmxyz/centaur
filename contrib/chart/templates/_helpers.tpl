@@ -140,3 +140,19 @@ registered refresh_token OAuthTokenSecrets by the API server at startup.
 {{- define "centaur.tokenBrokerUrl" -}}
 {{- printf "http://%s:%v" (include "centaur.tokenBrokerHost" .) .Values.tokenBroker.service.httpPort -}}
 {{- end -}}
+
+{{- /*
+iron-control — Rails control plane for authenticated API access and encrypted
+secret storage. Flag-gated (ironControl.enabled), in-cluster ClusterIP Service.
+*/ -}}
+{{- define "centaur.ironControlName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "iron-control") -}}
+{{- end -}}
+
+{{- define "centaur.ironControlHost" -}}
+{{- include "centaur.ironControlName" . -}}
+{{- end -}}
+
+{{- define "centaur.ironControlUrl" -}}
+{{- printf "http://%s:%v" (include "centaur.ironControlHost" .) .Values.ironControl.service.httpPort -}}
+{{- end -}}

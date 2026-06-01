@@ -56,6 +56,11 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
 {{- end }}
+{{- if .Values.ironControl.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
+{{- end }}
         - podSelector:
             matchLabels:
               centaur.ai/component: workflow-run
