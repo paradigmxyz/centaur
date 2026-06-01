@@ -1,11 +1,13 @@
 import { Hono } from 'hono'
 import {
   Chat,
+  StreamingMarkdownRenderer,
   StreamingPlan,
   type Attachment,
   type Logger,
   type Message,
   type StateAdapter,
+  type StreamChunk,
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
@@ -221,6 +223,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     userName,
     logger
   })
+  patchSlackAdapterStreaming(slack, options.botToken, logger)
   const chat = new Chat({
     userName,
     adapters: { slack },
@@ -612,6 +615,113 @@ function rendererOptions(thread: Thread, options: SlackbotV2Options): CodexAppSe
         await setAssistantTitle(thread, event.title)
       }
     }
+  }
+}
+
+type SlackStreamingAdapter = {
+  decodeThreadId(threadId: string): { channel: string; threadTs?: string }
+  getClientForToken?(token: string): SlackStreamingClient
+  stream?: (
+    threadId: string,
+    textStream: AsyncIterable<string | StreamChunk>,
+    options?: SlackStreamOptions
+  ) => Promise<{ id: string; raw: unknown; threadId: string }>
+}
+
+type SlackStreamingClient = {
+  chatStream(input: Record<string, unknown>): SlackStreamer
+}
+
+type SlackStreamer = {
+  append(input: Record<string, unknown>): Promise<unknown>
+  stop(input?: Record<string, unknown>): Promise<{ message?: { ts?: string }; ts?: string }>
+}
+
+type SlackStreamOptions = {
+  recipientTeamId?: string
+  recipientUserId?: string
+  stopBlocks?: unknown[]
+  taskDisplayMode?: 'plan' | 'timeline' | 'dense'
+}
+
+function patchSlackAdapterStreaming(adapter: unknown, botToken: string, logger: Logger): void {
+  const slack = adapter as SlackStreamingAdapter
+  if (!slack.getClientForToken || !slack.stream) return
+
+  const originalStream = slack.stream.bind(slack)
+  slack.stream = async (threadId, textStream, options) => {
+    if (!(options?.recipientUserId && options?.recipientTeamId)) {
+      return originalStream(threadId, textStream, options)
+    }
+
+    const { channel, threadTs: rawThreadTs } = slack.decodeThreadId(threadId)
+    const threadTs = rawThreadTs || undefined
+    if (!threadTs) {
+      return originalStream(threadId, textStream, options)
+    }
+
+    logger.debug('Slack: starting token-bound stream', { channel, threadTs })
+    const client = slack.getClientForToken!(botToken)
+    const streamer = client.chatStream({
+      channel,
+      thread_ts: threadTs,
+      recipient_user_id: options.recipientUserId,
+      recipient_team_id: options.recipientTeamId,
+      ...(options.taskDisplayMode ? { task_display_mode: options.taskDisplayMode } : {})
+    })
+
+    let lastAppended = ''
+    let structuredChunksSupported = true
+    const renderer = new StreamingMarkdownRenderer({ wrapTablesForAppend: false })
+
+    const flushMarkdownDelta = async (delta: string): Promise<void> => {
+      if (!delta) return
+      await streamer.append({ markdown_text: delta })
+    }
+
+    const pushTextAndFlush = async (text: string): Promise<void> => {
+      renderer.push(text)
+      const committable = renderer.getCommittableText()
+      const delta = committable.slice(lastAppended.length)
+      await flushMarkdownDelta(delta)
+      lastAppended = committable
+    }
+
+    const sendStructuredChunk = async (chunk: StreamChunk): Promise<void> => {
+      if (!structuredChunksSupported) return
+      const committable = renderer.getCommittableText()
+      const delta = committable.slice(lastAppended.length)
+      await flushMarkdownDelta(delta)
+      lastAppended = committable
+      try {
+        await streamer.append({ chunks: [chunk] })
+      } catch (error) {
+        structuredChunksSupported = false
+        logger.warn('Slack structured streaming chunk failed; falling back to text-only stream', {
+          chunkType: chunk.type,
+          error
+        })
+      }
+    }
+
+    for await (const chunk of textStream) {
+      if (typeof chunk === 'string') {
+        await pushTextAndFlush(chunk)
+      } else if (chunk.type === 'markdown_text') {
+        await pushTextAndFlush(chunk.text)
+      } else {
+        await sendStructuredChunk(chunk)
+      }
+    }
+
+    renderer.finish()
+    const finalCommittable = renderer.getCommittableText()
+    await flushMarkdownDelta(finalCommittable.slice(lastAppended.length))
+    const result = await streamer.stop(options.stopBlocks ? { blocks: options.stopBlocks } : undefined)
+    const messageTs = result.message?.ts ?? result.ts
+    if (!messageTs) throw new Error('Slack stream completed without a message timestamp')
+    logger.debug('Slack: token-bound stream complete', { messageId: messageTs })
+    return { id: messageTs, threadId, raw: result }
   }
 }
 

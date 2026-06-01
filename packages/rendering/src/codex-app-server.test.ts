@@ -116,6 +116,26 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('maps app-server agent message deltas keyed by turnId', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const events = mapper.process({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({
+        type: 'item.agentMessage.delta',
+        turnId: 'turn-1',
+        delta: 'PONG 1'
+      })
+    })
+
+    expect(mapper.flush()).toContainEqual({
+      type: 'renderer.message.delta',
+      delta: 'PONG 1',
+      force: true,
+      planPrefix: false
+    })
+    expect(events).toEqual([])
+  })
+
   it('accepts already-parsed Rust session output payloads from API clients', () => {
     const mapper = new CodexAppServerRendererEventMapper()
     mapper.process({
