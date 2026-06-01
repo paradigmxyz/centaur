@@ -1,5 +1,13 @@
 import { Hono } from 'hono'
-import { Chat, type Attachment, type Logger, type Message, type StateAdapter, type Thread } from 'chat'
+import {
+  Chat,
+  StreamingPlan,
+  type Attachment,
+  type Logger,
+  type Message,
+  type StateAdapter,
+  type Thread
+} from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import {
@@ -83,6 +91,7 @@ export type SlackbotV2Options = {
   slackApiUrl?: string
   state?: StateAdapter
   stateKeyPrefix?: string
+  streamTaskDisplayMode?: 'plan' | 'timeline'
   triggerBotAllowlist?: readonly string[]
   userName?: string
   mapper?: CodexAppServerToChatStreamOptions
@@ -422,9 +431,12 @@ async function renderExecutionStream(
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
   try {
     await thread.post(
-      codexAppServerToChatSdkStream(
-        withAssistantTitleUpdates(thread, stream),
-        options.mapper
+      new StreamingPlan(
+        codexAppServerToChatSdkStream(
+          withAssistantTitleUpdates(thread, stream),
+          options.mapper
+        ),
+        { groupTasks: options.streamTaskDisplayMode ?? 'plan' }
       )
     )
   } finally {

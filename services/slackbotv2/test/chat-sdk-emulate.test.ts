@@ -219,38 +219,10 @@ describe('slackbotv2', () => {
       'now execute with the latest'
     )
 
-    const structuredChunks = slackApi.calls.flatMap(call => streamChunks(call.body.chunks))
-    expect(structuredChunks).toContainEqual(
-      expect.objectContaining({ type: 'plan_update', title: 'Implementation plan' })
-    )
-    expect(structuredChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        title: 'Thinking',
-        status: 'in_progress',
-        details: expect.stringContaining('Checking the command output')
-      })
-    )
-    expect(structuredChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        title: 'Thinking',
-        details: expect.stringContaining('Inspecting the event stream')
-      })
-    )
-    expect(structuredChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        title: 'Run: pnpm test',
-        output: expect.stringContaining('tests passed')
-      })
-    )
-    expect(structuredChunks).toContainEqual(
-      expect.objectContaining({ type: 'markdown_text', text: 'Executed request 1.' })
-    )
-    expect(structuredChunks).toContainEqual(
-      expect.objectContaining({ type: 'markdown_text', text: 'Executed request 2.' })
-    )
+    expectSlackPlanStreamShape(slackApi.calls, {
+      answers: ['Executed request 1.', 'Executed request 2.'],
+      parentTs: parent.ts
+    })
     const assistantStatuses = slackApi.calls
       .filter(call => call.method === 'assistant.threads.setStatus')
       .map(call => stringField(call.body.status))
@@ -275,6 +247,13 @@ describe('slackbotv2', () => {
     expect(text).toContain('tests passed')
     expect(text).toContain('Executed request 1.')
     expect(text).toContain('Executed request 2.')
+
+    const renderedReplies = (await threadTexts(parent.ts)).filter(reply =>
+      reply.includes('Executed request')
+    )
+    expect(renderedReplies).toHaveLength(2)
+    expectSlackRenderedReply(renderedReplies[0]!, 'Executed request 1.')
+    expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
   it('forwards subscribed messages to /messages without executing during a stream', async () => {
@@ -705,12 +684,16 @@ async function postUserMessage(text: string, threadTs?: string): Promise<{ ts: s
 }
 
 async function threadText(threadTs: string): Promise<string> {
+  return (await threadTexts(threadTs)).join('\n')
+}
+
+async function threadTexts(threadTs: string): Promise<string[]> {
   const response = await slack.conversations.replies({
     channel: CHANNEL_ID,
     ts: threadTs,
     limit: 20
   })
-  return (response.messages ?? []).map(message => message.text ?? '').join('\n')
+  return (response.messages ?? []).map(message => message.text ?? '')
 }
 
 function signedSlackEvent(input: {
@@ -1015,12 +998,22 @@ type StreamCall = {
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
+  streamTs?: string
 }
 
 type StreamRecord = {
   channel: string
   text: string
   ts: string
+}
+
+type SlackStreamTranscript = {
+  appends: StreamCall[]
+  calls: StreamCall[]
+  chunks: Record<string, unknown>[]
+  start: StreamCall
+  stop: StreamCall
+  streamTs: string
 }
 
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
@@ -1188,7 +1181,6 @@ async function startStream(
   calls: StreamCall[]
 ): Promise<Response> {
   const body = await requestBody(request)
-  calls.push({ method: 'chat.startStream', body })
   const channel = stringField(body.channel)
   const threadTs = stringField(body.thread_ts)
   const text = streamBodyText(body) || ' '
@@ -1199,6 +1191,7 @@ async function startStream(
   })
   if (!posted.ok) return Response.json(posted)
   const ts = stringField(posted.ts)
+  calls.push({ method: 'chat.startStream', body, streamTs: ts })
   streams.set(streamKey(channel, ts), { channel, ts, text })
   return Response.json({ ok: true, channel, ts })
 }
@@ -1210,9 +1203,9 @@ async function appendStream(
   calls: StreamCall[]
 ): Promise<Response> {
   const body = await requestBody(request)
-  calls.push({ method: 'chat.appendStream', body })
   const channel = stringField(body.channel)
   const ts = stringField(body.ts)
+  calls.push({ method: 'chat.appendStream', body, streamTs: ts })
   const record = streams.get(streamKey(channel, ts)) ?? { channel, ts, text: '' }
   record.text += streamBodyText(body)
   streams.set(streamKey(channel, ts), record)
@@ -1231,9 +1224,9 @@ async function stopStream(
   calls: StreamCall[]
 ): Promise<Response> {
   const body = await requestBody(request)
-  calls.push({ method: 'chat.stopStream', body })
   const channel = stringField(body.channel)
   const ts = stringField(body.ts)
+  calls.push({ method: 'chat.stopStream', body, streamTs: ts })
   const key = streamKey(channel, ts)
   const record = streams.get(key) ?? { channel, ts, text: '' }
   const text = [record.text, streamBodyText(body)].filter(part => part.trim()).join('\n')
@@ -1286,14 +1279,180 @@ function streamChunks(value: unknown): Record<string, unknown>[] {
   })
 }
 
+function expectSlackPlanStreamShape(
+  calls: StreamCall[],
+  input: {
+    answers: string[]
+    parentTs: string
+  }
+): void {
+  const transcripts = slackStreamTranscripts(calls)
+  expect(transcripts).toHaveLength(input.answers.length)
+
+  for (const [index, transcript] of transcripts.entries()) {
+    const answer = input.answers[index]!
+    const markdownChunks = transcript.chunks.filter(chunk => chunk.type === 'markdown_text')
+    const progressChunks = transcript.chunks.filter(chunk => chunk.type !== 'markdown_text')
+    const markdownText = markdownChunks.map(chunk => stringField(chunk.text)).join('')
+    const progressText = progressChunks.map(chunkText).filter(Boolean).join('\n')
+    const renderedText = transcript.chunks.map(chunkText).filter(Boolean).join('\n')
+    const markdownIndex = transcript.chunks.findIndex(chunk => chunk.type === 'markdown_text')
+
+    expect(transcript.start.body).toEqual(
+      expect.objectContaining({
+        channel: CHANNEL_ID,
+        thread_ts: input.parentTs,
+        recipient_user_id: USER_ID,
+        recipient_team_id: TEAM_ID,
+        task_display_mode: 'plan'
+      })
+    )
+    expect(transcript.start.body.ts).toBeUndefined()
+    expect(transcript.start.body.markdown_text).toBeUndefined()
+    expect(streamChunks(transcript.start.body.chunks)[0]).toEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        title: 'Thinking',
+        status: 'in_progress'
+      })
+    )
+
+    expect(transcript.appends.length).toBeGreaterThan(0)
+    for (const append of transcript.appends) {
+      expect(append.body).toEqual(
+        expect.objectContaining({
+          channel: CHANNEL_ID,
+          ts: transcript.streamTs
+        })
+      )
+      expect(append.body.thread_ts).toBeUndefined()
+      expect(append.body.recipient_user_id).toBeUndefined()
+      expect(append.body.recipient_team_id).toBeUndefined()
+      expect(append.body.task_display_mode).toBeUndefined()
+      expect(append.body.markdown_text).toBeUndefined()
+      expect(streamChunks(append.body.chunks).length).toBeGreaterThan(0)
+    }
+
+    expect(transcript.stop.body).toEqual(
+      expect.objectContaining({
+        channel: CHANNEL_ID,
+        ts: transcript.streamTs
+      })
+    )
+    expect(transcript.stop.body.thread_ts).toBeUndefined()
+    expect(transcript.stop.body.recipient_user_id).toBeUndefined()
+    expect(transcript.stop.body.recipient_team_id).toBeUndefined()
+    expect(transcript.stop.body.task_display_mode).toBeUndefined()
+    expect(transcript.stop.body.markdown_text).toBeUndefined()
+
+    expect(markdownChunks).toEqual([{ type: 'markdown_text', text: answer }])
+    expect(markdownText).toBe(answer)
+    expect(markdownText).not.toContain('Implementation plan')
+    expect(markdownText).not.toContain('Checking the command output')
+    expect(markdownText).not.toContain('Inspecting the event stream')
+    expect(markdownText).not.toContain('Run: pnpm test')
+    expect(markdownText).not.toContain('tests passed')
+    expect(progressText).not.toContain(answer)
+
+    expect(markdownIndex).toBe(transcript.chunks.length - 1)
+    expect(progressChunks.length).toBeGreaterThan(0)
+    expect(progressChunks.every(chunk =>
+      chunk.type === 'plan_update' || chunk.type === 'task_update'
+    )).toBe(true)
+
+    expect(progressChunks).toContainEqual(
+      expect.objectContaining({ type: 'plan_update', title: 'Implementation plan' })
+    )
+    expect(progressChunks).toContainEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        id: 'commentary-1',
+        title: 'Thinking',
+        status: 'in_progress',
+        details: expect.stringContaining('Checking the command output')
+      })
+    )
+    expect(progressChunks).toContainEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        id: 'reasoning-1',
+        title: 'Thinking',
+        status: 'in_progress',
+        details: expect.stringContaining('Inspecting the event stream')
+      })
+    )
+    expect(progressChunks).toContainEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        id: 'reasoning-1',
+        title: 'Thinking',
+        status: 'complete',
+        details: expect.stringContaining('Inspecting the event stream')
+      })
+    )
+    expect(progressChunks).toContainEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        id: 'cmd-1',
+        title: 'Run: pnpm test',
+        output: expect.stringContaining('tests passed')
+      })
+    )
+
+    expect(renderedText).toContain('Implementation plan')
+    expect(renderedText).toContain('Inspect App Server events')
+    expect(renderedText).toContain('Stream Chat SDK chunks')
+    expect(renderedText).toContain('Checking the command output')
+    expect(renderedText).toContain('Inspecting the event stream')
+    expect(renderedText).toContain('Run: pnpm test')
+    expect(renderedText).toContain('tests passed')
+    expect(renderedText.trim().endsWith(answer)).toBe(true)
+  }
+}
+
+function expectSlackRenderedReply(text: string, answer: string): void {
+  expect(text).toContain('Implementation plan')
+  expect(text).toContain('Inspect App Server events')
+  expect(text).toContain('Stream Chat SDK chunks')
+  expect(text).toContain('Thinking')
+  expect(text).toContain('Checking the command output')
+  expect(text).toContain('Inspecting the event stream')
+  expect(text).toContain('Run: pnpm test')
+  expect(text).toContain('tests passed')
+  expect(text.trim().endsWith(answer)).toBe(true)
+}
+
+function slackStreamTranscripts(calls: StreamCall[]): SlackStreamTranscript[] {
+  const starts = calls.filter((call): call is StreamCall & { streamTs: string } => {
+    return call.method === 'chat.startStream' && Boolean(call.streamTs)
+  })
+
+  return starts.map(start => {
+    const streamTs = start.streamTs
+    const streamCalls = calls.filter(call => {
+      if (call === start) return true
+      if (call.method !== 'chat.appendStream' && call.method !== 'chat.stopStream') return false
+      return stringField(call.body.ts) === streamTs
+    })
+    const appends = streamCalls.filter(call => call.method === 'chat.appendStream')
+    const stops = streamCalls.filter(call => call.method === 'chat.stopStream')
+    expect(stops).toHaveLength(1)
+    const stop = stops[0]!
+    const chunks = streamCalls.flatMap(call => streamChunks(call.body.chunks))
+    return { appends, calls: streamCalls, chunks, start, stop, streamTs }
+  })
+}
+
+function chunkText(chunk: Record<string, unknown>): string {
+  if (typeof chunk.text === 'string') return chunk.text
+  return [chunk.title, chunk.details, chunk.output]
+    .filter(part => typeof part === 'string' && part.trim())
+    .join('\n')
+}
+
 function chunksText(value: unknown): string {
   return streamChunks(value)
-    .map(chunk => {
-      if (typeof chunk.text === 'string') return chunk.text
-      return [chunk.title, chunk.details, chunk.output]
-        .filter(part => typeof part === 'string' && part.trim())
-        .join('\n')
-    })
+    .map(chunkText)
     .filter(Boolean)
     .join('\n')
 }
