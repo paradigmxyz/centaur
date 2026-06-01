@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import importlib.util
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Protocol
 
+from api.integrations.gsuite.drive import GOOGLE_DOC_MIME_TYPE, GoogleDriveReadonlyClient
 from api.runtime_control import canonical_json
 from api.vm_metrics import (
     record_etl_items_failed,
@@ -20,8 +19,6 @@ from api.workflow_engine import WorkflowContext
 from workflows.slack_sync_shared import env_flag_enabled, positive_int
 
 WORKFLOW_NAME = "google_drive_sync"
-
-GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
 DEFAULT_SYNC_INTERVAL_SECONDS = 4 * 60 * 60
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_WATERMARK_OVERLAP_SECONDS = 60
@@ -62,83 +59,8 @@ class GoogleDriveSyncClient(Protocol):
     def docs_get_text(self, document_id: str) -> str: ...
 
 
-class GSuiteDriveClient:
-    """Adapter around the gsuite tool module.
-
-    The gsuite module routes google-api-python-client traffic through
-    iron-proxy, so workflows inherit the same OAuth refresh-token mechanism as
-    sandbox tools when their pod has HTTPS_PROXY/CA env wired from the API.
-    """
-
-    def __init__(self, module: Any):
-        self._module = module
-
-    def list_docs(
-        self,
-        *,
-        query: str,
-        page_size: int,
-        page_token: str | None = None,
-    ) -> dict[str, Any]:
-        service = self._module.get_drive_service()
-        kwargs: dict[str, Any] = {
-            "q": query,
-            "pageSize": page_size,
-            "fields": (
-                "nextPageToken, files("
-                "id, name, mimeType, webViewLink, driveId, parents, owners, "
-                "lastModifyingUser, trashed, createdTime, modifiedTime"
-                ")"
-            ),
-            "includeItemsFromAllDrives": True,
-            "supportsAllDrives": True,
-            "orderBy": "modifiedTime",
-        }
-        if page_token:
-            kwargs["pageToken"] = page_token
-        return service.files().list(**kwargs).execute()
-
-    def docs_get_text(self, document_id: str) -> str:
-        return str(self._module.docs_get_text(document_id) or "")
-
-
-def _repo_gsuite_client_paths() -> list[Path]:
-    repo_root = Path(__file__).resolve().parents[1]
-    return [
-        repo_root / "tools" / "productivity" / "gsuite" / "client.py",
-        repo_root / "tools" / "gsuite" / "client.py",
-    ]
-
-
-def _load_gsuite_module_from_path(client_path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(
-        "_google_drive_sync_gsuite_client",
-        client_path,
-    )
-    if not spec or not spec.loader:
-        raise ImportError(f"Could not load gsuite client module from {client_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _gsuite_module() -> Any:
-    try:
-        from gsuite import client as gsuite_client
-
-        return gsuite_client
-    except ModuleNotFoundError:
-        for client_path in _repo_gsuite_client_paths():
-            if client_path.exists():
-                return _load_gsuite_module_from_path(client_path)
-        candidates = ", ".join(str(path) for path in _repo_gsuite_client_paths())
-        raise FileNotFoundError(
-            f"Could not find gsuite client module. Tried: {candidates}"
-        )
-
-
 def _client() -> GoogleDriveSyncClient:
-    return GSuiteDriveClient(_gsuite_module())
+    return GoogleDriveReadonlyClient()
 
 
 def _parse_datetime(value: str | None) -> dt.datetime | None:
