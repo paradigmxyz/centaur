@@ -1,4 +1,4 @@
-"""Workflow: project synced Slack messages into company context documents."""
+"""Workflow: project synced source rows into company context documents."""
 
 from __future__ import annotations
 
@@ -59,7 +59,10 @@ SCHEDULE = {
         DEFAULT_SYNC_INTERVAL_SECONDS,
     ),
     "enabled": (
-        _env_flag_enabled("SLACK_ETL_ENABLED")
+        (
+            _env_flag_enabled("SLACK_ETL_ENABLED")
+            or _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
+        )
         and _env_flag_enabled("COMPANY_CONTEXT_DOCUMENTS_ENABLED", default=True)
     ),
     "no_delivery": True,
@@ -68,7 +71,7 @@ SCHEDULE = {
 
 @dataclass
 class Input:
-    """Runtime options for projecting Slack sync rows into context documents."""
+    """Runtime options for projecting synced source rows into context documents."""
 
     since: str | None = None
     watermark_overlap_seconds: int = DEFAULT_WATERMARK_OVERLAP_SECONDS
@@ -137,6 +140,12 @@ def _resolve_slack_mentions(
 def _content_hash(*parts: Any) -> str:
     """Hash projected document content so future syncs can detect changes cheaply."""
     return hashlib.sha256(canonical_json(parts).encode("utf-8")).hexdigest()
+
+
+def _source_enabled() -> bool:
+    return _env_flag_enabled("SLACK_ETL_ENABLED") or _env_flag_enabled(
+        "GOOGLE_DRIVE_ETL_ENABLED"
+    )
 
 
 async def _latest_successful_watermark(pool, current_run_id: str) -> dt.datetime | None:
@@ -212,8 +221,42 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
             for row in channel_day_rows
             if isinstance(row["day"], dt.date)
         ],
-        "threads": [(str(row["channel_id"]), str(row["thread_ts"])) for row in thread_rows],
+        "threads": [
+            (str(row["channel_id"]), str(row["thread_ts"])) for row in thread_rows
+        ],
         "changed_messages": int(stats["changed_messages"] or 0) if stats else 0,
+        "max_updated_at": max_updated_at,
+    }
+
+
+async def _load_changed_drive_files(pool, since: dt.datetime | None) -> dict[str, Any]:
+    """Find Google Drive files whose synced content changed."""
+    if since is None:
+        where_sql = "WHERE last_error = '' AND trashed = FALSE"
+        args: list[Any] = []
+    else:
+        where_sql = "WHERE last_error = '' AND trashed = FALSE AND updated_at > $1"
+        args = [since]
+
+    rows = await pool.fetch(
+        "SELECT file_id, name, mime_type, web_view_link, drive_id, parent_ids, owners, "
+        "last_modifying_user, source_created_at, source_modified_at, text_content, "
+        "text_hash, raw_payload, updated_at "
+        f"FROM google_drive_sync_files {where_sql} "
+        "ORDER BY source_modified_at NULLS LAST, file_id",
+        *args,
+    )
+    stats = await pool.fetchrow(
+        f"SELECT COUNT(*) AS changed_files, MAX(updated_at) AS max_updated_at "
+        f"FROM google_drive_sync_files {where_sql}",
+        *args,
+    )
+    max_updated_at = stats["max_updated_at"] if stats else None
+    if isinstance(max_updated_at, dt.datetime):
+        max_updated_at = max_updated_at.astimezone(dt.timezone.utc)
+    return {
+        "files": list(rows),
+        "changed_files": int(stats["changed_files"] or 0) if stats else 0,
         "max_updated_at": max_updated_at,
     }
 
@@ -222,38 +265,42 @@ async def _load_channel_day_messages(pool, channel_id: str, day: dt.date) -> lis
     """Load all messages for one Slack channel/day aggregate."""
     start = dt.datetime.combine(day, dt.time.min, tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(days=1)
-    return list(await pool.fetch(
-        "SELECT m.channel_id, c.channel_name, m.message_ts, m.occurred_at, "
-        "m.thread_ts, m.parent_message_ts, m.user_id, u.user_name, u.real_name, "
-        "u.display_name, m.text, m.permalink, m.reply_count, m.updated_at "
-        "FROM slack_sync_messages m "
-        "LEFT JOIN slack_sync_channels c ON c.channel_id = m.channel_id "
-        "LEFT JOIN slack_sync_users u ON u.user_id = m.user_id "
-        "WHERE m.channel_id = $1 "
-        "  AND m.occurred_at >= $2 "
-        "  AND m.occurred_at < $3 "
-        "ORDER BY m.occurred_at, m.message_ts",
-        channel_id,
-        start,
-        end,
-    ))
+    return list(
+        await pool.fetch(
+            "SELECT m.channel_id, c.channel_name, m.message_ts, m.occurred_at, "
+            "m.thread_ts, m.parent_message_ts, m.user_id, u.user_name, u.real_name, "
+            "u.display_name, m.text, m.permalink, m.reply_count, m.updated_at "
+            "FROM slack_sync_messages m "
+            "LEFT JOIN slack_sync_channels c ON c.channel_id = m.channel_id "
+            "LEFT JOIN slack_sync_users u ON u.user_id = m.user_id "
+            "WHERE m.channel_id = $1 "
+            "  AND m.occurred_at >= $2 "
+            "  AND m.occurred_at < $3 "
+            "ORDER BY m.occurred_at, m.message_ts",
+            channel_id,
+            start,
+            end,
+        )
+    )
 
 
 async def _load_thread_messages(pool, channel_id: str, thread_ts: str) -> list[Any]:
     """Load all messages for one Slack thread aggregate."""
-    return list(await pool.fetch(
-        "SELECT m.channel_id, c.channel_name, m.message_ts, m.occurred_at, "
-        "m.thread_ts, m.parent_message_ts, m.user_id, u.user_name, u.real_name, "
-        "u.display_name, m.text, m.permalink, m.reply_count, m.updated_at "
-        "FROM slack_sync_messages m "
-        "LEFT JOIN slack_sync_channels c ON c.channel_id = m.channel_id "
-        "LEFT JOIN slack_sync_users u ON u.user_id = m.user_id "
-        "WHERE m.channel_id = $1 "
-        "  AND m.thread_ts = $2 "
-        "ORDER BY m.occurred_at, m.message_ts",
-        channel_id,
-        thread_ts,
-    ))
+    return list(
+        await pool.fetch(
+            "SELECT m.channel_id, c.channel_name, m.message_ts, m.occurred_at, "
+            "m.thread_ts, m.parent_message_ts, m.user_id, u.user_name, u.real_name, "
+            "u.display_name, m.text, m.permalink, m.reply_count, m.updated_at "
+            "FROM slack_sync_messages m "
+            "LEFT JOIN slack_sync_channels c ON c.channel_id = m.channel_id "
+            "LEFT JOIN slack_sync_users u ON u.user_id = m.user_id "
+            "WHERE m.channel_id = $1 "
+            "  AND m.thread_ts = $2 "
+            "ORDER BY m.occurred_at, m.message_ts",
+            channel_id,
+            thread_ts,
+        )
+    )
 
 
 def _channel_day_document(
@@ -268,10 +315,14 @@ def _channel_day_document(
     if not messages:
         return None
 
-    channel_name = str(messages[0]["channel_name"] or channels_by_id.get(channel_id) or channel_id)
+    channel_name = str(
+        messages[0]["channel_name"] or channels_by_id.get(channel_id) or channel_id
+    )
     title = f"#{channel_name} - {day.isoformat()}"
     lines = [f"# {title}", ""]
-    last_updated = max(row["updated_at"].astimezone(dt.timezone.utc) for row in messages)
+    last_updated = max(
+        row["updated_at"].astimezone(dt.timezone.utc) for row in messages
+    )
     occurred_at = messages[0]["occurred_at"]
 
     for row in messages:
@@ -283,12 +334,14 @@ def _channel_day_document(
         )
         reply_count = int(row["reply_count"] or 0)
         reply_suffix = f" - {reply_count} replies" if reply_count else ""
-        lines.extend([
-            f"### {speaker} - {_format_time(row['occurred_at'])}{reply_suffix}",
-            "",
-            text,
-            "",
-        ])
+        lines.extend(
+            [
+                f"### {speaker} - {_format_time(row['occurred_at'])}{reply_suffix}",
+                "",
+                text,
+                "",
+            ]
+        )
 
     body = "\n".join(lines).strip()
     source_document_id = f"{channel_id}:{day.isoformat()}"
@@ -331,7 +384,9 @@ def _thread_document(
     if len(messages) < MIN_THREAD_MESSAGES:
         return None
 
-    channel_name = str(messages[0]["channel_name"] or channels_by_id.get(channel_id) or channel_id)
+    channel_name = str(
+        messages[0]["channel_name"] or channels_by_id.get(channel_id) or channel_id
+    )
     first = messages[0]
     first_text = _resolve_slack_mentions(
         str(first["text"] or ""),
@@ -340,7 +395,9 @@ def _thread_document(
     )
     title = _sanitize_heading(first_text)
     participants = sorted({_display_name(row) for row in messages if row["user_id"]})
-    last_updated = max(row["updated_at"].astimezone(dt.timezone.utc) for row in messages)
+    last_updated = max(
+        row["updated_at"].astimezone(dt.timezone.utc) for row in messages
+    )
     permalink = str(first["permalink"] or "")
     source_document_id = f"{channel_id}:{thread_ts}"
 
@@ -363,7 +420,9 @@ def _thread_document(
             users_by_id=users_by_id,
             channels_by_id=channels_by_id,
         )
-        lines.extend([f"### {speaker} - {_format_time(row['occurred_at'])}", "", text, ""])
+        lines.extend(
+            [f"### {speaker} - {_format_time(row['occurred_at'])}", "", text, ""]
+        )
 
     body = "\n".join(lines).strip()
     metadata = {
@@ -391,6 +450,87 @@ def _thread_document(
         "occurred_at": first["occurred_at"],
         "source_updated_at": last_updated,
         "content_hash": _content_hash(title, body, permalink, metadata),
+        "metadata": metadata,
+    }
+
+
+def _jsonb_value(row: Any, key: str, default: Any) -> Any:
+    value = row.get(key) if hasattr(row, "get") else row[key]
+    return decode_jsonb(value, default)
+
+
+def _drive_author(row: Any) -> tuple[str, str]:
+    owners = _jsonb_value(row, "owners", [])
+    if isinstance(owners, list):
+        for owner in owners:
+            if not isinstance(owner, dict):
+                continue
+            email = str(owner.get("emailAddress") or "").strip()
+            name = str(owner.get("displayName") or email).strip()
+            if email or name:
+                return email, name
+    last_modifying_user = _jsonb_value(row, "last_modifying_user", {})
+    if isinstance(last_modifying_user, dict):
+        email = str(last_modifying_user.get("emailAddress") or "").strip()
+        name = str(last_modifying_user.get("displayName") or email).strip()
+        if email or name:
+            return email, name
+    return "", ""
+
+
+def _drive_document(row: Any) -> dict[str, Any] | None:
+    """Render one synced Google Doc into a context document."""
+    file_id = str(row["file_id"] or "")
+    if not file_id:
+        return None
+    title = str(row["name"] or "Untitled Google Doc")
+    text = str(row["text_content"] or "").strip()
+    url = str(row["web_view_link"] or "")
+    parent_ids = _jsonb_value(row, "parent_ids", [])
+    owners = _jsonb_value(row, "owners", [])
+    last_modifying_user = _jsonb_value(row, "last_modifying_user", {})
+    raw_payload = _jsonb_value(row, "raw_payload", {})
+    author_id, author_name = _drive_author(row)
+    source_modified_at = row["source_modified_at"]
+    source_created_at = row["source_created_at"]
+
+    lines = [
+        f"# {title}",
+        "",
+        "- Source: Google Drive",
+        f"- Modified: {_format_time(source_modified_at)}",
+    ]
+    if url:
+        lines.append(f"- URL: {url}")
+    lines.extend(["", "---", "", text])
+    body = "\n".join(lines).strip()
+    metadata = {
+        "file_id": file_id,
+        "drive_id": str(row["drive_id"] or ""),
+        "parent_ids": parent_ids if isinstance(parent_ids, list) else [],
+        "owners": owners if isinstance(owners, list) else [],
+        "last_modifying_user": (
+            last_modifying_user if isinstance(last_modifying_user, dict) else {}
+        ),
+        "mime_type": str(row["mime_type"] or ""),
+        "raw_payload": raw_payload if isinstance(raw_payload, dict) else {},
+    }
+    return {
+        "document_id": f"google_drive:doc:{file_id}",
+        "source": "google_drive",
+        "source_type": "google_doc",
+        "source_document_id": file_id,
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": title,
+        "body": body,
+        "url": url,
+        "author_id": author_id,
+        "author_name": author_name,
+        "access_scope": "company",
+        "occurred_at": source_created_at or source_modified_at,
+        "source_updated_at": source_modified_at,
+        "content_hash": _content_hash(title, body, url, metadata),
         "metadata": metadata,
     }
 
@@ -462,16 +602,18 @@ async def _delete_document(pool, document_id: str) -> bool:
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
-    """Project changed Slack sync rows into embeddable company context documents."""
+    """Project changed sync rows into embeddable company context documents."""
     if not (
-        _env_flag_enabled("SLACK_ETL_ENABLED")
+        _source_enabled()
         and _env_flag_enabled("COMPANY_CONTEXT_DOCUMENTS_ENABLED", default=True)
     ):
         ctx.log("company_context_documents_skipped_disabled")
         return {"status": "skipped", "reason": "company_context_documents_disabled"}
 
     explicit_since = _parse_datetime(inp.since)
-    last_watermark = explicit_since or await _latest_successful_watermark(ctx._pool, ctx.run_id)
+    last_watermark = explicit_since or await _latest_successful_watermark(
+        ctx._pool, ctx.run_id
+    )
     overlap_seconds = _nonnegative_int(
         inp.watermark_overlap_seconds,
         DEFAULT_WATERMARK_OVERLAP_SECONDS,
@@ -482,8 +624,26 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         else None
     )
 
-    users_by_id, channels_by_id = await _load_slack_lookup_maps(ctx._pool)
-    changed = await _load_changed_message_keys(ctx._pool, since)
+    slack_enabled = _env_flag_enabled("SLACK_ETL_ENABLED")
+    google_drive_enabled = _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
+    changed = {
+        "channel_days": [],
+        "threads": [],
+        "changed_messages": 0,
+        "max_updated_at": None,
+    }
+    users_by_id: dict[str, str] = {}
+    channels_by_id: dict[str, str] = {}
+    if slack_enabled:
+        users_by_id, channels_by_id = await _load_slack_lookup_maps(ctx._pool)
+        changed = await _load_changed_message_keys(ctx._pool, since)
+    drive_changed = {
+        "files": [],
+        "changed_files": 0,
+        "max_updated_at": None,
+    }
+    if google_drive_enabled:
+        drive_changed = await _load_changed_drive_files(ctx._pool, since)
 
     documents_upserted = 0
     documents_deleted = 0
@@ -532,7 +692,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             channels_by_id=channels_by_id,
         )
         if document is None:
-            if await _delete_document(ctx._pool, f"slack:thread:{channel_id}:{thread_ts}"):
+            if await _delete_document(
+                ctx._pool, f"slack:thread:{channel_id}:{thread_ts}"
+            ):
                 documents_deleted += 1
                 record_company_context_documents_changed(
                     "slack",
@@ -554,12 +716,41 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if action in {"inserted", "updated"}:
             documents_upserted += 1
 
-    watermark = changed["max_updated_at"] or last_watermark
+    for row in drive_changed["files"]:
+        document = _drive_document(row)
+        if document is None:
+            continue
+        observe_company_context_document_size(
+            "google_drive",
+            str(document["source_type"]),
+            len(str(document["body"] or "")),
+        )
+        action = await _upsert_document(ctx._pool, document)
+        record_company_context_documents_changed(
+            "google_drive",
+            str(document["source_type"]),
+            action,
+        )
+        if action in {"inserted", "updated"}:
+            documents_upserted += 1
+
+    watermark_candidates = [
+        value
+        for value in (
+            changed["max_updated_at"],
+            drive_changed["max_updated_at"],
+            last_watermark,
+        )
+        if value is not None
+    ]
+    watermark = max(watermark_candidates) if watermark_candidates else None
     result = {
         "status": "completed",
         "changed_messages": changed["changed_messages"],
+        "changed_drive_files": drive_changed["changed_files"],
         "channel_day_documents": len(changed["channel_days"]),
         "thread_candidates": len(changed["threads"]),
+        "drive_documents": len(drive_changed["files"]),
         "documents_upserted": documents_upserted,
         "documents_deleted": documents_deleted,
         "watermark": watermark.isoformat() if watermark else None,

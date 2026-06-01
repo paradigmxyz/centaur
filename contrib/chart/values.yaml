@@ -97,6 +97,8 @@ api:
   slackBackfillChannelBatchLimit: 20
   slackSyncBackfillLookbackDays: 30
   slackSyncThreadLookbackDays: 3
+  googleDriveEtlEnabled: false
+  googleDriveSyncIntervalSeconds: 14400
   companyContextDocumentsIntervalSeconds: 14400
   slackEtlExcludedChannelPatterns: ""
   victoriaMetricsPushEnabled: false

@@ -22,8 +22,9 @@ class FakeCtx:
 @pytest_asyncio.fixture(autouse=True)
 async def _clear_company_context_tables(db_pool):
     await db_pool.execute(
-        "TRUNCATE TABLE company_context_documents, slack_sync_backfill_jobs, slack_sync_checkpoints, "
-        "slack_sync_messages, slack_sync_runs, slack_sync_users, slack_sync_channels, "
+        "TRUNCATE TABLE company_context_documents, google_drive_sync_checkpoints, "
+        "google_drive_sync_files, google_drive_sync_runs, slack_sync_backfill_jobs, "
+        "slack_sync_checkpoints, slack_sync_messages, slack_sync_runs, slack_sync_users, slack_sync_channels, "
         "workflow_runs CASCADE",
     )
     yield
@@ -62,6 +63,18 @@ def test_schedule_respects_env_overrides(monkeypatch):
 
     assert reloaded.SCHEDULE["enabled"] is False
     assert reloaded.SCHEDULE["interval_seconds"] == 300
+
+
+def test_schedule_enabled_when_google_drive_etl_enabled(monkeypatch):
+    monkeypatch.delenv("SLACK_ETL_ENABLED", raising=False)
+    monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "true")
+    monkeypatch.delenv("COMPANY_CONTEXT_DOCUMENTS_ENABLED", raising=False)
+
+    from workflows import company_context_documents
+
+    reloaded = importlib.reload(company_context_documents)
+
+    assert reloaded.SCHEDULE["enabled"] is True
 
 
 async def _seed_slack_basics(db_pool) -> None:
@@ -128,7 +141,9 @@ async def test_projects_channel_day_and_thread_documents(db_pool):
         ("1770000003.000000", "U1", "Use #team-eng context", thread_ts, 0),
         ("1770000004.000000", "U2", "Ship pg_search separately", thread_ts, 0),
     ]
-    for offset, (message_ts, user_id, text, parent_ts, reply_count) in enumerate(messages):
+    for offset, (message_ts, user_id, text, parent_ts, reply_count) in enumerate(
+        messages
+    ):
         await _insert_message(
             db_pool,
             message_ts=message_ts,
@@ -192,7 +207,9 @@ async def test_projects_documents_without_user_rows(db_pool):
         ("1770000003.000000", "UMISSING1", "Reply three", thread_ts, 0),
         ("1770000004.000000", "UMISSING2", "Reply four", thread_ts, 0),
     ]
-    for offset, (message_ts, user_id, text, parent_ts, reply_count) in enumerate(messages):
+    for offset, (message_ts, user_id, text, parent_ts, reply_count) in enumerate(
+        messages
+    ):
         await _insert_message(
             db_pool,
             message_ts=message_ts,
@@ -270,12 +287,91 @@ async def test_uses_previous_successful_watermark_for_incremental_projection(db_
 
     assert result["changed_messages"] == 1
     assert result["documents_upserted"] == 1
-    assert await db_pool.fetchval(
-        "SELECT COUNT(*) FROM company_context_documents",
-    ) == 1
+    assert (
+        await db_pool.fetchval(
+            "SELECT COUNT(*) FROM company_context_documents",
+        )
+        == 1
+    )
     doc = await db_pool.fetchrow(
         "SELECT document_id, body FROM company_context_documents",
     )
     assert doc["document_id"] == "slack:channel_day:C_PUBLIC:2026-05-06"
     assert "New message" in doc["body"]
     assert "Old message" not in doc["body"]
+
+
+@pytest.mark.asyncio
+async def test_projects_google_drive_documents(db_pool, monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "true")
+
+    from workflows import company_context_documents
+
+    created_at = dt.datetime(2026, 5, 1, 12, 0, tzinfo=dt.timezone.utc)
+    modified_at = dt.datetime(2026, 5, 2, 12, 0, tzinfo=dt.timezone.utc)
+    updated_at = dt.datetime(2026, 5, 3, 12, 0, tzinfo=dt.timezone.utc)
+    await db_pool.execute(
+        "INSERT INTO google_drive_sync_files ("
+        "file_id, name, mime_type, web_view_link, drive_id, parent_ids, owners, "
+        "last_modifying_user, source_created_at, source_modified_at, text_content, "
+        "text_hash, raw_payload, last_error, updated_at"
+        ") VALUES ("
+        "'doc-1', 'Investment memo', 'application/vnd.google-apps.document', "
+        "'https://docs.google.com/document/d/doc-1/edit', 'shared-drive-1', "
+        "$1::jsonb, $2::jsonb, $3::jsonb, $4, $5, $6, 'hash', $7::jsonb, '', $8"
+        ")",
+        json.dumps(["folder-1"]),
+        json.dumps(
+            [
+                {
+                    "emailAddress": "owner@example.com",
+                    "displayName": "Owner Example",
+                }
+            ]
+        ),
+        json.dumps(
+            {
+                "emailAddress": "editor@example.com",
+                "displayName": "Editor Example",
+            }
+        ),
+        created_at,
+        modified_at,
+        "Doc body\nWith details",
+        json.dumps({"id": "doc-1"}),
+        updated_at,
+    )
+
+    result = await company_context_documents.handler(
+        company_context_documents.Input(watermark_overlap_seconds=0),
+        FakeCtx(db_pool),
+    )
+
+    assert result["status"] == "completed"
+    assert result["changed_messages"] == 0
+    assert result["changed_drive_files"] == 1
+    assert result["drive_documents"] == 1
+    assert result["documents_upserted"] == 1
+    assert result["watermark"] == updated_at.isoformat()
+
+    row = await db_pool.fetchrow(
+        "SELECT document_id, source, source_type, title, body, url, author_id, "
+        "author_name, occurred_at, source_updated_at, metadata "
+        "FROM company_context_documents",
+    )
+    assert row["document_id"] == "google_drive:doc:doc-1"
+    assert row["source"] == "google_drive"
+    assert row["source_type"] == "google_doc"
+    assert row["title"] == "Investment memo"
+    assert "Doc body\nWith details" in row["body"]
+    assert "Modified: 2026-05-02 12:00:00 UTC" in row["body"]
+    assert row["url"] == "https://docs.google.com/document/d/doc-1/edit"
+    assert row["author_id"] == "owner@example.com"
+    assert row["author_name"] == "Owner Example"
+    assert row["occurred_at"] == created_at
+    assert row["source_updated_at"] == modified_at
+    metadata = json.loads(row["metadata"])
+    assert metadata["file_id"] == "doc-1"
+    assert metadata["parent_ids"] == ["folder-1"]
+    assert metadata["owners"][0]["emailAddress"] == "owner@example.com"
