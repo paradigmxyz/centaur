@@ -23,9 +23,10 @@ class FakeCtx:
 async def _clear_company_context_tables(db_pool):
     await db_pool.execute(
         "TRUNCATE TABLE company_context_documents, google_drive_sync_checkpoints, "
-        "google_drive_sync_files, google_drive_sync_runs, slack_sync_backfill_jobs, "
-        "slack_sync_checkpoints, slack_sync_messages, slack_sync_runs, slack_sync_users, slack_sync_channels, "
-        "workflow_runs CASCADE",
+        "google_drive_sync_files, google_drive_sync_runs, google_calendar_sync_checkpoints, "
+        "google_calendar_sync_events, google_calendar_sync_calendars, google_calendar_sync_runs, "
+        "slack_sync_backfill_jobs, slack_sync_checkpoints, slack_sync_messages, "
+        "slack_sync_runs, slack_sync_users, slack_sync_channels, workflow_runs CASCADE",
     )
     yield
 
@@ -68,6 +69,20 @@ def test_schedule_respects_env_overrides(monkeypatch):
 def test_schedule_enabled_when_google_drive_etl_enabled(monkeypatch):
     monkeypatch.delenv("SLACK_ETL_ENABLED", raising=False)
     monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "true")
+    monkeypatch.delenv("GOOGLE_CALENDAR_ETL_ENABLED", raising=False)
+    monkeypatch.delenv("COMPANY_CONTEXT_DOCUMENTS_ENABLED", raising=False)
+
+    from workflows import company_context_documents
+
+    reloaded = importlib.reload(company_context_documents)
+
+    assert reloaded.SCHEDULE["enabled"] is True
+
+
+def test_schedule_enabled_when_google_calendar_etl_enabled(monkeypatch):
+    monkeypatch.delenv("SLACK_ETL_ENABLED", raising=False)
+    monkeypatch.delenv("GOOGLE_DRIVE_ETL_ENABLED", raising=False)
+    monkeypatch.setenv("GOOGLE_CALENDAR_ETL_ENABLED", "true")
     monkeypatch.delenv("COMPANY_CONTEXT_DOCUMENTS_ENABLED", raising=False)
 
     from workflows import company_context_documents
@@ -375,3 +390,143 @@ async def test_projects_google_drive_documents(db_pool, monkeypatch):
     assert metadata["file_id"] == "doc-1"
     assert metadata["parent_ids"] == ["folder-1"]
     assert metadata["owners"][0]["emailAddress"] == "owner@example.com"
+
+
+@pytest.mark.asyncio
+async def test_projects_google_calendar_events(db_pool, monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_CALENDAR_ETL_ENABLED", "true")
+
+    from workflows import company_context_documents
+
+    created_at = dt.datetime(2026, 5, 1, 12, 0, tzinfo=dt.timezone.utc)
+    updated_at = dt.datetime(2026, 5, 2, 12, 0, tzinfo=dt.timezone.utc)
+    synced_at = dt.datetime(2026, 5, 3, 12, 0, tzinfo=dt.timezone.utc)
+    starts_at = dt.datetime(2026, 5, 6, 16, 0, tzinfo=dt.timezone.utc)
+    ends_at = dt.datetime(2026, 5, 6, 17, 0, tzinfo=dt.timezone.utc)
+    await db_pool.execute(
+        "INSERT INTO google_calendar_sync_runs (run_id, status) "
+        "VALUES ('run-calendar', 'completed')",
+    )
+    await db_pool.execute(
+        "INSERT INTO google_calendar_sync_calendars (calendar_id, summary) "
+        "VALUES ('primary@example.com', 'Primary')",
+    )
+    await db_pool.execute(
+        "INSERT INTO google_calendar_sync_events ("
+        "calendar_id, event_id, i_cal_uid, status, summary, description, location, "
+        "html_link, creator, organizer, attendees, start_payload, end_payload, "
+        "start_at, end_at, source_created_at, source_updated_at, content_text, "
+        "content_hash, raw_payload, updated_at"
+        ") VALUES ("
+        "'primary@example.com', 'event-1', 'ical-1', 'confirmed', "
+        "'Partner diligence sync', 'Review roadmap and diligence notes', "
+        "'Zoom', 'https://calendar.google.com/event?eid=event-1', "
+        "$1::jsonb, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, "
+        "$6, $7, $8, $9, 'Partner diligence sync Review roadmap', "
+        "'hash-1', $10::jsonb, $11"
+        ")",
+        json.dumps({"email": "creator@example.com", "displayName": "Creator"}),
+        json.dumps({"email": "organizer@example.com", "displayName": "Organizer"}),
+        json.dumps(
+            [
+                {"email": "alice@example.com", "displayName": "Alice Example"},
+                {"email": "bob@example.com"},
+            ]
+        ),
+        json.dumps({"dateTime": starts_at.isoformat()}),
+        json.dumps({"dateTime": ends_at.isoformat()}),
+        starts_at,
+        ends_at,
+        created_at,
+        updated_at,
+        json.dumps({"id": "event-1"}),
+        synced_at,
+    )
+
+    result = await company_context_documents.handler(
+        company_context_documents.Input(watermark_overlap_seconds=0),
+        FakeCtx(db_pool),
+    )
+
+    assert result["status"] == "completed"
+    assert result["changed_calendar_events"] == 1
+    assert result["calendar_event_documents"] == 1
+    assert result["documents_upserted"] == 1
+    assert result["watermark"] == synced_at.isoformat()
+
+    row = await db_pool.fetchrow(
+        "SELECT document_id, source, source_type, title, body, url, author_id, "
+        "author_name, occurred_at, source_updated_at, metadata "
+        "FROM company_context_documents",
+    )
+    assert row["document_id"] == "google_calendar:event:primary@example.com:event-1"
+    assert row["source"] == "google_calendar"
+    assert row["source_type"] == "calendar_event"
+    assert row["title"] == "Partner diligence sync"
+    assert "Calendar: Primary" in row["body"]
+    assert "Attendees: Alice Example, bob@example.com" in row["body"]
+    assert "Review roadmap and diligence notes" in row["body"]
+    assert row["url"] == "https://calendar.google.com/event?eid=event-1"
+    assert row["author_id"] == "organizer@example.com"
+    assert row["author_name"] == "Organizer"
+    assert row["occurred_at"] == starts_at
+    assert row["source_updated_at"] == updated_at
+    metadata = json.loads(row["metadata"])
+    assert metadata["calendar_id"] == "primary@example.com"
+    assert metadata["event_id"] == "event-1"
+    assert metadata["attendees"][0]["displayName"] == "Alice Example"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_google_calendar_events_delete_projected_documents(
+    db_pool,
+    monkeypatch,
+):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_CALENDAR_ETL_ENABLED", "true")
+
+    from workflows import company_context_documents
+
+    updated_at = dt.datetime(2026, 5, 3, 12, 0, tzinfo=dt.timezone.utc)
+    await db_pool.execute(
+        "INSERT INTO google_calendar_sync_runs (run_id, status) "
+        "VALUES ('run-calendar', 'completed')",
+    )
+    await db_pool.execute(
+        "INSERT INTO google_calendar_sync_calendars (calendar_id, summary) "
+        "VALUES ('primary@example.com', 'Primary')",
+    )
+    await db_pool.execute(
+        "INSERT INTO google_calendar_sync_events ("
+        "calendar_id, event_id, status, source_updated_at, updated_at"
+        ") VALUES ('primary@example.com', 'event-1', 'cancelled', $1, $1)",
+        updated_at,
+    )
+    await db_pool.execute(
+        "INSERT INTO company_context_documents ("
+        "document_id, source, source_type, source_document_id, title, body, "
+        "content_hash"
+        ") VALUES ("
+        "'google_calendar:event:primary@example.com:event-1', 'google_calendar', "
+        "'calendar_event', 'primary@example.com:event-1', 'Old event', 'Old body', "
+        "'old-hash'"
+        ")",
+    )
+
+    result = await company_context_documents.handler(
+        company_context_documents.Input(watermark_overlap_seconds=0),
+        FakeCtx(db_pool),
+    )
+
+    assert result["changed_calendar_events"] == 1
+    assert result["calendar_event_documents"] == 1
+    assert result["documents_deleted"] == 1
+    assert (
+        await db_pool.fetchval(
+            "SELECT COUNT(*) FROM company_context_documents",
+        )
+        == 0
+    )

@@ -62,6 +62,7 @@ SCHEDULE = {
         (
             _env_flag_enabled("SLACK_ETL_ENABLED")
             or _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
+            or _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
         )
         and _env_flag_enabled("COMPANY_CONTEXT_DOCUMENTS_ENABLED", default=True)
     ),
@@ -143,8 +144,10 @@ def _content_hash(*parts: Any) -> str:
 
 
 def _source_enabled() -> bool:
-    return _env_flag_enabled("SLACK_ETL_ENABLED") or _env_flag_enabled(
-        "GOOGLE_DRIVE_ETL_ENABLED"
+    return (
+        _env_flag_enabled("SLACK_ETL_ENABLED")
+        or _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
+        or _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
     )
 
 
@@ -257,6 +260,48 @@ async def _load_changed_drive_files(pool, since: dt.datetime | None) -> dict[str
     return {
         "files": list(rows),
         "changed_files": int(stats["changed_files"] or 0) if stats else 0,
+        "max_updated_at": max_updated_at,
+    }
+
+
+async def _load_changed_calendar_events(
+    pool,
+    since: dt.datetime | None,
+) -> dict[str, Any]:
+    """Find Google Calendar events whose synced content changed."""
+    if since is None:
+        where_sql = "WHERE e.last_error = ''"
+        args: list[Any] = []
+    else:
+        where_sql = "WHERE e.last_error = '' AND e.updated_at > $1"
+        args = [since]
+
+    rows = await pool.fetch(
+        "SELECT e.calendar_id, c.summary AS calendar_summary, c.time_zone, "
+        "e.event_id, e.i_cal_uid, e.status, e.summary, e.description, e.location, "
+        "e.html_link, e.creator, e.organizer, e.attendees, e.start_payload, "
+        "e.end_payload, e.start_at, e.end_at, e.is_all_day, e.recurring_event_id, "
+        "e.original_start, e.transparency, e.visibility, e.event_type, e.sequence, "
+        "e.source_created_at, e.source_updated_at, e.content_text, e.content_hash, "
+        "e.raw_payload, e.updated_at "
+        "FROM google_calendar_sync_events e "
+        "LEFT JOIN google_calendar_sync_calendars c ON c.calendar_id = e.calendar_id "
+        f"{where_sql} "
+        "ORDER BY e.source_updated_at NULLS LAST, e.start_at NULLS LAST, "
+        "e.calendar_id, e.event_id",
+        *args,
+    )
+    stats = await pool.fetchrow(
+        f"SELECT COUNT(*) AS changed_events, MAX(updated_at) AS max_updated_at "
+        f"FROM google_calendar_sync_events e {where_sql}",
+        *args,
+    )
+    max_updated_at = stats["max_updated_at"] if stats else None
+    if isinstance(max_updated_at, dt.datetime):
+        max_updated_at = max_updated_at.astimezone(dt.timezone.utc)
+    return {
+        "events": list(rows),
+        "changed_events": int(stats["changed_events"] or 0) if stats else 0,
         "max_updated_at": max_updated_at,
     }
 
@@ -535,6 +580,113 @@ def _drive_document(row: Any) -> dict[str, Any] | None:
     }
 
 
+def _calendar_person(value: Any) -> tuple[str, str]:
+    if not isinstance(value, dict):
+        return "", ""
+    email = str(value.get("email") or "").strip()
+    name = str(value.get("displayName") or email).strip()
+    return email, name
+
+
+def _calendar_attendee_names(attendees: Any) -> list[str]:
+    if not isinstance(attendees, list):
+        return []
+    names: list[str] = []
+    for attendee in attendees:
+        if not isinstance(attendee, dict):
+            continue
+        email = str(attendee.get("email") or "").strip()
+        name = str(attendee.get("displayName") or email).strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _calendar_event_document(row: Any) -> dict[str, Any] | None:
+    """Render one synced Google Calendar event into a context document."""
+    calendar_id = str(row["calendar_id"] or "")
+    event_id = str(row["event_id"] or "")
+    if not calendar_id or not event_id:
+        return None
+    title = str(row["summary"] or "Untitled calendar event")
+    description = str(row["description"] or "").strip()
+    location = str(row["location"] or "").strip()
+    url = str(row["html_link"] or "")
+    calendar_summary = str(row["calendar_summary"] or calendar_id)
+    status = str(row["status"] or "")
+    creator = _jsonb_value(row, "creator", {})
+    organizer = _jsonb_value(row, "organizer", {})
+    attendees = _jsonb_value(row, "attendees", [])
+    attendee_names = _calendar_attendee_names(attendees)
+    author_id, author_name = _calendar_person(organizer)
+    if not author_id and not author_name:
+        author_id, author_name = _calendar_person(creator)
+
+    start_at = row["start_at"]
+    end_at = row["end_at"]
+    source_updated_at = row["source_updated_at"]
+    source_created_at = row["source_created_at"]
+    occurred_at = start_at or source_created_at or source_updated_at
+    lines = [
+        f"# {title}",
+        "",
+        "- Source: Google Calendar",
+        f"- Calendar: {calendar_summary}",
+        f"- Status: {status or 'unknown'}",
+        f"- Starts: {_format_time(start_at)}",
+        f"- Ends: {_format_time(end_at)}",
+    ]
+    if location:
+        lines.append(f"- Location: {location}")
+    if attendee_names:
+        lines.append(f"- Attendees: {', '.join(attendee_names)}")
+    if url:
+        lines.append(f"- URL: {url}")
+    if description:
+        lines.extend(["", "---", "", description])
+    body = "\n".join(lines).strip()
+    metadata = {
+        "calendar_id": calendar_id,
+        "calendar_summary": calendar_summary,
+        "event_id": event_id,
+        "i_cal_uid": str(row["i_cal_uid"] or ""),
+        "status": status,
+        "location": location,
+        "creator": creator if isinstance(creator, dict) else {},
+        "organizer": organizer if isinstance(organizer, dict) else {},
+        "attendees": attendees if isinstance(attendees, list) else [],
+        "is_all_day": bool(row["is_all_day"]),
+        "recurring_event_id": str(row["recurring_event_id"] or ""),
+        "transparency": str(row["transparency"] or ""),
+        "visibility": str(row["visibility"] or ""),
+        "event_type": str(row["event_type"] or ""),
+    }
+    return {
+        "document_id": f"google_calendar:event:{calendar_id}:{event_id}",
+        "source": "google_calendar",
+        "source_type": "calendar_event",
+        "source_document_id": f"{calendar_id}:{event_id}",
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": title,
+        "body": body,
+        "url": url,
+        "author_id": author_id,
+        "author_name": author_name,
+        "access_scope": "company",
+        "occurred_at": occurred_at,
+        "source_updated_at": source_updated_at,
+        "content_hash": _content_hash(title, body, url, metadata),
+        "metadata": metadata,
+    }
+
+
+def _calendar_event_document_id(row: Any) -> str:
+    calendar_id = str(row["calendar_id"] or "")
+    event_id = str(row["event_id"] or "")
+    return f"google_calendar:event:{calendar_id}:{event_id}"
+
+
 async def _upsert_document(pool, document: dict[str, Any]) -> str:
     """Upsert a projected document and return inserted/updated/noop."""
     existing_hash = await pool.fetchval(
@@ -626,6 +778,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     slack_enabled = _env_flag_enabled("SLACK_ETL_ENABLED")
     google_drive_enabled = _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
+    google_calendar_enabled = _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
     changed = {
         "channel_days": [],
         "threads": [],
@@ -644,6 +797,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     }
     if google_drive_enabled:
         drive_changed = await _load_changed_drive_files(ctx._pool, since)
+    calendar_changed = {
+        "events": [],
+        "changed_events": 0,
+        "max_updated_at": None,
+    }
+    if google_calendar_enabled:
+        calendar_changed = await _load_changed_calendar_events(ctx._pool, since)
 
     documents_upserted = 0
     documents_deleted = 0
@@ -734,11 +894,39 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if action in {"inserted", "updated"}:
             documents_upserted += 1
 
+    for row in calendar_changed["events"]:
+        if str(row["status"] or "") == "cancelled":
+            if await _delete_document(ctx._pool, _calendar_event_document_id(row)):
+                documents_deleted += 1
+                record_company_context_documents_changed(
+                    "google_calendar",
+                    "calendar_event",
+                    "deleted",
+                )
+            continue
+        document = _calendar_event_document(row)
+        if document is None:
+            continue
+        observe_company_context_document_size(
+            "google_calendar",
+            str(document["source_type"]),
+            len(str(document["body"] or "")),
+        )
+        action = await _upsert_document(ctx._pool, document)
+        record_company_context_documents_changed(
+            "google_calendar",
+            str(document["source_type"]),
+            action,
+        )
+        if action in {"inserted", "updated"}:
+            documents_upserted += 1
+
     watermark_candidates = [
         value
         for value in (
             changed["max_updated_at"],
             drive_changed["max_updated_at"],
+            calendar_changed["max_updated_at"],
             last_watermark,
         )
         if value is not None
@@ -748,9 +936,11 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "status": "completed",
         "changed_messages": changed["changed_messages"],
         "changed_drive_files": drive_changed["changed_files"],
+        "changed_calendar_events": calendar_changed["changed_events"],
         "channel_day_documents": len(changed["channel_days"]),
         "thread_candidates": len(changed["threads"]),
         "drive_documents": len(drive_changed["files"]),
+        "calendar_event_documents": len(calendar_changed["events"]),
         "documents_upserted": documents_upserted,
         "documents_deleted": documents_deleted,
         "watermark": watermark.isoformat() if watermark else None,

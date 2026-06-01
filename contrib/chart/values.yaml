@@ -99,6 +99,8 @@ api:
   slackSyncThreadLookbackDays: 3
   googleDriveEtlEnabled: false
   googleDriveSyncIntervalSeconds: 14400
+  googleCalendarEtlEnabled: false
+  googleCalendarSyncIntervalSeconds: 14400
   companyContextDocumentsIntervalSeconds: 14400
   slackEtlExcludedChannelPatterns: ""
   victoriaMetricsPushEnabled: false

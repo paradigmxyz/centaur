@@ -30,6 +30,7 @@ build-backend = "hatchling.build"
 module = "client.py"
 hosts = [
     "gmail.googleapis.com",
+    "calendar.googleapis.com",
     "www.googleapis.com",
     "docs.googleapis.com",
     "sheets.googleapis.com",
@@ -46,6 +47,7 @@ hosts = [
 secrets = [
     { type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = [
         "gmail.googleapis.com",
+        "calendar.googleapis.com",
         "www.googleapis.com",
         "docs.googleapis.com",
         "sheets.googleapis.com",

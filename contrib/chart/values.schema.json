@@ -70,6 +70,10 @@
         "slackSyncIntervalSeconds": { "type": "integer" },
         "slackSyncLookbackDays": { "type": "integer" },
         "slackSyncThreadLookbackDays": { "type": "integer" },
+        "googleDriveEtlEnabled": { "type": "boolean" },
+        "googleDriveSyncIntervalSeconds": { "type": "integer" },
+        "googleCalendarEtlEnabled": { "type": "boolean" },
+        "googleCalendarSyncIntervalSeconds": { "type": "integer" },
         "companyContextDocumentsIntervalSeconds": { "type": "integer" }
       }
     },

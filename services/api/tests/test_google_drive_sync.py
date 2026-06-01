@@ -52,7 +52,9 @@ class FakeDriveClient:
 async def _clear_google_drive_tables(db_pool):
     await db_pool.execute(
         "TRUNCATE TABLE company_context_documents, google_drive_sync_checkpoints, "
-        "google_drive_sync_files, google_drive_sync_runs, workflow_runs CASCADE",
+        "google_drive_sync_files, google_drive_sync_runs, google_calendar_sync_checkpoints, "
+        "google_calendar_sync_events, google_calendar_sync_calendars, google_calendar_sync_runs, "
+        "workflow_runs CASCADE",
     )
     yield
 

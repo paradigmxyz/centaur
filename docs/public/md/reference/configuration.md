@@ -170,6 +170,15 @@ Slack ETL workflows:
 | `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `api.extraEnv` or chart batch limit. | Backfill enablement and batch sizing. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `api.extraEnv`. | Enables company-context projection when Slack ETL is on. |
 
+Google Workspace ETL workflows:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `GOOGLE_DRIVE_ETL_ENABLED` | `api.googleDriveEtlEnabled`. | Enables Google Drive Docs sync. |
+| `GOOGLE_DRIVE_SYNC_INTERVAL_SECONDS` | `api.googleDriveSyncIntervalSeconds`. | Google Drive Docs sync schedule interval. |
+| `GOOGLE_CALENDAR_ETL_ENABLED` | `api.googleCalendarEtlEnabled`. | Enables Google Calendar sync. |
+| `GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS` | `api.googleCalendarSyncIntervalSeconds`. | Google Calendar sync schedule interval. |
+
 ## Observability and Retention
 
 | Env var | Set from | Controls |

@@ -265,6 +265,14 @@ spec:
             - name: GOOGLE_DRIVE_SYNC_INTERVAL_SECONDS
               value: {{ .Values.api.googleDriveSyncIntervalSeconds | quote }}
 {{- end }}
+{{- if not (hasKey $apiExtraEnv "GOOGLE_CALENDAR_ETL_ENABLED") }}
+            - name: GOOGLE_CALENDAR_ETL_ENABLED
+              value: {{ ternary "1" "0" .Values.api.googleCalendarEtlEnabled | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS") }}
+            - name: GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS
+              value: {{ .Values.api.googleCalendarSyncIntervalSeconds | quote }}
+{{- end }}
 {{- if not (hasKey $apiExtraEnv "COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS") }}
             - name: COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS
               value: {{ .Values.api.companyContextDocumentsIntervalSeconds | quote }}
