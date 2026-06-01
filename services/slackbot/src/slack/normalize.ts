@@ -97,7 +97,8 @@ export async function normalizeSlackEnvelope(opts: {
   const isMention =
     event.type === 'app_mention' ||
     Boolean(opts.botUserId && messageMentionsBot(event, opts.botUserId))
-  const historyMessages = isMention
+  const shouldCollectHistory = isMention || event.channel_type === 'im'
+  const historyMessages = shouldCollectHistory
     ? await collectThreadHistorySafely({
         client: opts.client,
         channel: event.channel,
@@ -116,6 +117,7 @@ export async function normalizeSlackEnvelope(opts: {
     recipient_team_id: recipientSlackTeamId(event) ?? teamId,
     user_id: actorId,
     channel_id: event.channel,
+    channel_type: event.channel_type,
     thread_ts: threadTs,
     is_mention: isMention,
     parts,

@@ -56,7 +56,8 @@ export class CentaurHandoff {
                   app_id: event.slack.app_id,
                   bot_user_id: event.slack.bot_user_id
                 },
-                is_mention: event.is_mention
+                is_mention: event.is_mention,
+                trigger_reason: event.trigger_reason ?? 'mention'
               },
               delivery: {
                 platform: 'slack',

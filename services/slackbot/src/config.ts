@@ -7,6 +7,10 @@ const EnvSchema = z.object({
   SLACK_API_URL: z.string().url().optional(),
   SLACK_SIGNING_SECRET: z.string().optional(),
   SLACKBOT_API_KEY: z.string().optional(),
+  SLACKBOT_THREAD_FOLLOW: z
+    .string()
+    .optional()
+    .transform(value => parseStrictBoolean(value)),
   CENTAUR_API_URL: z.string().url().default('http://localhost:8000'),
   CENTAUR_API_KEY: z.string().optional(),
   CENTAUR_SLACK_EVENTS_PATH: z.string().default('/api/webhooks/slack'),
@@ -70,4 +74,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
 export function centaurApiKey(config: AppConfig): string | undefined {
   return config.SLACKBOT_API_KEY || config.CENTAUR_API_KEY || undefined
+}
+
+function parseStrictBoolean(value: string | undefined): boolean {
+  if (value === undefined || value.trim() === '') return false
+  const normalized = value.trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  throw new Error(`Invalid boolean value for SLACKBOT_THREAD_FOLLOW: ${value}`)
 }

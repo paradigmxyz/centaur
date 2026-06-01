@@ -11,6 +11,7 @@ const config: AppConfig = {
   RUNTIME_ERROR_ALERT_CHANNEL: '',
   SLACK_EVENT_DEDUP_TTL_MS: 600000,
   SLACK_SIGNATURE_MAX_AGE_SECONDS: 300,
+  SLACKBOT_THREAD_FOLLOW: false,
   SLACK_FEEDBACK_COMMANDS: ['/website-feedback'],
   SLACK_FEEDBACK_LINEAR_TEAM_ID: 'team-test',
   SLACK_FEEDBACK_LINEAR_PROJECT_ID: 'project-test',
@@ -59,13 +60,14 @@ describe('CentaurHandoff', () => {
       if (typeof bodyText !== 'string') throw new Error('expected JSON request body')
       const body = JSON.parse(bodyText) as {
         trigger_key: string
-        input: { metadata: { slack: unknown } }
+        input: { metadata: { slack: unknown; trigger_reason?: string } }
       }
       expect(body.trigger_key).toBe(event.message_id)
       expect(body.input.metadata.slack).toEqual({
         message_ts: '1778883099.579529',
         enterprise_id: 'E123'
       })
+      expect(body.input.metadata.trigger_reason).toBe('mention')
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -173,6 +175,47 @@ describe('CentaurHandoff', () => {
         recipient_team_id: 'TEXTERNAL',
         recipient_user_id: 'UEXTERNAL'
       })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('passes trigger_reason through workflow metadata', async () => {
+    const originalFetch = globalThis.fetch
+    let capturedInit: RequestInit | undefined
+    const fetchMock = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+      capturedInit = init
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    })
+    globalThis.fetch = fetchMock as any
+    try {
+      const handoff = new CentaurHandoff(config)
+      const event: NormalizedSlackEvent = {
+        thread_key: 'slack:T123:D123:1778883099.579529',
+        message_id: 'slack:T123:D123:1778883099.579529',
+        team_id: 'T123',
+        user_id: 'U123',
+        channel_id: 'D123',
+        channel_type: 'im',
+        thread_ts: '1778883099.579529',
+        is_mention: false,
+        trigger_reason: 'direct_message',
+        parts: [{ type: 'text', text: 'hello in dm' }],
+        slack: {
+          message_ts: '1778883099.579529'
+        }
+      }
+
+      await handoff.emit(event)
+
+      const bodyText = capturedInit?.body
+      expect(typeof bodyText).toBe('string')
+      if (typeof bodyText !== 'string') throw new Error('expected JSON request body')
+      const body = JSON.parse(bodyText) as {
+        input: { metadata: { is_mention?: boolean; trigger_reason?: string } }
+      }
+      expect(body.input.metadata.is_mention).toBe(false)
+      expect(body.input.metadata.trigger_reason).toBe('direct_message')
     } finally {
       globalThis.fetch = originalFetch
     }

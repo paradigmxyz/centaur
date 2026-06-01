@@ -6,6 +6,7 @@ import { requestId } from 'hono/request-id'
 import { prettyJSON } from 'hono/pretty-json'
 import { startFinalDeliveryPoller } from './centaur/final-delivery'
 import { CentaurHandoff } from './centaur/handoff'
+import { lookupActiveRuntimeAssignment } from './centaur/runtime'
 import { loadConfig } from './config'
 import { logError, logInfo, logWarn, sanitizeLogValue } from './logging'
 import {
@@ -26,6 +27,7 @@ import { normalizeSlackEnvelope } from './slack/normalize'
 import { markdownToStreamChunks } from './slack/render'
 import { verifySlackSignature } from './slack/signature'
 import { shouldAckWithReaction } from './slack/trivial-ack'
+import { resolveSlackTrigger } from './slack/triggers'
 import type { NormalizedSlackEvent, SlackEnvelope } from './slack/types'
 import type { AnyBlock, AnyChunk } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
@@ -580,31 +582,56 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
       spanAttributes(span, {
         'centaur.thread_key': normalized.thread_key,
         'slack.channel_id': normalized.channel_id,
+        'slack.channel_type': normalized.channel_type,
         'slack.thread_ts': normalized.thread_ts,
         'slack.user_id': normalized.user_id,
         'centaur.slackbot.is_mention': normalized.is_mention,
+        'centaur.slackbot.thread_follow_enabled': config.SLACKBOT_THREAD_FOLLOW,
         'centaur.slackbot.part_count': normalized.parts.length
       })
-      if (!normalized.is_mention) {
+      const triggerDecision = await resolveSlackTrigger({
+        event: normalized,
+        threadFollowEnabled: config.SLACKBOT_THREAD_FOLLOW,
+        hasActiveThread: async threadKey => {
+          const lookup = await lookupActiveRuntimeAssignment(config, threadKey)
+          if (!lookup.ok) {
+            logWarn('slack_thread_follow_runtime_lookup_failed', {
+              thread_key: threadKey,
+              status: lookup.status,
+              error: lookup.error
+            })
+            return false
+          }
+          return lookup.active
+        }
+      })
+      if (triggerDecision.action === 'ignore') {
         spanAttributes(span, {
           'centaur.slackbot.event_ignored': true,
-          'centaur.slackbot.ignore_reason': 'not_mention'
+          'centaur.slackbot.ignore_reason': triggerDecision.ignore_reason
         })
         return
       }
+      const triggered = {
+        ...normalized,
+        trigger_reason: triggerDecision.trigger_reason
+      }
+      spanAttributes(span, {
+        'centaur.slackbot.trigger_reason': triggerDecision.trigger_reason
+      })
 
-      if (shouldAckWithReaction(normalized)) {
+      if (shouldAckWithReaction(triggered)) {
         spanAttributes(span, {
           'centaur.slackbot.event_action': 'ack_reaction'
         })
-        await ackWithReaction(client, normalized)
+        await ackWithReaction(client, triggered)
         return
       }
 
       spanAttributes(span, {
         'centaur.slackbot.event_action': 'handoff'
       })
-      const result = await handoff.emit(normalized)
+      const result = await handoff.emit(triggered)
       spanAttributes(span, {
         'centaur.slackbot.handoff_status': result.status,
         'centaur.slackbot.handoff_ok': result.ok

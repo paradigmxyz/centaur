@@ -193,6 +193,178 @@ describe('normalizeSlackEnvelope', () => {
     expect(normalized?.slack.user_team).toBe('TEXTERNAL')
   })
 
+  it('exposes direct-message channel_type without treating DMs as mentions', async () => {
+    const replies = mock(async () => ({ ok: true, messages: [] }))
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-dm',
+        event: {
+          type: 'message',
+          user: 'U123',
+          channel: 'D123',
+          channel_type: 'im',
+          ts: '1778875070.942789',
+          text: 'hello in dm'
+        }
+      },
+      botUserId: 'UBOT',
+      client: {
+        token: 'xoxb-test-token',
+        conversations: { replies }
+      } as any
+    })
+
+    expect(normalized?.thread_key).toBe('slack:T123:D123:1778875070.942789')
+    expect(normalized?.channel_type).toBe('im')
+    expect(normalized?.is_mention).toBe(false)
+    expect(normalized?.parts).toEqual([{ type: 'text', text: 'hello in dm' }])
+    expect(normalized?.history_messages).toBeUndefined()
+    expect(replies).not.toHaveBeenCalled()
+  })
+
+  it('backfills prior Slack thread messages for DM thread replies', async () => {
+    const replies = mock(async () => ({
+      ok: true,
+      messages: [
+        {
+          type: 'message',
+          user: 'U123',
+          channel: 'D123',
+          ts: '1778875060.000100',
+          text: 'Original DM request'
+        },
+        {
+          type: 'message',
+          user: 'UBOT',
+          channel: 'D123',
+          ts: '1778875065.000100',
+          text: 'Prior Centaur answer'
+        },
+        {
+          type: 'message',
+          user: 'U123',
+          channel: 'D123',
+          ts: '1778875070.942789',
+          text: 'follow up'
+        }
+      ]
+    }))
+
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-dm-thread-reply',
+        event: {
+          type: 'message',
+          user: 'U123',
+          channel: 'D123',
+          channel_type: 'im',
+          thread_ts: '1778875060.000100',
+          ts: '1778875070.942789',
+          text: 'follow up'
+        }
+      },
+      botUserId: 'UBOT',
+      botId: 'BCENTAUR',
+      client: {
+        token: 'xoxb-test-token',
+        conversations: { replies }
+      } as any
+    })
+
+    expect(replies).toHaveBeenCalledWith({
+      channel: 'D123',
+      ts: '1778875060.000100',
+      limit: 200,
+      cursor: undefined
+    })
+    expect(normalized?.is_mention).toBe(false)
+    expect(normalized?.history_messages).toEqual([
+      {
+        message_id: 'slack:T123:D123:1778875060.000100',
+        role: 'user',
+        parts: [{ type: 'text', text: 'Original DM request' }],
+        user_id: 'U123',
+        metadata: { platform: 'slack', history_backfill: true }
+      },
+      {
+        message_id: 'slack:T123:D123:1778875065.000100',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Prior Centaur answer' }],
+        user_id: 'UBOT',
+        metadata: { platform: 'slack', history_backfill: true }
+      }
+    ])
+  })
+
+  it('does not backfill channel thread history for non-mention replies', async () => {
+    const replies = mock(async () => ({
+      ok: true,
+      messages: [
+        {
+          type: 'message',
+          user: 'U111',
+          channel: 'C123',
+          ts: '1778875060.000100',
+          text: 'Original channel request'
+        }
+      ]
+    }))
+
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-channel-thread-non-mention',
+        event: {
+          type: 'message',
+          user: 'U123',
+          channel: 'C123',
+          channel_type: 'channel',
+          thread_ts: '1778875060.000100',
+          ts: '1778875070.942789',
+          text: 'follow up'
+        }
+      },
+      botUserId: 'UBOT',
+      client: {
+        token: 'xoxb-test-token',
+        conversations: { replies }
+      } as any
+    })
+
+    expect(normalized?.is_mention).toBe(false)
+    expect(normalized?.history_messages).toBeUndefined()
+    expect(replies).not.toHaveBeenCalled()
+  })
+
+  it('ignores self-authored direct messages', async () => {
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-self-dm',
+        event: {
+          type: 'message',
+          bot_id: 'BCENTAUR',
+          user: 'UBOT',
+          channel: 'D123',
+          channel_type: 'im',
+          ts: '1778875070.942789',
+          text: 'bot echo'
+        }
+      },
+      botUserId: 'UBOT',
+      botId: 'BCENTAUR',
+      client
+    })
+
+    expect(normalized).toBeNull()
+  })
+
   it('does not treat a mention inside quoted rich text as an actionable mention', async () => {
     const normalized = await normalizeSlackEnvelope({
       envelope: {

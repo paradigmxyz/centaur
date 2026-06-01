@@ -19,13 +19,14 @@ const CHANNEL_ID = 'C000000001'
 type WorkflowRunRequest = {
   workflow_name: string
   trigger_key: string
+  eager_start?: boolean
   input: {
     thread_key: string
     parts: Array<{ type: string; text?: string }>
     history_messages?: Array<{ role: string; parts: Array<{ type: string; text?: string }> }>
     message_id: string
     user_id: string
-    metadata: { is_mention?: boolean; slack?: Record<string, unknown> }
+    metadata: { is_mention?: boolean; trigger_reason?: string; slack?: Record<string, unknown> }
     delivery: {
       platform: string
       channel: string
@@ -87,6 +88,7 @@ beforeAll(async () => {
     SLACK_API_URL: slackApiUrl,
     SLACK_SIGNING_SECRET: SIGNING_SECRET,
     SLACKBOT_API_KEY: API_KEY,
+    SLACKBOT_THREAD_FOLLOW: '1',
     CENTAUR_API_URL: centaur.url,
     SLACK_EVENT_DEDUP_TTL_MS: '600000',
     SLACKBOT_TRIGGER_BOT_ALLOWLIST: 'app:AALERTMANAGER',
@@ -133,13 +135,14 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
 
     const run = onlyRun()
     expect(run.workflow_name).toBe('slack_thread_turn')
-    expect('eager_start' in run).toBe(false)
+    expect(run.eager_start).toBe(true)
     expect(run.trigger_key).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
     expect(run.input.thread_key).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
     expect(run.input.message_id).toBe(`slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`)
     expect(run.input.parts).toEqual([{ type: 'text', text: 'summarize this incident' }])
     expect(run.input.user_id).toBe(USER_ID)
     expect(run.input.metadata.is_mention).toBe(true)
+    expect(run.input.metadata.trigger_reason).toBe('mention')
     expect(run.input.metadata.slack?.message_ts).toBe(parent.ts)
     expect(run.input.delivery).toMatchObject({
       platform: 'slack',
@@ -240,6 +243,7 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
     ])
     expect(run.input.user_id).toBe('UALERTMANAGER')
     expect(run.input.metadata.is_mention).toBe(true)
+    expect(run.input.metadata.trigger_reason).toBe('mention')
     expect(run.input.metadata.slack?.bot_id).toBe('BALERTMANAGER')
     expect(run.input.metadata.slack?.app_id).toBe('AALERTMANAGER')
     expect(run.input.delivery).toMatchObject({
@@ -249,6 +253,101 @@ describe(`Slack Emulate E2E (${IMPLEMENTATION})`, () => {
       recipient_user_id: 'UALERTMANAGER',
       recipient_team_id: TEAM_ID
     })
+  })
+
+  it('dispatches direct messages without requiring a mention', async () => {
+    const waits: Promise<unknown>[] = []
+    const response = await app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-emulate-direct-message',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: 'D000000001',
+          channel_type: 'im',
+          ts: '1780332285.000001',
+          text: 'Can you help from DM?'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const run = onlyRun()
+    expect(run.workflow_name).toBe('slack_thread_turn')
+    expect(run.input.thread_key).toBe(`slack:${TEAM_ID}:D000000001:1780332285.000001`)
+    expect(run.input.parts).toEqual([{ type: 'text', text: 'Can you help from DM?' }])
+    expect(run.input.metadata.is_mention).toBe(false)
+    expect(run.input.metadata.trigger_reason).toBe('direct_message')
+    expect(run.input.delivery).toMatchObject({
+      platform: 'slack',
+      channel: 'D000000001',
+      thread_ts: '1780332285.000001',
+      recipient_user_id: USER_ID,
+      recipient_team_id: TEAM_ID
+    })
+  })
+
+  it('dispatches only active non-mention channel thread replies', async () => {
+    const parent = await postUserMessage(`<@${BOT_USER_ID}> start this thread`)
+    const threadKey = `slack:${TEAM_ID}:${CHANNEL_ID}:${parent.ts}`
+    centaur.activeThreads.add(threadKey)
+    const activeReply = await postUserMessage('Additional context', parent.ts)
+    const activeWaits: Promise<unknown>[] = []
+
+    const activeResponse = await app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-emulate-active-thread-reply',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          channel_type: 'channel',
+          thread_ts: parent.ts,
+          ts: activeReply.ts,
+          text: 'Additional context'
+        }
+      }),
+      {},
+      waitUntilContext(activeWaits)
+    )
+    expect(activeResponse.status).toBe(200)
+    await Promise.all(activeWaits)
+
+    let run = onlyRun()
+    expect(run.input.thread_key).toBe(threadKey)
+    expect(run.input.metadata.is_mention).toBe(false)
+    expect(run.input.metadata.trigger_reason).toBe('active_thread_reply')
+    expect(run.input.parts).toEqual([{ type: 'text', text: 'Additional context' }])
+
+    centaur.reset()
+    const inactiveReply = await postUserMessage('Inactive context', parent.ts)
+    const inactiveWaits: Promise<unknown>[] = []
+    const inactiveResponse = await app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-emulate-inactive-thread-reply',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          channel_type: 'channel',
+          thread_ts: parent.ts,
+          ts: inactiveReply.ts,
+          text: 'Inactive context'
+        }
+      }),
+      {},
+      waitUntilContext(inactiveWaits)
+    )
+    expect(inactiveResponse.status).toBe(200)
+    await Promise.all(inactiveWaits)
+    expect(centaur.workflowRuns).toHaveLength(0)
   })
 
   it('ignores self bot-originated events and duplicate Slack event IDs', async () => {
@@ -523,6 +622,7 @@ async function createFakeCentaur() {
   const deliveries: FakeDelivery[] = []
   const delivered: string[] = []
   const failed: string[] = []
+  const activeThreads = new Set<string>()
   const port = await preferredPort(4014)
   const server = Bun.serve({
     port,
@@ -531,6 +631,21 @@ async function createFakeCentaur() {
       if (url.pathname === '/workflows/runs') {
         workflowRuns.push((await request.json()) as WorkflowRunRequest)
         return Response.json({ ok: true, run_id: `wfr-${workflowRuns.length}` })
+      }
+      if (url.pathname === '/agent/runtime') {
+        const key = url.searchParams.get('key') ?? ''
+        if (activeThreads.has(key)) {
+          return Response.json({
+            thread_key: key,
+            assignment_generation: 1,
+            runtime_id: 'rtm-emulate-active'
+          })
+        }
+        return Response.json({
+          thread_key: key,
+          assignment_generation: null,
+          runtime_id: null
+        })
       }
       if (url.pathname === '/agent/final-deliveries/claim') {
         return Response.json({ deliveries: deliveries.splice(0) })
@@ -554,11 +669,13 @@ async function createFakeCentaur() {
     deliveries,
     delivered,
     failed,
+    activeThreads,
     reset() {
       workflowRuns.length = 0
       deliveries.length = 0
       delivered.length = 0
       failed.length = 0
+      activeThreads.clear()
     },
     async close() {
       await server.stop()

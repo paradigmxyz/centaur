@@ -20,6 +20,8 @@ export type NormalizedBinaryPart = {
 
 export type NormalizedPart = NormalizedTextPart | NormalizedBinaryPart
 
+export type SlackTriggerReason = 'mention' | 'direct_message' | 'active_thread_reply'
+
 export type NormalizedSlackEvent = {
   thread_key: string
   message_id: string
@@ -27,8 +29,10 @@ export type NormalizedSlackEvent = {
   recipient_team_id?: string
   user_id: string
   channel_id: string
+  channel_type?: string
   thread_ts: string
   is_mention: boolean
+  trigger_reason?: SlackTriggerReason
   parts: NormalizedPart[]
   history_messages?: Array<{
     message_id: string

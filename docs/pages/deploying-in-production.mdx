@@ -203,6 +203,12 @@ Use the app page to install the bot, copy the Bot User OAuth Token for
 7. Subscribe to `app_mention` and to the message events you want Centaur to see:
    `message.channels`, `message.groups`, and `message.im`.
 
+Slackbot keeps strict mention-only behavior by default. Set
+`SLACKBOT_THREAD_FOLLOW=1` only after the app has the message subscriptions and
+history scopes for the surfaces you want enabled. Follow mode responds to 1:1
+DMs and to replies in channel threads with an active Centaur runtime assignment;
+unrelated channel messages remain ignored.
+
 The Slackbot currently normalizes Slack `app_mention` and `message` events.
 Do not rely on assistant-specific Slack event types unless the Slackbot code has
 explicit support for them.

@@ -166,6 +166,12 @@ for example `app_mentions:read` and `chat:write`. If you enable DM events such
 as `message.im`, Slack will also require direct-message scopes such as
 `im:history`.
 
+By default, Slackbot responds only to mentions. To let it also answer 1:1 DMs
+and follow replies in channel threads that already have an active Centaur runtime
+assignment, set `SLACKBOT_THREAD_FOLLOW=1` through `slackbot.extraEnv` and
+subscribe the Slack app to the matching message events, such as
+`message.channels`, `message.groups`, and `message.im`.
+
 Save changes and reinstall the app.
 
 ## 7. Try Slack mentions

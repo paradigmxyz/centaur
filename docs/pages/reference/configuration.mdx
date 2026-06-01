@@ -98,6 +98,7 @@ Execution tuning:
 | `RUNTIME_ERROR_ALERT_CHANNEL` | `slackbot.runtimeErrorAlertChannel`. | Slack channel for runtime error alerts. |
 | `SLACK_EVENT_DEDUP_TTL_MS` | `slackbot.extraEnv`. | Slack event dedupe window. |
 | `SLACK_SIGNATURE_MAX_AGE_SECONDS` | `slackbot.extraEnv`. | Maximum accepted Slack signature age. |
+| `SLACKBOT_THREAD_FOLLOW` | `slackbot.extraEnv`. | Opt-in follow mode. Defaults off. When enabled, Slackbot also responds to 1:1 DMs and to replies in channel threads that already have an active Centaur runtime assignment. Requires the Slack app to subscribe to the relevant `message.*` events and scopes. |
 | `LINEAR_API_KEY` | Secret or `slackbot.extraEnv`. | Enables Slack feedback commands to create Linear issues. |
 | `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
 | `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
