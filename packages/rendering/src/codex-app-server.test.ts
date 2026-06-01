@@ -218,10 +218,87 @@ describe('CodexAppServerRendererEventMapper', () => {
       type: 'task_update',
       id: 'reasoning-1',
       title: 'Thinking',
-      status: 'complete',
+      status: 'in_progress',
       details: 'Inspecting the event stream'
     })
+    expect(chunks).toContainEqual({
+      type: 'task_update',
+      id: 'reasoning-1',
+      title: 'Thinking',
+      status: 'complete'
+    })
     expect(chunks).toContainEqual({ type: 'markdown_text', text: 'Done.' })
+  })
+
+  it('streams command details once and command output incrementally', async () => {
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'item/started',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'cmd-1',
+                type: 'commandExecution',
+                command: 'echo one && echo two',
+                status: 'inProgress'
+              }
+            }
+          },
+          {
+            method: 'item/commandExecution/outputDelta',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'cmd-1',
+              delta: 'one\n'
+            }
+          },
+          {
+            method: 'item/commandExecution/outputDelta',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'cmd-1',
+              delta: 'two\n'
+            }
+          },
+          {
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'cmd-1',
+                type: 'commandExecution',
+                command: 'echo one && echo two',
+                status: 'completed',
+                aggregatedOutput: 'one\ntwo\n',
+                exitCode: 0
+              }
+            }
+          }
+        ])
+      )
+    )
+
+    const taskChunks = chunks.filter(
+      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+        chunk.type === 'task_update' && chunk.id === 'cmd-1'
+    )
+    expect(taskChunks.filter(chunk => chunk.details).map(chunk => chunk.details)).toEqual([
+      '```sh\necho one && echo two\n```'
+    ])
+    expect(taskChunks.filter(chunk => chunk.output).map(chunk => chunk.output)).toEqual([
+      '```text\none\n\n```',
+      '```text\ntwo\n\n```'
+    ])
+    expect(taskChunks.at(-1)).toMatchObject({
+      id: 'cmd-1',
+      status: 'complete'
+    })
   })
 
   it('marks open tasks as errors on Rust session failures and emits done', () => {
@@ -242,13 +319,7 @@ describe('CodexAppServerRendererEventMapper', () => {
         id: 'cmd-1',
         title: '1. Command execution',
         status: 'error',
-        details: [
-          {
-            type: 'code',
-            language: 'sh',
-            text: 'kubectl get pods'
-          }
-        ],
+        details: undefined,
         output: undefined
       },
       flush: true

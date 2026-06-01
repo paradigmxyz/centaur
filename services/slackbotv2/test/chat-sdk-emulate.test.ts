@@ -283,6 +283,7 @@ describe('slackbotv2', () => {
     expect(firstResponse.status).toBe(200)
     await waitFor(() => codexApi.executes.length === 1)
     await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
 
     const followUp = await postUserMessage('Actually queue this extra constraint.', parent.ts)
     const followUpWaits: Promise<unknown>[] = []
@@ -312,8 +313,45 @@ describe('slackbotv2', () => {
       'Actually queue this extra constraint.'
     ])
 
-    codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('Long run complete.'))
+    codexApi.closeStreams()
     await Promise.all(firstWaits)
+  })
+
+  it('starts the Slack stream before a slow session execute returns', async () => {
+    codexApi.autoRespond = false
+    const releaseExecute = codexApi.holdNextExecute()
+
+    const parent = await postUserMessage('Context before the slow run.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> start visibly`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-slow-execute',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start visibly`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+    expect(codexApi.eventRequests).toHaveLength(0)
+
+    releaseExecute()
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+    codexApi.closeStreams()
+    await Promise.all(waits)
   })
 
   it('refetches full context on a later mention if the initial execute failed', async () => {
@@ -756,13 +794,16 @@ type MockSessionApi = {
   appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
   autoRespond: boolean
   close(): Promise<void>
+  closeStreams(): void
   creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
   emitOutputLine(threadKey: string, line: string): void
   emitOutputLines(threadKey: string, lines: string[]): void
   eventRequests: MockSessionEventRequest[]
   executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
   failNextExecute: boolean
+  holdNextExecute(): () => void
   reset(): void
+  streamCount: number
   url: string
 }
 
@@ -774,9 +815,15 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[] = []
   const streams = new Set<ServerResponse>()
   let autoRespond = true
+  let executeHold: Promise<void> | null = null
+  let executeHoldRelease: (() => void) | null = null
   let eventId = 0
   let failNextExecute = false
   const port = await availablePort(4063)
+  const closeStreams = () => {
+    for (const stream of streams) stream.end()
+    streams.clear()
+  }
   const server = createServer((req, res) => {
     void handleMockCodexRequest(req, res, {
       appends,
@@ -786,6 +833,9 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       executes,
       get autoRespond() {
         return autoRespond
+      },
+      get executeHold() {
+        return executeHold
       },
       get failNextExecute() {
         return failNextExecute
@@ -817,13 +867,16 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       eventRequests.length = 0
       events.length = 0
       executes.length = 0
-      for (const stream of streams) stream.end()
-      streams.clear()
+      executeHoldRelease?.()
+      executeHold = null
+      executeHoldRelease = null
+      closeStreams()
       autoRespond = true
       eventId = 0
       failNextExecute = false
     },
     url: `http://127.0.0.1:${port}`,
+    closeStreams,
     get autoRespond() {
       return autoRespond
     },
@@ -835,6 +888,21 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     },
     set failNextExecute(value: boolean) {
       failNextExecute = value
+    },
+    holdNextExecute() {
+      if (executeHoldRelease) throw new Error('execute is already held')
+      executeHold = new Promise(resolve => {
+        executeHoldRelease = resolve
+      })
+      return () => {
+        const release = executeHoldRelease
+        executeHoldRelease = null
+        executeHold = null
+        release?.()
+      }
+    },
+    get streamCount() {
+      return streams.size
     },
     emitOutputLine(threadKey: string, line: string) {
       emitMockSessionEvent({
@@ -850,8 +918,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       for (const line of lines) api.emitOutputLine(threadKey, line)
     },
     async close() {
-      for (const stream of streams) stream.end()
-      streams.clear()
+      closeStreams()
       await closeServer(server)
     }
   }
@@ -867,6 +934,7 @@ async function handleMockCodexRequest(
     creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
     events: MockSessionEvent[]
     eventRequests: MockSessionEventRequest[]
+    executeHold: Promise<void> | null
     executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
     failNextExecute: boolean
     nextEventId(): number
@@ -934,6 +1002,7 @@ async function handleMockCodexRequest(
     await sendWebResponse(res, new Response('unavailable', { status: 503, statusText: 'Service Unavailable' }))
     return
   }
+  if (input.executeHold) await input.executeHold
   if (input.autoRespond) {
     for (const line of sampleCodexOutputLines(`Executed request ${input.executes.length}.`)) {
       emitMockSessionEvent({
@@ -1396,8 +1465,7 @@ function expectSlackPlanStreamShape(
         type: 'task_update',
         id: 'reasoning-1',
         title: 'Thinking',
-        status: 'complete',
-        details: expect.stringContaining('Inspecting the event stream')
+        status: 'complete'
       })
     )
     expect(progressChunks).toContainEqual(
@@ -1405,7 +1473,14 @@ function expectSlackPlanStreamShape(
         type: 'task_update',
         id: 'cmd-1',
         title: '1. Command execution',
-        details: expect.stringContaining('pnpm test'),
+        details: expect.stringContaining('pnpm test')
+      })
+    )
+    expect(progressChunks).toContainEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        id: 'cmd-1',
+        title: '1. Command execution',
         output: expect.stringContaining('tests passed')
       })
     )

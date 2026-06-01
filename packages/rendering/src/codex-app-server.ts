@@ -58,7 +58,7 @@ type CodexMapperState = {
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
   emittedActivityRunByTaskId: Set<string>
-  emittedActivityOutputByTaskId: Set<string>
+  emittedActivityOutputByTaskId: Map<string, string>
   emittedActivitySignatureByTaskId: Map<string, string>
   done: boolean
 }
@@ -655,7 +655,7 @@ function newState(): CodexMapperState {
     taskByUseId: new Map(),
     commandOutputById: new Map(),
     emittedActivityRunByTaskId: new Set(),
-    emittedActivityOutputByTaskId: new Set(),
+    emittedActivityOutputByTaskId: new Map(),
     emittedActivitySignatureByTaskId: new Map(),
     done: false
   }
@@ -1016,12 +1016,23 @@ function changedActivityTaskUpdates(
     let details: RendererTaskBlock[] | undefined
     let output: RendererTaskBlock[] | undefined
     if (task.details.length) {
-      state.emittedActivityRunByTaskId.add(task.id)
-      details = activityRunBlock(task)
+      const runBlock = activityRunBlock(task)
+      if (runBlock.length && !state.emittedActivityRunByTaskId.has(task.id)) {
+        state.emittedActivityRunByTaskId.add(task.id)
+        details = runBlock
+      }
     }
     if (task.output.length) {
-      state.emittedActivityOutputByTaskId.add(task.id)
-      output = activityOutputBlock(task)
+      const outputBlock = activityOutputBlock(task)
+      const emittedOutput = state.emittedActivityOutputByTaskId.get(task.id) ?? ''
+      const currentOutput = elementsToPlainText(outputBlock)
+      const outputDelta = currentOutput.startsWith(emittedOutput)
+        ? currentOutput.slice(emittedOutput.length)
+        : currentOutput
+      if (outputDelta) {
+        state.emittedActivityOutputByTaskId.set(task.id, currentOutput)
+        output = [pre(outputDelta, firstPreformattedLanguage(outputBlock) ?? 'text')]
+      }
     }
     const update = {
       id: task.id,
