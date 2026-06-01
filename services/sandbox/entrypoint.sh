@@ -202,6 +202,26 @@ if [ -d "$WS_SKILLS" ]; then
     ln -sf "$WS_SKILLS" "$WORKSPACE_DIR/.claude/skills"
 fi
 
+_add_pythonpath_entry() {
+    local entry="$1"
+    [ -d "$entry" ] || return 0
+    case ":${PYTHONPATH:-}:" in
+        *":$entry:"*) ;;
+        *) export PYTHONPATH="$entry${PYTHONPATH:+:$PYTHONPATH}" ;;
+    esac
+}
+
+# Tool CLIs can run in subprocess venvs from `centaur-tools`; keep the local
+# Centaur SDK importable without requiring it to be published to PyPI.
+_add_pythonpath_entry "/opt/centaur"
+_add_pythonpath_entry "$HOME_DIR/github"
+_add_pythonpath_entry "$HOME_DIR/github/centaur"
+_add_pythonpath_entry "$WORKSPACE_DIR"
+if [ -n "${CENTAUR_OVERLAY_DIR:-}" ]; then
+    _add_pythonpath_entry "$CENTAUR_OVERLAY_DIR"
+fi
+unset -f _add_pythonpath_entry
+
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
 # Org/persona overlays are mounted alongside the base prompt when present.
