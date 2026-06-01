@@ -48,6 +48,7 @@ pub struct AgentSandboxConfig {
     pub container_name: String,
     pub labels: BTreeMap<String, String>,
     pub annotations: BTreeMap<String, String>,
+    pub image_pull_policy: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
     pub ready_timeout: Duration,
 }
@@ -60,6 +61,7 @@ impl AgentSandboxConfig {
             container_name: DEFAULT_CONTAINER_NAME.to_owned(),
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
+            image_pull_policy: None,
             state_volume: None,
             ready_timeout: Duration::from_secs(60),
         }
@@ -555,6 +557,11 @@ fn build_agent_sandbox(
         "stdinOnce": false,
         "tty": false,
     });
+    insert_optional(
+        &mut container,
+        "imagePullPolicy",
+        config.image_pull_policy.clone(),
+    );
     insert_optional(&mut container, "command", spec.command.clone());
     insert_optional(
         &mut container,
