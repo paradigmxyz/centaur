@@ -14,6 +14,38 @@ Centaur publishes development images to GHCR. On a single small host, the
 simplest setup is to point the local chart at those images instead of building
 and importing images into k3s' container runtime.
 
+If you are evaluating on macOS, especially Apple Silicon, use the local-build
+path below. Native k3s is Linux-only, and published images are currently x86 only. In that case, build the images locally and load them into the local cluster runtime.
+
+## macOS local evaluation with kind
+
+This is the quickest reproducible laptop path when GHCR images do not match
+your Mac's architecture.
+
+```bash
+brew install just kubectl helm jq kind cloudflared
+kind create cluster --name centaur
+kubectl config use-context kind-centaur
+```
+
+Export the same bootstrap secrets as the Linux path below, then build and load
+local images:
+
+```bash
+just build
+kind load docker-image \
+  centaur-api:latest \
+  centaur-slackbot:latest \
+  centaur-iron-proxy:latest \
+  centaur-agent:latest \
+  --name centaur
+```
+
+Kind nodes have their own containerd image store, so local `docker build` images
+are not visible to Kubernetes until you run `kind load docker-image`. The same
+separate-image-store rule applies to k3s; use `just up k3s` there to import
+images into k3s containerd.
+
 ## 1. Install k3s
 
 Run these commands on the machine that will host Centaur:
@@ -100,3 +132,31 @@ Expected shape:
 
 Then continue with the [Quickstart](/quickstart) smoke test and agent-turn
 verification steps.
+
+## 6. Optional: expose local Slackbot with a tunnel
+
+If you are running Centaur only on your laptop, Slack cannot reach the in-cluster
+Slackbot service directly. Use any HTTPS tunnel that can forward to localhost,
+such as Cloudflare Tunnel, ngrok, zrok, or Tailscale Funnel. For example, with
+Cloudflare Tunnel, forward Slackbot to localhost and expose it with a temporary
+HTTPS URL:
+
+```bash
+kubectl port-forward -n centaur svc/centaur-centaur-slackbot 3001:3001
+```
+
+In another terminal:
+
+```bash
+cloudflared tunnel --url http://localhost:3001
+```
+
+Use the generated `https://*.trycloudflare.com` URL as the host in the
+[Quickstart Slack webhook setup](/quickstart#61-set-up-the-slack-app):
+
+```text
+https://<trycloudflare-host>/api/webhooks/slack
+```
+
+Temporary tunnel URLs usually change when the tunnel restarts, so update the
+Slack Request URL each time or configure a named tunnel/domain.
