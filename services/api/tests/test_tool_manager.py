@@ -729,6 +729,15 @@ class TestHarnessSecretSelection:
         # Base infra secrets (AMP_API_KEY, GITHUB_TOKEN, etc.) still present.
         assert "AMP_API_KEY" in names
 
+    def test_slack_etl_token_is_global_proxy_secret(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        secrets = tm.collect_secrets()
+        slack_etl = next(s for s in secrets if getattr(s, "name", None) == "SLACK_ETL_TOKEN")
+        assert slack_etl.secret_ref == "SLACK_ETL_TOKEN"
+        assert slack_etl.hosts == ("*.slack.com",)
+        assert slack_etl.match_headers == ("Authorization",)
+
     def test_collect_secrets_returns_union_of_all_harness_variants(self) -> None:
         """The shared API-side proxy and token broker need every harness
         credential so they can manage the full set regardless of which mode

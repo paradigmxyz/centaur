@@ -1836,12 +1836,12 @@ class ToolManager:
         )
         return loaded
 
-    # Base infrastructure secrets — credentials every sandbox's iron-proxy
-    # needs regardless of which harness is running. Each ``HttpSecret``
-    # carries the hosts iron-proxy attaches it to. Harness-specific provider
-    # credentials (Anthropic, OpenAI) live in ``_HARNESS_SECRETS`` below
-    # because the right credential depends on the sandbox's harness and
-    # auth mode.
+    # Global proxy secrets — credentials the shared API-side proxy and sandbox
+    # proxies may need regardless of which harness is running. Each
+    # ``HttpSecret`` carries the hosts iron-proxy attaches it to.
+    # Harness-specific provider credentials (Anthropic, OpenAI) live in
+    # ``_HARNESS_SECRETS`` below because the right credential depends on the
+    # sandbox's harness and auth mode.
     _INFRA_SECRETS: ClassVar[list[HttpSecret]] = [
         HttpSecret(
             name="XAI_API_KEY",
@@ -1870,6 +1870,12 @@ class ToolManager:
         HttpSecret(
             name="SLACK_BOT_TOKEN",
             secret_ref="SLACK_BOT_TOKEN",
+            hosts=("*.slack.com",),
+            match_headers=("Authorization",),
+        ),
+        HttpSecret(
+            name="SLACK_ETL_TOKEN",
+            secret_ref="SLACK_ETL_TOKEN",
             hosts=("*.slack.com",),
             match_headers=("Authorization",),
         ),

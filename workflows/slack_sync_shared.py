@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
-import importlib.util
+import json
 import os
-from pathlib import Path
-from typing import Any, Protocol
+import re
+import time
+from collections.abc import Callable
+from typing import Any, ClassVar, Protocol
 
+from centaur_sdk import secret
 from api.runtime_control import canonical_json
 
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
@@ -374,46 +377,639 @@ def workflow_run_id_to_sync_run_id(workflow_run_id: str) -> str:
     return f"slack_sync_{safe_run_id}"
 
 
-def repo_slack_client_paths() -> list[Path]:
-    """Return Slack tool client paths for installed and legacy repo layouts."""
-    repo_root = Path(__file__).resolve().parents[1]
-    return [
-        repo_root / "tools" / "productivity" / "slack" / "client.py",
-        repo_root / "tools" / "slack" / "client.py",
-    ]
+class SlackEtlAuthError(RuntimeError):
+    """Structured Slack ETL auth failure."""
+
+    def __init__(
+        self,
+        *,
+        slack_method: str,
+        error_code: str,
+        status_code: int | None,
+        requested_channel: str | None = None,
+        resolved_channel: str | None = None,
+    ) -> None:
+        payload = {
+            "error": "slack_auth_failed",
+            "message": f"Slack authentication failed for {slack_method} via user_token",
+            "slack_method": slack_method,
+            "access_path": "user_token",
+            "error_code": error_code,
+            "status_code": status_code,
+            "requested_channel": requested_channel,
+            "resolved_channel": resolved_channel,
+        }
+        self.payload = payload
+        super().__init__(json.dumps(payload, sort_keys=True))
 
 
-def slack_client_class_from_path(client_path: Path) -> type:
-    """Load SlackClient from a repo checkout path when package import is unavailable."""
-    spec = importlib.util.spec_from_file_location(
-        "_slack_sync_tool_client", client_path
+class SlackEtlRateLimitError(RuntimeError):
+    """Structured Slack ETL rate-limit failure."""
+
+    def __init__(self, *, slack_method: str, retry_after: float) -> None:
+        payload = {
+            "error": "slack_rate_limited",
+            "message": f"Slack rate limited {slack_method}; retry after {retry_after:.2f}s",
+            "slack_method": slack_method,
+            "access_path": "user_token",
+            "retry_after_seconds": retry_after,
+        }
+        self.payload = payload
+        super().__init__(json.dumps(payload, sort_keys=True))
+
+
+class SlackEtlClient:
+    """Slack user-token client used only by Slack ETL workflows."""
+
+    _MAX_PAGE_SIZE = 200
+    _DEFAULT_API_TIMEOUT_SECONDS = 8
+    _MAX_RATE_LIMIT_SLEEP_SECONDS = 0.0
+    _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
+    _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
+    _AUTH_ERROR_CODES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "account_inactive",
+            "invalid_auth",
+            "missing_scope",
+            "no_permission",
+            "not_allowed_token_type",
+            "not_authed",
+            "token_revoked",
+        }
     )
-    if not spec or not spec.loader:
-        raise ImportError(f"Could not load Slack client module from {client_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.SlackClient
 
+    def __init__(self, etl_token: str | None = None) -> None:
+        from slack_sdk import WebClient
 
-def slack_client_class() -> type:
-    """Resolve the SlackClient class from package imports or repo checkout paths."""
-    try:
-        from slack.client import SlackClient
+        token = (etl_token or secret("SLACK_ETL_TOKEN", default="")).strip()
+        if not token:
+            raise RuntimeError("SLACK_ETL_TOKEN not set for Slack ETL workflow")
+        self.token = token
+        self._client = WebClient(token=token, timeout=self._api_timeout_seconds())
+        self._user_cache: dict[str, str] = {}
+        self._ratelimit_deadlines: dict[str, float] = {}
 
-        return SlackClient
-    except ModuleNotFoundError:
-        for client_path in repo_slack_client_paths():
-            if client_path.exists():
-                return slack_client_class_from_path(client_path)
-        candidates = ", ".join(str(path) for path in repo_slack_client_paths())
-        raise FileNotFoundError(
-            f"Could not find Slack client module. Tried: {candidates}"
+    @classmethod
+    def _api_timeout_seconds(cls) -> int:
+        raw = secret("SLACK_API_TIMEOUT_SECONDS", default="")
+        if raw is None:
+            return cls._DEFAULT_API_TIMEOUT_SECONDS
+        raw = str(raw).strip()
+        if not raw:
+            return cls._DEFAULT_API_TIMEOUT_SECONDS
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return cls._DEFAULT_API_TIMEOUT_SECONDS
+
+    def _is_ratelimit_error(self, error: Exception) -> bool:
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        response_error = response.get("error") if hasattr(response, "get") else None
+        return status_code == 429 or response_error == "ratelimited"
+
+    def _slack_error_code(self, error: Exception) -> str:
+        response = getattr(error, "response", None)
+        if hasattr(response, "get"):
+            return str(response.get("error") or "unknown_error")
+        return "unknown_error"
+
+    def _is_auth_error(self, error: Exception) -> bool:
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        return status_code in {401, 403} or self._slack_error_code(error) in self._AUTH_ERROR_CODES
+
+    def _raise_slack_api_error(
+        self,
+        error: Exception,
+        *,
+        slack_method: str,
+        requested_channel: str | None = None,
+        resolved_channel: str | None = None,
+    ) -> None:
+        error_code = self._slack_error_code(error)
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if self._is_auth_error(error):
+            raise SlackEtlAuthError(
+                slack_method=slack_method,
+                error_code=error_code,
+                status_code=status_code,
+                requested_channel=requested_channel,
+                resolved_channel=resolved_channel,
+            ) from error
+        raise RuntimeError(f"Slack API error: {error_code}") from error
+
+    def _parse_retry_after(self, value: str | None, default: int = 5) -> float:
+        try:
+            seconds = float(value) if value is not None else float(default)
+        except (TypeError, ValueError):
+            seconds = float(default)
+        return max(seconds, 1.0) + 0.25
+
+    def _retry_on_ratelimit(
+        self,
+        func,
+        *args,
+        method_key: str | None = None,
+        max_retries: int = 6,
+        max_retry_sleep_s: float | None = None,
+        **kwargs,
+    ):
+        key = method_key or getattr(func, "__name__", "slack_api_call")
+        max_sleep = (
+            self._MAX_RATE_LIMIT_SLEEP_SECONDS
+            if max_retry_sleep_s is None
+            else max(0.0, max_retry_sleep_s)
         )
+        for attempt in range(max_retries):
+            blocked_until = self._ratelimit_deadlines.get(key, 0.0)
+            remaining = blocked_until - time.time()
+            if remaining > 0:
+                if remaining > max_sleep:
+                    raise SlackEtlRateLimitError(
+                        slack_method=key,
+                        retry_after=round(remaining, 3),
+                    )
+                time.sleep(remaining)
+
+            try:
+                return func(*args, **kwargs)
+            except Exception as exc:
+                if self._is_ratelimit_error(exc):
+                    retry_after = self._parse_retry_after(
+                        getattr(getattr(exc, "response", None), "headers", {}).get(
+                            "Retry-After"
+                        ),
+                        default=max(1, 2**attempt),
+                    )
+                    self._ratelimit_deadlines[key] = time.time() + retry_after
+                    if attempt < max_retries - 1 and retry_after <= max_sleep:
+                        time.sleep(retry_after)
+                        continue
+                    raise SlackEtlRateLimitError(
+                        slack_method=key,
+                        retry_after=retry_after,
+                    ) from exc
+                raise
+        raise RuntimeError("Max retries exceeded")
+
+    def _format_ts(self, value: float) -> str:
+        return f"{value:.6f}"
+
+    def _normalize_ts(self, value: str | int | float | None) -> str | None:
+        if value in (None, ""):
+            return None
+
+        if isinstance(value, int | float):
+            seconds = float(value)
+            if seconds >= 1_000_000_000_000:
+                seconds /= 1000.0
+            return self._format_ts(seconds)
+
+        raw = str(value).strip()
+        if not raw:
+            return None
+
+        if self._NUMERIC_TS_RE.fullmatch(raw):
+            seconds = float(raw)
+            if "." not in raw and len(raw) >= 13:
+                seconds /= 1000.0
+            return self._format_ts(seconds)
+
+        if self._DATE_ONLY_RE.fullmatch(raw):
+            parsed = dt.datetime.fromisoformat(f"{raw}T00:00:00+00:00")
+            return self._format_ts(parsed.timestamp())
+
+        try:
+            parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"Unsupported timestamp format '{value}'. Use Slack ts, epoch seconds, ISO datetime, or YYYY-MM-DD."
+            ) from exc
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.UTC)
+        return self._format_ts(parsed.timestamp())
+
+    def _message_permalink(self, channel_id: str, ts: str) -> str:
+        return f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
+
+    def _resolve_mentions(self, text: str, user_cache: dict[str, str]) -> str:
+        def replace_mention(match: re.Match) -> str:
+            user_id = match.group(1)
+            name = user_cache.get(user_id, user_id)
+            return f"@{name}"
+
+        return re.sub(r"<@([A-Z0-9]+)>", replace_mention, text)
+
+    def _serialize_message(
+        self,
+        msg: dict[str, Any],
+        channel_id: str,
+        user_cache: dict[str, str],
+        *,
+        channel_name: str | None = None,
+    ) -> dict[str, Any]:
+        user_id = msg.get("user") or msg.get("bot_id", "")
+        username = user_cache.get(user_id, msg.get("username", user_id))
+        if not username:
+            username = msg.get("bot_profile", {}).get("name", "") or user_id
+
+        ts = msg.get("ts", "")
+        message = {
+            "user": username,
+            "user_id": user_id,
+            "text": self._resolve_mentions(msg.get("text", ""), user_cache),
+            "timestamp": ts,
+            "permalink": self._message_permalink(channel_id, ts),
+            "channel_id": channel_id,
+            "thread_ts": msg.get("thread_ts"),
+            "reply_count": msg.get("reply_count", 0),
+            "reply_users": msg.get("reply_users", []),
+            "latest_reply": msg.get("latest_reply"),
+            "type": msg.get("type", "message"),
+            "subtype": msg.get("subtype"),
+            "parent_user_id": msg.get("parent_user_id"),
+            "bot_id": msg.get("bot_id"),
+        }
+        if channel_name is not None:
+            message["channel"] = channel_name
+        return message
+
+    def _collect_cursor_pages(
+        self,
+        fetch_page: Callable[[str | None, int], dict[str, Any]],
+        *,
+        result_key: str,
+        limit: int,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None, bool]:
+        remaining = max(limit, 0)
+        next_cursor = cursor
+        items: list[dict[str, Any]] = []
+
+        while remaining > 0:
+            batch_limit = min(remaining, self._MAX_PAGE_SIZE)
+            response = fetch_page(next_cursor, batch_limit)
+            batch = response.get(result_key, []) or []
+            items.extend(batch)
+
+            next_cursor = response.get("response_metadata", {}).get("next_cursor") or None
+            has_more = bool(next_cursor or response.get("has_more"))
+            if not has_more or not batch:
+                return items, next_cursor, has_more
+
+            remaining = limit - len(items)
+
+        return items, next_cursor, bool(next_cursor)
+
+    def _clean_channel_ref(self, channel: str) -> str:
+        raw = str(channel).strip()
+        if raw.startswith("<#") and raw.endswith(">"):
+            raw = raw[2:-1].split("|", 1)[0]
+        return raw.lstrip("#").strip()
+
+    def _looks_like_channel_id(self, channel: str) -> bool:
+        return bool(self._CHANNEL_ID_RE.fullmatch(self._clean_channel_ref(channel).upper()))
+
+    def _resolve_etl_channel(self, channel: str) -> str:
+        normalized = self._clean_channel_ref(channel)
+        if self._looks_like_channel_id(normalized):
+            return normalized.upper()
+
+        for item in self._list_etl_channels(limit=10_000):
+            if item["name"] == normalized:
+                return item["id"]
+        raise RuntimeError(f"Channel '{channel}' not found through Slack ETL user token")
+
+    def _resolve_etl_channel_name(self, channel: str, channel_id: str) -> str:
+        normalized = channel.lstrip("#")
+        if normalized != channel_id:
+            return normalized
+        return channel_id
+
+    def _etl_access_mode(self) -> str:
+        return "user_token"
+
+    def _get_etl_user_cache(self) -> dict[str, str]:
+        if self._user_cache:
+            return self._user_cache
+
+        user_cache: dict[str, str] = {}
+        try:
+            users_response = self._retry_on_ratelimit(
+                self._client.users_list,
+                method_key="etl.users.list",
+                limit=1000,
+            )
+            for user in users_response.get("members", []):
+                user_cache[user.get("id", "")] = user.get("name", "")
+            self._user_cache = user_cache
+        except SlackEtlRateLimitError:
+            pass
+        except Exception:
+            pass
+        return user_cache
+
+    def _list_etl_channels(
+        self,
+        limit: int = 500,
+        force_refresh: bool = False,
+    ) -> list[dict]:
+        channels = []
+        cursor = None
+
+        while len(channels) < limit:
+            try:
+                response = self._retry_on_ratelimit(
+                    self._client.conversations_list,
+                    method_key="etl.conversations.list",
+                    types="public_channel",
+                    limit=min(limit - len(channels), self._MAX_PAGE_SIZE),
+                    cursor=cursor,
+                    exclude_archived=True,
+                )
+            except SlackEtlRateLimitError:
+                raise
+            except Exception as exc:
+                self._raise_slack_api_error(
+                    exc,
+                    slack_method="conversations.list",
+                )
+
+            for channel in response.get("channels", []):
+                if channel.get("is_private", False):
+                    continue
+                channels.append(
+                    {
+                        "id": channel.get("id", ""),
+                        "name": channel.get("name", ""),
+                        "purpose": channel.get("purpose", {}).get("value", ""),
+                        "topic": channel.get("topic", {}).get("value", ""),
+                        "member_count": channel.get("num_members", 0),
+                        "is_archived": channel.get("is_archived", False),
+                        "is_private": channel.get("is_private", False),
+                        "is_member": channel.get("is_member", False),
+                    }
+                )
+
+            cursor = response.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+        return sorted(channels[:limit], key=lambda x: x["name"])
+
+    def _get_etl_channel_history_page(
+        self,
+        channel: str,
+        limit: int = 50,
+        cursor: str | None = None,
+        oldest: str | int | float | None = None,
+        latest: str | int | float | None = None,
+        inclusive: bool = False,
+    ) -> dict[str, Any]:
+        user_cache = self._get_etl_user_cache()
+        channel_id = self._resolve_etl_channel(channel)
+        channel_name = self._resolve_etl_channel_name(channel, channel_id)
+        normalized_oldest = self._normalize_ts(oldest)
+        normalized_latest = self._normalize_ts(latest)
+
+        requested_limit = max(1, min(int(limit), self._MAX_PAGE_SIZE))
+
+        def fetch_page(next_cursor: str | None, batch_limit: int) -> dict[str, Any]:
+            kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "limit": batch_limit,
+            }
+            if next_cursor:
+                kwargs["cursor"] = next_cursor
+            if normalized_oldest is not None:
+                kwargs["oldest"] = normalized_oldest
+            if normalized_latest is not None:
+                kwargs["latest"] = normalized_latest
+            if normalized_oldest is not None or normalized_latest is not None:
+                kwargs["inclusive"] = inclusive
+            return self._retry_on_ratelimit(
+                self._client.conversations_history,
+                method_key="etl.conversations.history",
+                **kwargs,
+            )
+
+        try:
+            raw_messages, next_cursor, has_more = self._collect_cursor_pages(
+                fetch_page,
+                result_key="messages",
+                limit=requested_limit,
+                cursor=cursor,
+            )
+        except SlackEtlRateLimitError:
+            raise
+        except Exception as exc:
+            self._raise_slack_api_error(
+                exc,
+                slack_method="conversations.history",
+                requested_channel=channel,
+                resolved_channel=channel_id,
+            )
+
+        messages = [self._serialize_message(msg, channel_id, user_cache) for msg in raw_messages]
+
+        return {
+            "channel": channel_name,
+            "channel_id": channel_id,
+            "messages": messages,
+            "count": len(messages),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "window": {
+                "oldest": normalized_oldest,
+                "latest": normalized_latest,
+                "inclusive": inclusive,
+            },
+            "order": "desc",
+        }
+
+    def _get_etl_thread_replies_page(
+        self,
+        channel: str,
+        thread_ts: str,
+        limit: int = 50,
+        cursor: str | None = None,
+        oldest: str | int | float | None = None,
+        latest: str | int | float | None = None,
+        inclusive: bool = True,
+    ) -> dict[str, Any]:
+        user_cache = self._get_etl_user_cache()
+        channel_id = self._resolve_etl_channel(channel)
+        normalized_oldest = self._normalize_ts(oldest)
+        normalized_latest = self._normalize_ts(latest)
+        normalized_thread_ts = self._normalize_ts(thread_ts)
+
+        if normalized_thread_ts is None:
+            raise ValueError("thread_ts is required")
+
+        requested_limit = max(1, min(int(limit), self._MAX_PAGE_SIZE))
+
+        def fetch_page(next_cursor: str | None, batch_limit: int) -> dict[str, Any]:
+            kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "ts": normalized_thread_ts,
+                "limit": batch_limit,
+                "inclusive": inclusive,
+            }
+            if next_cursor:
+                kwargs["cursor"] = next_cursor
+            if normalized_oldest is not None:
+                kwargs["oldest"] = normalized_oldest
+            if normalized_latest is not None:
+                kwargs["latest"] = normalized_latest
+            return self._retry_on_ratelimit(
+                self._client.conversations_replies,
+                method_key="etl.conversations.replies",
+                **kwargs,
+            )
+
+        try:
+            raw_messages, next_cursor, has_more = self._collect_cursor_pages(
+                fetch_page,
+                result_key="messages",
+                limit=requested_limit,
+                cursor=cursor,
+            )
+        except SlackEtlRateLimitError:
+            raise
+        except Exception as exc:
+            self._raise_slack_api_error(
+                exc,
+                slack_method="conversations.replies",
+                requested_channel=channel,
+                resolved_channel=channel_id,
+            )
+
+        messages = [self._serialize_message(msg, channel_id, user_cache) for msg in raw_messages]
+
+        return {
+            "channel_id": channel_id,
+            "thread_ts": normalized_thread_ts,
+            "messages": messages,
+            "count": len(messages),
+            "requested_limit": limit,
+            "effective_limit": requested_limit,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "continuation_available": has_more,
+            "window": {
+                "oldest": normalized_oldest,
+                "latest": normalized_latest,
+                "inclusive": inclusive,
+            },
+            "order": "asc",
+        }
+
+    def _sync_etl_channel_history(
+        self,
+        channel: str,
+        state: dict[str, Any] | None = None,
+        limit: int = 200,
+        lookback_days: int = 30,
+        oldest: str | int | float | None = None,
+        latest: str | int | float | None = None,
+    ) -> dict[str, Any]:
+        sync_state = dict(state or {})
+        cursor = sync_state.get("cursor")
+        watermark = self._normalize_ts(sync_state.get("watermark"))
+        normalized_oldest = self._normalize_ts(oldest) or sync_state.get("oldest")
+        normalized_latest = self._normalize_ts(latest) or sync_state.get("latest")
+
+        if cursor is None and normalized_oldest is None:
+            if watermark is not None:
+                lookback_seconds = max(lookback_days, 0) * 86400
+                normalized_oldest = self._format_ts(max(float(watermark) - lookback_seconds, 0.0))
+            elif lookback_days > 0:
+                normalized_oldest = self._format_ts(max(time.time() - (lookback_days * 86400), 0.0))
+
+        page = self._get_etl_channel_history_page(
+            channel=channel,
+            limit=limit,
+            cursor=cursor,
+            oldest=normalized_oldest,
+            latest=normalized_latest,
+            inclusive=True,
+        )
+
+        latest_seen = watermark
+        if page["messages"]:
+            latest_seen = self._format_ts(
+                max(float(message["timestamp"]) for message in page["messages"])
+            )
+
+        next_state: dict[str, Any] = {
+            "cursor": page["next_cursor"] if page["has_more"] else None,
+            "watermark": latest_seen or watermark,
+            "lookback_days": lookback_days,
+            "oldest": page["window"]["oldest"] if page["has_more"] else None,
+            "latest": page["window"]["latest"] if page["has_more"] else None,
+        }
+
+        return {
+            **page,
+            "sync_state": next_state,
+        }
+
+    def _list_etl_users(self, limit: int = 200) -> list[dict]:
+        users = []
+        cursor = None
+
+        while len(users) < limit:
+            try:
+                kwargs: dict[str, Any] = {
+                    "limit": min(limit - len(users), self._MAX_PAGE_SIZE),
+                }
+                if cursor:
+                    kwargs["cursor"] = cursor
+                response = self._retry_on_ratelimit(
+                    self._client.users_list,
+                    method_key="etl.users.list",
+                    **kwargs,
+                )
+            except SlackEtlRateLimitError:
+                raise
+            except Exception as exc:
+                self._raise_slack_api_error(
+                    exc,
+                    slack_method="users.list",
+                )
+
+            for user in response.get("members", []):
+                if user.get("deleted"):
+                    continue
+                profile = user.get("profile", {}) or {}
+                users.append(
+                    {
+                        "id": user.get("id", ""),
+                        "name": user.get("name", ""),
+                        "real_name": user.get("real_name", ""),
+                        "display_name": profile.get("display_name", ""),
+                        "email": profile.get("email", ""),
+                        "title": profile.get("title", ""),
+                        "is_bot": user.get("is_bot", False),
+                        "is_deleted": user.get("deleted", False),
+                        "team_id": user.get("team_id", "") or user.get("team", ""),
+                    }
+                )
+
+            cursor = response.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+        return sorted(users[:limit], key=lambda x: x["name"])
 
 
 def client() -> SlackSyncClient:
-    """Construct the Slack tool client from either import path or repo layout."""
-    return slack_client_class()()
+    """Construct the workflow-owned Slack ETL client."""
+    return SlackEtlClient()
 
 
 async def enqueue_backfill_job(
