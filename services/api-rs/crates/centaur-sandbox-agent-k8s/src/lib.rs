@@ -213,6 +213,7 @@ impl AgentSandboxBackend {
             stdout.ok_or_else(|| SandboxError::Io("stdout was not attached".to_owned()))?;
         let stderr =
             stderr.ok_or_else(|| SandboxError::Io("stderr was not attached".to_owned()))?;
+        // Keep kube's attach process alive as long as the returned streams are in use.
         Ok(SandboxIo::with_guard(stdin, stdout, stderr, attached))
     }
 }
@@ -302,6 +303,8 @@ fn sandbox_status_from_pod(replicas: i32, pod: Option<&Pod>) -> SandboxStatus {
     if replicas == 0 {
         return SandboxStatus::Suspended;
     }
+    // The backing Pod Ready condition is the attach boundary; phase alone can be Running while
+    // the sandbox is still not ready for I/O.
     let Some(pod) = pod else {
         return SandboxStatus::Created;
     };

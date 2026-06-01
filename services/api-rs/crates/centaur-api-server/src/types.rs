@@ -89,23 +89,37 @@ impl From<&str> for SessionEventName {
     }
 }
 
-pub fn session_event_to_sse(event: SessionEvent) -> Result<Event, SessionEventConversionError> {
-    let event_id = event.event_id;
-    let event_name = SessionEventName::from(event.event_type);
-    let sse = Event::default()
-        .id(event_id.to_string())
-        .event(event_name.as_str());
+pub struct SessionSseEvent(Event);
 
-    match event_name {
-        SessionEventName::OutputLine => {
-            let Some(line) = event.payload.as_str() else {
-                return Err(SessionEventConversionError::OutputLinePayload { event_id });
-            };
-            Ok(sse.data(line))
-        }
-        _ => sse
-            .json_data(event.payload)
-            .map_err(|source| SessionEventConversionError::JsonData { event_id, source }),
+impl TryFrom<SessionEvent> for SessionSseEvent {
+    type Error = SessionEventConversionError;
+
+    fn try_from(event: SessionEvent) -> Result<Self, Self::Error> {
+        let event_id = event.event_id;
+        let event_name = SessionEventName::from(event.event_type);
+        let sse = Event::default()
+            .id(event_id.to_string())
+            .event(event_name.as_str());
+
+        let sse = match event_name {
+            SessionEventName::OutputLine => {
+                let Some(line) = event.payload.as_str() else {
+                    return Err(SessionEventConversionError::OutputLinePayload { event_id });
+                };
+                sse.data(line)
+            }
+            _ => sse
+                .json_data(event.payload)
+                .map_err(|source| SessionEventConversionError::JsonData { event_id, source })?,
+        };
+
+        Ok(Self(sse))
+    }
+}
+
+impl From<SessionSseEvent> for Event {
+    fn from(value: SessionSseEvent) -> Self {
+        value.0
     }
 }
 

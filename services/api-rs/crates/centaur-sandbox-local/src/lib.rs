@@ -6,7 +6,6 @@
 
 use std::{
     collections::HashMap,
-    pin::Pin,
     process::Stdio,
     sync::{
         Arc,
@@ -17,10 +16,9 @@ use std::{
 use async_trait::async_trait;
 use centaur_sandbox_core::{
     ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
-    SandboxResult, SandboxSpec, SandboxStatus,
+    SandboxRead, SandboxResult, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::Mutex,
 };
@@ -135,9 +133,9 @@ impl SandboxBackend for LocalSandboxBackend {
             .take()
             .ok_or_else(|| SandboxError::Io("stderr is already open or closed".to_owned()))?;
         Ok(SandboxIo::new(
-            box_write(stdin),
-            box_read(stdout),
-            box_read(stderr),
+            Box::pin(stdin) as SandboxWrite,
+            Box::pin(stdout) as SandboxRead,
+            Box::pin(stderr) as SandboxRead,
         ))
     }
 
@@ -215,20 +213,6 @@ fn command_parts(spec: &SandboxSpec) -> SandboxResult<(&str, Vec<&str>)> {
         spec.image.as_str(),
         spec.args.iter().map(String::as_str).collect(),
     ))
-}
-
-fn box_read<R>(reader: R) -> Pin<Box<dyn AsyncRead + Send>>
-where
-    R: AsyncRead + Send + 'static,
-{
-    Box::pin(reader)
-}
-
-fn box_write<W>(writer: W) -> Pin<Box<dyn AsyncWrite + Send>>
-where
-    W: AsyncWrite + Send + 'static,
-{
-    Box::pin(writer)
 }
 
 async fn refresh_status(sandbox: &mut LocalSandbox) -> SandboxResult<SandboxStatus> {

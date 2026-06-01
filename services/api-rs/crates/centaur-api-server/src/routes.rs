@@ -19,7 +19,7 @@ use crate::{
     ApiError,
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, EventsQuery,
-        ExecuteSessionRequest, ExecuteSessionResponse, session_event_to_sse, stream_error_sse,
+        ExecuteSessionRequest, ExecuteSessionResponse, SessionSseEvent, stream_error_sse,
     },
 };
 
@@ -113,7 +113,8 @@ async fn stream_events(
         .await?;
     let stream = events.map(|result| {
         let sse = match result {
-            Ok(event) => session_event_to_sse(event)
+            Ok(event) => SessionSseEvent::try_from(event)
+                .map(Event::from)
                 .unwrap_or_else(|error| stream_error_sse(error.to_string())),
             Err(error) => stream_error_sse(error.to_string()),
         };
