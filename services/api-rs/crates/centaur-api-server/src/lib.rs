@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    convert::Infallible,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -23,16 +28,19 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::time::{Instant, sleep};
+use tokio::{sync::Mutex, time::sleep};
+use tracing::warn;
 
 const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_000;
 const DEFAULT_MAX_DURATION_MS: u64 = 60_000;
+type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AppState {
     store: PgSessionStore,
     sandbox_runtime: SandboxRuntime,
+    stdout_pumps: Arc<Mutex<HashSet<String>>>,
 }
 
 pub fn build_router(store: PgSessionStore) -> Router {
@@ -43,6 +51,7 @@ pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: Sandbox
     let state = AppState {
         store,
         sandbox_runtime,
+        stdout_pumps: Arc::new(Mutex::new(HashSet::new())),
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -58,13 +67,24 @@ pub enum SandboxRuntime {
     Mock,
     Backend {
         backend: Arc<dyn SandboxBackend>,
-        spec: SandboxSpec,
+        spec_factory: SandboxSpecFactory,
     },
 }
 
 impl SandboxRuntime {
     pub fn backend(backend: Arc<dyn SandboxBackend>, spec: SandboxSpec) -> Self {
-        Self::Backend { backend, spec }
+        let spec_factory = move |_thread_key: &ThreadKey, _execution_id: &str| spec.clone();
+        Self::backend_with_spec_factory(backend, spec_factory)
+    }
+
+    pub fn backend_with_spec_factory<F>(backend: Arc<dyn SandboxBackend>, spec_factory: F) -> Self
+    where
+        F: Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync + 'static,
+    {
+        Self::Backend {
+            backend,
+            spec_factory: Arc::new(spec_factory),
+        }
     }
 }
 
@@ -148,17 +168,31 @@ async fn execute_session(
         )
         .await?;
 
-    let output_line_count = match run_session_pipe(
-        &state.store,
-        &state.sandbox_runtime,
-        &thread_key,
-        &execution.execution_id,
-        &sandbox_id,
-        &request.input_lines,
-        pipe_options,
-    )
-    .await
-    {
+    let run_result = match &state.sandbox_runtime {
+        SandboxRuntime::Mock => {
+            run_mock_session_pipe(
+                &state.store,
+                &thread_key,
+                &execution.execution_id,
+                &sandbox_id,
+                pipe_options,
+            )
+            .await
+        }
+        SandboxRuntime::Backend { backend, .. } => {
+            match ensure_stdout_pump(&state, &thread_key, &sandbox_id).await {
+                Ok(()) => write_input_lines(
+                    backend.as_ref(),
+                    &SandboxId::new(&sandbox_id),
+                    &request.input_lines,
+                )
+                .await
+                .map(|()| 0),
+                Err(error) => Err(error),
+            }
+        }
+    };
+    let output_line_count = match run_result {
         Ok(output_line_count) => output_line_count,
         Err(error) => {
             let error_message = error.to_string();
@@ -193,6 +227,7 @@ async fn execute_session(
                 "execution_id": execution.execution_id,
                 "thread_key": thread_key.as_str(),
                 "output_line_count": output_line_count,
+                "completion_reason": "input_accepted",
             }),
         )
         .await?;
@@ -227,7 +262,10 @@ async fn ensure_session_sandbox(
                 .await?;
             Ok(sandbox_id)
         }
-        SandboxRuntime::Backend { backend, spec } => {
+        SandboxRuntime::Backend {
+            backend,
+            spec_factory,
+        } => {
             if let Some(sandbox_id) = existing_sandbox_id {
                 let id = SandboxId::new(sandbox_id);
                 match backend.status(&id).await {
@@ -239,10 +277,8 @@ async fn ensure_session_sandbox(
                 }
             }
 
-            let handle = backend
-                .create(spec.clone())
-                .await
-                .map_err(ApiError::Sandbox)?;
+            let spec = spec_factory(thread_key, execution_id);
+            let handle = backend.create(spec).await.map_err(ApiError::Sandbox)?;
             store
                 .update_sandbox_id(thread_key, Some(handle.id.as_str()))
                 .await?;
@@ -251,97 +287,135 @@ async fn ensure_session_sandbox(
     }
 }
 
-async fn run_session_pipe(
+async fn run_mock_session_pipe(
     store: &PgSessionStore,
-    runtime: &SandboxRuntime,
     thread_key: &ThreadKey,
     execution_id: &str,
     sandbox_id: &str,
-    input_lines: &[String],
     options: PipeOptions,
 ) -> Result<usize, ApiError> {
-    match runtime {
-        SandboxRuntime::Mock => {
-            let mut output_line_count = 0;
-            let output_lines = mock_app_server_output_lines(thread_key, execution_id, sandbox_id);
-            for (index, line) in output_lines.iter().enumerate() {
-                append_output_line(store, thread_key, execution_id, line).await?;
-                output_line_count += 1;
-                if index + 1 < output_lines.len() {
-                    sleep(Duration::from_millis(200)).await;
-                }
-            }
-            Ok(output_line_count)
+    let mut output_line_count = 0;
+    let output_lines = mock_app_server_output_lines(thread_key, execution_id, sandbox_id);
+    for (index, line) in output_lines.iter().enumerate() {
+        append_output_line(store, thread_key, Some(execution_id), line).await?;
+        output_line_count += 1;
+        if index + 1 < output_lines.len() {
+            sleep(Duration::from_millis(200)).await;
         }
-        SandboxRuntime::Backend { backend, .. } => {
-            let id = SandboxId::new(sandbox_id);
-            for line in input_lines {
-                write_input_line(backend.as_ref(), &id, line).await?;
+    }
+    if options.idle_timeout < Duration::from_millis(DEFAULT_IDLE_TIMEOUT_MS)
+        || options.max_duration < Duration::from_millis(DEFAULT_MAX_DURATION_MS)
+    {
+        sleep(options.idle_timeout).await;
+    }
+    Ok(output_line_count)
+}
+
+async fn ensure_stdout_pump(
+    state: &AppState,
+    thread_key: &ThreadKey,
+    sandbox_id: &str,
+) -> Result<(), ApiError> {
+    let SandboxRuntime::Backend { backend, .. } = &state.sandbox_runtime else {
+        return Ok(());
+    };
+
+    let mut pumps = state.stdout_pumps.lock().await;
+    if !pumps.insert(sandbox_id.to_owned()) {
+        return Ok(());
+    }
+    drop(pumps);
+
+    let store = state.store.clone();
+    let backend = backend.clone();
+    let thread_key = thread_key.clone();
+    let sandbox_id = SandboxId::new(sandbox_id);
+    let pump_key = sandbox_id.as_str().to_owned();
+    let stdout_pumps = state.stdout_pumps.clone();
+
+    tokio::spawn(async move {
+        let result = run_stdout_pump(store.clone(), backend, thread_key.clone(), sandbox_id).await;
+        if let Err(error) = result {
+            warn!(%pump_key, %error, "session stdout pump failed");
+            let _ = store
+                .append_event(
+                    &thread_key,
+                    None,
+                    "session.stdout_pump_failed",
+                    json!({
+                        "sandbox_id": pump_key,
+                        "error": error.to_string(),
+                    }),
+                )
+                .await;
+        }
+        stdout_pumps.lock().await.remove(&pump_key);
+    });
+
+    Ok(())
+}
+
+async fn run_stdout_pump(
+    store: PgSessionStore,
+    backend: Arc<dyn SandboxBackend>,
+    thread_key: ThreadKey,
+    sandbox_id: SandboxId,
+) -> Result<(), ApiError> {
+    let mut buffer = String::new();
+    loop {
+        match backend
+            .read_bytes(
+                &sandbox_id,
+                ReadOptions {
+                    stream: OutputStream::Stdout,
+                    after_offset: None,
+                    max_bytes: 8192,
+                    timeout_ms: Some(1_000),
+                },
+            )
+            .await
+            .map_err(ApiError::Sandbox)?
+        {
+            ReadResult::Bytes { bytes, .. } => {
+                let chunk = std::str::from_utf8(&bytes).map_err(|err| {
+                    ApiError::BadRequest(format!("sandbox stdout was not UTF-8: {err}"))
+                })?;
+                buffer.push_str(chunk);
+
+                while let Some(index) = buffer.find('\n') {
+                    let line = buffer[..index].trim_end_matches('\r').to_owned();
+                    buffer.drain(..=index);
+                    append_output_line(&store, &thread_key, None, &line).await?;
+                }
             }
-
-            let mut buffer = String::new();
-            let mut output_line_count = 0;
-            let started_at = Instant::now();
-            let mut last_output_at: Option<Instant> = None;
-            let deadline = started_at + options.max_duration;
-
-            loop {
-                if Instant::now() >= deadline {
-                    output_line_count +=
-                        flush_partial_output(store, thread_key, execution_id, &mut buffer).await?;
-                    return Ok(output_line_count);
-                }
-
-                match backend
-                    .read_bytes(
-                        &id,
-                        ReadOptions {
-                            stream: OutputStream::Stdout,
-                            after_offset: None,
-                            max_bytes: 8192,
-                            timeout_ms: Some(1_000),
-                        },
+            ReadResult::TimedOut => {}
+            ReadResult::Eof => {
+                flush_partial_output(&store, &thread_key, None, &mut buffer).await?;
+                store
+                    .append_event(
+                        &thread_key,
+                        None,
+                        "session.stdout_eof",
+                        json!({
+                            "sandbox_id": sandbox_id.as_str(),
+                        }),
                     )
-                    .await
-                    .map_err(ApiError::Sandbox)?
-                {
-                    ReadResult::Bytes { bytes, .. } => {
-                        let chunk = std::str::from_utf8(&bytes).map_err(|err| {
-                            ApiError::BadRequest(format!("sandbox stdout was not UTF-8: {err}"))
-                        })?;
-                        last_output_at = Some(Instant::now());
-                        buffer.push_str(chunk);
-
-                        while let Some(index) = buffer.find('\n') {
-                            let line = buffer[..index].trim_end_matches('\r').to_owned();
-                            buffer.drain(..=index);
-                            append_output_line(store, thread_key, execution_id, &line).await?;
-                            output_line_count += 1;
-                        }
-                    }
-                    ReadResult::TimedOut => {
-                        let idle_reference = last_output_at.unwrap_or(started_at);
-                        if idle_reference.elapsed() >= options.idle_timeout
-                            && (output_line_count > 0
-                                || !buffer.is_empty()
-                                || input_lines.is_empty())
-                        {
-                            output_line_count +=
-                                flush_partial_output(store, thread_key, execution_id, &mut buffer)
-                                    .await?;
-                            return Ok(output_line_count);
-                        }
-                    }
-                    ReadResult::Eof => {
-                        output_line_count +=
-                            flush_partial_output(store, thread_key, execution_id, &mut buffer)
-                                .await?;
-                        return Ok(output_line_count);
-                    }
-                }
+                    .await?;
+                return Ok(());
             }
         }
     }
+}
+
+async fn write_input_lines(
+    backend: &dyn SandboxBackend,
+    sandbox_id: &SandboxId,
+    input_lines: &[String],
+) -> Result<(), ApiError> {
+    for line in input_lines {
+        write_input_line(backend, sandbox_id, line).await?;
+    }
+    Ok(())
 }
 
 async fn write_input_line(
@@ -362,7 +436,7 @@ async fn write_input_line(
 async fn flush_partial_output(
     store: &PgSessionStore,
     thread_key: &ThreadKey,
-    execution_id: &str,
+    execution_id: Option<&str>,
     buffer: &mut String,
 ) -> Result<usize, ApiError> {
     if buffer.is_empty() {
@@ -377,13 +451,13 @@ async fn flush_partial_output(
 async fn append_output_line(
     store: &PgSessionStore,
     thread_key: &ThreadKey,
-    execution_id: &str,
+    execution_id: Option<&str>,
     line: &str,
 ) -> Result<(), ApiError> {
     store
         .append_event(
             thread_key,
-            Some(execution_id),
+            execution_id,
             SESSION_OUTPUT_LINE_EVENT,
             Value::String(line.to_owned()),
         )
@@ -455,7 +529,10 @@ async fn stream_events(
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let thread_key = parse_thread_key(raw_thread_key)?;
-    state.store.get_session(&thread_key).await?;
+    let session = state.store.get_session(&thread_key).await?;
+    if let Some(sandbox_id) = session.sandbox_id.as_deref() {
+        ensure_stdout_pump(&state, &thread_key, sandbox_id).await?;
+    }
 
     let stream = stream::unfold(
         SessionEventStreamState {
