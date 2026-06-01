@@ -6,13 +6,19 @@ use centaur_session_core::{
     ExecutionStatus, HarnessType, Session, SessionEvent, SessionExecution, SessionMessage,
     SessionMessageInput, SessionStatus, ThreadKey, empty_object,
 };
+use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    FromRow, PgPool,
+    postgres::{PgListener, PgPoolOptions},
+};
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
 
 #[derive(Clone)]
 pub struct PgSessionStore {
@@ -39,6 +45,12 @@ impl PgSessionStore {
     pub async fn run_migrations(&self) -> Result<(), SessionStoreError> {
         MIGRATOR.run(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn listen_session_events(&self) -> Result<SessionEventListener, SessionStoreError> {
+        let mut listener = PgListener::connect_with(&self.pool).await?;
+        listener.listen(SESSION_EVENTS_CHANNEL).await?;
+        Ok(SessionEventListener { listener })
     }
 
     pub async fn create_or_get_session(
@@ -341,6 +353,36 @@ impl PgSessionStore {
     }
 }
 
+pub struct SessionEventListener {
+    listener: PgListener,
+}
+
+impl SessionEventListener {
+    pub async fn recv(&mut self) -> Result<SessionEventNotification, SessionStoreError> {
+        loop {
+            let notification = self.listener.recv().await?;
+            if notification.channel() != SESSION_EVENTS_CHANNEL {
+                continue;
+            }
+
+            let payload = notification.payload();
+            return serde_json::from_str(payload).map_err(|error| {
+                SessionStoreError::InvalidNotification {
+                    channel: notification.channel().to_owned(),
+                    payload: payload.to_owned(),
+                    error,
+                }
+            });
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct SessionEventNotification {
+    pub thread_key: String,
+    pub event_id: i64,
+}
+
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
     #[error("session not found for thread_key {thread_key}")]
@@ -355,6 +397,12 @@ pub enum SessionStoreError {
     },
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),
+    #[error("invalid notification payload on {channel}: {payload}: {error}")]
+    InvalidNotification {
+        channel: String,
+        payload: String,
+        error: serde_json::Error,
+    },
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
@@ -489,4 +537,23 @@ fn prefixed_id(prefix: &str) -> String {
 
 pub fn default_metadata(metadata: Option<Value>) -> Value {
     metadata.unwrap_or_else(empty_object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionEventNotification;
+
+    #[test]
+    fn parses_session_event_notification_payload() {
+        let notification: SessionEventNotification =
+            serde_json::from_str(r#"{"thread_key":"cli:test","event_id":42}"#).unwrap();
+
+        assert_eq!(
+            notification,
+            SessionEventNotification {
+                thread_key: "cli:test".to_owned(),
+                event_id: 42,
+            }
+        );
+    }
 }

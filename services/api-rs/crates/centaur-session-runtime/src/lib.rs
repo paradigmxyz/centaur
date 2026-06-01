@@ -12,17 +12,24 @@ use centaur_sandbox_manager::SandboxManager;
 use centaur_session_core::{
     HarnessType, Session, SessionEvent, SessionExecution, SessionMessageInput, ThreadKey,
 };
-use centaur_session_sqlx::{PgSessionStore, SessionStoreError, default_metadata};
+use centaur_session_sqlx::{
+    PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
+};
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::{io, sync::Mutex, time::sleep};
+use tokio::{
+    io,
+    sync::Mutex,
+    time::{Instant, Interval, MissedTickBehavior, interval_at},
+};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::warn;
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
 const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
+const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
@@ -69,6 +76,8 @@ struct EventStreamState {
     thread_key: ThreadKey,
     after_event_id: i64,
     pending: VecDeque<SessionEvent>,
+    listener: SessionEventListener,
+    safety_tick: Interval,
     done: bool,
 }
 
@@ -206,10 +215,13 @@ impl SessionRuntime {
             self.ensure_session_pipe(thread_key, sandbox_id).await?;
         }
 
+        let listener = self.store.listen_session_events().await?;
+
         Ok(session_event_stream(
             self.store.clone(),
             thread_key.clone(),
             after_event_id,
+            listener,
         ))
     }
 
@@ -389,6 +401,7 @@ fn session_event_stream(
     store: PgSessionStore,
     thread_key: ThreadKey,
     after_event_id: i64,
+    listener: SessionEventListener,
 ) -> impl Stream<Item = Result<SessionEvent, SessionRuntimeError>> {
     stream::unfold(
         EventStreamState {
@@ -396,6 +409,15 @@ fn session_event_stream(
             thread_key,
             after_event_id,
             pending: VecDeque::new(),
+            listener,
+            safety_tick: {
+                let mut tick = interval_at(
+                    Instant::now() + EVENT_STREAM_SAFETY_POLL_INTERVAL,
+                    EVENT_STREAM_SAFETY_POLL_INTERVAL,
+                );
+                tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                tick
+            },
             done: false,
         },
         |mut state| async move {
@@ -412,7 +434,26 @@ fn session_event_stream(
                     .list_events_after(&state.thread_key, state.after_event_id, 100)
                     .await
                 {
-                    Ok(events) if events.is_empty() => sleep(Duration::from_millis(250)).await,
+                    Ok(events) if events.is_empty() => loop {
+                        tokio::select! {
+                            notification = state.listener.recv() => {
+                                match notification {
+                                    Ok(notification)
+                                        if notification.thread_key == state.thread_key.as_str()
+                                            && notification.event_id > state.after_event_id =>
+                                    {
+                                        break;
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        state.done = true;
+                                        return Some((Err(SessionRuntimeError::Store(error)), state));
+                                    }
+                                }
+                            }
+                            _ = state.safety_tick.tick() => break,
+                        }
+                    },
                     Ok(events) => state.pending = events.into(),
                     Err(error) => {
                         state.done = true;
