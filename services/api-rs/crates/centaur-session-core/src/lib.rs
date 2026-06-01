@@ -222,8 +222,8 @@ mod tests {
 
     #[test]
     fn thread_key_accepts_namespaced_values() {
-        let key = ThreadKey::parse("slack:C123:1780000000.000000").unwrap();
-        assert_eq!(key.as_str(), "slack:C123:1780000000.000000");
+        let key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        assert_eq!(key.as_str(), "chat:C123:1780000000.000000");
     }
 
     #[test]

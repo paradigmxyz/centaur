@@ -17,6 +17,7 @@
     "check:types": "bun tsgo --project tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@centaur/rendering": "workspace:*",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.218.0",
     "@opentelemetry/resources": "^2.7.1",

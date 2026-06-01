@@ -173,6 +173,19 @@ export class AgentSessionRenderer {
     return streamedTextSourceChars(state)
   }
 
+  async title(sessionId: string, title: string): Promise<void> {
+    const state = requireSession(sessionId)
+    state.title = title
+    const threads = this.client.assistant?.threads
+    if (!threads?.setTitle) return
+    const response = await threads.setTitle({
+      channel_id: state.channel,
+      thread_ts: state.parentTs,
+      title
+    })
+    if (!response.ok) throw new Error(response.error ?? 'assistant.threads.setTitle failed')
+  }
+
   async blocks(
     sessionId: string,
     blocks: AnyBlock[],

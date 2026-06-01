@@ -8,8 +8,8 @@ Target: `services/api-rs`
 
 Introduce `Session` as the durable control-plane object above the sandbox
 runtime abstraction from RFC 0001. A session represents one ongoing agent
-conversation, regardless of whether it was started by Slack, a workflow, a CLI,
-or another caller.
+conversation, regardless of whether it was started by a chat app, a workflow, a
+CLI, or another caller.
 
 The session is the source of truth for:
 
@@ -41,7 +41,7 @@ The public API should be small:
 - Keep clients thin: create/get session, append messages, execute, stream events.
 - Make output replayable through durable session events, not process-local
   streams.
-- Keep this layer independent from any specific caller such as Slack or
+- Keep this layer independent from any specific caller such as a chat app or
   workflows.
 
 ## Non-goals
@@ -49,7 +49,7 @@ The public API should be small:
 - Exposing sandbox create, pause, resume, or stop as public API endpoints.
 - Designing every migration detail from the current Python API.
 - Preserving `assignment_generation` as a public client concept.
-- Designing Slack final delivery, workflow scheduling, tool discovery, API key
+- Designing chat final delivery, workflow scheduling, tool discovery, API key
   management, or persona selection in detail.
 - Making `sandbox_id` historical. The session stores the current sandbox only;
   historical sandbox lifecycle can be represented as events if needed.
@@ -87,9 +87,9 @@ Session {
 
 Field notes:
 
-- `thread_key` is the unique public key and storage primary key. For Slack it
-  can be the Slack thread key. For workflows it can be a workflow-owned key. For
-  CLI or test callers it can be any caller-owned stable key.
+- `thread_key` is the unique public key and storage primary key. For chat apps
+  it can be the chat thread key. For workflows it can be a workflow-owned key.
+  For CLI or test callers it can be any caller-owned stable key.
 - `sandbox_id` is the current runtime assignment. It is nullable before the
   first execution and can be overwritten when the control plane replaces a dead
   sandbox.
@@ -131,7 +131,7 @@ without relying on a still-open process stream.
 
 `thread_key` should be constrained rather than arbitrary unbounded text:
 
-- namespaced by source, for example `slack:C123:1780000000.000000`
+- namespaced by source, for example `chat:C123:1780000000.000000`
 - stable for the lifetime of the conversation
 - globally unique, or unique inside an explicit tenant scope
 - bounded to a practical maximum length, for example 512 bytes
@@ -155,7 +155,7 @@ Example request:
 {
   "harness_type": "amp",
   "metadata": {
-    "source": "slack",
+    "source": "chat",
     "channel_id": "C123",
     "user_id": "U123"
   }
@@ -166,7 +166,7 @@ Example response:
 
 ```json
 {
-  "thread_key": "slack:C123:1780000000.000000",
+  "thread_key": "chat:C123:1780000000.000000",
   "sandbox_id": null,
   "harness_type": "amp",
   "harness_thread_id": null,
@@ -201,7 +201,7 @@ Example request:
         {"type": "text", "text": "Reply with exactly PONG and nothing else."}
       ],
       "metadata": {
-        "source": "slack",
+        "source": "chat",
         "user_id": "U123"
       }
     }
@@ -247,7 +247,7 @@ Example request:
   "idle_timeout_ms": 1000,
   "max_duration_ms": 60000,
   "metadata": {
-    "source": "slack"
+    "source": "chat"
   }
 }
 ```
@@ -258,7 +258,7 @@ Example response:
 {
   "ok": true,
   "execution_id": "exe_123",
-  "thread_key": "slack:C123:1780000000.000000",
+  "thread_key": "chat:C123:1780000000.000000",
   "status": "queued"
 }
 ```
@@ -293,7 +293,7 @@ Example stream:
 ```text
 id: 101
 event: session.execution_started
-data: {"execution_id":"exe_123","thread_key":"slack:C123:1780000000.000000"}
+data: {"execution_id":"exe_123","thread_key":"chat:C123:1780000000.000000"}
 
 id: 102
 event: session.output.line
@@ -366,7 +366,7 @@ A migration can be incremental:
 
 1. Add session tables and endpoints.
 2. Implement the endpoints as wrappers around the existing execution machinery.
-3. Teach Slackbot, workflows, and CLI callers to use sessions.
+3. Teach chat adapters, workflows, and CLI callers to use sessions.
 4. Keep legacy endpoints as compatibility shims until callers have moved.
 5. Remove legacy public concepts once sessions are the only client contract.
 
@@ -401,5 +401,5 @@ A migration can be incremental:
 Start with `Session` as the only public durable conversation object. Keep the
 API small, make `thread_key` the canonical public address and primary key, treat
 `sandbox_id` as a replaceable current binding, and make SSE replay come from
-durable session events. This gives Slack, workflows, and future clients one
-protocol without exposing sandbox lifecycle details.
+durable session events. This gives chat adapters, workflows, and future clients
+one protocol without exposing sandbox lifecycle details.

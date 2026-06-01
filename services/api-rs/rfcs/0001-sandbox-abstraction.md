@@ -35,7 +35,7 @@ runtime layer.
 ## Non-goals
 
 - Exposing sandbox create/stop/pause/resume through public API endpoints.
-- Porting durable execution, workflow engine, Slack delivery, API key issuance,
+- Porting durable execution, workflow engine, chat delivery, API key issuance,
   tool discovery, or assignment management.
 - Encoding Centaur-specific agent concepts in `SandboxSpec`.
 - Designing the final database schema for sandbox ownership.

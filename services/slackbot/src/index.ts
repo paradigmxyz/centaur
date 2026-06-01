@@ -16,18 +16,19 @@ import {
   spanAttributes,
   withSpan
 } from './otel'
-import { AgentSessionRenderer, withAgentSessionLock } from './slack/agent-session'
+import { SlackChatSDKRenderer, SlackStreamRenderer, type SlackStreamChunk } from './rendering/slack'
+import { withAgentSessionLock } from './slack/agent-session'
 import { authorizeSlackOrg } from './slack/authorization'
 import { CodexSessionRenderer, hasActiveCodexSession } from './slack/codex-session'
 import { EventDeduper, slackDedupKey } from './slack/dedup'
 import { duplicateSlackAlertText, type DuplicateSlackEventDetails } from './slack/duplicate-alert'
 import { EnvSlackInstallationStore, SlackClientResolver } from './slack/installations'
 import { normalizeSlackEnvelope } from './slack/normalize'
-import { markdownToStreamChunks } from './slack/render'
 import { verifySlackSignature } from './slack/signature'
 import { shouldAckWithReaction } from './slack/trivial-ack'
 import type { NormalizedSlackEvent, SlackEnvelope } from './slack/types'
-import type { AnyBlock, AnyChunk } from '@slack/types'
+import type { RendererTaskBody } from '@centaur/rendering'
+import type { AnyBlock } from '@slack/types'
 import type { WebClient } from '@slack/web-api'
 
 const config = loadConfig()
@@ -256,22 +257,24 @@ app.post('/api/slack/streams/start', apiKeyMiddleware, async c => {
     channel: string
     thread_ts: string
     markdown?: string
-    chunks?: AnyChunk[]
+    chunks?: SlackStreamChunk[]
     recipient_team_id?: string
     recipient_user_id?: string
     task_display_mode?: 'plan' | 'timeline'
   }>()
   const { client } = await resolver.resolve({})
   try {
-    const response = await client.chat.startStream({
-      channel: body.channel,
-      thread_ts: body.thread_ts,
-      chunks: body.chunks ?? markdownToStreamChunks(body.markdown ?? ' '),
-      recipient_team_id: body.recipient_team_id,
-      recipient_user_id: body.recipient_user_id,
-      task_display_mode: body.task_display_mode
+    const response = await new SlackStreamRenderer(client).start({
+      target: {
+        channel: body.channel,
+        threadTs: body.thread_ts,
+        recipientTeamId: body.recipient_team_id,
+        recipientUserId: body.recipient_user_id
+      },
+      markdown: body.markdown,
+      chunks: body.chunks,
+      taskDisplayMode: body.task_display_mode
     })
-    if (!response.ok) return c.json(response, 502)
     return c.json({ ok: true, channel: response.channel, ts: response.ts })
   } catch (error) {
     return slackApiErrorResponse(c, error)
@@ -283,16 +286,18 @@ app.post('/api/slack/streams/append', apiKeyMiddleware, async c => {
     channel: string
     ts: string
     markdown?: string
-    chunks?: AnyChunk[]
+    chunks?: SlackStreamChunk[]
   }>()
   const { client } = await resolver.resolve({})
   try {
-    const response = await client.chat.appendStream({
-      channel: body.channel,
-      ts: body.ts,
-      chunks: body.chunks ?? markdownToStreamChunks(body.markdown ?? ' ')
+    const response = await new SlackStreamRenderer(client).append({
+      target: {
+        channel: body.channel,
+        ts: body.ts
+      },
+      markdown: body.markdown,
+      chunks: body.chunks
     })
-    if (!response.ok) return c.json(response, 502)
     return c.json({ ok: true, channel: response.channel, ts: response.ts })
   } catch (error) {
     return slackApiErrorResponse(c, error)
@@ -304,18 +309,20 @@ app.post('/api/slack/streams/stop', apiKeyMiddleware, async c => {
     channel: string
     ts: string
     markdown?: string
-    chunks?: AnyChunk[]
+    chunks?: SlackStreamChunk[]
     blocks?: AnyBlock[]
   }>()
   const { client } = await resolver.resolve({})
   try {
-    const response = await client.chat.stopStream({
-      channel: body.channel,
-      ts: body.ts,
-      chunks: body.chunks ?? (body.markdown ? markdownToStreamChunks(body.markdown) : undefined),
+    const response = await new SlackStreamRenderer(client).stop({
+      target: {
+        channel: body.channel,
+        ts: body.ts
+      },
+      markdown: body.markdown,
+      chunks: body.chunks,
       blocks: body.blocks
     })
-    if (!response.ok) return c.json(response, 502)
     return c.json({ ok: true, channel: response.channel, ts: response.ts })
   } catch (error) {
     return slackApiErrorResponse(c, error)
@@ -333,13 +340,15 @@ app.post('/api/slack/agent-sessions', apiKeyMiddleware, async c => {
   }>()
   const { client } = await resolver.resolve({})
   try {
-    const result = await new AgentSessionRenderer(client).open({
-      channel: body.channel,
-      parentTs: body.parent_ts,
-      recipientTeamId: body.recipient_team_id,
-      recipientUserId: body.recipient_user_id,
+    const result = await new SlackChatSDKRenderer(client).open({
       title: body.title,
-      header: body.header
+      header: body.header,
+      target: {
+        channel: body.channel,
+        parentTs: body.parent_ts,
+        recipientTeamId: body.recipient_team_id,
+        recipientUserId: body.recipient_user_id
+      }
     })
     return c.json({ ok: true, session_id: result.sessionId })
   } catch (error) {
@@ -353,7 +362,10 @@ app.post('/api/slack/agent-sessions/:session_id/text', apiKeyMiddleware, async c
   try {
     const sessionId = c.req.param('session_id')
     await withAgentSessionLock(sessionId, () =>
-      new AgentSessionRenderer(client).text(sessionId, body.markdown)
+      new SlackChatSDKRenderer(client).render(sessionId, {
+        type: 'renderer.message.delta',
+        delta: body.markdown
+      })
     )
     return c.json({ ok: true })
   } catch (error) {
@@ -373,7 +385,16 @@ app.post('/api/slack/agent-sessions/:session_id/step', apiKeyMiddleware, async c
   try {
     const sessionId = c.req.param('session_id')
     await withAgentSessionLock(sessionId, () =>
-      new AgentSessionRenderer(client).step(sessionId, body)
+      new SlackChatSDKRenderer(client).render(sessionId, {
+        type: 'renderer.task.update',
+        task: {
+          id: body.id,
+          title: body.title,
+          status: body.status ?? 'in_progress',
+          details: rendererTaskBody(body.details),
+          output: rendererTaskBody(body.output)
+        }
+      })
     )
     return c.json({ ok: true })
   } catch (error) {
@@ -390,7 +411,7 @@ app.post('/api/slack/agent-sessions/:session_id/done', apiKeyMiddleware, async c
       if (hasActiveCodexSession(sessionId)) {
         await new CodexSessionRenderer(client).done(sessionId, body.thread_id)
       } else {
-        await new AgentSessionRenderer(client).done(sessionId)
+        await new SlackChatSDKRenderer(client).close(sessionId, { type: 'renderer.done' })
       }
     })
     return c.json({ ok: true })
@@ -658,6 +679,11 @@ function slackApiErrorResponse(c: Context, error: unknown) {
     },
     502
   )
+}
+
+function rendererTaskBody(markdown: string | undefined): RendererTaskBody | undefined {
+  if (!markdown) return undefined
+  return [{ type: 'text', text: markdown }]
 }
 
 type SlackCommandPayload = {

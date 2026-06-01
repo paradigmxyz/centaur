@@ -1,19 +1,19 @@
 {
-  "name": "@centaur/harness-events",
+  "name": "@centaur/rendering",
   "version": "0.1.0",
   "private": true,
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
-    "test": "vitest run",
+    "test": "bun test src",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "@types/node": "^25.7.0",
-    "typescript": "5.9.3",
-    "vitest": "^4.1.0"
-  },
   "dependencies": {
-    "chat": "^4.29.0"
+    "@centaur/harness-events": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "@types/node": "^25.7.0",
+    "typescript": "5.9.3"
   }
 }

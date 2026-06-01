@@ -354,3 +354,10 @@ export type ServerNotification =
       params: ReasoningSummaryTextDeltaNotification;
     }
   | { method: "item/reasoning/textDelta"; params: ReasoningTextDeltaNotification };
+
+export type RustSessionStreamEvent = {
+  eventId?: number;
+  eventKind?: string;
+  event?: string;
+  data?: unknown;
+};
