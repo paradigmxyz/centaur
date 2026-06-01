@@ -811,6 +811,52 @@ async def refresh_etl_metrics(pool: Pool) -> None:
         max(max_sync_freshness_s, 0.0)
     )
 
+    drive_scope_rows = await pool.fetch(
+        "SELECT scope_id, watermark_time, last_success_at, last_error, updated_at "
+        "FROM google_drive_sync_checkpoints"
+    )
+    drive_active_scopes = len(drive_scope_rows)
+    if os.getenv("GOOGLE_DRIVE_ETL_ENABLED", "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        drive_active_scopes = max(drive_active_scopes, 1)
+    ETL_ACTIVE_SCOPES.labels(source="google_drive", source_type="doc").set(
+        drive_active_scopes
+    )
+    failed_scopes = 0
+    max_lag_s = 0.0
+    max_sync_freshness_s = 0.0
+    for row in drive_scope_rows:
+        has_error = bool(str(row["last_error"] or "").strip())
+        if has_error:
+            failed_scopes += 1
+        watermark_time = row["watermark_time"]
+        if isinstance(watermark_time, dt.datetime):
+            max_lag_s = max(
+                max_lag_s,
+                (now - watermark_time.astimezone(dt.timezone.utc)).total_seconds(),
+            )
+        if not has_error:
+            success_at = row["last_success_at"] or row["updated_at"]
+            if isinstance(success_at, dt.datetime):
+                max_sync_freshness_s = max(
+                    max_sync_freshness_s,
+                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                )
+    ETL_FAILED_SCOPES.labels(source="google_drive", source_type="doc").set(
+        failed_scopes
+    )
+    ETL_SOURCE_CURSOR_LAG_SECONDS.labels(source="google_drive", source_type="doc").set(
+        max(max_lag_s, 0.0)
+    )
+    ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(
+        source="google_drive", source_type="doc"
+    ).set(max(max_sync_freshness_s, 0.0))
+
     backfill_rows = await pool.fetch(
         "SELECT job_type, status, COUNT(*) AS cnt, MIN(updated_at) AS oldest_updated_at "
         "FROM slack_sync_backfill_jobs "
@@ -850,6 +896,25 @@ async def refresh_etl_metrics(pool: Pool) -> None:
         else:
             projection_lag_s = max((now - raw_latest).total_seconds(), 0.0)
     COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.labels(source="slack").set(projection_lag_s)
+
+    raw_latest = await pool.fetchval(
+        "SELECT MAX(updated_at) FROM google_drive_sync_files"
+    )
+    projected_latest = await pool.fetchval(
+        "SELECT MAX(source_updated_at) FROM company_context_documents "
+        "WHERE source = 'google_drive'"
+    )
+    projection_lag_s = 0.0
+    if isinstance(raw_latest, dt.datetime):
+        raw_latest = raw_latest.astimezone(dt.timezone.utc)
+        if isinstance(projected_latest, dt.datetime):
+            projected_latest = projected_latest.astimezone(dt.timezone.utc)
+            projection_lag_s = max((raw_latest - projected_latest).total_seconds(), 0.0)
+        else:
+            projection_lag_s = max((now - raw_latest).total_seconds(), 0.0)
+    COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.labels(source="google_drive").set(
+        projection_lag_s
+    )
 
 
 # ---------------------------------------------------------------------------

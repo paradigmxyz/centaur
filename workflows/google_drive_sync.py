@@ -497,6 +497,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                             error=error,
                             run_id=run_id,
                         )
+                        ctx.log(
+                            "google_drive_sync_file_failed",
+                            scope_id=scope_id,
+                            file_id=file_id,
+                            file_name=str(file.get("name") or ""),
+                            error=error,
+                        )
                 page_token = page.get("nextPageToken")
                 if not page_token:
                     break
@@ -510,6 +517,10 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             ctx.log(
                 "google_drive_sync_scope_completed",
                 scope_id=scope_id,
+                files_seen=counts["files_seen"],
+                files_upserted=counts["files_upserted"],
+                docs_fetched=counts["docs_fetched"],
+                docs_upserted=counts["docs_upserted"],
                 watermark=_rfc3339(successful_watermark)
                 if successful_watermark
                 else "",

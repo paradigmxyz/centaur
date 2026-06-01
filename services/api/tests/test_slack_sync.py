@@ -169,7 +169,8 @@ async def _clear_slack_sync_tables(db_pool, monkeypatch):
     monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
     monkeypatch.delenv("SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS", raising=False)
     await db_pool.execute(
-        "TRUNCATE TABLE slack_sync_backfill_jobs, slack_sync_checkpoints, "
+        "TRUNCATE TABLE company_context_documents, google_drive_sync_checkpoints, "
+        "google_drive_sync_files, google_drive_sync_runs, slack_sync_backfill_jobs, slack_sync_checkpoints, "
         "slack_sync_messages, slack_sync_runs, slack_sync_users, slack_sync_channels CASCADE",
     )
     yield
@@ -1508,11 +1509,40 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
         json.dumps({"thread_ts": "3000000.000000"}),
         now - dt.timedelta(seconds=60),
     )
+    await db_pool.execute(
+        "INSERT INTO google_drive_sync_checkpoints ("
+        "scope_id, watermark_time, last_success_at, last_error, updated_at"
+        ") VALUES ('all_visible', $1, $2, '', $2)",
+        now - dt.timedelta(seconds=90),
+        now - dt.timedelta(seconds=45),
+    )
+    await db_pool.execute(
+        "INSERT INTO google_drive_sync_files ("
+        "file_id, name, mime_type, source_modified_at, text_content, text_hash, updated_at"
+        ") VALUES ("
+        "'doc-1', 'Drive doc', 'application/vnd.google-apps.document', $1, "
+        "'Drive body', 'hash', $2"
+        ")",
+        now - dt.timedelta(seconds=120),
+        now - dt.timedelta(seconds=20),
+    )
+    await db_pool.execute(
+        "INSERT INTO company_context_documents ("
+        "document_id, source, source_type, source_document_id, title, body, "
+        "source_updated_at, content_hash"
+        ") VALUES ("
+        "'google_drive:doc:doc-1', 'google_drive', 'google_doc', 'doc-1', "
+        "'Drive doc', 'Drive body', $1, 'hash'"
+        ")",
+        now - dt.timedelta(seconds=70),
+    )
 
     metrics = (await render_metrics(db_pool)).decode()
 
     assert 'etl_active_scopes{source="slack",source_type="channel"} 2' in metrics
     assert 'etl_failed_scopes{source="slack",source_type="channel"} 1' in metrics
+    assert 'etl_active_scopes{source="google_drive",source_type="doc"} 1' in metrics
+    assert 'etl_failed_scopes{source="google_drive",source_type="doc"} 0' in metrics
     assert (
         'etl_backfill_jobs{job_type="channel_bootstrap",source="slack",status="pending"} 1'
         in metrics
@@ -1537,6 +1567,24 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
     )
     assert freshness_match is not None
     assert 25 <= float(freshness_match.group(1)) < 100
+    drive_lag_match = re.search(
+        r'etl_source_cursor_lag_seconds\{source="google_drive",source_type="doc"\} ([0-9.]+)',
+        metrics,
+    )
+    assert drive_lag_match is not None
+    assert float(drive_lag_match.group(1)) >= 80
+    drive_freshness_match = re.search(
+        r'etl_scope_sync_freshness_seconds\{source="google_drive",source_type="doc"\} ([0-9.]+)',
+        metrics,
+    )
+    assert drive_freshness_match is not None
+    assert 40 <= float(drive_freshness_match.group(1)) < 120
+    drive_projection_lag_match = re.search(
+        r'company_context_projection_lag_seconds\{source="google_drive"\} ([0-9.]+)',
+        metrics,
+    )
+    assert drive_projection_lag_match is not None
+    assert float(drive_projection_lag_match.group(1)) >= 45
     age_match = re.search(
         r'etl_backfill_job_age_seconds\{job_type="channel_bootstrap",source="slack",status="pending"\} ([0-9.]+)',
         metrics,
