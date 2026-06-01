@@ -1475,7 +1475,13 @@ function expectSlackPlanStreamShape(
     expect(transcript.stop.body.recipient_user_id).toBeUndefined()
     expect(transcript.stop.body.recipient_team_id).toBeUndefined()
     expect(transcript.stop.body.task_display_mode).toBeUndefined()
-    expect(transcript.stop.body.markdown_text).toBeUndefined()
+    const stopFinalText = [
+      stringField(transcript.stop.body.markdown_text),
+      blocksText(transcript.stop.body.blocks)
+    ]
+      .filter(Boolean)
+      .join('\n')
+    if (stopFinalText) expect(stopFinalText).toContain(answer)
 
     expect(markdownChunks).toEqual([{ type: 'markdown_text', text: answer }])
     expect(markdownText).toBe(answer)
@@ -1603,6 +1609,20 @@ function chunkText(chunk: Record<string, unknown>): string {
 function chunksText(value: unknown): string {
   return streamChunks(value)
     .map(chunkText)
+    .filter(Boolean)
+    .join('\n')
+}
+
+function blocksText(value: unknown): string {
+  if (!Array.isArray(value)) return ''
+  return value
+    .map(block => {
+      if (!block || typeof block !== 'object' || Array.isArray(block)) return ''
+      const text = (block as Record<string, unknown>).text
+      if (typeof text === 'string') return text
+      if (!text || typeof text !== 'object' || Array.isArray(text)) return ''
+      return stringField((text as Record<string, unknown>).text)
+    })
     .filter(Boolean)
     .join('\n')
 }

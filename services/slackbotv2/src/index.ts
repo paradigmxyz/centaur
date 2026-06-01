@@ -316,6 +316,8 @@ type SlackStreamingAdapter = {
 }
 
 type SlackStreamPayload = { [key: string]: unknown }
+const SLACK_MAX_BLOCKS = 50
+const SLACK_SECTION_TEXT_MAX_CHARS = 3000
 
 type SlackStreamingClient = {
   chatStream(input: SlackStreamPayload): SlackStreamer
@@ -405,13 +407,49 @@ function patchSlackAdapterStreaming(adapter: unknown, botToken: string, logger: 
 
     renderer.finish()
     const finalCommittable = renderer.getCommittableText()
-    await flushMarkdownDelta(finalCommittable.slice(lastAppended.length))
-    const result = await streamer.stop(options.stopBlocks ? { blocks: options.stopBlocks } : undefined)
+    const finalDelta = finalCommittable.slice(lastAppended.length)
+    await flushMarkdownDelta(finalDelta)
+    lastAppended = finalCommittable
+    const stopPayload: SlackStreamPayload = {}
+    const stopBlocks =
+      options.stopBlocks && finalCommittable.trim()
+        ? appendFinalMarkdownBlocks(options.stopBlocks, finalCommittable)
+        : options.stopBlocks
+    if (stopBlocks) {
+      stopPayload.blocks = stopBlocks
+    }
+    const result = await streamer.stop(Object.keys(stopPayload).length ? stopPayload : undefined)
     const messageTs = result.message?.ts ?? result.ts
     if (!messageTs) throw new Error('Slack stream completed without a message timestamp')
     logger.debug('Slack: token-bound stream complete', { messageId: messageTs })
     return { id: messageTs, threadId, raw: result }
   }
+}
+
+function appendFinalMarkdownBlocks(blocks: unknown[], markdown: string): unknown[] {
+  const finalBlocks = markdownSectionBlocks(markdown)
+  const available = Math.max(0, SLACK_MAX_BLOCKS - finalBlocks.length)
+  return [...blocks.slice(0, available), ...finalBlocks]
+}
+
+function markdownSectionBlocks(markdown: string): unknown[] {
+  const text = markdown.trim()
+  if (!text) return []
+
+  const blocks: unknown[] = []
+  let remaining = text
+  while (remaining && blocks.length < SLACK_MAX_BLOCKS) {
+    const chunk = remaining.slice(0, SLACK_SECTION_TEXT_MAX_CHARS)
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: chunk
+      }
+    })
+    remaining = remaining.slice(chunk.length)
+  }
+  return blocks
 }
 
 async function setAssistantStatus(thread: Thread, status: string): Promise<void> {

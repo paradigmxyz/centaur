@@ -321,6 +321,37 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('omits binary command output from task updates', async () => {
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'cmd-1',
+                type: 'commandExecution',
+                command: 'head -40 $(which centaur-tools)',
+                status: 'completed',
+                aggregatedOutput: `ELF\u0000\u0001\u0002\u0003${'\u0004'.repeat(16)}`,
+                exitCode: 0
+              }
+            }
+          }
+        ])
+      )
+    )
+
+    const taskChunk = chunks.find(
+      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+        chunk.type === 'task_update' && chunk.id === 'cmd-1'
+    )
+    expect(taskChunk?.output).toContain('[binary output omitted;')
+    expect(taskChunk?.output).not.toContain('\u0000')
+  })
+
   it('marks open tasks as errors on Rust session failures and emits done', () => {
     const mapper = new CodexAppServerRendererEventMapper()
     mapper.process({

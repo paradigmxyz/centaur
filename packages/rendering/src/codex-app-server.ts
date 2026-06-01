@@ -1153,7 +1153,12 @@ function commandOutputElements(output: string, exitCode?: number | null): Render
 }
 
 function formatCommandOutput(output: string): { body: string; language: string } {
-  const trimmed = output.trim()
+  const sanitized = sanitizeCommandOutput(output)
+  if (sanitized.binary) {
+    return { body: sanitized.body, language: 'text' }
+  }
+
+  const trimmed = sanitized.body.trim()
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
       const pretty = JSON.stringify(JSON.parse(trimmed), null, 2)
@@ -1164,9 +1169,39 @@ function formatCommandOutput(output: string): { body: string; language: string }
     } catch {}
   }
   return {
-    body: clipLines(output, limits.finalPlan.taskOutputCodeBlockLines),
-    language: languageFromContent(output)
+    body: clipLines(sanitized.body, limits.finalPlan.taskOutputCodeBlockLines),
+    language: languageFromContent(sanitized.body)
   }
+}
+
+function sanitizeCommandOutput(output: string): { body: string; binary: boolean } {
+  if (!looksLikeBinaryOutput(output)) {
+    return {
+      body: output.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '?'),
+      binary: false
+    }
+  }
+
+  const exitCodePrefix = /^exit code \d+\n/.exec(output)?.[0] ?? ''
+  return {
+    body: `${exitCodePrefix}[binary output omitted; ${output.length - exitCodePrefix.length} chars received]`,
+    binary: true
+  }
+}
+
+function looksLikeBinaryOutput(output: string): boolean {
+  const sample = output.slice(0, 4096)
+  if (!sample) return false
+  if (sample.includes('\u0000')) return true
+
+  let controlChars = 0
+  for (let index = 0; index < sample.length; index += 1) {
+    const code = sample.charCodeAt(index)
+    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127) {
+      controlChars += 1
+    }
+  }
+  return controlChars >= 8 || controlChars / sample.length > 0.02
 }
 
 function fileChangeTask(item: any, eventType: string, existing?: HarnessTask): HarnessTask {
