@@ -7,8 +7,6 @@ import re
 from datetime import datetime
 from urllib.parse import urlencode
 
-from browser_use import Agent, Browser, ChatBrowserUse
-
 
 def build_search_url(
     term: str = "",
@@ -59,6 +57,10 @@ async def search_restaurants(
     limit: int = 10,
 ) -> list[dict]:
     """Search OpenTable for available reservations using browser automation."""
+    # Lazy import: browser_use touches ~/.config on import, which fails in the
+    # non-root sandbox tool-server and breaks tool loading.
+    from browser_use import Agent, Browser, ChatBrowserUse
+
     url = build_search_url(
         term=term,
         covers=covers,
