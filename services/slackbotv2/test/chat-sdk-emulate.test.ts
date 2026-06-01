@@ -317,6 +317,68 @@ describe('slackbotv2', () => {
     await Promise.all(firstWaits)
   })
 
+  it('does not execute a second mention while a stream is already active', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before the long mention run.')
+    const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start a long run`, parent.ts)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-long-mention-run',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start a long run`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const secondMentionText = `<@${BOT_USER_ID}> add this while still running`
+    const secondMention = await postUserMessage(secondMentionText, parent.ts)
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-second-mention-during-stream',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: secondMentionText
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+    await waitFor(() => codexApi.appends.length === 2)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.streamCount).toBe(1)
+    expect(sessionMessageTexts(codexApi.appends[1]!.body.messages)).toEqual([
+      `@${BOT_USER_ID} add this while still running`
+    ])
+
+    codexApi.closeStreams()
+    await Promise.all(firstWaits)
+  })
+
   it('starts the Slack stream before a slow session execute returns', async () => {
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
