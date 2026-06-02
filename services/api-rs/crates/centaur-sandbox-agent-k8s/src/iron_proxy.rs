@@ -92,8 +92,8 @@ pub(crate) struct ResolvedIronProxy {
     listen_ports: Vec<u16>,
     pg_dsn_env: BTreeMap<String, String>,
     pg_proxy_password_env: BTreeMap<String, String>,
-    // iron-control principal OID this sandbox's proxy binds to (sync mode).
-    principal_id: Option<String>,
+    // iron-control principal OID this sandbox's proxy binds to.
+    principal_id: String,
 }
 
 /// Env injected into a sync-mode proxy pod so iron-proxy pulls its config from
@@ -121,21 +121,22 @@ impl AgentSandboxBackend {
         let Some(iron_proxy) = &self.config.iron_proxy else {
             return Ok(None);
         };
-        // Sync mode: iron-control is configured and the sandbox carries a
-        // principal. Secrets are delivered over `/proxy/sync`, so the rendered
-        // config is base-only (allowlist/tls/dns/management); no infra/tool
-        // secret transforms are baked in.
-        let principal_id = spec.iron_control_principal.clone();
-        let sync_mode = self.config.iron_control.is_some() && principal_id.is_some();
-        let fragments = if sync_mode {
-            Vec::new()
-        } else {
-            let mut fragments = vec![centaur_iron_proxy::infra_fragment().map_err(|err| {
-                SandboxError::InvalidSpec(format!("iron-proxy infra fragment: {err}"))
-            })?];
-            fragments.extend(iron_proxy.fragments.clone());
-            fragments
-        };
+        // iron-control is the only mode: the proxy pulls its effective config
+        // (infra + tool secret transforms) from iron-control over
+        // `/proxy/sync`, so the rendered ConfigMap is base-only
+        // (allowlist/tls/dns/management) and the sandbox must carry the
+        // principal its proxy binds to.
+        if self.config.iron_control.is_none() {
+            return Err(SandboxError::InvalidSpec(
+                "iron-proxy requires iron-control to be configured".to_owned(),
+            ));
+        }
+        let principal_id = spec.iron_control_principal.clone().ok_or_else(|| {
+            SandboxError::InvalidSpec(
+                "iron-proxy sandbox spec is missing its iron-control principal".to_owned(),
+            )
+        })?;
+        let fragments: Vec<ProxyFragment> = Vec::new();
 
         let config_yaml = centaur_iron_proxy::render_proxy_yaml_with_source_policy(
             None,
@@ -194,10 +195,7 @@ impl AgentSandboxBackend {
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy service", err))?;
-        let control_port = sync
-            .as_ref()
-            .and_then(|sync| url_port(&sync.control_url))
-            .unwrap_or(443);
+        let control_port = url_port(&sync.control_url).unwrap_or(443);
         for policy in build_iron_proxy_network_policies(id, resolved, iron_proxy, control_port) {
             self.network_policies()
                 .create(&PostParams::default(), &policy)
@@ -207,29 +205,27 @@ impl AgentSandboxBackend {
         self.pods()
             .create(
                 &PostParams::default(),
-                &build_iron_proxy_pod(id, iron_proxy, resolved, sync.as_ref()),
+                &build_iron_proxy_pod(id, iron_proxy, resolved, &sync),
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy pod", err))?;
         self.wait_until_proxy_running(resolved).await
     }
 
-    /// Register a per-sandbox proxy in iron-control for a sync-mode sandbox and
-    /// return the env (URL + `iprx_` token) to inject. ``None`` when not in
-    /// sync mode. The proxy OID is recorded so it can be deregistered on stop.
+    /// Register a per-sandbox proxy in iron-control and return the env (URL +
+    /// `iprx_` token) to inject. The proxy OID is recorded so it can be
+    /// deregistered on stop.
     async fn register_sync_proxy(
         &self,
         id: &SandboxId,
         resolved: &ResolvedIronProxy,
-    ) -> SandboxResult<Option<ProxySyncEnv>> {
-        let (Some(iron_control), Some(principal_id)) =
-            (self.config.iron_control.as_ref(), resolved.principal_id.as_deref())
-        else {
-            return Ok(None);
-        };
+    ) -> SandboxResult<ProxySyncEnv> {
+        let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
+            SandboxError::Backend("iron-proxy requires iron-control to be configured".to_owned())
+        })?;
         let proxy = iron_control
             .client
-            .create_proxy(id.as_str(), principal_id)
+            .create_proxy(id.as_str(), &resolved.principal_id)
             .await
             .map_err(|err| SandboxError::Backend(format!("iron-control create proxy: {err}")))?;
         let token = proxy.token.ok_or_else(|| {
@@ -239,10 +235,10 @@ impl AgentSandboxBackend {
             .lock()
             .await
             .insert(id.as_str().to_owned(), proxy.id);
-        Ok(Some(ProxySyncEnv {
+        Ok(ProxySyncEnv {
             control_url: iron_control.control_url.clone(),
             token,
-        }))
+        })
     }
 
     pub(crate) async fn delete_iron_proxy_resources(&self, id: &SandboxId) -> SandboxResult<()> {
@@ -504,7 +500,7 @@ fn build_iron_proxy_pod(
     id: &SandboxId,
     iron_proxy: &IronProxyConfig,
     resolved: &ResolvedIronProxy,
-    sync: Option<&ProxySyncEnv>,
+    sync: &ProxySyncEnv,
 ) -> Pod {
     Pod {
         metadata: object_meta(resolved.proxy_pod_name.clone(), iron_proxy_labels(id)),
@@ -522,7 +518,7 @@ fn build_iron_proxy_pod(
 fn iron_proxy_container(
     iron_proxy: &IronProxyConfig,
     resolved: &ResolvedIronProxy,
-    sync: Option<&ProxySyncEnv>,
+    sync: &ProxySyncEnv,
 ) -> Container {
     Container {
         name: "iron-proxy".to_owned(),
@@ -563,25 +559,23 @@ fn iron_proxy_container(
 fn iron_proxy_env_vars(
     iron_proxy: &IronProxyConfig,
     resolved: &ResolvedIronProxy,
-    sync: Option<&ProxySyncEnv>,
+    sync: &ProxySyncEnv,
 ) -> Vec<K8sEnvVar> {
     let mut env = BTreeMap::new();
     env.insert(
         "IRON_MANAGEMENT_API_KEY".to_owned(),
         env_var("IRON_MANAGEMENT_API_KEY", "unused-local-sidecar-key"),
     );
-    if let Some(sync) = sync {
-        // Control-plane sync mode: iron-proxy pulls its effective config from
-        // iron-control using this token instead of the rendered ConfigMap.
-        env.insert(
-            "IRON_CONTROL_URL".to_owned(),
-            env_var("IRON_CONTROL_URL", &sync.control_url),
-        );
-        env.insert(
-            "IRON_PROXY_TOKEN".to_owned(),
-            env_var("IRON_PROXY_TOKEN", &sync.token),
-        );
-    }
+    // iron-proxy pulls its effective config from iron-control using this token
+    // instead of the rendered ConfigMap.
+    env.insert(
+        "IRON_CONTROL_URL".to_owned(),
+        env_var("IRON_CONTROL_URL", &sync.control_url),
+    );
+    env.insert(
+        "IRON_PROXY_TOKEN".to_owned(),
+        env_var("IRON_PROXY_TOKEN", &sync.token),
+    );
     for (name, value) in &iron_proxy.extra_env {
         env.insert(name.clone(), env_var(name, value));
     }

@@ -60,6 +60,11 @@ where
         self.backend.observe(id).await
     }
 
+    /// List every sandbox observation the backend currently owns.
+    pub async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
+        self.backend.list_observed().await
+    }
+
     pub async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
         self.backend.pause(id).await?;
         if let Some(DesiredSandboxState::Running(spec) | DesiredSandboxState::Suspended(spec)) =

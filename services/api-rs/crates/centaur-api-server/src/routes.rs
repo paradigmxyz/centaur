@@ -39,6 +39,7 @@ pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {
         .route("/api/session/{thread_key}/messages", post(append_messages))
         .route("/api/session/{thread_key}/execute", post(execute_session))
         .route("/api/session/{thread_key}/events", get(stream_events))
+        .route("/api/sandboxes/drain", post(drain_sandboxes))
         .with_state(AppState { runtime })
 }
 
@@ -99,6 +100,21 @@ async fn execute_session(
         thread_key: execution.thread_key,
         status: execution.status.to_string(),
     }))
+}
+
+async fn drain_sandboxes(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let report = state.runtime.drain().await?;
+    let failed = report
+        .failed
+        .iter()
+        .map(|failure| json!({ "sandbox_id": failure.sandbox_id, "error": failure.error }))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "ok": report.failed.is_empty(),
+        "stopped_count": report.stopped.len(),
+        "stopped": report.stopped,
+        "failed": failed,
+    })))
 }
 
 async fn stream_events(

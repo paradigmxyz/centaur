@@ -41,10 +41,6 @@ pub struct SessionRuntime {
     sandbox_runtime: SandboxRuntime,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
     iron_control: Option<SessionRegistrar>,
-    // thread_key -> iron-control principal foreign id, captured at session
-    // creation so the sandbox's egress proxy binds to the same principal the
-    // registrar upserted (DM principals depend on slack_user_id, only known here).
-    session_principals: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Clone)]
@@ -63,6 +59,20 @@ pub enum SandboxWorkloadMode {
         env: Vec<(String, String)>,
         mounts: Vec<Mount>,
     },
+}
+
+/// Outcome of [`SessionRuntime::drain`]: the sandboxes that were stopped and
+/// any that failed to stop (with the backend error text).
+#[derive(Debug, Default)]
+pub struct DrainReport {
+    pub stopped: Vec<String>,
+    pub failed: Vec<DrainFailure>,
+}
+
+#[derive(Debug)]
+pub struct DrainFailure {
+    pub sandbox_id: String,
+    pub error: String,
 }
 
 #[derive(Debug)]
@@ -95,7 +105,6 @@ impl SessionRuntime {
             sandbox_runtime,
             sandbox_pipes: Arc::new(Mutex::new(HashMap::new())),
             iron_control: None,
-            session_principals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -112,37 +121,33 @@ impl SessionRuntime {
         harness_type: &HarnessType,
         metadata: Option<Value>,
     ) -> Result<Session, SessionRuntimeError> {
-        if let Some(registrar) = &self.iron_control {
-            // Best-effort: a registration failure must not block session
-            // creation. The proxy data-path still falls back to its rendered
-            // config until the control-plane sync cutover (Phase 4) lands.
-            let slack_user_id = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("slack_user_id"))
-                .and_then(Value::as_str);
-            match registrar
-                .register_session(thread_key.as_str(), slack_user_id)
-                .await
-            {
-                Ok(principal) => {
-                    self.session_principals
-                        .lock()
-                        .await
-                        .insert(thread_key.as_str().to_owned(), principal.id);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        thread_key = thread_key.as_str(),
-                        %error,
-                        "iron-control session registration failed"
-                    );
-                }
-            }
-        }
-        Ok(self
+        // Read slack_user_id before `metadata` is consumed below; it keys the
+        // 1:1 DM principal and is only known here at session creation.
+        let slack_user_id = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("slack_user_id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let session = self
             .store
             .create_or_get_session(thread_key, harness_type, default_metadata(metadata))
-            .await?)
+            .await?;
+        if let Some(registrar) = &self.iron_control {
+            // iron-control is the source of truth for the session's egress
+            // proxy: without a registered principal the proxy has no identity
+            // to bind to, so a registration failure must fail session creation
+            // rather than silently boot a sandbox with a non-functional proxy.
+            let principal = registrar
+                .register_session(thread_key.as_str(), slack_user_id.as_deref())
+                .await?;
+            // Persist the principal OID on the session row so a resumed session
+            // can recreate its sandbox after a restart without re-deriving it.
+            return Ok(self
+                .store
+                .set_iron_control_principal(thread_key, Some(&principal.id))
+                .await?);
+        }
+        Ok(session)
     }
 
     pub async fn append_messages(
@@ -156,6 +161,37 @@ impl SessionRuntime {
             ));
         }
         Ok(self.store.append_messages(thread_key, messages).await?)
+    }
+
+    /// Stop every non-terminal sandbox the backend currently owns.
+    ///
+    /// Intended for a clean control-plane shutdown (e.g. before a deploy):
+    /// each sandbox is stopped independently so one failure does not abort the
+    /// rest, and the [`DrainReport`] records which were stopped and which
+    /// failed so the caller can surface partial failure.
+    pub async fn drain(&self) -> Result<DrainReport, SessionRuntimeError> {
+        let observed = self.sandbox_runtime.manager.list_observed().await?;
+        let mut report = DrainReport::default();
+        for sandbox in observed {
+            if sandbox.status.is_terminal() {
+                continue;
+            }
+            let id = sandbox.id.as_str().to_owned();
+            match self.sandbox_runtime.manager.stop(&sandbox.id).await {
+                Ok(()) => {
+                    self.sandbox_pipes.lock().await.remove(&id);
+                    report.stopped.push(id);
+                }
+                Err(error) => {
+                    warn!(sandbox_id = %id, %error, "drain failed to stop sandbox");
+                    report.failed.push(DrainFailure {
+                        sandbox_id: id,
+                        error: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(report)
     }
 
     pub async fn execute_session(
@@ -179,6 +215,7 @@ impl SessionRuntime {
             .ensure_session_sandbox(
                 thread_key,
                 session.sandbox_id.as_deref(),
+                session.iron_control_principal.as_deref(),
                 &execution.execution_id,
             )
             .await?;
@@ -272,6 +309,7 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         existing_sandbox_id: Option<&str>,
+        iron_control_principal: Option<&str>,
         execution_id: &str,
     ) -> Result<String, SessionRuntimeError> {
         if let Some(sandbox_id) = existing_sandbox_id {
@@ -286,14 +324,8 @@ impl SessionRuntime {
         }
 
         let mut spec = (self.sandbox_runtime.spec_factory)(thread_key, execution_id);
-        if let Some(principal) = self
-            .session_principals
-            .lock()
-            .await
-            .get(thread_key.as_str())
-            .cloned()
-        {
-            spec.iron_control_principal = Some(principal);
+        if let Some(principal) = iron_control_principal {
+            spec.iron_control_principal = Some(principal.to_owned());
         }
         let handle = self.sandbox_runtime.manager.create_running(spec).await?;
         self.store
@@ -683,4 +715,6 @@ pub enum SessionRuntimeError {
     Store(#[from] SessionStoreError),
     #[error(transparent)]
     Sandbox(#[from] SandboxError),
+    #[error(transparent)]
+    IronControl(#[from] centaur_iron_control::IronControlError),
 }

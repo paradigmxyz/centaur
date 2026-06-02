@@ -144,6 +144,9 @@ pub struct Session {
     pub harness_type: HarnessType,
     pub harness_thread_id: Option<String>,
     pub status: SessionStatus,
+    /// iron-control principal OID this session's egress proxy binds to,
+    /// captured at registration so a resumed session can recreate its sandbox.
+    pub iron_control_principal: Option<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }

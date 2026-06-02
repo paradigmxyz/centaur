@@ -297,6 +297,15 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         config.iron_proxy = args.iron_proxy.to_config()?;
         config.iron_control = args.iron_control.settings();
+        // iron-control is the only proxy mode: a per-sandbox proxy syncs its
+        // secrets from the control plane, so configuring iron-proxy without
+        // iron-control would produce a non-functional proxy. Fail fast.
+        if config.iron_proxy.is_some() && config.iron_control.is_none() {
+            return Err(ServerError::UnsupportedConfig(
+                "iron-proxy requires iron-control: set IRON_CONTROL_URL and IRON_CONTROL_API_KEY"
+                    .to_owned(),
+            ));
+        }
         Ok(config)
     }
 }

@@ -87,7 +87,7 @@ impl PgSessionStore {
     pub async fn get_session(&self, thread_key: &ThreadKey) -> Result<Session, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
-            select thread_key, sandbox_id, harness_type, harness_thread_id, status, created_at, updated_at
+            select thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
             from sessions
             where thread_key = $1
             "#,
@@ -301,11 +301,32 @@ impl PgSessionStore {
             update sessions
             set sandbox_id = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, created_at, updated_at
+            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
         .bind(sandbox_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        row.try_into()
+    }
+
+    pub async fn set_iron_control_principal(
+        &self,
+        thread_key: &ThreadKey,
+        iron_control_principal: Option<&str>,
+    ) -> Result<Session, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionRow>(
+            r#"
+            update sessions
+            set iron_control_principal = $2, updated_at = now()
+            where thread_key = $1
+            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(iron_control_principal)
         .fetch_one(&self.pool)
         .await?;
 
@@ -322,7 +343,7 @@ impl PgSessionStore {
             update sessions
             set harness_thread_id = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, created_at, updated_at
+            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -416,6 +437,7 @@ struct SessionRow {
     harness_type: String,
     harness_thread_id: Option<String>,
     status: String,
+    iron_control_principal: Option<String>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
 }
@@ -430,6 +452,7 @@ impl TryFrom<SessionRow> for Session {
             harness_type: parse_persisted(row.harness_type)?,
             harness_thread_id: row.harness_thread_id,
             status: parse_persisted(row.status)?,
+            iron_control_principal: row.iron_control_principal,
             created_at: row.created_at,
             updated_at: row.updated_at,
         })
