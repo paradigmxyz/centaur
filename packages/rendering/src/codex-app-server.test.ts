@@ -472,6 +472,76 @@ describe('CodexAppServerRendererEventMapper', () => {
     expect(rendered).toContain('SLACK_BOT_TOKEN=[REDACTED_TOKEN]')
   })
 
+  it('preserves full command output in task updates', async () => {
+    const longSuffix = 'x'.repeat(13_000)
+    const aggregatedOutput = `one\ntwo\nthree\nfour\nfive\n${longSuffix}`
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'cmd-1',
+                type: 'commandExecution',
+                command: 'cat long-output.log',
+                status: 'completed',
+                aggregatedOutput,
+                exitCode: 0
+              }
+            }
+          }
+        ])
+      )
+    )
+
+    const taskChunk = chunks.find(
+      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+        chunk.type === 'task_update' && chunk.id === 'cmd-1'
+    )
+    expect(taskChunk?.output).toContain(aggregatedOutput)
+    expect(taskChunk?.output).not.toContain('// truncated')
+    expect(taskChunk?.output).not.toContain('/* truncated */')
+    expect(taskChunk?.output).not.toContain('[output truncated]')
+    expect(taskChunk?.output).not.toContain('[truncated')
+  })
+
+  it('preserves full file change diffs in task updates', async () => {
+    const longLine = `+${'diff-line'.repeat(400)}`
+    const diff = ['diff --git a/file.txt b/file.txt', '@@ -1 +1 @@', '-old', longLine].join('\n')
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'file-1',
+                type: 'fileChange',
+                status: 'completed',
+                changes: [{ path: 'file.txt', diff }]
+              }
+            }
+          }
+        ])
+      )
+    )
+
+    const taskChunk = chunks.find(
+      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+        chunk.type === 'task_update' && chunk.id === 'file-1'
+    )
+    expect(taskChunk?.output).toContain(diff)
+    expect(taskChunk?.output).not.toContain('// truncated')
+    expect(taskChunk?.output).not.toContain('/* truncated */')
+    expect(taskChunk?.output).not.toContain('[output truncated]')
+    expect(taskChunk?.output).not.toContain('[truncated')
+  })
+
   it('omits binary command output from task updates', async () => {
     const chunks = await collect(
       codexAppServerToChatSdkStream(

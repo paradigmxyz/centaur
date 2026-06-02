@@ -23,9 +23,7 @@ const limits = {
     taskTitleChars: 128
   },
   finalPlan: {
-    taskTitleChars: 140,
-    taskOutputCodeBlockLines: 4,
-    outputPreviewChars: 2_200
+    taskTitleChars: 140
   }
 } as const
 
@@ -1178,13 +1176,13 @@ function formatCommandOutput(output: string): { body: string; language: string }
     try {
       const pretty = JSON.stringify(JSON.parse(trimmed), null, 2)
       return {
-        body: clipLines(pretty, limits.finalPlan.taskOutputCodeBlockLines),
+        body: pretty,
         language: 'json'
       }
     } catch {}
   }
   return {
-    body: clipLines(sanitized.body, limits.finalPlan.taskOutputCodeBlockLines),
+    body: sanitized.body,
     language: languageFromContent(sanitized.body)
   }
 }
@@ -1260,7 +1258,7 @@ function fileChangeTask(item: any, eventType: string, existing?: HarnessTask): H
     details: uniquePaths.length
       ? [section([text('Files: '), text(uniquePaths.join(', '), { code: true })])]
       : (existing?.details ?? []),
-    output: diff ? [pre(clip(diff), 'diff')] : (existing?.output ?? [])
+    output: diff ? [pre(diff, 'diff')] : (existing?.output ?? [])
   }
 }
 
@@ -1403,18 +1401,6 @@ function languageFromContent(value: string): string {
     return 'ts'
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'json'
   return 'text'
-}
-
-function clip(value: string, max: number = limits.finalPlan.outputPreviewChars): string {
-  return value.length > max ? `${value.slice(0, max)}\n/* truncated */` : value
-}
-
-function clipLines(value: string, maxLines: number): string {
-  if (maxLines <= 0) return ''
-  const lines = value.split('\n')
-  if (lines.length <= maxLines) return value
-  if (maxLines === 1) return '// truncated'
-  return [...lines.slice(0, maxLines - 1), '// truncated'].join('\n')
 }
 
 function oneLine(value: string, max: number = limits.finalPlan.taskTitleChars): string {

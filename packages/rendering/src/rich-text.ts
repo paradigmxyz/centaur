@@ -13,7 +13,7 @@ export function section(elements: InlineText[]): RendererTaskBlock {
 export function preformatted(text: string, language?: string): RendererTaskBlock {
   return {
     type: 'code',
-    text: clip(text, 12_000),
+    text,
     ...(language ? { language } : {}),
   }
 }
@@ -31,8 +31,4 @@ function elementToPlainText(element: RendererTaskBlock): string {
     return element.text
   }
   return element.text
-}
-
-function clip(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max - 1)}...` : value
 }

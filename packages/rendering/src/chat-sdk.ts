@@ -109,15 +109,18 @@ function taskChunk(task: RendererTaskUpdate): ChatSDKStreamChunk {
     title: task.title,
     status: task.status,
     ...(task.details?.length ? { details: taskBodyToChatSdkText(task.details) } : {}),
-    ...(task.output?.length ? { output: taskBodyToChatSdkText(task.output, { fenceCode: false }) } : {})
+    ...(task.output?.length
+      ? { output: taskBodyToChatSdkText(task.output, { fenceCode: false, truncate: false }) }
+      : {})
   }
 }
 
 function taskBodyToChatSdkText(
   blocks: RendererTaskBlock[],
-  options: { fenceCode?: boolean } = {}
+  options: { fenceCode?: boolean; truncate?: boolean } = {}
 ): string {
   const fenceCode = options.fenceCode ?? true
+  const truncate = options.truncate ?? true
   const text = blocks
     .map(block => {
       if (block.type === 'text') return block.text
@@ -127,7 +130,7 @@ function taskBodyToChatSdkText(
     })
     .filter(Boolean)
     .join('\n')
-  return truncateTaskBody(text)
+  return truncate ? truncateTaskBody(text) : text
 }
 
 function truncateTaskBody(text: string): string {
