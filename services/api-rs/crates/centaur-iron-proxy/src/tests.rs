@@ -308,14 +308,24 @@ broker_credentials:
 }
 
 #[test]
-fn discovers_tool_local_iron_yaml_fragments() {
+fn discovers_tool_local_fragments() {
     let root = temp_dir("discover");
     let base_tool = root.join("tools").join("base").join("websearch");
     let overlay_tool = root.join("overlay").join("tools").join("slack");
     fs::create_dir_all(&base_tool).unwrap();
     fs::create_dir_all(&overlay_tool).unwrap();
     fs::write(base_tool.join("iron.yaml"), "transforms: []\n").unwrap();
+    fs::write(
+        base_tool.join("pyproject.toml"),
+        "[project]\nname = \"websearch\"\n",
+    )
+    .unwrap();
     fs::write(overlay_tool.join("iron.yaml"), "transforms: []\n").unwrap();
+    fs::write(
+        overlay_tool.join("pyproject.toml"),
+        "[project]\nname = \"slack\"\n",
+    )
+    .unwrap();
     fs::write(root.join("iron-proxy.yaml"), "transforms: []\n").unwrap();
 
     let discovered = discover_fragment_files(&[root.join("tools"), root.join("overlay")])
@@ -328,9 +338,68 @@ fn discovers_tool_local_iron_yaml_fragments() {
         discovered,
         vec![
             PathBuf::from("overlay/tools/slack/iron.yaml"),
+            PathBuf::from("overlay/tools/slack/pyproject.toml"),
             PathBuf::from("tools/base/websearch/iron.yaml"),
+            PathBuf::from("tools/base/websearch/pyproject.toml"),
         ]
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn converts_tool_pyproject_secrets_to_proxy_fragment() {
+    let root = temp_dir("pyproject");
+    let tool_dir = root.join("tools").join("productivity").join("gsuite");
+    fs::create_dir_all(&tool_dir).unwrap();
+    let pyproject = tool_dir.join("pyproject.toml");
+    fs::write(
+        &pyproject,
+        r#"
+[project]
+name = "gsuite"
+
+[tool.centaur]
+hosts = ["gmail.googleapis.com"]
+secrets = [
+  { type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"] },
+  { type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = ["www.googleapis.com"], fields = { refresh_token = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "refresh_token" }, client_id = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_id" }, client_secret = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_secret" } } },
+]
+"#,
+    )
+    .unwrap();
+
+    let fragment = load_fragment_file(&pyproject).unwrap();
+    let (_, cfg) = render_cfg(
+        &[fragment],
+        SourcePolicy::onepassword("centaur-agent", "10m"),
+    );
+    let names = transform_names(&cfg);
+    assert!(names.contains(&"secrets"));
+    assert!(names.contains(&"oauth_token"));
+
+    let transforms = cfg["transforms"].as_sequence().unwrap();
+    let secret = &transforms
+        .iter()
+        .find(|transform| transform["name"].as_str() == Some("secrets"))
+        .unwrap()["config"]["secrets"][0];
+    assert_eq!(
+        secret["source"]["secret_ref"],
+        "op://centaur-agent/SLACK_BOT_TOKEN/credential"
+    );
+    assert_eq!(secret["replace"]["match_headers"][0], "Authorization");
+    assert_eq!(secret["rules"][0]["host"], "slack.com");
+
+    let token = &transforms
+        .iter()
+        .find(|transform| transform["name"].as_str() == Some("oauth_token"))
+        .unwrap()["config"]["tokens"][0];
+    assert_eq!(
+        token["refresh_token"]["secret_ref"],
+        "op://centaur-agent/GOOGLE_TOKEN_JSON/credential"
+    );
+    assert_eq!(token["refresh_token"]["json_key"], "refresh_token");
+    assert_eq!(token["rules"][0]["host"], "www.googleapis.com");
 
     fs::remove_dir_all(root).unwrap();
 }

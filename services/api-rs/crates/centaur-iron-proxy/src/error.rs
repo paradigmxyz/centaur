@@ -19,6 +19,11 @@ pub enum IronProxyConfigError {
         path: PathBuf,
         source: serde_yaml::Error,
     },
+    #[error("failed to parse tool pyproject {path}: {source}")]
+    ParsePyproject {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
     #[error("failed to parse iron-proxy base yaml: {0}")]
     ParseBase(serde_yaml::Error),
     #[error("failed to serialize iron-proxy yaml: {0}")]
