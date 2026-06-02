@@ -284,6 +284,11 @@ struct IronProxyArgs {
     )]
     token_broker_name: Option<String>,
     #[arg(
+        long = "kubernetes-token-broker-url",
+        env = "KUBERNETES_TOKEN_BROKER_URL"
+    )]
+    token_broker_url: Option<String>,
+    #[arg(
         long = "kubernetes-token-broker-configmap-name",
         env = "KUBERNETES_TOKEN_BROKER_CONFIGMAP_NAME"
     )]
@@ -311,6 +316,12 @@ impl IronProxyArgs {
             .extend(load_fragment_files(&fragment_paths)?);
         config.env_from_secret_names = self.env_from_secret_names();
         config.token_broker_name = self.token_broker_name.clone();
+        config.token_broker_url = self
+            .token_broker_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
         config.token_broker_configmap_name = self.token_broker_configmap_name.clone();
         if let Some(labels) = self
             .api_pod_label_selector
@@ -368,7 +379,7 @@ impl IronProxyCaArgs {
 struct IronProxySourceArgs {
     #[arg(
         long = "kubernetes-firewall-manager-secret-source",
-        env = "KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE",
+        env = "FIREWALL_MANAGER_SECRET_SOURCE",
         default_value = "env"
     )]
     source: SourceKind,
@@ -376,13 +387,13 @@ struct IronProxySourceArgs {
     op_vault: String,
     #[arg(
         long = "kubernetes-firewall-manager-secret-ttl",
-        env = "KUBERNETES_FIREWALL_MANAGER_SECRET_TTL",
+        env = "FIREWALL_MANAGER_SECRET_TTL",
         default_value = "10m"
     )]
     secret_ttl: String,
     #[arg(
         long = "kubernetes-firewall-manager-token-broker-ttl",
-        env = "KUBERNETES_FIREWALL_MANAGER_TOKEN_BROKER_TTL",
+        env = "FIREWALL_MANAGER_TOKEN_BROKER_TTL",
         default_value = "1m"
     )]
     token_broker_ttl: String,

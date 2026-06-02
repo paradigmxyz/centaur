@@ -24,7 +24,7 @@ pub enum IronProxyConfigError {
     #[error("failed to serialize iron-proxy yaml: {0}")]
     Serialize(serde_yaml::Error),
     #[error(
-        "iron-token-broker store cannot use env source for {placeholder}; configure KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE=onepassword or onepassword-connect"
+        "iron-token-broker store cannot use env source for {placeholder}; configure FIREWALL_MANAGER_SECRET_SOURCE=onepassword or onepassword-connect"
     )]
     BrokerStoreEnv { placeholder: String },
     #[error(

@@ -240,8 +240,13 @@ impl SandboxBackend for AgentSandboxBackend {
         if let Some(resolved) = &resolved_iron_proxy {
             iron_proxy::apply_proxy_env(&mut spec, resolved);
         }
-        self.create_iron_proxy_resources(&id, resolved_iron_proxy.as_ref())
-            .await?;
+        if let Err(err) = self
+            .create_iron_proxy_resources(&id, resolved_iron_proxy.as_ref())
+            .await
+        {
+            let _ = self.delete_iron_proxy_resources(&id).await;
+            return Err(err);
+        }
         let sandbox = build_agent_sandbox(&id, &spec, &self.config)?;
         let create_result = self
             .sandboxes()

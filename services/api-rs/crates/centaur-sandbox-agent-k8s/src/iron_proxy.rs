@@ -48,6 +48,7 @@ pub struct IronProxyConfig {
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
     pub token_broker_name: Option<String>,
+    pub token_broker_url: Option<String>,
     pub token_broker_configmap_name: Option<String>,
 }
 
@@ -73,6 +74,7 @@ impl IronProxyConfig {
                 "api".to_owned(),
             )]),
             token_broker_name: None,
+            token_broker_url: None,
             token_broker_configmap_name: None,
         }
     }
@@ -128,7 +130,7 @@ impl AgentSandboxBackend {
         for entry in centaur_iron_proxy::pg_dsn_envs(&fragments) {
             let password = pg_proxy_password_env
                 .entry(entry.password_env.clone())
-                .or_insert_with(proxy_password)
+                .or_insert_with(|| format!("pg-{}", uuid::Uuid::new_v4().simple()))
                 .clone();
             pg_dsn_env.entry(entry.env_name).or_insert_with(|| {
                 format!(
@@ -501,16 +503,10 @@ fn iron_proxy_env_vars(
     for (name, value) in &iron_proxy.extra_env {
         env.insert(name.clone(), env_var(name, value));
     }
-    if let Some(name) = &iron_proxy.token_broker_name {
+    if let Some(url) = &iron_proxy.token_broker_url {
         env.insert(
             "IRON_BROKER_URL".to_owned(),
-            env_var(
-                "IRON_BROKER_URL",
-                &format!(
-                    "http://{name}:{}",
-                    centaur_iron_proxy::DEFAULT_BROKER_LISTEN_PORT
-                ),
-            ),
+            env_var("IRON_BROKER_URL", url),
         );
     }
     for (name, value) in &resolved.pg_proxy_password_env {
@@ -638,10 +634,10 @@ fn proxy_egress_rules(iron_proxy: &IronProxyConfig) -> Vec<NetworkPolicyEgressRu
             ..Default::default()
         },
     ];
-    if iron_proxy.token_broker_name.is_some() {
+    if let Some(url) = iron_proxy.token_broker_url.as_deref() {
         rules.push(egress_to(
             vec![pod_peer(token_broker_pod_labels())],
-            vec![network_port(centaur_iron_proxy::DEFAULT_BROKER_LISTEN_PORT)],
+            vec![network_port(token_broker_port(url))],
         ));
     }
     if matches!(
@@ -778,6 +774,21 @@ fn host_from_url(value: String) -> Option<String> {
         .split_once(':')
         .map_or(host_port, |(host, _)| host);
     (!host.is_empty()).then(|| host.to_owned())
+}
+
+fn token_broker_port(url: &str) -> u16 {
+    url_port(url).unwrap_or(centaur_iron_proxy::DEFAULT_BROKER_LISTEN_PORT)
+}
+
+fn url_port(value: &str) -> Option<u16> {
+    let authority = value
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(value)
+        .split('/')
+        .next()?
+        .trim();
+    authority.rsplit_once(':')?.1.parse().ok()
 }
 
 fn pod_running(pod: &Pod) -> bool {
@@ -980,10 +991,6 @@ fn token_broker_pod_labels() -> BTreeMap<String, String> {
         "app.kubernetes.io/component".to_owned(),
         "token-broker".to_owned(),
     )])
-}
-
-fn proxy_password() -> String {
-    format!("pg-{}", unique_suffix())
 }
 
 fn unique_suffix() -> String {
