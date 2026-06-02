@@ -5,7 +5,7 @@ use std::{
 };
 
 use centaur_sandbox_core::{
-    SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
+    Mount, SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
     SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::SandboxManager;
@@ -55,6 +55,7 @@ pub enum SandboxWorkloadMode {
     CodexAppServer {
         image: String,
         env: Vec<(String, String)>,
+        mounts: Vec<Mount>,
     },
 }
 
@@ -355,7 +356,16 @@ impl SandboxWorkloadMode {
         Self::CodexAppServer {
             image: image.into(),
             env: env.into_iter().collect(),
+            mounts: Vec::new(),
         }
+    }
+
+    pub fn mount(mut self, mount: Mount) -> Self {
+        match &mut self {
+            Self::MockAppServer { .. } => {}
+            Self::CodexAppServer { mounts, .. } => mounts.push(mount),
+        }
+        self
     }
 
     fn spec(&self, thread_key: &ThreadKey) -> SandboxSpec {
@@ -363,9 +373,12 @@ impl SandboxWorkloadMode {
             Self::MockAppServer { image } => SandboxSpec::new(image)
                 .command(["/bin/sh", "-lc"])
                 .args([mock_app_server_script()]),
-            Self::CodexAppServer { image, env } => {
+            Self::CodexAppServer { image, env, mounts } => {
                 let mut spec =
                     SandboxSpec::new(image).env("CENTAUR_THREAD_KEY", thread_key.as_str());
+                for mount in mounts {
+                    spec = spec.mount(mount.clone());
+                }
                 for (name, value) in env {
                     spec = spec.env(name.clone(), value.clone());
                 }
@@ -573,6 +586,42 @@ fn nonzero_duration_millis(value: u64) -> Result<Duration, SessionRuntimeError> 
         ));
     }
     Ok(Duration::from_millis(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use centaur_sandbox_core::MountKind;
+
+    #[test]
+    fn codex_workload_applies_mounts_to_sandbox_spec() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            [("CENTAUR_API_URL".to_owned(), "http://api:8000".to_owned())],
+        )
+        .mount(
+            Mount::new(
+                MountKind::Bind {
+                    source_path: "/host/github".to_owned(),
+                },
+                "/home/agent/github",
+            )
+            .read_only(),
+        );
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+
+        let spec = workload.spec(&thread_key);
+
+        assert_eq!(spec.mounts.len(), 1);
+        assert_eq!(spec.mounts[0].target_path, "/home/agent/github");
+        assert!(spec.mounts[0].read_only);
+        assert_eq!(
+            spec.mounts[0].kind,
+            MountKind::Bind {
+                source_path: "/host/github".to_owned(),
+            }
+        );
+    }
 }
 
 #[derive(Debug, Error)]

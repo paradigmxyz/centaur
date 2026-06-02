@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-coingecko = "coingecko.cli:app"
+coingecko = "centaur_tool_coingecko.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_coingecko"
 
 [build-system]
 requires = ["hatchling"]

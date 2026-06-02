@@ -13,6 +13,15 @@ dependencies = [
     "typer>=0.12.0",
 ]
 
+[project.scripts]
+websearch = "centaur_tool_websearch.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_websearch"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

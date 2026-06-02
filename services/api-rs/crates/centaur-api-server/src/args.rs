@@ -14,12 +14,15 @@ use centaur_iron_proxy::{
     load_fragment_files,
 };
 use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronProxyConfig};
+use centaur_sandbox_core::{Mount, MountKind};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::SandboxWorkloadMode;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 
 use crate::ServerError;
+
+const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 
 #[derive(Debug, Parser)]
 #[command(about = "Run the Centaur API Rust session control plane")]
@@ -103,6 +106,8 @@ struct SandboxArgs {
     centaur_api_url_override: Option<String>,
     #[arg(long, env = "CENTAUR_API_URL")]
     centaur_api_url: Option<String>,
+    #[arg(long = "repos-path", env = "REPOS_PATH")]
+    repos_path: Option<String>,
     #[arg(
         long = "session-sandbox-passthrough-env",
         env = "SESSION_SANDBOX_PASSTHROUGH_ENV",
@@ -167,7 +172,22 @@ impl SandboxArgs {
         match self.workload {
             SandboxWorkloadKind::Mock => SandboxWorkloadMode::mock_app_server(image),
             SandboxWorkloadKind::CodexAppServer => {
-                SandboxWorkloadMode::codex_app_server(image, self.codex_app_server_env_template())
+                let mut workload = SandboxWorkloadMode::codex_app_server(
+                    image,
+                    self.codex_app_server_env_template(),
+                );
+                if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
+                    workload = workload.mount(
+                        Mount::new(
+                            MountKind::Bind {
+                                source_path: repos_path,
+                            },
+                            SANDBOX_REPOS_MOUNT_PATH,
+                        )
+                        .read_only(),
+                    );
+                }
+                workload
             }
         }
     }
@@ -570,6 +590,13 @@ fn parse_host_port(value: &str) -> Option<u16> {
     value.rsplit_once(':')?.1.parse().ok()
 }
 
+fn clean_optional_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, String> {
     let mut labels = BTreeMap::new();
     for item in value
@@ -689,6 +716,34 @@ mod tests {
                 "http://host.docker.internal:8080".to_owned()
             )]
         );
+    }
+
+    #[test]
+    fn codex_workload_mounts_repos_path_read_only() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-workload",
+            "codex-app-server",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+        ])
+        .unwrap();
+
+        let workload = args.sandbox.container_workload_mode();
+        let SandboxWorkloadMode::CodexAppServer { mounts, .. } = workload else {
+            panic!("expected codex app server workload");
+        };
+
+        assert!(mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_REPOS_MOUNT_PATH
+                && mount.read_only
+                && mount.kind
+                    == (MountKind::Bind {
+                        source_path: "/var/lib/centaur/repos".to_owned(),
+                    })
+        }));
     }
 
     #[test]

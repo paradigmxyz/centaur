@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-nansen = "nansen.cli:app"
+nansen = "centaur_tool_nansen.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_nansen"
 
 [build-system]
 requires = ["hatchling"]

@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-airtable = "airtable.cli:app"
+airtable = "centaur_tool_airtable.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_airtable"
 
 [build-system]
 requires = ["hatchling"]

@@ -10,6 +10,15 @@ dependencies = [
     "rich>=13.0.0",
 ]
 
+[project.scripts]
+reth = "centaur_tool_reth.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_reth"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

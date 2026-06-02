@@ -5,6 +5,23 @@ HOME_DIR="$(eval echo ~)"
 FIREWALL_HOSTNAME="${FIREWALL_HOST:-firewall}"
 STATE_DIR="${CENTAUR_STATE_DIR:-$HOME_DIR/state}"
 
+append_tool_dirs() {
+    if [ -z "${1:-}" ]; then
+        return
+    fi
+    if [ -n "${TOOL_DIRS:-}" ]; then
+        TOOL_DIRS="${TOOL_DIRS}:$1"
+    else
+        TOOL_DIRS="$1"
+    fi
+}
+
+append_tool_dirs "${TOOLS_PATH:-}"
+append_tool_dirs "${TOOLS_OVERLAY_PATH:-}"
+if [ -n "${TOOL_DIRS:-}" ]; then
+    export TOOL_DIRS
+fi
+
 if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
     mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude"
     rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/uploads" "$HOME_DIR/branches"
@@ -201,26 +218,6 @@ if [ -d "$WS_SKILLS" ]; then
     rm -rf "$WORKSPACE_DIR/.claude/skills"
     ln -sf "$WS_SKILLS" "$WORKSPACE_DIR/.claude/skills"
 fi
-
-_add_pythonpath_entry() {
-    local entry="$1"
-    [ -d "$entry" ] || return 0
-    case ":${PYTHONPATH:-}:" in
-        *":$entry:"*) ;;
-        *) export PYTHONPATH="$entry${PYTHONPATH:+:$PYTHONPATH}" ;;
-    esac
-}
-
-# Tool CLIs can run in subprocess venvs from `centaur-tools`; keep the local
-# Centaur SDK importable without requiring it to be published to PyPI.
-_add_pythonpath_entry "/opt/centaur"
-_add_pythonpath_entry "$HOME_DIR/github"
-_add_pythonpath_entry "$HOME_DIR/github/centaur"
-_add_pythonpath_entry "$WORKSPACE_DIR"
-if [ -n "${CENTAUR_OVERLAY_DIR:-}" ]; then
-    _add_pythonpath_entry "$CENTAUR_OVERLAY_DIR"
-fi
-unset -f _add_pythonpath_entry
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.

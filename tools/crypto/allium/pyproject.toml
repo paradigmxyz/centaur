@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-allium = "allium.cli:app"
+allium = "centaur_tool_allium.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_allium"
 
 [build-system]
 requires = ["hatchling"]

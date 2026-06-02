@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-notion = "notion.cli:app"
+notion = "centaur_tool_notion.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_notion"
 
 [build-system]
 requires = ["hatchling"]

@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-attio = "attio.cli:app"
+attio = "centaur_tool_attio.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_attio"
 
 [build-system]
 requires = ["hatchling"]

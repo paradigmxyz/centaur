@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-kalshi = "kalshi.cli:app"
+kalshi = "centaur_tool_kalshi.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_kalshi"
 
 [build-system]
 requires = ["hatchling"]
