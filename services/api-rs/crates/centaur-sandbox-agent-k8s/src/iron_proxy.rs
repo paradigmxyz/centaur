@@ -141,6 +141,39 @@ impl AgentSandboxBackend {
         }))
     }
 
+    /// Resolve the proxy for a resume, where only the sandbox id is known.
+    /// Rebinds to the principal stamped on the sandbox at create (read back off
+    /// its annotation, so it survives pause and api-rs restarts). Returns `None`
+    /// when the sandbox has no proxy or carries no principal annotation.
+    pub(crate) async fn resolve_iron_proxy_for_resume(
+        &self,
+        id: &SandboxId,
+    ) -> SandboxResult<Option<ResolvedIronProxy>> {
+        if self.config.iron_proxy.is_none() {
+            return Ok(None);
+        }
+        let sandbox = self
+            .sandboxes()
+            .get(id.as_str())
+            .await
+            .map_err(|err| map_kube_error("get sandbox for resume", err))?;
+        let principal_id = sandbox
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION))
+            .cloned();
+        let Some(principal_id) = principal_id else {
+            return Ok(None);
+        };
+        Ok(Some(ResolvedIronProxy {
+            proxy_host: iron_proxy_service_name(id),
+            proxy_pod_name: new_iron_proxy_pod_name(id),
+            proxy_port: PROXY_TUNNEL_PORT,
+            principal_id,
+        }))
+    }
+
     pub(crate) async fn create_iron_proxy_resources(
         &self,
         id: &SandboxId,

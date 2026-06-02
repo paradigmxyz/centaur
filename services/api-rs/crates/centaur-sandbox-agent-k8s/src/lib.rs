@@ -34,6 +34,10 @@ const DEFAULT_CONTAINER_NAME: &str = "agent";
 const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const MANAGED_BY_VALUE: &str = "api-rs";
+// iron-control principal OID the sandbox's proxy binds to, stamped at create
+// so resume (which has only the sandbox id) can rebind without the spec or any
+// in-memory state. Survives pause and api-rs restarts.
+const IRON_CONTROL_PRINCIPAL_ANNOTATION: &str = "centaur.ai/iron-control-principal";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -354,6 +358,11 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn resume(&self, id: &SandboxId) -> SandboxResult<()> {
+        // Resume only has the sandbox id, not the spec, so rebind the proxy to
+        // the principal recorded at create rather than re-resolving from spec.
+        let resolved_iron_proxy = self.resolve_iron_proxy_for_resume(id).await?;
+        self.create_iron_proxy_resources(id, resolved_iron_proxy.as_ref())
+            .await?;
         self.patch_replicas(id, 1).await?;
         self.wait_until_running(id).await
     }
@@ -490,11 +499,19 @@ fn build_agent_sandbox(
         config.state_volume.as_ref().map(state_volume_claim_json),
     );
 
-    let spec = serde_json::from_value(agent_spec)
+    let mut annotations = config.annotations.clone();
+    if let Some(principal) = &spec.iron_control_principal {
+        annotations.insert(
+            IRON_CONTROL_PRINCIPAL_ANNOTATION.to_owned(),
+            principal.clone(),
+        );
+    }
+
+    let crd_spec = serde_json::from_value(agent_spec)
         .map_err(|err| SandboxError::InvalidSpec(format!("invalid Agent Sandbox spec: {err}")))?;
-    let mut sandbox = crd::Sandbox::new(id.as_str(), spec);
+    let mut sandbox = crd::Sandbox::new(id.as_str(), crd_spec);
     sandbox.metadata.labels = Some(labels);
-    sandbox.metadata.annotations = Some(config.annotations.clone());
+    sandbox.metadata.annotations = Some(annotations);
     Ok(sandbox)
 }
 
