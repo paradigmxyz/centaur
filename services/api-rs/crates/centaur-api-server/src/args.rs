@@ -49,48 +49,63 @@ pub(crate) struct ServerArgs {
 #[derive(Debug, ClapArgs)]
 struct SandboxArgs {
     #[arg(
-        long = "kubernetes-sandbox-backend",
-        env = "KUBERNETES_SANDBOX_BACKEND",
+        long = "session-sandbox-backend",
+        alias = "kubernetes-sandbox-backend",
+        env = "SESSION_SANDBOX_BACKEND",
         value_enum,
         default_value = "local"
     )]
     backend: SandboxBackendKind,
     #[arg(
-        long = "kubernetes-sandbox-workload",
-        env = "KUBERNETES_SANDBOX_WORKLOAD",
+        long = "session-sandbox-workload",
+        alias = "kubernetes-sandbox-workload",
+        env = "SESSION_SANDBOX_WORKLOAD",
         value_enum,
         default_value = "mock"
     )]
     workload: SandboxWorkloadKind,
     #[arg(
-        long = "kubernetes-namespace",
-        env = "KUBERNETES_NAMESPACE",
+        long = "session-sandbox-k8s-namespace",
+        alias = "kubernetes-namespace",
+        env = "SESSION_SANDBOX_K8S_NAMESPACE",
         default_value = "centaur-sandbox-e2e"
     )]
-    namespace: String,
-    #[arg(long = "kubernetes-agent-image", env = "KUBERNETES_AGENT_IMAGE")]
+    k8s_namespace: String,
+    #[arg(
+        long = "session-sandbox-image",
+        alias = "kubernetes-agent-image",
+        env = "SESSION_SANDBOX_IMAGE"
+    )]
     agent_image: Option<String>,
     #[arg(
-        long = "kubernetes-agent-image-pull-policy",
-        env = "KUBERNETES_AGENT_IMAGE_PULL_POLICY"
+        long = "session-sandbox-image-pull-policy",
+        alias = "kubernetes-agent-image-pull-policy",
+        env = "SESSION_SANDBOX_IMAGE_PULL_POLICY"
     )]
     agent_image_pull_policy: Option<String>,
     #[arg(
-        long = "kubernetes-sandbox-ready-timeout-s",
-        env = "KUBERNETES_SANDBOX_READY_TIMEOUT_S",
+        long = "session-sandbox-ready-timeout-secs",
+        alias = "kubernetes-sandbox-ready-timeout-s",
+        env = "SESSION_SANDBOX_READY_TIMEOUT_SECS",
         default_value_t = 90
     )]
-    ready_timeout_s: u64,
-    #[arg(long = "kubernetes-context", env = "KUBERNETES_CONTEXT")]
-    context: Option<String>,
+    ready_timeout_secs: u64,
     #[arg(
-        long = "kubernetes-sandbox-centaur-api-url",
-        env = "KUBERNETES_SANDBOX_CENTAUR_API_URL"
+        long = "session-sandbox-k8s-context",
+        alias = "kubernetes-context",
+        env = "SESSION_SANDBOX_K8S_CONTEXT"
     )]
+    k8s_context: Option<String>,
+    #[arg(
+        long = "session-sandbox-centaur-api-url",
+        env = "SESSION_SANDBOX_CENTAUR_API_URL"
+    )]
+    centaur_api_url_override: Option<String>,
+    #[arg(long, env = "CENTAUR_API_URL")]
     centaur_api_url: Option<String>,
     #[arg(
-        long = "kubernetes-sandbox-passthrough-env",
-        env = "KUBERNETES_SANDBOX_PASSTHROUGH_ENV",
+        long = "session-sandbox-passthrough-env",
+        env = "SESSION_SANDBOX_PASSTHROUGH_ENV",
         value_delimiter = ','
     )]
     passthrough_env: Vec<String>,
@@ -119,7 +134,7 @@ impl SandboxArgs {
     }
 
     async fn kube_client(&self) -> Result<kube::Client, ServerError> {
-        if let Some(context) = self.context.as_deref() {
+        if let Some(context) = self.k8s_context.as_deref() {
             let kube_config = kube::Config::from_kubeconfig(&kube::config::KubeConfigOptions {
                 context: Some(context.to_owned()),
                 ..kube::config::KubeConfigOptions::default()
@@ -139,8 +154,7 @@ impl SandboxArgs {
                     .unwrap_or_else(|| "local-mock-app-server".to_owned()),
             )),
             SandboxWorkloadKind::CodexAppServer => Err(ServerError::UnsupportedConfig(
-                "codex-app-server workload requires --kubernetes-sandbox-backend agent-k8s"
-                    .to_owned(),
+                "codex-app-server workload requires --session-sandbox-backend agent-k8s".to_owned(),
             )),
         }
     }
@@ -161,9 +175,11 @@ impl SandboxArgs {
     fn codex_app_server_env_template(&self) -> Vec<(String, String)> {
         let mut envs = vec![(
             "CENTAUR_API_URL".to_owned(),
-            self.centaur_api_url
-                .clone()
-                .unwrap_or_else(|| "http://api:8000".to_owned()),
+            self.centaur_api_url_override
+                .as_deref()
+                .or(self.centaur_api_url.as_deref())
+                .unwrap_or("http://api:8000")
+                .to_owned(),
         )];
 
         for name in &self.passthrough_env {
@@ -191,9 +207,9 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
     type Error = ServerError;
 
     fn try_from(args: &SandboxArgs) -> Result<Self, Self::Error> {
-        let mut config = AgentSandboxConfig::new(args.namespace.clone());
+        let mut config = AgentSandboxConfig::new(args.k8s_namespace.clone());
         config.image_pull_policy = args.agent_image_pull_policy.clone();
-        config.ready_timeout = Duration::from_secs(args.ready_timeout_s);
+        config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         config.iron_proxy = args.iron_proxy.to_config()?;
         Ok(config)
     }
@@ -579,22 +595,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_kubernetes_sandbox_flags() {
+    fn parses_session_sandbox_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
-            "--kubernetes-sandbox-backend",
+            "--session-sandbox-backend",
             "agent-k8s",
-            "--kubernetes-sandbox-workload",
+            "--session-sandbox-workload",
             "codex-app-server",
-            "--kubernetes-namespace",
+            "--session-sandbox-k8s-namespace",
             "centaur-test",
-            "--kubernetes-agent-image",
+            "--session-sandbox-image",
             "centaur-agent:test",
-            "--kubernetes-sandbox-ready-timeout-s",
+            "--session-sandbox-ready-timeout-secs",
             "17",
-            "--kubernetes-context",
+            "--session-sandbox-k8s-context",
             "kind-test",
             "--kubernetes-sandbox-iron-proxy-mode",
             "disabled",
@@ -603,27 +619,13 @@ mod tests {
 
         assert_eq!(args.sandbox.backend, SandboxBackendKind::AgentK8s);
         assert_eq!(args.sandbox.workload, SandboxWorkloadKind::CodexAppServer);
-        assert_eq!(args.sandbox.namespace, "centaur-test");
-        assert_eq!(args.sandbox.ready_timeout_s, 17);
-        assert_eq!(args.sandbox.context.as_deref(), Some("kind-test"));
+        assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
+        assert_eq!(args.sandbox.ready_timeout_secs, 17);
+        assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
     }
 
     #[test]
-    fn rejects_removed_session_sandbox_flags() {
-        assert!(
-            Args::try_parse_from([
-                "centaur-api-server",
-                "--database-url",
-                "postgres://postgres:postgres@localhost/centaur",
-                "--session-sandbox-backend",
-                "agent-k8s",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn agent_k8s_config_converts_from_sandbox_args() {
+    fn accepts_kubernetes_aliases_for_sandbox_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -632,9 +634,28 @@ mod tests {
             "agent-k8s",
             "--kubernetes-namespace",
             "centaur-test",
-            "--kubernetes-agent-image-pull-policy",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+        ])
+        .unwrap();
+
+        assert_eq!(args.sandbox.backend, SandboxBackendKind::AgentK8s);
+        assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
+    }
+
+    #[test]
+    fn agent_k8s_config_converts_from_sandbox_args() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--session-sandbox-k8s-namespace",
+            "centaur-test",
+            "--session-sandbox-image-pull-policy",
             "IfNotPresent",
-            "--kubernetes-sandbox-ready-timeout-s",
+            "--session-sandbox-ready-timeout-secs",
             "42",
             "--kubernetes-sandbox-iron-proxy-mode",
             "disabled",
@@ -654,9 +675,9 @@ mod tests {
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
-            "--kubernetes-sandbox-workload",
+            "--session-sandbox-workload",
             "codex-app-server",
-            "--kubernetes-sandbox-centaur-api-url",
+            "--session-sandbox-centaur-api-url",
             "http://host.docker.internal:8080",
         ])
         .unwrap();

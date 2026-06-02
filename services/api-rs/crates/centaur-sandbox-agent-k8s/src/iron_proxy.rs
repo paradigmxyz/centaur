@@ -136,8 +136,8 @@ impl AgentSandboxBackend {
                 .clone();
             pg_dsn_env.entry(entry.env_name).or_insert_with(|| {
                 format!(
-                    "postgresql://app_user:{password}@{proxy_host}:{}/{}",
-                    entry.port, entry.database
+                    "postgresql://{}:{password}@{proxy_host}:{}/{}",
+                    entry.user, entry.port, entry.database
                 )
             });
         }

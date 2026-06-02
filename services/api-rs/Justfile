@@ -14,6 +14,8 @@ kind_e2e_cluster := "centaur-api-rs-e2e"
 kind_e2e_context := "kind-" + kind_e2e_cluster
 kind_e2e_namespace := "centaur-sandbox-e2e"
 kind_e2e_tmp := "target/e2e"
+kind_e2e_agent_image := "centaur-agent:latest"
+kind_e2e_iron_proxy_image := "centaur-iron-proxy:latest"
 
 default:
     just --list
@@ -43,6 +45,47 @@ kind-e2e-up:
     kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/controller.yaml"
     kubectl --context "{{kind_e2e_context}}" create namespace "{{kind_e2e_namespace}}" --dry-run=client -o yaml | kubectl --context "{{kind_e2e_context}}" apply -f -
     kubectl --context "{{kind_e2e_context}}" -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=120s
+
+kind-e2e-build-images:
+    cd ../.. && docker build --target sandbox -t "{{kind_e2e_agent_image}}" -f services/sandbox/Dockerfile .
+    cd ../.. && docker build -t "{{kind_e2e_iron_proxy_image}}" -f services/iron-proxy/Dockerfile .
+
+kind-e2e-load-images: kind-e2e-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node="{{kind_e2e_cluster}}-control-plane"
+    force="${KIND_E2E_FORCE_IMAGE_LOAD:-0}"
+
+    image_present() {
+      local image="$1"
+      local repo="${image%:*}"
+      local tag="${image##*:}"
+      if [[ "$repo" == "$tag" ]]; then
+        tag="latest"
+      fi
+      case "$repo" in
+        */*) ;;
+        *) repo="docker.io/library/${repo}" ;;
+      esac
+      docker exec "$node" crictl images \
+        | awk -v repo="$repo" -v tag="$tag" '$1 == repo && $2 == tag { found = 1 } END { exit found ? 0 : 1 }'
+    }
+
+    load_if_missing() {
+      local image="$1"
+      if [[ "$force" =~ ^(1|true|yes)$ ]]; then
+        echo "Refreshing $image in Kind node $node"
+        kind load docker-image --name "{{kind_e2e_cluster}}" "$image"
+      elif image_present "$image"; then
+        echo "Kind node $node already has $image; skipping kind load"
+      else
+        echo "Loading $image into Kind node $node"
+        kind load docker-image --name "{{kind_e2e_cluster}}" "$image"
+      fi
+    }
+
+    load_if_missing "{{kind_e2e_agent_image}}"
+    load_if_missing "{{kind_e2e_iron_proxy_image}}"
 
 e2e-kind: kind-e2e-up
     SANDBOX_E2E_IMPLS=all \

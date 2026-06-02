@@ -84,6 +84,7 @@ postgres:
             env_name: "WAREHOUSE_DSN".to_owned(),
             database: "warehouse".to_owned(),
             port: 5440,
+            user: "app_user".to_owned(),
             password_env: "PG_PROXY_PASSWORD_WAREHOUSE".to_owned(),
         }]
     );

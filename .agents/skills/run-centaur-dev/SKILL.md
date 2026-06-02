@@ -37,15 +37,14 @@ just kind-e2e-up
 
 This creates/uses `kind-centaur-api-rs-e2e`, installs the Agent Sandbox CRD/controller, and creates namespace `centaur-sandbox-e2e`.
 
-Build and load the images the sandbox backend needs:
+Build the images the sandbox backend needs, then load them only if the Kind node does not already have them:
 
 ```bash
-cd ../..
-docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .
-docker build -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
-kind load docker-image --name centaur-api-rs-e2e centaur-agent:latest
-kind load docker-image --name centaur-api-rs-e2e centaur-iron-proxy:latest
+just kind-e2e-build-images
+just kind-e2e-load-images
 ```
+
+`kind-e2e-load-images` skips `kind load` when `centaur-agent:latest` and `centaur-iron-proxy:latest` are already present in the Kind node. Re-run with `KIND_E2E_FORCE_IMAGE_LOAD=1 just kind-e2e-load-images` only after changing the sandbox image, iron-proxy image, or baked sandbox skills/prompts. If you keep the Kind cluster around, the images stay around too; deleting the Kind cluster deletes that node-local image cache.
 
 Bootstrap namespace secrets for the sandbox namespace. Set real values first; `SLACKBOT_API_KEY` can be a local random service key because api-rs currently has no auth middleware.
 
@@ -100,13 +99,14 @@ RUST_LOG=info \
 DATABASE_URL="$DATABASE_URL" \
 RUN_MIGRATIONS=true \
 BIND_ADDR=0.0.0.0:8080 \
-KUBERNETES_CONTEXT=kind-centaur-api-rs-e2e \
-KUBERNETES_NAMESPACE=centaur-sandbox-e2e \
-KUBERNETES_SANDBOX_BACKEND=agent-k8s \
-KUBERNETES_SANDBOX_WORKLOAD=codex-app-server \
-KUBERNETES_AGENT_IMAGE=centaur-agent:latest \
-KUBERNETES_AGENT_IMAGE_PULL_POLICY=IfNotPresent \
+SESSION_SANDBOX_K8S_CONTEXT=kind-centaur-api-rs-e2e \
+SESSION_SANDBOX_K8S_NAMESPACE=centaur-sandbox-e2e \
+SESSION_SANDBOX_BACKEND=agent-k8s \
+SESSION_SANDBOX_WORKLOAD=codex-app-server \
+SESSION_SANDBOX_IMAGE=centaur-agent:latest \
+SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent \
 KUBERNETES_SANDBOX_IRON_PROXY_MODE=enabled \
+KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY=IfNotPresent \
 KUBERNETES_FIREWALL_CA_SECRET_NAME=centaur-firewall-ca \
 KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME=centaur-firewall-ca-key \
 FIREWALL_MANAGER_SECRET_SOURCE=onepassword \
@@ -114,7 +114,7 @@ KUBERNETES_BOOTSTRAP_SECRET_NAME=centaur-infra-env \
 OP_VAULT="${OP_VAULT:-centaur-agent}" \
 TOOL_DIRS="$PWD/../../tools" \
 REPOS_PATH="$HOME/paradigmxyz" \
-KUBERNETES_SANDBOX_CENTAUR_API_URL="$SANDBOX_HOST_API_URL" \
+SESSION_SANDBOX_CENTAUR_API_URL="$SANDBOX_HOST_API_URL" \
 CODEX_AUTH_MODE=api_key \
 cargo run -p centaur-api-server
 ```
@@ -286,9 +286,9 @@ kubectl --context kind-centaur-api-rs-e2e -n centaur-sandbox-e2e get sandboxes,p
 
 ## Troubleshooting
 
-- Mock output instead of Codex: restart api-rs with `KUBERNETES_SANDBOX_BACKEND=agent-k8s` and `KUBERNETES_SANDBOX_WORKLOAD=codex-app-server`.
-- Sandbox cannot call API/tools: verify `SANDBOX_HOST_API_URL` from inside a Kind pod and restart api-rs with the working value in `KUBERNETES_SANDBOX_CENTAUR_API_URL`.
-- Sandbox image pull failure: rebuild and `kind load docker-image --name centaur-api-rs-e2e centaur-agent:latest`; keep `KUBERNETES_AGENT_IMAGE_PULL_POLICY=IfNotPresent`.
+- Mock output instead of Codex: restart api-rs with `SESSION_SANDBOX_BACKEND=agent-k8s` and `SESSION_SANDBOX_WORKLOAD=codex-app-server`.
+- Sandbox cannot call API/tools: verify `SANDBOX_HOST_API_URL` from inside a Kind pod and restart api-rs with the working value in `SESSION_SANDBOX_CENTAUR_API_URL`.
+- Agent or iron-proxy image pull failure after changing images: rebuild and run `KIND_E2E_FORCE_IMAGE_LOAD=1 just kind-e2e-load-images`; keep `SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent` and `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY=IfNotPresent`.
 - Iron-proxy missing CA: rerun `CENTAUR_NAMESPACE=centaur-sandbox-e2e just bootstrap-secrets` and verify `centaur-firewall-ca` plus `centaur-firewall-ca-key` exist.
 - Model auth failure: check api-rs sandbox env says `CODEX_AUTH_MODE=api_key`, iron-proxy is enabled, and `FIREWALL_MANAGER_SECRET_SOURCE=onepassword` has the expected `OP_SERVICE_ACCOUNT_TOKEN`/`OP_VAULT` in `centaur-infra-env`.
 - Slack does not reach the bot: `tailscale funnel status`, Slack Request URL must end in `/api/webhooks/slack`, and `SLACK_SIGNING_SECRET` must match the app.

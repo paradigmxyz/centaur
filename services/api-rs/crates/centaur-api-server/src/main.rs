@@ -12,6 +12,7 @@ use args::Args;
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
+    init_crypto_provider();
     init_tracing();
 
     let args = Args::parse();
@@ -29,6 +30,10 @@ async fn main() -> Result<(), ServerError> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn init_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 fn init_tracing() {

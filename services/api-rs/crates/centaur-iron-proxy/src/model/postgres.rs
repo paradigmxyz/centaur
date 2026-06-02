@@ -1,5 +1,3 @@
-//! Iron-proxy Postgres listener YAML, separate from Centaur's own sqlx-backed database.
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +30,11 @@ impl PostgresListener {
         let env_name = non_empty(sandbox_env.name.as_deref())?;
         let database = non_empty(sandbox_env.database.as_deref())?;
         let port = self.listen.as_deref().and_then(listen_port)?;
+        let user = non_empty(
+            self.client
+                .as_ref()
+                .and_then(|client| client.user.as_deref()),
+        )?;
         let password_env = non_empty(
             self.client
                 .as_ref()
@@ -41,6 +44,7 @@ impl PostgresListener {
             env_name: env_name.to_owned(),
             database: database.to_owned(),
             port,
+            user: user.to_owned(),
             password_env: password_env.to_owned(),
         })
     }
@@ -104,5 +108,6 @@ pub struct PgDsnEnv {
     pub env_name: String,
     pub database: String,
     pub port: u16,
+    pub user: String,
     pub password_env: String,
 }
