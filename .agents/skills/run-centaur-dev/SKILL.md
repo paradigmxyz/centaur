@@ -98,24 +98,24 @@ Run the API:
 cd services/api-rs
 RUST_LOG=info \
 DATABASE_URL="$DATABASE_URL" \
-RUN_MIGRATIONS=1 \
-BIND_ADDR=127.0.0.1:8080 \
-KUBERNETES_CONTEXT=kind-centaur-api-rs-e2e \
-KUBERNETES_NAMESPACE=centaur-sandbox-e2e \
-KUBERNETES_SANDBOX_BACKEND=agent-k8s \
-KUBERNETES_SANDBOX_WORKLOAD=codex-app-server \
-KUBERNETES_AGENT_IMAGE=centaur-agent:latest \
-KUBERNETES_AGENT_IMAGE_PULL_POLICY=IfNotPresent \
+RUN_MIGRATIONS=true \
+BIND_ADDR=0.0.0.0:8080 \
+SESSION_SANDBOX_K8S_CONTEXT=kind-centaur-api-rs-e2e \
+SESSION_SANDBOX_K8S_NAMESPACE=centaur-sandbox-e2e \
+SESSION_SANDBOX_BACKEND=agent-k8s \
+SESSION_SANDBOX_WORKLOAD=codex-app-server \
+SESSION_SANDBOX_IMAGE=centaur-agent:latest \
+SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent \
 KUBERNETES_SANDBOX_IRON_PROXY_MODE=enabled \
 KUBERNETES_FIREWALL_CA_SECRET_NAME=centaur-firewall-ca \
 KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME=centaur-firewall-ca-key \
-KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE=onepassword \
+FIREWALL_MANAGER_SECRET_SOURCE=onepassword \
 KUBERNETES_BOOTSTRAP_SECRET_NAME=centaur-infra-env \
 OP_VAULT="${OP_VAULT:-centaur-agent}" \
 TOOL_DIRS="$PWD/../../tools" \
 REPOS_PATH="$HOME/paradigmxyz" \
-CENTAUR_API_URL="$SANDBOX_HOST_API_URL" \
-CENTAUR_API_KEY="$SLACKBOT_API_KEY" \
+SESSION_SANDBOX_CENTAUR_API_URL="$SANDBOX_HOST_API_URL" \
+SESSION_SANDBOX_CENTAUR_API_KEY="$SLACKBOT_API_KEY" \
 CODEX_AUTH_MODE=api_key \
 cargo run -p centaur-api-server
 ```
@@ -287,11 +287,11 @@ kubectl --context kind-centaur-api-rs-e2e -n centaur-sandbox-e2e get sandboxes,p
 
 ## Troubleshooting
 
-- Mock output instead of Codex: restart api-rs with `KUBERNETES_SANDBOX_BACKEND=agent-k8s` and `KUBERNETES_SANDBOX_WORKLOAD=codex-app-server`.
-- Sandbox cannot call API/tools: verify `SANDBOX_HOST_API_URL` from inside a Kind pod and restart api-rs with the working value in `CENTAUR_API_URL`.
-- Sandbox image pull failure: rebuild and `kind load docker-image --name centaur-api-rs-e2e centaur-agent:latest`; keep `KUBERNETES_AGENT_IMAGE_PULL_POLICY=IfNotPresent`.
+- Mock output instead of Codex: restart api-rs with `SESSION_SANDBOX_BACKEND=agent-k8s` and `SESSION_SANDBOX_WORKLOAD=codex-app-server`.
+- Sandbox cannot call API/tools: verify `SANDBOX_HOST_API_URL` from inside a Kind pod and restart api-rs with the working value in `SESSION_SANDBOX_CENTAUR_API_URL`.
+- Sandbox image pull failure: rebuild and `kind load docker-image --name centaur-api-rs-e2e centaur-agent:latest`; keep `SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent`.
 - Iron-proxy missing CA: rerun `CENTAUR_NAMESPACE=centaur-sandbox-e2e just bootstrap-secrets` and verify `centaur-firewall-ca` plus `centaur-firewall-ca-key` exist.
-- Model auth failure: check api-rs sandbox env says `CODEX_AUTH_MODE=api_key`, iron-proxy is enabled, and `KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE=onepassword` has the expected `OP_SERVICE_ACCOUNT_TOKEN`/`OP_VAULT` in `centaur-infra-env`.
+- Model auth failure: check api-rs sandbox env says `CODEX_AUTH_MODE=api_key`, iron-proxy is enabled, and `FIREWALL_MANAGER_SECRET_SOURCE=onepassword` has the expected `OP_SERVICE_ACCOUNT_TOKEN`/`OP_VAULT` in `centaur-infra-env`.
 - Slack does not reach the bot: `tailscale funnel status`, Slack Request URL must end in `/api/webhooks/slack`, and `SLACK_SIGNING_SECRET` must match the app.
 - Slackbot receives events but does not stream: check `SLACKBOTV2_DATABASE_URL`, Slack `assistant:write` scope, and `chat.startStream`/`chat.appendStream` errors in Slackbot logs.
 - Re-run sandbox invariant tests when changing sandbox/runtime behavior:
