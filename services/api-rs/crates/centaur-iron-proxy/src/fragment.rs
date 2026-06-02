@@ -141,6 +141,8 @@ fn load_pyproject_fragment_file(path: &Path) -> Result<ProxyFragment> {
 }
 
 fn pyproject_fragment(pyproject: &TomlValue) -> ProxyFragment {
+    // TODO: Convert pyproject tool metadata into yaml fragments eventually so
+    // this path uses the same fragment representation as iron.yaml.
     let Some(centaur) = pyproject
         .get("tool")
         .and_then(|tool| tool.get("centaur"))
