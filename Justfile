@@ -8,6 +8,14 @@ dev_values := "contrib/chart/values.dev.yaml"
 # Command used to import images into k3s's containerd. Override for rootless or
 # remote setups, e.g. CENTAUR_K3S_CTR="k3s ctr" or "ssh host sudo k3s ctr".
 k3s_ctr := env_var_or_default("CENTAUR_K3S_CTR", "sudo k3s ctr")
+# Local image registry `just up k3s` pushes to. Images are pushed under the
+# `library/` namespace so k3s resolves the chart's bare `:latest` tags through a
+# docker.io registry mirror — configure that on the node with:
+#   /etc/rancher/k3s/registries.yaml
+#     mirrors:
+#       docker.io:
+#         endpoint: ["http://localhost:5000"]
+registry := env_var_or_default("CENTAUR_LOCAL_REGISTRY", "localhost:5000")
 
 default:
     just --list
@@ -19,7 +27,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api _build-iron-proxy _build-slackbot _build-agent; do
+      for recipe in _build-api _build-api-rs _build-iron-proxy _build-slackbot _build-slackbotv2 _build-agent; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -32,8 +40,10 @@ build:
 
 _build-all-sequential:
     just _build-api
+    just _build-api-rs
     just _build-iron-proxy
     just _build-slackbot
+    just _build-slackbotv2
     just _build-agent
 
 build-one service:
@@ -41,8 +51,10 @@ build-one service:
     set -euo pipefail
     case "{{service}}" in
       api) just _build-api ;;
+      api-rs) just _build-api-rs ;;
       iron-proxy) just _build-iron-proxy ;;
       slackbot) just _build-slackbot ;;
+      slackbotv2) just _build-slackbotv2 ;;
       agent|sandbox) just _build-agent ;;
       *) echo "unknown service: {{service}}" >&2; exit 2 ;;
     esac
@@ -50,22 +62,41 @@ build-one service:
 _build-api:
     docker build -t centaur-api:latest -f services/api/Dockerfile .
 
+_build-api-rs:
+    docker build -t centaur-api-rs:latest -f services/api-rs/Dockerfile .
+
 _build-iron-proxy:
     docker build -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
 
 _build-slackbot:
     docker build -t centaur-slackbot:latest -f services/slackbot/Dockerfile .
 
+_build-slackbotv2:
+    docker build -t centaur-slackbotv2:latest -f services/slackbotv2/Dockerfile .
+
 _build-agent:
     docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .
 
-# Import locally-built images into k3s's containerd. k3s uses containerd, not
-# the Docker daemon, so `docker build` images are otherwise invisible to it
-# (pods ImagePullBackOff on the :latest tags). Used by `just up k3s`.
+# Push locally-built images to the local registry under library/ so k3s pulls
+# them via its docker.io mirror. Used by `just up k3s`. Only changed layers are
+# pushed, so this is much faster than `_import-k3s` on repeat runs.
+_push-registry:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for img in centaur-api centaur-api-rs centaur-iron-proxy centaur-slackbot centaur-slackbotv2 centaur-agent; do
+      target="{{registry}}/library/${img}:latest"
+      echo "pushing ${img}:latest -> ${target}..."
+      docker tag "${img}:latest" "${target}"
+      docker push "${target}"
+    done
+
+# Legacy: import locally-built images straight into k3s's containerd (no registry
+# needed). Slower than `_push-registry`; kept as a fallback. Run manually with
+# `just _import-k3s`.
 _import-k3s:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api centaur-iron-proxy centaur-slackbot centaur-agent; do
+    for img in centaur-api centaur-api-rs centaur-iron-proxy centaur-slackbot centaur-slackbotv2 centaur-agent; do
       echo "importing ${img}:latest into k3s containerd..."
       docker save "${img}:latest" | {{k3s_ctr}} images import -
     done
@@ -83,8 +114,10 @@ deploy:
       ghcr)
         extra_args+=(
           --set api.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api
+          --set apiRs.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api-rs
           --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
           --set slackbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbot
+          --set slackbotv2.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbotv2
           --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
         )
         ;;
@@ -108,7 +141,8 @@ deploy:
     fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
-# Bring up the dev stack; pass `k3s` (just up k3s) to import local images into k3s's containerd.
+# Bring up the dev stack; pass `k3s` (just up k3s) to push local images to the
+# local registry (CENTAUR_LOCAL_REGISTRY, default localhost:5000) for k3s to pull.
 up import="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -120,7 +154,7 @@ up import="":
       local)
         just build
         if [[ "{{import}}" == "k3s" ]]; then
-          just _import-k3s
+          just _push-registry
         fi
         ;;
       ghcr) ;;

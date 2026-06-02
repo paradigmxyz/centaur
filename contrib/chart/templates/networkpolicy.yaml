@@ -51,10 +51,25 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+{{- if .Values.apiRs.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+{{- end }}
+{{- if .Values.slackbotv2.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+{{- end }}
 {{- if .Values.slackbot.enabled }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbot") | nindent 14 }}
+{{- end }}
+{{- if .Values.ironControl.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
 {{- end }}
         - podSelector:
             matchLabels:
@@ -70,6 +85,127 @@ spec:
           port: 5432
 ---
 {{- end }}
+{{- if .Values.apiRs.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "api-rs") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+{{- if .Values.slackbotv2.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+{{- end }}
+        # Sandboxes call back into the control plane. agent-k8s labels its pods
+        # centaur.ai/managed-by=api-rs (MANAGED_BY_VALUE in centaur-sandbox-agent-k8s),
+        # which also covers the per-sandbox iron-proxy pods.
+        - podSelector:
+            matchLabels:
+              centaur.ai/managed-by: api-rs
+{{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+{{- range .Values.runnerAccess.allowedCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+  egress:
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    # Per-sandbox iron-proxy listeners (HTTP proxy + postgres port range).
+    - to:
+        - podSelector:
+            matchLabels:
+              centaur.ai/iron-proxy: "true"
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ironProxy.service.proxyPort }}
+        - protocol: TCP
+          port: {{ .Values.ironProxy.service.pgPortRangeStart }}
+          endPort: {{ .Values.ironProxy.service.pgPortRangeEnd }}
+    - ports:
+        - protocol: TCP
+          port: 443
+    # Kubernetes API egress. The kubernetes.default ClusterIP (:443) is DNAT'd
+    # to the real endpoint port (6443 on k3s/kubeadm); enforcing CNIs match
+    # egress post-DNAT, so allow that port or api-rs can't manage sandboxes.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.apiServerPort }}
+---
+{{- end }}
+{{- if .Values.slackbotv2.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- end }}
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    # Slack API egress (direct HTTPS; slackbotv2 does not use the firewall proxy).
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
+{{- if .Values.api.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -151,6 +287,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.apiServerPort }}
 ---
+{{- end }}
 {{- if .Values.slackbot.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

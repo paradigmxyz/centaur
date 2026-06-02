@@ -13,7 +13,15 @@ postgres:
     existingSecretKey: POSTGRES_PASSWORD
 
 slackbot:
-  enabled: true
+  enabled: false
+  image:
+    pullPolicy: IfNotPresent
+
+slackbotv2:
+  image:
+    pullPolicy: IfNotPresent
+
+apiRs:
   image:
     pullPolicy: IfNotPresent
 

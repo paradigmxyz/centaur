@@ -14,6 +14,7 @@ spec:
       targetPort: 5432
 ---
 {{- end }}
+{{- if .Values.api.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -28,6 +29,7 @@ spec:
       port: 8000
       targetPort: 8000
 ---
+{{- end }}
 {{- if .Values.slackbot.enabled }}
 apiVersion: v1
 kind: Service

@@ -103,6 +103,7 @@ spec:
   {{- end }}
 ---
 {{- end }}
+{{- if .Values.api.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -452,6 +453,7 @@ spec:
                 path: services/sandbox/SYSTEM_PROMPT.md
 {{- end }}
 ---
+{{- end }}
 {{- if .Values.slackbot.enabled }}
 apiVersion: apps/v1
 kind: Deployment

@@ -1,10 +1,10 @@
-{{- if and .Values.ingress.enabled .Values.slackbot.enabled }}
+{{- if and .Values.ingress.enabled .Values.slackbotv2.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbot") }}
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "slackbot") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
 {{ toYaml . | nindent 4 }}
@@ -23,7 +23,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "centaur.componentName" (dict "root" . "component" "slackbot") }}
+                name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
                 port:
                   number: 3001
   {{- with .Values.ingress.tls }}

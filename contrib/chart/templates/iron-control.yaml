@@ -1,0 +1,211 @@
+{{- if .Values.ironControl.enabled }}
+{{- $secretEnv := include "centaur.secretEnvName" . }}
+{{- $prefix := .Values.secretManager.envPrefix }}
+# iron-control — Rails control plane for authenticated API access and encrypted
+# secret storage. The chart owns the Deployment shape (image, port, env,
+# security context) so operators tune it via `helm upgrade`. It runs against a
+# dedicated `iron_control_production` database on the bundled Postgres (a separate logical
+# DB so its Rails schema_migrations table never collides with the API's dbmate
+# table); the create-db init container provisions that DB idempotently. All
+# secret material — the primary DB URL, the bootstrap user/API-key, the three
+# ActiveRecord encryption keys, and SECRET_KEY_BASE — comes from the shared
+# infra Secret via explicit secretKeyRefs (NOT envFrom, which would leak the
+# API's ai_v2 DATABASE_URL into iron-control's env).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.ironControlName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.ironControl.service.httpPort }}
+      targetPort: {{ .Values.ironControl.service.httpPort }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.ironControlName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+spec:
+  replicas: {{ .Values.ironControl.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # Create the dedicated logical DB on the bundled Postgres. Idempotent:
+        # guarded by a pg_database existence check, and the CREATE tolerates a
+        # lost race against a concurrent replica. Connects as the admin (ai_v2)
+        # DSN, whose `tempo` superuser can create databases.
+        - name: create-db
+          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              exists=$(psql "$ADMIN_DATABASE_URL" -tAc \
+                "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")
+              if [ "$exists" != "1" ]; then
+                psql "$ADMIN_DATABASE_URL" -c "CREATE DATABASE \"$DB_NAME\"" || true
+              fi
+          env:
+            - name: ADMIN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sDATABASE_URL" $prefix }}
+            - name: DB_NAME
+              value: {{ .Values.ironControl.database.name | quote }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            seccompProfile:
+              type: RuntimeDefault
+      containers:
+        - name: iron-control
+          image: {{ printf "%s:%s" .Values.ironControl.image.repository .Values.ironControl.image.tag | quote }}
+          imagePullPolicy: {{ .Values.ironControl.image.pullPolicy }}
+          env:
+            # Explicit secretKeyRefs only — never envFrom the shared Secret, or
+            # its DATABASE_URL (ai_v2) would leak into iron-control's env. Env
+            # var names match the IRON_CONTROL_* secret keys 1:1 (except
+            # SECRET_KEY_BASE, which Rails reads by its standard name). The DB
+            # URL carries connection info only (no database path) so each Rails
+            # connection's db name comes from the image's database.yml.
+            - name: IRON_CONTROL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            - name: IRON_CONTROL_INITIAL_USER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_EMAIL" $prefix }}
+            - name: IRON_CONTROL_INITIAL_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_PASSWORD" $prefix }}
+            - name: IRON_CONTROL_INITIAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" $prefix }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" $prefix }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY" $prefix }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" $prefix }}
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+            - name: RAILS_ENV
+              value: {{ .Values.ironControl.railsEnv | quote }}
+            - name: PORT
+              value: {{ .Values.ironControl.service.httpPort | quote }}
+            - name: RAILS_LOG_TO_STDOUT
+              value: "1"
+            - name: RAILS_SERVE_STATIC_FILES
+              value: "1"
+          ports:
+            - containerPort: {{ .Values.ironControl.service.httpPort }}
+              name: http
+          startupProbe:
+            httpGet:
+              path: /up
+              port: http
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /up
+              port: http
+            failureThreshold: 6
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /up
+              port: http
+            failureThreshold: 6
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            # No readOnlyRootFilesystem — Rails writes to tmp/ at runtime.
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.ironControl.resources | nindent 12 }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.ironControlName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The API is the natural control-plane caller. Widen this when a concrete
+    # client integrates. (kubectl port-forward works regardless — it arrives
+    # via the kubelet, not pod-to-pod.)
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ironControl.service.httpPort }}
+  egress:
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    # Outbound HTTPS (external DB DSNs, IdPs, etc.).
+    - ports:
+        - protocol: TCP
+          port: 443
+{{- end }}
+{{- end }}
