@@ -434,20 +434,22 @@ impl IronProxyArgs {
         self.source.policy()
     }
 
-    /// The roles to register in iron-control: the shared infra role (from the
-    /// infra fragment), a per-harness role, and one per tool fragment. The
-    /// harness and tool fragments both become per-tool roles.
+    /// The two roles to register in iron-control: the shared `infra` role
+    /// (from the infra fragment) and the shared `tools` role, which holds every
+    /// secret the harness and tool fragments declare. A session's principal is
+    /// granted both (see [`SessionRegistrar`]).
     fn roles_to_register(&self) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
-        let mut roles = vec![(RoleSpec::infra(), infra_fragment()?)];
-        let engine = harness_fragment_engine_name(&self.harness.engine);
+        let mut tools = ProxyFragment::default();
         for fragment in self.harness.fragments()? {
-            roles.push((RoleSpec::tool(engine), fragment));
+            merge_fragment(&mut tools, fragment);
         }
         for path in self.fragments.paths()? {
-            let name = tool_name_from_path(&path);
-            roles.push((RoleSpec::tool(&name), load_fragment_file(&path)?));
+            merge_fragment(&mut tools, load_fragment_file(&path)?);
         }
-        Ok(roles)
+        Ok(vec![
+            (RoleSpec::infra(), infra_fragment()?),
+            (RoleSpec::tools(), tools),
+        ])
     }
 
     /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the proxy
@@ -713,23 +715,14 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
     }
 }
 
-/// Name the role for a tool fragment after the tool. A bare ``iron.yaml`` /
-/// ``pyproject.toml`` is named for its parent directory (the tool dir);
-/// otherwise the file stem is used.
-fn tool_name_from_path(path: &std::path::Path) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default();
-    if matches!(stem, "iron" | "pyproject") {
-        path.parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| stem.to_owned())
-    } else {
-        stem.to_owned()
-    }
+/// Fold ``source`` into ``target`` so several fragments register under one
+/// role: concatenate transforms, postgres listeners, and broker credentials,
+/// and merge top-level keys (later fragments win on conflict).
+fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
+    target.transforms.extend(source.transforms);
+    target.postgres.extend(source.postgres);
+    target.broker_credentials.extend(source.broker_credentials);
+    target.top_level.extend(source.top_level);
 }
 
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {

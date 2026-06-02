@@ -43,6 +43,15 @@ impl RoleSpec {
         }
     }
 
+    /// The single shared tools role, holding every secret the harness and tool
+    /// fragments declare.
+    pub fn tools() -> Self {
+        Self {
+            foreign_id: "tools".to_owned(),
+            name: "Tools".to_owned(),
+        }
+    }
+
     /// A per-tool (or per-harness) role keyed by tool name.
     pub fn tool(name: &str) -> Self {
         Self {
