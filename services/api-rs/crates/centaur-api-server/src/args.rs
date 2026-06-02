@@ -280,14 +280,12 @@ impl SandboxArgs {
             envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
         }
 
-        // Inject the harness fragment's placeholder credentials so the agent
-        // sends the proxy_value the egress proxy replaces (e.g. in api_key mode
-        // OPENAI_API_KEY=OPENAI_API_KEY → codex logs in with that placeholder
-        // and hits api.openai.com, where iron-proxy swaps in the real key).
-        // Without it codex finds no key, skips login, and falls back to the
-        // ChatGPT auth.json. The placeholder set follows the resolved auth mode
-        // (empty for access_token, which uses inject rather than replace).
-        for (name, value) in centaur_iron_proxy::placeholder_env(&self.iron_proxy.harness.fragments()?) {
+        // Inject the proxy fragments' placeholder credentials so env-based
+        // consumers send the proxy_value iron-proxy replaces with the real
+        // secret: codex's OPENAI_API_KEY (api_key mode → codex logs in and
+        // hits api.openai.com instead of falling back to the ChatGPT
+        // auth.json), git's GITHUB_TOKEN, and the rest of the infra/tool set.
+        for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             if !envs.iter().any(|(existing, _)| existing == &name) {
                 envs.push((name, value));
             }
@@ -450,6 +448,18 @@ impl IronProxyArgs {
             roles.push((RoleSpec::tool(&name), load_fragment_file(&path)?));
         }
         Ok(roles)
+    }
+
+    /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the proxy
+    /// fragments declare — infra, harness, and tools — so env-based consumers
+    /// in the sandbox send the proxy_value iron-proxy replaces with the real
+    /// credential (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …). Mirrors
+    /// the full fragment set registered as iron-control roles.
+    fn sandbox_placeholder_env(&self) -> Result<BTreeMap<String, String>, ServerError> {
+        let mut fragments = vec![infra_fragment()?];
+        fragments.extend(self.harness.fragments()?);
+        fragments.extend(load_fragment_files(&self.fragments.paths()?)?);
+        Ok(centaur_iron_proxy::placeholder_env(&fragments))
     }
 
     fn env_from_secret_names(&self) -> Vec<String> {
