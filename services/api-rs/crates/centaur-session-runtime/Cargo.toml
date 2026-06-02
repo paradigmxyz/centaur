@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+centaur-iron-control.workspace = true
 centaur-sandbox-core.workspace = true
 centaur-sandbox-manager.workspace = true
 centaur-session-core.workspace = true

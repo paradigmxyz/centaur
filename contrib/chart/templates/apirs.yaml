@@ -159,6 +159,18 @@ spec:
               value: /app/tools
             - name: CODEX_AUTH_MODE
               value: {{ .Values.apiRs.codexAuthMode | quote }}
+{{- if .Values.ironControl.enabled }}
+            # iron-control control plane: principals/roles/grants + per-sandbox
+            # proxy sync. When unset, the api-rs falls back to the rendered
+            # static proxy config.
+            - name: IRON_CONTROL_URL
+              value: {{ include "centaur.ironControlUrl" . | quote }}
+            - name: IRON_CONTROL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
+{{- end }}
 {{- range $name, $value := .Values.apiRs.extraEnv }}
             - name: {{ $name }}
               value: {{ $value | quote }}

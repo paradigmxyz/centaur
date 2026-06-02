@@ -1,6 +1,7 @@
 mod args;
 
-use centaur_api_server::build_router_with_runtime;
+use centaur_api_server::build_router_with_session_runtime;
+use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
 use clap::Parser;
 use thiserror::Error;
@@ -22,11 +23,16 @@ async fn main() -> Result<(), ServerError> {
         store.run_migrations().await?;
     }
     let sandbox_runtime = args.sandbox_runtime().await?;
+    let mut runtime = SessionRuntime::new(store, sandbox_runtime);
+    if let Some(registrar) = args.iron_control_registrar().await? {
+        info!("iron-control session registration enabled");
+        runtime = runtime.with_iron_control(registrar);
+    }
 
     let listener = TcpListener::bind(args.server.bind_addr).await?;
     info!(bind_addr = %args.server.bind_addr, "starting centaur api-rs server");
 
-    axum::serve(listener, build_router_with_runtime(store, sandbox_runtime))
+    axum::serve(listener, build_router_with_session_runtime(runtime))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
@@ -59,6 +65,8 @@ pub(crate) enum ServerError {
     Kube(#[from] kube::Error),
     #[error(transparent)]
     IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
+    #[error(transparent)]
+    IronControlRegister(#[from] centaur_iron_control::RegisterError),
     #[error("iron-proxy requires both firewall CA cert and key Secret names")]
     MissingIronProxyCaSecret,
     #[error("{0}")]

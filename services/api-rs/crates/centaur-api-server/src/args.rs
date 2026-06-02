@@ -8,12 +8,15 @@ use std::{
 };
 
 use centaur_api_server::SandboxRuntime;
+use centaur_iron_control::{IronControlClient, RoleSpec, SessionRegistrar, register_role};
 use centaur_iron_proxy::{
     ProxyFragment, SourceKind, SourcePolicy, default_harness_fragment_dirs,
     discover_fragment_files, harness_broker_fragments_from_dirs, harness_fragment_from_dirs,
-    load_fragment_files,
+    infra_fragment, load_fragment_file, load_fragment_files,
 };
-use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronProxyConfig};
+use centaur_sandbox_agent_k8s::{
+    AgentSandboxBackend, AgentSandboxConfig, IronControlSettings, IronProxyConfig,
+};
 use centaur_sandbox_core::{Mount, MountKind};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::HarnessType;
@@ -37,6 +40,49 @@ impl Args {
     pub(crate) async fn sandbox_runtime(&self) -> Result<SandboxRuntime, ServerError> {
         self.sandbox.runtime().await
     }
+
+    pub(crate) async fn iron_control_registrar(
+        &self,
+    ) -> Result<Option<SessionRegistrar>, ServerError> {
+        self.sandbox.iron_control_registrar().await
+    }
+}
+
+#[derive(Debug, ClapArgs)]
+struct IronControlArgs {
+    #[arg(long = "iron-control-url", env = "IRON_CONTROL_URL")]
+    url: Option<String>,
+    #[arg(long = "iron-control-api-key", env = "IRON_CONTROL_API_KEY")]
+    api_key: Option<String>,
+    #[arg(
+        long = "iron-control-namespace",
+        env = "IRON_CONTROL_NAMESPACE",
+        default_value = "default"
+    )]
+    namespace: String,
+}
+
+impl IronControlArgs {
+    /// An [`IronControlClient`] when both URL and API key are configured.
+    fn client(&self) -> Option<IronControlClient> {
+        let url = non_empty(self.url.as_deref())?;
+        let api_key = non_empty(self.api_key.as_deref())?;
+        Some(IronControlClient::new(url, api_key))
+    }
+
+    /// Backend sync settings (admin client + control-plane URL) when iron-control
+    /// is configured.
+    fn settings(&self) -> Option<IronControlSettings> {
+        let url = non_empty(self.url.as_deref())?;
+        Some(IronControlSettings {
+            client: self.client()?,
+            control_url: url.to_owned(),
+        })
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, ClapArgs)]
@@ -116,9 +162,28 @@ struct SandboxArgs {
     passthrough_env: Vec<String>,
     #[command(flatten)]
     iron_proxy: IronProxyArgs,
+    #[command(flatten)]
+    iron_control: IronControlArgs,
 }
 
 impl SandboxArgs {
+    /// Build the iron-control session registrar, registering the infra,
+    /// harness, and tool roles up front. Returns ``None`` when iron-control is
+    /// not configured (no URL/API key), leaving the legacy proxy path intact.
+    async fn iron_control_registrar(&self) -> Result<Option<SessionRegistrar>, ServerError> {
+        let Some(client) = self.iron_control.client() else {
+            return Ok(None);
+        };
+        let namespace = self.iron_control.namespace.clone();
+        let policy = self.iron_proxy.source_policy();
+        let roles = self.iron_proxy.roles_to_register()?;
+        let mut role_ids = Vec::with_capacity(roles.len());
+        for (spec, fragment) in &roles {
+            role_ids.push(register_role(&client, &namespace, spec, fragment, &policy).await?);
+        }
+        Ok(Some(SessionRegistrar::new(client, namespace, role_ids)))
+    }
+
     async fn runtime(&self) -> Result<SandboxRuntime, ServerError> {
         match self.backend {
             SandboxBackendKind::Local => Ok(SandboxRuntime::backend_with_workload(
@@ -231,6 +296,7 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         config.image_pull_policy = args.agent_image_pull_policy.clone();
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         config.iron_proxy = args.iron_proxy.to_config()?;
+        config.iron_control = args.iron_control.settings();
         Ok(config)
     }
 }
@@ -331,6 +397,26 @@ impl IronProxyArgs {
         Ok(Some(config))
     }
 
+    fn source_policy(&self) -> SourcePolicy {
+        self.source.policy()
+    }
+
+    /// The roles to register in iron-control: the shared infra role (from the
+    /// infra fragment), a per-harness role, and one per tool fragment. The
+    /// harness and tool fragments both become per-tool roles.
+    fn roles_to_register(&self) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
+        let mut roles = vec![(RoleSpec::infra(), infra_fragment()?)];
+        let engine = harness_fragment_engine_name(&self.harness.engine);
+        for fragment in self.harness.fragments()? {
+            roles.push((RoleSpec::tool(engine), fragment));
+        }
+        for path in self.fragments.paths()? {
+            let name = tool_name_from_path(&path);
+            roles.push((RoleSpec::tool(&name), load_fragment_file(&path)?));
+        }
+        Ok(roles)
+    }
+
     fn env_from_secret_names(&self) -> Vec<String> {
         let mut names = BTreeSet::new();
         if let Some(secret_name) = self
@@ -422,13 +508,17 @@ struct IronProxySourceArgs {
 }
 
 impl IronProxySourceArgs {
-    fn apply_to_config(&self, config: &mut IronProxyConfig) {
-        config.source_policy = SourcePolicy {
+    fn policy(&self) -> SourcePolicy {
+        SourcePolicy {
             kind: self.source,
             op_vault: self.op_vault.clone(),
             ttl: self.secret_ttl.clone(),
             token_broker_ttl: self.token_broker_ttl.clone(),
-        };
+        }
+    }
+
+    fn apply_to_config(&self, config: &mut IronProxyConfig) {
+        config.source_policy = self.policy();
         if let Some(app_name) = &self.op_connect_app_name {
             config.op_connect_app_name = app_name.clone();
         }
@@ -575,6 +665,25 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
+    }
+}
+
+/// Name the role for a tool fragment after the tool. A bare ``iron.yaml`` /
+/// ``pyproject.toml`` is named for its parent directory (the tool dir);
+/// otherwise the file stem is used.
+fn tool_name_from_path(path: &std::path::Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    if matches!(stem, "iron" | "pyproject") {
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| stem.to_owned())
+    } else {
+        stem.to_owned()
     }
 }
 

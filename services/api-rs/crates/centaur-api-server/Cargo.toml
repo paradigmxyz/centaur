@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+centaur-iron-control.workspace = true
 centaur-iron-proxy.workspace = true
 centaur-sandbox-agent-k8s.workspace = true
 centaur-sandbox-core.workspace = true

@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use centaur_iron_control::SessionRegistrar;
 use centaur_sandbox_core::{
     Mount, SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
     SandboxStatus, SandboxWrite,
@@ -39,6 +40,11 @@ pub struct SessionRuntime {
     store: PgSessionStore,
     sandbox_runtime: SandboxRuntime,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    iron_control: Option<SessionRegistrar>,
+    // thread_key -> iron-control principal foreign id, captured at session
+    // creation so the sandbox's egress proxy binds to the same principal the
+    // registrar upserted (DM principals depend on slack_user_id, only known here).
+    session_principals: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Clone)]
@@ -88,7 +94,16 @@ impl SessionRuntime {
             store,
             sandbox_runtime,
             sandbox_pipes: Arc::new(Mutex::new(HashMap::new())),
+            iron_control: None,
+            session_principals: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Attach an iron-control registrar so each new session upserts its
+    /// principal and assigns the configured roles.
+    pub fn with_iron_control(mut self, registrar: SessionRegistrar) -> Self {
+        self.iron_control = Some(registrar);
+        self
     }
 
     pub async fn create_or_get_session(
@@ -97,6 +112,33 @@ impl SessionRuntime {
         harness_type: &HarnessType,
         metadata: Option<Value>,
     ) -> Result<Session, SessionRuntimeError> {
+        if let Some(registrar) = &self.iron_control {
+            // Best-effort: a registration failure must not block session
+            // creation. The proxy data-path still falls back to its rendered
+            // config until the control-plane sync cutover (Phase 4) lands.
+            let slack_user_id = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("slack_user_id"))
+                .and_then(Value::as_str);
+            match registrar
+                .register_session(thread_key.as_str(), slack_user_id)
+                .await
+            {
+                Ok(principal) => {
+                    self.session_principals
+                        .lock()
+                        .await
+                        .insert(thread_key.as_str().to_owned(), principal.id);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        thread_key = thread_key.as_str(),
+                        %error,
+                        "iron-control session registration failed"
+                    );
+                }
+            }
+        }
         Ok(self
             .store
             .create_or_get_session(thread_key, harness_type, default_metadata(metadata))
@@ -243,7 +285,16 @@ impl SessionRuntime {
             }
         }
 
-        let spec = (self.sandbox_runtime.spec_factory)(thread_key, execution_id);
+        let mut spec = (self.sandbox_runtime.spec_factory)(thread_key, execution_id);
+        if let Some(principal) = self
+            .session_principals
+            .lock()
+            .await
+            .get(thread_key.as_str())
+            .cloned()
+        {
+            spec.iron_control_principal = Some(principal);
+        }
         let handle = self.sandbox_runtime.manager.create_running(spec).await?;
         self.store
             .update_sandbox_id(thread_key, Some(handle.id.as_str()))

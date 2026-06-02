@@ -3,12 +3,15 @@
 //! The Agent Sandbox CRD types are generated from the upstream CRD with
 //! `just codegen-agent-sandbox-crd`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use centaur_iron_control::IronControlClient;
+use tokio::sync::Mutex;
 use centaur_sandbox_core::{
     MountKind, ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
     SandboxResult, SandboxSpec, SandboxStatus,
@@ -44,7 +47,20 @@ pub struct AgentSandboxConfig {
     pub image_pull_policy: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
+    pub iron_control: Option<IronControlSettings>,
     pub ready_timeout: Duration,
+}
+
+/// iron-control coordinates for sync-mode egress proxies. When set, a sandbox
+/// whose spec carries an `iron_control_principal` gets a per-sandbox proxy
+/// registered in iron-control (synced over `IRON_CONTROL_URL` with its
+/// `iprx_` token) instead of a rendered static proxy config.
+#[derive(Clone, Debug)]
+pub struct IronControlSettings {
+    /// Admin client used to register/deregister the per-sandbox proxy.
+    pub client: IronControlClient,
+    /// Base URL injected into the proxy pod as `IRON_CONTROL_URL`.
+    pub control_url: String,
 }
 
 impl AgentSandboxConfig {
@@ -58,6 +74,7 @@ impl AgentSandboxConfig {
             image_pull_policy: None,
             state_volume: None,
             iron_proxy: None,
+            iron_control: None,
             ready_timeout: Duration::from_secs(60),
         }
     }
@@ -69,6 +86,11 @@ impl AgentSandboxConfig {
 
     pub fn iron_proxy(mut self, iron_proxy: IronProxyConfig) -> Self {
         self.iron_proxy = Some(iron_proxy);
+        self
+    }
+
+    pub fn iron_control(mut self, iron_control: IronControlSettings) -> Self {
+        self.iron_control = Some(iron_control);
         self
     }
 }
@@ -99,11 +121,18 @@ impl StateVolumeConfig {
 pub struct AgentSandboxBackend {
     client: Client,
     config: AgentSandboxConfig,
+    // sandbox id -> iron-control proxy OID, so the proxy can be deregistered on
+    // stop. Only populated for sync-mode sandboxes.
+    proxy_ids: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AgentSandboxBackend {
     pub fn new(client: Client, config: AgentSandboxConfig) -> Self {
-        Self { client, config }
+        Self {
+            client,
+            config,
+            proxy_ids: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn try_default(namespace: impl Into<String>) -> SandboxResult<Self> {

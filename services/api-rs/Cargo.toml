@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/centaur-api-server",
+    "crates/centaur-iron-control",
     "crates/centaur-iron-proxy",
     "crates/centaur-sandbox-core",
     "crates/centaur-sandbox-e2e",
@@ -25,6 +26,7 @@ async-trait = "0.1"
 axum = "0.8.9"
 bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }
+centaur-iron-control = { path = "crates/centaur-iron-control" }
 centaur-iron-proxy = { path = "crates/centaur-iron-proxy" }
 centaur-sandbox-core = { path = "crates/centaur-sandbox-core" }
 centaur-sandbox-agent-k8s = { path = "crates/centaur-sandbox-agent-k8s" }

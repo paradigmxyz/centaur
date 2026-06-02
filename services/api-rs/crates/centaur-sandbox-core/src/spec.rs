@@ -9,6 +9,11 @@ pub struct SandboxSpec {
     pub working_dir: Option<String>,
     pub mounts: Vec<Mount>,
     pub resources: Option<ResourceLimits>,
+    /// iron-control principal OID (``prn_…``) this sandbox's egress proxy
+    /// should act as. When set, the backend registers/binds an iron-control
+    /// proxy for the sandbox instead of rendering a static proxy config.
+    #[serde(default)]
+    pub iron_control_principal: Option<String>,
 }
 
 impl SandboxSpec {
@@ -21,7 +26,13 @@ impl SandboxSpec {
             working_dir: None,
             mounts: Vec::new(),
             resources: None,
+            iron_control_principal: None,
         }
+    }
+
+    pub fn iron_control_principal(mut self, principal_foreign_id: impl Into<String>) -> Self {
+        self.iron_control_principal = Some(principal_foreign_id.into());
+        self
     }
 
     pub fn command(mut self, command: impl IntoIterator<Item = impl Into<String>>) -> Self {

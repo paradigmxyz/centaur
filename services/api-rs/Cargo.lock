@@ -263,6 +263,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "centaur-iron-control",
  "centaur-iron-proxy",
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
@@ -287,6 +288,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "centaur-iron-control"
+version = "0.1.0"
+dependencies = [
+ "centaur-iron-proxy",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "urlencoding",
+]
+
+[[package]]
 name = "centaur-iron-proxy"
 version = "0.1.0"
 dependencies = [
@@ -304,6 +318,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "centaur-iron-control",
  "centaur-iron-proxy",
  "centaur-sandbox-core",
  "clap",
@@ -392,6 +407,7 @@ dependencies = [
 name = "centaur-session-runtime"
 version = "0.1.0"
 dependencies = [
+ "centaur-iron-control",
  "centaur-sandbox-core",
  "centaur-sandbox-manager",
  "centaur-session-core",

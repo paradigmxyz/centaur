@@ -145,6 +145,16 @@ spec:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.pgPortRangeStart }}
           endPort: {{ .Values.ironProxy.service.pgPortRangeEnd }}
+{{- if .Values.ironControl.enabled }}
+    # iron-control control plane: register principals/roles/grants and per-sandbox proxies.
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ironControl.service.httpPort }}
+{{- end }}
     - ports:
         - protocol: TCP
           port: 443
