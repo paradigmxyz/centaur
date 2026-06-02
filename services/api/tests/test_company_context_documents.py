@@ -25,6 +25,8 @@ async def _clear_company_context_tables(db_pool):
         "TRUNCATE TABLE company_context_documents, google_drive_sync_checkpoints, "
         "google_drive_sync_files, google_drive_sync_runs, google_calendar_sync_checkpoints, "
         "google_calendar_sync_events, google_calendar_sync_calendars, google_calendar_sync_runs, "
+        "linear_sync_checkpoints, linear_sync_comments, linear_sync_issues, "
+        "linear_sync_projects, linear_sync_runs, "
         "slack_sync_backfill_jobs, slack_sync_checkpoints, slack_sync_messages, "
         "slack_sync_runs, slack_sync_users, slack_sync_channels, workflow_runs CASCADE",
     )
@@ -83,6 +85,21 @@ def test_schedule_enabled_when_google_calendar_etl_enabled(monkeypatch):
     monkeypatch.delenv("SLACK_ETL_ENABLED", raising=False)
     monkeypatch.delenv("GOOGLE_DRIVE_ETL_ENABLED", raising=False)
     monkeypatch.setenv("GOOGLE_CALENDAR_ETL_ENABLED", "true")
+    monkeypatch.delenv("LINEAR_ETL_ENABLED", raising=False)
+    monkeypatch.delenv("COMPANY_CONTEXT_DOCUMENTS_ENABLED", raising=False)
+
+    from workflows import company_context_documents
+
+    reloaded = importlib.reload(company_context_documents)
+
+    assert reloaded.SCHEDULE["enabled"] is True
+
+
+def test_schedule_enabled_when_linear_etl_enabled(monkeypatch):
+    monkeypatch.delenv("SLACK_ETL_ENABLED", raising=False)
+    monkeypatch.delenv("GOOGLE_DRIVE_ETL_ENABLED", raising=False)
+    monkeypatch.delenv("GOOGLE_CALENDAR_ETL_ENABLED", raising=False)
+    monkeypatch.setenv("LINEAR_ETL_ENABLED", "true")
     monkeypatch.delenv("COMPANY_CONTEXT_DOCUMENTS_ENABLED", raising=False)
 
     from workflows import company_context_documents
@@ -137,6 +154,115 @@ async def _insert_message(
         text,
         f"https://slack.com/archives/{channel_id}/p{message_ts.replace('.', '')}",
         reply_count,
+        updated_at,
+    )
+
+
+async def _seed_linear_run(db_pool) -> None:
+    await db_pool.execute(
+        "INSERT INTO linear_sync_runs (run_id, status) "
+        "VALUES ('run-linear', 'completed')",
+    )
+
+
+async def _insert_linear_issue(
+    db_pool,
+    *,
+    issue_id: str = "issue-1",
+    identifier: str = "DATA-123",
+    title: str = "Fix warehouse sync",
+    description: str = "Warehouse rows are missing after backfill.",
+    url: str = "https://linear.app/acme/issue/DATA-123/fix-warehouse-sync",
+    team_id: str = "team-data",
+    team_key: str = "DATA",
+    team_name: str = "Data",
+    project_id: str = "project-1",
+    project_name: str = "Data Platform",
+    state_id: str = "state-1",
+    state_name: str = "In Progress",
+    state_type: str = "started",
+    assignee_user_id: str = "user-assignee",
+    assignee_name: str = "Akshaan",
+    creator_user_id: str = "user-creator",
+    creator_name: str = "Jane",
+    source_created_at: dt.datetime | None = None,
+    source_updated_at: dt.datetime | None = None,
+    updated_at: dt.datetime | None = None,
+) -> None:
+    assert source_created_at is not None
+    assert source_updated_at is not None
+    assert updated_at is not None
+    await db_pool.execute(
+        "INSERT INTO linear_sync_issues ("
+        "issue_id, identifier, issue_number, title, description, url, priority, "
+        "priority_label, estimate, due_date, team_id, team_key, team_name, "
+        "project_id, project_name, state_id, state_name, state_type, "
+        "assignee_user_id, assignee_name, creator_user_id, creator_name, "
+        "content_text, content_hash, source_created_at, source_updated_at, "
+        "raw_payload, source_run_id, updated_at"
+        ") VALUES ("
+        "$1, $2, 123, $3, $4, $5, 2, 'High', 3.5, DATE '2026-06-15', "
+        "$6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, "
+        "$18, 'issue-hash', $19, $20, $21::jsonb, 'run-linear', $22"
+        ")",
+        issue_id,
+        identifier,
+        title,
+        description,
+        url,
+        team_id,
+        team_key,
+        team_name,
+        project_id,
+        project_name,
+        state_id,
+        state_name,
+        state_type,
+        assignee_user_id,
+        assignee_name,
+        creator_user_id,
+        creator_name,
+        f"{identifier} {title} {description}",
+        source_created_at,
+        source_updated_at,
+        json.dumps({"id": issue_id}),
+        updated_at,
+    )
+
+
+async def _insert_linear_comment(
+    db_pool,
+    *,
+    comment_id: str,
+    issue_id: str = "issue-1",
+    user_id: str = "comment-user",
+    user_name: str = "Sam",
+    body: str = "Comment body",
+    source_created_at: dt.datetime | None = None,
+    source_updated_at: dt.datetime | None = None,
+    updated_at: dt.datetime | None = None,
+) -> None:
+    assert source_created_at is not None
+    assert source_updated_at is not None
+    assert updated_at is not None
+    await db_pool.execute(
+        "INSERT INTO linear_sync_comments ("
+        "comment_id, issue_id, project_id, user_id, user_name, body, url, "
+        "content_text, content_hash, source_created_at, source_updated_at, "
+        "raw_payload, source_run_id, updated_at"
+        ") VALUES ("
+        "$1, $2, 'project-1', $3, $4, $5, $6, $5, 'comment-hash', "
+        "$7, $8, $9::jsonb, 'run-linear', $10"
+        ")",
+        comment_id,
+        issue_id,
+        user_id,
+        user_name,
+        body,
+        f"https://linear.app/acme/comment/{comment_id}",
+        source_created_at,
+        source_updated_at,
+        json.dumps({"id": comment_id}),
         updated_at,
     )
 
@@ -477,6 +603,149 @@ async def test_projects_google_calendar_events(db_pool, monkeypatch):
     assert metadata["calendar_id"] == "primary@example.com"
     assert metadata["event_id"] == "event-1"
     assert metadata["attendees"][0]["displayName"] == "Alice Example"
+
+
+@pytest.mark.asyncio
+async def test_projects_linear_issue_documents_with_comments(db_pool, monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_CALENDAR_ETL_ENABLED", "false")
+    monkeypatch.setenv("LINEAR_ETL_ENABLED", "true")
+
+    from workflows import company_context_documents
+
+    await _seed_linear_run(db_pool)
+    created_at = dt.datetime(2026, 6, 1, 12, 0, tzinfo=dt.timezone.utc)
+    issue_updated_at = dt.datetime(2026, 6, 1, 13, 0, tzinfo=dt.timezone.utc)
+    comment_created_at = dt.datetime(2026, 6, 1, 14, 0, tzinfo=dt.timezone.utc)
+    comment_updated_at = dt.datetime(2026, 6, 1, 14, 30, tzinfo=dt.timezone.utc)
+    synced_at = dt.datetime(2026, 6, 1, 15, 0, tzinfo=dt.timezone.utc)
+    await _insert_linear_issue(
+        db_pool,
+        source_created_at=created_at,
+        source_updated_at=issue_updated_at,
+        updated_at=synced_at,
+    )
+    await _insert_linear_comment(
+        db_pool,
+        comment_id="comment-1",
+        user_name="Sam",
+        body="I found the missing partition in the warehouse load.",
+        source_created_at=comment_created_at,
+        source_updated_at=comment_updated_at,
+        updated_at=synced_at + dt.timedelta(minutes=1),
+    )
+    await _insert_linear_comment(
+        db_pool,
+        comment_id="comment-2",
+        user_name="Mira",
+        body="Let's backfill after the deploy finishes.",
+        source_created_at=comment_created_at + dt.timedelta(minutes=15),
+        source_updated_at=comment_updated_at + dt.timedelta(minutes=15),
+        updated_at=synced_at + dt.timedelta(minutes=2),
+    )
+
+    result = await company_context_documents.handler(
+        company_context_documents.Input(watermark_overlap_seconds=0),
+        FakeCtx(db_pool),
+    )
+
+    assert result["status"] == "completed"
+    assert result["changed_linear_issues"] == 1
+    assert result["linear_issue_documents"] == 1
+    assert result["documents_upserted"] == 1
+    assert result["watermark"] == (synced_at + dt.timedelta(minutes=2)).isoformat()
+
+    row = await db_pool.fetchrow(
+        "SELECT document_id, source, source_type, source_document_id, title, body, "
+        "url, author_id, author_name, occurred_at, source_updated_at, metadata "
+        "FROM company_context_documents",
+    )
+    assert row["document_id"] == "linear:issue:issue-1"
+    assert row["source"] == "linear"
+    assert row["source_type"] == "linear_issue"
+    assert row["source_document_id"] == "issue-1"
+    assert row["title"] == "DATA-123: Fix warehouse sync"
+    assert "Team: Data (DATA)" in row["body"]
+    assert "Project: Data Platform" in row["body"]
+    assert "Status: In Progress (started)" in row["body"]
+    assert "Assignee: Akshaan" in row["body"]
+    assert "Warehouse rows are missing after backfill." in row["body"]
+    assert "Sam - 2026-06-01 14:00:00 UTC" in row["body"]
+    assert "I found the missing partition" in row["body"]
+    assert "Mira - 2026-06-01 14:15:00 UTC" in row["body"]
+    assert row["url"] == "https://linear.app/acme/issue/DATA-123/fix-warehouse-sync"
+    assert row["author_id"] == "user-creator"
+    assert row["author_name"] == "Jane"
+    assert row["occurred_at"] == created_at
+    assert row["source_updated_at"] == comment_updated_at + dt.timedelta(minutes=15)
+    metadata = json.loads(row["metadata"])
+    assert metadata["identifier"] == "DATA-123"
+    assert metadata["team_key"] == "DATA"
+    assert metadata["project_name"] == "Data Platform"
+    assert metadata["state_type"] == "started"
+    assert metadata["comment_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_projects_linear_issue_document_when_comment_changes(
+    db_pool,
+    monkeypatch,
+):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_CALENDAR_ETL_ENABLED", "false")
+    monkeypatch.setenv("LINEAR_ETL_ENABLED", "true")
+
+    from workflows import company_context_documents
+
+    await _seed_linear_run(db_pool)
+    watermark = dt.datetime(2026, 6, 1, 15, 0, tzinfo=dt.timezone.utc)
+    await db_pool.execute(
+        "INSERT INTO workflow_runs ("
+        "run_id, workflow_name, workflow_version, request_hash, root_run_id, status, "
+        "output_json, completed_at"
+        ") VALUES ("
+        "'wfr-previous', 'company_context_documents', 'test', 'hash', "
+        "'wfr-previous', 'completed', $1::jsonb, $2"
+        ")",
+        json.dumps({"watermark": watermark.isoformat()}),
+        watermark,
+    )
+    await _insert_linear_issue(
+        db_pool,
+        source_created_at=dt.datetime(2026, 6, 1, 12, 0, tzinfo=dt.timezone.utc),
+        source_updated_at=dt.datetime(2026, 6, 1, 13, 0, tzinfo=dt.timezone.utc),
+        updated_at=watermark - dt.timedelta(minutes=10),
+    )
+    await _insert_linear_comment(
+        db_pool,
+        comment_id="comment-new",
+        user_name="Sam",
+        body="The comment changed after the issue row was already projected.",
+        source_created_at=watermark + dt.timedelta(minutes=5),
+        source_updated_at=watermark + dt.timedelta(minutes=6),
+        updated_at=watermark + dt.timedelta(minutes=7),
+    )
+
+    result = await company_context_documents.handler(
+        company_context_documents.Input(watermark_overlap_seconds=0),
+        FakeCtx(db_pool, run_id="wfr-current"),
+    )
+
+    assert result["changed_linear_issues"] == 1
+    assert result["linear_issue_documents"] == 1
+    assert result["documents_upserted"] == 1
+    assert result["watermark"] == (watermark + dt.timedelta(minutes=7)).isoformat()
+
+    row = await db_pool.fetchrow(
+        "SELECT document_id, body, source_updated_at FROM company_context_documents",
+    )
+    assert row["document_id"] == "linear:issue:issue-1"
+    assert (
+        "The comment changed after the issue row was already projected." in row["body"]
+    )
+    assert row["source_updated_at"] == watermark + dt.timedelta(minutes=6)
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,7 @@ SCHEDULE = {
             _env_flag_enabled("SLACK_ETL_ENABLED")
             or _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
             or _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
+            or _env_flag_enabled("LINEAR_ETL_ENABLED")
         )
         and _env_flag_enabled("COMPANY_CONTEXT_DOCUMENTS_ENABLED", default=True)
     ),
@@ -148,6 +149,7 @@ def _source_enabled() -> bool:
         _env_flag_enabled("SLACK_ETL_ENABLED")
         or _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
         or _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
+        or _env_flag_enabled("LINEAR_ETL_ENABLED")
     )
 
 
@@ -304,6 +306,95 @@ async def _load_changed_calendar_events(
         "changed_events": int(stats["changed_events"] or 0) if stats else 0,
         "max_updated_at": max_updated_at,
     }
+
+
+async def _load_changed_linear_issues(
+    pool,
+    since: dt.datetime | None,
+) -> dict[str, Any]:
+    """Find Linear issues whose issue row or embedded comments changed."""
+    if since is None:
+        args: list[Any] = []
+        where_sql = "WHERE i.last_error = ''"
+        comment_where_sql = ""
+    else:
+        args = [since]
+        where_sql = (
+            "WHERE i.last_error = '' "
+            "AND (i.updated_at > $1 OR EXISTS ("
+            "  SELECT 1 FROM linear_sync_comments c "
+            "  WHERE c.issue_id = i.issue_id "
+            "    AND c.last_error = '' "
+            "    AND c.updated_at > $1"
+            "))"
+        )
+        comment_where_sql = "WHERE c.last_error = '' AND c.updated_at > $1"
+
+    rows = await pool.fetch(
+        "SELECT i.issue_id, i.identifier, i.issue_number, i.title, i.description, "
+        "i.url, i.priority, i.priority_label, i.estimate, i.due_date, i.team_id, "
+        "i.team_key, i.team_name, i.project_id, i.project_name, i.cycle_id, "
+        "i.cycle_name, i.state_id, i.state_name, i.state_type, "
+        "i.assignee_user_id, i.assignee_name, i.creator_user_id, i.creator_name, "
+        "i.parent_issue_id, i.parent_identifier, i.content_text, i.content_hash, "
+        "i.source_created_at, i.source_updated_at, i.source_archived_at, "
+        "i.source_started_at, i.source_completed_at, i.source_canceled_at, "
+        "i.updated_at, "
+        "(SELECT MAX(COALESCE(c.source_updated_at, c.source_edited_at, c.updated_at)) "
+        " FROM linear_sync_comments c "
+        " WHERE c.issue_id = i.issue_id AND c.last_error = '') "
+        "AS comments_source_updated_at "
+        f"FROM linear_sync_issues i {where_sql} "
+        "ORDER BY i.source_updated_at NULLS LAST, i.identifier, i.issue_id",
+        *args,
+    )
+    issue_stats = await pool.fetchrow(
+        f"SELECT COUNT(*) AS changed_issues, MAX(updated_at) AS max_issue_updated_at "
+        f"FROM linear_sync_issues i {where_sql}",
+        *args,
+    )
+    if since is None:
+        comment_stats = await pool.fetchrow(
+            "SELECT MAX(c.updated_at) AS max_comment_updated_at "
+            "FROM linear_sync_comments c WHERE c.last_error = ''",
+        )
+    else:
+        comment_stats = await pool.fetchrow(
+            "SELECT MAX(c.updated_at) AS max_comment_updated_at "
+            f"FROM linear_sync_comments c {comment_where_sql}",
+            *args,
+        )
+    max_updated_candidates: list[dt.datetime] = []
+    for value in (
+        issue_stats["max_issue_updated_at"] if issue_stats else None,
+        comment_stats["max_comment_updated_at"] if comment_stats else None,
+    ):
+        if isinstance(value, dt.datetime):
+            max_updated_candidates.append(value.astimezone(dt.timezone.utc))
+    return {
+        "issues": list(rows),
+        "changed_issues": int(issue_stats["changed_issues"] or 0) if issue_stats else 0,
+        "max_updated_at": max(max_updated_candidates)
+        if max_updated_candidates
+        else None,
+    }
+
+
+async def _load_linear_issue_comments(pool, issue_id: str) -> list[Any]:
+    """Load comments to embed in one Linear issue context document."""
+    return list(
+        await pool.fetch(
+            "SELECT comment_id, issue_id, project_id, parent_comment_id, user_id, "
+            "user_name, body, url, content_text, content_hash, source_created_at, "
+            "source_updated_at, source_archived_at, source_edited_at, "
+            "source_resolved_at, raw_payload, updated_at "
+            "FROM linear_sync_comments "
+            "WHERE issue_id = $1 AND last_error = '' "
+            "ORDER BY source_created_at NULLS LAST, source_updated_at NULLS LAST, "
+            "comment_id",
+            issue_id,
+        )
+    )
 
 
 async def _load_channel_day_messages(pool, channel_id: str, day: dt.date) -> list[Any]:
@@ -681,6 +772,181 @@ def _calendar_event_document(row: Any) -> dict[str, Any] | None:
     }
 
 
+def _linear_issue_title(row: Any) -> str:
+    identifier = str(row["identifier"] or "").strip()
+    title = str(row["title"] or "").strip()
+    if identifier and title:
+        return f"{identifier}: {title}"
+    return title or identifier or "Untitled Linear issue"
+
+
+def _linear_issue_document(row: Any, comments: list[Any]) -> dict[str, Any] | None:
+    """Render one Linear issue plus comments into a single context document."""
+    issue_id = str(row["issue_id"] or "").strip()
+    if not issue_id:
+        return None
+
+    title = _linear_issue_title(row)
+    identifier = str(row["identifier"] or "").strip()
+    description = str(row["description"] or "").strip()
+    url = str(row["url"] or "").strip()
+    source_created_at = row["source_created_at"]
+    source_updated_at = row["source_updated_at"] or row["updated_at"]
+    comments_source_updated_at = row["comments_source_updated_at"]
+    if isinstance(comments_source_updated_at, dt.datetime):
+        if not isinstance(source_updated_at, dt.datetime):
+            source_updated_at = comments_source_updated_at
+        else:
+            source_updated_at = max(
+                source_updated_at.astimezone(dt.timezone.utc),
+                comments_source_updated_at.astimezone(dt.timezone.utc),
+            )
+
+    team_key = str(row["team_key"] or "").strip()
+    team_name = str(row["team_name"] or "").strip()
+    project_name = str(row["project_name"] or "").strip()
+    state_name = str(row["state_name"] or "").strip()
+    state_type = str(row["state_type"] or "").strip()
+    assignee_name = str(row["assignee_name"] or "").strip()
+    creator_name = str(row["creator_name"] or "").strip()
+    priority_label = str(row["priority_label"] or "").strip()
+    parent_identifier = str(row["parent_identifier"] or "").strip()
+    archived_at = row["source_archived_at"]
+    completed_at = row["source_completed_at"]
+    canceled_at = row["source_canceled_at"]
+    due_date = row["due_date"]
+
+    lines = [
+        f"# {title}",
+        "",
+        "- Source: Linear",
+    ]
+    if identifier:
+        lines.append(f"- Identifier: {identifier}")
+    if team_name or team_key:
+        team_label = (
+            f"{team_name} ({team_key})"
+            if team_name and team_key
+            else team_name or team_key
+        )
+        lines.append(f"- Team: {team_label}")
+    if project_name:
+        lines.append(f"- Project: {project_name}")
+    if state_name or state_type:
+        state_label = (
+            f"{state_name} ({state_type})"
+            if state_name and state_type
+            else state_name or state_type
+        )
+        lines.append(f"- Status: {state_label}")
+    if assignee_name:
+        lines.append(f"- Assignee: {assignee_name}")
+    if creator_name:
+        lines.append(f"- Creator: {creator_name}")
+    if priority_label:
+        lines.append(f"- Priority: {priority_label}")
+    if row["estimate"] is not None:
+        lines.append(f"- Estimate: {row['estimate']}")
+    if due_date:
+        lines.append(f"- Due: {due_date}")
+    if parent_identifier:
+        lines.append(f"- Parent: {parent_identifier}")
+    if archived_at:
+        lines.append(f"- Archived: {_format_time(archived_at)}")
+    if completed_at:
+        lines.append(f"- Completed: {_format_time(completed_at)}")
+    if canceled_at:
+        lines.append(f"- Canceled: {_format_time(canceled_at)}")
+    if url:
+        lines.append(f"- URL: {url}")
+    lines.extend(["", "---", ""])
+
+    if description:
+        lines.extend(["## Description", "", description, ""])
+    else:
+        lines.extend(["## Description", "", "_No description._", ""])
+
+    if comments:
+        lines.extend(["## Comments", ""])
+        for comment in comments:
+            author = str(comment["user_name"] or comment["user_id"] or "Unknown")
+            created = comment["source_created_at"] or comment["source_updated_at"]
+            body = str(comment["body"] or comment["content_text"] or "").strip()
+            suffixes: list[str] = []
+            if comment["parent_comment_id"]:
+                suffixes.append(f"reply to {comment['parent_comment_id']}")
+            if comment["source_edited_at"]:
+                suffixes.append(f"edited {_format_time(comment['source_edited_at'])}")
+            if comment["source_resolved_at"]:
+                suffixes.append(
+                    f"resolved {_format_time(comment['source_resolved_at'])}"
+                )
+            if comment["source_archived_at"]:
+                suffixes.append(
+                    f"archived {_format_time(comment['source_archived_at'])}"
+                )
+            suffix = f" ({'; '.join(suffixes)})" if suffixes else ""
+            lines.extend(
+                [
+                    f"### {author} - {_format_time(created)}{suffix}",
+                    "",
+                    body or "_No comment body._",
+                    "",
+                ]
+            )
+    else:
+        lines.extend(["## Comments", "", "_No comments._", ""])
+
+    body = "\n".join(lines).strip()
+    metadata = {
+        "issue_id": issue_id,
+        "identifier": identifier,
+        "issue_number": row["issue_number"],
+        "team_id": str(row["team_id"] or ""),
+        "team_key": team_key,
+        "team_name": team_name,
+        "project_id": str(row["project_id"] or ""),
+        "project_name": project_name,
+        "cycle_id": str(row["cycle_id"] or ""),
+        "cycle_name": str(row["cycle_name"] or ""),
+        "state_id": str(row["state_id"] or ""),
+        "state_name": state_name,
+        "state_type": state_type,
+        "assignee_user_id": str(row["assignee_user_id"] or ""),
+        "assignee_name": assignee_name,
+        "creator_user_id": str(row["creator_user_id"] or ""),
+        "creator_name": creator_name,
+        "priority": row["priority"],
+        "priority_label": priority_label,
+        "estimate": row["estimate"],
+        "due_date": due_date.isoformat() if due_date else None,
+        "parent_issue_id": str(row["parent_issue_id"] or ""),
+        "parent_identifier": parent_identifier,
+        "comment_count": len(comments),
+        "archived": archived_at is not None,
+        "completed": completed_at is not None,
+        "canceled": canceled_at is not None,
+    }
+    return {
+        "document_id": f"linear:issue:{issue_id}",
+        "source": "linear",
+        "source_type": "linear_issue",
+        "source_document_id": issue_id,
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": title,
+        "body": body,
+        "url": url,
+        "author_id": str(row["creator_user_id"] or ""),
+        "author_name": creator_name,
+        "access_scope": "company",
+        "occurred_at": source_created_at or source_updated_at,
+        "source_updated_at": source_updated_at,
+        "content_hash": _content_hash(title, body, url, metadata),
+        "metadata": metadata,
+    }
+
+
 def _calendar_event_document_id(row: Any) -> str:
     calendar_id = str(row["calendar_id"] or "")
     event_id = str(row["event_id"] or "")
@@ -779,6 +1045,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     slack_enabled = _env_flag_enabled("SLACK_ETL_ENABLED")
     google_drive_enabled = _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
     google_calendar_enabled = _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
+    linear_enabled = _env_flag_enabled("LINEAR_ETL_ENABLED")
     changed = {
         "channel_days": [],
         "threads": [],
@@ -804,6 +1071,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     }
     if google_calendar_enabled:
         calendar_changed = await _load_changed_calendar_events(ctx._pool, since)
+    linear_changed = {
+        "issues": [],
+        "changed_issues": 0,
+        "max_updated_at": None,
+    }
+    if linear_enabled:
+        linear_changed = await _load_changed_linear_issues(ctx._pool, since)
 
     documents_upserted = 0
     documents_deleted = 0
@@ -921,12 +1195,32 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if action in {"inserted", "updated"}:
             documents_upserted += 1
 
+    for row in linear_changed["issues"]:
+        comments = await _load_linear_issue_comments(ctx._pool, str(row["issue_id"]))
+        document = _linear_issue_document(row, comments)
+        if document is None:
+            continue
+        observe_company_context_document_size(
+            "linear",
+            str(document["source_type"]),
+            len(str(document["body"] or "")),
+        )
+        action = await _upsert_document(ctx._pool, document)
+        record_company_context_documents_changed(
+            "linear",
+            str(document["source_type"]),
+            action,
+        )
+        if action in {"inserted", "updated"}:
+            documents_upserted += 1
+
     watermark_candidates = [
         value
         for value in (
             changed["max_updated_at"],
             drive_changed["max_updated_at"],
             calendar_changed["max_updated_at"],
+            linear_changed["max_updated_at"],
             last_watermark,
         )
         if value is not None
@@ -937,10 +1231,12 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "changed_messages": changed["changed_messages"],
         "changed_drive_files": drive_changed["changed_files"],
         "changed_calendar_events": calendar_changed["changed_events"],
+        "changed_linear_issues": linear_changed["changed_issues"],
         "channel_day_documents": len(changed["channel_days"]),
         "thread_candidates": len(changed["threads"]),
         "drive_documents": len(drive_changed["files"]),
         "calendar_event_documents": len(calendar_changed["events"]),
+        "linear_issue_documents": len(linear_changed["issues"]),
         "documents_upserted": documents_upserted,
         "documents_deleted": documents_deleted,
         "watermark": watermark.isoformat() if watermark else None,
