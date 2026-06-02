@@ -37,6 +37,8 @@ These are broadly useful across most deployments and are good candidates to conf
 | `company_context` | Search indexed company history across internal sources | None |
 | `grafana` | Query dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
 | `posthog` | Query product analytics, events, pageviews, breakdowns, and user agents | `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` |
+| `railway` | Inspect Railway projects, services, deployments, and deployment logs | `RAILWAY_TOKEN`; optional: `RAILWAY_PROJECT_TOKEN` |
+| `vercel` | Inspect Vercel teams, projects, deployments, and deployment events | `VERCEL_TOKEN` |
 | `attio` | Work with CRM objects, records, lists, notes, tasks, calls, and meetings | `ATTIO_API_KEY` |
 | `pylon` | Read and manage support issues, accounts, contacts, teams, tags, and users | `PYLON_API_KEY` |
 
@@ -64,8 +66,10 @@ These are broadly useful across most deployments and are good candidates to conf
 | `grafana` | Grafana dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
 | `posthog` | Product analytics through HogQL, events, pageviews, and breakdowns | `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` |
 | `profslice` | Extract Firefox Profiler data for analysis | None |
+| `railway` | Railway projects, services, deployments, and deployment logs | `RAILWAY_TOKEN`; optional: `RAILWAY_PROJECT_TOKEN` |
 | `reth` | Reth execution timing and performance metrics | None |
 | `reth-log-analyzer` | Parse Reth logs and generate performance graphs | None |
+| `vercel` | Vercel teams, projects, deployments, and deployment events | `VERCEL_TOKEN` |
 | `vlogs` | VictoriaLogs queries, fields, streams, and log analytics | None |
 | `vmetrics` | VictoriaMetrics PromQL/MetricsQL queries and metric discovery | None |
 
