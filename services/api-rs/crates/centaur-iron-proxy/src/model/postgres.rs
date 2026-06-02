@@ -111,3 +111,36 @@ pub struct PgDsnEnv {
     pub user: String,
     pub password_env: String,
 }
+
+/// The iron-control `pg_dsn` secret foreign_id for a listener name. Shared so
+/// the control-plane registration and the managed proxy's `IRON_PROXY_PG_*`
+/// env derive the same key. foreign_id is restricted to `[A-Za-z0-9-._~]`.
+pub fn pg_foreign_id(name: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for ch in name.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            prev_dash = false;
+        } else if !prev_dash && !slug.is_empty() {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    format!("pg-{}", if slug.is_empty() { "pg" } else { slug })
+}
+
+/// The managed proxy reads each listener's local config from
+/// `IRON_PROXY_PG_<FOREIGN_ID>_<SUFFIX>`, with the foreign_id normalized to
+/// env-safe form: uppercase, with `- . ~` mapped to `_`.
+pub fn pg_env_var(foreign_id: &str, suffix: &str) -> String {
+    let normalized: String = foreign_id
+        .chars()
+        .map(|ch| match ch {
+            '-' | '.' | '~' => '_',
+            other => other.to_ascii_uppercase(),
+        })
+        .collect();
+    format!("IRON_PROXY_PG_{normalized}_{suffix}")
+}

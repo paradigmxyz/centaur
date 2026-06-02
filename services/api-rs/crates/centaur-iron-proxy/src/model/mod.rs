@@ -5,7 +5,10 @@ mod transform;
 mod values;
 
 pub use broker::BrokerCredential;
-pub use postgres::{PgDsnEnv, PostgresClient, PostgresListener, PostgresUpstream, SandboxEnv};
+pub use postgres::{
+    PgDsnEnv, PostgresClient, PostgresListener, PostgresUpstream, SandboxEnv, pg_env_var,
+    pg_foreign_id,
+};
 pub use proxy::ProxyFragment;
 pub use transform::{Secret, SecretReplace, Transform, TransformConfig};
 

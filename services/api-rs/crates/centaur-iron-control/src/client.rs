@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 use crate::error::{IronControlError, Result};
 use crate::models::{
     DataEnvelope, GcpAuthSecretInput, Grant, GrantSecret, Grantee, IdentityInput,
-    OAuthTokenSecretInput, Principal, Proxy, ProxyInput, Role, SecretRecord, StaticSecretInput,
+    OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, Role, SecretRecord,
+    StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -109,6 +110,16 @@ impl IronControlClient {
                     .await
             }
         }
+    }
+
+    /// Upsert a Postgres DSN secret by ``foreign_id``.
+    pub async fn upsert_pg_dsn_secret(&self, input: &PgDsnSecretInput) -> Result<SecretRecord> {
+        self.write(
+            Method::PUT,
+            &upsert_path("pg_dsn_secrets", &input.foreign_id),
+            input,
+        )
+        .await
     }
 
     // ----- grants ----------------------------------------------------------
@@ -210,6 +221,7 @@ fn grant_body(grantee: &Grantee, secret: &GrantSecret) -> Value {
         GrantSecret::Static(id) => ("static_secret_id", id),
         GrantSecret::GcpAuth(id) => ("gcp_auth_secret_id", id),
         GrantSecret::OAuthToken(id) => ("oauth_token_secret_id", id),
+        GrantSecret::PgDsn(id) => ("pg_dsn_secret_id", id),
     };
     map.insert(key.to_owned(), json!(id));
     Value::Object(map)

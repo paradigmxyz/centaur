@@ -14,7 +14,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use centaur_iron_proxy::{ProxyFragment, Secret, SecretReplace, SourceKind, SourcePolicy};
+use centaur_iron_proxy::{
+    PostgresListener, ProxyFragment, Secret, SecretReplace, SourceKind, SourcePolicy, pg_foreign_id,
+};
 use serde_json::{Value as JsonValue, json};
 use serde_yaml::Value as YamlValue;
 
@@ -22,7 +24,7 @@ use crate::client::IronControlClient;
 use crate::error::IronControlError;
 use crate::models::{
     GcpAuthSecretInput, GrantSecret, Grantee, IdentityInput, InjectConfig, OAuthTokenSecretInput,
-    ReplaceConfig, RequestRule, SecretSource, StaticSecretInput,
+    PgDsnSecretInput, ReplaceConfig, RequestRule, SecretSource, StaticSecretInput,
 };
 use crate::util::slugify;
 
@@ -68,6 +70,7 @@ pub enum SecretInput {
     Static(StaticSecretInput),
     OAuthToken(OAuthTokenSecretInput),
     GcpAuth(GcpAuthSecretInput),
+    PgDsn(PgDsnSecretInput),
 }
 
 /// A fragment transform iron-control cannot represent, or a malformed entry.
@@ -127,6 +130,9 @@ pub async fn register_role(
             SecretInput::GcpAuth(input) => {
                 GrantSecret::GcpAuth(client.upsert_gcp_auth_secret(&input).await?.id)
             }
+            SecretInput::PgDsn(input) => {
+                GrantSecret::PgDsn(client.upsert_pg_dsn_secret(&input).await?.id)
+            }
         };
         client
             .create_grant(&Grantee::Role(role_record.id.clone()), &secret)
@@ -141,20 +147,21 @@ pub async fn register_role(
 /// transform (replace and inject, including ``token_broker`` sources),
 /// ``oauth_token``, and ``gcp_auth``. ``hmac_sign`` and Postgres listeners
 /// have no iron-control representation and error out (no tool uses them).
+/// Postgres listeners translate to ``pg_dsn`` secrets (one per listener).
 pub fn secret_inputs_from_fragment(
     namespace: &str,
     role_foreign_id: &str,
     fragment: &ProxyFragment,
     policy: &SourcePolicy,
 ) -> Result<Vec<SecretInput>, TranslateError> {
-    if !fragment.postgres.is_empty() {
-        return Err(TranslateError::Unsupported {
-            what: "pg_dsn / postgres listeners".to_owned(),
-        });
-    }
-
     let mut inputs = Vec::new();
     let mut used_foreign_ids = BTreeSet::new();
+
+    for listener in &fragment.postgres {
+        let mut input = pg_dsn_from_listener(namespace, role_foreign_id, listener, policy)?;
+        input.foreign_id = unique_foreign_id(input.foreign_id, &mut used_foreign_ids);
+        inputs.push(SecretInput::PgDsn(input));
+    }
     for transform in &fragment.transforms {
         match transform.name.as_str() {
             "secrets" => {
@@ -393,6 +400,78 @@ fn rules_from_values(role: &str, rules: &[YamlValue]) -> Result<Vec<RequestRule>
             })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Postgres DSN secrets
+// ---------------------------------------------------------------------------
+
+fn pg_dsn_from_listener(
+    namespace: &str,
+    role: &str,
+    listener: &PostgresListener,
+    policy: &SourcePolicy,
+) -> Result<PgDsnSecretInput, TranslateError> {
+    let name = listener
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| malformed(role, "postgres listener missing name"))?;
+    let dsn_value = listener
+        .upstream
+        .as_ref()
+        .and_then(|upstream| upstream.dsn.as_ref())
+        .ok_or_else(|| malformed(role, &format!("postgres listener {name} missing upstream.dsn")))?;
+    let dsn = pg_dsn_source(role, dsn_value, policy)?;
+    let role_to_set = listener
+        .extra
+        .get("role")
+        .and_then(YamlValue::as_str)
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(PgDsnSecretInput {
+        namespace: namespace.to_owned(),
+        foreign_id: pg_foreign_id(name),
+        name: name.to_owned(),
+        description: None,
+        role: role_to_set,
+        labels: managed_labels(),
+        dsn,
+    })
+}
+
+/// Resolve a listener's ``upstream.dsn`` into an iron-control secret source.
+/// Accepts a ``token_broker`` reference, an explicit ``env`` source, or a
+/// placeholder (resolved against the deployment's [`SourcePolicy`], like any
+/// other secret).
+fn pg_dsn_source(
+    role: &str,
+    dsn: &YamlValue,
+    policy: &SourcePolicy,
+) -> Result<SecretSource, TranslateError> {
+    if yaml_str(dsn, "type") == Some("token_broker") {
+        let credential_id = yaml_str(dsn, "credential_id")
+            .ok_or_else(|| malformed(role, "pg_dsn token_broker source missing credential_id"))?;
+        return Ok(SecretSource::token_broker(credential_id));
+    }
+    if yaml_str(dsn, "type") == Some("env") {
+        let var = yaml_str(dsn, "var")
+            .ok_or_else(|| malformed(role, "pg_dsn env source missing var"))?;
+        return Ok(SecretSource::env(var));
+    }
+    if let Some(placeholder) = yaml_str(dsn, "placeholder").or_else(|| dsn.as_str()) {
+        return Ok(source_from_placeholder(
+            policy,
+            placeholder,
+            yaml_str(dsn, "json_key"),
+        ));
+    }
+    Err(malformed(
+        role,
+        "pg_dsn upstream.dsn must be a placeholder or a typed (env/token_broker) source",
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -721,18 +800,31 @@ transforms:
     }
 
     #[test]
-    fn postgres_listeners_are_unsupported() {
+    fn postgres_listener_translates_to_pg_dsn_secret() {
         let fragment = load_fragment_str(
             r#"
 postgres:
-  - name: core
-    listen: "0.0.0.0:5432"
+  - name: analytics
+    listen: "0.0.0.0:6432"
+    upstream:
+      dsn: { placeholder: PG_ANALYTICS_DSN }
+    client:
+      user: app
+    role: readonly
 "#,
         )
         .unwrap();
-        let err = secret_inputs_from_fragment("default", "infra", &fragment, &env_policy())
-            .unwrap_err();
-        assert!(matches!(err, TranslateError::Unsupported { .. }));
+        let inputs =
+            secret_inputs_from_fragment("default", "tools", &fragment, &env_policy()).unwrap();
+        assert_eq!(inputs.len(), 1);
+        let SecretInput::PgDsn(input) = &inputs[0] else {
+            panic!("expected a pg_dsn secret");
+        };
+        assert_eq!(input.foreign_id, "pg-analytics");
+        assert_eq!(input.name, "analytics");
+        assert_eq!(input.role.as_deref(), Some("readonly"));
+        assert_eq!(input.dsn.source_type, "env");
+        assert_eq!(input.dsn.config, json!({ "var": "PG_ANALYTICS_DSN" }));
     }
 
     #[test]

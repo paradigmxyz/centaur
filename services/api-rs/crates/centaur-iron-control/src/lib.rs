@@ -18,8 +18,8 @@ pub use client::IronControlClient;
 pub use error::{IronControlError, Result};
 pub use models::{
     GcpAuthSecretInput, Grant, GrantSecret, Grantee, IdentityInput, InjectConfig,
-    OAuthTokenSecretInput, Principal, Proxy, ProxyInput, ReplaceConfig, RequestRule, Role,
-    SecretRecord, SecretSource, StaticSecretInput,
+    OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, ReplaceConfig,
+    RequestRule, Role, SecretRecord, SecretSource, StaticSecretInput,
 };
 pub use principal::{PrincipalRef, derive_principal};
 pub use registry::{

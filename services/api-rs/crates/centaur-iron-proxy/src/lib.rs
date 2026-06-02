@@ -19,7 +19,7 @@ pub use fragment::{
 };
 pub use model::{
     BrokerCredential, PgDsnEnv, PostgresClient, PostgresListener, PostgresUpstream, ProxyFragment,
-    SandboxEnv, Secret, SecretReplace, Transform, TransformConfig,
+    SandboxEnv, Secret, SecretReplace, Transform, TransformConfig, pg_env_var, pg_foreign_id,
 };
 pub use ports::{ListenPorts, listen_ports_from_yaml, pg_dsn_envs};
 pub use render::{render_proxy_yaml, render_proxy_yaml_with_source_policy};

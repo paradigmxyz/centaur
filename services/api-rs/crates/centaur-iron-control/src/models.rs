@@ -210,6 +210,28 @@ pub struct GcpAuthSecretInput {
 }
 
 // ---------------------------------------------------------------------------
+// Postgres DSN secrets
+// ---------------------------------------------------------------------------
+
+/// Request body for ``POST``/``PUT /api/v1/pg_dsn_secrets``. ``dsn`` is the
+/// upstream connection string, resolved like any other secret source; ``role``
+/// is an optional Postgres role the proxy issues ``SET ROLE`` for.
+// Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PgDsnSecretInput {
+    pub namespace: String,
+    pub foreign_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    pub dsn: SecretSource,
+}
+
+// ---------------------------------------------------------------------------
 // Principals and roles
 // ---------------------------------------------------------------------------
 
@@ -273,6 +295,7 @@ pub enum GrantSecret {
     Static(String),
     GcpAuth(String),
     OAuthToken(String),
+    PgDsn(String),
 }
 
 /// A created grant as returned by ``POST /api/v1/grants``.
