@@ -99,6 +99,33 @@ def _isoformat(value: Any) -> str | None:
     return None
 
 
+def _parse_datetime_filter(value: str | datetime | None, *, name: str) -> datetime | None:
+    """Parse optional date filters for tool calls."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an ISO 8601 date or timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _validate_date_window(start: datetime | None, end: datetime | None) -> None:
+    """Reject inverted date ranges before hitting Postgres."""
+    if start is not None and end is not None and start >= end:
+        raise ValueError("occurred_after must be earlier than occurred_before")
+
+
 def _normalize_text(value: str) -> str:
     """Collapse whitespace so previews stay compact and readable."""
     return re.sub(r"\s+", " ", value).strip()
@@ -292,6 +319,8 @@ class CompanyContextClient:
         limit: int,
         source: str | None,
         source_type: str | None,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
@@ -299,7 +328,9 @@ class CompanyContextClient:
             search_terms = [query, *terms]
             source_param = len(search_terms) + 1
             source_type_param = len(search_terms) + 2
-            limit_param = len(search_terms) + 3
+            occurred_after_param = len(search_terms) + 3
+            occurred_before_param = len(search_terms) + 4
+            limit_param = len(search_terms) + 5
             rows = await conn.fetch(
                 f"""
                 SELECT
@@ -322,6 +353,10 @@ class CompanyContextClient:
                 WHERE {_search_where_clause(len(terms))}
                   AND (${source_param}::text IS NULL OR source = ${source_param})
                   AND (${source_type_param}::text IS NULL OR source_type = ${source_type_param})
+                  AND (${occurred_after_param}::timestamptz IS NULL
+                       OR occurred_at >= ${occurred_after_param})
+                  AND (${occurred_before_param}::timestamptz IS NULL
+                       OR occurred_at < ${occurred_before_param})
                 ORDER BY
                     paradedb.score(document_id)
                     * CASE source_type
@@ -335,6 +370,8 @@ class CompanyContextClient:
                 *search_terms,
                 source,
                 source_type,
+                occurred_after,
+                occurred_before,
                 limit,
             )
             results = []
@@ -354,6 +391,9 @@ class CompanyContextClient:
             live_error = None
             should_search_live_slack = source == "slack" and (
                 source_type is None or source_type.startswith("slack")
+            )
+            should_search_live_slack = (
+                should_search_live_slack and occurred_after is None and occurred_before is None
             )
             if should_search_live_slack:
                 latest = await self._latest_date_for_connection(
@@ -376,6 +416,8 @@ class CompanyContextClient:
                 "query": query,
                 "source": source,
                 "source_type": source_type,
+                "occurred_after": _isoformat(occurred_after),
+                "occurred_before": _isoformat(occurred_before),
                 "count": len(results) + len(live_results),
                 "indexed_count": len(results),
                 "live_count": len(live_results),
@@ -438,6 +480,8 @@ class CompanyContextClient:
         limit: int = DEFAULT_SEARCH_LIMIT,
         source: str | None = None,
         source_type: str | None = None,
+        occurred_after: str | datetime | None = None,
+        occurred_before: str | datetime | None = None,
     ) -> dict:
         """Search company context documents and return candidate document ids."""
         normalized_query = query.strip()
@@ -445,12 +489,114 @@ class CompanyContextClient:
             return {"status": "error", "error": "query cannot be empty"}
 
         try:
+            parsed_occurred_after = _parse_datetime_filter(
+                occurred_after,
+                name="occurred_after",
+            )
+            parsed_occurred_before = _parse_datetime_filter(
+                occurred_before,
+                name="occurred_before",
+            )
+            _validate_date_window(parsed_occurred_after, parsed_occurred_before)
             return asyncio.run(
                 self._search_async(
                     query=normalized_query,
                     limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
                     source=source.strip() if source else None,
                     source_type=source_type.strip() if source_type else None,
+                    occurred_after=parsed_occurred_after,
+                    occurred_before=parsed_occurred_before,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def _list_documents_async(
+        self,
+        *,
+        limit: int,
+        source: str | None,
+        source_type: str | None,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    document_id,
+                    source,
+                    source_type,
+                    source_document_id,
+                    source_chunk_id,
+                    parent_document_id,
+                    title,
+                    url,
+                    author_name,
+                    access_scope,
+                    body,
+                    occurred_at,
+                    source_updated_at,
+                    metadata
+                FROM company_context_documents
+                WHERE ($1::text IS NULL OR source = $1)
+                  AND ($2::text IS NULL OR source_type = $2)
+                  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
+                  AND ($4::timestamptz IS NULL OR occurred_at < $4)
+                ORDER BY occurred_at ASC NULLS LAST, source_updated_at DESC NULLS LAST,
+                         document_id ASC
+                LIMIT $5
+                """,
+                source,
+                source_type,
+                occurred_after,
+                occurred_before,
+                limit,
+            )
+            results = []
+            for row in rows:
+                result = _document_summary(row)
+                result["preview"] = _body_preview(str(_row_value(row, "body", "") or ""), query="")
+                results.append(result)
+            return {
+                "status": "ok",
+                "source": source,
+                "source_type": source_type,
+                "occurred_after": _isoformat(occurred_after),
+                "occurred_before": _isoformat(occurred_before),
+                "count": len(results),
+                "results": results,
+            }
+        finally:
+            await conn.close()
+
+    def list_documents(
+        self,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+        source: str | None = None,
+        source_type: str | None = None,
+        occurred_after: str | datetime | None = None,
+        occurred_before: str | datetime | None = None,
+    ) -> dict:
+        """List company context documents, optionally bounded by occurred_at."""
+        try:
+            parsed_occurred_after = _parse_datetime_filter(
+                occurred_after,
+                name="occurred_after",
+            )
+            parsed_occurred_before = _parse_datetime_filter(
+                occurred_before,
+                name="occurred_before",
+            )
+            _validate_date_window(parsed_occurred_after, parsed_occurred_before)
+            return asyncio.run(
+                self._list_documents_async(
+                    limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
+                    source=source.strip() if source else None,
+                    source_type=source_type.strip() if source_type else None,
+                    occurred_after=parsed_occurred_after,
+                    occurred_before=parsed_occurred_before,
                 )
             )
         except Exception as exc:
