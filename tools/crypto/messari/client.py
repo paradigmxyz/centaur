@@ -6,8 +6,8 @@ import httpx
 
 from centaur_sdk import secret
 
-BASE_URL_V1 = "https://data.messari.io/api/v1"
-BASE_URL_V2 = "https://data.messari.io/api/v2"
+BASE_URL_V1 = "https://api.messari.io/metrics/v1"
+BASE_URL_V2 = "https://api.messari.io/metrics/v2"
 
 
 class MessariClient:
@@ -22,7 +22,9 @@ class MessariClient:
             timeout=30.0,
         )
 
-    def _request(self, endpoint: str, version: int = 1, params: dict | None = None) -> dict[str, Any]:
+    def _request(
+        self, endpoint: str, version: int = 1, params: dict | None = None
+    ) -> dict[str, Any]:
         """Make request to Messari API."""
         base_url = BASE_URL_V1 if version == 1 else BASE_URL_V2
         url = f"{base_url}{endpoint}"
@@ -37,33 +39,30 @@ class MessariClient:
         return response.json()
 
     def list_assets(self, asset_key: str = "bitcoin", limit: int = 20) -> list[dict]:
-        """Get asset metrics (list endpoint deprecated, returns single asset metrics).
-
-        Note: The old /assets list endpoint has been disabled on data.messari.io.
-        This now returns metrics for a single asset as a workaround.
-        """
-        data = self._request(f"/assets/{asset_key}/metrics", version=1)
-        result = data.get("data", {})
-        return [result] if result else []
+        """List assets from the current Messari Metrics API."""
+        _ = asset_key
+        data = self._request("/assets", version=1, params={"limit": limit})
+        result = data.get("data", [])
+        return result if isinstance(result, list) else []
 
     def get_asset(self, asset_key: str) -> dict:
-        """Get asset metrics by slug (profile endpoint deprecated)."""
-        data = self._request(f"/assets/{asset_key}/metrics", version=1)
+        """Get asset details by slug or ID."""
+        data = self._request(f"/assets/{asset_key}", version=1)
         return data.get("data", {})
 
     def get_asset_metrics(self, asset_key: str) -> dict:
         """Get metrics for an asset."""
-        data = self._request(f"/assets/{asset_key}/metrics", version=1)
+        data = self._request(f"/assets/{asset_key}", version=1)
         return data.get("data", {})
 
     def get_asset_profile(self, asset_key: str) -> dict:
-        """Get asset metrics (profile endpoint deprecated, returns metrics instead)."""
-        data = self._request(f"/assets/{asset_key}/metrics", version=1)
+        """Get asset details; profile fields depend on Messari subscription tier."""
+        data = self._request(f"/assets/{asset_key}", version=1)
         return data.get("data", {})
 
     def get_asset_markets(self, asset_key: str) -> dict:
-        """Get asset metrics (markets endpoint deprecated, returns metrics instead)."""
-        data = self._request(f"/assets/{asset_key}/metrics", version=1)
+        """Get asset details; market fields depend on Messari subscription tier."""
+        data = self._request(f"/assets/{asset_key}", version=1)
         return data.get("data", {})
 
     def get_news(self, limit: int = 10) -> dict:
@@ -72,7 +71,7 @@ class MessariClient:
         Note: The /news endpoint has been disabled on data.messari.io.
         Returns bitcoin metrics as a fallback.
         """
-        data = self._request("/assets/bitcoin/metrics", version=1)
+        data = self._request("/assets/bitcoin", version=1)
         return data.get("data", {})
 
     def get_timeseries(
@@ -93,9 +92,7 @@ class MessariClient:
         )
         return data.get("data", {})
 
-    def raw_request(
-        self, endpoint: str, version: int = 1, params: dict | None = None
-    ) -> dict:
+    def raw_request(self, endpoint: str, version: int = 1, params: dict | None = None) -> dict:
         """Make a raw API call to any endpoint."""
         return self._request(endpoint, version=version, params=params)
 

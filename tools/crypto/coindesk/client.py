@@ -29,7 +29,7 @@ class CoinDeskClient:
             "User-Agent": self.USER_AGENT,
             "Accept": "application/rss+xml, application/xml, text/xml, */*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": "gzip, deflate",
             "Referer": "https://www.coindesk.com/",
         }
         try:
