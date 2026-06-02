@@ -16,7 +16,7 @@ import time
 import tomllib
 import types
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -1090,12 +1090,35 @@ def _secret_env_refs(secret: SecretDef) -> set[str]:
     return {secret.secret_ref}
 
 
-def _missing_required_secret_env(secrets: list[SecretDef]) -> list[str]:
-    """Required-secret env refs that are unset or empty, sorted and de-duped."""
+def secret_env_refs(secrets: Collection[SecretDef]) -> set[str]:
+    """Union of env-var refs a set of secrets depends on (env secret source).
+
+    The central API uses this to tell the secret-less tool-server sidecar which
+    refs are actually available (the secrets it put into the sandbox's
+    iron-proxy config), so the sidecar's discovery gate has an authoritative
+    allowlist instead of its own empty environment.
+    """
+    refs: set[str] = set()
+    for secret in secrets:
+        refs.update(_secret_env_refs(secret))
+    return refs
+
+
+def _missing_required_secret_env(
+    secrets: list[SecretDef], available: Collection[str] | None = None
+) -> list[str]:
+    """Required-secret env refs that are unavailable, sorted and de-duped.
+
+    When ``available`` is given (an authoritative allowlist — e.g. the set the
+    central API hands the secret-less tool-server sidecar), a ref counts as
+    present iff it is in that set. Otherwise presence is read from this
+    process's environment.
+    """
     missing: set[str] = set()
     for secret in secrets:
         for ref in _secret_env_refs(secret):
-            if not os.getenv(ref):
+            present = ref in available if available is not None else bool(os.getenv(ref))
+            if not present:
                 missing.add(ref)
     return sorted(missing)
 
@@ -1659,6 +1682,7 @@ class ToolManager:
         tools_dir: Path | list[Path],
         *,
         gate_on_missing_secrets: bool = True,
+        available_secret_refs: Collection[str] | None = None,
     ):
         if isinstance(tools_dir, list):
             self.tools_dirs: list[Path] = list(tools_dir)
@@ -1667,17 +1691,27 @@ class ToolManager:
         self.tools: dict[str, LoadedTool] = {}
         self.personas: dict[str, LoadedPersona] = {}
         self.load_failures: list[dict[str, str]] = []
-        # Tools skipped at discovery because required secret env vars are unset
-        # (env secret source only). Each: {"name", "missing_secrets": [...]}.
+        # Tools skipped at discovery because a required secret is unavailable.
+        # Each: {"name", "missing_secrets": [...]}.
         self.gated_tools: list[dict[str, Any]] = []
-        # Whether discovery applies the required-secret env gate. The gate's
-        # premise — "env var unset ⇒ tool unusable" — only holds where the
-        # secret env vars actually live (the central API, which also builds the
-        # iron-proxy config). The per-sandbox tool-server sidecar runs the same
-        # discovery but never holds secrets (they live in its iron-proxy peer),
-        # so it must NOT gate or it would hide every secret-backed tool from the
-        # agent. Such callers pass ``gate_on_missing_secrets=False``.
+        # How the required-secret discovery gate decides availability:
+        #   * ``available_secret_refs`` set  → an authoritative allowlist. Used
+        #     by the per-sandbox tool-server sidecar, which never holds secrets
+        #     itself (they live in its iron-proxy peer) and so cannot read
+        #     presence from its own env. The central API computes this from the
+        #     loaded-tool secrets it puts into the sandbox's iron-proxy config.
+        #   * else, ``gate_on_missing_secrets`` True (the default) → presence is
+        #     read from this process's env, under the env secret source only.
+        #     Correct in the central API, which holds the secret env vars.
+        #   * else (flag False, no allowlist) → no gate (fail open). The sidecar
+        #     uses this only as a fallback when no allowlist was provided, so it
+        #     never gates against its own empty env and hides usable tools.
         self._gate_on_missing_secrets = gate_on_missing_secrets
+        self._available_secret_refs: frozenset[str] | None = (
+            frozenset(available_secret_refs)
+            if available_secret_refs is not None
+            else None
+        )
         self._reload_lock = threading.Lock()
 
     def _collect_tools(self) -> list[tuple[Path, dict]]:
@@ -1694,7 +1728,12 @@ class ToolManager:
         seen: dict[str, int] = {}
         tools: list[tuple[Path, dict]] = []
         self.gated_tools = []
-        gate_on_env = self._gate_on_missing_secrets and _secret_source_is_env()
+        if self._available_secret_refs is not None:
+            gate_active = True
+        elif self._gate_on_missing_secrets:
+            gate_active = _secret_source_is_env()
+        else:
+            gate_active = False
         for dir_idx, base_dir in enumerate(self.tools_dirs):
             if not base_dir.exists():
                 continue
@@ -1767,15 +1806,19 @@ class ToolManager:
                 if tool_conf.get("type") == "persona":
                     continue
 
-                # Discovery gate: under the env secret source, a tool whose
-                # required secret env vars aren't set can't actually work — the
-                # call would only fail later at the iron-proxy boundary — so
-                # don't advertise it. No-op under 1Password sources, where the
-                # values aren't env vars. ``optional_secrets`` never gate. If an
-                # overlay tool is gated out, the earlier base tool of the same
-                # name (already collected) remains as a sane fallback.
-                if gate_on_env:
-                    missing = _missing_required_secret_env(secrets)
+                # Discovery gate: a tool whose required secret isn't available
+                # can't actually work — the call would only fail later at the
+                # iron-proxy boundary — so don't advertise it. Availability is
+                # an allowlist when one was supplied (the sidecar), else read
+                # from this process's env under the env secret source (the
+                # central API; no-op under 1Password, where values aren't env
+                # vars). ``optional_secrets`` never gate. If an overlay tool is
+                # gated out, the earlier base tool of the same name (already
+                # collected) remains as a sane fallback.
+                if gate_active:
+                    missing = _missing_required_secret_env(
+                        secrets, available=self._available_secret_refs
+                    )
                     if missing:
                         self.gated_tools.append(
                             {"name": name, "missing_secrets": missing}
@@ -1875,7 +1918,13 @@ class ToolManager:
             log.info("tools_dirs_missing", paths=[str(d) for d in self.tools_dirs])
             return []
 
-        if not self._gate_on_missing_secrets:
+        if self._available_secret_refs is not None:
+            log.info(
+                "tool_secret_gate_active",
+                source="allowlist",
+                available_refs=len(self._available_secret_refs),
+            )
+        elif not self._gate_on_missing_secrets:
             log.info("tool_secret_gate_inactive", reason="disabled_by_caller")
         elif not _secret_source_is_env():
             log.info(

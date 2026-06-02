@@ -45,7 +45,7 @@ from api.sandbox.config import (
     sandbox_extra_env_map,
 )
 from api.sandbox.prompt_assembly import assemble_prompt
-from api.tool_manager import PgDsnSecret, SecretDef
+from api.tool_manager import PgDsnSecret, SecretDef, secret_env_refs
 
 log = structlog.get_logger()
 
@@ -431,6 +431,7 @@ def _build_tool_server_container(
     api_url: str,
     overlay_mount: str | None,
     database_url: str,
+    available_secret_refs: set[str],
 ) -> dict[str, Any]:
     """Build the tool-server sidecar container spec.
 
@@ -488,6 +489,14 @@ def _build_tool_server_container(
         {"name": "CENTAUR_API_KEY", "value": mint_sandbox_token(thread_key, container_name)},
         {"name": "TOOL_DIRS", "value": _tool_server_tool_dirs()},
         {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
+        # Authoritative allowlist of available secret refs so the secret-less
+        # sidecar's discovery gate hides exactly the tools whose secrets aren't
+        # configured — without it the sidecar would gate against its own empty
+        # env (hiding everything) or not at all (advertising unusable tools).
+        {
+            "name": "CENTAUR_AVAILABLE_SECRET_REFS",
+            "value": ",".join(sorted(available_secret_refs)),
+        },
     ]
     _apply_tool_server_extra_env(env, no_proxy)
 
@@ -567,6 +576,7 @@ def _apply_tool_server_extra_env(env: list[dict[str, Any]], computed_no_proxy: s
         "CENTAUR_API_KEY",
         "TOOL_DIRS",
         "PLUGIN_WATCHER_ENABLED",
+        "CENTAUR_AVAILABLE_SECRET_REFS",
     }
     no_proxy_keys = {"NO_PROXY", "no_proxy"}
     for name, value in sandbox_extra_env_map().items():
@@ -1616,6 +1626,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                         _SANDBOX_OVERLAY_ROOT if overlay_image else None
                     ),
                     database_url=core_pg["dsn"],
+                    available_secret_refs=secret_env_refs(secrets),
                 )
             )
 

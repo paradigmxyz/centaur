@@ -601,9 +601,9 @@ class TestSecretDiscoveryGate:
     def test_gate_disabled_by_caller_loads_secretless_tools(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The tool-server sidecar runs discovery with gate_on_missing_secrets
-        # =False: it never holds secrets (iron-proxy does), so the env gate must
-        # not hide secret-backed tools even under the env source.
+        # Fail-open fallback: the sidecar runs discovery with
+        # gate_on_missing_secrets=False when no allowlist is supplied, so it
+        # never gates against its own (secret-less) env under the env source.
         monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
         monkeypatch.delenv("NEEDS_KEY", raising=False)
         tools_dir = tmp_path / "tools"
@@ -614,6 +614,27 @@ class TestSecretDiscoveryGate:
 
         assert [t.name for t in loaded] == ["gated"]
         assert manager.gated_tools == []
+
+    def test_allowlist_gates_against_supplied_refs_not_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The sidecar gates against the central API's authoritative allowlist,
+        # NOT its own env: a tool loads when its ref is in the allowlist even
+        # though the env var is unset, and is gated when its ref is absent even
+        # though the env var IS set.
+        monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+        monkeypatch.setenv("ABSENT_KEY", "set-in-env-but-not-allowlisted")
+        monkeypatch.delenv("PRESENT_KEY", raising=False)
+        tools_dir = tmp_path / "tools"
+        _write_tool(tools_dir, "usable", FAKE_TOOL_CLIENT, secrets=["PRESENT_KEY"])
+        _write_tool(tools_dir, "unusable", FAKE_TOOL_CLIENT, secrets=["ABSENT_KEY"])
+
+        manager = ToolManager(tools_dir, available_secret_refs={"PRESENT_KEY"})
+        loaded = manager.discover()
+
+        assert [t.name for t in loaded] == ["usable"]
+        assert [g["name"] for g in manager.gated_tools] == ["unusable"]
+        assert manager.gated_tools[0]["missing_secrets"] == ["ABSENT_KEY"]
 
 
 class TestSecretEnvRefHelpers:

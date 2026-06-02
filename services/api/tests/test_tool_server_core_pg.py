@@ -47,13 +47,17 @@ def test_tool_server_container_uses_proxied_dsn_value(
 ) -> None:
     monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-api:latest")
     monkeypatch.setenv("KUBERNETES_SECRET_ENV_NAME", "centaur-infra-env")
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
 
     dsn = "postgresql://app_user:pw@proxy-host:5433/ai_v2"
     container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
         firewall_host="proxy-host",
         api_url="http://api:8000",
         overlay_mount=None,
         database_url=dsn,
+        available_secret_refs=set(),
     )
 
     env = {e["name"]: e for e in container["env"]}

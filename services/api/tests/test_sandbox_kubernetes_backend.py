@@ -596,6 +596,7 @@ def test_tool_server_container_has_verifiable_api_key(
         api_url="http://api.internal:8000",
         overlay_mount=None,
         database_url="postgres://app_user@firewall.internal:5433/centaur",
+        available_secret_refs=set(),
     )
 
     env = {item["name"]: item.get("value") for item in container["env"]}
@@ -638,6 +639,7 @@ def test_tool_server_container_inherits_sandbox_extra_env(
         api_url="http://api.internal:8000",
         overlay_mount=None,
         database_url="postgres://app_user@firewall.internal:5433/centaur",
+        available_secret_refs=set(),
     )
 
     env = {item["name"]: item.get("value") for item in container["env"]}
@@ -650,6 +652,36 @@ def test_tool_server_container_inherits_sandbox_extra_env(
     assert "firewall.internal" in env["NO_PROXY"]
     assert "api.internal" in env["NO_PROXY"]
     assert "stg-laminar-app-server" in env["NO_PROXY"]
+
+
+def test_tool_server_container_carries_available_secret_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar gets the central API's allowlist of available secret refs,
+    sorted+joined, so its discovery gate hides exactly the unusable tools. The
+    value is pinned: operator sandbox env cannot override it."""
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps([{"name": "CENTAUR_AVAILABLE_SECRET_REFS", "value": "EVIL"}]),
+    )
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount=None,
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+        available_secret_refs={"POSTHOG_PROJECT_ID", "POSTHOG_API_KEY", "MONACO_API_KEY"},
+    )
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert (
+        env["CENTAUR_AVAILABLE_SECRET_REFS"]
+        == "MONACO_API_KEY,POSTHOG_API_KEY,POSTHOG_PROJECT_ID"
+    )
 
 
 @pytest.mark.asyncio

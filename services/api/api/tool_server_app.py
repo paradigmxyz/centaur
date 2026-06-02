@@ -128,10 +128,17 @@ except ImportError:
     pass
 
 # The sidecar never holds tool secrets (they live in its iron-proxy peer, which
-# substitutes them on the wire), so the required-secret env gate would falsely
-# hide every secret-backed tool from the agent. Discover ungated; the central
-# API and iron-proxy remain the enforcement point.
-tool_manager = ToolManager(_tools_dirs, gate_on_missing_secrets=False)
+# substitutes them on the wire), so it can't read secret presence from its own
+# env. The central API hands it the authoritative set of available secret refs
+# via CENTAUR_AVAILABLE_SECRET_REFS; gate against that so the agent sees exactly
+# the usable tools. If the allowlist is absent (older API), fail open rather
+# than gate against the empty env, which would hide every secret-backed tool.
+_available_refs_raw = os.getenv("CENTAUR_AVAILABLE_SECRET_REFS")
+if _available_refs_raw is not None:
+    _available_refs = {r.strip() for r in _available_refs_raw.split(",") if r.strip()}
+    tool_manager = ToolManager(_tools_dirs, available_secret_refs=_available_refs)
+else:
+    tool_manager = ToolManager(_tools_dirs, gate_on_missing_secrets=False)
 tool_manager.discover()
 app.state.tool_manager = tool_manager
 app.include_router(tool_manager.create_rest_router())
