@@ -267,6 +267,21 @@ impl SandboxArgs {
                 .to_owned(),
         )];
 
+        // Single source of truth: propagate this control plane's harness auth
+        // modes into the sandbox so the agent's auth.json matches the
+        // credential the egress proxy injects — api-rs reads the same
+        // CODEX_AUTH_MODE to register the iron-control fragment. Codex defaults
+        // to api_key so the agent never silently falls back to the ChatGPT
+        // auth.json; CLAUDE_CODE_AUTH_MODE rides along when set.
+        envs.push((
+            "CODEX_AUTH_MODE".to_owned(),
+            clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
+                .unwrap_or_else(|| "api_key".to_owned()),
+        ));
+        if let Some(mode) = clean_optional_value(env::var("CLAUDE_CODE_AUTH_MODE").ok().as_deref()) {
+            envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
+        }
+
         for name in &self.passthrough_env {
             let name = name.trim();
             if name.is_empty() {
@@ -827,13 +842,20 @@ mod tests {
         ])
         .unwrap();
 
+        let env = args.sandbox.codex_app_server_env_template();
+        // CENTAUR_API_URL is always first.
         assert_eq!(
-            args.sandbox.codex_app_server_env_template(),
-            vec![(
+            env[0],
+            (
                 "CENTAUR_API_URL".to_owned(),
                 "http://host.docker.internal:8080".to_owned()
-            )]
+            )
         );
+        // The codex auth mode is propagated so the sandbox agent matches the
+        // proxy's registered credential.
+        assert!(env.iter().any(|(name, _)| name == "CODEX_AUTH_MODE"));
+        // No OpenAI/codex API key is materialized into the sandbox env.
+        assert!(!env.iter().any(|(name, _)| name.contains("API_KEY")));
     }
 
     #[test]

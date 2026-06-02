@@ -169,6 +169,16 @@ sandbox:
     pullPolicy: Always
   runtimeClassName: ""
   reposPath: ""
+  # How the in-sandbox harness authenticates upstream. Single source of truth:
+  # the control plane reads it to register the matching iron-proxy credential
+  # AND propagates it into the sandbox, so the agent's auth.json and the
+  # injected credential always agree.
+  #   api_key      — codex/claude use an API key (proxy replaces the
+  #                  placeholder against api.openai.com / api.anthropic.com).
+  #   access_token — codex uses a ChatGPT token against chatgpt.com / claude a
+  #                  subscription token (proxy injects the brokered credential).
+  codexAuthMode: api_key
+  claudeCodeAuthMode: api_key
   extraEnv: {}
   stateVolume:
     enabled: false
@@ -232,7 +242,6 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   ironProxy:
     mode: enabled
-  codexAuthMode: api_key
   # 1Password vault the iron-proxy secret source reads from when
   # ironProxy.secretSource is "onepassword". Empty falls back to the binary
   # default ("ai-agents").

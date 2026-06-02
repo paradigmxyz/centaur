@@ -367,11 +367,17 @@ spec:
             - name: REPOS_PATH
               value: {{ $reposPath | quote }}
 {{- end }}
-{{- with .Values.sandbox.extraEnv }}
 {{- $envList := list }}
-{{- range $k, $v := . }}
+{{- if .Values.sandbox.codexAuthMode }}
+{{- $envList = append $envList (dict "name" "CODEX_AUTH_MODE" "value" (.Values.sandbox.codexAuthMode | toString)) }}
+{{- end }}
+{{- if .Values.sandbox.claudeCodeAuthMode }}
+{{- $envList = append $envList (dict "name" "CLAUDE_CODE_AUTH_MODE" "value" (.Values.sandbox.claudeCodeAuthMode | toString)) }}
+{{- end }}
+{{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $envList = append $envList (dict "name" $k "value" ($v | toString)) }}
 {{- end }}
+{{- if $envList }}
             - name: KUBERNETES_SANDBOX_EXTRA_ENV
               value: {{ $envList | toJson | quote }}
 {{- end }}

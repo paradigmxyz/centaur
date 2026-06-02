@@ -157,8 +157,14 @@ spec:
 {{- end }}
             - name: TOOL_DIRS
               value: /app/tools
+            # Harness auth modes: single source of truth (sandbox.*AuthMode).
+            # api-rs reads these to register the matching iron-proxy credential
+            # and propagates them into each sandbox so the agent's auth.json
+            # and the injected credential agree.
             - name: CODEX_AUTH_MODE
-              value: {{ .Values.apiRs.codexAuthMode | quote }}
+              value: {{ .Values.sandbox.codexAuthMode | quote }}
+            - name: CLAUDE_CODE_AUTH_MODE
+              value: {{ .Values.sandbox.claudeCodeAuthMode | quote }}
 {{- if .Values.ironControl.enabled }}
             # iron-control control plane: principals/roles/grants + per-sandbox
             # proxy sync. When unset, the api-rs falls back to the rendered
