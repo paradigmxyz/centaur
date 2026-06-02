@@ -6,24 +6,22 @@ use std::{
 
 use crate::{IronProxyConfigError, ProxyFragment, Result};
 
-pub const DEFAULT_PROXY_BASE_CONFIG: &str =
-    include_str!("../../../../api/api/iron-proxy.base.yaml");
-pub const INFRA_FRAGMENT: &str = include_str!("../../../../iron-proxy/infra.yaml");
-pub const CLAUDE_CODE_API_KEY_FRAGMENT: &str =
-    include_str!("../../../../iron-proxy/harness/claude-code-api-key.yaml");
-pub const CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT: &str =
-    include_str!("../../../../iron-proxy/harness/claude-code-access-token.yaml");
-pub const CODEX_API_KEY_FRAGMENT: &str =
-    include_str!("../../../../iron-proxy/harness/codex-api-key.yaml");
-pub const CODEX_ACCESS_TOKEN_FRAGMENT: &str =
-    include_str!("../../../../iron-proxy/harness/codex-access-token.yaml");
+const DEFAULT_PROXY_BASE_CONFIG_PATH: &str = "services/api/api/iron-proxy.base.yaml";
+const DEFAULT_INFRA_FRAGMENT_PATH: &str = "services/iron-proxy/infra.yaml";
+const DEFAULT_HARNESS_FRAGMENT_DIR: &str = "services/iron-proxy/harness";
+const API_KEY_FRAGMENT_SUFFIX: &str = "-api-key";
+const ACCESS_TOKEN_FRAGMENT_SUFFIX: &str = "-access-token";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessFragmentFile {
+    pub engine: String,
+    pub auth_mode: String,
+    pub path: PathBuf,
+}
 
 pub fn load_fragment_file(path: impl AsRef<Path>) -> Result<ProxyFragment> {
     let path = path.as_ref();
-    let contents = fs::read_to_string(path).map_err(|source| IronProxyConfigError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let contents = read_file(path)?;
     serde_yaml::from_str(&contents).map_err(|source| IronProxyConfigError::ParseFragment {
         path: path.to_path_buf(),
         source,
@@ -49,6 +47,47 @@ pub fn discover_fragment_files(dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+pub fn load_default_proxy_base_config() -> Result<String> {
+    read_file(default_proxy_base_config_path())
+}
+
+pub fn default_harness_fragment_dirs() -> Vec<PathBuf> {
+    vec![repo_relative_path(DEFAULT_HARNESS_FRAGMENT_DIR)]
+}
+
+pub fn discover_harness_fragment_files(dirs: &[PathBuf]) -> Result<Vec<HarnessFragmentFile>> {
+    let mut files = Vec::new();
+    for dir in dirs {
+        visit_harness_fragment_dir(dir, &mut files)?;
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files.dedup_by(|left, right| left.path == right.path);
+    Ok(files)
+}
+
+pub fn harness_fragment_from_dirs(
+    engine: &str,
+    auth_mode: &str,
+    dirs: &[PathBuf],
+) -> Result<Option<ProxyFragment>> {
+    let auth_mode = normalize_auth_mode(auth_mode);
+    let Some(fragment_file) = discover_harness_fragment_files(dirs)?
+        .into_iter()
+        .find(|file| file.engine == engine && file.auth_mode == auth_mode)
+    else {
+        return Ok(None);
+    };
+    load_fragment_file(fragment_file.path).map(Some)
+}
+
+pub fn harness_broker_fragments_from_dirs(dirs: &[PathBuf]) -> Result<Vec<ProxyFragment>> {
+    discover_harness_fragment_files(dirs)?
+        .into_iter()
+        .filter(|file| file.auth_mode == "access_token")
+        .map(|file| load_fragment_file(file.path))
+        .collect()
 }
 
 fn visit_fragment_dir(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -82,29 +121,44 @@ fn visit_fragment_dir(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-pub fn harness_fragment(engine: &str, auth_mode: &str) -> Result<Option<ProxyFragment>> {
-    let contents = match (engine, auth_mode) {
-        ("claude-code", "access_token") => CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT,
-        ("claude-code", _) => CLAUDE_CODE_API_KEY_FRAGMENT,
-        ("codex", "access_token") => CODEX_ACCESS_TOKEN_FRAGMENT,
-        ("codex", _) => CODEX_API_KEY_FRAGMENT,
-        _ => return Ok(None),
-    };
-    load_fragment_str(contents).map(Some)
+fn visit_harness_fragment_dir(dir: &Path, files: &mut Vec<HarnessFragmentFile>) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir).map_err(|source| IronProxyConfigError::ReadDir {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| IronProxyConfigError::ReadDir {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|source| IronProxyConfigError::ReadDir {
+                path: path.clone(),
+                source,
+            })?;
+        if file_type.is_dir() {
+            visit_harness_fragment_dir(&path, files)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("yaml")
+            && let Some(file) = parse_harness_fragment_file(path)
+        {
+            files.push(file);
+        }
+    }
+    Ok(())
 }
 
 pub fn infra_fragment() -> Result<ProxyFragment> {
-    load_fragment_str(INFRA_FRAGMENT)
+    load_fragment_file(repo_relative_path(DEFAULT_INFRA_FRAGMENT_PATH))
 }
 
 pub fn harness_broker_fragments() -> Result<Vec<ProxyFragment>> {
-    [
-        CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT,
-        CODEX_ACCESS_TOKEN_FRAGMENT,
-    ]
-    .into_iter()
-    .map(load_fragment_str)
-    .collect()
+    harness_broker_fragments_from_dirs(&default_harness_fragment_dirs())
 }
 
 pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> {
@@ -117,4 +171,57 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
         .filter(|value| !value.is_empty() && !value.contains('='))
         .map(|value| (value.to_owned(), value.to_owned()))
         .collect()
+}
+
+fn parse_harness_fragment_file(path: PathBuf) -> Option<HarnessFragmentFile> {
+    let stem = path.file_stem()?.to_str()?;
+    let (engine, auth_mode) = strip_auth_suffix(stem, API_KEY_FRAGMENT_SUFFIX, "api_key")
+        .or_else(|| strip_auth_suffix(stem, ACCESS_TOKEN_FRAGMENT_SUFFIX, "access_token"))?;
+    Some(HarnessFragmentFile {
+        engine: engine.to_owned(),
+        auth_mode: auth_mode.to_owned(),
+        path,
+    })
+}
+
+fn strip_auth_suffix<'a>(
+    stem: &'a str,
+    suffix: &str,
+    auth_mode: &'static str,
+) -> Option<(&'a str, &'static str)> {
+    stem.strip_suffix(suffix)
+        .filter(|engine| !engine.is_empty())
+        .map(|engine| (engine, auth_mode))
+}
+
+fn normalize_auth_mode(value: &str) -> String {
+    value.replace('-', "_")
+}
+
+fn repo_relative_path(relative: impl AsRef<Path>) -> PathBuf {
+    let relative = relative.as_ref();
+    let Ok(mut dir) = std::env::current_dir() else {
+        return relative.to_path_buf();
+    };
+    loop {
+        let candidate = dir.join(relative);
+        if candidate.exists() {
+            return candidate;
+        }
+        if !dir.pop() {
+            return relative.to_path_buf();
+        }
+    }
+}
+
+fn default_proxy_base_config_path() -> PathBuf {
+    repo_relative_path(DEFAULT_PROXY_BASE_CONFIG_PATH)
+}
+
+fn read_file(path: impl AsRef<Path>) -> Result<String> {
+    let path = path.as_ref();
+    fs::read_to_string(path).map_err(|source| IronProxyConfigError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })
 }

@@ -1,11 +1,13 @@
 mod broker;
-mod postgres;
+mod postgres_proxy;
 mod proxy;
 mod transform;
 mod values;
 
 pub use broker::BrokerCredential;
-pub use postgres::{PgDsnEnv, PostgresClient, PostgresListener, PostgresUpstream, SandboxEnv};
+pub use postgres_proxy::{
+    PgDsnEnv, PostgresClient, PostgresListener, PostgresUpstream, SandboxEnv,
+};
 pub use proxy::ProxyFragment;
 pub use transform::{Secret, SecretReplace, Transform, TransformConfig};
 

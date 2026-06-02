@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DEFAULT_PROXY_BASE_CONFIG, IronProxyConfigError, ProxyConfig, ProxyFragment, Result, Secret,
-    SourcePolicy, Transform, resolve_placeholder_source_values, value_field_str,
+    IronProxyConfigError, ProxyConfig, ProxyFragment, Result, Secret, SourcePolicy, Transform,
+    load_default_proxy_base_config, resolve_placeholder_source_values, value_field_str,
 };
 
 pub fn render_proxy_yaml(base_config: Option<&str>, fragments: &[ProxyFragment]) -> Result<String> {
@@ -16,9 +16,16 @@ pub fn render_proxy_yaml_with_source_policy(
     fragments: &[ProxyFragment],
     source_policy: &SourcePolicy,
 ) -> Result<String> {
+    let default_base_config;
+    let base_config = match base_config {
+        Some(base_config) => base_config,
+        None => {
+            default_base_config = load_default_proxy_base_config()?;
+            default_base_config.as_str()
+        }
+    };
     let mut cfg: ProxyConfig =
-        serde_yaml::from_str(base_config.unwrap_or(DEFAULT_PROXY_BASE_CONFIG))
-            .map_err(IronProxyConfigError::ParseBase)?;
+        serde_yaml::from_str(base_config).map_err(IronProxyConfigError::ParseBase)?;
 
     for fragment in fragments {
         for (key, value) in &fragment.top_level {

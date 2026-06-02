@@ -50,6 +50,7 @@ pub struct IronProxyConfig {
     pub token_broker_name: Option<String>,
     pub token_broker_url: Option<String>,
     pub token_broker_configmap_name: Option<String>,
+    pub token_broker_fragments: Vec<ProxyFragment>,
 }
 
 impl IronProxyConfig {
@@ -76,6 +77,7 @@ impl IronProxyConfig {
             token_broker_name: None,
             token_broker_url: None,
             token_broker_configmap_name: None,
+            token_broker_fragments: Vec::new(),
         }
     }
 }
@@ -311,9 +313,7 @@ impl AgentSandboxBackend {
         let Some(token_broker_name) = iron_proxy.token_broker_name.as_deref() else {
             return Ok(());
         };
-        let mut fragments = centaur_iron_proxy::harness_broker_fragments().map_err(|err| {
-            SandboxError::InvalidSpec(format!("iron-token-broker fragments: {err}"))
-        })?;
+        let mut fragments = iron_proxy.token_broker_fragments.clone();
         fragments.extend(iron_proxy.fragments.clone());
         let rendered = centaur_iron_proxy::render_token_broker_yaml_with_source_policy(
             &fragments,

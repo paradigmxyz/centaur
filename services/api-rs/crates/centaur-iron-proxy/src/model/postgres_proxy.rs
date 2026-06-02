@@ -1,3 +1,5 @@
+//! Iron-proxy Postgres listener YAML, separate from Centaur's own sqlx-backed database.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
