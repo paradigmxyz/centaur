@@ -301,7 +301,7 @@ def test_backfill_schedule_defaults_disabled(monkeypatch):
     assert reloaded.DEFAULT_CHANNEL_PAGES_PER_JOB == 5
     assert reloaded.SCHEDULE == {
         "schedule_id": "slack_backfill",
-        "interval_seconds": 60,
+        "interval_seconds": 600,
         "enabled": False,
         "no_delivery": True,
     }
@@ -1478,6 +1478,18 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
 
     now = dt.datetime.now(dt.timezone.utc)
     await db_pool.execute(
+        "INSERT INTO workflow_schedules ("
+        "schedule_id, workflow_name, schedule_kind, interval_seconds, next_run_at"
+        ") VALUES "
+        "('slack_sync', 'slack_sync', 'interval', 20, $1), "
+        "('google_drive_sync', 'google_drive_sync', 'interval', 30, $1), "
+        "('google_calendar_sync', 'google_calendar_sync', 'interval', 40, $1), "
+        "('linear_sync', 'linear_sync', 'interval', 50, $1) "
+        "ON CONFLICT (schedule_id) DO UPDATE SET "
+        "interval_seconds = EXCLUDED.interval_seconds",
+        now,
+    )
+    await db_pool.execute(
         "INSERT INTO slack_sync_channels (channel_id, channel_name, is_syncable) "
         "VALUES ('C_PUBLIC', 'ai-agent', TRUE), ('C_OTHER', 'other-channel', TRUE)",
     )
@@ -1605,7 +1617,7 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
         metrics,
     )
     assert freshness_match is not None
-    assert 25 <= float(freshness_match.group(1)) < 100
+    assert 5 <= float(freshness_match.group(1)) < 60
     drive_lag_match = re.search(
         r'etl_source_cursor_lag_seconds\{source="google_drive",source_type="doc"\} ([0-9.]+)',
         metrics,
@@ -1617,7 +1629,7 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
         metrics,
     )
     assert drive_freshness_match is not None
-    assert 40 <= float(drive_freshness_match.group(1)) < 120
+    assert 10 <= float(drive_freshness_match.group(1)) < 70
     calendar_lag_match = re.search(
         r'etl_source_cursor_lag_seconds\{source="google_calendar",source_type="calendar"\} ([0-9.]+)',
         metrics,
@@ -1629,7 +1641,7 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
         metrics,
     )
     assert calendar_freshness_match is not None
-    assert 50 <= float(calendar_freshness_match.group(1)) < 130
+    assert 10 <= float(calendar_freshness_match.group(1)) < 70
     linear_lag_match = re.search(
         r'etl_source_cursor_lag_seconds\{source="linear",source_type="workspace"\} ([0-9.]+)',
         metrics,
@@ -1641,7 +1653,7 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
         metrics,
     )
     assert linear_freshness_match is not None
-    assert 70 <= float(linear_freshness_match.group(1)) < 140
+    assert 20 <= float(linear_freshness_match.group(1)) < 80
     drive_projection_lag_match = re.search(
         r'company_context_projection_lag_seconds\{source="google_drive"\} ([0-9.]+)',
         metrics,

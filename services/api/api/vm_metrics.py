@@ -27,6 +27,12 @@ _PUSH_ENABLED = os.environ.get(
     "no",
 }
 _PUSH_INTERVAL_S = 15
+_DEFAULT_ETL_SCHEDULE_INTERVALS_S = {
+    "slack_sync": 60 * 60,
+    "google_drive_sync": 4 * 60 * 60,
+    "google_calendar_sync": 4 * 60 * 60,
+    "linear_sync": 4 * 60 * 60,
+}
 
 # ---------------------------------------------------------------------------
 # Metric primitives
@@ -453,7 +459,7 @@ ETL_SOURCE_CURSOR_LAG_SECONDS = Gauge(
 )
 ETL_SCOPE_SYNC_FRESHNESS_SECONDS = Gauge(
     "etl_scope_sync_freshness_seconds",
-    "Worst time since a syncable ETL scope last completed successfully.",
+    "Worst schedule-adjusted overdue time for a syncable ETL scope.",
     ["source", "source_type"],
 )
 ETL_ACTIVE_SCOPES = Gauge(
@@ -800,6 +806,32 @@ async def refresh_runtime_metrics(pool: Pool) -> None:
     await refresh_etl_metrics(pool)
 
 
+async def _etl_schedule_intervals_s(pool: Pool) -> dict[str, int]:
+    intervals = dict(_DEFAULT_ETL_SCHEDULE_INTERVALS_S)
+    rows = await pool.fetch(
+        "SELECT schedule_id, interval_seconds "
+        "FROM workflow_schedules "
+        "WHERE schedule_id = ANY($1::text[]) "
+        "  AND schedule_kind = 'interval' "
+        "  AND interval_seconds IS NOT NULL "
+        "  AND interval_seconds > 0",
+        list(intervals),
+    )
+    for row in rows:
+        intervals[str(row["schedule_id"])] = int(row["interval_seconds"])
+    return intervals
+
+
+def _sync_freshness_overdue_s(
+    success_at: dt.datetime,
+    *,
+    now: dt.datetime,
+    schedule_interval_s: int,
+) -> float:
+    age_s = (now - success_at.astimezone(dt.timezone.utc)).total_seconds()
+    return max(age_s - float(schedule_interval_s), 0.0)
+
+
 async def refresh_etl_metrics(pool: Pool) -> None:
     """Refresh ETL freshness gauges from durable Postgres state."""
     ETL_SOURCE_CURSOR_LAG_SECONDS.clear_children()
@@ -810,6 +842,7 @@ async def refresh_etl_metrics(pool: Pool) -> None:
     ETL_BACKFILL_JOB_AGE_SECONDS.clear_children()
     COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.clear_children()
 
+    schedule_intervals_s = await _etl_schedule_intervals_s(pool)
     slack_scope_rows = await pool.fetch(
         "SELECT ch.channel_id, cp.watermark_ts, cp.last_success_at, cp.last_error, cp.updated_at "
         "FROM slack_sync_channels ch "
@@ -842,7 +875,11 @@ async def refresh_etl_metrics(pool: Pool) -> None:
             if isinstance(success_at, dt.datetime):
                 max_sync_freshness_s = max(
                     max_sync_freshness_s,
-                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s["slack_sync"],
+                    ),
                 )
     ETL_FAILED_SCOPES.labels(source="slack", source_type="channel").set(failed_scopes)
     ETL_SOURCE_CURSOR_LAG_SECONDS.labels(source="slack", source_type="channel").set(
@@ -886,7 +923,11 @@ async def refresh_etl_metrics(pool: Pool) -> None:
             if isinstance(success_at, dt.datetime):
                 max_sync_freshness_s = max(
                     max_sync_freshness_s,
-                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s["google_drive_sync"],
+                    ),
                 )
     ETL_FAILED_SCOPES.labels(source="google_drive", source_type="doc").set(
         failed_scopes
@@ -933,7 +974,13 @@ async def refresh_etl_metrics(pool: Pool) -> None:
             if isinstance(success_at, dt.datetime):
                 max_sync_freshness_s = max(
                     max_sync_freshness_s,
-                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s[
+                            "google_calendar_sync"
+                        ],
+                    ),
                 )
     ETL_FAILED_SCOPES.labels(source="google_calendar", source_type="calendar").set(
         failed_scopes
@@ -979,7 +1026,11 @@ async def refresh_etl_metrics(pool: Pool) -> None:
             if isinstance(success_at, dt.datetime):
                 max_sync_freshness_s = max(
                     max_sync_freshness_s,
-                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s["linear_sync"],
+                    ),
                 )
     ETL_FAILED_SCOPES.labels(source="linear", source_type="workspace").set(
         failed_scopes

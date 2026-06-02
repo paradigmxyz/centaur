@@ -22,9 +22,19 @@ class _FakeSlackResponse(dict):
 
 
 class _FakeSlackError(Exception):
-    def __init__(self, *, error: str, status_code: int) -> None:
+    def __init__(
+        self,
+        *,
+        error: str,
+        status_code: int,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(error)
-        self.response = _FakeSlackResponse(error=error, status_code=status_code)
+        self.response = _FakeSlackResponse(
+            error=error,
+            status_code=status_code,
+            headers=headers,
+        )
 
 
 class _FakeWebClient:
@@ -159,3 +169,43 @@ def test_get_etl_thread_replies_page_reports_user_token_auth_failures() -> None:
     assert payload["access_path"] == "user_token"
     assert payload["slack_method"] == "conversations.replies"
     assert payload["error_code"] == "missing_scope"
+
+
+def test_retry_on_ratelimit_honors_short_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _make_client()
+    sleeps: list[float] = []
+    attempts = 0
+    now = 1_000.0
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def fake_time() -> float:
+        return now
+
+    def rate_limited_once() -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _FakeSlackError(
+                error="ratelimited",
+                status_code=429,
+                headers={"Retry-After": "2"},
+            )
+        return {"ok": True}
+
+    monkeypatch.setattr("workflows.slack_sync_shared.time.sleep", fake_sleep)
+    monkeypatch.setattr("workflows.slack_sync_shared.time.time", fake_time)
+
+    result = client._retry_on_ratelimit(
+        rate_limited_once,
+        method_key="etl.conversations.history",
+    )
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert sleeps == [2.25]

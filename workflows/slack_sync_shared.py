@@ -423,7 +423,7 @@ class SlackEtlClient:
 
     _MAX_PAGE_SIZE = 200
     _DEFAULT_API_TIMEOUT_SECONDS = 8
-    _MAX_RATE_LIMIT_SLEEP_SECONDS = 0.0
+    _MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
     _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
     _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")

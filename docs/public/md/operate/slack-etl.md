@@ -28,7 +28,7 @@ token and writes durable rows into Postgres.
 | Workflow | Default cadence | Role |
 |----------|-----------------|------|
 | `slack_sync` | 1 hour | Lists public channels, refreshes users, syncs recent root messages, advances per-channel checkpoints, and enqueues backfill jobs. |
-| `slack_backfill` | 1 minute | Claims queued backfill jobs and drains Slack cursors without slowing the incremental sync. |
+| `slack_backfill` | 10 minutes | Claims queued backfill jobs and drains Slack cursors without slowing the incremental sync. |
 | `company_context_documents` | 4 hours | Projects changed Slack rows into `company_context_documents` for retrieval. |
 
 The schedules are registered from the workflow files at API startup. Each
@@ -65,7 +65,7 @@ once Slack ETL is enabled, but can be tuned independently.
 | `SLACK_ETL_ENABLED` | `false` | Enables `slack_sync`, `slack_backfill`, and the default document projection. |
 | `SLACK_SYNC_INTERVAL_SECONDS` | `3600` | How often to run incremental Slack sync. |
 | `SLACK_BACKFILL_ENABLED` | `true` | Enables the backfill worker schedule. |
-| `SLACK_BACKFILL_INTERVAL_SECONDS` | `60` | How often to drain queued backfill jobs. |
+| `SLACK_BACKFILL_INTERVAL_SECONDS` | `600` | How often to drain queued backfill jobs. |
 | `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT` | `50` | Maximum backfill jobs claimed per run. |
 | `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `5` | Maximum Slack history pages drained before a job is requeued. |
 | `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS` | `30` | Historical window seeded for first-time channel backfills. |
