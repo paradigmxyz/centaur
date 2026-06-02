@@ -1,12 +1,10 @@
 import { Hono } from 'hono'
 import {
   Chat,
-  StreamingMarkdownRenderer,
   StreamingPlan,
   type Logger,
   type Message,
   type StateAdapter,
-  type StreamChunk,
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
@@ -75,7 +73,6 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     userName,
     logger
   })
-  patchSlackAdapterStreaming(slack, options.botToken, logger)
   const chat = new Chat({
     userName,
     adapters: { slack },
@@ -303,153 +300,6 @@ function rendererOptions(thread: Thread, options: SlackbotV2Options): CodexAppSe
       }
     }
   }
-}
-
-type SlackStreamingAdapter = {
-  decodeThreadId(threadId: string): { channel: string; threadTs?: string }
-  getClientForToken?(token: string): SlackStreamingClient
-  stream?: (
-    threadId: string,
-    textStream: AsyncIterable<string | StreamChunk>,
-    options?: SlackStreamOptions
-  ) => Promise<{ id: string; raw: unknown; threadId: string }>
-}
-
-type SlackStreamPayload = { [key: string]: unknown }
-const SLACK_MAX_BLOCKS = 50
-const SLACK_SECTION_TEXT_MAX_CHARS = 3000
-
-type SlackStreamingClient = {
-  chatStream(input: SlackStreamPayload): SlackStreamer
-}
-
-type SlackStreamer = {
-  append(input: SlackStreamPayload): Promise<unknown>
-  stop(input?: SlackStreamPayload): Promise<{ message?: { ts?: string }; ts?: string }>
-}
-
-type SlackStreamOptions = {
-  recipientTeamId?: string
-  recipientUserId?: string
-  stopBlocks?: unknown[]
-  taskDisplayMode?: 'plan' | 'timeline' | 'dense'
-}
-
-function patchSlackAdapterStreaming(adapter: unknown, botToken: string, logger: Logger): void {
-  const slack = adapter as SlackStreamingAdapter
-  if (!slack.getClientForToken || !slack.stream) return
-
-  const originalStream = slack.stream.bind(slack)
-  slack.stream = async (threadId, textStream, options) => {
-    if (!(options?.recipientUserId && options?.recipientTeamId)) {
-      return originalStream(threadId, textStream, options)
-    }
-
-    const { channel, threadTs: rawThreadTs } = slack.decodeThreadId(threadId)
-    const threadTs = rawThreadTs || undefined
-    if (!threadTs) {
-      return originalStream(threadId, textStream, options)
-    }
-
-    logger.debug('Slack: starting token-bound stream', { channel, threadTs })
-    const client = slack.getClientForToken!(botToken)
-    const streamer = client.chatStream({
-      channel,
-      thread_ts: threadTs,
-      recipient_user_id: options.recipientUserId,
-      recipient_team_id: options.recipientTeamId,
-      ...(options.taskDisplayMode ? { task_display_mode: options.taskDisplayMode } : {})
-    })
-
-    let lastAppended = ''
-    let structuredChunksSupported = true
-    const renderer = new StreamingMarkdownRenderer({ wrapTablesForAppend: false })
-
-    const flushMarkdownDelta = async (delta: string): Promise<void> => {
-      if (!delta) return
-      await streamer.append({ markdown_text: delta })
-    }
-
-    const pushTextAndFlush = async (text: string): Promise<void> => {
-      renderer.push(text)
-      const committable = renderer.getCommittableText()
-      const delta = committable.slice(lastAppended.length)
-      await flushMarkdownDelta(delta)
-      lastAppended = committable
-    }
-
-    const sendStructuredChunk = async (chunk: StreamChunk): Promise<void> => {
-      if (!structuredChunksSupported) return
-      const committable = renderer.getCommittableText()
-      const delta = committable.slice(lastAppended.length)
-      await flushMarkdownDelta(delta)
-      lastAppended = committable
-      try {
-        await streamer.append({ chunks: [chunk] })
-      } catch (error) {
-        structuredChunksSupported = false
-        logger.warn('Slack structured streaming chunk failed; falling back to text-only stream', {
-          chunkType: chunk.type,
-          error
-        })
-      }
-    }
-
-    for await (const chunk of textStream) {
-      if (typeof chunk === 'string') {
-        await pushTextAndFlush(chunk)
-      } else if (chunk.type === 'markdown_text') {
-        await pushTextAndFlush(chunk.text)
-      } else {
-        await sendStructuredChunk(chunk)
-      }
-    }
-
-    renderer.finish()
-    const finalCommittable = renderer.getCommittableText()
-    const finalDelta = finalCommittable.slice(lastAppended.length)
-    await flushMarkdownDelta(finalDelta)
-    lastAppended = finalCommittable
-    const stopPayload: SlackStreamPayload = {}
-    const stopBlocks =
-      options.stopBlocks && finalCommittable.trim()
-        ? appendFinalMarkdownBlocks(options.stopBlocks, finalCommittable)
-        : options.stopBlocks
-    if (stopBlocks) {
-      stopPayload.blocks = stopBlocks
-    }
-    const result = await streamer.stop(Object.keys(stopPayload).length ? stopPayload : undefined)
-    const messageTs = result.message?.ts ?? result.ts
-    if (!messageTs) throw new Error('Slack stream completed without a message timestamp')
-    logger.debug('Slack: token-bound stream complete', { messageId: messageTs })
-    return { id: messageTs, threadId, raw: result }
-  }
-}
-
-function appendFinalMarkdownBlocks(blocks: unknown[], markdown: string): unknown[] {
-  const finalBlocks = markdownSectionBlocks(markdown)
-  const available = Math.max(0, SLACK_MAX_BLOCKS - finalBlocks.length)
-  return [...blocks.slice(0, available), ...finalBlocks]
-}
-
-function markdownSectionBlocks(markdown: string): unknown[] {
-  const text = markdown.trim()
-  if (!text) return []
-
-  const blocks: unknown[] = []
-  let remaining = text
-  while (remaining && blocks.length < SLACK_MAX_BLOCKS) {
-    const chunk = remaining.slice(0, SLACK_SECTION_TEXT_MAX_CHARS)
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: chunk
-      }
-    })
-    remaining = remaining.slice(chunk.length)
-  }
-  return blocks
 }
 
 async function setAssistantStatus(thread: Thread, status: string): Promise<void> {
