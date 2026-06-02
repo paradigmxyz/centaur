@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
 
@@ -96,6 +98,106 @@ def test_linear_readonly_client_builds_issue_filters():
     assert 'team: { key: { eq: "EN\\"G" } }' in query
     assert 'assignee: { name: { containsIgnoreCase: "Ada" } }' in query
     assert 'state: { name: { containsIgnoreCase: "In Progress" } }' in query
+
+
+def test_linear_readonly_client_lists_etl_projects_with_incremental_filter():
+    from api.integrations.linear import LinearReadonlyClient
+
+    http = FakeHttpClient(
+        [
+            {
+                "data": {
+                    "projects": {
+                        "nodes": [{"id": "project-1", "name": "Roadmap"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearReadonlyClient(api_key="lin-test", http_client=http)
+
+    result = client.list_etl_projects(
+        page_size=25,
+        cursor="cursor-1",
+        updated_after=dt.datetime(2026, 5, 1, 12, 0, tzinfo=dt.timezone.utc),
+        include_archived=True,
+    )
+
+    assert result["nodes"][0]["id"] == "project-1"
+    request = http.requests[0]["json"]
+    assert "projects(" in request["query"]
+    assert "filter: { updatedAt: { gte: $updatedAfter } }" in request["query"]
+    assert request["variables"] == {
+        "first": 25,
+        "after": "cursor-1",
+        "includeArchived": True,
+        "updatedAfter": "2026-05-01T12:00:00Z",
+    }
+
+
+def test_linear_readonly_client_lists_etl_issues_without_incremental_filter():
+    from api.integrations.linear import LinearReadonlyClient
+
+    http = FakeHttpClient(
+        [
+            {
+                "data": {
+                    "issues": {
+                        "nodes": [{"id": "issue-1", "identifier": "ENG-1"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearReadonlyClient(api_key="lin-test", http_client=http)
+
+    result = client.list_etl_issues(page_size=50, include_archived=False)
+
+    assert result["nodes"][0]["identifier"] == "ENG-1"
+    request = http.requests[0]["json"]
+    assert "issues(" in request["query"]
+    assert "$updatedAfter" not in request["query"]
+    assert request["variables"] == {
+        "first": 50,
+        "after": None,
+        "includeArchived": False,
+    }
+
+
+def test_linear_readonly_client_lists_etl_comments_with_incremental_filter():
+    from api.integrations.linear import LinearReadonlyClient
+
+    http = FakeHttpClient(
+        [
+            {
+                "data": {
+                    "comments": {
+                        "nodes": [{"id": "comment-1", "issueId": "issue-1"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearReadonlyClient(api_key="lin-test", http_client=http)
+
+    result = client.list_etl_comments(
+        page_size=10,
+        updated_after="2026-05-01T12:00:00Z",
+    )
+
+    assert result["nodes"][0]["id"] == "comment-1"
+    request = http.requests[0]["json"]
+    assert "comments(" in request["query"]
+    assert "filter: { updatedAt: { gte: $updatedAfter } }" in request["query"]
+    assert request["variables"] == {
+        "first": 10,
+        "after": None,
+        "includeArchived": True,
+        "updatedAfter": "2026-05-01T12:00:00Z",
+    }
 
 
 def test_linear_tool_client_keeps_mutations_and_inherits_readonly_methods():

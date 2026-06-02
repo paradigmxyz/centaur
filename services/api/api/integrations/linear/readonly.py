@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import mimetypes
 from typing import Any
 from urllib.parse import urlparse
@@ -16,6 +17,17 @@ def _linear_string_literal(value: str) -> str:
 
 def _team_key_filter(team_key: str) -> str:
     return f"team: {{ key: {{ eq: {_linear_string_literal(team_key)} }} }}"
+
+
+def _linear_datetime(value: dt.datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    return value
 
 
 class LinearReadonlyClient(LinearGraphQLClient):
@@ -193,6 +205,64 @@ class LinearReadonlyClient(LinearGraphQLClient):
         """
         return self._connection_nodes(query, connection_path=("projects",), limit=limit)
 
+    def list_etl_projects(
+        self,
+        *,
+        page_size: int = 100,
+        cursor: str | None = None,
+        updated_after: dt.datetime | str | None = None,
+        include_archived: bool = True,
+    ) -> dict[str, Any]:
+        """List one page of projects with the fields needed by the ETL."""
+        filter_arg = ""
+        variables: dict[str, Any] = {
+            "first": page_size,
+            "after": cursor,
+            "includeArchived": include_archived,
+        }
+        updated_after_value = _linear_datetime(updated_after)
+        updated_after_var = ""
+        if updated_after_value:
+            filter_arg = "filter: { updatedAt: { gte: $updatedAfter } },"
+            updated_after_var = ",\n            $updatedAfter: DateTimeOrDuration"
+            variables["updatedAfter"] = updated_after_value
+
+        query = f"""
+        query LinearEtlProjects(
+            $first: Int!,
+            $after: String,
+            $includeArchived: Boolean
+            {updated_after_var}
+        ) {{
+            projects(
+                first: $first,
+                after: $after,
+                includeArchived: $includeArchived,
+                orderBy: updatedAt,
+                {filter_arg}
+            ) {{
+                nodes {{
+                    id
+                    name
+                    description
+                    slugId
+                    state
+                    status {{ id name type color }}
+                    lead {{ id name displayName email }}
+                    teams {{ nodes {{ id name key }} }}
+                    createdAt
+                    updatedAt
+                    archivedAt
+                    completedAt
+                    canceledAt
+                    url
+                }}
+                pageInfo {{ hasNextPage endCursor }}
+            }}
+        }}
+        """
+        return self._query(query, variables).get("projects", {})
+
     def project(self, project_id: str) -> dict[str, Any]:
         """Get a single project."""
         query = """
@@ -326,3 +396,126 @@ class LinearReadonlyClient(LinearGraphQLClient):
             variables={"query": query_str},
             limit=limit,
         )
+
+    def list_etl_issues(
+        self,
+        *,
+        page_size: int = 100,
+        cursor: str | None = None,
+        updated_after: dt.datetime | str | None = None,
+        include_archived: bool = True,
+    ) -> dict[str, Any]:
+        """List one page of issues with the fields needed by the ETL."""
+        filter_arg = ""
+        variables: dict[str, Any] = {
+            "first": page_size,
+            "after": cursor,
+            "includeArchived": include_archived,
+        }
+        updated_after_value = _linear_datetime(updated_after)
+        updated_after_var = ""
+        if updated_after_value:
+            filter_arg = "filter: { updatedAt: { gte: $updatedAfter } },"
+            updated_after_var = ",\n            $updatedAfter: DateTimeOrDuration"
+            variables["updatedAfter"] = updated_after_value
+
+        query = f"""
+        query LinearEtlIssues(
+            $first: Int!,
+            $after: String,
+            $includeArchived: Boolean
+            {updated_after_var}
+        ) {{
+            issues(
+                first: $first,
+                after: $after,
+                includeArchived: $includeArchived,
+                orderBy: updatedAt,
+                {filter_arg}
+            ) {{
+                nodes {{
+                    id
+                    identifier
+                    number
+                    title
+                    description
+                    url
+                    priority
+                    priorityLabel
+                    estimate
+                    dueDate
+                    team {{ id name key }}
+                    project {{ id name }}
+                    cycle {{ id name number }}
+                    state {{ id name type color }}
+                    assignee {{ id name displayName email }}
+                    creator {{ id name displayName email }}
+                    parent {{ id identifier title }}
+                    createdAt
+                    updatedAt
+                    archivedAt
+                    startedAt
+                    completedAt
+                    canceledAt
+                }}
+                pageInfo {{ hasNextPage endCursor }}
+            }}
+        }}
+        """
+        return self._query(query, variables).get("issues", {})
+
+    def list_etl_comments(
+        self,
+        *,
+        page_size: int = 100,
+        cursor: str | None = None,
+        updated_after: dt.datetime | str | None = None,
+        include_archived: bool = True,
+    ) -> dict[str, Any]:
+        """List one page of comments with the fields needed by the ETL."""
+        filter_arg = ""
+        variables: dict[str, Any] = {
+            "first": page_size,
+            "after": cursor,
+            "includeArchived": include_archived,
+        }
+        updated_after_value = _linear_datetime(updated_after)
+        updated_after_var = ""
+        if updated_after_value:
+            filter_arg = "filter: { updatedAt: { gte: $updatedAfter } },"
+            updated_after_var = ",\n            $updatedAfter: DateTimeOrDuration"
+            variables["updatedAfter"] = updated_after_value
+
+        query = f"""
+        query LinearEtlComments(
+            $first: Int!,
+            $after: String,
+            $includeArchived: Boolean
+            {updated_after_var}
+        ) {{
+            comments(
+                first: $first,
+                after: $after,
+                includeArchived: $includeArchived,
+                orderBy: updatedAt,
+                {filter_arg}
+            ) {{
+                nodes {{
+                    id
+                    body
+                    url
+                    issueId
+                    projectId
+                    parentId
+                    user {{ id name displayName email }}
+                    createdAt
+                    updatedAt
+                    archivedAt
+                    editedAt
+                    resolvedAt
+                }}
+                pageInfo {{ hasNextPage endCursor }}
+            }}
+        }}
+        """
+        return self._query(query, variables).get("comments", {})

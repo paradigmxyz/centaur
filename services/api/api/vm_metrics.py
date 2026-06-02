@@ -19,7 +19,9 @@ from asyncpg import Pool
 log = structlog.get_logger().bind(service="api", component="vm_metrics")
 
 _VM_URL = os.environ.get("VICTORIAMETRICS_URL", "http://victoriametrics:8428")
-_PUSH_ENABLED = os.environ.get("VICTORIAMETRICS_PUSH_ENABLED", "1").strip().lower() not in {
+_PUSH_ENABLED = os.environ.get(
+    "VICTORIAMETRICS_PUSH_ENABLED", "1"
+).strip().lower() not in {
     "0",
     "false",
     "no",
@@ -38,7 +40,9 @@ def _escape_label_value(v: str) -> str:
 
 
 class _MetricBase:
-    def __init__(self, name: str, help_text: str, label_names: list[str] | None = None) -> None:
+    def __init__(
+        self, name: str, help_text: str, label_names: list[str] | None = None
+    ) -> None:
         self.name = name
         self.help_text = help_text
         self.label_names: list[str] = list(label_names or [])
@@ -67,7 +71,9 @@ class _ChildProxy:
 
 
 class Counter(_MetricBase):
-    def __init__(self, name: str, help_text: str, label_names: list[str] | None = None) -> None:
+    def __init__(
+        self, name: str, help_text: str, label_names: list[str] | None = None
+    ) -> None:
         super().__init__(name, help_text, label_names)
         self._values: dict[tuple[tuple[str, str], ...], float] = {}
 
@@ -105,7 +111,9 @@ class _CounterChild:
 
 
 class Gauge(_MetricBase):
-    def __init__(self, name: str, help_text: str, label_names: list[str] | None = None) -> None:
+    def __init__(
+        self, name: str, help_text: str, label_names: list[str] | None = None
+    ) -> None:
         super().__init__(name, help_text, label_names)
         self._values: dict[tuple[tuple[str, str], ...], float] = {}
 
@@ -205,7 +213,10 @@ class Histogram(_MetricBase):
                     d["buckets"][i] += 1
 
     def render(self) -> str:
-        lines = [f"# HELP {self.name} {self.help_text}", f"# TYPE {self.name} histogram"]
+        lines = [
+            f"# HELP {self.name} {self.help_text}",
+            f"# TYPE {self.name} histogram",
+        ]
         with self._lock:
             snapshot = list(self._data.items())
         for key, d in snapshot:
@@ -216,10 +227,14 @@ class Histogram(_MetricBase):
                 cum += d["buckets"][i]
                 le_labels = dict(labels)
                 le_labels["le"] = str(bound)
-                lines.append(f"{self.name}_bucket{self._format_labels(le_labels)} {cum}")
+                lines.append(
+                    f"{self.name}_bucket{self._format_labels(le_labels)} {cum}"
+                )
             inf_labels = dict(labels)
             inf_labels["le"] = "+Inf"
-            lines.append(f"{self.name}_bucket{self._format_labels(inf_labels)} {d['count']}")
+            lines.append(
+                f"{self.name}_bucket{self._format_labels(inf_labels)} {d['count']}"
+            )
             lines.append(f"{self.name}_sum{lbl_str} {d['sum']}")
             lines.append(f"{self.name}_count{lbl_str} {d['count']}")
         return "\n".join(lines)
@@ -508,14 +523,18 @@ COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS = Histogram(
 # ---------------------------------------------------------------------------
 
 
-def observe_http_request(method: str, path: str, status: int, duration_s: float) -> None:
+def observe_http_request(
+    method: str, path: str, status: int, duration_s: float
+) -> None:
     HTTP_REQUESTS_TOTAL.labels(method=method, path=path, status=str(status)).inc()
     HTTP_REQUEST_DURATION_SECONDS.labels(method=method, path=path).observe(duration_s)
 
 
 def record_agent_execution(harness: str, status: str, duration_s: float) -> None:
     AGENT_EXECUTIONS_TOTAL.labels(harness=harness, status=status).inc()
-    AGENT_EXECUTION_DURATION_SECONDS.labels(harness=harness, status=status).observe(duration_s)
+    AGENT_EXECUTION_DURATION_SECONDS.labels(harness=harness, status=status).observe(
+        duration_s
+    )
 
 
 def record_execution_terminal(harness: str, status: str, terminal_reason: str) -> None:
@@ -526,13 +545,15 @@ def record_execution_terminal(harness: str, status: str, terminal_reason: str) -
     ).inc()
 
 
-def record_tool_call(tool_name: str, tool_method: str, success: bool, duration_s: float) -> None:
+def record_tool_call(
+    tool_name: str, tool_method: str, success: bool, duration_s: float
+) -> None:
     TOOL_CALLS_TOTAL.labels(
         tool_name=tool_name, tool_method=tool_method, success=str(success).lower()
     ).inc()
-    TOOL_CALL_DURATION_SECONDS.labels(tool_name=tool_name, tool_method=tool_method).observe(
-        duration_s
-    )
+    TOOL_CALL_DURATION_SECONDS.labels(
+        tool_name=tool_name, tool_method=tool_method
+    ).observe(duration_s)
 
 
 def record_execution_enqueued(harness: str) -> None:
@@ -552,7 +573,9 @@ def record_warm_pool_claim(outcome: str) -> None:
     WARM_POOL_CLAIMS_TOTAL.labels(outcome=outcome).inc()
 
 
-def record_message_observation(role: str, text_chars: int, attachment_count: int) -> None:
+def record_message_observation(
+    role: str, text_chars: int, attachment_count: int
+) -> None:
     has_attachments = "true" if attachment_count > 0 else "false"
     MESSAGE_EVENTS_TOTAL.labels(role=role, has_attachments=has_attachments).inc()
     MESSAGE_TEXT_CHARS.labels(role=role).observe(max(text_chars, 0))
@@ -582,14 +605,18 @@ def record_tool_error_category(tool_name: str, category: str) -> None:
 
 
 def record_execution_by_user(user_id: str, harness: str, status: str) -> None:
-    EXECUTION_BY_USER_TOTAL.labels(user_id=user_id, harness=harness, status=status).inc()
+    EXECUTION_BY_USER_TOTAL.labels(
+        user_id=user_id, harness=harness, status=status
+    ).inc()
 
 
-def record_workflow_run_terminal(workflow_name: str, status: str, duration_s: float) -> None:
+def record_workflow_run_terminal(
+    workflow_name: str, status: str, duration_s: float
+) -> None:
     WORKFLOW_RUNS_TOTAL.labels(workflow_name=workflow_name, status=status).inc()
-    WORKFLOW_RUN_DURATION_SECONDS.labels(workflow_name=workflow_name, status=status).observe(
-        duration_s
-    )
+    WORKFLOW_RUN_DURATION_SECONDS.labels(
+        workflow_name=workflow_name, status=status
+    ).observe(duration_s)
 
 
 def record_workflow_run_enqueued(workflow_name: str) -> None:
@@ -598,14 +625,18 @@ def record_workflow_run_enqueued(workflow_name: str) -> None:
 
 def record_workflow_run_claimed(workflow_name: str, queue_delay_s: float) -> None:
     WORKFLOW_RUNS_CLAIMED_TOTAL.labels(workflow_name=workflow_name).inc()
-    WORKFLOW_RUN_QUEUE_DELAY_SECONDS.labels(workflow_name=workflow_name).observe(queue_delay_s)
+    WORKFLOW_RUN_QUEUE_DELAY_SECONDS.labels(workflow_name=workflow_name).observe(
+        queue_delay_s
+    )
 
 
 def record_workflow_event_sent(event_type: str) -> None:
     WORKFLOW_EVENTS_TOTAL.labels(event_type=event_type).inc()
 
 
-def record_etl_items_seen(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_seen(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_SEEN_TOTAL.labels(
             source=source,
@@ -614,7 +645,9 @@ def record_etl_items_seen(source: str, source_type: str, item_type: str, count: 
         ).inc(count)
 
 
-def record_etl_items_enqueued(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_enqueued(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_ENQUEUED_TOTAL.labels(
             source=source,
@@ -623,7 +656,9 @@ def record_etl_items_enqueued(source: str, source_type: str, item_type: str, cou
         ).inc(count)
 
 
-def record_etl_items_upserted(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_upserted(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_UPSERTED_TOTAL.labels(
             source=source,
@@ -632,7 +667,9 @@ def record_etl_items_upserted(source: str, source_type: str, item_type: str, cou
         ).inc(count)
 
 
-def record_etl_items_deleted(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_deleted(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_DELETED_TOTAL.labels(
             source=source,
@@ -671,7 +708,9 @@ def record_company_context_documents_changed(
         ).inc(count)
 
 
-def observe_company_context_document_size(source: str, source_type: str, chars: int) -> None:
+def observe_company_context_document_size(
+    source: str, source_type: str, chars: int
+) -> None:
     COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS.labels(
         source=source,
         source_type=source_type,
@@ -791,7 +830,9 @@ async def refresh_etl_metrics(pool: Pool) -> None:
         watermark_ts = str(row["watermark_ts"] or "").strip()
         if watermark_ts:
             try:
-                watermark = dt.datetime.fromtimestamp(float(watermark_ts), tz=dt.timezone.utc)
+                watermark = dt.datetime.fromtimestamp(
+                    float(watermark_ts), tz=dt.timezone.utc
+                )
             except (TypeError, ValueError, OSError):
                 pass
             else:
@@ -902,6 +943,52 @@ async def refresh_etl_metrics(pool: Pool) -> None:
     ).set(max(max_lag_s, 0.0))
     ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(
         source="google_calendar", source_type="calendar"
+    ).set(max(max_sync_freshness_s, 0.0))
+
+    linear_scope_rows = await pool.fetch(
+        "SELECT scope_id, watermark_time, last_success_at, last_error, updated_at "
+        "FROM linear_sync_checkpoints"
+    )
+    linear_active_scopes = len(linear_scope_rows)
+    if os.getenv("LINEAR_ETL_ENABLED", "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        linear_active_scopes = max(linear_active_scopes, 3)
+    ETL_ACTIVE_SCOPES.labels(source="linear", source_type="workspace").set(
+        linear_active_scopes
+    )
+    failed_scopes = 0
+    max_lag_s = 0.0
+    max_sync_freshness_s = 0.0
+    for row in linear_scope_rows:
+        has_error = bool(str(row["last_error"] or "").strip())
+        if has_error:
+            failed_scopes += 1
+        watermark_time = row["watermark_time"]
+        if isinstance(watermark_time, dt.datetime):
+            max_lag_s = max(
+                max_lag_s,
+                (now - watermark_time.astimezone(dt.timezone.utc)).total_seconds(),
+            )
+        if not has_error:
+            success_at = row["last_success_at"] or row["updated_at"]
+            if isinstance(success_at, dt.datetime):
+                max_sync_freshness_s = max(
+                    max_sync_freshness_s,
+                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                )
+    ETL_FAILED_SCOPES.labels(source="linear", source_type="workspace").set(
+        failed_scopes
+    )
+    ETL_SOURCE_CURSOR_LAG_SECONDS.labels(source="linear", source_type="workspace").set(
+        max(max_lag_s, 0.0)
+    )
+    ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(
+        source="linear", source_type="workspace"
     ).set(max(max_sync_freshness_s, 0.0))
 
     backfill_rows = await pool.fetch(

@@ -172,6 +172,8 @@ async def _clear_slack_sync_tables(db_pool, monkeypatch):
         "TRUNCATE TABLE company_context_documents, google_drive_sync_checkpoints, "
         "google_drive_sync_files, google_drive_sync_runs, google_calendar_sync_checkpoints, "
         "google_calendar_sync_events, google_calendar_sync_calendars, google_calendar_sync_runs, "
+        "linear_sync_checkpoints, linear_sync_comments, linear_sync_issues, "
+        "linear_sync_projects, linear_sync_runs, "
         "slack_sync_backfill_jobs, slack_sync_checkpoints, slack_sync_messages, "
         "slack_sync_runs, slack_sync_users, slack_sync_channels CASCADE",
     )
@@ -1537,6 +1539,23 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
         now - dt.timedelta(seconds=50),
     )
     await db_pool.execute(
+        "INSERT INTO linear_sync_runs (run_id, status) VALUES ('linear-seed', 'completed')"
+    )
+    await db_pool.execute(
+        "INSERT INTO linear_sync_checkpoints ("
+        "scope_id, watermark_time, last_run_id, last_success_at, last_error, updated_at"
+        ") VALUES "
+        "('projects', $1, 'linear-seed', $2, '', $2), "
+        "('issues', $3, 'linear-seed', $4, '', $4), "
+        "('comments', $5, 'linear-seed', NULL, 'api_error', $6)",
+        now - dt.timedelta(seconds=180),
+        now - dt.timedelta(seconds=65),
+        now - dt.timedelta(seconds=210),
+        now - dt.timedelta(seconds=75),
+        now - dt.timedelta(seconds=300),
+        now - dt.timedelta(seconds=70),
+    )
+    await db_pool.execute(
         "INSERT INTO company_context_documents ("
         "document_id, source, source_type, source_document_id, title, body, "
         "source_updated_at, content_hash"
@@ -1553,8 +1572,16 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
     assert 'etl_failed_scopes{source="slack",source_type="channel"} 1' in metrics
     assert 'etl_active_scopes{source="google_drive",source_type="doc"} 1' in metrics
     assert 'etl_failed_scopes{source="google_drive",source_type="doc"} 0' in metrics
-    assert 'etl_active_scopes{source="google_calendar",source_type="calendar"} 2' in metrics
-    assert 'etl_failed_scopes{source="google_calendar",source_type="calendar"} 1' in metrics
+    assert (
+        'etl_active_scopes{source="google_calendar",source_type="calendar"} 2'
+        in metrics
+    )
+    assert (
+        'etl_failed_scopes{source="google_calendar",source_type="calendar"} 1'
+        in metrics
+    )
+    assert 'etl_active_scopes{source="linear",source_type="workspace"} 3' in metrics
+    assert 'etl_failed_scopes{source="linear",source_type="workspace"} 1' in metrics
     assert (
         'etl_backfill_jobs{job_type="channel_bootstrap",source="slack",status="pending"} 1'
         in metrics
@@ -1603,6 +1630,18 @@ async def test_etl_freshness_metrics_refresh_from_slack_sync_tables(db_pool):
     )
     assert calendar_freshness_match is not None
     assert 50 <= float(calendar_freshness_match.group(1)) < 130
+    linear_lag_match = re.search(
+        r'etl_source_cursor_lag_seconds\{source="linear",source_type="workspace"\} ([0-9.]+)',
+        metrics,
+    )
+    assert linear_lag_match is not None
+    assert float(linear_lag_match.group(1)) >= 250
+    linear_freshness_match = re.search(
+        r'etl_scope_sync_freshness_seconds\{source="linear",source_type="workspace"\} ([0-9.]+)',
+        metrics,
+    )
+    assert linear_freshness_match is not None
+    assert 70 <= float(linear_freshness_match.group(1)) < 140
     drive_projection_lag_match = re.search(
         r'company_context_projection_lag_seconds\{source="google_drive"\} ([0-9.]+)',
         metrics,
