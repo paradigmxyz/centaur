@@ -173,17 +173,14 @@ impl SandboxArgs {
     }
 
     fn codex_app_server_env_template(&self) -> Vec<(String, String)> {
-        let mut envs = vec![
-            ("CENTAUR_HARNESS_KIND".to_owned(), "codex".to_owned()),
-            (
-                "CENTAUR_API_URL".to_owned(),
-                self.centaur_api_url_override
-                    .as_deref()
-                    .or(self.centaur_api_url.as_deref())
-                    .unwrap_or("http://api:8000")
-                    .to_owned(),
-            ),
-        ];
+        let mut envs = vec![(
+            "CENTAUR_API_URL".to_owned(),
+            self.centaur_api_url_override
+                .as_deref()
+                .or(self.centaur_api_url.as_deref())
+                .unwrap_or("http://api:8000")
+                .to_owned(),
+        )];
 
         for name in &self.passthrough_env {
             let name = name.trim();
@@ -687,13 +684,10 @@ mod tests {
 
         assert_eq!(
             args.sandbox.codex_app_server_env_template(),
-            vec![
-                ("CENTAUR_HARNESS_KIND".to_owned(), "codex".to_owned()),
-                (
-                    "CENTAUR_API_URL".to_owned(),
-                    "http://host.docker.internal:8080".to_owned()
-                )
-            ]
+            vec![(
+                "CENTAUR_API_URL".to_owned(),
+                "http://host.docker.internal:8080".to_owned()
+            )]
         );
     }
 
