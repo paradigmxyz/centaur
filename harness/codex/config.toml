@@ -1,5 +1,5 @@
 model = "gpt-5.5"
-model_reasoning_effort = "low"
+model_reasoning_effort = "high"
 personality = "pragmatic"
 model_verbosity = "low"
 service_tier = "fast"
