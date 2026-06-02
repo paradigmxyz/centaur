@@ -34,8 +34,8 @@ log_json "info" "ca_shared" "CA cert shared at /certs/ca-cert.pem"
 # ── Managed mode: the control plane is the source of truth for the proxy
 # config, and everything local comes from IRON_* env vars, so run with no
 # -config. A local config file would conflict (e.g. management.listen). ────
-if [ -n "${IRON_CONTROL_URL:-}" ]; then
-    log_json "info" "managed_mode" "IRON_CONTROL_URL set; running without a local config"
+if [ -n "${IRON_CONTROL_PLANE_URL:-}" ]; then
+    log_json "info" "managed_mode" "IRON_CONTROL_PLANE_URL set; running without a local config"
     exec iron-proxy
 fi
 

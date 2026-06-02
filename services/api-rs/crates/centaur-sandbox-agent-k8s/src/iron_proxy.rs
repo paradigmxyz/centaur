@@ -474,7 +474,7 @@ fn iron_proxy_container(
             volume_mount("iron-proxy-ca", "/etc/iron-proxy-ca", true),
         ]),
         // Use the image entrypoint directly: it loads the CA and, with
-        // IRON_CONTROL_URL set, runs iron-proxy with no local config.
+        // IRON_CONTROL_PLANE_URL set, runs iron-proxy with no local config.
         ..Default::default()
     }
 }
@@ -487,9 +487,12 @@ fn iron_proxy_env_vars(iron_proxy: &IronProxyConfig, sync: &ProxySyncEnv) -> Vec
     );
     // iron-proxy pulls its effective config (allowlist, secrets, management)
     // from iron-control using this token; no local config file is rendered.
+    // The binary reads the control-plane base URL from IRON_CONTROL_PLANE_URL
+    // (distinct from api-rs's own IRON_CONTROL_URL admin-client var); a wrong
+    // name makes it fall back to its built-in default endpoint.
     env.insert(
-        "IRON_CONTROL_URL".to_owned(),
-        env_var("IRON_CONTROL_URL", &sync.control_url),
+        "IRON_CONTROL_PLANE_URL".to_owned(),
+        env_var("IRON_CONTROL_PLANE_URL", &sync.control_url),
     );
     env.insert(
         "IRON_PROXY_TOKEN".to_owned(),
