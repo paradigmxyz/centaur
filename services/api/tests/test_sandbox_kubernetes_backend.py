@@ -14,7 +14,9 @@ from api.sandbox.config import container_env as sandbox_container_env
 from api.sandbox.kubernetes import (
     KubernetesExecutorBackend,
     STDOUT_CHANNEL,
+    _OVERLAY_TOOL_DEPS_DIR,
     _build_tool_server_container,
+    _tool_server_tool_dirs,
 )
 from api.sandbox.kubernetes_agent_sandbox import KubernetesAgentSandboxBackend
 from api.sandbox.registry import auto_configure
@@ -653,7 +655,6 @@ def test_tool_server_container_inherits_sandbox_extra_env(
     assert "api.internal" in env["NO_PROXY"]
     assert "stg-laminar-app-server" in env["NO_PROXY"]
 
-
 def test_tool_server_container_carries_available_secret_refs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -682,6 +683,73 @@ def test_tool_server_container_carries_available_secret_refs(
         env["CENTAUR_AVAILABLE_SECRET_REFS"]
         == "MONACO_API_KEY,POSTHOG_API_KEY,POSTHOG_PROJECT_ID"
     )
+
+
+def test_tool_server_container_installs_overlay_deps_before_uvicorn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar overrides the image ENTRYPOINT, so it must run the overlay
+    tool-dep install itself. It runs as non-root, so deps go to a writable
+    --target dir — never the root-owned venv. tool-server-startup.sh puts that
+    dir on PYTHONPATH at runtime, so it is not set on the container spec."""
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount="/home/agent/overlay",
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+        available_secret_refs=set(),
+    )
+
+    # The startup script installs overlay deps (best-effort) then execs uvicorn.
+    # It gets the listen port and the writable deps target as args; the script
+    # exports PYTHONPATH itself, so it must not appear on the container spec.
+    assert container["command"] == ["/app/tool-server-startup.sh"]
+    port, target = container["args"]
+    assert target == _OVERLAY_TOOL_DEPS_DIR
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert "PYTHONPATH" not in env
+
+
+def test_tool_server_tool_dirs_points_overlay_at_sandbox_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar mounts the overlay at /home/agent/overlay/org, not the API's
+    overlay mount. Its TOOL_DIRS must point there or every overlay tool silently
+    disappears."""
+    monkeypatch.delenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS", raising=False)
+    monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test")
+
+    assert (
+        _tool_server_tool_dirs()
+        == "/app/tools:/home/agent/overlay/org/tools"
+    )
+
+
+def test_tool_server_tool_dirs_without_overlay_is_base_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS", raising=False)
+    monkeypatch.delenv("CENTAUR_OVERLAY_IMAGE", raising=False)
+
+    assert _tool_server_tool_dirs() == "/app/tools"
+
+
+def test_tool_server_tool_dirs_explicit_override_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_TOOL_SERVER_TOOL_DIRS",
+        "/custom/tools",
+    )
+    monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test")
+
+    assert _tool_server_tool_dirs() == "/custom/tools"
 
 
 @pytest.mark.asyncio

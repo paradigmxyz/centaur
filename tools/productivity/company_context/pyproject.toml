@@ -1,6 +1,6 @@
 [project]
 name = "company_context"
-description = "Search indexed company history across multiple sources. Prefer this over direct Slack search for historical queries. Current sources: Slack."
+description = "Search indexed company history across multiple sources. Prefer this over direct Slack search for historical queries. Current sources: Slack, Google Drive, Google Calendar, Linear."
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [

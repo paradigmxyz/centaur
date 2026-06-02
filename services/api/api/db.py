@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import subprocess
@@ -96,7 +97,13 @@ def _dbmate_url(database_url: str) -> str:
     return f"{database_url}{sep}sslmode=disable"
 
 
-async def create_pool(database_url: str, *, apply_migrations: bool = True) -> asyncpg.Pool:
+async def create_pool(
+    database_url: str,
+    *,
+    apply_migrations: bool = True,
+    min_size: int = 2,
+    max_size: int = 10,
+) -> asyncpg.Pool:
     # The sandbox tool-server sidecar reaches the DB through the per-sandbox
     # iron-proxy and is not a schema owner, so it opens a pool with
     # apply_migrations=False. The API (and shared tool-server) own migrations.
@@ -104,12 +111,59 @@ async def create_pool(database_url: str, *, apply_migrations: bool = True) -> as
         run_migrations(database_url)
     pool = await asyncpg.create_pool(
         database_url,
-        min_size=2,
-        max_size=10,
+        min_size=min_size,
+        max_size=max_size,
         command_timeout=60,
     )
     assert pool is not None
     return pool
+
+
+async def create_pool_with_retry(
+    database_url: str,
+    *,
+    apply_migrations: bool = True,
+    min_size: int = 2,
+    max_size: int = 10,
+    max_attempts: int = 30,
+    base_delay: float = 0.5,
+    max_delay: float = 5.0,
+) -> asyncpg.Pool:
+    """Create the pool with capped exponential backoff over connection errors.
+
+    Tolerates a DB endpoint that isn't accepting connections yet (e.g. the
+    tool-server sidecar racing its iron-proxy on startup). Re-raises the last
+    error once ``max_attempts`` is exhausted.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return await create_pool(
+                database_url,
+                apply_migrations=apply_migrations,
+                min_size=min_size,
+                max_size=max_size,
+            )
+        except Exception as exc:
+            if attempt >= max_attempts:
+                log.error(
+                    "db_pool_create_exhausted",
+                    attempts=attempt,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise
+            delay = min(max_delay, base_delay * 2 ** (attempt - 1))
+            log.warning(
+                "db_pool_create_retry",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                delay=delay,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            await asyncio.sleep(delay)
 
 
 async def close_pool(pool: asyncpg.Pool) -> None:

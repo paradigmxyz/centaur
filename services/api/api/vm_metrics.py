@@ -19,12 +19,20 @@ from asyncpg import Pool
 log = structlog.get_logger().bind(service="api", component="vm_metrics")
 
 _VM_URL = os.environ.get("VICTORIAMETRICS_URL", "http://victoriametrics:8428")
-_PUSH_ENABLED = os.environ.get("VICTORIAMETRICS_PUSH_ENABLED", "1").strip().lower() not in {
+_PUSH_ENABLED = os.environ.get(
+    "VICTORIAMETRICS_PUSH_ENABLED", "1"
+).strip().lower() not in {
     "0",
     "false",
     "no",
 }
 _PUSH_INTERVAL_S = 15
+_DEFAULT_ETL_SCHEDULE_INTERVALS_S = {
+    "slack_sync": 60 * 60,
+    "google_drive_sync": 4 * 60 * 60,
+    "google_calendar_sync": 4 * 60 * 60,
+    "linear_sync": 4 * 60 * 60,
+}
 
 # ---------------------------------------------------------------------------
 # Metric primitives
@@ -38,7 +46,9 @@ def _escape_label_value(v: str) -> str:
 
 
 class _MetricBase:
-    def __init__(self, name: str, help_text: str, label_names: list[str] | None = None) -> None:
+    def __init__(
+        self, name: str, help_text: str, label_names: list[str] | None = None
+    ) -> None:
         self.name = name
         self.help_text = help_text
         self.label_names: list[str] = list(label_names or [])
@@ -67,7 +77,9 @@ class _ChildProxy:
 
 
 class Counter(_MetricBase):
-    def __init__(self, name: str, help_text: str, label_names: list[str] | None = None) -> None:
+    def __init__(
+        self, name: str, help_text: str, label_names: list[str] | None = None
+    ) -> None:
         super().__init__(name, help_text, label_names)
         self._values: dict[tuple[tuple[str, str], ...], float] = {}
 
@@ -105,7 +117,9 @@ class _CounterChild:
 
 
 class Gauge(_MetricBase):
-    def __init__(self, name: str, help_text: str, label_names: list[str] | None = None) -> None:
+    def __init__(
+        self, name: str, help_text: str, label_names: list[str] | None = None
+    ) -> None:
         super().__init__(name, help_text, label_names)
         self._values: dict[tuple[tuple[str, str], ...], float] = {}
 
@@ -205,7 +219,10 @@ class Histogram(_MetricBase):
                     d["buckets"][i] += 1
 
     def render(self) -> str:
-        lines = [f"# HELP {self.name} {self.help_text}", f"# TYPE {self.name} histogram"]
+        lines = [
+            f"# HELP {self.name} {self.help_text}",
+            f"# TYPE {self.name} histogram",
+        ]
         with self._lock:
             snapshot = list(self._data.items())
         for key, d in snapshot:
@@ -216,10 +233,14 @@ class Histogram(_MetricBase):
                 cum += d["buckets"][i]
                 le_labels = dict(labels)
                 le_labels["le"] = str(bound)
-                lines.append(f"{self.name}_bucket{self._format_labels(le_labels)} {cum}")
+                lines.append(
+                    f"{self.name}_bucket{self._format_labels(le_labels)} {cum}"
+                )
             inf_labels = dict(labels)
             inf_labels["le"] = "+Inf"
-            lines.append(f"{self.name}_bucket{self._format_labels(inf_labels)} {d['count']}")
+            lines.append(
+                f"{self.name}_bucket{self._format_labels(inf_labels)} {d['count']}"
+            )
             lines.append(f"{self.name}_sum{lbl_str} {d['sum']}")
             lines.append(f"{self.name}_count{lbl_str} {d['count']}")
         return "\n".join(lines)
@@ -438,7 +459,7 @@ ETL_SOURCE_CURSOR_LAG_SECONDS = Gauge(
 )
 ETL_SCOPE_SYNC_FRESHNESS_SECONDS = Gauge(
     "etl_scope_sync_freshness_seconds",
-    "Worst time since a syncable ETL scope last completed successfully.",
+    "Worst schedule-adjusted overdue time for a syncable ETL scope.",
     ["source", "source_type"],
 )
 ETL_ACTIVE_SCOPES = Gauge(
@@ -508,14 +529,18 @@ COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS = Histogram(
 # ---------------------------------------------------------------------------
 
 
-def observe_http_request(method: str, path: str, status: int, duration_s: float) -> None:
+def observe_http_request(
+    method: str, path: str, status: int, duration_s: float
+) -> None:
     HTTP_REQUESTS_TOTAL.labels(method=method, path=path, status=str(status)).inc()
     HTTP_REQUEST_DURATION_SECONDS.labels(method=method, path=path).observe(duration_s)
 
 
 def record_agent_execution(harness: str, status: str, duration_s: float) -> None:
     AGENT_EXECUTIONS_TOTAL.labels(harness=harness, status=status).inc()
-    AGENT_EXECUTION_DURATION_SECONDS.labels(harness=harness, status=status).observe(duration_s)
+    AGENT_EXECUTION_DURATION_SECONDS.labels(harness=harness, status=status).observe(
+        duration_s
+    )
 
 
 def record_execution_terminal(harness: str, status: str, terminal_reason: str) -> None:
@@ -526,13 +551,15 @@ def record_execution_terminal(harness: str, status: str, terminal_reason: str) -
     ).inc()
 
 
-def record_tool_call(tool_name: str, tool_method: str, success: bool, duration_s: float) -> None:
+def record_tool_call(
+    tool_name: str, tool_method: str, success: bool, duration_s: float
+) -> None:
     TOOL_CALLS_TOTAL.labels(
         tool_name=tool_name, tool_method=tool_method, success=str(success).lower()
     ).inc()
-    TOOL_CALL_DURATION_SECONDS.labels(tool_name=tool_name, tool_method=tool_method).observe(
-        duration_s
-    )
+    TOOL_CALL_DURATION_SECONDS.labels(
+        tool_name=tool_name, tool_method=tool_method
+    ).observe(duration_s)
 
 
 def record_execution_enqueued(harness: str) -> None:
@@ -552,7 +579,9 @@ def record_warm_pool_claim(outcome: str) -> None:
     WARM_POOL_CLAIMS_TOTAL.labels(outcome=outcome).inc()
 
 
-def record_message_observation(role: str, text_chars: int, attachment_count: int) -> None:
+def record_message_observation(
+    role: str, text_chars: int, attachment_count: int
+) -> None:
     has_attachments = "true" if attachment_count > 0 else "false"
     MESSAGE_EVENTS_TOTAL.labels(role=role, has_attachments=has_attachments).inc()
     MESSAGE_TEXT_CHARS.labels(role=role).observe(max(text_chars, 0))
@@ -582,14 +611,18 @@ def record_tool_error_category(tool_name: str, category: str) -> None:
 
 
 def record_execution_by_user(user_id: str, harness: str, status: str) -> None:
-    EXECUTION_BY_USER_TOTAL.labels(user_id=user_id, harness=harness, status=status).inc()
+    EXECUTION_BY_USER_TOTAL.labels(
+        user_id=user_id, harness=harness, status=status
+    ).inc()
 
 
-def record_workflow_run_terminal(workflow_name: str, status: str, duration_s: float) -> None:
+def record_workflow_run_terminal(
+    workflow_name: str, status: str, duration_s: float
+) -> None:
     WORKFLOW_RUNS_TOTAL.labels(workflow_name=workflow_name, status=status).inc()
-    WORKFLOW_RUN_DURATION_SECONDS.labels(workflow_name=workflow_name, status=status).observe(
-        duration_s
-    )
+    WORKFLOW_RUN_DURATION_SECONDS.labels(
+        workflow_name=workflow_name, status=status
+    ).observe(duration_s)
 
 
 def record_workflow_run_enqueued(workflow_name: str) -> None:
@@ -598,14 +631,18 @@ def record_workflow_run_enqueued(workflow_name: str) -> None:
 
 def record_workflow_run_claimed(workflow_name: str, queue_delay_s: float) -> None:
     WORKFLOW_RUNS_CLAIMED_TOTAL.labels(workflow_name=workflow_name).inc()
-    WORKFLOW_RUN_QUEUE_DELAY_SECONDS.labels(workflow_name=workflow_name).observe(queue_delay_s)
+    WORKFLOW_RUN_QUEUE_DELAY_SECONDS.labels(workflow_name=workflow_name).observe(
+        queue_delay_s
+    )
 
 
 def record_workflow_event_sent(event_type: str) -> None:
     WORKFLOW_EVENTS_TOTAL.labels(event_type=event_type).inc()
 
 
-def record_etl_items_seen(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_seen(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_SEEN_TOTAL.labels(
             source=source,
@@ -614,7 +651,9 @@ def record_etl_items_seen(source: str, source_type: str, item_type: str, count: 
         ).inc(count)
 
 
-def record_etl_items_enqueued(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_enqueued(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_ENQUEUED_TOTAL.labels(
             source=source,
@@ -623,7 +662,9 @@ def record_etl_items_enqueued(source: str, source_type: str, item_type: str, cou
         ).inc(count)
 
 
-def record_etl_items_upserted(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_upserted(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_UPSERTED_TOTAL.labels(
             source=source,
@@ -632,7 +673,9 @@ def record_etl_items_upserted(source: str, source_type: str, item_type: str, cou
         ).inc(count)
 
 
-def record_etl_items_deleted(source: str, source_type: str, item_type: str, count: int) -> None:
+def record_etl_items_deleted(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
     if count > 0:
         ETL_ITEMS_DELETED_TOTAL.labels(
             source=source,
@@ -671,7 +714,9 @@ def record_company_context_documents_changed(
         ).inc(count)
 
 
-def observe_company_context_document_size(source: str, source_type: str, chars: int) -> None:
+def observe_company_context_document_size(
+    source: str, source_type: str, chars: int
+) -> None:
     COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS.labels(
         source=source,
         source_type=source_type,
@@ -761,6 +806,32 @@ async def refresh_runtime_metrics(pool: Pool) -> None:
     await refresh_etl_metrics(pool)
 
 
+async def _etl_schedule_intervals_s(pool: Pool) -> dict[str, int]:
+    intervals = dict(_DEFAULT_ETL_SCHEDULE_INTERVALS_S)
+    rows = await pool.fetch(
+        "SELECT schedule_id, interval_seconds "
+        "FROM workflow_schedules "
+        "WHERE schedule_id = ANY($1::text[]) "
+        "  AND schedule_kind = 'interval' "
+        "  AND interval_seconds IS NOT NULL "
+        "  AND interval_seconds > 0",
+        list(intervals),
+    )
+    for row in rows:
+        intervals[str(row["schedule_id"])] = int(row["interval_seconds"])
+    return intervals
+
+
+def _sync_freshness_overdue_s(
+    success_at: dt.datetime,
+    *,
+    now: dt.datetime,
+    schedule_interval_s: int,
+) -> float:
+    age_s = (now - success_at.astimezone(dt.timezone.utc)).total_seconds()
+    return max(age_s - float(schedule_interval_s), 0.0)
+
+
 async def refresh_etl_metrics(pool: Pool) -> None:
     """Refresh ETL freshness gauges from durable Postgres state."""
     ETL_SOURCE_CURSOR_LAG_SECONDS.clear_children()
@@ -771,6 +842,7 @@ async def refresh_etl_metrics(pool: Pool) -> None:
     ETL_BACKFILL_JOB_AGE_SECONDS.clear_children()
     COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.clear_children()
 
+    schedule_intervals_s = await _etl_schedule_intervals_s(pool)
     slack_scope_rows = await pool.fetch(
         "SELECT ch.channel_id, cp.watermark_ts, cp.last_success_at, cp.last_error, cp.updated_at "
         "FROM slack_sync_channels ch "
@@ -791,7 +863,9 @@ async def refresh_etl_metrics(pool: Pool) -> None:
         watermark_ts = str(row["watermark_ts"] or "").strip()
         if watermark_ts:
             try:
-                watermark = dt.datetime.fromtimestamp(float(watermark_ts), tz=dt.timezone.utc)
+                watermark = dt.datetime.fromtimestamp(
+                    float(watermark_ts), tz=dt.timezone.utc
+                )
             except (TypeError, ValueError, OSError):
                 pass
             else:
@@ -801,7 +875,11 @@ async def refresh_etl_metrics(pool: Pool) -> None:
             if isinstance(success_at, dt.datetime):
                 max_sync_freshness_s = max(
                     max_sync_freshness_s,
-                    (now - success_at.astimezone(dt.timezone.utc)).total_seconds(),
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s["slack_sync"],
+                    ),
                 )
     ETL_FAILED_SCOPES.labels(source="slack", source_type="channel").set(failed_scopes)
     ETL_SOURCE_CURSOR_LAG_SECONDS.labels(source="slack", source_type="channel").set(
@@ -810,6 +888,159 @@ async def refresh_etl_metrics(pool: Pool) -> None:
     ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(source="slack", source_type="channel").set(
         max(max_sync_freshness_s, 0.0)
     )
+
+    drive_scope_rows = await pool.fetch(
+        "SELECT scope_id, watermark_time, last_success_at, last_error, updated_at "
+        "FROM google_drive_sync_checkpoints"
+    )
+    drive_active_scopes = len(drive_scope_rows)
+    if os.getenv("GOOGLE_DRIVE_ETL_ENABLED", "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        drive_active_scopes = max(drive_active_scopes, 1)
+    ETL_ACTIVE_SCOPES.labels(source="google_drive", source_type="doc").set(
+        drive_active_scopes
+    )
+    failed_scopes = 0
+    max_lag_s = 0.0
+    max_sync_freshness_s = 0.0
+    for row in drive_scope_rows:
+        has_error = bool(str(row["last_error"] or "").strip())
+        if has_error:
+            failed_scopes += 1
+        watermark_time = row["watermark_time"]
+        if isinstance(watermark_time, dt.datetime):
+            max_lag_s = max(
+                max_lag_s,
+                (now - watermark_time.astimezone(dt.timezone.utc)).total_seconds(),
+            )
+        if not has_error:
+            success_at = row["last_success_at"] or row["updated_at"]
+            if isinstance(success_at, dt.datetime):
+                max_sync_freshness_s = max(
+                    max_sync_freshness_s,
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s["google_drive_sync"],
+                    ),
+                )
+    ETL_FAILED_SCOPES.labels(source="google_drive", source_type="doc").set(
+        failed_scopes
+    )
+    ETL_SOURCE_CURSOR_LAG_SECONDS.labels(source="google_drive", source_type="doc").set(
+        max(max_lag_s, 0.0)
+    )
+    ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(
+        source="google_drive", source_type="doc"
+    ).set(max(max_sync_freshness_s, 0.0))
+
+    calendar_scope_rows = await pool.fetch(
+        "SELECT cal.calendar_id, cp.watermark_time, cp.last_success_at, cp.last_error, cp.updated_at "
+        "FROM google_calendar_sync_calendars cal "
+        "LEFT JOIN google_calendar_sync_checkpoints cp ON cp.calendar_id = cal.calendar_id"
+    )
+    calendar_active_scopes = len(calendar_scope_rows)
+    if os.getenv("GOOGLE_CALENDAR_ETL_ENABLED", "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        calendar_active_scopes = max(calendar_active_scopes, 1)
+    ETL_ACTIVE_SCOPES.labels(source="google_calendar", source_type="calendar").set(
+        calendar_active_scopes
+    )
+    failed_scopes = 0
+    max_lag_s = 0.0
+    max_sync_freshness_s = 0.0
+    for row in calendar_scope_rows:
+        has_error = bool(str(row["last_error"] or "").strip())
+        if has_error:
+            failed_scopes += 1
+        watermark_time = row["watermark_time"]
+        if isinstance(watermark_time, dt.datetime):
+            max_lag_s = max(
+                max_lag_s,
+                (now - watermark_time.astimezone(dt.timezone.utc)).total_seconds(),
+            )
+        if not has_error:
+            success_at = row["last_success_at"] or row["updated_at"]
+            if isinstance(success_at, dt.datetime):
+                max_sync_freshness_s = max(
+                    max_sync_freshness_s,
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s[
+                            "google_calendar_sync"
+                        ],
+                    ),
+                )
+    ETL_FAILED_SCOPES.labels(source="google_calendar", source_type="calendar").set(
+        failed_scopes
+    )
+    ETL_SOURCE_CURSOR_LAG_SECONDS.labels(
+        source="google_calendar", source_type="calendar"
+    ).set(max(max_lag_s, 0.0))
+    ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(
+        source="google_calendar", source_type="calendar"
+    ).set(max(max_sync_freshness_s, 0.0))
+
+    linear_scope_rows = await pool.fetch(
+        "SELECT scope_id, watermark_time, last_success_at, last_error, updated_at "
+        "FROM linear_sync_checkpoints"
+    )
+    linear_active_scopes = len(linear_scope_rows)
+    if os.getenv("LINEAR_ETL_ENABLED", "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        linear_active_scopes = max(linear_active_scopes, 3)
+    ETL_ACTIVE_SCOPES.labels(source="linear", source_type="workspace").set(
+        linear_active_scopes
+    )
+    failed_scopes = 0
+    max_lag_s = 0.0
+    max_sync_freshness_s = 0.0
+    for row in linear_scope_rows:
+        has_error = bool(str(row["last_error"] or "").strip())
+        if has_error:
+            failed_scopes += 1
+        watermark_time = row["watermark_time"]
+        if isinstance(watermark_time, dt.datetime):
+            max_lag_s = max(
+                max_lag_s,
+                (now - watermark_time.astimezone(dt.timezone.utc)).total_seconds(),
+            )
+        if not has_error:
+            success_at = row["last_success_at"] or row["updated_at"]
+            if isinstance(success_at, dt.datetime):
+                max_sync_freshness_s = max(
+                    max_sync_freshness_s,
+                    _sync_freshness_overdue_s(
+                        success_at,
+                        now=now,
+                        schedule_interval_s=schedule_intervals_s["linear_sync"],
+                    ),
+                )
+    ETL_FAILED_SCOPES.labels(source="linear", source_type="workspace").set(
+        failed_scopes
+    )
+    ETL_SOURCE_CURSOR_LAG_SECONDS.labels(source="linear", source_type="workspace").set(
+        max(max_lag_s, 0.0)
+    )
+    ETL_SCOPE_SYNC_FRESHNESS_SECONDS.labels(
+        source="linear", source_type="workspace"
+    ).set(max(max_sync_freshness_s, 0.0))
 
     backfill_rows = await pool.fetch(
         "SELECT job_type, status, COUNT(*) AS cnt, MIN(updated_at) AS oldest_updated_at "
@@ -850,6 +1081,44 @@ async def refresh_etl_metrics(pool: Pool) -> None:
         else:
             projection_lag_s = max((now - raw_latest).total_seconds(), 0.0)
     COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.labels(source="slack").set(projection_lag_s)
+
+    raw_latest = await pool.fetchval(
+        "SELECT MAX(updated_at) FROM google_drive_sync_files"
+    )
+    projected_latest = await pool.fetchval(
+        "SELECT MAX(source_updated_at) FROM company_context_documents "
+        "WHERE source = 'google_drive'"
+    )
+    projection_lag_s = 0.0
+    if isinstance(raw_latest, dt.datetime):
+        raw_latest = raw_latest.astimezone(dt.timezone.utc)
+        if isinstance(projected_latest, dt.datetime):
+            projected_latest = projected_latest.astimezone(dt.timezone.utc)
+            projection_lag_s = max((raw_latest - projected_latest).total_seconds(), 0.0)
+        else:
+            projection_lag_s = max((now - raw_latest).total_seconds(), 0.0)
+    COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.labels(source="google_drive").set(
+        projection_lag_s
+    )
+
+    raw_latest = await pool.fetchval(
+        "SELECT MAX(source_updated_at) FROM google_calendar_sync_events"
+    )
+    projected_latest = await pool.fetchval(
+        "SELECT MAX(source_updated_at) FROM company_context_documents "
+        "WHERE source = 'google_calendar'"
+    )
+    projection_lag_s = 0.0
+    if isinstance(raw_latest, dt.datetime):
+        raw_latest = raw_latest.astimezone(dt.timezone.utc)
+        if isinstance(projected_latest, dt.datetime):
+            projected_latest = projected_latest.astimezone(dt.timezone.utc)
+            projection_lag_s = max((raw_latest - projected_latest).total_seconds(), 0.0)
+        else:
+            projection_lag_s = max((now - raw_latest).total_seconds(), 0.0)
+    COMPANY_CONTEXT_PROJECTION_LAG_SECONDS.labels(source="google_calendar").set(
+        projection_lag_s
+    )
 
 
 # ---------------------------------------------------------------------------

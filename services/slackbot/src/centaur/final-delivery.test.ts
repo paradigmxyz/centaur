@@ -454,6 +454,134 @@ describe("final delivery polling", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("rewrites Slack archive markdown links to app deep links for final delivery", async () => {
+    const originalFetch = globalThis.fetch;
+    const slackCalls: Array<{ method: string; params: any }> = [];
+    const fetchMock = mock(
+      async (input: string | URL | Request, _init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        if (url.pathname === "/agent/final-deliveries/claim") {
+          return jsonResponse({
+            deliveries: [
+              {
+                execution_id: "exe-slack-link",
+                thread_key: "slack:T123:C999:1778883099.579529",
+                delivery: {
+                  platform: "slack",
+                  channel: "C999",
+                  thread_ts: "1778883099.579529",
+                  recipient_team_id: "T123",
+                },
+                final_payload: {
+                  result_text:
+                    "See [thread](https://tempoxyz.enterprise.slack.com/archives/C456/p1779828836722119?thread_ts=1779828827.919439&channel=C456&message_ts=1779828836.722119)",
+                },
+              },
+            ],
+          });
+        }
+        if (url.pathname === "/agent/final-deliveries/exe-slack-link/delivered")
+          return jsonResponse({ ok: true });
+        throw new Error(`unexpected request: ${url.pathname}`);
+      },
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = {
+      chat: {
+        postMessage: async (params: any) => {
+          slackCalls.push({ method: "chat.postMessage", params });
+          return { ok: true };
+        },
+      },
+      conversations: {
+        replies: async () => ({ ok: true, messages: [] }),
+      },
+    };
+
+    try {
+      await pollFinalDeliveriesOnce(
+        { ...config, SLACK_TEAM_ID: "T123" },
+        client as any,
+      );
+      const postMessage = slackCalls.find(
+        (call) => call.method === "chat.postMessage",
+      );
+      const expected =
+        "See [thread](slack://channel?team=T123&id=C456&message=1779828836.722119&thread_ts=1779828827.919439)";
+      expect(postMessage?.params.text).toBe(expected);
+      expect(postMessage?.params.blocks).toEqual([
+        { type: "markdown", text: expected },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("leaves Slack archive links unchanged when SLACK_TEAM_ID is not configured", async () => {
+    const originalFetch = globalThis.fetch;
+    const slackCalls: Array<{ method: string; params: any }> = [];
+    const archiveLink =
+      "https://tempoxyz.enterprise.slack.com/archives/C456/p1779828836722119?thread_ts=1779828827.919439&channel=C456&message_ts=1779828836.722119";
+    const fetchMock = mock(
+      async (input: string | URL | Request, _init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        if (url.pathname === "/agent/final-deliveries/claim") {
+          return jsonResponse({
+            deliveries: [
+              {
+                execution_id: "exe-slack-link-fallback",
+                thread_key: "slack:T123:C999:1778883099.579529",
+                delivery: {
+                  platform: "slack",
+                  channel: "C999",
+                  thread_ts: "1778883099.579529",
+                  recipient_team_id: "T123",
+                },
+                final_payload: {
+                  result_text: `See [thread](${archiveLink})`,
+                },
+              },
+            ],
+          });
+        }
+        if (
+          url.pathname ===
+          "/agent/final-deliveries/exe-slack-link-fallback/delivered"
+        )
+          return jsonResponse({ ok: true });
+        throw new Error(`unexpected request: ${url.pathname}`);
+      },
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = {
+      chat: {
+        postMessage: async (params: any) => {
+          slackCalls.push({ method: "chat.postMessage", params });
+          return { ok: true };
+        },
+      },
+      conversations: {
+        replies: async () => ({ ok: true, messages: [] }),
+      },
+    };
+
+    try {
+      await pollFinalDeliveriesOnce(config, client as any);
+      const postMessage = slackCalls.find(
+        (call) => call.method === "chat.postMessage",
+      );
+      const expected = `See [thread](${archiveLink})`;
+      expect(postMessage?.params.text).toBe(expected);
+      expect(postMessage?.params.blocks).toEqual([
+        { type: "markdown", text: expected },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 function jsonResponse(body: unknown): Response {

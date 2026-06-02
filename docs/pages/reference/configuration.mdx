@@ -103,6 +103,7 @@ Execution tuning:
 | `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
 | `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
 | `SLACKBOT_EXTERNAL_ORG_ALLOWLIST` | `slackbot.extraEnv`. | Slack team ids allowed for external org handoff. |
+| `SLACK_TEAM_ID` | `slackbot.extraEnv`. | Workspace team ID (e.g. `T01ABCD2EFG`) used to rewrite `https://*.slack.com/archives/...` URLs in final-delivery messages into native `slack://channel?team=...` deep links that open in the Slack app. Leave unset to keep archive URLs unchanged. |
 | `COMMIT_SHA` | Build/deploy env. | Commit shown in Slackbot metadata. |
 
 ## Sandbox
@@ -175,6 +176,15 @@ Slack ETL workflows:
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `api.slackEtlExcludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
 | `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `api.extraEnv` or chart batch limit. | Backfill enablement and batch sizing. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `api.extraEnv`. | Enables company-context projection when Slack ETL is on. |
+
+Google Workspace ETL workflows:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `GOOGLE_DRIVE_ETL_ENABLED` | `api.googleDriveEtlEnabled`. | Enables Google Drive Docs sync. |
+| `GOOGLE_DRIVE_SYNC_INTERVAL_SECONDS` | `api.googleDriveSyncIntervalSeconds`. | Google Drive Docs sync schedule interval. |
+| `GOOGLE_CALENDAR_ETL_ENABLED` | `api.googleCalendarEtlEnabled`. | Enables Google Calendar sync. |
+| `GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS` | `api.googleCalendarSyncIntervalSeconds`. | Google Calendar sync schedule interval. |
 
 ## Observability and Retention
 

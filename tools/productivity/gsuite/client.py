@@ -17,6 +17,11 @@ from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+try:
+    from api.integrations.gsuite.http import build_http as _shared_build_http
+except ModuleNotFoundError:
+    _shared_build_http = None
+
 
 def _build_http() -> httplib2.Http:
     """Build an httplib2 client routed through iron-proxy.
@@ -37,6 +42,9 @@ def _build_http() -> httplib2.Http:
     Falls back to a direct, default-CA client when the proxy env vars are
     absent (local use outside the sandbox).
     """
+    if _shared_build_http is not None:
+        return _shared_build_http()
+
     proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     proxy_info = None
     if proxy_url:

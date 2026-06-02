@@ -28,7 +28,6 @@ from workflows.slack_sync_shared import (
     load_thread_refresh_times,
     message_row,
     positive_int,
-    repo_slack_client_paths,
     record_run_finish,
     record_run_start,
     seed_channel_bootstrap_job,
@@ -258,11 +257,6 @@ async def _load_checkpoint(pool, channel_id: str) -> dict[str, Any] | None:
         channel_id,
     )
     return dict(row) if row else None
-
-
-def _repo_slack_client_paths():
-    """Compatibility wrapper for tests patching the old helper."""
-    return repo_slack_client_paths()
 
 
 def _client():

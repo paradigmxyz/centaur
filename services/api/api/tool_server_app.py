@@ -22,7 +22,7 @@ import structlog
 from fastapi import FastAPI
 
 from api.config import settings
-from api.db import close_pool, create_pool
+from api.db import close_pool, create_pool_with_retry
 from api.logging_config import configure_structlog
 from api.tool_manager import ToolManager, load_plugins_config
 
@@ -79,7 +79,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the core DB through the iron-proxy (DATABASE_URL points at the proxy's
     # core listener) and the shared tool-server Deployment runs alongside the
     # API. Open the pool without running migrations; the API owns migrations.
-    app.state.db_pool = await create_pool(settings.database_url, apply_migrations=False)
+    # Retry because the sidecar can start before the proxy is listening, and
+    # cap at one connection — the sidecar's DB use is light.
+    app.state.db_pool = await create_pool_with_retry(
+        settings.database_url, apply_migrations=False, min_size=1, max_size=1
+    )
     watcher_task = asyncio.create_task(_watch_tools(app.state.tool_manager))
     try:
         yield

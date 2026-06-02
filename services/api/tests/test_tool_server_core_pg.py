@@ -14,7 +14,10 @@ from api.sandbox.kubernetes import (
 
 
 def test_build_core_pg_points_at_proxy_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.config import settings
+
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/ai_v2")
+    monkeypatch.setattr(settings, "database_url", "postgresql://u:p@db:5432/ai_v2")
     monkeypatch.delenv("KUBERNETES_SECRET_ENV_PREFIX", raising=False)
 
     core = _build_core_pg("proxy-host", {"TOOLDB": PG_LISTEN_PORT_BASE})
@@ -65,6 +68,34 @@ def test_tool_server_container_uses_proxied_dsn_value(
     assert env["DATABASE_URL"] == {"name": "DATABASE_URL", "value": dsn}
     # the signing key still comes from the secret
     assert "valueFrom" in env["SANDBOX_SIGNING_KEY"]
+
+
+def test_tool_server_container_includes_pg_dsn_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool code runs in the sidecar, so pg_dsn secrets must reach it as env.
+
+    Without this, ``secret("EXAMPLE_DSN")`` resolves to the placeholder because
+    ``_resolve_secrets`` delivers ``PgDsnSecret`` via the environment, not
+    ``ToolContext`` — and only the agent container had it.
+    """
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-api:latest")
+    monkeypatch.setenv("KUBERNETES_SECRET_ENV_NAME", "centaur-infra-env")
+
+    example_dsn = "postgresql://app_user:pw@proxy-host:5434/example"
+    container = _build_tool_server_container(
+        thread_key="thread-1",
+        container_name="centaur-sandbox-1",
+        firewall_host="proxy-host",
+        api_url="http://api:8000",
+        overlay_mount=None,
+        database_url="postgresql://app_user:pw@proxy-host:5433/ai_v2",
+        available_secret_refs=set(),
+        pg_dsns={"EXAMPLE_DSN": example_dsn},
+    )
+
+    env = {e["name"]: e for e in container["env"]}
+    assert env["EXAMPLE_DSN"] == {"name": "EXAMPLE_DSN", "value": example_dsn}
 
 
 def test_proxy_iron_env_includes_core_password_when_set(

@@ -6,6 +6,12 @@ const EnvSchema = z.object({
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_API_URL: z.string().url().optional(),
   SLACK_SIGNING_SECRET: z.string().optional(),
+  // Slack workspace team ID (e.g. `T01ABCD2EFG`) used to build native
+  // `slack://channel?team=...` deep links when rewriting `https://*.slack.com/archives/...`
+  // URLs in final-delivery messages. When unset, archive URLs are posted unchanged
+  // so they continue to open in the browser. Set this to the workspace where the
+  // bot lives so replies open directly in the Slack desktop/mobile app.
+  SLACK_TEAM_ID: z.string().optional(),
   SLACKBOT_API_KEY: z.string().optional(),
   CENTAUR_API_URL: z.string().url().default('http://localhost:8000'),
   CENTAUR_API_KEY: z.string().optional(),

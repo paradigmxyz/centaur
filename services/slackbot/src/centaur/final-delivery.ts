@@ -85,7 +85,7 @@ export async function pollFinalDeliveriesOnce(
         }),
         async (span) => {
           try {
-            await deliver(client, delivery);
+            await deliver(client, delivery, config);
             await centaur(
               config,
               `/agent/final-deliveries/${executionId}/delivered`,
@@ -124,7 +124,11 @@ export async function pollFinalDeliveriesOnce(
   }
 }
 
-async function deliver(client: WebClient, delivery: any): Promise<void> {
+async function deliver(
+  client: WebClient,
+  delivery: any,
+  config: AppConfig,
+): Promise<void> {
   const meta = delivery.delivery ?? {};
   const payload = delivery.final_payload ?? {};
   const target = targetFromDelivery(delivery);
@@ -143,6 +147,7 @@ async function deliver(client: WebClient, delivery: any): Promise<void> {
     channel,
     threadTs,
     executionId(delivery),
+    config.SLACK_TEAM_ID,
     chunks,
   );
 }
@@ -156,6 +161,7 @@ async function postFollowups(
   channel: string,
   threadTs: string,
   executionId: string,
+  teamId: string | undefined,
   chunks: string[],
 ): Promise<void> {
   const posted = await withSpan(
@@ -169,6 +175,7 @@ async function postFollowups(
   );
   for (const [index, chunk] of chunks.entries()) {
     if (posted.has(index)) continue;
+    const renderedChunk = rewriteSlackArchiveLinksForApp(chunk, teamId);
     const response = await withSpan(
       "centaur.slackbot.slack.post_message",
       clientSpanOptions({
@@ -177,14 +184,14 @@ async function postFollowups(
         "centaur.execution_id": executionId,
         "centaur.final_delivery.chunk_index": index,
         "centaur.final_delivery.chunk_count": chunks.length,
-        "centaur.final_delivery.chunk_chars": chunk.length,
+        "centaur.final_delivery.chunk_chars": renderedChunk.length,
       }),
       () =>
         client.chat.postMessage({
           channel,
           thread_ts: threadTs,
-          text: chunk,
-          blocks: renderMarkdownBlocks(chunk),
+          text: renderedChunk,
+          blocks: renderMarkdownBlocks(renderedChunk),
           unfurl_links: false,
           unfurl_media: false,
           metadata: chunkMetadata(executionId, index, chunks.length),
@@ -273,6 +280,52 @@ function continuationText(payload: any, text: string): string | null {
   const offset = Math.floor(rawOffset);
   if (offset >= text.length) return null;
   return text.slice(offset).trimStart();
+}
+
+function rewriteSlackArchiveLinksForApp(
+  text: string,
+  teamId: string | undefined,
+): string {
+  const team = String(teamId ?? "").trim();
+  if (!team) return text;
+  return text.replace(
+    /\[([^\]]+)\]\((https:\/\/(?:[A-Za-z0-9-]+\.)*slack\.com\/archives\/([A-Z0-9]+)\/p(\d{16})(?:\?([^)]*))?)\)/g,
+    (
+      match,
+      label: string,
+      _url: string,
+      channel: string,
+      rawMessageTs: string,
+      query: string | undefined,
+    ) => {
+      const messageTs = slackTsFromArchivePath(rawMessageTs);
+      if (!messageTs) return match;
+      const params = new URLSearchParams(query ?? "");
+      const threadTs = params.get("thread_ts") || undefined;
+      const deepLink = slackAppDeepLink({ team, channel, messageTs, threadTs });
+      return `[${label}](${deepLink})`;
+    },
+  );
+}
+
+function slackTsFromArchivePath(raw: string): string | null {
+  if (!/^\d{16}$/.test(raw)) return null;
+  return `${raw.slice(0, 10)}.${raw.slice(10)}`;
+}
+
+function slackAppDeepLink(opts: {
+  team: string;
+  channel: string;
+  messageTs: string;
+  threadTs?: string;
+}): string {
+  const params = new URLSearchParams({
+    team: opts.team,
+    id: opts.channel,
+    message: opts.messageTs,
+  });
+  if (opts.threadTs) params.set("thread_ts", opts.threadTs);
+  return `slack://channel?${params.toString()}`;
 }
 
 function splitFinalDeliveryText(text: string): string[] {

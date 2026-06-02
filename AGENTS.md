@@ -520,6 +520,12 @@ Tool credentials (e.g., `ANTHROPIC_API_KEY`, `AMP_API_KEY`) are never materializ
 
 For local development, infra secrets are stored in Kubernetes Secrets created by `just bootstrap-secrets`; application secrets continue to come from 1Password.
 
+### iron-control
+
+[iron-control](https://github.com/ironsh/iron-control) is an optional Rails control plane for authenticated API access and encrypted secret storage. It is off by default; enable it with `--set ironControl.enabled=true` (or set `ironControl.enabled: true` in a values file). When enabled, it runs against a dedicated `iron_control_production` database on the bundled Postgres (a separate logical DB so its Rails `schema_migrations` table never collides with the API's dbmate table), created by an idempotent init container.
+
+`just bootstrap-secrets` seeds the required keys into `centaur-infra-env`: the three ActiveRecord encryption keys, `SECRET_KEY_BASE`, and the initial admin password/API key are auto-generated (only when absent, never rotated in place). `IRON_CONTROL_DATABASE_URL` defaults to the bundled Postgres server with no database path (so Rails resolves each connection's database name from the image's `database.yml`); export it before running `just bootstrap-secrets` to point at an external server. Override the admin email with `IRON_CONTROL_INITIAL_USER_EMAIL` (default `admin@centaur.local`).
+
 ## Observability & Audit Logs
 
 ### Architecture

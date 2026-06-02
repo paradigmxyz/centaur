@@ -594,6 +594,7 @@ class TestBuildSessionContext:
         assert "GitHub handle verified: yes" in ctx
         assert "GitHub PR Attribution" in ctx
         assert "Prompted by: @alice" in ctx
+        assert "not the Slack thread OP/root author" in ctx
         assert "Assign the PR to the requester when possible: `alice`" in ctx
         assert "not a Slack response mention rule" in ctx
 
@@ -657,6 +658,25 @@ class TestBuildSessionContext:
         )
 
         assert await _get_latest_thread_user_id(thread_key) == "U123"
+
+    @pytest.mark.asyncio
+    async def test_latest_thread_user_id_prefers_newest_requester_over_thread_op(
+        self, db_pool
+    ):
+        from api.agent import _get_latest_thread_user_id
+
+        thread_key = "test:requester-not-thread-op"
+        await db_pool.execute(
+            "INSERT INTO chat_messages (id, thread_key, role, parts, user_id, metadata, created_at) "
+            "VALUES "
+            "($1, $2, 'user', '[]'::jsonb, 'U_THREAD_OP', '{}'::jsonb, NOW() - INTERVAL '5 minutes'), "
+            "($3, $2, 'user', '[]'::jsonb, 'U_PROMPTER', '{}'::jsonb, NOW())",
+            "msg-thread-op",
+            thread_key,
+            "msg-current-prompter",
+        )
+
+        assert await _get_latest_thread_user_id(thread_key) == "U_PROMPTER"
 
     @pytest.mark.asyncio
     async def test_latest_thread_user_id_reads_execution_delivery(self, db_pool):
