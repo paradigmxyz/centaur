@@ -183,13 +183,19 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # The API is the natural control-plane caller. Widen this when a concrete
-    # client integrates. (kubectl port-forward works regardless — it arrives
-    # via the kubelet, not pod-to-pod.)
+    # The API and api-rs are the control-plane callers (api-rs registers
+    # principals/roles/grants on startup and per session). Widen this when
+    # another concrete client integrates. (kubectl port-forward works
+    # regardless — it arrives via the kubelet, not pod-to-pod.)
     - from:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+{{- if .Values.apiRs.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+{{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.ironControl.service.httpPort }}
