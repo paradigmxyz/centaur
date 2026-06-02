@@ -1,0 +1,26 @@
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - replace:
+            proxy_value: XAI_API_KEY
+            match_headers: ["Authorization"]
+          rules: [{ host: api.x.ai }]
+        - replace:
+            proxy_value: GEMINI_API_KEY
+            match_headers: ["X-Goog-Api-Key"]
+          rules: [{ host: generativelanguage.googleapis.com }]
+        - replace:
+            proxy_value: AMP_API_KEY
+            match_headers: ["Authorization"]
+          rules: [{ host: ampcode.com }]
+        - replace:
+            proxy_value: GITHUB_TOKEN
+            match_headers: ["Authorization"]
+          rules:
+            - { host: github.com }
+            - { host: api.github.com }
+        - replace:
+            proxy_value: SLACK_BOT_TOKEN
+            match_headers: ["Authorization"]
+          rules: [{ host: "*.slack.com" }]

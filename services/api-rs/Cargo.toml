@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/centaur-api-server",
+    "crates/centaur-iron-proxy",
     "crates/centaur-sandbox-core",
     "crates/centaur-sandbox-e2e",
     "crates/centaur-sandbox-agent-k8s",
@@ -24,6 +25,7 @@ async-trait = "0.1"
 axum = "0.8.9"
 bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }
+centaur-iron-proxy = { path = "crates/centaur-iron-proxy" }
 centaur-sandbox-core = { path = "crates/centaur-sandbox-core" }
 centaur-sandbox-agent-k8s = { path = "crates/centaur-sandbox-agent-k8s" }
 centaur-sandbox-local = { path = "crates/centaur-sandbox-local" }
@@ -40,8 +42,11 @@ k8s-openapi = { version = "0.27.1", features = ["latest"] }
 kube = "3.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 ratatui = "0.29"
+rustls = "0.23"
 sqlx = { version = "0.8.6", default-features = false, features = ["derive", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "time"] }
 strum = { version = "0.28", features = ["derive"] }
 test-case = "3.3.1"

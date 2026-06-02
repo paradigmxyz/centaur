@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+centaur-iron-proxy.workspace = true
 centaur-sandbox-agent-k8s.workspace = true
 centaur-sandbox-local.workspace = true
 centaur-session-core.workspace = true
@@ -17,6 +18,7 @@ eventsource-stream.workspace = true
 futures-util.workspace = true
 kube.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

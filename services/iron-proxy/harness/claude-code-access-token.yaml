@@ -1,0 +1,19 @@
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - source:
+            type: token_broker
+            credential_id: anthropic-claude
+          inject:
+            header: Authorization
+            formatter: "Bearer {{.Value}}"
+          rules: [{ host: api.anthropic.com }]
+
+broker_credentials:
+  - id: anthropic-claude
+    token_endpoint: https://console.anthropic.com/v1/oauth/token
+    client_id:
+      placeholder: CLAUDE_CODE_CLIENT_ID
+    store:
+      placeholder: CLAUDE_CODE_BLOB

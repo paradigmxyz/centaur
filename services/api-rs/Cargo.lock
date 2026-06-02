@@ -263,6 +263,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "centaur-iron-proxy",
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
  "centaur-sandbox-local",
@@ -274,6 +275,7 @@ dependencies = [
  "futures-util",
  "kube",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",
@@ -285,17 +287,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "centaur-iron-proxy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "sha2",
+ "strum 0.28.0",
+ "thiserror",
+]
+
+[[package]]
 name = "centaur-sandbox-agent-k8s"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "centaur-iron-proxy",
  "centaur-sandbox-core",
  "clap",
  "k8s-openapi",
  "kube",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

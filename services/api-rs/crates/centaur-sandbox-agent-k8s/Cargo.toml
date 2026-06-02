@@ -8,10 +8,12 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+centaur-iron-proxy.workspace = true
 centaur-sandbox-core.workspace = true
 clap.workspace = true
 k8s-openapi.workspace = true
 kube = { workspace = true, features = ["derive", "ws"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }

@@ -1,0 +1,8 @@
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - replace:
+            proxy_value: ANTHROPIC_API_KEY
+            match_headers: ["X-Api-Key"]
+          rules: [{ host: api.anthropic.com }]

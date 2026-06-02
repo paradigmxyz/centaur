@@ -21,8 +21,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Instant, sleep};
 
 pub use generated::agents_x_k8s_io as crd;
+pub use iron_proxy::IronProxyConfig;
 
 pub mod generated;
+mod iron_proxy;
 
 const BACKEND_NAME: &str = "agent-sandbox-k8s";
 const DEFAULT_CONTAINER_NAME: &str = "agent";
@@ -41,6 +43,7 @@ pub struct AgentSandboxConfig {
     pub annotations: BTreeMap<String, String>,
     pub image_pull_policy: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
+    pub iron_proxy: Option<IronProxyConfig>,
     pub ready_timeout: Duration,
 }
 
@@ -54,12 +57,18 @@ impl AgentSandboxConfig {
             annotations: BTreeMap::new(),
             image_pull_policy: None,
             state_volume: None,
+            iron_proxy: None,
             ready_timeout: Duration::from_secs(60),
         }
     }
 
     pub fn state_volume(mut self, state_volume: StateVolumeConfig) -> Self {
         self.state_volume = Some(state_volume);
+        self
+    }
+
+    pub fn iron_proxy(mut self, iron_proxy: IronProxyConfig) -> Self {
+        self.iron_proxy = Some(iron_proxy);
         self
     }
 }
@@ -226,13 +235,23 @@ impl SandboxBackend for AgentSandboxBackend {
 
     async fn create(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
         let id = SandboxId::new(next_sandbox_name());
+        let mut spec = spec;
+        let resolved_iron_proxy = self.resolve_iron_proxy(&id, &spec)?;
+        if let Some(resolved) = &resolved_iron_proxy {
+            iron_proxy::apply_proxy_env(&mut spec, resolved);
+        }
+        self.create_iron_proxy_resources(&id, resolved_iron_proxy.as_ref())
+            .await?;
         let sandbox = build_agent_sandbox(&id, &spec, &self.config)?;
         let create_result = self
             .sandboxes()
             .create(&PostParams::default(), &sandbox)
             .await
             .map_err(|err| map_kube_error("create sandbox", err));
-        create_result?;
+        if let Err(err) = create_result {
+            let _ = self.delete_iron_proxy_resources(&id).await;
+            return Err(err);
+        }
         if let Err(err) = self.wait_until_running(&id).await {
             let _ = self.stop(&id).await;
             return Err(err);
@@ -278,13 +297,20 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
+        let proxy_result = self.delete_iron_proxy_resources(id).await;
         match self
             .sandboxes()
             .delete(id.as_str(), &DeleteParams::default())
             .await
         {
-            Ok(_) => self.delete_state_pvc(id).await,
-            Err(err) if is_not_found(&err) => self.delete_state_pvc(id).await,
+            Ok(_) => {
+                proxy_result?;
+                self.delete_state_pvc(id).await
+            }
+            Err(err) if is_not_found(&err) => {
+                proxy_result?;
+                self.delete_state_pvc(id).await
+            }
             Err(err) => Err(map_kube_error("delete sandbox", err)),
         }
     }
@@ -390,6 +416,10 @@ fn build_agent_sandbox(
             "name": "state",
             "mountPath": state_volume.mount_path,
         }));
+    }
+    if let Some(iron_proxy) = &config.iron_proxy {
+        volume_mounts.push(iron_proxy::sandbox_ca_volume_mount_json());
+        volumes.push(iron_proxy::sandbox_ca_volume_json(iron_proxy));
     }
     insert_optional(
         &mut container,
