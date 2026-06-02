@@ -197,7 +197,7 @@ impl SandboxArgs {
                 );
                 Ok(SandboxRuntime::backend_with_workload(
                     Arc::new(backend),
-                    self.container_workload_mode(),
+                    self.container_workload_mode()?,
                 ))
             }
         }
@@ -229,18 +229,16 @@ impl SandboxArgs {
         }
     }
 
-    fn container_workload_mode(&self) -> SandboxWorkloadMode {
+    fn container_workload_mode(&self) -> Result<SandboxWorkloadMode, ServerError> {
         let image = self
             .agent_image
             .clone()
             .unwrap_or_else(|| default_sandbox_image(self.workload).to_owned());
         match self.workload {
-            SandboxWorkloadKind::Mock => SandboxWorkloadMode::mock_app_server(image),
+            SandboxWorkloadKind::Mock => Ok(SandboxWorkloadMode::mock_app_server(image)),
             SandboxWorkloadKind::CodexAppServer => {
-                let mut workload = SandboxWorkloadMode::codex_app_server(
-                    image,
-                    self.codex_app_server_env_template(),
-                );
+                let mut workload =
+                    SandboxWorkloadMode::codex_app_server(image, self.codex_app_server_env_template()?);
                 if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
                     workload = workload.mount(
                         Mount::new(
@@ -252,12 +250,12 @@ impl SandboxArgs {
                         .read_only(),
                     );
                 }
-                workload
+                Ok(workload)
             }
         }
     }
 
-    fn codex_app_server_env_template(&self) -> Vec<(String, String)> {
+    fn codex_app_server_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
         let mut envs = vec![(
             "CENTAUR_API_URL".to_owned(),
             self.centaur_api_url_override
@@ -282,6 +280,19 @@ impl SandboxArgs {
             envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
         }
 
+        // Inject the harness fragment's placeholder credentials so the agent
+        // sends the proxy_value the egress proxy replaces (e.g. in api_key mode
+        // OPENAI_API_KEY=OPENAI_API_KEY → codex logs in with that placeholder
+        // and hits api.openai.com, where iron-proxy swaps in the real key).
+        // Without it codex finds no key, skips login, and falls back to the
+        // ChatGPT auth.json. The placeholder set follows the resolved auth mode
+        // (empty for access_token, which uses inject rather than replace).
+        for (name, value) in centaur_iron_proxy::placeholder_env(&self.iron_proxy.harness.fragments()?) {
+            if !envs.iter().any(|(existing, _)| existing == &name) {
+                envs.push((name, value));
+            }
+        }
+
         for name in &self.passthrough_env {
             let name = name.trim();
             if name.is_empty() {
@@ -299,7 +310,7 @@ impl SandboxArgs {
             }
         }
 
-        envs
+        Ok(envs)
     }
 }
 
@@ -830,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_app_server_env_template_omits_api_key_by_default() {
+    fn codex_app_server_env_template_injects_auth_mode_and_placeholder() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -842,7 +853,7 @@ mod tests {
         ])
         .unwrap();
 
-        let env = args.sandbox.codex_app_server_env_template();
+        let env = args.sandbox.codex_app_server_env_template().unwrap();
         // CENTAUR_API_URL is always first.
         assert_eq!(
             env[0],
@@ -854,8 +865,13 @@ mod tests {
         // The codex auth mode is propagated so the sandbox agent matches the
         // proxy's registered credential.
         assert!(env.iter().any(|(name, _)| name == "CODEX_AUTH_MODE"));
-        // No OpenAI/codex API key is materialized into the sandbox env.
-        assert!(!env.iter().any(|(name, _)| name.contains("API_KEY")));
+        // api_key mode (the default) injects the placeholder the egress proxy
+        // replaces, so codex logs in and hits api.openai.com instead of
+        // falling back to the ChatGPT auth.json.
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == "OPENAI_API_KEY" && value == "OPENAI_API_KEY")
+        );
     }
 
     #[test]
@@ -871,7 +887,7 @@ mod tests {
         ])
         .unwrap();
 
-        let workload = args.sandbox.container_workload_mode();
+        let workload = args.sandbox.container_workload_mode().unwrap();
         let SandboxWorkloadMode::CodexAppServer { mounts, .. } = workload else {
             panic!("expected codex app server workload");
         };
