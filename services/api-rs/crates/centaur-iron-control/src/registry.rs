@@ -27,7 +27,7 @@ use crate::models::{
     OAuthTokenSecretInput, PgDsnSecretInput, ReplaceConfig, RequestRule, SecretSource,
     StaticSecretInput,
 };
-use crate::util::slugify;
+use crate::util::{managed_labels, slugify};
 
 /// A role to register secrets against. ``foreign_id`` is the stable upsert key
 /// (e.g. ``infra`` or ``tool-github``); ``name`` is the human label.
@@ -91,13 +91,6 @@ pub enum RegisterError {
     Translate(#[from] TranslateError),
     #[error(transparent)]
     Control(#[from] IronControlError),
-}
-
-const MANAGED_LABEL_KEY: &str = "managed-by";
-const MANAGED_LABEL_VALUE: &str = "centaur";
-
-fn managed_labels() -> BTreeMap<String, String> {
-    BTreeMap::from([(MANAGED_LABEL_KEY.to_owned(), MANAGED_LABEL_VALUE.to_owned())])
 }
 
 /// The default GCP OAuth scope applied when a ``gcp_auth`` secret declares
@@ -313,16 +306,30 @@ fn static_secret_identity(secret: &Secret) -> String {
     "secret".to_owned()
 }
 
+/// Resolve a ``token_broker`` source to a [`SecretSource`], or ``Ok(None)`` if
+/// ``value`` is not a token_broker source. ``what`` prefixes the error so the
+/// caller's context (e.g. ``"pg_dsn "``) appears in malformed messages.
+fn token_broker_source(
+    role: &str,
+    value: &YamlValue,
+    what: &str,
+) -> Result<Option<SecretSource>, TranslateError> {
+    if yaml_str(value, "type") != Some("token_broker") {
+        return Ok(None);
+    }
+    let credential_id = yaml_str(value, "credential_id")
+        .ok_or_else(|| malformed(role, &format!("{what}token_broker source missing credential_id")))?;
+    Ok(Some(SecretSource::token_broker(credential_id)))
+}
+
 fn source_from_secret(
     role: &str,
     secret: &Secret,
     policy: &SourcePolicy,
 ) -> Result<SecretSource, TranslateError> {
     if let Some(source) = &secret.source {
-        if yaml_str(source, "type") == Some("token_broker") {
-            let credential_id = yaml_str(source, "credential_id")
-                .ok_or_else(|| malformed(role, "token_broker source missing credential_id"))?;
-            return Ok(SecretSource::token_broker(credential_id));
+        if let Some(broker) = token_broker_source(role, source, "")? {
+            return Ok(broker);
         }
         if let Some(placeholder) = yaml_str(source, "placeholder") {
             return Ok(source_from_placeholder(
@@ -506,10 +513,8 @@ fn pg_dsn_source(
     dsn: &YamlValue,
     policy: &SourcePolicy,
 ) -> Result<SecretSource, TranslateError> {
-    if yaml_str(dsn, "type") == Some("token_broker") {
-        let credential_id = yaml_str(dsn, "credential_id")
-            .ok_or_else(|| malformed(role, "pg_dsn token_broker source missing credential_id"))?;
-        return Ok(SecretSource::token_broker(credential_id));
+    if let Some(broker) = token_broker_source(role, dsn, "pg_dsn ")? {
+        return Ok(broker);
     }
     if yaml_str(dsn, "type") == Some("env") {
         let var = yaml_str(dsn, "var")
@@ -710,7 +715,10 @@ fn malformed(role: &str, detail: &str) -> TranslateError {
     }
 }
 
-fn unique_foreign_id(candidate: String, used: &mut BTreeSet<String>) -> String {
+/// Deduplicate a foreign id against the set of ids already used in this batch,
+/// suffixing `-2`, `-3`, … on collision. Shared with `centaur-perms`, which
+/// translates tool-manifest secrets with the same id conventions.
+pub fn unique_foreign_id(candidate: String, used: &mut BTreeSet<String>) -> String {
     if used.insert(candidate.clone()) {
         return candidate;
     }

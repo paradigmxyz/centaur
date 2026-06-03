@@ -406,12 +406,7 @@ impl IronProxyArgs {
         config.token_broker_fragments = vec![harness_fragment];
         config.env_from_secret_names = self.env_from_secret_names();
         config.token_broker_name = self.token_broker_name.clone();
-        config.token_broker_url = self
-            .token_broker_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
+        config.token_broker_url = clean_optional_value(self.token_broker_url.as_deref());
         config.token_broker_configmap_name = self.token_broker_configmap_name.clone();
         if let Some(labels) = self
             .api_pod_label_selector
@@ -427,10 +422,11 @@ impl IronProxyArgs {
         self.source.policy()
     }
 
-    /// The two roles to register in iron-control: the shared `infra` role
-    /// (from the infra fragment) and the shared `tools` role, which holds every
-    /// secret the harness and tool fragments declare. A session's principal is
-    /// granted both (see [`SessionRegistrar`]).
+    /// The roles to register in iron-control at startup: just the shared
+    /// `infra` role (infra secrets plus harness auth). Tool secrets are
+    /// operator-managed in the control plane via `centaur-perms`, not
+    /// bootstrapped here. A session's principal is granted the infra role
+    /// (see [`SessionRegistrar`]).
     fn roles_to_register(&self) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
         Ok(vec![(RoleSpec::infra(), self.infra_fragment()?)])
     }
@@ -444,31 +440,23 @@ impl IronProxyArgs {
         Ok(infra)
     }
 
-    /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the proxy
-    /// fragments declare — infra, harness, and tools — so env-based consumers
-    /// in the sandbox send the proxy_value iron-proxy replaces with the real
-    /// credential (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …). Mirrors
-    /// the full fragment set registered as iron-control roles.
+    /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the infra
+    /// fragment declares — infra secrets plus harness auth — so env-based
+    /// consumers in the sandbox send the proxy_value iron-proxy replaces with
+    /// the real credential (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …).
+    /// Mirrors the infra role registered in iron-control. Tool secrets are
+    /// granted out of band and carry their own placeholders.
     fn sandbox_placeholder_env(&self) -> Result<BTreeMap<String, String>, ServerError> {
         Ok(centaur_iron_proxy::placeholder_env(&[self.infra_fragment()?]))
     }
 
     fn env_from_secret_names(&self) -> Vec<String> {
         let mut names = BTreeSet::new();
-        if let Some(secret_name) = self
-            .secret_env_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        {
+        if let Some(secret_name) = non_empty(self.secret_env_name.as_deref()) {
             names.insert(secret_name.to_owned());
         }
         if self.source.uses_bootstrap_secret()
-            && let Some(secret_name) = self
-                .bootstrap_secret_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
+            && let Some(secret_name) = non_empty(self.bootstrap_secret_name.as_deref())
         {
             names.insert(secret_name.to_owned());
         }
@@ -682,10 +670,7 @@ fn parse_host_port(value: &str) -> Option<u16> {
 }
 
 fn clean_optional_value(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    non_empty(value).map(ToOwned::to_owned)
 }
 
 fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, String> {

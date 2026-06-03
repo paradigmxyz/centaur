@@ -14,8 +14,7 @@
 //! upsert the returned [`PrincipalRef`] at session start.
 
 use crate::models::IdentityInput;
-use crate::util::slugify;
-use std::collections::BTreeMap;
+use crate::util::{managed_labels, slugify};
 
 /// The principal a session resolves to, as a stable upsert key plus a label.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +31,7 @@ impl PrincipalRef {
             namespace: namespace.to_owned(),
             foreign_id: self.foreign_id.clone(),
             name: self.name.clone(),
-            labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+            labels: managed_labels(),
         }
     }
 }
@@ -49,13 +48,13 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
     let scope = team_id.map(|team| format!("{}-", slugify(team))).unwrap_or_default();
     let team_suffix = team_id.map(|team| format!(" (team {team})")).unwrap_or_default();
 
-    if is_direct_message(conversation_id) {
-        if let Some(user) = slack_user_id.map(str::trim).filter(|user| !user.is_empty()) {
-            return PrincipalRef {
-                foreign_id: format!("slack-user-{scope}{}", slugify(user)),
-                name: format!("Slack user {user}{team_suffix}"),
-            };
-        }
+    if is_direct_message(conversation_id)
+        && let Some(user) = slack_user_id.map(str::trim).filter(|user| !user.is_empty())
+    {
+        return PrincipalRef {
+            foreign_id: format!("slack-user-{scope}{}", slugify(user)),
+            name: format!("Slack user {user}{team_suffix}"),
+        };
     }
 
     if let Some(conversation_id) = conversation_id {

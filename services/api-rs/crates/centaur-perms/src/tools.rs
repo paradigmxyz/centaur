@@ -8,7 +8,6 @@
 //! into iron-control inputs. Only the secret *schema* is reimplemented here;
 //! the API's loader stays the source of truth for runtime tool loading.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result, bail, eyre};
@@ -550,6 +549,32 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
     })
 }
 
+/// Parse one `secret_ref | {secret_ref, json_key}` value into a [`FieldSource`].
+/// `ctx` is the error prefix identifying the entry and field, e.g.
+/// `oauth_token entry "x" field "y"`.
+fn parse_field_source(raw: &Value, ctx: &str) -> Result<FieldSource> {
+    if let Some(s) = raw.as_str() {
+        if s.is_empty() {
+            bail!("{ctx} 'secret_ref' must be non-empty");
+        }
+        Ok(FieldSource { secret_ref: s.to_owned(), json_key: None })
+    } else if let Some(t) = raw.as_table() {
+        let ref_ = req_str(t, "secret_ref").wrap_err_with(|| ctx.to_owned())?;
+        let json_key = match t.get("json_key") {
+            Some(v) => Some(
+                v.as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| eyre!("{ctx} 'json_key' must be a non-empty string"))?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        Ok(FieldSource { secret_ref: ref_, json_key })
+    } else {
+        bail!("{ctx} must be a string or table");
+    }
+}
+
 /// Parse the `credentials` table for an `hmac_sign` entry, requiring the
 /// `secret` HMAC key. Mirrors `_parse_hmac_credentials`.
 fn parse_hmac_credentials(value: Option<&Value>, name: &str) -> Result<Vec<(String, FieldSource)>> {
@@ -559,27 +584,7 @@ fn parse_hmac_credentials(value: Option<&Value>, name: &str) -> Result<Vec<(Stri
         .ok_or_else(|| eyre!("hmac_sign entry {name:?} 'credentials' must be a non-empty table"))?;
     let mut out = Vec::with_capacity(table.len());
     for (field, raw) in table {
-        let src = if let Some(s) = raw.as_str() {
-            if s.is_empty() {
-                bail!("hmac_sign entry {name:?} credential {field:?} 'secret_ref' must be non-empty");
-            }
-            FieldSource { secret_ref: s.to_owned(), json_key: None }
-        } else if let Some(t) = raw.as_table() {
-            let ref_ = req_str(t, "secret_ref")
-                .wrap_err_with(|| format!("hmac_sign entry {name:?} credential {field:?}"))?;
-            let json_key = match t.get("json_key") {
-                Some(v) => Some(
-                    v.as_str()
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| eyre!("hmac_sign entry {name:?} credential {field:?} 'json_key' must be a non-empty string"))?
-                        .to_owned(),
-                ),
-                None => None,
-            };
-            FieldSource { secret_ref: ref_, json_key }
-        } else {
-            bail!("hmac_sign entry {name:?} credential {field:?} must be a string or table");
-        };
+        let src = parse_field_source(raw, &format!("hmac_sign entry {name:?} credential {field:?}"))?;
         out.push((field.clone(), src));
     }
     if !out.iter().any(|(field, _)| field == HMAC_REQUIRED_CREDENTIAL) {
@@ -629,27 +634,7 @@ fn parse_field_map(value: Option<&Value>, secret: &str, what: &str) -> Result<Ve
         .ok_or_else(|| eyre!("oauth_token entry {secret:?} {what:?} must be a table"))?;
     let mut out = Vec::with_capacity(table.len());
     for (field, raw) in table {
-        let src = if let Some(s) = raw.as_str() {
-            if s.is_empty() {
-                bail!("oauth_token entry {secret:?} field {field:?} 'secret_ref' must be non-empty");
-            }
-            FieldSource { secret_ref: s.to_owned(), json_key: None }
-        } else if let Some(t) = raw.as_table() {
-            let ref_ = req_str(t, "secret_ref")
-                .wrap_err_with(|| format!("oauth_token entry {secret:?} field {field:?}"))?;
-            let json_key = match t.get("json_key") {
-                Some(v) => Some(
-                    v.as_str()
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| eyre!("oauth_token entry {secret:?} field {field:?} 'json_key' must be a non-empty string"))?
-                        .to_owned(),
-                ),
-                None => None,
-            };
-            FieldSource { secret_ref: ref_, json_key }
-        } else {
-            bail!("oauth_token entry {secret:?} field {field:?} must be a string or table");
-        };
+        let src = parse_field_source(raw, &format!("oauth_token entry {secret:?} field {field:?}"))?;
         out.push((field.clone(), src));
     }
     Ok(out)
@@ -715,18 +700,3 @@ fn reject_keys(table: &toml::Table, name: &str, mode: &str, keys: &[&str]) -> Re
     Ok(())
 }
 
-/// Deduplicate a foreign id against the set of ids already used in this batch,
-/// suffixing `-2`, `-3`, … on collision. Mirrors `registry.rs::unique_foreign_id`.
-pub fn unique_foreign_id(candidate: String, used: &mut BTreeSet<String>) -> String {
-    if used.insert(candidate.clone()) {
-        return candidate;
-    }
-    let mut counter = 2;
-    loop {
-        let next = format!("{candidate}-{counter}");
-        if used.insert(next.clone()) {
-            return next;
-        }
-        counter += 1;
-    }
-}

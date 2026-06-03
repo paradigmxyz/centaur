@@ -6,12 +6,11 @@
 //! canonical mappings (`derive_principal`, `RoleSpec::tool`) so the principal
 //! and role `foreign_id`s it writes match exactly what api-rs registers.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use centaur_iron_control::{
     Grant, GrantSecret, Grantee, IdentityInput, IronControlClient, IronControlError, Role, RoleSpec,
-    SECRET_TYPES, grant_inputs_to_role,
+    SECRET_TYPES, grant_inputs_to_role, managed_labels,
 };
 use centaur_iron_proxy::SourcePolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -373,11 +372,7 @@ async fn principals_grant(cli: &Cli, client: &IronControlClient, args: &Principa
         println!("  role {role_fid} ({}): assigned", role.id);
     }
 
-    for oid in &args.secrets {
-        let secret = grant_secret_from_oid(oid)?;
-        let grant = client.create_grant(&Grantee::Principal(principal_id.clone()), &secret).await?;
-        println!("  secret {oid}: granted ({})", grant.id);
-    }
+    grant_secrets(client, &Grantee::Principal(principal_id.clone()), &args.secrets).await?;
     Ok(())
 }
 
@@ -407,15 +402,13 @@ async fn principals_revoke(cli: &Cli, client: &IronControlClient, args: &Princip
 
     if !args.secrets.is_empty() {
         let grants = client.list_principal_grants(&principal.id).await?;
-        for oid in &args.secrets {
-            match grants.iter().find(|g| g.secret_id() == Some(oid.as_str())) {
-                Some(grant) => {
-                    client.delete_grant(&grant.id).await?;
-                    println!("  secret {oid}: grant {} revoked", grant.id);
-                }
-                None => println!("  secret {oid}: no direct grant on this principal — nothing to do"),
-            }
-        }
+        revoke_secrets(
+            client,
+            &grants,
+            &args.secrets,
+            "no direct grant on this principal — nothing to do",
+        )
+        .await?;
     }
 
     for grant_id in &args.grant_ids {
@@ -468,11 +461,7 @@ async fn roles_grant(cli: &Cli, client: &IronControlClient, args: &RoleGrantArgs
     let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
     println!("role: {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
 
-    for oid in &args.secrets {
-        let secret = grant_secret_from_oid(oid)?;
-        let grant = client.create_grant(&Grantee::Role(role.id.clone()), &secret).await?;
-        println!("  secret {oid}: granted ({})", grant.id);
-    }
+    grant_secrets(client, &Grantee::Role(role.id.clone()), &args.secrets).await?;
 
     if let Some(tool) = &args.tool {
         let policy = build_source_policy(cli)?;
@@ -522,15 +511,13 @@ async fn roles_revoke(cli: &Cli, client: &IronControlClient, args: &RoleSecretAr
     let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
     println!("role: {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
     let grants = client.list_role_grants(&role.id).await?;
-    for oid in &args.secrets {
-        match grants.iter().find(|g| g.secret_id() == Some(oid.as_str())) {
-            Some(grant) => {
-                client.delete_grant(&grant.id).await?;
-                println!("  secret {oid}: grant {} revoked", grant.id);
-            }
-            None => println!("  secret {oid}: not granted to this role — nothing to do"),
-        }
-    }
+    revoke_secrets(
+        client,
+        &grants,
+        &args.secrets,
+        "not granted to this role — nothing to do",
+    )
+    .await?;
     Ok(())
 }
 
@@ -685,21 +672,45 @@ fn role_identity(role: &RoleSpec, namespace: &str) -> IdentityInput {
         namespace: namespace.to_owned(),
         foreign_id: role.foreign_id.clone(),
         name: role.name.clone(),
-        labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+        labels: managed_labels(),
     }
 }
 
+/// Grant each secret OID to `grantee`, printing one line per grant.
+async fn grant_secrets(client: &IronControlClient, grantee: &Grantee, oids: &[String]) -> Result<()> {
+    for oid in oids {
+        let secret = grant_secret_from_oid(oid)?;
+        let grant = client.create_grant(grantee, &secret).await?;
+        println!("  secret {oid}: granted ({})", grant.id);
+    }
+    Ok(())
+}
+
+/// Revoke each secret OID from `grants` (the grantee's current grants),
+/// printing one line per OID. `missing_note` describes the no-op when an OID
+/// has no matching grant.
+async fn revoke_secrets(
+    client: &IronControlClient,
+    grants: &[Grant],
+    oids: &[String],
+    missing_note: &str,
+) -> Result<()> {
+    for oid in oids {
+        match grants.iter().find(|g| g.secret_id() == Some(oid.as_str())) {
+            Some(grant) => {
+                client.delete_grant(&grant.id).await?;
+                println!("  secret {oid}: grant {} revoked", grant.id);
+            }
+            None => println!("  secret {oid}: {missing_note}"),
+        }
+    }
+    Ok(())
+}
+
 fn grant_secret_from_oid(oid: &str) -> Result<GrantSecret> {
-    if oid.starts_with("ssr_") {
-        Ok(GrantSecret::Static(oid.to_owned()))
-    } else if oid.starts_with("ots_") {
-        Ok(GrantSecret::OAuthToken(oid.to_owned()))
-    } else if oid.starts_with("gas_") {
-        Ok(GrantSecret::GcpAuth(oid.to_owned()))
-    } else if oid.starts_with("hms_") {
-        Ok(GrantSecret::Hmac(oid.to_owned()))
-    } else {
-        bail!("--secret expects a secret OID (ssr_/ots_/gas_/hms_), got {oid:?}");
+    match GrantSecret::from_oid(oid) {
+        Some(secret) => Ok(secret),
+        None => bail!("--secret expects a secret OID (ssr_/ots_/gas_/pgs_/hms_), got {oid:?}"),
     }
 }
 

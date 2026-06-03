@@ -26,7 +26,7 @@ pub use principal::{PrincipalRef, derive_principal};
 pub use registry::{
     GCP_AUTH_DEFAULT_SCOPE, RegisterError, RoleSpec, SecretInput, TranslateError,
     gcp_auth_scopes_or_default, grant_inputs_to_role, register_role, secret_inputs_from_fragment,
-    source_from_placeholder,
+    source_from_placeholder, unique_foreign_id,
 };
 pub use session::SessionRegistrar;
-pub use util::slugify;
+pub use util::{managed_labels, slugify};

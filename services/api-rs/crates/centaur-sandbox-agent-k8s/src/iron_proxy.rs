@@ -344,10 +344,10 @@ impl AgentSandboxBackend {
         }
         // Deregister the iron-control proxy first (best-effort): once the pod is
         // gone the token is useless, and a stale proxy row just fails to sync.
-        if let Some(iron_control) = self.config.iron_control.as_ref() {
-            if let Some(proxy_id) = self.proxy_ids.lock().await.remove(id.as_str()) {
-                let _ = iron_control.client.delete_proxy(&proxy_id).await;
-            }
+        if let Some(iron_control) = self.config.iron_control.as_ref()
+            && let Some(proxy_id) = self.proxy_ids.lock().await.remove(id.as_str())
+        {
+            let _ = iron_control.client.delete_proxy(&proxy_id).await;
         }
         let _ = self.delete_iron_proxy_pods_for_sandbox(id).await;
         let _ = self
@@ -928,13 +928,19 @@ fn current_env_values<const N: usize>(spec: &SandboxSpec, names: [&str; N]) -> V
         .collect()
 }
 
-fn host_from_url(value: String) -> Option<String> {
-    let value = value.trim();
+/// The authority (`[user@]host[:port]`) of a URL or bare `host:port`, with any
+/// scheme and path stripped and surrounding whitespace trimmed.
+fn authority(value: &str) -> Option<&str> {
     let without_scheme = value
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or(value);
     let authority = without_scheme.split('/').next()?.trim();
+    (!authority.is_empty()).then_some(authority)
+}
+
+fn host_from_url(value: String) -> Option<String> {
+    let authority = authority(&value)?;
     let host_port = authority
         .rsplit_once('@')
         .map(|(_, host_port)| host_port)
@@ -950,14 +956,7 @@ fn token_broker_port(url: &str) -> u16 {
 }
 
 fn url_port(value: &str) -> Option<u16> {
-    let authority = value
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(value)
-        .split('/')
-        .next()?
-        .trim();
-    authority.rsplit_once(':')?.1.parse().ok()
+    authority(value)?.rsplit_once(':')?.1.parse().ok()
 }
 
 fn pod_running(pod: &Pod) -> bool {

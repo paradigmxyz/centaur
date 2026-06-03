@@ -395,6 +395,23 @@ pub enum GrantSecret {
     Hmac(String),
 }
 
+impl GrantSecret {
+    /// Route an OID to its grant variant by prefix (see [`SECRET_TYPES`]).
+    /// `None` when the OID matches no known secret type.
+    pub fn from_oid(oid: &str) -> Option<Self> {
+        let (label, ..) = SECRET_TYPES.iter().find(|(_, _, prefix)| oid.starts_with(prefix))?;
+        let id = oid.to_owned();
+        Some(match *label {
+            "static" => Self::Static(id),
+            "oauth_token" => Self::OAuthToken(id),
+            "gcp_auth" => Self::GcpAuth(id),
+            "pg_dsn" => Self::PgDsn(id),
+            "hmac" => Self::Hmac(id),
+            _ => return None,
+        })
+    }
+}
+
 /// A grant as returned by ``POST /api/v1/grants`` and the grantee-scoped list
 /// endpoints (``GET /api/v1/{principals,roles}/:id/grants``). Create responses
 /// populate the grantee/secret references too; only the relevant ids are set.

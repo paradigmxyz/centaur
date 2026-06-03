@@ -12,13 +12,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use centaur_iron_control::{
     GcpAuthSecretInput, HmacSecretHeader, HmacSecretInput, InjectConfig, OAuthTokenSecretInput,
     PgDsnSecretInput, ReplaceConfig, RequestRule, SecretInput, SecretSource, StaticSecretInput,
-    gcp_auth_scopes_or_default, slugify, source_from_placeholder,
+    gcp_auth_scopes_or_default, managed_labels, slugify, source_from_placeholder, unique_foreign_id,
 };
 use centaur_iron_proxy::SourcePolicy;
 
 use crate::tools::{
     FieldSource, GcpAuthSecret, HmacSignSecret, HttpSecret, OAuthTokenSecret, ParsedSecret,
-    PgDsnSecret, SecretMode, unique_foreign_id,
+    PgDsnSecret, SecretMode,
 };
 
 /// The result of translating a tool's secrets: the iron-control inputs to
@@ -28,10 +28,6 @@ pub struct Translation {
     pub inputs: Vec<SecretInput>,
     /// `(name, type)` of secrets skipped because the type is unsupported.
     pub skipped: Vec<(String, String)>,
-}
-
-fn managed_labels() -> BTreeMap<String, String> {
-    BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())])
 }
 
 fn rules_from_hosts(hosts: &[String]) -> Vec<RequestRule> {

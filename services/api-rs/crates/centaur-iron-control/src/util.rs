@@ -1,5 +1,18 @@
 //! Small shared helpers for building stable iron-control identifiers.
 
+use std::collections::BTreeMap;
+
+/// The label key/value every Centaur-managed iron-control resource carries, so
+/// listings can be scoped to the resources this system owns.
+pub const MANAGED_LABEL_KEY: &str = "managed-by";
+pub const MANAGED_LABEL_VALUE: &str = "centaur";
+
+/// The single-entry label map tagging a resource as Centaur-managed. Used for
+/// every secret, role, and principal Centaur upserts.
+pub fn managed_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([(MANAGED_LABEL_KEY.to_owned(), MANAGED_LABEL_VALUE.to_owned())])
+}
+
 /// Lowercase ``value``, collapse runs of non-alphanumerics to single dashes,
 /// and trim leading/trailing dashes. Dashes are inserted lazily before the
 /// next alphanumeric, so the result never starts or ends with one. An input
