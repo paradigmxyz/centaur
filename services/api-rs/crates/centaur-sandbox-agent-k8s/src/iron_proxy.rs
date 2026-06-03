@@ -38,10 +38,6 @@ const PROXY_HEALTH_PORT: u16 = 9090;
 // env vars instead. The CA paths match where the entrypoint copies the
 // mounted CA secret.
 const PROXY_TUNNEL_PORT: u16 = 8080;
-// Base port for per-sandbox Postgres listeners; api-rs assigns sequentially.
-const PG_LISTEN_PORT_BASE: u16 = 6432;
-// Postgres user the sandbox connects as (the proxy fronts the real upstream).
-const PG_CLIENT_USER: &str = "app_user";
 const PROXY_DNS_LISTEN: &str = ":53";
 const PROXY_DNS_PROXY_IP: &str = "127.0.0.1";
 const PROXY_TLS_MODE: &str = "mitm";
@@ -206,29 +202,11 @@ impl AgentSandboxBackend {
             .map(|value| (value.clone(), value))
             .collect();
 
-        let mut entries: Vec<_> = effective
-            .postgres
-            .iter()
-            .filter(|pg| !pg.foreign_id.trim().is_empty() && !pg.database.trim().is_empty())
-            .collect();
-        entries.sort_by(|a, b| a.foreign_id.cmp(&b.foreign_id));
-        let listeners = entries
-            .into_iter()
-            .enumerate()
-            .map(|(idx, pg)| {
-                let port = PG_LISTEN_PORT_BASE + idx as u16;
-                ResolvedPgListener {
-                    foreign_id: pg.foreign_id.clone(),
-                    listen: format!("0.0.0.0:{port}"),
-                    port,
-                    user: PG_CLIENT_USER.to_owned(),
-                    password: format!("pg-{}", uuid::Uuid::new_v4().simple()),
-                    sandbox_env_name: centaur_iron_proxy::pg_sandbox_env_var(&pg.foreign_id),
-                    database: pg.database.clone(),
-                }
-            })
-            .collect();
-        Ok((listeners, replace_placeholders))
+        // Postgres is deferred: iron-control's effective_config postgres entries
+        // carry no resolvable database (the dsn is an unresolved source), so the
+        // sandbox connect-db is unsettled. No pg listeners derived for now; the
+        // pg wiring stays dormant until the connect-db source is decided.
+        Ok((Vec::new(), replace_placeholders))
     }
 
     /// Resolve the proxy for a resume, where only the sandbox id is known.

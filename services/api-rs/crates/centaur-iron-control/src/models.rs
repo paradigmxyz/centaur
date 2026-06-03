@@ -282,13 +282,13 @@ pub struct EffectiveReplace {
     pub proxy_value: String,
 }
 
-/// One synced Postgres upstream. api-rs assigns the local port/user/password
-/// and the sandbox env var name from `foreign_id`; `database` (the upstream
-/// dbname the sandbox must connect to) is owned by the control plane.
+/// One synced Postgres upstream. iron-control returns only `{id, foreign_id,
+/// dsn, role}` — the `dsn` is an unresolved source, so there's no dbname to
+/// return. api-rs keys everything local (port/user/password, sandbox env var
+/// name, and connect db) off `foreign_id`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct EffectivePgDsn {
     pub foreign_id: String,
-    pub database: String,
 }
 
 /// A role as returned by iron-control.
