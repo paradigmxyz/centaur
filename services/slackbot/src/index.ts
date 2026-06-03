@@ -583,12 +583,14 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
         'slack.thread_ts': normalized.thread_ts,
         'slack.user_id': normalized.user_id,
         'centaur.slackbot.is_mention': normalized.is_mention,
+        'centaur.slackbot.is_thread_reply': normalized.is_thread_reply,
+        'centaur.slackbot.bot_in_thread': normalized.bot_in_thread,
         'centaur.slackbot.part_count': normalized.parts.length
       })
-      if (!normalized.is_mention) {
+      if (!shouldHandoffToCentaur(normalized)) {
         spanAttributes(span, {
           'centaur.slackbot.event_ignored': true,
-          'centaur.slackbot.ignore_reason': 'not_mention'
+          'centaur.slackbot.ignore_reason': 'not_mention_or_active_thread'
         })
         return
       }
@@ -618,6 +620,11 @@ async function processSlackEvent(envelope: SlackEnvelope): Promise<void> {
       }
     }
   )
+}
+
+function shouldHandoffToCentaur(event: NormalizedSlackEvent): boolean {
+  if (event.is_mention) return true
+  return event.is_thread_reply && event.bot_in_thread
 }
 
 const TRIVIAL_ACK_REACTION = 'ok_hand'

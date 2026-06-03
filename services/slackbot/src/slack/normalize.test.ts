@@ -439,6 +439,80 @@ describe('normalizeSlackEnvelope', () => {
     ])
   })
 
+  it('marks unmentioned thread replies as continuations when the bot is already in the thread', async () => {
+    const replies = mock(async () => ({
+      ok: true,
+      messages: [
+        {
+          type: 'message',
+          user: 'U111',
+          channel: 'C123',
+          ts: '1778875060.000100',
+          text: 'Can you explain the architecture?'
+        },
+        {
+          type: 'message',
+          channel: 'C123',
+          subtype: 'bot_message',
+          bot_id: 'B123',
+          bot_profile: { id: 'B123', user_id: 'UBOT' },
+          ts: '1778875065.000100',
+          text: 'Here is the high-level architecture.'
+        },
+        {
+          type: 'message',
+          user: 'U123',
+          channel: 'C123',
+          ts: '1778875070.942789',
+          text: 'go deeper on the sandbox piece'
+        }
+      ]
+    }))
+
+    const normalized = await normalizeSlackEnvelope({
+      envelope: {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-thread-followup',
+        event: {
+          type: 'message',
+          user: 'U123',
+          channel: 'C123',
+          channel_type: 'channel',
+          thread_ts: '1778875060.000100',
+          ts: '1778875070.942789',
+          text: 'go deeper on the sandbox piece'
+        }
+      },
+      botUserId: 'UBOT',
+      botId: 'B123',
+      client: {
+        token: 'xoxb-test-token',
+        conversations: { replies }
+      } as any
+    })
+
+    expect(normalized?.is_mention).toBe(false)
+    expect(normalized?.is_thread_reply).toBe(true)
+    expect(normalized?.bot_in_thread).toBe(true)
+    expect(normalized?.history_messages).toEqual([
+      {
+        message_id: 'slack:T123:C123:1778875060.000100',
+        role: 'user',
+        parts: [{ type: 'text', text: 'Can you explain the architecture?' }],
+        user_id: 'U111',
+        metadata: { platform: 'slack', history_backfill: true }
+      },
+      {
+        message_id: 'slack:T123:C123:1778875065.000100',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Here is the high-level architecture.' }],
+        user_id: 'UBOT',
+        metadata: { platform: 'slack', history_backfill: true }
+      }
+    ])
+  })
+
   it('does not duplicate text when Slack sends both rich_text blocks and event.text', async () => {
     const normalized = await normalizeSlackEnvelope({
       envelope: {
