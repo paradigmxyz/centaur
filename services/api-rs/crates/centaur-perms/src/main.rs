@@ -205,7 +205,7 @@ async fn main() -> Result<()> {
     match &cli.command {
         Command::Principals(cmd) => match cmd {
             PrincipalsCmd::List(args) => principals_list(&cli, &client, args).await,
-            PrincipalsCmd::Show(args) => principals_show(&client, args).await,
+            PrincipalsCmd::Show(args) => principals_show(&cli, &client, args).await,
             PrincipalsCmd::Grant(args) => principals_grant(&cli, &client, args).await,
             PrincipalsCmd::Revoke(args) => principals_revoke(&cli, &client, args).await,
         },
@@ -237,12 +237,9 @@ async fn principals_list(cli: &Cli, client: &IronControlClient, args: &FilterArg
     Ok(())
 }
 
-async fn principals_show(client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
-    // A value with ':' is a Slack thread key (derive its foreign_id); anything
-    // else — a foreign_id or a `prn_` OID — is looked up verbatim, both of which
-    // `GET /principals/:id` accepts.
-    let lookup = principal::resolve_lookup(&args.principal, args.slack_user.as_deref());
-    let principal = get_principal_or_fail(client, &lookup).await?;
+async fn principals_show(cli: &Cli, client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
+    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
+    let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
     println!(
         "principal: {} ({}) — {}",
         principal.foreign_id.as_deref().unwrap_or("-"),
