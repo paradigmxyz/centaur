@@ -883,6 +883,15 @@ def test_render_emits_header_and_gcp_auth_transforms(
     assert entry["rules"] == [{"host": "api.openai.com"}]
 
 
+def test_render_allows_project_access_token_header() -> None:
+    cfg = yaml.safe_load(render_proxy_yaml([]))
+    header_allowlist = next(
+        t for t in cfg["transforms"] if t["name"] == "header_allowlist"
+    )
+
+    assert "project-access-token" in header_allowlist["config"]["headers"]
+
+
 def test_render_replace_secret_emits_query_and_path_locations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1494,7 +1503,10 @@ def test_render_emits_postgres_listeners_with_env_refs(
     ]
     cfg = yaml.safe_load(render_proxy_yaml(secrets))
     listeners = cfg["postgres"]
-    assert [l["name"] for l in listeners] == ["analytics_pg", "database_url"]
+    assert [listener["name"] for listener in listeners] == [
+        "analytics_pg",
+        "database_url",
+    ]
     assert listeners[0]["listen"] == "0.0.0.0:5432"
     assert listeners[1]["listen"] == "0.0.0.0:5433"
     # upstream.dsn uses the secret_ref directly so iron-proxy can resolve it
