@@ -15,7 +15,7 @@ pub use fragment::{
     HarnessFragmentFile, default_harness_fragment_dirs, discover_fragment_files,
     discover_harness_fragment_files, harness_broker_fragments, harness_broker_fragments_from_dirs,
     harness_fragment_from_dirs, infra_fragment, load_default_proxy_base_config, load_fragment_file,
-    load_fragment_files, load_fragment_str, placeholder_env,
+    harness_auth_fragment, load_fragment_files, load_fragment_str, placeholder_env,
 };
 pub use model::{
     BrokerCredential, PgDsnEnv, PostgresClient, PostgresListener, PostgresUpstream, ProxyFragment,

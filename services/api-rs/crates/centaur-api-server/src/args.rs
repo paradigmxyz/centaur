@@ -2,18 +2,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     net::SocketAddr,
-    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
 
 use centaur_api_server::SandboxRuntime;
 use centaur_iron_control::{IronControlClient, RoleSpec, SessionRegistrar, register_role};
-use centaur_iron_proxy::{
-    ProxyFragment, SourceKind, SourcePolicy, default_harness_fragment_dirs,
-    discover_fragment_files, harness_broker_fragments_from_dirs, harness_fragment_from_dirs,
-    infra_fragment, load_fragment_file, load_fragment_files,
-};
+use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy, harness_auth_fragment, infra_fragment};
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, IronControlSettings, IronProxyConfig,
 };
@@ -359,8 +354,6 @@ struct IronProxyArgs {
     #[command(flatten)]
     source: IronProxySourceArgs,
     #[command(flatten)]
-    fragments: IronProxyFragmentsArgs,
-    #[command(flatten)]
     harness: IronProxyHarnessArgs,
     #[arg(
         long = "kubernetes-secret-env-name",
@@ -394,23 +387,22 @@ struct IronProxyArgs {
 impl IronProxyArgs {
     fn to_config(&self) -> Result<Option<IronProxyConfig>, ServerError> {
         let mode = self.mode;
-        let fragment_paths = self.fragments.paths()?;
         let ca = self.ca.secrets(mode)?;
-        if !mode.enabled(!fragment_paths.is_empty(), ca.is_some()) {
+        // The harness auth fragment (infra) is always present, so iron-proxy is
+        // enabled whenever a CA is available (or mode forces it).
+        if !mode.enabled(true, ca.is_some()) {
             return Ok(None);
         }
         let (ca_cert_secret_name, ca_key_secret_name) =
             ca.ok_or(ServerError::MissingIronProxyCaSecret)?;
 
+        let harness_fragment = self.harness.fragment()?;
         let mut config =
             IronProxyConfig::new(self.image.clone(), ca_cert_secret_name, ca_key_secret_name);
         config.image_pull_policy = self.image_pull_policy.clone();
         self.source.apply_to_config(&mut config);
-        config.fragments = self.harness.fragments()?;
-        config
-            .fragments
-            .extend(load_fragment_files(&fragment_paths)?);
-        config.token_broker_fragments = self.harness.broker_fragments()?;
+        config.fragments = vec![harness_fragment.clone()];
+        config.token_broker_fragments = vec![harness_fragment];
         config.env_from_secret_names = self.env_from_secret_names();
         config.token_broker_name = self.token_broker_name.clone();
         config.token_broker_url = self
@@ -439,17 +431,16 @@ impl IronProxyArgs {
     /// secret the harness and tool fragments declare. A session's principal is
     /// granted both (see [`SessionRegistrar`]).
     fn roles_to_register(&self) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
-        let mut tools = ProxyFragment::default();
-        for fragment in self.harness.fragments()? {
-            merge_fragment(&mut tools, fragment);
-        }
-        for path in self.fragments.paths()? {
-            merge_fragment(&mut tools, load_fragment_file(&path)?);
-        }
-        Ok(vec![
-            (RoleSpec::infra(), infra_fragment()?),
-            (RoleSpec::tools(), tools),
-        ])
+        Ok(vec![(RoleSpec::infra(), self.infra_fragment()?)])
+    }
+
+    /// The full infra fragment: the shared infra secrets plus the harness auth
+    /// (also infra), selected by auth mode. Tool secrets are operator-managed
+    /// in the control plane, not bootstrapped here.
+    fn infra_fragment(&self) -> Result<ProxyFragment, ServerError> {
+        let mut infra = infra_fragment()?;
+        merge_fragment(&mut infra, self.harness.fragment()?);
+        Ok(infra)
     }
 
     /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the proxy
@@ -458,10 +449,7 @@ impl IronProxyArgs {
     /// credential (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …). Mirrors
     /// the full fragment set registered as iron-control roles.
     fn sandbox_placeholder_env(&self) -> Result<BTreeMap<String, String>, ServerError> {
-        let mut fragments = vec![infra_fragment()?];
-        fragments.extend(self.harness.fragments()?);
-        fragments.extend(load_fragment_files(&self.fragments.paths()?)?);
-        Ok(centaur_iron_proxy::placeholder_env(&fragments))
+        Ok(centaur_iron_proxy::placeholder_env(&[self.infra_fragment()?]))
     }
 
     fn env_from_secret_names(&self) -> Vec<String> {
@@ -588,38 +576,6 @@ impl IronProxySourceArgs {
 }
 
 #[derive(Debug, ClapArgs)]
-struct IronProxyFragmentsArgs {
-    #[arg(
-        long = "kubernetes-iron-proxy-fragment-paths",
-        env = "KUBERNETES_IRON_PROXY_FRAGMENT_PATHS",
-        value_delimiter = ','
-    )]
-    paths: Vec<PathBuf>,
-    #[arg(
-        long = "kubernetes-iron-proxy-fragment-dirs",
-        env = "KUBERNETES_IRON_PROXY_FRAGMENT_DIRS",
-        value_delimiter = ','
-    )]
-    dirs: Vec<PathBuf>,
-    #[arg(long = "tool-dirs", env = "TOOL_DIRS", value_delimiter = ':')]
-    tool_dirs: Vec<PathBuf>,
-}
-
-impl IronProxyFragmentsArgs {
-    fn paths(&self) -> Result<Vec<PathBuf>, ServerError> {
-        let mut paths = self.paths.clone();
-        let mut dirs = self.dirs.clone();
-        if dirs.is_empty() {
-            dirs.extend(self.tool_dirs.clone());
-        }
-        paths.extend(discover_fragment_files(&dirs)?);
-        paths.sort();
-        paths.dedup();
-        Ok(paths)
-    }
-}
-
-#[derive(Debug, ClapArgs)]
 struct IronProxyHarnessArgs {
     #[arg(
         long = "kubernetes-iron-proxy-harness-engine",
@@ -632,40 +588,27 @@ struct IronProxyHarnessArgs {
         env = "KUBERNETES_IRON_PROXY_HARNESS_AUTH_MODE"
     )]
     auth_mode: Option<String>,
-    #[arg(
-        long = "kubernetes-iron-proxy-harness-fragment-dirs",
-        env = "KUBERNETES_IRON_PROXY_HARNESS_FRAGMENT_DIRS",
-        value_delimiter = ','
-    )]
-    fragment_dirs: Vec<PathBuf>,
 }
 
 impl IronProxyHarnessArgs {
-    fn fragments(&self) -> Result<Vec<ProxyFragment>, ServerError> {
-        let auth_mode = self
-            .auth_mode
+    fn resolved_auth_mode(&self) -> String {
+        self.auth_mode
             .clone()
             .or_else(|| harness_auth_mode_env(&self.engine))
-            .unwrap_or_else(|| "api_key".to_owned());
-        Ok(harness_fragment_from_dirs(
-            harness_fragment_engine_name(&self.engine),
-            auth_mode.as_str(),
-            &self.fragment_dirs(),
-        )?
-        .into_iter()
-        .collect())
+            .unwrap_or_else(|| "api_key".to_owned())
     }
 
-    fn broker_fragments(&self) -> Result<Vec<ProxyFragment>, ServerError> {
-        Ok(harness_broker_fragments_from_dirs(&self.fragment_dirs())?)
-    }
-
-    fn fragment_dirs(&self) -> Vec<PathBuf> {
-        if self.fragment_dirs.is_empty() {
-            default_harness_fragment_dirs()
-        } else {
-            self.fragment_dirs.clone()
-        }
+    /// The harness auth fragment — infra, baked in and selected by auth mode.
+    /// Carries the harness credential secret(s) and, for access_token, the
+    /// token-broker credential.
+    fn fragment(&self) -> Result<ProxyFragment, ServerError> {
+        let engine = harness_fragment_engine_name(&self.engine);
+        let auth_mode = self.resolved_auth_mode();
+        harness_auth_fragment(engine, &auth_mode)?.ok_or_else(|| {
+            ServerError::UnsupportedConfig(format!(
+                "no harness auth fragment for engine {engine} auth-mode {auth_mode}"
+            ))
+        })
     }
 }
 

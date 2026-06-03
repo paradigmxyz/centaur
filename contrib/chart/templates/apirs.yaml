@@ -155,8 +155,6 @@ spec:
             - name: KUBERNETES_OP_CONNECT_HOST
               value: {{ include "centaur.onepasswordConnectUrl" . | quote }}
 {{- end }}
-            - name: TOOL_DIRS
-              value: /app/tools
             # Harness auth modes: single source of truth (sandbox.*AuthMode).
             # api-rs reads these to register the matching iron-proxy credential
             # and propagates them into each sandbox so the agent's auth.json
