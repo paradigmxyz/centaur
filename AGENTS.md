@@ -526,6 +526,104 @@ For local development, infra secrets are stored in Kubernetes Secrets created by
 
 `just bootstrap-secrets` seeds the required keys into `centaur-infra-env`: the three ActiveRecord encryption keys, `SECRET_KEY_BASE`, and the initial admin password/API key are auto-generated (only when absent, never rotated in place). `IRON_CONTROL_DATABASE_URL` defaults to the bundled Postgres server with no database path (so Rails resolves each connection's database name from the image's `database.yml`); export it before running `just bootstrap-secrets` to point at an external server. Override the admin email with `IRON_CONTROL_INITIAL_USER_EMAIL` (default `admin@centaur.local`).
 
+### centaur-perms
+
+`centaur-perms` is the operator CLI for iron-control permissions: it controls which Slack principals (users and channels) and which roles hold which tool roles and secrets. It lives at `services/api-rs/crates/centaur-perms` and reuses iron-control's canonical mappings (`derive_principal`, `RoleSpec::tool`), so every principal and role `foreign_id` it writes matches exactly what `api-rs` registers at session start. It is the supported way to inspect and edit grants by hand; the API writes the same resources at runtime.
+
+#### Concepts
+
+- **Principal** — a Slack user or channel that an agent session runs as. `foreign_id`s are derived canonically: `slack-channel-<team>-<conv>` for a channel, `slack-user-<team>-<user>` for a DM. A channel's grants win when present; otherwise the session falls back to the requesting user's grants.
+- **Role** — a named bundle of secret grants assignable to principals. Canonical roles: `infra` (shared infra secrets), `tools` (shared harness/tool secrets), and one `tool-<slug>` per tool (e.g. `tool-github`).
+- **Secret** — a typed iron-control resource (static `ssr_`, OAuth token `ots_`, GCP auth `gas_`, Postgres DSN `pgs_`, HMAC signing `hms_`). iron-control never returns credential values, only the source each resolves from. Each `tool-<slug>` secret keeps a canonical `tool-<slug>-…` id so the same object is shared no matter which role grants it.
+- **Grant** — binds a secret to a grantee (a principal or a role). `centaur-perms` resources carry the label `managed-by=centaur`.
+
+A principal's *effective* access is the union of its directly granted secrets and the secrets carried by every role assigned to it.
+
+#### Setup
+
+The CLI talks to the iron-control admin API. Provide the connection via flags or env vars (iron-control must be enabled — see above):
+
+```bash
+export IRON_CONTROL_URL=http://localhost:3000        # admin API base URL
+export IRON_CONTROL_API_KEY=iak_…                    # admin API key
+export IRON_CONTROL_NAMESPACE=default                # optional, defaults to "default"
+```
+
+For `--tool` lookups, point the CLI at the same tool directories the API uses, via repeatable `--tools-dir` flags or the colon-separated `TOOL_DIRS` env var (explicit dirs first, then env; later dirs shadow earlier ones, matching the overlay order). Build and run from `services/api-rs`:
+
+```bash
+cd services/api-rs
+cargo run -p centaur-perms -- <args>     # or: cargo build -p centaur-perms; ./target/debug/centaur-perms <args>
+```
+
+The `--tool` flag parses a tool's `pyproject.toml` `[tool.centaur]` secrets and registers them in iron-control before granting. How each secret's `secret_ref` resolves to a source is set by `--source-policy` (`env` default, `onepassword`, or `onepassword-connect`); the 1Password policies also require `--op-vault` (and accept `--op-ttl`, default `10m`).
+
+#### Command surface
+
+Commands are resource-first — `centaur-perms <noun> <verb>`:
+
+| Command | What it does |
+|---------|--------------|
+| `principals list [--filter S] [--label k=v] [--managed]` | List principals. `--filter` is a case-insensitive substring on `foreign_id`/name; `--managed` is shorthand for `--label managed-by=centaur`. |
+| `principals show <principal> [--slack-user U]` | Show a principal's roles (with each role's grants), direct grants, and effective replace-secret placeholders. |
+| `principals grant <principal> [--tool N] [--role F] [--secret OID]` | Grant access. `--tool` registers the tool's `tool-<slug>` role + secrets then assigns it; `--role` assigns an existing role; `--secret` grants a secret OID directly. All repeatable; creates the principal if absent. |
+| `principals revoke <principal> [--tool N] [--role F] [--secret OID] [--grant-id OID]` | Reverse of grant. `--tool`/`--role` unassign the role; `--secret` deletes the direct grant for that secret; `--grant-id` deletes a grant by its `grant_…` id. |
+| `roles list / show <role>` | List roles, or show the secrets granted to one role. |
+| `roles grant <role> [--secret OID] [--tool N [--secret-name NAME]]` | Grant secrets to a role by OID, or register+grant a tool's declared secrets. `--secret-name` (repeatable, requires `--tool`) selects specific declared secrets instead of all. |
+| `roles revoke <role> --secret OID` | Revoke one or more secrets from a role (`--secret` required, repeatable). |
+| `secrets list [--filter S] [--label k=v] [--managed]` | List secrets across every type, one row per secret. |
+| `secrets show <secret>` | Show one secret's full config by OID or `foreign_id` (values are never shown — only the source). |
+
+A `<principal>` argument is treated as a Slack thread key when it contains `:` (e.g. `slack:T123:C456:1700000000.0001`) and run through `derive_principal` — pass `--slack-user` so a DM thread keys to the user. Any value without a `:` is used verbatim as a `foreign_id` (e.g. `slack-channel-t123-c456`) or an OID. Grant/revoke operations are idempotent: re-granting an assigned role or revoking a missing grant is a no-op, reported as such.
+
+Tool secret types that iron-control can't represent (`brokered_token`) are skipped and reported, never dropped silently.
+
+#### Common workflows
+
+Give a channel access to a tool (registers the tool's role + secrets from its `pyproject.toml`, then assigns the role to the channel):
+
+```bash
+centaur-perms principals grant slack-channel-t123-c456 --tool github --tools-dir tools
+```
+
+Inspect what a principal can actually do (resolve a live thread key, then list roles, direct grants, and effective secrets):
+
+```bash
+centaur-perms principals show slack:T123:C456:1700000000.0001
+```
+
+Give an individual user a tool only in their DMs:
+
+```bash
+centaur-perms principals grant slack:D9999999:1700000000.0001 --slack-user U07ABC --tool github --tools-dir tools
+```
+
+Register a tool's secrets once on the shared `tools` role, then assign that role to many principals:
+
+```bash
+centaur-perms roles grant tools --tool github --tools-dir tools
+centaur-perms principals grant slack-channel-t123-c456 --role tools
+```
+
+Register only a single named secret from a tool onto a role:
+
+```bash
+centaur-perms roles grant infra --tool slackbot --secret-name SLACK_BOT_TOKEN --tools-dir tools
+```
+
+Revoke a tool from a channel (unassigns the `tool-<slug>` role; shared secrets on other roles are untouched):
+
+```bash
+centaur-perms principals revoke slack-channel-t123-c456 --tool github
+```
+
+Audit Centaur-managed secrets and inspect one:
+
+```bash
+centaur-perms secrets list --managed
+centaur-perms secrets show tool-github-github_token
+```
+
 ## Observability & Audit Logs
 
 ### Architecture
