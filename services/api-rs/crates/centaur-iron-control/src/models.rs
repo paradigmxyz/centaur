@@ -214,14 +214,18 @@ pub struct GcpAuthSecretInput {
 // ---------------------------------------------------------------------------
 
 /// Request body for ``POST``/``PUT /api/v1/pg_dsn_secrets``. ``dsn`` is the
-/// upstream connection string, resolved like any other secret source; ``role``
-/// is an optional Postgres role the proxy issues ``SET ROLE`` for.
+/// upstream connection string, resolved like any other secret source;
+/// ``database`` is the database name to connect to on both the proxied and the
+/// upstream connection (the ``dsn`` source is opaque, so it can't be parsed out
+/// of the connection string); ``role`` is an optional Postgres role the proxy
+/// issues ``SET ROLE`` for.
 // Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PgDsnSecretInput {
     pub namespace: String,
     pub foreign_id: String,
     pub name: String,
+    pub database: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,13 +286,15 @@ pub struct EffectiveReplace {
     pub proxy_value: String,
 }
 
-/// One synced Postgres upstream. iron-control returns only `{id, foreign_id,
-/// dsn, role}` — the `dsn` is an unresolved source, so there's no dbname to
-/// return. api-rs keys everything local (port/user/password, sandbox env var
-/// name, and connect db) off `foreign_id`.
+/// One synced Postgres upstream. iron-control returns the `foreign_id` (the
+/// listener binding key) and the `database` to connect to on both the proxied
+/// and upstream connection. The `dsn`/`role` are proxy-side, so they're not
+/// captured here; api-rs keys the remaining local knobs (port, user, password,
+/// sandbox env var name) off `foreign_id`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct EffectivePgDsn {
     pub foreign_id: String,
+    pub database: String,
 }
 
 /// A role as returned by iron-control.
@@ -309,6 +315,9 @@ pub struct SecretRecord {
     pub id: String,
     pub namespace: String,
     pub foreign_id: Option<String>,
+    /// Human label. Optional because some secret types allow a null ``name``.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +368,23 @@ impl Grant {
             .or(self.oauth_token_secret_id.as_deref())
             .or(self.gcp_auth_secret_id.as_deref())
             .or(self.pg_dsn_secret_id.as_deref())
+    }
+
+    /// The granted secret's ``(type label, REST collection, OID)``, whichever of
+    /// the four secret types it is. The collection is the path segment for
+    /// fetching the secret (e.g. to resolve its name).
+    pub fn secret_target(&self) -> Option<(&'static str, &'static str, &str)> {
+        if let Some(id) = &self.static_secret_id {
+            Some(("static", "static_secrets", id))
+        } else if let Some(id) = &self.oauth_token_secret_id {
+            Some(("oauth_token", "oauth_token_secrets", id))
+        } else if let Some(id) = &self.gcp_auth_secret_id {
+            Some(("gcp_auth", "gcp_auth_secrets", id))
+        } else if let Some(id) = &self.pg_dsn_secret_id {
+            Some(("pg_dsn", "pg_dsn_secrets", id))
+        } else {
+            None
+        }
     }
 }
 

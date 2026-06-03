@@ -103,15 +103,27 @@ pub struct GcpAuthSecret {
     pub scopes: Vec<String>,
 }
 
+/// A `type = "pg_dsn"` secret: a Postgres upstream the proxy fronts. `name` is
+/// the DSN env var the sandbox reads, `secret_ref` resolves the upstream
+/// connection string, and `database` is the database to connect to. pg_dsn
+/// secrets have no `hosts`/rules — a listener matches by port, not by request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgDsnSecret {
+    pub name: String,
+    pub secret_ref: String,
+    pub database: String,
+}
+
 /// One parsed `[tool.centaur]` secret entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedSecret {
     Http(HttpSecret),
     OAuthToken(OAuthTokenSecret),
     GcpAuth(GcpAuthSecret),
+    PgDsn(PgDsnSecret),
     /// A declared secret type this CLI cannot represent as an iron-control
-    /// resource (`pg_dsn`, `hmac_sign`, `brokered_token`). Carried so the
-    /// caller can report it was skipped rather than dropping it silently.
+    /// resource (`hmac_sign`, `brokered_token`). Carried so the caller can
+    /// report it was skipped rather than dropping it silently.
     Unsupported { name: String, kind: String },
 }
 
@@ -122,6 +134,7 @@ impl ParsedSecret {
             ParsedSecret::Http(s) => &s.name,
             ParsedSecret::OAuthToken(s) => &s.name,
             ParsedSecret::GcpAuth(s) => &s.name,
+            ParsedSecret::PgDsn(s) => &s.name,
             ParsedSecret::Unsupported { name, .. } => name,
         }
     }
@@ -291,7 +304,8 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
         }
         "oauth_token" => Ok(ParsedSecret::OAuthToken(parse_oauth(table, &name)?)),
         "gcp_auth" => Ok(ParsedSecret::GcpAuth(parse_gcp(table, &name, &secret_ref)?)),
-        "pg_dsn" | "hmac_sign" | "brokered_token" => {
+        "pg_dsn" => Ok(ParsedSecret::PgDsn(parse_pg_dsn(table, &name, &secret_ref)?)),
+        "hmac_sign" | "brokered_token" => {
             Ok(ParsedSecret::Unsupported { name, kind: secret_type.to_owned() })
         }
         other => bail!("unknown secret type {other:?} for secret {name:?}"),
@@ -449,6 +463,16 @@ fn parse_gcp(table: &toml::Table, name: &str, secret_ref: &str) -> Result<GcpAut
         secret_ref: secret_ref.to_owned(),
         hosts,
         scopes,
+    })
+}
+
+fn parse_pg_dsn(table: &toml::Table, name: &str, secret_ref: &str) -> Result<PgDsnSecret> {
+    let database = req_str(table, "database")
+        .wrap_err_with(|| format!("pg_dsn entry {name:?} requires a non-empty 'database'"))?;
+    Ok(PgDsnSecret {
+        name: name.to_owned(),
+        secret_ref: secret_ref.to_owned(),
+        database,
     })
 }
 

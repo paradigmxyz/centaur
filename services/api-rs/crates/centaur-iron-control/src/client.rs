@@ -229,6 +229,16 @@ impl IronControlClient {
         .await
     }
 
+    /// Fetch a secret's identity (id, ``foreign_id``, ``name``) by OID. The
+    /// ``collection`` is the resource path segment for the secret's type
+    /// (``static_secrets``, ``oauth_token_secrets``, ``gcp_auth_secrets``,
+    /// ``pg_dsn_secrets``) — see [`Grant::secret_target`].
+    pub async fn get_secret(&self, collection: &str, oid: &str) -> Result<SecretRecord> {
+        let path = format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(oid));
+        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+        decode_data(resp, Method::GET, &path).await
+    }
+
     // ----- grants ----------------------------------------------------------
 
     /// Attach a secret to a grantee (principal or role).
@@ -529,6 +539,32 @@ mod tests {
             serde_json::to_value(inject).unwrap(),
             json!({ "header": "Authorization", "formatter": "Bearer {{ .Value }}" })
         );
+    }
+
+    #[test]
+    fn grant_secret_target_maps_type_and_collection() {
+        let grant: Grant = serde_json::from_value(json!({
+            "id": "grant_1",
+            "oauth_token_secret_id": "ots_slack"
+        }))
+        .unwrap();
+        assert_eq!(
+            grant.secret_target(),
+            Some(("oauth_token", "oauth_token_secrets", "ots_slack"))
+        );
+
+        let pg: Grant = serde_json::from_value(json!({
+            "id": "grant_2",
+            "pg_dsn_secret_id": "pgs_reshift"
+        }))
+        .unwrap();
+        assert_eq!(
+            pg.secret_target(),
+            Some(("pg_dsn", "pg_dsn_secrets", "pgs_reshift"))
+        );
+
+        let empty: Grant = serde_json::from_value(json!({ "id": "grant_3" })).unwrap();
+        assert_eq!(empty.secret_target(), None);
     }
 
     #[test]

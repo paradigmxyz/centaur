@@ -24,8 +24,9 @@ pub use models::{
 };
 pub use principal::{PrincipalRef, derive_principal};
 pub use registry::{
-    RegisterError, RoleSpec, SecretInput, TranslateError, grant_inputs_to_role, register_role,
-    secret_inputs_from_fragment, source_from_placeholder,
+    GCP_AUTH_DEFAULT_SCOPE, RegisterError, RoleSpec, SecretInput, TranslateError,
+    gcp_auth_scopes_or_default, grant_inputs_to_role, register_role, secret_inputs_from_fragment,
+    source_from_placeholder,
 };
 pub use session::SessionRegistrar;
 pub use util::slugify;

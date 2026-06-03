@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use centaur_iron_control::SecretInput;
-use centaur_iron_proxy::SourcePolicy;
+use centaur_iron_proxy::{SourcePolicy, pg_sandbox_env_var};
 
 use crate::tools::{self, ParsedSecret, SecretMode};
 use crate::translate;
@@ -107,7 +107,7 @@ fn oauth_missing_required_field_errors() {
 
 #[test]
 fn unsupported_types_are_marked_not_errored() {
-    for kind in ["pg_dsn", "hmac_sign", "brokered_token"] {
+    for kind in ["hmac_sign", "brokered_token"] {
         let src = format!(r#"{{type = "{kind}", name = "X", hosts = ["x.com"], database = "db"}}"#);
         let parsed = tools::parse_secret(&entry(&src), &[]).unwrap();
         match parsed {
@@ -118,6 +118,29 @@ fn unsupported_types_are_marked_not_errored() {
             other => panic!("expected unsupported, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn parses_pg_dsn_secret() {
+    let parsed = tools::parse_secret(
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN" }"#),
+        &[],
+    )
+    .unwrap();
+    let ParsedSecret::PgDsn(pg) = parsed else { panic!("expected pg_dsn") };
+    assert_eq!(pg.name, "RESHIFT_DSN");
+    assert_eq!(pg.database, "pmadmin");
+    assert_eq!(pg.secret_ref, "RESHIFT_DSN");
+}
+
+#[test]
+fn pg_dsn_requires_database() {
+    let err = tools::parse_secret(
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN" }"#),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("database"), "{err}");
 }
 
 #[test]
@@ -163,6 +186,24 @@ fn translates_http_replace_to_static_input() {
 }
 
 #[test]
+fn translates_gcp_auth_defaults_scopes_when_unset() {
+    let secrets = vec![
+        tools::parse_secret(
+            &entry(r#"{ type = "gcp_auth", name = "GCP_CRED", hosts = ["storage.googleapis.com"] }"#),
+            &[],
+        )
+        .unwrap(),
+    ];
+    let out = translate::translate("default", "tool-gcs", &secrets, &SourcePolicy::env());
+    let SecretInput::GcpAuth(input) = &out.inputs[0] else { panic!("expected gcp_auth") };
+    // No scopes declared -> the single default cloud-platform scope.
+    assert_eq!(
+        input.scopes,
+        vec!["https://www.googleapis.com/auth/cloud-platform".to_owned()]
+    );
+}
+
+#[test]
 fn translates_oauth_with_json_key_fields() {
     let secrets = vec![
         tools::parse_secret(
@@ -180,6 +221,28 @@ fn translates_oauth_with_json_key_fields() {
     let refresh = input.credentials.get("refresh_token").unwrap();
     assert_eq!(refresh.source_type, "env");
     assert_eq!(refresh.config, serde_json::json!({ "var": "GOOGLE_TOKEN_JSON", "json_key": "refresh_token" }));
+}
+
+#[test]
+fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
+    let secrets = vec![
+        tools::parse_secret(
+            &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN" }"#),
+            &[],
+        )
+        .unwrap(),
+    ];
+    let out = translate::translate("default", "tool-reshift", &secrets, &SourcePolicy::env());
+    assert!(out.skipped.is_empty());
+    let SecretInput::PgDsn(input) = &out.inputs[0] else { panic!("expected pg_dsn") };
+    // The foreign_id is not role-prefixed: it must round-trip back to the
+    // sandbox DSN env var (`RESHIFT_DSN`) that api-rs derives from it.
+    assert_eq!(input.foreign_id, "reshift");
+    assert_eq!(pg_sandbox_env_var(&input.foreign_id), "RESHIFT_DSN");
+    assert_eq!(input.name, "RESHIFT_DSN");
+    assert_eq!(input.database, "pmadmin");
+    assert_eq!(input.dsn.source_type, "env");
+    assert_eq!(input.dsn.config, serde_json::json!({ "var": "RESHIFT_DSN" }));
 }
 
 #[test]

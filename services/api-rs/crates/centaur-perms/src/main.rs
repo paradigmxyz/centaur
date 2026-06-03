@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use centaur_iron_control::{
-    GrantSecret, Grantee, IdentityInput, IronControlClient, IronControlError, Role, RoleSpec,
+    Grant, GrantSecret, Grantee, IdentityInput, IronControlClient, IronControlError, Role, RoleSpec,
     grant_inputs_to_role,
 };
 use centaur_iron_proxy::SourcePolicy;
@@ -237,6 +237,26 @@ async fn principals_list(cli: &Cli, client: &IronControlClient, args: &FilterArg
     Ok(())
 }
 
+/// Describe a grant's secret as ``<type> <name> (<oid>)`` for the show views,
+/// resolving the secret's name/foreign_id by OID. Returns `None` for a grant
+/// with no secret target. The name lookup is best-effort: if the secret can't
+/// be fetched (e.g. it was deleted out from under the grant), the OID is shown
+/// alone so a dangling grant still surfaces rather than failing the command.
+async fn describe_grant(client: &IronControlClient, grant: &Grant) -> Option<String> {
+    let (kind, collection, oid) = grant.secret_target()?;
+    let label = match client.get_secret(collection, oid).await {
+        Ok(record) => record
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .or(record.foreign_id.as_deref())
+            .unwrap_or(oid)
+            .to_owned(),
+        Err(_) => oid.to_owned(),
+    };
+    Some(format!("{kind} {label} ({oid})"))
+}
+
 async fn principals_show(cli: &Cli, client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
     let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
     let principal = get_principal_or_fail(client, &cli.namespace, &identity.foreign_id).await?;
@@ -255,8 +275,8 @@ async fn principals_show(cli: &Cli, client: &IronControlClient, args: &Principal
         for role in &roles {
             println!("  {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
             for grant in client.list_role_grants(&role.id).await? {
-                if let Some(secret) = grant.secret_id() {
-                    println!("    grants {secret}");
+                if let Some(desc) = describe_grant(client, &grant).await {
+                    println!("    grants {desc}");
                 }
             }
         }
@@ -268,8 +288,8 @@ async fn principals_show(cli: &Cli, client: &IronControlClient, args: &Principal
     } else {
         println!("direct grants:");
         for grant in &direct {
-            if let Some(secret) = grant.secret_id() {
-                println!("  {secret} (grant {})", grant.id);
+            if let Some(desc) = describe_grant(client, grant).await {
+                println!("  {desc} (grant {})", grant.id);
             }
         }
     }
@@ -410,8 +430,8 @@ async fn roles_show(cli: &Cli, client: &IronControlClient, args: &RoleSelector) 
     } else {
         println!("secrets:");
         for grant in &grants {
-            if let Some(secret) = grant.secret_id() {
-                println!("  {secret} (grant {})", grant.id);
+            if let Some(desc) = describe_grant(client, grant).await {
+                println!("  {desc} (grant {})", grant.id);
             }
         }
     }

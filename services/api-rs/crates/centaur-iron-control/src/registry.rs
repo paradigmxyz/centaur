@@ -98,6 +98,21 @@ fn managed_labels() -> BTreeMap<String, String> {
     BTreeMap::from([(MANAGED_LABEL_KEY.to_owned(), MANAGED_LABEL_VALUE.to_owned())])
 }
 
+/// The default GCP OAuth scope applied when a ``gcp_auth`` secret declares
+/// none, mirroring ``GCP_AUTH_SCOPES`` in the Python ``proxy_config``. iron-
+/// control requires a non-empty ``scopes``, so a scope-less entry would
+/// otherwise be rejected.
+pub const GCP_AUTH_DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+
+/// ``scopes`` if non-empty, else the single default GCP scope.
+pub fn gcp_auth_scopes_or_default(scopes: Vec<String>) -> Vec<String> {
+    if scopes.is_empty() {
+        vec![GCP_AUTH_DEFAULT_SCOPE.to_owned()]
+    } else {
+        scopes
+    }
+}
+
 /// Upsert ``role``, upsert every secret the fragment declares, and grant each
 /// to the role. Idempotent: foreign-id upserts mean re-running converges.
 /// Returns the role's iron-control OID so callers can assign it to principals
@@ -442,6 +457,16 @@ fn pg_dsn_from_listener(
         .and_then(|upstream| upstream.dsn.as_ref())
         .ok_or_else(|| malformed(role, &format!("postgres listener {name} missing upstream.dsn")))?;
     let dsn = pg_dsn_source(role, dsn_value, policy)?;
+    let database = listener
+        .sandbox_env
+        .as_ref()
+        .and_then(|sandbox_env| sandbox_env.database.as_deref())
+        .map(str::trim)
+        .filter(|database| !database.is_empty())
+        .ok_or_else(|| {
+            malformed(role, &format!("postgres listener {name} missing sandbox_env.database"))
+        })?
+        .to_owned();
     let role_to_set = listener
         .extra
         .get("role")
@@ -453,6 +478,7 @@ fn pg_dsn_from_listener(
         namespace: namespace.to_owned(),
         foreign_id: pg_foreign_id(name),
         name: name.to_owned(),
+        database,
         description: None,
         role: role_to_set,
         labels: managed_labels(),
@@ -597,7 +623,7 @@ fn gcp_auth_from_transform(
     policy: &SourcePolicy,
 ) -> Result<GcpAuthSecretInput, TranslateError> {
     let config = &transform.config.extra;
-    let scopes = yaml_string_array(config.get("scopes"));
+    let scopes = gcp_auth_scopes_or_default(yaml_string_array(config.get("scopes")));
     let rules = rules_from_values(role, &sequence(config.get("rules")))?;
 
     let (keyfile, foreign_id) = match config.get("keyfile") {
@@ -828,6 +854,8 @@ postgres:
       dsn: { placeholder: PG_ANALYTICS_DSN }
     client:
       user: app
+    sandbox_env:
+      database: analytics_db
     role: readonly
 "#,
         )
@@ -840,6 +868,7 @@ postgres:
         };
         assert_eq!(input.foreign_id, "pg-analytics");
         assert_eq!(input.name, "analytics");
+        assert_eq!(input.database, "analytics_db");
         assert_eq!(input.role.as_deref(), Some("readonly"));
         assert_eq!(input.dsn.source_type, "env");
         assert_eq!(input.dsn.config, json!({ "var": "PG_ANALYTICS_DSN" }));

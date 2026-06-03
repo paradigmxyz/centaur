@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy, pg_env_var};
+use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy, pg_env_var, pg_sandbox_env_var};
 use centaur_sandbox_core::{SandboxError, SandboxId, SandboxResult, SandboxSpec};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{
@@ -44,6 +44,12 @@ const PROXY_TLS_MODE: &str = "mitm";
 const PROXY_TLS_CA_CERT_PATH: &str = "/etc/iron-proxy/ca.crt";
 const PROXY_TLS_CA_KEY_PATH: &str = "/etc/iron-proxy/ca.key";
 const PROXY_LOG_LEVEL: &str = "info";
+// Local listener knobs api-rs assigns per Postgres upstream (the control plane
+// owns the upstream DSN/role/database). Listener ports start here and increment
+// per listener (sorted by foreign_id), matching the chart's pgPortRangeStart;
+// the sandbox connects as PG_SANDBOX_USER with a per-sandbox generated password.
+const PG_LISTENER_PORT_BASE: u16 = 5432;
+const PG_SANDBOX_USER: &str = "app_user";
 
 #[derive(Clone, Debug)]
 pub struct IronProxyConfig {
@@ -202,11 +208,33 @@ impl AgentSandboxBackend {
             .map(|value| (value.clone(), value))
             .collect();
 
-        // Postgres is deferred: iron-control's effective_config postgres entries
-        // carry no resolvable database (the dsn is an unresolved source), so the
-        // sandbox connect-db is unsettled. No pg listeners derived for now; the
-        // pg wiring stays dormant until the connect-db source is decided.
-        Ok((Vec::new(), replace_placeholders))
+        // One listener per Postgres upstream the principal resolves to. The
+        // control plane owns the upstream DSN/role and the connect `database`;
+        // api-rs assigns each listener's local port (sequential from
+        // PG_LISTENER_PORT_BASE, sorted by foreign_id so the assignment is
+        // stable), the sandbox user, a per-sandbox client password, and the DSN
+        // env var name (re-derived from foreign_id so it matches what the CLI
+        // registered against).
+        let mut entries: Vec<_> = effective.postgres.iter().collect();
+        entries.sort_by(|a, b| a.foreign_id.cmp(&b.foreign_id));
+        let pg_listeners = entries
+            .into_iter()
+            .enumerate()
+            .map(|(offset, entry)| {
+                let port = PG_LISTENER_PORT_BASE + offset as u16;
+                ResolvedPgListener {
+                    foreign_id: entry.foreign_id.clone(),
+                    listen: format!("0.0.0.0:{port}"),
+                    port,
+                    user: PG_SANDBOX_USER.to_owned(),
+                    password: format!("pg-{}", uuid::Uuid::new_v4().simple()),
+                    sandbox_env_name: pg_sandbox_env_var(&entry.foreign_id),
+                    database: entry.database.clone(),
+                }
+            })
+            .collect();
+
+        Ok((pg_listeners, replace_placeholders))
     }
 
     /// Resolve the proxy for a resume, where only the sandbox id is known.

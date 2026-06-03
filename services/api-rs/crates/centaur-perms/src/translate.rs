@@ -10,13 +10,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use centaur_iron_control::{
-    GcpAuthSecretInput, InjectConfig, OAuthTokenSecretInput, ReplaceConfig, RequestRule,
-    SecretInput, SecretSource, StaticSecretInput, slugify, source_from_placeholder,
+    GcpAuthSecretInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput, ReplaceConfig,
+    RequestRule, SecretInput, SecretSource, StaticSecretInput, gcp_auth_scopes_or_default, slugify,
+    source_from_placeholder,
 };
 use centaur_iron_proxy::SourcePolicy;
 
 use crate::tools::{
-    FieldSource, GcpAuthSecret, HttpSecret, OAuthTokenSecret, ParsedSecret, SecretMode,
+    FieldSource, GcpAuthSecret, HttpSecret, OAuthTokenSecret, ParsedSecret, PgDsnSecret, SecretMode,
     unique_foreign_id,
 };
 
@@ -65,6 +66,10 @@ pub fn translate(
             ParsedSecret::GcpAuth(gcp) => {
                 out.inputs
                     .push(SecretInput::GcpAuth(gcp_input(namespace, role_foreign_id, gcp, policy, &mut used)));
+            }
+            ParsedSecret::PgDsn(pg) => {
+                out.inputs
+                    .push(SecretInput::PgDsn(pg_dsn_input(namespace, pg, policy)));
             }
             ParsedSecret::Unsupported { name, kind } => {
                 out.skipped.push((name.clone(), kind.clone()));
@@ -148,12 +153,46 @@ fn gcp_input(
         namespace: namespace.to_owned(),
         foreign_id: Some(unique_foreign_id(format!("{role}-gcp-{}", slugify(&gcp.name)), used)),
         name: Some(format!("GCP Auth ({role})")),
-        scopes: gcp.scopes.clone(),
+        scopes: gcp_auth_scopes_or_default(gcp.scopes.clone()),
         subject: None,
         keyfile: Some(source_from_placeholder(policy, &gcp.secret_ref, None)),
         credentials_provider: None,
         rules: rules_from_hosts(&gcp.hosts),
     }
+}
+
+/// Translate a `pg_dsn` secret into a [`PgDsnSecretInput`].
+///
+/// Unlike the other secret types, the pg_dsn `foreign_id` is **not**
+/// role-prefixed or deduped: api-rs re-derives the sandbox's DSN env var name
+/// from the `foreign_id` (via `pg_sandbox_env_var`), so the id has to round-trip
+/// back to the tool's declared `name`. `pg_sandbox_env_var` appends `_DSN`, so a
+/// trailing `_dsn`/`-dsn` is stripped before slugifying — e.g. `RESHIFT_DSN`
+/// becomes `reshift`, which `pg_sandbox_env_var` turns back into `RESHIFT_DSN`.
+fn pg_dsn_input(namespace: &str, pg: &PgDsnSecret, policy: &SourcePolicy) -> PgDsnSecretInput {
+    PgDsnSecretInput {
+        namespace: namespace.to_owned(),
+        foreign_id: pg_dsn_foreign_id(&pg.name),
+        name: pg.name.clone(),
+        database: pg.database.clone(),
+        description: None,
+        role: None,
+        labels: managed_labels(),
+        dsn: source_from_placeholder(policy, &pg.secret_ref, None),
+    }
+}
+
+/// The pg_dsn `foreign_id` for a secret `name`: drop a trailing `_dsn`/`-dsn`
+/// (case-insensitive) so the `_DSN` suffix `pg_sandbox_env_var` re-appends isn't
+/// doubled, then slugify.
+fn pg_dsn_foreign_id(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let base = if lower.ends_with("_dsn") || lower.ends_with("-dsn") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    };
+    slugify(base)
 }
 
 fn field_sources(fields: &[(String, FieldSource)], policy: &SourcePolicy) -> BTreeMap<String, SecretSource> {
