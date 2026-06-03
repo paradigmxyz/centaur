@@ -1,10 +1,14 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import {
   Chat,
+  Message as ChatMessage,
   StreamingPlan,
+  ThreadImpl,
+  parseMarkdown,
+  type Adapter,
   type Logger,
-  type Message,
   type StateAdapter,
   type Thread
 } from 'chat'
@@ -31,11 +35,12 @@ import type {
   SlackbotV2ApiMessage,
   SlackbotV2MessageMode,
   SlackbotV2Options,
+  SlackbotV2RenderObligation,
   SlackbotV2RendererSource,
   SlackbotV2ThreadState,
   SlackbotV2Trace
 } from './types'
-import { elapsedMs, errorMessage, noopLogger, nowMs, traceLog } from './utils'
+import { elapsedMs, errorMessage, isJsonObject, noopLogger, nowMs, traceLog } from './utils'
 
 export type {
   SlackbotV2,
@@ -71,6 +76,10 @@ type SlackbotV2RequestContext = {
 }
 
 const requestContext = new AsyncLocalStorage<SlackbotV2RequestContext>()
+const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
+const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
+const RENDER_OBLIGATION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
 
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
@@ -84,7 +93,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     logger
   })
   const state = options.state ?? createDefaultState(options, logger)
-  const chat = new Chat({
+  const chat = new Chat<{ slack: typeof slack }, SlackbotV2ThreadState>({
     userName,
     adapters: { slack },
     state,
@@ -154,6 +163,10 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     })
   })
 
+  if (options.recoverRenderObligationsOnStart !== false) {
+    scheduleRenderObligationRecovery(chat, state, options)
+  }
+
   return { app, chat }
 }
 
@@ -171,7 +184,7 @@ function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAd
  */
 async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,
-  message: Message,
+  message: ChatMessage,
   input: {
     mode: SlackbotV2MessageMode
     options: SlackbotV2Options
@@ -260,6 +273,13 @@ async function syncThreadMessageToSession(
     const latest = (await thread.state) ?? {}
     const latestExecutedMessageIds = new Set(latest.executedMessageIds ?? [])
     latestExecutedMessageIds.add(serializedMessage.id)
+    await persistRenderObligation(input.state, {
+      afterEventId: lastEventId,
+      message: serializedMessage,
+      options: input.options,
+      threadId: thread.id,
+      trace
+    })
     await thread.setState({
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
@@ -298,6 +318,7 @@ async function syncThreadMessageToSession(
       thread,
       serializedMessage,
       input.options,
+      input.state,
       forwardInput,
       () => lastEventId,
       trace
@@ -326,11 +347,13 @@ function scheduleExecutionRender(
   thread: Thread<SlackbotV2ThreadState>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
+  state: StateAdapter,
   input: ForwardSessionInput,
   getLastEventId: () => number,
   trace?: SlackbotV2Trace
 ): void {
   const promise = (async () => {
+    let rendered = false
     try {
       await renderExecutionStream(
         thread,
@@ -339,19 +362,280 @@ function scheduleExecutionRender(
         options,
         trace
       )
+      rendered = true
       traceLog(options, 'slackbotv2_render_complete', trace)
+    } catch (error) {
+      traceLog(options, 'slackbotv2_render_failed', trace, {
+        error: errorMessage(error)
+      })
+      throw error
     } finally {
       const latest = (await thread.state) ?? {}
       await thread.setState({
         activeExecution: false,
         lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId())
       })
+      if (rendered) await clearRenderObligation(state, thread.id)
       traceLog(options, 'slackbotv2_render_finalized', trace, {
+        obligation_cleared: rendered,
         last_event_id: getLastEventId()
       })
     }
   })()
   backgroundWaitUntil(promise)
+}
+
+function scheduleRenderObligationRecovery(
+  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
+  state: StateAdapter,
+  options: SlackbotV2Options
+): void {
+  backgroundWaitUntil(
+    recoverRenderObligations(chat, state, options).catch(error => {
+      traceLog(options, 'slackbotv2_render_recovery_failed', undefined, {
+        error: errorMessage(error)
+      })
+    })
+  )
+}
+
+async function recoverRenderObligations(
+  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
+  state: StateAdapter,
+  options: SlackbotV2Options
+): Promise<void> {
+  const startedAtMs = nowMs()
+  await chat.initialize()
+  const indexedThreadIds = await state.getList<unknown>(RENDER_OBLIGATION_INDEX_KEY)
+  const threadIds = Array.from(
+    new Set(indexedThreadIds.filter((threadId): threadId is string => typeof threadId === 'string'))
+  )
+  traceLog(options, 'slackbotv2_render_recovery_scan', undefined, {
+    obligation_count: threadIds.length,
+    phase_ms: elapsedMs(startedAtMs)
+  })
+
+  for (const threadId of threadIds) {
+    const obligation = await state.get<unknown>(renderObligationKey(threadId))
+    if (!isRenderObligation(obligation)) {
+      if (obligation === null) continue
+      traceLog(options, 'slackbotv2_render_recovery_invalid_obligation', undefined, {
+        thread_id: threadId
+      })
+      continue
+    }
+
+    const leaseToken = randomUUID()
+    const leaseAcquired = await state.setIfNotExists(
+      renderRecoveryLeaseKey(threadId),
+      leaseToken,
+      RENDER_RECOVERY_LEASE_TTL_MS
+    )
+    if (!leaseAcquired) {
+      traceLog(options, 'slackbotv2_render_recovery_lease_skipped', undefined, {
+        thread_id: threadId
+      })
+      continue
+    }
+
+    try {
+      await recoverRenderObligation(chat, state, options, obligation)
+    } finally {
+      const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
+      if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
+    }
+  }
+}
+
+async function recoverRenderObligation(
+  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
+  state: StateAdapter,
+  options: SlackbotV2Options,
+  obligation: SlackbotV2RenderObligation
+): Promise<void> {
+  const trace: SlackbotV2Trace = {
+    includeContext: false,
+    messageId: obligation.message.id,
+    mode: 'execute',
+    openStream: true,
+    startedAtMs: nowMs(),
+    threadId: obligation.threadId
+  }
+  const thread = recoveryThread(chat, state, options, obligation.message)
+  const threadState = (await thread.state) ?? {}
+  let lastEventId = Math.max(threadState.lastEventId ?? 0, obligation.afterEventId)
+  const input: ForwardSessionInput = {
+    afterEventId: lastEventId,
+    messages: [],
+    onEventId: eventId => {
+      lastEventId = Math.max(lastEventId, eventId)
+    },
+    openStream: false,
+    threadId: obligation.threadId,
+    trace
+  }
+
+  let openedStream: AsyncIterable<SlackbotV2RendererSource>
+  try {
+    openedStream = await openSessionEventStream(options, input)
+  } catch (error) {
+    traceLog(options, 'slackbotv2_render_recovery_deferred', trace, {
+      error: errorMessage(error),
+      last_event_id: lastEventId
+    })
+    return
+  }
+
+  let rendered = false
+  try {
+    await thread.setState({
+      activeExecution: true,
+      lastEventId
+    })
+    await renderExecutionStream(
+      thread,
+      streamOpenedSession(input, openedStream),
+      obligation.message,
+      options,
+      trace
+    )
+    rendered = true
+    traceLog(options, 'slackbotv2_render_recovery_complete', trace)
+  } catch (error) {
+    traceLog(options, 'slackbotv2_render_recovery_render_failed', trace, {
+      error: errorMessage(error)
+    })
+    throw error
+  } finally {
+    const latest = (await thread.state) ?? {}
+    await thread.setState({
+      activeExecution: false,
+      lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId)
+    })
+    if (rendered) await clearRenderObligation(state, obligation.threadId)
+    traceLog(options, 'slackbotv2_render_recovery_finalized', trace, {
+      obligation_cleared: rendered,
+      last_event_id: lastEventId
+    })
+  }
+}
+
+async function persistRenderObligation(
+  state: StateAdapter,
+  input: {
+    afterEventId: number
+    message: SlackbotV2ApiMessage
+    options: SlackbotV2Options
+    threadId: string
+    trace?: SlackbotV2Trace
+  }
+): Promise<void> {
+  const now = Date.now()
+  const obligation: SlackbotV2RenderObligation = {
+    afterEventId: input.afterEventId,
+    createdAtMs: now,
+    message: input.message,
+    threadId: input.threadId,
+    updatedAtMs: now,
+    version: 1
+  }
+  await state.set(renderObligationKey(input.threadId), obligation, RENDER_OBLIGATION_TTL_MS)
+  await state.appendToList(RENDER_OBLIGATION_INDEX_KEY, input.threadId, {
+    maxLength: RENDER_OBLIGATION_INDEX_MAX_LENGTH,
+    ttlMs: RENDER_OBLIGATION_TTL_MS
+  })
+  traceLog(input.options, 'slackbotv2_render_obligation_persisted', input.trace, {
+    after_event_id: input.afterEventId
+  })
+}
+
+async function clearRenderObligation(state: StateAdapter, threadId: string): Promise<void> {
+  await state.delete(renderObligationKey(threadId))
+}
+
+function recoveryThread(
+  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
+  state: StateAdapter,
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage
+): Thread<SlackbotV2ThreadState> {
+  const baseThread = chat.thread(message.threadId)
+  const adapter = baseThread.adapter
+  const currentMessage = new ChatMessage({
+    attachments: [],
+    author: message.author,
+    formatted: parseMarkdown(message.text),
+    id: message.id,
+    isMention: message.isMention,
+    metadata: {
+      dateSent: validDateOrNow(message.timestamp),
+      edited: false
+    },
+    raw: message.raw,
+    text: message.text,
+    threadId: message.threadId
+  })
+  return new ThreadImpl<SlackbotV2ThreadState>({
+    adapter,
+    channelId: adapter.channelIdFromThreadId(message.threadId),
+    channelVisibility: adapter.getChannelVisibility?.(message.threadId) ?? 'unknown',
+    currentMessage,
+    id: message.threadId,
+    initialMessage: currentMessage,
+    isDM: adapter.isDM?.(message.threadId) ?? false,
+    isSubscribedContext: true,
+    logger: options.logger ?? noopLogger,
+    stateAdapter: state
+  })
+}
+
+async function* streamOpenedSession(
+  input: Pick<ForwardSessionInput, 'threadId' | 'trace'>,
+  stream: AsyncIterable<SlackbotV2RendererSource>
+): AsyncIterable<SlackbotV2RendererSource> {
+  yield startingStreamNotification(input.threadId)
+  for await (const event of stream) yield event
+}
+
+function renderObligationKey(threadId: string): string {
+  return `slackbotv2:render:${threadId}`
+}
+
+function renderRecoveryLeaseKey(threadId: string): string {
+  return `slackbotv2:render:lease:${threadId}`
+}
+
+function isRenderObligation(value: unknown): value is SlackbotV2RenderObligation {
+  if (!isJsonObject(value) || value.version !== 1) return false
+  return (
+    typeof value.afterEventId === 'number' &&
+    typeof value.createdAtMs === 'number' &&
+    typeof value.threadId === 'string' &&
+    typeof value.updatedAtMs === 'number' &&
+    isApiMessage(value.message)
+  )
+}
+
+function isApiMessage(value: unknown): value is SlackbotV2ApiMessage {
+  if (!isJsonObject(value) || !isJsonObject(value.author)) return false
+  return (
+    Array.isArray(value.attachments) &&
+    typeof value.author.fullName === 'string' &&
+    (typeof value.author.isBot === 'boolean' || value.author.isBot === 'unknown') &&
+    typeof value.author.isMe === 'boolean' &&
+    typeof value.author.userId === 'string' &&
+    typeof value.author.userName === 'string' &&
+    typeof value.id === 'string' &&
+    typeof value.isMention === 'boolean' &&
+    typeof value.text === 'string' &&
+    typeof value.threadId === 'string' &&
+    typeof value.timestamp === 'string'
+  )
+}
+
+function validDateOrNow(value: string): Date {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? new Date() : date
 }
 
 async function renderExecutionStream(
@@ -403,7 +687,7 @@ async function* streamError(error: unknown): AsyncIterable<SlackbotV2RendererSou
 
 async function requestSlackRetry(
   state: StateAdapter,
-  message: Message,
+  message: ChatMessage,
   error: unknown,
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace

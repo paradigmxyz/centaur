@@ -15,6 +15,7 @@ import {
   createSlackbotV2,
   type SlackbotV2,
   type SlackbotV2AppendMessagesRequest,
+  type SlackbotV2ApiMessage,
   type SlackbotV2CreateSessionRequest,
   type SlackbotV2ExecuteSessionRequest,
   type SlackbotV2SessionMessage
@@ -425,6 +426,65 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
   })
 
+  it('recovers unfinished render obligations from Chat SDK state on startup', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+
+    const parent = await postUserMessage('Context before restart recovery.')
+    const mentionText = `<@${BOT_USER_ID}> recover a completed run`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = apiMessageFromSlackEvent({
+      isMention: true,
+      text: mentionText,
+      threadId: key,
+      ts: mention.ts
+    })
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [mention.ts],
+      forwardedMessageIds: [mention.ts],
+      historyForwarded: true,
+      lastEventId: 0
+    })
+    await sharedState.set(`slackbotv2:render:${key}`, {
+      afterEventId: 0,
+      createdAtMs: Date.now(),
+      message,
+      threadId: key,
+      updatedAtMs: Date.now(),
+      version: 1
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered request.'))
+
+    bot = createTestBot({ state: sharedState })
+
+    await waitFor(() => codexApi.eventRequests.length === 1, 2000)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.stopStream'), 2000)
+
+    expect(codexApi.creates).toHaveLength(0)
+    expect(codexApi.appends).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+    expect(codexApi.eventRequests).toEqual([{ afterEventId: 0, threadKey: key }])
+    expectSlackPlanStreamShape(slackApi.calls, {
+      answers: ['Recovered request.'],
+      parentTs: parent.ts
+    })
+    expect(await threadText(parent.ts)).toContain('Recovered request.')
+    expect(await sharedState.get(`slackbotv2:render:${key}`)).toBeNull()
+    const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${key}`
+    )
+    expect(recoveredThreadState).toEqual(
+      expect.objectContaining({
+        activeExecution: false,
+        lastEventId: expect.any(Number)
+      })
+    )
+    expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)
+  })
+
   it('returns 503 for retryable execute failure and lets Slack retry without duplicate append', async () => {
     codexApi.failNextExecute = true
 
@@ -780,6 +840,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function threadKey(threadTs: string): string {
   return `slack:${CHANNEL_ID}:${threadTs}`
+}
+
+function apiMessageFromSlackEvent(input: {
+  isMention: boolean
+  text: string
+  threadId: string
+  ts: string
+}): SlackbotV2ApiMessage {
+  const threadTs = input.threadId.split(':')[2] ?? input.ts
+  return {
+    attachments: [],
+    author: {
+      fullName: 'Test User',
+      isBot: false,
+      isMe: false,
+      userId: USER_ID,
+      userName: 'tester'
+    },
+    id: input.ts,
+    isMention: input.isMention,
+    raw: {
+      channel: CHANNEL_ID,
+      team: TEAM_ID,
+      team_id: TEAM_ID,
+      text: input.text,
+      thread_ts: threadTs,
+      ts: input.ts,
+      type: input.isMention ? 'app_mention' : 'message',
+      user: USER_ID
+    },
+    text: input.text,
+    threadId: input.threadId,
+    timestamp: new Date().toISOString()
+  }
 }
 
 async function postUserMessage(text: string, threadTs?: string): Promise<{ ts: string }> {
