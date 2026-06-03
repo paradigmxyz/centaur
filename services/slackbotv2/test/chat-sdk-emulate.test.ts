@@ -481,6 +481,76 @@ describe('slackbotv2', () => {
     expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)
   })
 
+  it('retries retryable event stream open failures after execute', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+    codexApi.failNextEvents = true
+
+    const parent = await postUserMessage('Context before stream retry.')
+    const mentionText = `<@${BOT_USER_ID}> recover after stream open failure`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-stream-open-retry',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: mentionText
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(false)
+
+    const deferredThreadState = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${key}`
+    )
+    expect(deferredThreadState).toEqual(
+      expect.objectContaining({
+        activeExecution: true,
+        renderObligation: expect.any(Object)
+      })
+    )
+
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered after stream retry.'))
+    await waitFor(() => codexApi.eventRequests.length >= 2, 3000)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.stopStream'), 3000)
+    await Promise.all(waits)
+
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.eventRequests).toEqual([
+      { afterEventId: 0, threadKey: key },
+      { afterEventId: 0, threadKey: key }
+    ])
+    expect(await threadText(parent.ts)).toContain('Recovered after stream retry.')
+    const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${key}`
+    )
+    expect(recoveredThreadState).toEqual(
+      expect.objectContaining({
+        activeExecution: false,
+        lastEventId: expect.any(Number),
+        renderObligation: null
+      })
+    )
+    expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)
+  })
+
   it('returns 503 for retryable execute failure and lets Slack retry without duplicate append', async () => {
     codexApi.failNextExecute = true
 
@@ -957,6 +1027,7 @@ type MockSessionApi = {
   emitOutputLines(threadKey: string, lines: string[]): void
   eventRequests: MockSessionEventRequest[]
   executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
+  failNextEvents: boolean
   failNextExecute: boolean
   holdNextExecute(): () => void
   reset(): void
@@ -975,6 +1046,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   let executeHold: Promise<void> | null = null
   let executeHoldRelease: (() => void) | null = null
   let eventId = 0
+  let failNextEvents = false
   let failNextExecute = false
   const port = await availablePort(4063)
   const closeStreams = () => {
@@ -997,11 +1069,17 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       get failNextExecute() {
         return failNextExecute
       },
+      get failNextEvents() {
+        return failNextEvents
+      },
       nextEventId() {
         eventId += 1
         return eventId
       },
       port,
+      setFailNextEvents(value) {
+        failNextEvents = value
+      },
       setFailNextExecute(value) {
         failNextExecute = value
       },
@@ -1030,6 +1108,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       closeStreams()
       autoRespond = true
       eventId = 0
+      failNextEvents = false
       failNextExecute = false
     },
     url: `http://127.0.0.1:${port}`,
@@ -1045,6 +1124,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     },
     set failNextExecute(value: boolean) {
       failNextExecute = value
+    },
+    get failNextEvents() {
+      return failNextEvents
+    },
+    set failNextEvents(value: boolean) {
+      failNextEvents = value
     },
     holdNextExecute() {
       if (executeHoldRelease) throw new Error('execute is already held')
@@ -1093,9 +1178,11 @@ async function handleMockCodexRequest(
     eventRequests: MockSessionEventRequest[]
     executeHold: Promise<void> | null
     executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
+    failNextEvents: boolean
     failNextExecute: boolean
     nextEventId(): number
     port: number
+    setFailNextEvents(value: boolean): void
     setFailNextExecute(value: boolean): void
     streams: Set<ServerResponse>
   }
@@ -1129,6 +1216,14 @@ async function handleMockCodexRequest(
   if (endpoint === 'events') {
     const afterEventId = Number.parseInt(url.searchParams.get('after_event_id') ?? '0', 10) || 0
     input.eventRequests.push({ threadKey, afterEventId })
+    if (input.failNextEvents) {
+      input.setFailNextEvents(false)
+      await sendWebResponse(
+        res,
+        new Response('unavailable', { status: 503, statusText: 'Service Unavailable' })
+      )
+      return
+    }
     res.writeHead(200, {
       'cache-control': 'no-cache',
       connection: 'keep-alive',

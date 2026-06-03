@@ -78,6 +78,8 @@ const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
+const RENDER_RETRY_INITIAL_DELAY_MS = 250
+const RENDER_RETRY_MAX_DELAY_MS = 5_000
 
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
@@ -378,36 +380,76 @@ function scheduleExecutionRender(
   trace?: SlackbotV2Trace
 ): void {
   const promise = (async () => {
-    let rendered = false
-    try {
-      await renderExecutionStream(
+    let attempt = 0
+    while (true) {
+      const result = await renderExecutionAttempt(
         thread,
-        streamSessionAfterHandoff(options, input),
         message,
         options,
+        input,
+        getLastEventId,
         trace
       )
-      rendered = true
-      traceLog(options, 'slackbotv2_render_complete', trace)
-    } catch (error) {
-      traceLog(options, 'slackbotv2_render_failed', trace, {
-        error: errorMessage(error)
+      if (result === 'complete') return
+      const delayMs = renderRetryDelayMs(attempt)
+      attempt += 1
+      traceLog(options, 'slackbotv2_render_retry_scheduled', trace, {
+        retry_delay_ms: delayMs,
+        retry_attempt: attempt
       })
-      throw error
-    } finally {
-      const latest = (await thread.state) ?? {}
-      await thread.setState({
-        activeExecution: false,
-        lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId()),
-        ...(rendered ? { renderObligation: null } : {})
-      })
-      traceLog(options, 'slackbotv2_render_finalized', trace, {
-        obligation_cleared: rendered,
-        last_event_id: getLastEventId()
-      })
+      await sleep(delayMs)
     }
   })()
   backgroundWaitUntil(promise)
+}
+
+async function renderExecutionAttempt(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: SlackbotV2ApiMessage,
+  options: SlackbotV2Options,
+  input: ForwardSessionInput,
+  getLastEventId: () => number,
+  trace?: SlackbotV2Trace
+): Promise<'complete' | 'retry'> {
+  let rendered = false
+  let retry = false
+  try {
+    await renderExecutionStream(
+      thread,
+      streamSessionAfterHandoff(options, input),
+      message,
+      options,
+      trace
+    )
+    rendered = true
+    traceLog(options, 'slackbotv2_render_complete', trace)
+    return 'complete'
+  } catch (error) {
+    if (isRetryableSessionApiError(error)) {
+      retry = true
+      traceLog(options, 'slackbotv2_render_deferred', trace, {
+        error: errorMessage(error),
+        last_event_id: getLastEventId()
+      })
+      return 'retry'
+    }
+    traceLog(options, 'slackbotv2_render_failed', trace, {
+      error: errorMessage(error)
+    })
+    throw error
+  } finally {
+    const latest = (await thread.state) ?? {}
+    await thread.setState({
+      activeExecution: retry,
+      lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId()),
+      ...(rendered ? { renderObligation: null } : {})
+    })
+    traceLog(options, 'slackbotv2_render_finalized', trace, {
+      obligation_cleared: rendered,
+      retry_scheduled: retry,
+      last_event_id: getLastEventId()
+    })
+  }
 }
 
 function scheduleRenderObligationRecovery(
@@ -416,23 +458,47 @@ function scheduleRenderObligationRecovery(
   options: SlackbotV2Options
 ): void {
   backgroundWaitUntil(
-    recoverRenderObligations(chat, state, options).catch(error => {
+    recoverRenderObligationsWithRetry(chat, state, options)
+  )
+}
+
+async function recoverRenderObligationsWithRetry(
+  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
+  state: StateAdapter,
+  options: SlackbotV2Options
+): Promise<void> {
+  let attempt = 0
+  while (true) {
+    try {
+      const deferredCount = await recoverRenderObligations(chat, state, options)
+      if (deferredCount === 0) return
+      const delayMs = renderRetryDelayMs(attempt)
+      attempt += 1
+      traceLog(options, 'slackbotv2_render_recovery_retry_scheduled', undefined, {
+        deferred_count: deferredCount,
+        retry_delay_ms: delayMs,
+        retry_attempt: attempt
+      })
+      await sleep(delayMs)
+    } catch (error) {
       traceLog(options, 'slackbotv2_render_recovery_failed', undefined, {
         error: errorMessage(error)
       })
-    })
-  )
+      return
+    }
+  }
 }
 
 async function recoverRenderObligations(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options
-): Promise<void> {
+): Promise<number> {
   const startedAtMs = nowMs()
   await chat.initialize()
   const indexedThreadIds = await state.getList<string>(RENDER_OBLIGATION_INDEX_KEY)
   const threadIds = Array.from(new Set(indexedThreadIds))
+  let deferredCount = 0
   traceLog(options, 'slackbotv2_render_recovery_scan', undefined, {
     obligation_count: threadIds.length,
     phase_ms: elapsedMs(startedAtMs)
@@ -458,12 +524,15 @@ async function recoverRenderObligations(
     }
 
     try {
-      await recoverRenderObligation(chat, state, options, threadId, obligation)
+      if (await recoverRenderObligation(chat, state, options, threadId, obligation)) {
+        deferredCount += 1
+      }
     } finally {
       const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
       if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
     }
   }
+  return deferredCount
 }
 
 async function recoverRenderObligation(
@@ -472,7 +541,7 @@ async function recoverRenderObligation(
   options: SlackbotV2Options,
   threadId: string,
   obligation: SlackbotV2RenderObligation
-): Promise<void> {
+): Promise<boolean> {
   const trace: SlackbotV2Trace = {
     includeContext: false,
     messageId: obligation.message.id,
@@ -499,11 +568,20 @@ async function recoverRenderObligation(
   try {
     openedStream = await openSessionEventStream(options, input)
   } catch (error) {
+    const retryable = isRetryableSessionApiError(error)
     traceLog(options, 'slackbotv2_render_recovery_deferred', trace, {
       error: errorMessage(error),
-      last_event_id: lastEventId
+      last_event_id: lastEventId,
+      retryable
     })
-    return
+    if (retryable) return true
+    await renderRecoveredExecutionStream(thread, streamError(error), obligation.message, options, trace)
+    await thread.setState({
+      activeExecution: false,
+      lastEventId,
+      renderObligation: null
+    })
+    return false
   }
 
   let rendered = false
@@ -538,6 +616,7 @@ async function recoverRenderObligation(
       last_event_id: lastEventId
     })
   }
+  return false
 }
 
 async function indexRenderObligation(
@@ -624,18 +703,21 @@ async function* streamSessionAfterHandoff(
   options: SlackbotV2Options,
   input: ForwardSessionInput
 ): AsyncIterable<SlackbotV2RendererSource> {
-  yield startingStreamNotification(input.threadId)
-  traceLog(options, 'slackbotv2_stream_heartbeat_emitted', input.trace)
-
+  let stream: AsyncIterable<SlackbotV2RendererSource>
   try {
-    const stream = await openSessionEventStream(options, input)
-    for await (const event of stream) yield event
+    stream = await openSessionEventStream(options, input)
   } catch (error) {
     traceLog(options, 'slackbotv2_forward_failed', input.trace, {
       error: errorMessage(error)
     })
+    if (isRetryableSessionApiError(error)) throw error
     yield sessionStreamError(error)
+    return
   }
+
+  yield startingStreamNotification(input.threadId)
+  traceLog(options, 'slackbotv2_stream_heartbeat_emitted', input.trace)
+  for await (const event of stream) yield event
 }
 
 async function* streamError(error: unknown): AsyncIterable<SlackbotV2RendererSource> {
@@ -672,6 +754,14 @@ function rendererOptions(thread: Thread, options: SlackbotV2Options): CodexAppSe
       }
     }
   }
+}
+
+function renderRetryDelayMs(attempt: number): number {
+  return Math.min(RENDER_RETRY_INITIAL_DELAY_MS * 2 ** attempt, RENDER_RETRY_MAX_DELAY_MS)
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms))
 }
 
 async function setAssistantStatus(thread: Thread, status: string): Promise<void> {
