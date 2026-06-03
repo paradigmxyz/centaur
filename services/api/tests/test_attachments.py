@@ -19,8 +19,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from api.attachments.processor import AttachmentProcessor
 from api.runtime_control import extract_inline_attachments, event_to_chat_parts
 from api.sandbox.harness_protocol import messages_to_content_blocks
+
+
+class TestAttachmentProcessor:
+    def test_classifies_common_mime_types(self):
+        processor = AttachmentProcessor()
+
+        assert processor.classify_mime_type("image/png") == "image"
+        assert processor.classify_mime_type("application/pdf") == "document"
+        assert processor.classify_mime_type("text/csv") == "text"
+        assert processor.classify_mime_type("application/zip") == "archive"
+        assert processor.classify_mime_type("video/mp4") == "video"
+
+    def test_detects_known_url_sources(self):
+        processor = AttachmentProcessor()
+
+        assert processor.detect_url_source("https://docs.google.com/document/d/abc") == {
+            "source": "google_drive_url",
+            "host": "docs.google.com",
+        }
+        assert processor.detect_url_source("https://example.docsend.com/view/abc") == {
+            "source": "docsend_url",
+            "host": "example.docsend.com",
+        }
+        assert processor.detect_url_source("https://files.slack.com/files-pri/T-F/x.pdf") == {
+            "source": "slack_file_url",
+            "host": "files.slack.com",
+        }
+
+    def test_normalizes_slack_file_metadata_without_fetching_bytes(self):
+        candidate = AttachmentProcessor().candidate_from_slack_file_metadata(
+            {
+                "id": "F123",
+                "name": "report.pdf",
+                "mimetype": "application/pdf",
+                "size": 1234,
+                "url_private_download": "https://files.slack.com/report.pdf",
+            }
+        )
+
+        assert candidate is not None
+        assert candidate.source == "slack_file"
+        assert candidate.external_id == "F123"
+        assert candidate.name == "report.pdf"
+        assert candidate.kind == "document"
+        assert candidate.size_bytes == 1234
+
+    def test_normalizes_google_doc_metadata_without_storing(self):
+        candidate = AttachmentProcessor().candidate_from_google_doc(
+            {
+                "id": "doc-123",
+                "name": "Investment memo",
+                "mimeType": "application/vnd.google-apps.document",
+                "webViewLink": "https://docs.google.com/document/d/doc-123/edit",
+            },
+            text_content="memo body",
+        )
+
+        assert candidate is not None
+        assert candidate.source == "google_doc"
+        assert candidate.external_id == "doc-123"
+        assert candidate.name == "Investment memo"
+        assert candidate.kind == "document"
+        assert candidate.text_content == "memo body"
 
 
 # ── Unit: harness_protocol attachment_ref handling ──────────────────────────

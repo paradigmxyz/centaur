@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import base64
-import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
+from api.attachments.storage import insert_thread_attachment
 from api.deps import enforce_sandbox_thread_scope, verify_api_key
 
 log = structlog.get_logger()
@@ -79,19 +79,23 @@ async def upload_attachment(request: Request):
     except Exception:
         raise HTTPException(status_code=422, detail="data is not valid base64")
 
-    att_id = f"att-{uuid.uuid4().hex[:16]}"
     message_id = body.get("message_id")
     source_url = body.get("source_url")
 
     pool = request.app.state.db_pool
-    await pool.execute(
-        "INSERT INTO attachments (id, thread_key, message_id, name, mime_type, data) "
-        "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
-        att_id, thread_key, message_id, name, mime_type, raw_bytes,
+    stored = await insert_thread_attachment(
+        pool,
+        thread_key=thread_key,
+        message_id=message_id,
+        name=name,
+        mime_type=mime_type,
+        data=raw_bytes,
+        source="direct_upload",
+        source_url=source_url,
     )
     log.info(
         "attachment_uploaded",
-        id=att_id,
+        id=stored.id,
         thread_key=thread_key,
         name=name,
         mime_type=mime_type,
@@ -99,10 +103,10 @@ async def upload_attachment(request: Request):
         source_url=source_url,
     )
     return {
-        "id": att_id,
+        "id": stored.id,
         "name": name,
         "mime_type": mime_type,
-        "download_url": f"/agent/attachments/{att_id}/download",
+        "download_url": stored.download_url,
     }
 
 
