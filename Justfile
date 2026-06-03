@@ -16,6 +16,10 @@ k3s_ctr := env_var_or_default("CENTAUR_K3S_CTR", "sudo k3s ctr")
 #       docker.io:
 #         endpoint: ["http://localhost:5000"]
 registry := env_var_or_default("CENTAUR_LOCAL_REGISTRY", "localhost:5000")
+agent_dockerfile := env_var_or_default("CENTAUR_AGENT_DOCKERFILE", "services/sandbox/Dockerfile")
+agent_build_target := env_var_or_default("CENTAUR_AGENT_BUILD_TARGET", "sandbox")
+agent_image := env_var_or_default("CENTAUR_AGENT_IMAGE", "centaur-agent:latest")
+thin_agent_image := env_var_or_default("CENTAUR_THIN_AGENT_IMAGE", "centaur-agent:thin")
 
 default:
     just --list
@@ -56,6 +60,7 @@ build-one service:
       slackbot) just _build-slackbot ;;
       slackbotv2) just _build-slackbotv2 ;;
       agent|sandbox) just _build-agent ;;
+      agent-thin|sandbox-thin) just _build-agent-thin ;;
       *) echo "unknown service: {{service}}" >&2; exit 2 ;;
     esac
 
@@ -75,7 +80,10 @@ _build-slackbotv2:
     docker build -t centaur-slackbotv2:latest -f services/slackbotv2/Dockerfile .
 
 _build-agent:
-    docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .
+    docker build --target "{{agent_build_target}}" -t "{{agent_image}}" -f "{{agent_dockerfile}}" .
+
+_build-agent-thin:
+    docker build --target sandbox -t "{{thin_agent_image}}" -f services/sandbox/Dockerfile.thin .
 
 # Push locally-built images to the local registry under library/ so k3s pulls
 # them via its docker.io mirror. Used by `just up k3s`. Only changed layers are

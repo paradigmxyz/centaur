@@ -15,6 +15,8 @@ kind_e2e_context := "kind-" + kind_e2e_cluster
 kind_e2e_namespace := "centaur-sandbox-e2e"
 kind_e2e_tmp := "target/e2e"
 kind_e2e_agent_image := "centaur-agent:latest"
+kind_e2e_agent_dockerfile := env_var_or_default("KIND_E2E_AGENT_DOCKERFILE", "services/sandbox/Dockerfile")
+kind_e2e_agent_target := env_var_or_default("KIND_E2E_AGENT_TARGET", "sandbox")
 kind_e2e_iron_proxy_image := "centaur-iron-proxy:latest"
 
 default:
@@ -47,7 +49,7 @@ kind-e2e-up:
     kubectl --context "{{kind_e2e_context}}" -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=120s
 
 kind-e2e-build-images:
-    cd ../.. && docker build --target sandbox -t "{{kind_e2e_agent_image}}" -f services/sandbox/Dockerfile .
+    cd ../.. && docker build --target "{{kind_e2e_agent_target}}" -t "{{kind_e2e_agent_image}}" -f "{{kind_e2e_agent_dockerfile}}" .
     cd ../.. && docker build -t "{{kind_e2e_iron_proxy_image}}" -f services/iron-proxy/Dockerfile .
 
 kind-e2e-load-images: kind-e2e-up
