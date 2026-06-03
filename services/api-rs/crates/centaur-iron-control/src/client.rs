@@ -62,9 +62,10 @@ impl IronControlClient {
             .await
     }
 
-    /// Fetch a role by OID or ``foreign_id``. Read-only.
-    pub async fn get_role(&self, role: &str) -> Result<Role> {
-        let path = format!("{API_PREFIX}/roles/{}", urlencoding::encode(role));
+    /// Fetch a role by OID (``role_…``) or ``foreign_id``. Read-only. A
+    /// ``foreign_id`` is resolved through the namespaced lookup endpoint.
+    pub async fn get_role(&self, namespace: &str, role: &str) -> Result<Role> {
+        let path = fetch_or_lookup_path("roles", "role_", namespace, role);
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
     }
@@ -137,10 +138,12 @@ impl IronControlClient {
         decode_data(resp, Method::GET, &path).await
     }
 
-    /// Fetch a principal by OID or ``foreign_id``. Read-only: unlike
-    /// [`Self::upsert_principal`] it never creates the principal.
-    pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
-        let path = format!("{API_PREFIX}/principals/{}", urlencoding::encode(principal));
+    /// Fetch a principal by OID (``prn_…``) or ``foreign_id``. Read-only: unlike
+    /// [`Self::upsert_principal`] it never creates the principal. A ``foreign_id``
+    /// is resolved through the namespaced lookup endpoint, since the bare
+    /// ``/:id`` route only matches OIDs.
+    pub async fn get_principal(&self, namespace: &str, principal: &str) -> Result<Principal> {
+        let path = fetch_or_lookup_path("principals", "prn_", namespace, principal);
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
     }
@@ -358,6 +361,21 @@ fn upsert_path(collection: &str, foreign_id: &str) -> String {
     format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(foreign_id))
 }
 
+/// Path to fetch one resource by ``ident``: the bare ``/:id`` route when
+/// ``ident`` is an OID (carries ``oid_prefix``), else the namespaced
+/// ``/lookup/:namespace/:foreign_id`` route, since ``/:id`` only matches OIDs.
+fn fetch_or_lookup_path(collection: &str, oid_prefix: &str, namespace: &str, ident: &str) -> String {
+    if ident.starts_with(oid_prefix) {
+        format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(ident))
+    } else {
+        format!(
+            "{API_PREFIX}/{collection}/lookup/{}/{}",
+            urlencoding::encode(namespace),
+            urlencoding::encode(ident)
+        )
+    }
+}
+
 async fn decode_data<R: DeserializeOwned>(resp: Response, method: Method, path: &str) -> Result<R> {
     let resp = ensure_success(resp, method, path).await?;
     let envelope: DataEnvelope<R> =
@@ -424,6 +442,24 @@ mod tests {
             "/api/v1/static_secrets/github%2Ftoken"
         );
         assert_eq!(collection_path("grants"), "/api/v1/grants");
+    }
+
+    #[test]
+    fn fetch_or_lookup_path_routes_oids_and_foreign_ids() {
+        // An OID hits the bare /:id route.
+        assert_eq!(
+            fetch_or_lookup_path("principals", "prn_", "default", "prn_abc"),
+            "/api/v1/principals/prn_abc"
+        );
+        // A foreign_id hits the namespaced lookup route.
+        assert_eq!(
+            fetch_or_lookup_path("principals", "prn_", "default", "slack-channel-c9"),
+            "/api/v1/principals/lookup/default/slack-channel-c9"
+        );
+        assert_eq!(
+            fetch_or_lookup_path("roles", "role_", "team-a", "tool-github"),
+            "/api/v1/roles/lookup/team-a/tool-github"
+        );
     }
 
     #[test]

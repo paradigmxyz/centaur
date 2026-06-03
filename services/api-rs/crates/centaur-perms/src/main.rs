@@ -211,9 +211,9 @@ async fn main() -> Result<()> {
         },
         Command::Roles(cmd) => match cmd {
             RolesCmd::List(args) => roles_list(&cli, &client, args).await,
-            RolesCmd::Show(args) => roles_show(&client, args).await,
+            RolesCmd::Show(args) => roles_show(&cli, &client, args).await,
             RolesCmd::Grant(args) => roles_grant(&cli, &client, args).await,
-            RolesCmd::Revoke(args) => roles_revoke(&client, args).await,
+            RolesCmd::Revoke(args) => roles_revoke(&cli, &client, args).await,
         },
     }
 }
@@ -239,7 +239,7 @@ async fn principals_list(cli: &Cli, client: &IronControlClient, args: &FilterArg
 
 async fn principals_show(cli: &Cli, client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
     let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
-    let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
+    let principal = get_principal_or_fail(client, &cli.namespace, &identity.foreign_id).await?;
     println!(
         "principal: {} ({}) — {}",
         principal.foreign_id.as_deref().unwrap_or("-"),
@@ -325,7 +325,7 @@ async fn principals_grant(cli: &Cli, client: &IronControlClient, args: &Principa
     }
 
     for role_fid in &args.roles {
-        let role = get_role_or_fail(client, role_fid).await?;
+        let role = get_role_or_fail(client, &cli.namespace, role_fid).await?;
         assign_role_idempotent(client, &principal_id, &role.id).await?;
         println!("  role {role_fid} ({}): assigned", role.id);
     }
@@ -343,7 +343,7 @@ async fn principals_revoke(cli: &Cli, client: &IronControlClient, args: &Princip
         bail!("nothing to revoke: pass at least one --tool, --role, --secret, or --grant-id");
     }
     let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
-    let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
+    let principal = get_principal_or_fail(client, &cli.namespace, &identity.foreign_id).await?;
     println!("principal: {} ({})", identity.foreign_id, principal.id);
 
     let assigned = client.list_principal_roles(&principal.id).await?;
@@ -401,8 +401,8 @@ async fn roles_list(cli: &Cli, client: &IronControlClient, args: &FilterArgs) ->
     Ok(())
 }
 
-async fn roles_show(client: &IronControlClient, args: &RoleSelector) -> Result<()> {
-    let role = get_role_or_fail(client, &args.role).await?;
+async fn roles_show(cli: &Cli, client: &IronControlClient, args: &RoleSelector) -> Result<()> {
+    let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
     println!("role: {} ({}) — {}", role.foreign_id.as_deref().unwrap_or("-"), role.id, role.name);
     let grants = client.list_role_grants(&role.id).await?;
     if grants.is_empty() {
@@ -422,7 +422,7 @@ async fn roles_grant(cli: &Cli, client: &IronControlClient, args: &RoleGrantArgs
     if args.secrets.is_empty() && args.tool.is_none() {
         bail!("nothing to grant: pass at least one --secret <OID> or --tool <NAME>");
     }
-    let role = get_role_or_fail(client, &args.role).await?;
+    let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
     println!("role: {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
 
     for oid in &args.secrets {
@@ -475,8 +475,8 @@ fn select_secrets(all: Vec<ParsedSecret>, names: &[String]) -> Result<Vec<Parsed
     Ok(selected)
 }
 
-async fn roles_revoke(client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {
-    let role = get_role_or_fail(client, &args.role).await?;
+async fn roles_revoke(cli: &Cli, client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {
+    let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
     println!("role: {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
     let grants = client.list_role_grants(&role.id).await?;
     for oid in &args.secrets {
@@ -580,7 +580,7 @@ fn parse_label(raw: &str) -> Result<(String, String)> {
 /// existing principal (e.g. one a session created) is never clobbered; creates
 /// it only when absent.
 async fn ensure_principal(client: &IronControlClient, identity: &IdentityInput) -> Result<String> {
-    match client.get_principal(&identity.foreign_id).await {
+    match client.get_principal(&identity.namespace, &identity.foreign_id).await {
         Ok(p) => Ok(p.id),
         Err(e) if is_status(&e, 404) => Ok(client.upsert_principal(identity).await?.id),
         Err(e) => Err(e.into()),
@@ -589,17 +589,18 @@ async fn ensure_principal(client: &IronControlClient, identity: &IdentityInput) 
 
 async fn get_principal_or_fail(
     client: &IronControlClient,
-    foreign_id: &str,
+    namespace: &str,
+    ident: &str,
 ) -> Result<centaur_iron_control::Principal> {
-    match client.get_principal(foreign_id).await {
+    match client.get_principal(namespace, ident).await {
         Ok(p) => Ok(p),
-        Err(e) if is_status(&e, 404) => bail!("principal {foreign_id:?} not found in iron-control"),
+        Err(e) if is_status(&e, 404) => bail!("principal {ident:?} not found in iron-control"),
         Err(e) => Err(e.into()),
     }
 }
 
-async fn get_role_or_fail(client: &IronControlClient, role: &str) -> Result<Role> {
-    match client.get_role(role).await {
+async fn get_role_or_fail(client: &IronControlClient, namespace: &str, role: &str) -> Result<Role> {
+    match client.get_role(namespace, role).await {
         Ok(r) => Ok(r),
         Err(e) if is_status(&e, 404) => bail!("role {role:?} not found in iron-control"),
         Err(e) => Err(e.into()),
