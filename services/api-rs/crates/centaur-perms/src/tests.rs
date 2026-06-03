@@ -206,7 +206,7 @@ fn duplicate_secret_names_get_unique_foreign_ids() {
 // ----- overlay resolution ---------------------------------------------------
 
 fn tmp_root(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("centaur-grants-test-{}-{tag}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("centaur-perms-test-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir

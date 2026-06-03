@@ -1,12 +1,12 @@
 [package]
-name = "centaur-grants"
+name = "centaur-perms"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "centaur-grants"
+name = "centaur-perms"
 path = "src/main.rs"
 
 [dependencies]

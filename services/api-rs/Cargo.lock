@@ -288,19 +288,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "centaur-grants"
-version = "0.1.0"
-dependencies = [
- "centaur-iron-control",
- "centaur-iron-proxy",
- "clap",
- "eyre",
- "serde_json",
- "tokio",
- "toml",
-]
-
-[[package]]
 name = "centaur-iron-control"
 version = "0.1.0"
 dependencies = [
@@ -321,6 +308,19 @@ dependencies = [
  "serde_yaml",
  "strum 0.28.0",
  "thiserror",
+]
+
+[[package]]
+name = "centaur-perms"
+version = "0.1.0"
+dependencies = [
+ "centaur-iron-control",
+ "centaur-iron-proxy",
+ "clap",
+ "eyre",
+ "serde_json",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

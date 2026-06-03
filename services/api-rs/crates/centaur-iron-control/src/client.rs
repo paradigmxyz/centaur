@@ -62,6 +62,13 @@ impl IronControlClient {
             .await
     }
 
+    /// Fetch a role by OID or ``foreign_id``. Read-only.
+    pub async fn get_role(&self, role: &str) -> Result<Role> {
+        let path = format!("{API_PREFIX}/roles/{}", urlencoding::encode(role));
+        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+        decode_data(resp, Method::GET, &path).await
+    }
+
     /// List every principal in ``namespace``, optionally filtered to those
     /// carrying all of ``labels`` (JSONB containment). Pages are fetched
     /// transparently, so the full set is returned.
@@ -71,6 +78,11 @@ impl IronControlClient {
         labels: &[(String, String)],
     ) -> Result<Vec<Principal>> {
         self.list_collection("principals", namespace, labels).await
+    }
+
+    /// List every role in ``namespace``, optionally filtered by ``labels``.
+    pub async fn list_roles(&self, namespace: &str, labels: &[(String, String)]) -> Result<Vec<Role>> {
+        self.list_collection("roles", namespace, labels).await
     }
 
     /// Paginate a namespaced collection (``principals``/``roles``) to exhaustion.
