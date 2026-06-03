@@ -21,6 +21,8 @@ mod principal;
 mod tools;
 mod translate;
 
+use tools::ParsedSecret;
+
 #[cfg(test)]
 mod tests;
 
@@ -99,8 +101,8 @@ enum RolesCmd {
     List(FilterArgs),
     /// Show the secrets granted to a role.
     Show(RoleSelector),
-    /// Grant one or more secrets to a role.
-    Grant(RoleSecretArgs),
+    /// Grant secrets to a role, by OID or sourced from a tool's config.
+    Grant(RoleGrantArgs),
     /// Revoke one or more secrets from a role.
     Revoke(RoleSecretArgs),
 }
@@ -174,6 +176,26 @@ struct RoleSecretArgs {
     secrets: Vec<String>,
 }
 
+#[derive(Args, Debug)]
+struct RoleGrantArgs {
+    /// Role `foreign_id` (e.g. `infra`, `tools`, `tool-github`) or OID.
+    role: String,
+
+    /// Existing secret OID (`ssr_`/`ots_`/`gas_`) to grant. Repeatable.
+    #[arg(long = "secret", value_name = "OID")]
+    secrets: Vec<String>,
+
+    /// Tool name whose `pyproject.toml` secrets to register and grant to the
+    /// role. The secret resources keep their canonical `tool-<slug>-…` ids.
+    #[arg(long = "tool", value_name = "NAME")]
+    tool: Option<String>,
+
+    /// When used with `--tool`, only register the named secret(s) (e.g.
+    /// `SLACK_BOT_TOKEN`) instead of all the tool declares. Repeatable.
+    #[arg(long = "secret-name", value_name = "NAME", requires = "tool")]
+    secret_names: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -189,7 +211,7 @@ async fn main() -> Result<()> {
         Command::Roles(cmd) => match cmd {
             RolesCmd::List(args) => roles_list(&cli, &client, args).await,
             RolesCmd::Show(args) => roles_show(&client, args).await,
-            RolesCmd::Grant(args) => roles_grant(&client, args).await,
+            RolesCmd::Grant(args) => roles_grant(&cli, &client, args).await,
             RolesCmd::Revoke(args) => roles_revoke(&client, args).await,
         },
     }
@@ -390,15 +412,61 @@ async fn roles_show(client: &IronControlClient, args: &RoleSelector) -> Result<(
     Ok(())
 }
 
-async fn roles_grant(client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {
+async fn roles_grant(cli: &Cli, client: &IronControlClient, args: &RoleGrantArgs) -> Result<()> {
+    if args.secrets.is_empty() && args.tool.is_none() {
+        bail!("nothing to grant: pass at least one --secret <OID> or --tool <NAME>");
+    }
     let role = get_role_or_fail(client, &args.role).await?;
     println!("role: {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
+
     for oid in &args.secrets {
         let secret = grant_secret_from_oid(oid)?;
         let grant = client.create_grant(&Grantee::Role(role.id.clone()), &secret).await?;
         println!("  secret {oid}: granted ({})", grant.id);
     }
+
+    if let Some(tool) = &args.tool {
+        let policy = build_source_policy(cli)?;
+        let dirs = tools::resolve_tool_dirs(&cli.tools_dirs, std::env::var("TOOL_DIRS").ok().as_deref());
+        let manifest = tools::find_tool(&dirs, tool)?;
+        let selected = select_secrets(manifest.all_secrets().cloned().collect(), &args.secret_names)?;
+        // Key the secret resources on the tool's canonical role so the same
+        // secret object is shared no matter which role it's granted to.
+        let tool_role = RoleSpec::tool(&manifest.name).foreign_id;
+        let translation = translate::translate(&cli.namespace, &tool_role, &selected, &policy);
+        let granted = grant_inputs_to_role(client, &role.id, translation.inputs).await?;
+        println!(
+            "  tool {} (from {}): {} secret(s) registered and granted to {}",
+            manifest.name,
+            manifest.dir.display(),
+            granted.len(),
+            role.foreign_id.as_deref().unwrap_or(&role.id)
+        );
+        for (name, kind) in &translation.skipped {
+            println!("    skipped {name} (unsupported secret type {kind:?})");
+        }
+    }
     Ok(())
+}
+
+/// Pick the named secrets out of a tool's declared set, preserving the order
+/// requested. An empty `names` selects them all. Errors if a requested name
+/// isn't declared by the tool.
+fn select_secrets(all: Vec<ParsedSecret>, names: &[String]) -> Result<Vec<ParsedSecret>> {
+    if names.is_empty() {
+        return Ok(all);
+    }
+    let mut selected = Vec::with_capacity(names.len());
+    for name in names {
+        match all.iter().find(|s| s.name() == name) {
+            Some(secret) => selected.push(secret.clone()),
+            None => bail!(
+                "tool has no secret named {name:?}; declared: {:?}",
+                all.iter().map(ParsedSecret::name).collect::<Vec<_>>()
+            ),
+        }
+    }
+    Ok(selected)
 }
 
 async fn roles_revoke(client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {

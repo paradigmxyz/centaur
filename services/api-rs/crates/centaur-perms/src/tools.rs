@@ -116,9 +116,7 @@ pub enum ParsedSecret {
 }
 
 impl ParsedSecret {
-    /// The declared secret name. Used by tests and callers that summarize a
-    /// tool's secrets.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The declared secret name (e.g. `SLACK_BOT_TOKEN`).
     pub fn name(&self) -> &str {
         match self {
             ParsedSecret::Http(s) => &s.name,

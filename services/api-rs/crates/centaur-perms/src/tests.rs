@@ -278,6 +278,38 @@ fn parses_label_filters() {
     assert!(crate::parse_label("=v").is_err());
 }
 
+// ----- secret selection -----------------------------------------------------
+
+fn http(name: &str) -> ParsedSecret {
+    tools::parse_secret(
+        &entry(&format!(r#"{{type = "http", name = "{name}", match_headers = ["Authorization"], hosts = ["x.com"]}}"#)),
+        &[],
+    )
+    .unwrap()
+}
+
+#[test]
+fn select_secrets_empty_names_keeps_all() {
+    let all = vec![http("A"), http("B")];
+    let out = crate::select_secrets(all.clone(), &[]).unwrap();
+    assert_eq!(out.len(), 2);
+}
+
+#[test]
+fn select_secrets_filters_by_name() {
+    let all = vec![http("A"), http("B"), http("C")];
+    let out = crate::select_secrets(all, &["B".to_owned()]).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].name(), "B");
+}
+
+#[test]
+fn select_secrets_unknown_name_errors() {
+    let all = vec![http("A")];
+    let err = crate::select_secrets(all, &["NOPE".to_owned()]).unwrap_err();
+    assert!(err.to_string().contains("no secret named"), "{err}");
+}
+
 // ----- fidelity against the real in-repo tools ------------------------------
 
 /// The repo `tools/` directory, relative to this crate. `None` when the crate
