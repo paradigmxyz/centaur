@@ -72,6 +72,7 @@ impl IronControlArgs {
         Some(IronControlSettings {
             client: self.client()?,
             control_url: url.to_owned(),
+            namespace: self.namespace.clone(),
         })
     }
 }

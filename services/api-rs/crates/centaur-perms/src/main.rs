@@ -274,7 +274,7 @@ async fn principals_show(cli: &Cli, client: &IronControlClient, args: &Principal
         }
     }
 
-    let effective = client.effective_config(&principal.id).await?;
+    let effective = client.effective_config(&cli.namespace, &principal.id).await?;
     let placeholders: Vec<&str> = effective
         .secrets
         .iter()

@@ -65,7 +65,7 @@ impl IronControlClient {
     /// Fetch a role by OID (``role_…``) or ``foreign_id``. Read-only. A
     /// ``foreign_id`` is resolved through the namespaced lookup endpoint.
     pub async fn get_role(&self, namespace: &str, role: &str) -> Result<Role> {
-        let path = fetch_or_lookup_path("roles", "role_", namespace, role);
+        let path = resource_path("roles", "role_", namespace, role, "");
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
     }
@@ -127,13 +127,12 @@ impl IronControlClient {
     }
 
     /// The principal's effective config — the secrets/postgres its proxy would
-    /// sync. Accepts the principal OID or foreign_id. api-rs reads this to wire
-    /// the sandbox's env for operator-managed secrets.
-    pub async fn effective_config(&self, principal: &str) -> Result<EffectiveConfig> {
-        let path = format!(
-            "{API_PREFIX}/principals/{}/effective_config",
-            urlencoding::encode(principal)
-        );
+    /// sync. Accepts the principal OID (``prn_…``) or a ``foreign_id`` (resolved
+    /// through the namespaced lookup endpoint, since the bare ``/:id`` form is
+    /// OID-only). api-rs reads this to wire the sandbox's env for
+    /// operator-managed secrets.
+    pub async fn effective_config(&self, namespace: &str, principal: &str) -> Result<EffectiveConfig> {
+        let path = resource_path("principals", "prn_", namespace, principal, "/effective_config");
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
     }
@@ -143,7 +142,7 @@ impl IronControlClient {
     /// is resolved through the namespaced lookup endpoint, since the bare
     /// ``/:id`` route only matches OIDs.
     pub async fn get_principal(&self, namespace: &str, principal: &str) -> Result<Principal> {
-        let path = fetch_or_lookup_path("principals", "prn_", namespace, principal);
+        let path = resource_path("principals", "prn_", namespace, principal, "");
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
     }
@@ -158,7 +157,8 @@ impl IronControlClient {
             .await
     }
 
-    /// List the roles assigned to a principal (by OID or ``foreign_id``).
+    /// List the roles assigned to a principal (by OID; this sub-resource route
+    /// does not resolve ``foreign_id``s — pass the OID from [`Self::get_principal`]).
     pub async fn list_principal_roles(&self, principal: &str) -> Result<Vec<Role>> {
         let path = format!(
             "{API_PREFIX}/principals/{}/roles",
@@ -237,13 +237,15 @@ impl IronControlClient {
             .await
     }
 
-    /// List the grants made directly to a principal (by OID or ``foreign_id``).
+    /// List the grants made directly to a principal (by OID; this sub-resource
+    /// route does not resolve ``foreign_id``s).
     pub async fn list_principal_grants(&self, principal: &str) -> Result<Vec<Grant>> {
         let base = format!("{API_PREFIX}/principals/{}/grants", urlencoding::encode(principal));
         self.paginate(&base).await
     }
 
-    /// List the grants attached to a role (by OID or ``foreign_id``).
+    /// List the grants attached to a role (by OID; this sub-resource route does
+    /// not resolve ``foreign_id``s — pass the OID from [`Self::get_role`]).
     pub async fn list_role_grants(&self, role: &str) -> Result<Vec<Grant>> {
         let base = format!("{API_PREFIX}/roles/{}/grants", urlencoding::encode(role));
         self.paginate(&base).await
@@ -361,15 +363,18 @@ fn upsert_path(collection: &str, foreign_id: &str) -> String {
     format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(foreign_id))
 }
 
-/// Path to fetch one resource by ``ident``: the bare ``/:id`` route when
-/// ``ident`` is an OID (carries ``oid_prefix``), else the namespaced
-/// ``/lookup/:namespace/:foreign_id`` route, since ``/:id`` only matches OIDs.
-fn fetch_or_lookup_path(collection: &str, oid_prefix: &str, namespace: &str, ident: &str) -> String {
+/// Path to a resource (or sub-resource) addressed by ``ident``: the bare
+/// ``/:id`` route when ``ident`` is an OID (carries ``oid_prefix``), else the
+/// namespaced ``/lookup/:namespace/:foreign_id`` route, since the ``/:id`` form
+/// only matches OIDs. ``suffix`` is appended after the id segment for
+/// sub-resources (e.g. ``"/effective_config"``); pass ``""`` for the resource
+/// itself.
+fn resource_path(collection: &str, oid_prefix: &str, namespace: &str, ident: &str, suffix: &str) -> String {
     if ident.starts_with(oid_prefix) {
-        format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(ident))
+        format!("{API_PREFIX}/{collection}/{}{suffix}", urlencoding::encode(ident))
     } else {
         format!(
-            "{API_PREFIX}/{collection}/lookup/{}/{}",
+            "{API_PREFIX}/{collection}/lookup/{}/{}{suffix}",
             urlencoding::encode(namespace),
             urlencoding::encode(ident)
         )
@@ -445,20 +450,32 @@ mod tests {
     }
 
     #[test]
-    fn fetch_or_lookup_path_routes_oids_and_foreign_ids() {
+    fn resource_path_routes_oids_and_foreign_ids() {
         // An OID hits the bare /:id route.
         assert_eq!(
-            fetch_or_lookup_path("principals", "prn_", "default", "prn_abc"),
+            resource_path("principals", "prn_", "default", "prn_abc", ""),
             "/api/v1/principals/prn_abc"
         );
         // A foreign_id hits the namespaced lookup route.
         assert_eq!(
-            fetch_or_lookup_path("principals", "prn_", "default", "slack-channel-c9"),
+            resource_path("principals", "prn_", "default", "slack-channel-c9", ""),
             "/api/v1/principals/lookup/default/slack-channel-c9"
         );
         assert_eq!(
-            fetch_or_lookup_path("roles", "role_", "team-a", "tool-github"),
+            resource_path("roles", "role_", "team-a", "tool-github", ""),
             "/api/v1/roles/lookup/team-a/tool-github"
+        );
+    }
+
+    #[test]
+    fn resource_path_appends_subresource_suffix() {
+        assert_eq!(
+            resource_path("principals", "prn_", "default", "prn_abc", "/effective_config"),
+            "/api/v1/principals/prn_abc/effective_config"
+        );
+        assert_eq!(
+            resource_path("principals", "prn_", "ns1", "slack-channel-c9", "/effective_config"),
+            "/api/v1/principals/lookup/ns1/slack-channel-c9/effective_config"
         );
     }
 
