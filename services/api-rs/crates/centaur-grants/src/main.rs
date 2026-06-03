@@ -98,7 +98,8 @@ struct GrantArgs {
     #[arg(long = "tool", value_name = "NAME")]
     tools: Vec<String>,
 
-    /// Secret OID (`ssr_`/`ots_`/`gas_`) to grant directly. `add` only. Repeatable.
+    /// Secret OID (`ssr_`/`ots_`/`gas_`) to grant (`add`) or revoke (`revoke`,
+    /// by finding the principal's matching grant). Repeatable.
     #[arg(long = "secret", value_name = "OID")]
     secrets: Vec<String>,
 
@@ -207,11 +208,8 @@ async fn add(cli: &Cli, client: &IronControlClient, policy: &SourcePolicy, args:
 }
 
 async fn revoke(cli: &Cli, client: &IronControlClient, args: &GrantArgs) -> Result<()> {
-    if args.tools.is_empty() && args.grant_ids.is_empty() {
-        bail!("nothing to revoke: pass at least one --tool or --grant-id");
-    }
-    if !args.secrets.is_empty() {
-        bail!("revoke a direct secret grant with --grant-id (its grant OID), not --secret");
+    if args.tools.is_empty() && args.secrets.is_empty() && args.grant_ids.is_empty() {
+        bail!("nothing to revoke: pass at least one --tool, --secret, or --grant-id");
     }
     let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
     let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
@@ -226,6 +224,19 @@ async fn revoke(cli: &Cli, client: &IronControlClient, args: &GrantArgs) -> Resu
                 println!("  tool {tool}: role {role_fid} unassigned");
             }
             None => println!("  tool {tool}: role {role_fid} was not assigned — nothing to do"),
+        }
+    }
+
+    if !args.secrets.is_empty() {
+        let grants = client.list_principal_grants(&principal.id).await?;
+        for oid in &args.secrets {
+            match grants.iter().find(|g| g.secret_id() == Some(oid.as_str())) {
+                Some(grant) => {
+                    client.delete_grant(&grant.id).await?;
+                    println!("  secret {oid}: grant {} revoked", grant.id);
+                }
+                None => println!("  secret {oid}: no direct grant on this principal — nothing to do"),
+            }
         }
     }
 
@@ -248,6 +259,23 @@ async fn list(cli: &Cli, client: &IronControlClient, args: &ListArgs) -> Result<
         println!("roles:");
         for role in &roles {
             println!("  {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
+            for grant in client.list_role_grants(&role.id).await? {
+                if let Some(secret) = grant.secret_id() {
+                    println!("    grants {secret}");
+                }
+            }
+        }
+    }
+
+    let direct = client.list_principal_grants(&principal.id).await?;
+    if direct.is_empty() {
+        println!("direct grants: (none)");
+    } else {
+        println!("direct grants:");
+        for grant in &direct {
+            if let Some(secret) = grant.secret_id() {
+                println!("  {secret} (grant {})", grant.id);
+            }
         }
     }
 

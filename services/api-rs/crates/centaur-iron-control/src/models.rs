@@ -331,10 +331,35 @@ pub enum GrantSecret {
     PgDsn(String),
 }
 
-/// A created grant as returned by ``POST /api/v1/grants``.
+/// A grant as returned by ``POST /api/v1/grants`` and the grantee-scoped list
+/// endpoints (``GET /api/v1/{principals,roles}/:id/grants``). Create responses
+/// populate the grantee/secret references too; only the relevant ids are set.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Grant {
     pub id: String,
+    #[serde(default)]
+    pub principal_id: Option<String>,
+    #[serde(default)]
+    pub role_id: Option<String>,
+    #[serde(default)]
+    pub static_secret_id: Option<String>,
+    #[serde(default)]
+    pub oauth_token_secret_id: Option<String>,
+    #[serde(default)]
+    pub gcp_auth_secret_id: Option<String>,
+    #[serde(default)]
+    pub pg_dsn_secret_id: Option<String>,
+}
+
+impl Grant {
+    /// The granted secret's OID, whichever of the four secret types it is.
+    pub fn secret_id(&self) -> Option<&str> {
+        self.static_secret_id
+            .as_deref()
+            .or(self.oauth_token_secret_id.as_deref())
+            .or(self.gcp_auth_secret_id.as_deref())
+            .or(self.pg_dsn_secret_id.as_deref())
+    }
 }
 
 // ---------------------------------------------------------------------------

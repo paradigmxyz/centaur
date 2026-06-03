@@ -80,22 +80,27 @@ impl IronControlClient {
         namespace: &str,
         labels: &[(String, String)],
     ) -> Result<Vec<R>> {
+        let mut base = format!("{API_PREFIX}/{collection}?namespace={}", urlencoding::encode(namespace));
+        for (key, value) in labels {
+            base.push_str(&format!(
+                "&labels[{}]={}",
+                urlencoding::encode(key),
+                urlencoding::encode(value)
+            ));
+        }
+        self.paginate(&base).await
+    }
+
+    /// Fetch every page of a list endpoint, appending ``page``/``limit`` (with
+    /// the right separator depending on whether ``base_path`` already has a
+    /// query string) and reading until a short page signals the end.
+    async fn paginate<R: DeserializeOwned>(&self, base_path: &str) -> Result<Vec<R>> {
         const LIMIT: usize = 100;
+        let sep = if base_path.contains('?') { '&' } else { '?' };
         let mut out = Vec::new();
         let mut page = 1usize;
         loop {
-            let mut query = format!(
-                "namespace={}&page={page}&limit={LIMIT}",
-                urlencoding::encode(namespace)
-            );
-            for (key, value) in labels {
-                query.push_str(&format!(
-                    "&labels[{}]={}",
-                    urlencoding::encode(key),
-                    urlencoding::encode(value)
-                ));
-            }
-            let path = format!("{API_PREFIX}/{collection}?{query}");
+            let path = format!("{base_path}{sep}page={page}&limit={LIMIT}");
             let resp = self.send(Method::GET, &path, None::<&Value>).await?;
             let items: Vec<R> = decode_data(resp, Method::GET, &path).await?;
             let fetched = items.len();
@@ -217,8 +222,19 @@ impl IronControlClient {
             .await
     }
 
-    /// Revoke a grant by OID. iron-control has no list-grants-by-grantee
-    /// endpoint, so callers must hold the ``grant_`` OID returned at creation.
+    /// List the grants made directly to a principal (by OID or ``foreign_id``).
+    pub async fn list_principal_grants(&self, principal: &str) -> Result<Vec<Grant>> {
+        let base = format!("{API_PREFIX}/principals/{}/grants", urlencoding::encode(principal));
+        self.paginate(&base).await
+    }
+
+    /// List the grants attached to a role (by OID or ``foreign_id``).
+    pub async fn list_role_grants(&self, role: &str) -> Result<Vec<Grant>> {
+        let base = format!("{API_PREFIX}/roles/{}/grants", urlencoding::encode(role));
+        self.paginate(&base).await
+    }
+
+    /// Revoke a grant by OID.
     pub async fn delete_grant(&self, id: &str) -> Result<()> {
         let path = format!("{API_PREFIX}/grants/{}", urlencoding::encode(id));
         let resp = self.send(Method::DELETE, &path, None::<&Value>).await?;
