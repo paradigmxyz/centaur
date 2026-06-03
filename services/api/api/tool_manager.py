@@ -1919,7 +1919,7 @@ class ToolManager:
                 name="OPENAI_API_KEY",
                 secret_ref="OPENAI_API_KEY",
                 hosts=("api.openai.com",),
-                match_headers=("Authorization",),
+                match_headers=("Authorization", "authorization"),
             ),
         ),
         ("codex", "access_token"): (

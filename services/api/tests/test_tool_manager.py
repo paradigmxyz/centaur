@@ -694,12 +694,13 @@ class TestHarnessSecretSelection:
     def test_codex_api_key_includes_openai_excludes_anthropic(self) -> None:
         tm = ToolManager.__new__(ToolManager)
         tm.tools = {}
-        names = self._names(
-            tm.secrets_for_sandbox("codex", {"CODEX_AUTH_MODE": "api_key"})
-        )
+        secrets = tm.secrets_for_sandbox("codex", {"CODEX_AUTH_MODE": "api_key"})
+        names = self._names(secrets)
+        openai = next(secret for secret in secrets if secret.name == "OPENAI_API_KEY")
         assert "OPENAI_API_KEY" in names
         assert "ANTHROPIC_API_KEY" not in names
         assert "openai-codex" not in names
+        assert openai.match_headers == ("Authorization", "authorization")
 
     def test_codex_access_token_swaps_to_brokered_with_account_id(self) -> None:
         tm = ToolManager.__new__(ToolManager)
