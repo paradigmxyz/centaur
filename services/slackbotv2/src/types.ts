@@ -94,6 +94,7 @@ export type SlackbotV2 = {
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
+  executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   historyForwarded?: boolean
   lastEventId?: number

@@ -379,85 +379,87 @@ describe('slackbotv2', () => {
     await Promise.all(firstWaits)
   })
 
-  it('starts the Slack stream before a slow session execute returns', async () => {
+  it('waits for a slow session execute before acknowledging Slack and starting the stream', async () => {
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
 
     const parent = await postUserMessage('Context before the slow run.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> start visibly`, parent.ts)
     const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-slow-execute',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: mention.ts,
-          thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> start visibly`
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
+    let responseSettled = false
+    const responsePromise = Promise.resolve(
+      bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-slow-execute',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> start visibly`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+    ).then((response: Response) => {
+      responseSettled = true
+      return response
+    })
 
-    expect(response.status).toBe(200)
     await waitFor(() => codexApi.executes.length === 1)
-    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+    await sleep(50)
+    expect(responseSettled).toBe(false)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
     expect(codexApi.eventRequests).toHaveLength(0)
 
     releaseExecute()
+    const response = await responsePromise
+    expect(response.status).toBe(200)
     await waitFor(() => codexApi.eventRequests.length === 1)
     await waitFor(() => codexApi.streamCount === 1)
     codexApi.closeStreams()
     await Promise.all(waits)
   })
 
-  it('refetches full context on a later mention if the initial execute failed', async () => {
+  it('returns 503 for retryable execute failure and lets Slack retry without duplicate append', async () => {
     codexApi.failNextExecute = true
 
     const parent = await postUserMessage('History that must not be lost.')
     const failedMention = await postUserMessage(`<@${BOT_USER_ID}> first try`, parent.ts)
+    const retryableEvent = signedSlackEvent({
+      event_id: 'Ev-slackbotv2-retryable-mention',
+      event: {
+        type: 'app_mention',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: failedMention.ts,
+        thread_ts: parent.ts,
+        text: `<@${BOT_USER_ID}> first try`
+      }
+    })
     const failedWaits: Promise<unknown>[] = []
     const failedResponse = await bot.app.request(
       '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-failed-mention',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: failedMention.ts,
-          thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> first try`
-        }
-      }),
+      retryableEvent,
       {},
       waitUntilContext(failedWaits)
     )
-    expect(failedResponse.status).toBe(200)
+    expect(failedResponse.status).toBe(503)
     await Promise.all(failedWaits)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.eventRequests).toHaveLength(0)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
 
-    const retryMention = await postUserMessage(`<@${BOT_USER_ID}> retry`, parent.ts)
     const retryWaits: Promise<unknown>[] = []
     const retryResponse = await bot.app.request(
       '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-retry-mention',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: retryMention.ts,
-          thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> retry`
-        }
-      }),
+      retryableEvent,
       {},
       waitUntilContext(retryWaits)
     )
@@ -465,10 +467,12 @@ describe('slackbotv2', () => {
     await Promise.all(retryWaits)
 
     expect(codexApi.executes).toHaveLength(2)
-    const retryContextTexts = sessionMessageTexts(codexApi.appends[1]?.body.messages ?? [])
+    expect(codexApi.appends).toHaveLength(1)
+    const retryContextTexts = sessionMessageTexts(codexApi.appends[0]?.body.messages ?? [])
     expect(retryContextTexts).toContain('History that must not be lost.')
     expect(retryContextTexts.some(text => text.includes('first try'))).toBe(true)
-    expect(retryContextTexts.some(text => text.includes('retry'))).toBe(true)
+    expect(codexApi.eventRequests).toHaveLength(1)
+    expect(await threadText(parent.ts)).toContain('Executed request 2.')
   })
 
   it('keeps v1 external org and trigger-bot allowlist behavior', async () => {
@@ -1656,6 +1660,10 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error('Timed out waiting for condition')
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms))
 }
 
 async function availablePort(preferred: number): Promise<number> {
