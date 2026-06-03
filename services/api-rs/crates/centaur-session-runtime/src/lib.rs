@@ -30,6 +30,8 @@ pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
 const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const EXECUTION_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
+const CODEX_TURN_COMPLETED_EVENT_TYPE: &str = "turn.completed";
 
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
@@ -82,6 +84,11 @@ struct EventStreamState {
     done: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CodexTurnCompletion {
+    turn_id: Option<String>,
+}
+
 impl SessionRuntime {
     pub fn new(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Self {
         Self {
@@ -116,6 +123,35 @@ impl SessionRuntime {
         Ok(self.store.append_messages(thread_key, messages).await?)
     }
 
+    pub fn start_execution_recovery_loop(&self) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let mut tick = interval_at(Instant::now(), EXECUTION_RECOVERY_INTERVAL);
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if let Err(error) = runtime.recover_running_executions().await {
+                    warn!(%error, "session execution recovery pass failed");
+                }
+            }
+        });
+    }
+
+    pub async fn recover_running_executions(&self) -> Result<(), SessionRuntimeError> {
+        let executions = self.store.list_running_executions().await?;
+        for execution in executions {
+            if let Err(error) = self.recover_running_execution(&execution).await {
+                warn!(
+                    execution_id = %execution.execution_id,
+                    thread_key = %execution.thread_key,
+                    %error,
+                    "failed to recover running session execution"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub async fn execute_session(
         &self,
         thread_key: &ThreadKey,
@@ -147,7 +183,7 @@ impl SessionRuntime {
                 Some(&execution.execution_id),
                 "session.execution_started",
                 json!({
-                    "execution_id": execution.execution_id,
+                    "execution_id": execution.execution_id.as_str(),
                     "thread_key": thread_key.as_str(),
                     "input_line_count": input.input_lines.len(),
                 }),
@@ -165,42 +201,21 @@ impl SessionRuntime {
                 let error_message = error.to_string();
                 let _ = self
                     .store
-                    .append_event(
-                        thread_key,
-                        Some(&execution.execution_id),
-                        "session.execution_failed",
+                    .fail_running_execution_with_event(
+                        &execution.execution_id,
+                        &error_message,
                         json!({
-                            "execution_id": execution.execution_id,
+                            "execution_id": execution.execution_id.as_str(),
                             "thread_key": thread_key.as_str(),
                             "error": error_message,
                         }),
                     )
                     .await;
-                let _ = self
-                    .store
-                    .fail_execution(&execution.execution_id, &error_message)
-                    .await;
                 return Err(error);
             }
         }
 
-        self.store
-            .append_event(
-                thread_key,
-                Some(&execution.execution_id),
-                "session.execution_completed",
-                json!({
-                    "execution_id": execution.execution_id,
-                    "thread_key": thread_key.as_str(),
-                    "completion_reason": "input_accepted",
-                }),
-            )
-            .await?;
-
-        Ok(self
-            .store
-            .complete_execution(&execution.execution_id)
-            .await?)
+        Ok(execution)
     }
 
     pub async fn stream_events(
@@ -313,6 +328,125 @@ impl SessionRuntime {
         });
 
         Ok(pipe)
+    }
+
+    async fn recover_running_execution(
+        &self,
+        execution: &SessionExecution,
+    ) -> Result<(), SessionRuntimeError> {
+        if self.project_persisted_terminal_events(execution).await? {
+            return Ok(());
+        }
+
+        let session = self.store.get_session(&execution.thread_key).await?;
+        let Some(sandbox_id) = session.sandbox_id.as_deref() else {
+            self.fail_running_execution(
+                execution,
+                "running execution has no sandbox to recover",
+                "missing_sandbox",
+            )
+            .await?;
+            return Ok(());
+        };
+
+        let sandbox_id = SandboxId::new(sandbox_id);
+        match self.sandbox_runtime.manager.status(&sandbox_id).await {
+            Ok(SandboxStatus::Running) => {
+                self.ensure_session_pipe(&execution.thread_key, sandbox_id.as_str())
+                    .await?;
+            }
+            Ok(SandboxStatus::Gone | SandboxStatus::Stopped) => {
+                self.fail_running_execution(
+                    execution,
+                    "running execution sandbox is gone",
+                    "sandbox_gone",
+                )
+                .await?;
+            }
+            Ok(status) => {
+                warn!(
+                    execution_id = %execution.execution_id,
+                    thread_key = %execution.thread_key,
+                    sandbox_id = %sandbox_id.as_str(),
+                    ?status,
+                    "running execution sandbox is not ready for recovery attach"
+                );
+            }
+            Err(SandboxError::NotFound(_)) => {
+                self.fail_running_execution(
+                    execution,
+                    "running execution sandbox was not found",
+                    "sandbox_not_found",
+                )
+                .await?;
+            }
+            Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+        }
+        Ok(())
+    }
+
+    async fn project_persisted_terminal_events(
+        &self,
+        execution: &SessionExecution,
+    ) -> Result<bool, SessionRuntimeError> {
+        let output_events = self
+            .store
+            .list_events_for_execution(&execution.execution_id, SESSION_OUTPUT_LINE_EVENT)
+            .await?;
+        for event in output_events {
+            let Some(line) = event.payload.as_str() else {
+                continue;
+            };
+            let Some(completion) = codex_turn_completion(line) else {
+                continue;
+            };
+            return self
+                .complete_running_execution_from_codex_turn(execution, completion)
+                .await;
+        }
+        Ok(false)
+    }
+
+    async fn complete_running_execution_from_codex_turn(
+        &self,
+        execution: &SessionExecution,
+        completion: CodexTurnCompletion,
+    ) -> Result<bool, SessionRuntimeError> {
+        let completed = self
+            .store
+            .complete_running_execution_with_event(
+                &execution.execution_id,
+                json!({
+                    "execution_id": execution.execution_id.as_str(),
+                    "thread_key": execution.thread_key.as_str(),
+                    "completion_reason": "codex_turn_completed",
+                    "turn_id": completion.turn_id,
+                }),
+            )
+            .await?;
+        Ok(completed.is_some())
+    }
+
+    async fn fail_running_execution(
+        &self,
+        execution: &SessionExecution,
+        error: &str,
+        failure_reason: &str,
+    ) -> Result<bool, SessionRuntimeError> {
+        let failed = self
+            .store
+            .fail_running_execution_with_event(
+                &execution.execution_id,
+                error,
+                json!({
+                    "execution_id": execution.execution_id.as_str(),
+                    "thread_key": execution.thread_key.as_str(),
+                    "failure_reason": failure_reason,
+                    "error": error,
+                }),
+            )
+            .await?;
+        Ok(failed.is_some())
     }
 }
 
@@ -491,7 +625,15 @@ async fn run_stdout_pump(
     );
     while let Some(line) = stdout.next().await {
         let line = line.map_err(codec_error_to_runtime)?;
-        append_output_line(&store, &thread_key, None, &line).await?;
+        let completion = codex_turn_completion(&line);
+        let execution = store.get_running_execution(&thread_key).await?;
+        let execution_id = execution
+            .as_ref()
+            .map(|execution| execution.execution_id.as_str());
+        append_output_line(&store, &thread_key, execution_id, &line).await?;
+        if let (Some(execution), Some(completion)) = (execution, completion) {
+            complete_running_execution_from_codex_turn(&store, &execution, completion).await?;
+        }
     }
     store
         .append_event(
@@ -504,6 +646,25 @@ async fn run_stdout_pump(
         )
         .await?;
     Ok(())
+}
+
+async fn complete_running_execution_from_codex_turn(
+    store: &PgSessionStore,
+    execution: &SessionExecution,
+    completion: CodexTurnCompletion,
+) -> Result<bool, SessionRuntimeError> {
+    let completed = store
+        .complete_running_execution_with_event(
+            &execution.execution_id,
+            json!({
+                "execution_id": execution.execution_id.as_str(),
+                "thread_key": execution.thread_key.as_str(),
+                "completion_reason": "codex_turn_completed",
+                "turn_id": completion.turn_id,
+            }),
+        )
+        .await?;
+    Ok(completed.is_some())
 }
 
 async fn drain_stderr(mut stderr: SandboxRead) -> Result<(), SessionRuntimeError> {
@@ -544,6 +705,11 @@ async fn append_output_line(
 }
 
 fn validate_input_lines(lines: &[String]) -> Result<(), SessionRuntimeError> {
+    if lines.is_empty() {
+        return Err(SessionRuntimeError::BadRequest(
+            "input_lines must not be empty".to_owned(),
+        ));
+    }
     for (index, line) in lines.iter().enumerate() {
         if line.contains('\n') || line.contains('\r') {
             return Err(SessionRuntimeError::BadRequest(format!(
@@ -552,6 +718,23 @@ fn validate_input_lines(lines: &[String]) -> Result<(), SessionRuntimeError> {
         }
     }
     Ok(())
+}
+
+fn codex_turn_completion(line: &str) -> Option<CodexTurnCompletion> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let event_type = value.get("type").and_then(Value::as_str)?;
+    if event_type != CODEX_TURN_COMPLETED_EVENT_TYPE {
+        return None;
+    }
+
+    let turn_id = value
+        .get("turn")
+        .and_then(|turn| turn.get("id"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("turn_id").and_then(Value::as_str))
+        .map(str::to_owned);
+
+    Some(CodexTurnCompletion { turn_id })
 }
 
 fn codec_error_to_runtime(error: LinesCodecError) -> SessionRuntimeError {
@@ -592,6 +775,37 @@ fn nonzero_duration_millis(value: u64) -> Result<Duration, SessionRuntimeError> 
 mod tests {
     use super::*;
     use centaur_sandbox_core::MountKind;
+
+    #[test]
+    fn codex_turn_completion_detects_terminal_turn_line() {
+        let completion = codex_turn_completion(
+            r#"{"type":"turn.completed","turn":{"id":"turn-1"},"usage":{"input_tokens":1}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            completion,
+            CodexTurnCompletion {
+                turn_id: Some("turn-1".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn codex_turn_completion_ignores_non_terminal_or_invalid_lines() {
+        assert_eq!(
+            codex_turn_completion(r#"{"type":"item.agentMessage.delta","delta":"PONG"}"#),
+            None
+        );
+        assert_eq!(codex_turn_completion("not json"), None);
+    }
+
+    #[test]
+    fn execute_input_lines_must_start_a_turn() {
+        let err = validate_input_lines(&[]).unwrap_err();
+
+        assert_eq!(err.to_string(), "input_lines must not be empty");
+    }
 
     #[test]
     fn codex_workload_applies_mounts_to_sandbox_spec() {

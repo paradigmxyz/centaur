@@ -175,6 +175,45 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    pub async fn list_running_executions(
+        &self,
+    ) -> Result<Vec<SessionExecution>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            select execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            from session_executions
+            where status = $1
+            order by created_at, execution_id
+            "#,
+        )
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn get_running_execution(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            select execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            from session_executions
+            where thread_key = $1 and status = $2
+            order by created_at desc, execution_id desc
+            limit 1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
     pub async fn mark_execution_running(
         &self,
         execution_id: &str,
@@ -219,6 +258,63 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    pub async fn complete_running_execution_with_event(
+        &self,
+        execution_id: &str,
+        payload: Value,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2, completed_at = coalesce(completed_at, now()), updated_at = now()
+            where execution_id = $1 and status = $3
+            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Completed.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let thread_key = row.thread_key.clone();
+        let execution_id = row.execution_id.clone();
+        sqlx::query(
+            r#"
+            insert into session_events (thread_key, execution_id, event_type, payload)
+            values ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(&thread_key)
+        .bind(&execution_id)
+        .bind("session.execution_completed")
+        .bind(payload)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            update sessions
+            set status = $2, updated_at = now()
+            where thread_key = $1
+            "#,
+        )
+        .bind(&thread_key)
+        .bind(SessionStatus::Idle.as_ref())
+        .execute(&mut *tx)
+        .await?;
+
+        let execution = row.try_into()?;
+        tx.commit().await?;
+        Ok(Some(execution))
+    }
+
     pub async fn fail_execution(
         &self,
         execution_id: &str,
@@ -241,6 +337,65 @@ impl PgSessionStore {
         self.set_session_status(&row.thread_key, SessionStatus::Failed)
             .await?;
         row.try_into()
+    }
+
+    pub async fn fail_running_execution_with_event(
+        &self,
+        execution_id: &str,
+        error: &str,
+        payload: Value,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
+            where execution_id = $1 and status = $4
+            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Failed.as_ref())
+        .bind(error)
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let thread_key = row.thread_key.clone();
+        let execution_id = row.execution_id.clone();
+        sqlx::query(
+            r#"
+            insert into session_events (thread_key, execution_id, event_type, payload)
+            values ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(&thread_key)
+        .bind(&execution_id)
+        .bind("session.execution_failed")
+        .bind(payload)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            update sessions
+            set status = $2, updated_at = now()
+            where thread_key = $1
+            "#,
+        )
+        .bind(&thread_key)
+        .bind(SessionStatus::Failed.as_ref())
+        .execute(&mut *tx)
+        .await?;
+
+        let execution = row.try_into()?;
+        tx.commit().await?;
+        Ok(Some(execution))
     }
 
     pub async fn append_event(
@@ -285,6 +440,27 @@ impl PgSessionStore {
         .bind(thread_key.as_str())
         .bind(after_event_id)
         .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn list_events_for_execution(
+        &self,
+        execution_id: &str,
+        event_type: &str,
+    ) -> Result<Vec<SessionEvent>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, SessionEventRow>(
+            r#"
+            select event_id, thread_key, execution_id, event_type, payload, created_at
+            from session_events
+            where execution_id = $1 and event_type = $2
+            order by event_id
+            "#,
+        )
+        .bind(execution_id)
+        .bind(event_type)
         .fetch_all(&self.pool)
         .await?;
 
