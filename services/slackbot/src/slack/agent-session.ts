@@ -300,14 +300,23 @@ export class AgentSessionRenderer {
     })
     const streamedTextLive =
       Boolean(segment.streamedText.trim()) && segment.streamedText.length < MAX_LIVE_TEXT_CHARS
-    // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
-    // Only add blocks for content that was not streamed live; live task_update chunks carry
-    // fenced details/output, and the header has already been streamed as the first chunk.
-    const blocks = sanitizeFinalMessagePayload([
-      ...(tasks.length && !segment.planStarted
+    // Slack accumulates appendStream chunks, but stopStream `blocks` REPLACE
+    // the streamed message body. So whenever we emit a composed block layout
+    // (e.g. a plan block), any answer that was streamed live as chunks must be
+    // re-included in the blocks or it is dropped from the final message. This
+    // is what makes plan-emitting harnesses (Codex) lose short answers that
+    // were already streamed: the plan block alone replaces them. Only omit the
+    // answer blocks when we send no blocks at all and the answer was already
+    // streamed live (the accumulated chunks then stand on their own).
+    const planBlocks =
+      tasks.length && !segment.planStarted
         ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
-        : []),
-      ...(!streamedTextLive && answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
+        : []
+    const includeAnswerBlocks =
+      Boolean(answerMarkdown) && (planBlocks.length > 0 || !streamedTextLive)
+    const blocks = sanitizeFinalMessagePayload([
+      ...planBlocks,
+      ...(includeAnswerBlocks ? renderMarkdownBlocks(answerMarkdown) : [])
     ] as AnyBlock[])
     const fallbackText = buildFinalFallbackText({
       title: state.title,
