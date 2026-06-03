@@ -2,16 +2,16 @@
 //! principals (users / channels) and roles hold which tool roles and secrets.
 //!
 //! Commands are resource-first: `centaur-perms <noun> <verb>`, where the noun is
-//! `principals` or `roles`. The CLI reuses `centaur-iron-control`'s canonical
-//! mappings (`derive_principal`, `RoleSpec::tool`) so the principal and role
-//! `foreign_id`s it writes match exactly what api-rs registers.
+//! `principals`, `roles`, or `secrets`. The CLI reuses `centaur-iron-control`'s
+//! canonical mappings (`derive_principal`, `RoleSpec::tool`) so the principal
+//! and role `foreign_id`s it writes match exactly what api-rs registers.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use centaur_iron_control::{
     Grant, GrantSecret, Grantee, IdentityInput, IronControlClient, IronControlError, Role, RoleSpec,
-    grant_inputs_to_role,
+    SECRET_TYPES, grant_inputs_to_role,
 };
 use centaur_iron_proxy::SourcePolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -81,6 +81,9 @@ enum Command {
     /// Inspect roles and manage the secrets attached to them.
     #[command(subcommand)]
     Roles(RolesCmd),
+    /// Inspect the secrets registered in iron-control.
+    #[command(subcommand)]
+    Secrets(SecretsCmd),
 }
 
 #[derive(Subcommand, Debug)]
@@ -105,6 +108,22 @@ enum RolesCmd {
     Grant(RoleGrantArgs),
     /// Revoke one or more secrets from a role.
     Revoke(RoleSecretArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum SecretsCmd {
+    /// List secrets of every type registered in iron-control.
+    List(FilterArgs),
+    /// Show one secret's full configuration. Credential values are never
+    /// returned by iron-control — only the source each resolves from.
+    Show(SecretSelector),
+}
+
+#[derive(Args, Debug)]
+struct SecretSelector {
+    /// Secret OID (`ssr_`/`ots_`/`gas_`/`pgs_`/`hms_`) or `foreign_id`. A
+    /// `foreign_id` is resolved by trying each secret type in turn.
+    secret: String,
 }
 
 #[derive(Args, Debug)]
@@ -214,6 +233,10 @@ async fn main() -> Result<()> {
             RolesCmd::Show(args) => roles_show(&cli, &client, args).await,
             RolesCmd::Grant(args) => roles_grant(&cli, &client, args).await,
             RolesCmd::Revoke(args) => roles_revoke(&cli, &client, args).await,
+        },
+        Command::Secrets(cmd) => match cmd {
+            SecretsCmd::List(args) => secrets_list(&cli, &client, args).await,
+            SecretsCmd::Show(args) => secrets_show(&cli, &client, args).await,
         },
     }
 }
@@ -509,6 +532,96 @@ async fn roles_revoke(cli: &Cli, client: &IronControlClient, args: &RoleSecretAr
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// secrets
+// ---------------------------------------------------------------------------
+
+async fn secrets_list(cli: &Cli, client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+    let labels = filter_labels(args)?;
+    // One row per secret across every type: (type, foreign_id, oid, name).
+    let mut rows: Vec<(&'static str, Option<String>, String, String)> = Vec::new();
+    for (label, collection, _) in SECRET_TYPES {
+        match client.list_secrets(collection, &cli.namespace, &labels).await {
+            Ok(found) => rows.extend(
+                found
+                    .into_iter()
+                    .map(|s| (*label, s.foreign_id, s.id, s.name.unwrap_or_default())),
+            ),
+            // A type that rejects the query (e.g. one that doesn't support a
+            // label filter) shouldn't sink the whole cross-type sweep.
+            Err(e) => eprintln!("warning: listing {label} secrets failed: {e}"),
+        }
+    }
+    apply_filter(&mut rows, args.filter.as_deref(), |(_, fid, _, name)| {
+        (fid.clone().unwrap_or_default(), name.clone())
+    });
+    rows.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    print_secrets(&rows, &cli.namespace);
+    Ok(())
+}
+
+async fn secrets_show(cli: &Cli, client: &IronControlClient, args: &SecretSelector) -> Result<()> {
+    let (label, detail) = fetch_secret_detail(client, &cli.namespace, &args.secret).await?;
+    println!("secret: {} (type {label})", args.secret);
+    println!("{}", serde_json::to_string_pretty(&detail)?);
+    Ok(())
+}
+
+/// Resolve a secret reference (OID or `foreign_id`) to its `(type label, full
+/// resource)`. An OID routes straight to its type by prefix; a `foreign_id` is
+/// ambiguous across types, so each type's lookup endpoint is tried in turn
+/// until one resolves (404s are skipped).
+async fn fetch_secret_detail(
+    client: &IronControlClient,
+    namespace: &str,
+    ident: &str,
+) -> Result<(&'static str, serde_json::Value)> {
+    if let Some((label, collection, prefix)) = secret_type_for_oid(ident) {
+        let detail = client.get_secret_detail(collection, prefix, namespace, ident).await?;
+        return Ok((label, detail));
+    }
+    for (label, collection, prefix) in SECRET_TYPES {
+        match client.get_secret_detail(collection, prefix, namespace, ident).await {
+            Ok(detail) => return Ok((label, detail)),
+            Err(e) if is_status(&e, 404) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    bail!("secret {ident:?} not found in namespace {namespace:?} (tried every secret type)");
+}
+
+/// The `(type label, REST collection, OID prefix)` for an OID, matched by
+/// prefix. `None` when `ident` is not a recognized secret OID — callers then
+/// treat it as a `foreign_id`.
+fn secret_type_for_oid(ident: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    SECRET_TYPES.iter().copied().find(|(_, _, prefix)| ident.starts_with(prefix))
+}
+
+fn print_secrets(rows: &[(&str, Option<String>, String, String)], namespace: &str) {
+    if rows.is_empty() {
+        println!("no secrets found in namespace {namespace:?}");
+        return;
+    }
+    let type_w = rows.iter().map(|(kind, ..)| kind.len()).max().unwrap_or(0);
+    let fid_w = rows
+        .iter()
+        .map(|(_, fid, _, _)| fid.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(0);
+    for (kind, fid, oid, name) in rows {
+        println!(
+            "{:<type_w$}  {:<fid_w$}  {}  {}",
+            kind,
+            fid.as_deref().unwrap_or("-"),
+            oid,
+            name,
+            type_w = type_w,
+            fid_w = fid_w,
+        );
+    }
+    println!("({} secret(s))", rows.len());
 }
 
 // ---------------------------------------------------------------------------

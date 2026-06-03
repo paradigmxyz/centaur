@@ -362,6 +362,18 @@ pub struct SecretRecord {
     pub name: Option<String>,
 }
 
+/// Every secret type as ``(type label, REST collection, OID prefix)``. Mirrors
+/// the arms of [`Grant::secret_target`] and [`GrantSecret`]; callers sweep this
+/// to enumerate secrets across all types and to route an OID to its endpoint by
+/// prefix.
+pub const SECRET_TYPES: &[(&str, &str, &str)] = &[
+    ("static", "static_secrets", "ssr_"),
+    ("oauth_token", "oauth_token_secrets", "ots_"),
+    ("gcp_auth", "gcp_auth_secrets", "gas_"),
+    ("pg_dsn", "pg_dsn_secrets", "pgs_"),
+    ("hmac", "hmac_secrets", "hms_"),
+];
+
 // ---------------------------------------------------------------------------
 // Grants
 // ---------------------------------------------------------------------------

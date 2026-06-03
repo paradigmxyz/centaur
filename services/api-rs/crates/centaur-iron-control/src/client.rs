@@ -249,6 +249,36 @@ impl IronControlClient {
         decode_data(resp, Method::GET, &path).await
     }
 
+    /// List every secret of ``collection`` (a ``*_secrets`` path segment) in
+    /// ``namespace``, optionally filtered by ``labels``. Pages are fetched
+    /// transparently. See [`crate::SECRET_TYPES`] for the collection segments.
+    pub async fn list_secrets(
+        &self,
+        collection: &str,
+        namespace: &str,
+        labels: &[(String, String)],
+    ) -> Result<Vec<SecretRecord>> {
+        self.list_collection(collection, namespace, labels).await
+    }
+
+    /// Fetch a secret's full resource object (every field iron-control returns,
+    /// including type-specific config; credential values are never echoed) by
+    /// OID or ``foreign_id``. ``collection``/``oid_prefix`` select the type and
+    /// route an OID to the bare ``/:id`` endpoint, a ``foreign_id`` to the
+    /// namespaced lookup. Returned as a raw [`Value`] so callers can render
+    /// arbitrary type-specific fields without modeling each type.
+    pub async fn get_secret_detail(
+        &self,
+        collection: &str,
+        oid_prefix: &str,
+        namespace: &str,
+        ident: &str,
+    ) -> Result<Value> {
+        let path = resource_path(collection, oid_prefix, namespace, ident, "");
+        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+        decode_data(resp, Method::GET, &path).await
+    }
+
     // ----- grants ----------------------------------------------------------
 
     /// Attach a secret to a grantee (principal or role).

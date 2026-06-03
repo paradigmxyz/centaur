@@ -14,8 +14,6 @@ centaur-iron-control.workspace = true
 centaur-iron-proxy.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 eyre.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

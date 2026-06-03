@@ -14,6 +14,20 @@ fn entry(toml_src: &str) -> toml::Value {
     v.get("x").expect("x key").clone()
 }
 
+// ----- secrets routing -----------------------------------------------------
+
+#[test]
+fn secret_type_routes_by_oid_prefix() {
+    use crate::secret_type_for_oid;
+    assert_eq!(secret_type_for_oid("ssr_1").map(|t| t.1), Some("static_secrets"));
+    assert_eq!(secret_type_for_oid("ots_2").map(|t| t.1), Some("oauth_token_secrets"));
+    assert_eq!(secret_type_for_oid("gas_3").map(|t| t.1), Some("gcp_auth_secrets"));
+    assert_eq!(secret_type_for_oid("pgs_4").map(|t| t.0), Some("pg_dsn"));
+    assert_eq!(secret_type_for_oid("hms_5").map(|t| t.0), Some("hmac"));
+    // A bare foreign_id is not an OID — callers fall back to lookup.
+    assert!(secret_type_for_oid("falconx-hmac").is_none());
+}
+
 // ----- parsing -------------------------------------------------------------
 
 #[test]
