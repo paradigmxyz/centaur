@@ -11,7 +11,6 @@ use crate::{
     IronProxyConfigError, ProxyFragment, Result, Secret, SecretReplace, Transform, TransformConfig,
 };
 
-const DEFAULT_PROXY_BASE_CONFIG_PATH: &str = "services/api/api/iron-proxy.base.yaml";
 const DEFAULT_INFRA_FRAGMENT_PATH: &str = "services/iron-proxy/infra.yaml";
 
 pub fn load_fragment_file(path: impl AsRef<Path>) -> Result<ProxyFragment> {
@@ -31,10 +30,6 @@ pub fn load_fragment_str(contents: &str) -> Result<ProxyFragment> {
         path: PathBuf::from("<inline>"),
         source,
     })
-}
-
-pub fn load_default_proxy_base_config() -> Result<String> {
-    read_file(default_proxy_base_config_path())
 }
 
 /// The harness auth fragment for ``engine`` (`codex`/`claude-code`) and
@@ -372,10 +367,6 @@ fn repo_relative_path(relative: impl AsRef<Path>) -> PathBuf {
             return relative.to_path_buf();
         }
     }
-}
-
-fn default_proxy_base_config_path() -> PathBuf {
-    repo_relative_path(DEFAULT_PROXY_BASE_CONFIG_PATH)
 }
 
 fn read_file(path: impl AsRef<Path>) -> Result<String> {
