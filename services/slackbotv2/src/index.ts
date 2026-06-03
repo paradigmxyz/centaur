@@ -298,8 +298,21 @@ async function syncThreadMessageToSession(
         })
       }
     } catch (error) {
-      if (await requestSlackRetry(input.state, message, error, input.options, trace)) {
-        throw error
+      if (isRetryableSessionApiError(error)) {
+        const context = requestContext.getStore()
+        if (context) {
+          context.retryableErrors.push(error)
+          try {
+            await input.state.delete(`dedupe:slack:${message.id}`)
+          } catch (deleteError) {
+            traceLog(input.options, 'slackbotv2_webhook_retry_dedupe_clear_failed', trace, {
+              error: errorMessage(deleteError)
+            })
+          }
+          traceLog(input.options, 'slackbotv2_webhook_retry_marked', trace, {
+            error: errorMessage(error)
+          })
+        }
       }
       throw error
     }
@@ -331,8 +344,22 @@ async function syncThreadMessageToSession(
       activeExecution: false,
       lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId)
     })
-    if (await requestSlackRetry(input.state, message, error, input.options, trace)) {
-      throw error
+    if (isRetryableSessionApiError(error)) {
+      const context = requestContext.getStore()
+      if (context) {
+        context.retryableErrors.push(error)
+        try {
+          await input.state.delete(`dedupe:slack:${message.id}`)
+        } catch (deleteError) {
+          traceLog(input.options, 'slackbotv2_webhook_retry_dedupe_clear_failed', trace, {
+            error: errorMessage(deleteError)
+          })
+        }
+        traceLog(input.options, 'slackbotv2_webhook_retry_marked', trace, {
+          error: errorMessage(error)
+        })
+        throw error
+      }
     }
     await renderExecutionStream(thread, streamError(error), serializedMessage, input.options, trace)
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
@@ -613,30 +640,6 @@ async function* streamSessionAfterHandoff(
 
 async function* streamError(error: unknown): AsyncIterable<SlackbotV2RendererSource> {
   yield sessionStreamError(error)
-}
-
-async function requestSlackRetry(
-  state: StateAdapter,
-  message: ChatMessage,
-  error: unknown,
-  options: SlackbotV2Options,
-  trace?: SlackbotV2Trace
-): Promise<boolean> {
-  if (!isRetryableSessionApiError(error)) return false
-  const context = requestContext.getStore()
-  if (!context) return false
-  context.retryableErrors.push(error)
-  try {
-    await state.delete(`dedupe:slack:${message.id}`)
-  } catch (deleteError) {
-    traceLog(options, 'slackbotv2_webhook_retry_dedupe_clear_failed', trace, {
-      error: errorMessage(deleteError)
-    })
-  }
-  traceLog(options, 'slackbotv2_webhook_retry_marked', trace, {
-    error: errorMessage(error)
-  })
-  return true
 }
 
 function backgroundWaitUntil(promise: Promise<unknown>): void {
