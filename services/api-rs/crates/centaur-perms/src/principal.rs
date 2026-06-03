@@ -25,9 +25,29 @@ pub fn resolve_principal(principal: &str, slack_user: Option<&str>, namespace: &
     }
 }
 
+/// Resolve a `--principal` selector to the value to *look up* (read-only paths).
+///
+/// A value containing `:` is a Slack thread key and is derived to its canonical
+/// `foreign_id`; anything else — a `foreign_id` or a `prn_` OID — is returned
+/// verbatim, both of which `GET /principals/:id` accepts.
+pub fn resolve_lookup(principal: &str, slack_user: Option<&str>) -> String {
+    if principal.contains(':') {
+        derive_principal(principal, slack_user).foreign_id
+    } else {
+        principal.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookup_derives_thread_key_but_passes_oid_verbatim() {
+        assert_eq!(resolve_lookup("slack:T1:C9:ts", None), "slack-channel-t1-c9");
+        assert_eq!(resolve_lookup("prn_abc123", None), "prn_abc123");
+        assert_eq!(resolve_lookup("slack-channel-t1-c9", None), "slack-channel-t1-c9");
+    }
 
     #[test]
     fn thread_key_is_derived() {

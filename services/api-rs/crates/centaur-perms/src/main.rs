@@ -124,7 +124,8 @@ struct FilterArgs {
 
 #[derive(Args, Debug)]
 struct PrincipalSelector {
-    /// Slack thread key (`slack:T…:C…[:ts]`, derived) or raw principal `foreign_id`.
+    /// Slack thread key (`slack:T…:C…[:ts]`, derived), a principal `foreign_id`
+    /// (e.g. `slack-channel-t1-c9`), or an OID (`prn_…`).
     principal: String,
 
     /// Acting Slack user id, used only to key a DM principal from a thread key.
@@ -204,7 +205,7 @@ async fn main() -> Result<()> {
     match &cli.command {
         Command::Principals(cmd) => match cmd {
             PrincipalsCmd::List(args) => principals_list(&cli, &client, args).await,
-            PrincipalsCmd::Show(args) => principals_show(&cli, &client, args).await,
+            PrincipalsCmd::Show(args) => principals_show(&client, args).await,
             PrincipalsCmd::Grant(args) => principals_grant(&cli, &client, args).await,
             PrincipalsCmd::Revoke(args) => principals_revoke(&cli, &client, args).await,
         },
@@ -236,10 +237,18 @@ async fn principals_list(cli: &Cli, client: &IronControlClient, args: &FilterArg
     Ok(())
 }
 
-async fn principals_show(cli: &Cli, client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
-    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
-    let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
-    println!("principal: {} ({}) — {}", identity.foreign_id, principal.id, principal.name);
+async fn principals_show(client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
+    // A value with ':' is a Slack thread key (derive its foreign_id); anything
+    // else — a foreign_id or a `prn_` OID — is looked up verbatim, both of which
+    // `GET /principals/:id` accepts.
+    let lookup = principal::resolve_lookup(&args.principal, args.slack_user.as_deref());
+    let principal = get_principal_or_fail(client, &lookup).await?;
+    println!(
+        "principal: {} ({}) — {}",
+        principal.foreign_id.as_deref().unwrap_or("-"),
+        principal.id,
+        principal.name
+    );
 
     let roles = client.list_principal_roles(&principal.id).await?;
     if roles.is_empty() {
