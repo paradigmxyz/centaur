@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
 # Infra + harness auth secrets are embedded in the binary at compile time
-# (include_str! of services/iron-proxy/infra.yaml); tool secrets are
-# operator-managed in the control plane. No runtime config files needed.
+# (include_str! of the in-crate infra.yaml); tool secrets are operator-managed
+# in the control plane. No runtime config files needed.
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/centaur-api-server"]

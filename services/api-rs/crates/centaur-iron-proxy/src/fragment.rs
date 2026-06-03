@@ -3,8 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use crate::{IronProxyConfigError, ProxyFragment, Result};
 
 /// The shared infra secrets, embedded at compile time so the binary carries no
-/// runtime config-file dependency.
-const INFRA_FRAGMENT: &str = include_str!("../../../../iron-proxy/infra.yaml");
+/// runtime config-file dependency. The source lives in this crate so it's
+/// always in the build context.
+const INFRA_FRAGMENT: &str = include_str!("infra.yaml");
 
 pub fn load_fragment_str(contents: &str) -> Result<ProxyFragment> {
     serde_yaml::from_str(contents).map_err(|source| IronProxyConfigError::ParseFragment {
