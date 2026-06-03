@@ -183,30 +183,14 @@ postgres:
 }
 
 #[test]
-fn loads_builtin_fragments() {
-    let dirs = default_harness_fragment_dirs();
-    let discovered = discover_harness_fragment_files(&dirs).unwrap();
-    assert_eq!(discovered.len(), 4);
-    assert!(
-        discovered
-            .iter()
-            .any(|file| { file.engine == "codex" && file.auth_mode == "api_key" })
-    );
-    assert!(
-        discovered
-            .iter()
-            .any(|file| { file.engine == "claude-code" && file.auth_mode == "access_token" })
-    );
-
-    let codex = harness_fragment_from_dirs("codex", "api_key", &dirs)
-        .unwrap()
-        .unwrap();
+fn harness_auth_fragments_are_baked_in() {
+    let codex = harness_auth_fragment("codex", "api_key").unwrap().unwrap();
     assert_eq!(
         placeholder_env(&[codex]),
         BTreeMap::from([("OPENAI_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned())])
     );
 
-    let codex_access = harness_fragment_from_dirs("codex", "access_token", &dirs)
+    let codex_access = harness_auth_fragment("codex", "access_token")
         .unwrap()
         .unwrap();
     let (rendered, _) = render_cfg(
@@ -217,6 +201,8 @@ fn loads_builtin_fragments() {
     assert!(rendered.contains("chatgpt-account-id"));
     assert!(!rendered.contains("placeholder:"));
 
+    assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
+
     let infra = infra_fragment().unwrap();
     let placeholders = placeholder_env(&[infra]);
     for name in ["AMP_API_KEY", "GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
@@ -226,7 +212,14 @@ fn loads_builtin_fragments() {
 
 #[test]
 fn renders_token_broker_config() {
-    let mut fragments = harness_broker_fragments().unwrap();
+    let mut fragments = vec![
+        harness_auth_fragment("codex", "access_token")
+            .unwrap()
+            .unwrap(),
+        harness_auth_fragment("claude-code", "access_token")
+            .unwrap()
+            .unwrap(),
+    ];
     fragments.push(fragment(
         r#"
 broker_credentials:

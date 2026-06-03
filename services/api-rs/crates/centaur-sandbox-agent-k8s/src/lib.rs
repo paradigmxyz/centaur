@@ -269,7 +269,7 @@ impl SandboxBackend for AgentSandboxBackend {
     async fn create(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
         let id = SandboxId::new(next_sandbox_name());
         let mut spec = spec;
-        let resolved_iron_proxy = self.resolve_iron_proxy(&id, &spec)?;
+        let resolved_iron_proxy = self.resolve_iron_proxy(&id, &spec).await?;
         if let Some(resolved) = &resolved_iron_proxy {
             iron_proxy::apply_proxy_env(&mut spec, resolved);
         }

@@ -131,16 +131,25 @@ pub fn pg_foreign_id(name: &str) -> String {
     format!("pg-{}", if slug.is_empty() { "pg" } else { slug })
 }
 
-/// The managed proxy reads each listener's local config from
-/// `IRON_PROXY_PG_<FOREIGN_ID>_<SUFFIX>`, with the foreign_id normalized to
-/// env-safe form: uppercase, with `- . ~` mapped to `_`.
-pub fn pg_env_var(foreign_id: &str, suffix: &str) -> String {
-    let normalized: String = foreign_id
+/// Normalize a foreign_id to env-safe form: uppercase, with `- . ~` → `_`.
+fn normalize_foreign_id(foreign_id: &str) -> String {
+    foreign_id
         .chars()
         .map(|ch| match ch {
             '-' | '.' | '~' => '_',
             other => other.to_ascii_uppercase(),
         })
-        .collect();
-    format!("IRON_PROXY_PG_{normalized}_{suffix}")
+        .collect()
+}
+
+/// The managed proxy reads each listener's local config from
+/// `IRON_PROXY_PG_<FOREIGN_ID>_<SUFFIX>` (foreign_id normalized).
+pub fn pg_env_var(foreign_id: &str, suffix: &str) -> String {
+    format!("IRON_PROXY_PG_{}_{suffix}", normalize_foreign_id(foreign_id))
+}
+
+/// The sandbox env var that receives a listener's proxied DSN:
+/// `<NORMALIZED_FOREIGN_ID>_DSN` (e.g. `pg-analytics` → `PG_ANALYTICS_DSN`).
+pub fn pg_sandbox_env_var(foreign_id: &str) -> String {
+    format!("{}_DSN", normalize_foreign_id(foreign_id))
 }

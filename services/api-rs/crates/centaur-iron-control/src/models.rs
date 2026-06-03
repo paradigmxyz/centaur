@@ -258,6 +258,39 @@ pub struct Principal {
     pub labels: BTreeMap<String, String>,
 }
 
+/// A principal's effective config — the same secrets/postgres the principal's
+/// proxy syncs. api-rs reads it to wire a sandbox's env. Only the fields api-rs
+/// needs are captured; the proxy owns the rest (sources, rules, dsn, role).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct EffectiveConfig {
+    #[serde(default)]
+    pub secrets: Vec<EffectiveSecret>,
+    #[serde(default)]
+    pub postgres: Vec<EffectivePgDsn>,
+}
+
+/// One synced secret. Only replace secrets surface a placeholder the sandbox
+/// must send; inject/oauth/gcp secrets are proxy-side and carry no `replace`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct EffectiveSecret {
+    #[serde(default)]
+    pub replace: Option<EffectiveReplace>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct EffectiveReplace {
+    pub proxy_value: String,
+}
+
+/// One synced Postgres upstream. api-rs assigns the local port/user/password
+/// and the sandbox env var name from `foreign_id`; `database` (the upstream
+/// dbname the sandbox must connect to) is owned by the control plane.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct EffectivePgDsn {
+    pub foreign_id: String,
+    pub database: String,
+}
+
 /// A role as returned by iron-control.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Role {

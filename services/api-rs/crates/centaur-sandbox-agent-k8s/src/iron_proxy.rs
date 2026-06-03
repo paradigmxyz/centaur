@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use centaur_iron_proxy::{
-    PostgresListener, ProxyFragment, SourceKind, SourcePolicy, pg_env_var, pg_foreign_id,
-};
+use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy, pg_env_var};
 use centaur_sandbox_core::{SandboxError, SandboxId, SandboxResult, SandboxSpec};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{
@@ -40,6 +38,10 @@ const PROXY_HEALTH_PORT: u16 = 9090;
 // env vars instead. The CA paths match where the entrypoint copies the
 // mounted CA secret.
 const PROXY_TUNNEL_PORT: u16 = 8080;
+// Base port for per-sandbox Postgres listeners; api-rs assigns sequentially.
+const PG_LISTEN_PORT_BASE: u16 = 6432;
+// Postgres user the sandbox connects as (the proxy fronts the real upstream).
+const PG_CLIENT_USER: &str = "app_user";
 const PROXY_DNS_LISTEN: &str = ":53";
 const PROXY_DNS_PROXY_IP: &str = "127.0.0.1";
 const PROXY_TLS_MODE: &str = "mitm";
@@ -102,11 +104,14 @@ pub(crate) struct ResolvedIronProxy {
     proxy_port: u16,
     // iron-control principal OID this sandbox's proxy binds to.
     principal_id: String,
-    // Per-listener Postgres config. The upstream DSN + role come from the
-    // control plane (the pg_dsn secret); these are the local listen/client
-    // knobs the managed proxy reads from IRON_PROXY_PG_* env, plus the DSN the
-    // sandbox connects with.
+    // Per-listener Postgres config, derived from the principal's effective
+    // config. The upstream DSN/role/database are control-plane-owned; api-rs
+    // assigns the local listen/client knobs (IRON_PROXY_PG_* + the sandbox DSN).
     pg_listeners: Vec<ResolvedPgListener>,
+    // Replace-secret placeholders the operator granted the principal
+    // (`proxy_value` -> same), set as sandbox env so tools send the value the
+    // proxy swaps. Infra placeholders are set separately from the known set.
+    replace_placeholders: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -136,7 +141,7 @@ struct ProxySyncEnv {
 }
 
 impl AgentSandboxBackend {
-    pub(crate) fn resolve_iron_proxy(
+    pub(crate) async fn resolve_iron_proxy(
         &self,
         id: &SandboxId,
         spec: &SandboxSpec,
@@ -158,37 +163,72 @@ impl AgentSandboxBackend {
                 "iron-proxy sandbox spec is missing its iron-control principal".to_owned(),
             )
         })?;
+        let (pg_listeners, replace_placeholders) =
+            self.effective_pg_and_placeholders(&principal_id).await?;
 
         Ok(Some(ResolvedIronProxy {
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
             principal_id,
-            pg_listeners: self.resolve_pg_listeners()?,
+            pg_listeners,
+            replace_placeholders,
         }))
     }
 
-    /// Per-listener Postgres config gathered from the infra + tool fragments —
-    /// the same set registered as iron-control pg_dsn secrets. The upstream is
-    /// control-plane-owned; here we only resolve the local listen/client knobs.
-    fn resolve_pg_listeners(&self) -> SandboxResult<Vec<ResolvedPgListener>> {
-        let Some(iron_proxy) = &self.config.iron_proxy else {
-            return Ok(Vec::new());
+    /// Read the principal's effective config from iron-control and derive what
+    /// the sandbox/proxy need for operator-managed secrets: the replace-secret
+    /// placeholders (sandbox env) and the Postgres listeners. The upstream
+    /// DSN/role/database are control-plane-owned; api-rs assigns each listener's
+    /// local port (sequential, sorted by foreign_id), user, password, and env
+    /// var name.
+    async fn effective_pg_and_placeholders(
+        &self,
+        principal: &str,
+    ) -> SandboxResult<(Vec<ResolvedPgListener>, BTreeMap<String, String>)> {
+        let Some(iron_control) = self.config.iron_control.as_ref() else {
+            return Ok((Vec::new(), BTreeMap::new()));
         };
-        let infra = centaur_iron_proxy::infra_fragment()
-            .map_err(|err| SandboxError::InvalidSpec(format!("iron-proxy infra fragment: {err}")))?;
-        let mut listeners = Vec::new();
-        let mut seen = BTreeSet::new();
-        for fragment in std::iter::once(&infra).chain(iron_proxy.fragments.iter()) {
-            for listener in &fragment.postgres {
-                if let Some(resolved) = resolve_pg_listener(listener)
-                    && seen.insert(resolved.foreign_id.clone())
-                {
-                    listeners.push(resolved);
+        let effective = iron_control
+            .client
+            .effective_config(principal)
+            .await
+            .map_err(|err| {
+                SandboxError::Backend(format!("iron-control effective_config: {err}"))
+            })?;
+
+        let replace_placeholders = effective
+            .secrets
+            .iter()
+            .filter_map(|secret| secret.replace.as_ref())
+            .map(|replace| replace.proxy_value.trim().to_owned())
+            .filter(|value| !value.is_empty() && !value.contains('='))
+            .map(|value| (value.clone(), value))
+            .collect();
+
+        let mut entries: Vec<_> = effective
+            .postgres
+            .iter()
+            .filter(|pg| !pg.foreign_id.trim().is_empty() && !pg.database.trim().is_empty())
+            .collect();
+        entries.sort_by(|a, b| a.foreign_id.cmp(&b.foreign_id));
+        let listeners = entries
+            .into_iter()
+            .enumerate()
+            .map(|(idx, pg)| {
+                let port = PG_LISTEN_PORT_BASE + idx as u16;
+                ResolvedPgListener {
+                    foreign_id: pg.foreign_id.clone(),
+                    listen: format!("0.0.0.0:{port}"),
+                    port,
+                    user: PG_CLIENT_USER.to_owned(),
+                    password: format!("pg-{}", uuid::Uuid::new_v4().simple()),
+                    sandbox_env_name: centaur_iron_proxy::pg_sandbox_env_var(&pg.foreign_id),
+                    database: pg.database.clone(),
                 }
-            }
-        }
-        Ok(listeners)
+            })
+            .collect();
+        Ok((listeners, replace_placeholders))
     }
 
     /// Resolve the proxy for a resume, where only the sandbox id is known.
@@ -216,12 +256,15 @@ impl AgentSandboxBackend {
         let Some(principal_id) = principal_id else {
             return Ok(None);
         };
+        let (pg_listeners, replace_placeholders) =
+            self.effective_pg_and_placeholders(&principal_id).await?;
         Ok(Some(ResolvedIronProxy {
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
             principal_id,
-            pg_listeners: self.resolve_pg_listeners()?,
+            pg_listeners,
+            replace_placeholders,
         }))
     }
 
@@ -488,6 +531,12 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
     ) {
         set_env(spec, &name, &value);
     }
+    // Operator-granted replace placeholders: the sandbox sends the proxy_value
+    // and iron-proxy swaps in the real secret. set_missing so infra placeholders
+    // (already on the spec from the known set) win.
+    for (name, value) in &resolved.replace_placeholders {
+        set_missing_env(spec, name, value);
+    }
     // Each Postgres listener reaches the sandbox as a DSN env var pointing at
     // the proxy's per-listener port; iron-proxy fronts the real upstream.
     for listener in &resolved.pg_listeners {
@@ -497,36 +546,6 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
         );
         set_missing_env(spec, &listener.sandbox_env_name, &dsn);
     }
-}
-
-/// Resolve a fragment's Postgres listener into the local listen/client knobs
-/// the managed proxy needs. Returns `None` when the listener can't form a
-/// sandbox DSN (no name, sandbox_env, or listen address).
-fn resolve_pg_listener(listener: &PostgresListener) -> Option<ResolvedPgListener> {
-    let name = trimmed(listener.name.as_deref())?;
-    let sandbox_env = listener.sandbox_env.as_ref()?;
-    let sandbox_env_name = trimmed(sandbox_env.name.as_deref())?;
-    let database = trimmed(sandbox_env.database.as_deref())?;
-    let listen = trimmed(listener.listen.as_deref())?;
-    let port = url_port(listen)?;
-    let user = listener
-        .client
-        .as_ref()
-        .and_then(|client| trimmed(client.user.as_deref()))
-        .unwrap_or("app_user");
-    Some(ResolvedPgListener {
-        foreign_id: pg_foreign_id(name),
-        listen: listen.to_owned(),
-        port,
-        user: user.to_owned(),
-        password: format!("pg-{}", uuid::Uuid::new_v4().simple()),
-        sandbox_env_name: sandbox_env_name.to_owned(),
-        database: database.to_owned(),
-    })
-}
-
-fn trimmed(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 pub(crate) fn sandbox_ca_volume_mount_json() -> Value {

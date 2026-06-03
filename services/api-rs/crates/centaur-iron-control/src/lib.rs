@@ -17,7 +17,8 @@ mod util;
 pub use client::IronControlClient;
 pub use error::{IronControlError, Result};
 pub use models::{
-    GcpAuthSecretInput, Grant, GrantSecret, Grantee, IdentityInput, InjectConfig,
+    EffectiveConfig, EffectivePgDsn, EffectiveReplace, EffectiveSecret, GcpAuthSecretInput, Grant,
+    GrantSecret, Grantee, IdentityInput, InjectConfig,
     OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, ReplaceConfig,
     RequestRule, Role, SecretRecord, SecretSource, StaticSecretInput,
 };

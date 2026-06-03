@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use crate::error::{IronControlError, Result};
 use crate::models::{
     DataEnvelope, GcpAuthSecretInput, Grant, GrantSecret, Grantee, IdentityInput,
-    OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, Role, SecretRecord,
-    StaticSecretInput,
+    EffectiveConfig, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, Role,
+    SecretRecord, StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -60,6 +60,18 @@ impl IronControlClient {
     pub async fn upsert_role(&self, input: &IdentityInput) -> Result<Role> {
         self.write(Method::PUT, &upsert_path("roles", &input.foreign_id), input)
             .await
+    }
+
+    /// The principal's effective config — the secrets/postgres its proxy would
+    /// sync. Accepts the principal OID or foreign_id. api-rs reads this to wire
+    /// the sandbox's env for operator-managed secrets.
+    pub async fn effective_config(&self, principal: &str) -> Result<EffectiveConfig> {
+        let path = format!(
+            "{API_PREFIX}/principals/{}/effective_config",
+            urlencoding::encode(principal)
+        );
+        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+        decode_data(resp, Method::GET, &path).await
     }
 
     /// Assign a role (by OID) to a principal (by OID).
