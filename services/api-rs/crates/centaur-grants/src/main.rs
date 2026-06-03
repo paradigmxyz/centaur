@@ -79,6 +79,8 @@ enum Command {
     Revoke(GrantArgs),
     /// List the roles and effective secrets a principal resolves to.
     List(ListArgs),
+    /// List principals registered in iron-control (for discovery).
+    Principals(PrincipalsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -116,6 +118,21 @@ struct ListArgs {
     slack_user: Option<String>,
 }
 
+#[derive(Args, Debug)]
+struct PrincipalsArgs {
+    /// Only principals carrying this label. Repeatable: `--label key=value`.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    labels: Vec<String>,
+
+    /// Case-insensitive substring to match against `foreign_id` or name.
+    #[arg(long)]
+    filter: Option<String>,
+
+    /// Only show Centaur-managed principals (label `managed-by=centaur`).
+    #[arg(long)]
+    managed: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -126,6 +143,7 @@ async fn main() -> Result<()> {
         Command::Add(args) => add(&cli, &client, &policy, args).await,
         Command::Revoke(args) => revoke(&cli, &client, args).await,
         Command::List(args) => list(&cli, &client, args).await,
+        Command::Principals(args) => principals(&cli, &client, args).await,
     }
 }
 
@@ -250,9 +268,54 @@ async fn list(cli: &Cli, client: &IronControlClient, args: &ListArgs) -> Result<
     Ok(())
 }
 
+async fn principals(cli: &Cli, client: &IronControlClient, args: &PrincipalsArgs) -> Result<()> {
+    let mut labels = args.labels.iter().map(|l| parse_label(l)).collect::<Result<Vec<_>>>()?;
+    if args.managed {
+        labels.push(("managed-by".to_owned(), "centaur".to_owned()));
+    }
+
+    let mut found = client.list_principals(&cli.namespace, &labels).await?;
+    if let Some(needle) = args.filter.as_deref().map(str::to_lowercase) {
+        found.retain(|p| {
+            p.foreign_id.as_deref().unwrap_or("").to_lowercase().contains(&needle)
+                || p.name.to_lowercase().contains(&needle)
+        });
+    }
+    found.sort_by(|a, b| a.foreign_id.cmp(&b.foreign_id));
+
+    if found.is_empty() {
+        println!("no principals found in namespace {:?}", cli.namespace);
+        return Ok(());
+    }
+    let width = found
+        .iter()
+        .map(|p| p.foreign_id.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(0);
+    for p in &found {
+        println!(
+            "{:<width$}  {}  {}",
+            p.foreign_id.as_deref().unwrap_or("-"),
+            p.id,
+            p.name,
+            width = width
+        );
+    }
+    println!("({} principal(s))", found.len());
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Parse a `key=value` label filter.
+fn parse_label(raw: &str) -> Result<(String, String)> {
+    match raw.split_once('=') {
+        Some((k, v)) if !k.is_empty() => Ok((k.to_owned(), v.to_owned())),
+        _ => bail!("--label must be key=value, got {raw:?}"),
+    }
+}
 
 fn role_identity(role: &RoleSpec, namespace: &str) -> IdentityInput {
     IdentityInput {

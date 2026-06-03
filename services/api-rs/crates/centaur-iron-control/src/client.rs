@@ -62,6 +62,52 @@ impl IronControlClient {
             .await
     }
 
+    /// List every principal in ``namespace``, optionally filtered to those
+    /// carrying all of ``labels`` (JSONB containment). Pages are fetched
+    /// transparently, so the full set is returned.
+    pub async fn list_principals(
+        &self,
+        namespace: &str,
+        labels: &[(String, String)],
+    ) -> Result<Vec<Principal>> {
+        self.list_collection("principals", namespace, labels).await
+    }
+
+    /// Paginate a namespaced collection (``principals``/``roles``) to exhaustion.
+    async fn list_collection<R: DeserializeOwned>(
+        &self,
+        collection: &str,
+        namespace: &str,
+        labels: &[(String, String)],
+    ) -> Result<Vec<R>> {
+        const LIMIT: usize = 100;
+        let mut out = Vec::new();
+        let mut page = 1usize;
+        loop {
+            let mut query = format!(
+                "namespace={}&page={page}&limit={LIMIT}",
+                urlencoding::encode(namespace)
+            );
+            for (key, value) in labels {
+                query.push_str(&format!(
+                    "&labels[{}]={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
+                ));
+            }
+            let path = format!("{API_PREFIX}/{collection}?{query}");
+            let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+            let items: Vec<R> = decode_data(resp, Method::GET, &path).await?;
+            let fetched = items.len();
+            out.extend(items);
+            if fetched < LIMIT {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
     /// The principal's effective config — the secrets/postgres its proxy would
     /// sync. Accepts the principal OID or foreign_id. api-rs reads this to wire
     /// the sandbox's env for operator-managed secrets.

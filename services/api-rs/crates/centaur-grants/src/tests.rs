@@ -267,6 +267,17 @@ fn missing_tool_errors() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+// ----- label parsing --------------------------------------------------------
+
+#[test]
+fn parses_label_filters() {
+    assert_eq!(crate::parse_label("managed-by=centaur").unwrap(), ("managed-by".to_owned(), "centaur".to_owned()));
+    // empty value is allowed (matches an explicitly-empty label)
+    assert_eq!(crate::parse_label("k=").unwrap(), ("k".to_owned(), String::new()));
+    assert!(crate::parse_label("noequals").is_err());
+    assert!(crate::parse_label("=v").is_err());
+}
+
 // ----- fidelity against the real in-repo tools ------------------------------
 
 /// The repo `tools/` directory, relative to this crate. `None` when the crate
