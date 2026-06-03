@@ -404,10 +404,8 @@ async function recoverRenderObligations(
 ): Promise<void> {
   const startedAtMs = nowMs()
   await chat.initialize()
-  const indexedThreadIds = await state.getList<unknown>(RENDER_OBLIGATION_INDEX_KEY)
-  const threadIds = Array.from(
-    new Set(indexedThreadIds.filter((threadId): threadId is string => typeof threadId === 'string'))
-  )
+  const indexedThreadIds = await state.getList<string>(RENDER_OBLIGATION_INDEX_KEY)
+  const threadIds = Array.from(new Set(indexedThreadIds))
   traceLog(options, 'slackbotv2_render_recovery_scan', undefined, {
     obligation_count: threadIds.length,
     phase_ms: elapsedMs(startedAtMs)
@@ -418,12 +416,6 @@ async function recoverRenderObligations(
     const threadState = await thread.state
     const obligation = threadState?.renderObligation
     if (!obligation) continue
-    if (!canRecoverRenderObligation(obligation)) {
-      traceLog(options, 'slackbotv2_render_recovery_invalid_obligation', undefined, {
-        thread_id: threadId
-      })
-      continue
-    }
 
     const leaseToken = randomUUID()
     const leaseAcquired = await state.setIfNotExists(
@@ -548,18 +540,6 @@ function renderRecoveryLeaseKey(threadId: string): string {
   return `slackbotv2:render:lease:${threadId}`
 }
 
-function canRecoverRenderObligation(value: SlackbotV2RenderObligation): boolean {
-  const message = value.message
-  return (
-    typeof value.afterEventId === 'number' &&
-    Boolean(message) &&
-    typeof message.id === 'string' &&
-    typeof message.teamId === 'string' &&
-    typeof message.text === 'string' &&
-    typeof message.threadId === 'string'
-  )
-}
-
 async function renderExecutionStream(
   thread: Thread,
   stream: AsyncIterable<SlackbotV2RendererSource>,
@@ -592,14 +572,6 @@ async function renderRecoveredExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
 ): Promise<void> {
-  const recipient = slackStreamRecipient(message)
-  if (!recipient) {
-    throw new Error('Cannot recover Slack stream without recipient user/team context')
-  }
-  if (!thread.adapter.stream) {
-    throw new Error('Cannot recover Slack stream because adapter streaming is unavailable')
-  }
-
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
@@ -607,27 +579,18 @@ async function renderRecoveredExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   try {
-    await thread.adapter.stream(
+    await thread.adapter.stream!(
       thread.id,
       codexAppServerToChatSdkStream(stream, rendererOptions(thread, options)),
       {
-        recipientTeamId: recipient.teamId,
-        recipientUserId: recipient.userId,
+        recipientTeamId: message.teamId,
+        recipientUserId: message.author.userId,
         taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
       }
     )
   } finally {
     await setAssistantStatus(thread, '')
   }
-}
-
-function slackStreamRecipient(
-  message: SlackbotV2ApiMessage
-): { teamId: string; userId: string } | null {
-  const teamId = message.teamId
-  const userId = message.author.userId
-  if (!teamId || !userId) return null
-  return { teamId, userId }
 }
 
 async function* streamSessionAfterHandoff(

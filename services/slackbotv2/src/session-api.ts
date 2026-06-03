@@ -94,7 +94,7 @@ export async function serializeMessage(message: Message): Promise<SlackbotV2ApiM
     id: message.id,
     isMention: message.isMention === true,
     raw: message.raw,
-    teamId: slackTeamId(message.raw),
+    teamId: slackTeamId(message.raw) as string,
     text: message.text,
     threadId: message.threadId,
     timestamp: message.metadata.dateSent.toISOString()

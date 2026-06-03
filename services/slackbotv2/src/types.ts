@@ -34,7 +34,7 @@ export type SlackbotV2ApiMessage = {
   id: string
   isMention: boolean
   raw: unknown
-  teamId?: string
+  teamId: string
   text: string
   threadId: string
   timestamp: string
