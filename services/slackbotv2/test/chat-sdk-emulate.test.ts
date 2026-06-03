@@ -445,15 +445,11 @@ describe('slackbotv2', () => {
       executedMessageIds: [mention.ts],
       forwardedMessageIds: [mention.ts],
       historyForwarded: true,
-      lastEventId: 0
-    })
-    await sharedState.set(`slackbotv2:render:${key}`, {
-      afterEventId: 0,
-      createdAtMs: Date.now(),
-      message,
-      threadId: key,
-      updatedAtMs: Date.now(),
-      version: 1
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        message
+      }
     })
     await sharedState.appendToList('slackbotv2:render:index', key)
     codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered request.'))
@@ -472,14 +468,14 @@ describe('slackbotv2', () => {
       parentTs: parent.ts
     })
     expect(await threadText(parent.ts)).toContain('Recovered request.')
-    expect(await sharedState.get(`slackbotv2:render:${key}`)).toBeNull()
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )
     expect(recoveredThreadState).toEqual(
       expect.objectContaining({
         activeExecution: false,
-        lastEventId: expect.any(Number)
+        lastEventId: expect.any(Number),
+        renderObligation: null
       })
     )
     expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)

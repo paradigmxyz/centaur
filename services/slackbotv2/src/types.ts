@@ -99,15 +99,12 @@ export type SlackbotV2ThreadState = {
   forwardedMessageIds?: string[]
   historyForwarded?: boolean
   lastEventId?: number
+  renderObligation?: SlackbotV2RenderObligation | null
 }
 
 export type SlackbotV2RenderObligation = {
   afterEventId: number
-  createdAtMs: number
   message: SlackbotV2ApiMessage
-  threadId: string
-  updatedAtMs: number
-  version: 1
 }
 
 export type SlackbotV2MessageMode = 'append' | 'execute'
