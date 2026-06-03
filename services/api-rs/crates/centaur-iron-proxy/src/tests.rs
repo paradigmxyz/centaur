@@ -67,3 +67,21 @@ fn access_token_fragment_carries_no_broker_credentials_block() {
         .unwrap();
     assert!(!codex.top_level.contains_key("broker_credentials"));
 }
+
+#[test]
+fn shipped_proxy_allowlist_preserves_railway_project_tokens() {
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../../../../iron-proxy/iron-proxy.yaml")).unwrap();
+    let transforms = config["transforms"].as_sequence().unwrap();
+    let header_allowlist = transforms
+        .iter()
+        .find(|transform| transform["name"].as_str() == Some("header_allowlist"))
+        .unwrap();
+    let headers = header_allowlist["config"]["headers"]
+        .as_sequence()
+        .unwrap();
+
+    assert!(headers
+        .iter()
+        .any(|header| header.as_str() == Some("project-access-token")));
+}
