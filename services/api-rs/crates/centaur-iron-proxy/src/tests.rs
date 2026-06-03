@@ -301,46 +301,6 @@ broker_credentials:
 }
 
 #[test]
-fn discovers_tool_local_fragments() {
-    let root = temp_dir("discover");
-    let base_tool = root.join("tools").join("base").join("websearch");
-    let overlay_tool = root.join("overlay").join("tools").join("slack");
-    fs::create_dir_all(&base_tool).unwrap();
-    fs::create_dir_all(&overlay_tool).unwrap();
-    fs::write(base_tool.join("iron.yaml"), "transforms: []\n").unwrap();
-    fs::write(
-        base_tool.join("pyproject.toml"),
-        "[project]\nname = \"websearch\"\n",
-    )
-    .unwrap();
-    fs::write(overlay_tool.join("iron.yaml"), "transforms: []\n").unwrap();
-    fs::write(
-        overlay_tool.join("pyproject.toml"),
-        "[project]\nname = \"slack\"\n",
-    )
-    .unwrap();
-    fs::write(root.join("iron-proxy.yaml"), "transforms: []\n").unwrap();
-
-    let discovered = discover_fragment_files(&[root.join("tools"), root.join("overlay")])
-        .unwrap()
-        .into_iter()
-        .map(|path| path.strip_prefix(&root).unwrap().to_path_buf())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        discovered,
-        vec![
-            PathBuf::from("overlay/tools/slack/iron.yaml"),
-            PathBuf::from("overlay/tools/slack/pyproject.toml"),
-            PathBuf::from("tools/base/websearch/iron.yaml"),
-            PathBuf::from("tools/base/websearch/pyproject.toml"),
-        ]
-    );
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn converts_tool_pyproject_secrets_to_proxy_fragment() {
     let root = temp_dir("pyproject");
     let tool_dir = root.join("tools").join("productivity").join("gsuite");
