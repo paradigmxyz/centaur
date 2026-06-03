@@ -43,6 +43,7 @@ export type SlackbotV2ApiMessage = {
 export type SlackbotV2SessionMessageRole = 'user' | 'assistant' | 'system' | 'tool'
 
 export type SlackbotV2SessionMessage = {
+  client_message_id?: string
   metadata: JsonObject
   parts: JsonValue[]
   role: SlackbotV2SessionMessageRole
@@ -58,10 +59,18 @@ export type SlackbotV2CreateSessionRequest = {
 }
 
 export type SlackbotV2ExecuteSessionRequest = {
+  idempotency_key?: string
   idle_timeout_ms?: number
   input_lines: string[]
   max_duration_ms?: number
   metadata: JsonObject
+}
+
+export type SlackbotV2ExecuteSessionResponse = {
+  execution_id: string
+  ok: boolean
+  status: string
+  thread_key: string
 }
 
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
@@ -105,6 +114,7 @@ export type SlackbotV2ThreadState = {
 
 export type SlackbotV2RenderObligation = {
   afterEventId: number
+  executionId: string
   message: SlackbotV2ApiMessage
 }
 

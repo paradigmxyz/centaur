@@ -20,6 +20,12 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
 
+#[derive(Clone, Debug)]
+pub struct CreateExecutionResult {
+    pub execution: SessionExecution,
+    pub created: bool,
+}
+
 #[derive(Clone)]
 pub struct PgSessionStore {
     pool: PgPool,
@@ -113,20 +119,26 @@ impl PgSessionStore {
         for message in messages {
             let message_id = prefixed_id("msg");
             let parts = Value::Array(message.parts.clone());
-            sqlx::query(
+            let persisted_message_id = sqlx::query_scalar::<_, String>(
                 r#"
-                insert into session_messages (message_id, thread_key, role, parts, metadata)
-                values ($1, $2, $3, $4, $5)
+                insert into session_messages
+                    (message_id, thread_key, client_message_id, role, parts, metadata)
+                values ($1, $2, $3, $4, $5, $6)
+                on conflict (thread_key, client_message_id)
+                    where client_message_id is not null
+                do update set client_message_id = excluded.client_message_id
+                returning message_id
                 "#,
             )
             .bind(&message_id)
             .bind(thread_key.as_str())
+            .bind(message.client_message_id.as_deref())
             .bind(message.role.as_ref())
             .bind(parts)
             .bind(message.metadata.clone())
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
-            message_ids.push(message_id);
+            message_ids.push(persisted_message_id);
         }
 
         tx.commit().await?;
@@ -139,7 +151,7 @@ impl PgSessionStore {
     ) -> Result<Vec<SessionMessage>, SessionStoreError> {
         let rows = sqlx::query_as::<_, SessionMessageRow>(
             r#"
-            select message_id, thread_key, role, parts, metadata, created_at
+            select message_id, client_message_id, thread_key, role, parts, metadata, created_at
             from session_messages
             where thread_key = $1
             order by created_at, message_id
@@ -155,18 +167,35 @@ impl PgSessionStore {
     pub async fn create_execution(
         &self,
         thread_key: &ThreadKey,
+        idempotency_key: Option<&str>,
         metadata: Value,
-    ) -> Result<SessionExecution, SessionStoreError> {
+    ) -> Result<CreateExecutionResult, SessionStoreError> {
         let execution_id = prefixed_id("exe");
-        let row = sqlx::query_as::<_, SessionExecutionRow>(
+        let row = sqlx::query_as::<_, CreateExecutionRow>(
             r#"
-            insert into session_executions (execution_id, thread_key, status, metadata)
-            values ($1, $2, $3, $4)
-            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            insert into session_executions
+                (execution_id, thread_key, idempotency_key, status, metadata)
+            values ($1, $2, $3, $4, $5)
+            on conflict (thread_key, idempotency_key)
+                where idempotency_key is not null
+            do update set idempotency_key = excluded.idempotency_key
+            returning
+                execution_id = $1 as created,
+                execution_id,
+                idempotency_key,
+                thread_key,
+                status,
+                metadata,
+                error,
+                created_at,
+                updated_at,
+                started_at,
+                completed_at
             "#,
         )
         .bind(&execution_id)
         .bind(thread_key.as_str())
+        .bind(idempotency_key)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(metadata)
         .fetch_one(&self.pool)
@@ -179,18 +208,33 @@ impl PgSessionStore {
         &self,
         execution_id: &str,
     ) -> Result<SessionExecution, SessionStoreError> {
-        let row = sqlx::query_as::<_, SessionExecutionRow>(
+        let maybe_row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
             update session_executions
             set status = $2, started_at = coalesce(started_at, now()), updated_at = now()
-            where execution_id = $1
-            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            where execution_id = $1 and status = $3
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
         .bind(ExecutionStatus::Running.as_ref())
-        .fetch_one(&self.pool)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .fetch_optional(&self.pool)
         .await?;
+
+        let Some(row) = maybe_row else {
+            let row = sqlx::query_as::<_, SessionExecutionRow>(
+                r#"
+                select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+                from session_executions
+                where execution_id = $1
+                "#,
+            )
+            .bind(execution_id)
+            .fetch_one(&self.pool)
+            .await?;
+            return row.try_into();
+        };
 
         self.set_session_status(&row.thread_key, SessionStatus::Executing)
             .await?;
@@ -206,7 +250,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1
-            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -229,7 +273,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1
-            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -439,6 +483,7 @@ impl TryFrom<SessionRow> for Session {
 #[derive(Debug, FromRow)]
 struct SessionMessageRow {
     message_id: String,
+    client_message_id: Option<String>,
     thread_key: String,
     role: String,
     parts: Value,
@@ -456,6 +501,7 @@ impl TryFrom<SessionMessageRow> for SessionMessage {
         };
         Ok(Self {
             message_id: row.message_id,
+            client_message_id: row.client_message_id,
             thread_key: parse_persisted(row.thread_key)?,
             role: parse_persisted(row.role)?,
             parts,
@@ -468,6 +514,7 @@ impl TryFrom<SessionMessageRow> for SessionMessage {
 #[derive(Debug, FromRow)]
 struct SessionExecutionRow {
     execution_id: String,
+    idempotency_key: Option<String>,
     thread_key: String,
     status: String,
     metadata: Value,
@@ -484,6 +531,7 @@ impl TryFrom<SessionExecutionRow> for SessionExecution {
     fn try_from(row: SessionExecutionRow) -> Result<Self, Self::Error> {
         Ok(Self {
             execution_id: row.execution_id,
+            idempotency_key: row.idempotency_key,
             thread_key: parse_persisted(row.thread_key)?,
             status: parse_persisted(row.status)?,
             metadata: row.metadata,
@@ -492,6 +540,44 @@ impl TryFrom<SessionExecutionRow> for SessionExecution {
             updated_at: row.updated_at,
             started_at: row.started_at,
             completed_at: row.completed_at,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct CreateExecutionRow {
+    created: bool,
+    execution_id: String,
+    idempotency_key: Option<String>,
+    thread_key: String,
+    status: String,
+    metadata: Value,
+    error: Option<String>,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    started_at: Option<OffsetDateTime>,
+    completed_at: Option<OffsetDateTime>,
+}
+
+impl TryFrom<CreateExecutionRow> for CreateExecutionResult {
+    type Error = SessionStoreError;
+
+    fn try_from(row: CreateExecutionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            created: row.created,
+            execution: SessionExecutionRow {
+                execution_id: row.execution_id,
+                idempotency_key: row.idempotency_key,
+                thread_key: row.thread_key,
+                status: row.status,
+                metadata: row.metadata,
+                error: row.error,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                started_at: row.started_at,
+                completed_at: row.completed_at,
+            }
+            .try_into()?,
         })
     }
 }

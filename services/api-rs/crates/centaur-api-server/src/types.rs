@@ -24,6 +24,7 @@ pub struct AppendMessagesResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecuteSessionRequest {
+    pub idempotency_key: Option<String>,
     pub metadata: Option<Value>,
     #[serde(default)]
     pub input_lines: Vec<String>,

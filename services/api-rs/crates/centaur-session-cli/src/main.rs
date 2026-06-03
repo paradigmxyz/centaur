@@ -213,6 +213,7 @@ pub(crate) async fn append_user_message(
             thread_key,
             AppendMessagesRequest {
                 messages: vec![SessionMessageInput {
+                    client_message_id: None,
                     role: MessageRole::User,
                     parts: vec![json!({"type": "text", "text": text})],
                     metadata: json!({
@@ -236,6 +237,7 @@ pub(crate) async fn execute_input_lines(
         .execute_session(
             thread_key,
             ExecuteSessionRequest {
+                idempotency_key: None,
                 metadata: Some(json!({
                     "source": "centaur-session-cli",
                 })),

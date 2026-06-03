@@ -160,6 +160,8 @@ pub enum MessageRole {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessageInput {
+    #[serde(default)]
+    pub client_message_id: Option<String>,
     pub role: MessageRole,
     pub parts: Vec<Value>,
     #[serde(default = "empty_object")]
@@ -169,6 +171,7 @@ pub struct SessionMessageInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessage {
     pub message_id: String,
+    pub client_message_id: Option<String>,
     pub thread_key: ThreadKey,
     pub role: MessageRole,
     pub parts: Vec<Value>,
@@ -190,6 +193,7 @@ pub enum ExecutionStatus {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionExecution {
     pub execution_id: String,
+    pub idempotency_key: Option<String>,
     pub thread_key: ThreadKey,
     pub status: ExecutionStatus,
     pub metadata: Value,

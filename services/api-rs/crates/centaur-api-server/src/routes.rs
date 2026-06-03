@@ -86,6 +86,7 @@ async fn execute_session(
         .execute_session(
             &thread_key,
             ExecuteSessionInput {
+                idempotency_key: request.idempotency_key,
                 metadata: request.metadata,
                 input_lines: request.input_lines,
                 idle_timeout_ms: request.idle_timeout_ms,

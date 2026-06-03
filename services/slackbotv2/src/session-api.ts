@@ -9,6 +9,7 @@ import type {
   SlackbotV2AppendMessagesRequest,
   SlackbotV2CreateSessionRequest,
   SlackbotV2ExecuteSessionRequest,
+  SlackbotV2ExecuteSessionResponse,
   SlackbotV2Options,
   SlackbotV2RendererSource,
   SlackbotV2SessionMessage
@@ -49,7 +50,7 @@ export function isRetryableSessionApiError(error: unknown): boolean {
 }
 
 type ForwardSessionApiCallbacks = {
-  onExecutionStarted?(): Promise<void>
+  onExecutionStarted?(execution: SlackbotV2ExecuteSessionResponse): Promise<void>
   onMessagesAppended?(): Promise<void>
 }
 
@@ -140,11 +141,12 @@ export async function forwardToSessionApi(
   if (!input.executeMessage) return null
 
   const executeStartedAtMs = nowMs()
-  await executeSession(options, input.threadId, input.executeMessage)
+  const execution = await executeSession(options, input.threadId, input.executeMessage)
   traceLog(options, 'slackbotv2_session_execute_complete', input.trace, {
+    execution_id: execution.execution_id,
     phase_ms: elapsedMs(executeStartedAtMs)
   })
-  await callbacks.onExecutionStarted?.()
+  await callbacks.onExecutionStarted?.(execution)
   if (!input.openStream) return null
 
   return openSessionEventStream(options, input)
@@ -263,9 +265,10 @@ async function executeSession(
   options: SlackbotV2Options,
   threadId: string,
   message: SlackbotV2ApiMessage
-): Promise<void> {
+): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const body: SlackbotV2ExecuteSessionRequest = {
+    idempotency_key: message.id,
     metadata: sessionMetadata(message, { action: 'execute' }),
     input_lines: [toCodexInputLine(message, threadId)],
     ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
@@ -277,6 +280,7 @@ async function executeSession(
     body: JSON.stringify(body)
   })
   await ensureApiOk(response, 'execute session')
+  return (await response.json()) as SlackbotV2ExecuteSessionResponse
 }
 
 async function ensureApiOk(response: Response, action: string): Promise<void> {
@@ -342,6 +346,7 @@ function apiHeaders(options: SlackbotV2Options, jsonBody = true): HeadersInit {
 
 function toSessionMessage(message: SlackbotV2ApiMessage): SlackbotV2SessionMessage {
   return {
+    client_message_id: message.id,
     role: message.author.isMe ? 'assistant' : 'user',
     parts: sessionMessageParts(message),
     metadata: sessionMetadata(message)

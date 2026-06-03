@@ -176,6 +176,10 @@ describe('slackbotv2', () => {
 
     const firstAppend = codexApi.appends[0]!
     expect(firstAppend.threadKey).toBe(threadKey(parent.ts))
+    expect(firstAppend.body.messages.map(message => message.client_message_id)).toEqual([
+      parent.ts,
+      firstMention.ts
+    ])
     expect(sessionMessageTexts(firstAppend.body.messages)).toContain('The deploy context is above.')
     expect(sessionMessageTexts(firstAppend.body.messages).some(text =>
       text.includes('run with this screenshot')
@@ -196,6 +200,7 @@ describe('slackbotv2', () => {
 
     const firstExecute = codexApi.executes[0]!
     expect(firstExecute.threadKey).toBe(threadKey(parent.ts))
+    expect(firstExecute.body.idempotency_key).toBe(firstMention.ts)
     const firstInputLine = JSON.parse(firstExecute.body.input_lines[0]!) as Record<string, unknown>
     expect(firstInputLine).toEqual(
       expect.objectContaining({
@@ -207,6 +212,7 @@ describe('slackbotv2', () => {
 
     const followUpAppend = codexApi.appends[1]!
     expect(followUpAppend.threadKey).toBe(threadKey(parent.ts))
+    expect(followUpAppend.body.messages[0]?.client_message_id).toBe(followUp.ts)
     expect(sessionMessageTexts(followUpAppend.body.messages)).toEqual([
       'Additional detail for the subscribed thread.'
     ])
@@ -216,6 +222,7 @@ describe('slackbotv2', () => {
       'now execute with the latest'
     )
     const secondExecute = codexApi.executes[1]!
+    expect(secondExecute.body.idempotency_key).toBe(secondMention.ts)
     expect(JSON.stringify(JSON.parse(secondExecute.body.input_lines[0]!))).toContain(
       'now execute with the latest'
     )
@@ -448,6 +455,7 @@ describe('slackbotv2', () => {
       lastEventId: 0,
       renderObligation: {
         afterEventId: 0,
+        executionId: 'exe-recovery',
         message
       }
     })
@@ -598,7 +606,58 @@ describe('slackbotv2', () => {
     expect(retryContextTexts).toContain('History that must not be lost.')
     expect(retryContextTexts.some(text => text.includes('first try'))).toBe(true)
     expect(codexApi.eventRequests).toHaveLength(1)
-    expect(await threadText(parent.ts)).toContain('Executed request 2.')
+    expect(await threadText(parent.ts)).toContain('Executed request 1.')
+  })
+
+  it('reuses an accepted execution when Slack retries after a lost execute response', async () => {
+    codexApi.failNextExecuteAfterAccept = true
+
+    const parent = await postUserMessage('History before response loss.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> first try accepted`, parent.ts)
+    const retryableEvent = signedSlackEvent({
+      event_id: 'Ev-slackbotv2-execute-response-lost',
+      event: {
+        type: 'app_mention',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: mention.ts,
+        thread_ts: parent.ts,
+        text: `<@${BOT_USER_ID}> first try accepted`
+      }
+    })
+    const failedWaits: Promise<unknown>[] = []
+    const failedResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      retryableEvent,
+      {},
+      waitUntilContext(failedWaits)
+    )
+    expect(failedResponse.status).toBe(503)
+    await Promise.all(failedWaits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.eventRequests).toHaveLength(0)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
+
+    const retryWaits: Promise<unknown>[] = []
+    const retryResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      retryableEvent,
+      {},
+      waitUntilContext(retryWaits)
+    )
+    expect(retryResponse.status).toBe(200)
+    await Promise.all(retryWaits)
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([
+      mention.ts,
+      mention.ts
+    ])
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.eventRequests).toHaveLength(1)
+    expect(await threadText(parent.ts)).toContain('Executed request 1.')
+    expect(await threadText(parent.ts)).not.toContain('Executed request 2.')
   })
 
   it('keeps v1 external org and trigger-bot allowlist behavior', async () => {
@@ -1029,6 +1088,7 @@ type MockSessionApi = {
   executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
   failNextEvents: boolean
   failNextExecute: boolean
+  failNextExecuteAfterAccept: boolean
   holdNextExecute(): () => void
   reset(): void
   streamCount: number
@@ -1041,6 +1101,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const eventRequests: MockSessionEventRequest[] = []
   const events: MockSessionEvent[] = []
   const executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[] = []
+  const idempotentExecutions = new Map<string, string>()
   const streams = new Set<ServerResponse>()
   let autoRespond = true
   let executeHold: Promise<void> | null = null
@@ -1048,6 +1109,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   let eventId = 0
   let failNextEvents = false
   let failNextExecute = false
+  let failNextExecuteAfterAccept = false
   const port = await availablePort(4063)
   const closeStreams = () => {
     for (const stream of streams) stream.end()
@@ -1069,9 +1131,13 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       get failNextExecute() {
         return failNextExecute
       },
+      get failNextExecuteAfterAccept() {
+        return failNextExecuteAfterAccept
+      },
       get failNextEvents() {
         return failNextEvents
       },
+      idempotentExecutions,
       nextEventId() {
         eventId += 1
         return eventId
@@ -1082,6 +1148,9 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       },
       setFailNextExecute(value) {
         failNextExecute = value
+      },
+      setFailNextExecuteAfterAccept(value) {
+        failNextExecuteAfterAccept = value
       },
       streams
     }).catch(error => {
@@ -1102,6 +1171,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       eventRequests.length = 0
       events.length = 0
       executes.length = 0
+      idempotentExecutions.clear()
       executeHoldRelease?.()
       executeHold = null
       executeHoldRelease = null
@@ -1110,6 +1180,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       eventId = 0
       failNextEvents = false
       failNextExecute = false
+      failNextExecuteAfterAccept = false
     },
     url: `http://127.0.0.1:${port}`,
     closeStreams,
@@ -1124,6 +1195,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     },
     set failNextExecute(value: boolean) {
       failNextExecute = value
+    },
+    get failNextExecuteAfterAccept() {
+      return failNextExecuteAfterAccept
+    },
+    set failNextExecuteAfterAccept(value: boolean) {
+      failNextExecuteAfterAccept = value
     },
     get failNextEvents() {
       return failNextEvents
@@ -1178,12 +1255,15 @@ async function handleMockCodexRequest(
     eventRequests: MockSessionEventRequest[]
     executeHold: Promise<void> | null
     executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
+    failNextExecuteAfterAccept: boolean
     failNextEvents: boolean
     failNextExecute: boolean
+    idempotentExecutions: Map<string, string>
     nextEventId(): number
     port: number
     setFailNextEvents(value: boolean): void
     setFailNextExecute(value: boolean): void
+    setFailNextExecuteAfterAccept(value: boolean): void
     streams: Set<ServerResponse>
   }
 ): Promise<void> {
@@ -1255,8 +1335,19 @@ async function handleMockCodexRequest(
     return
   }
   if (input.executeHold) await input.executeHold
-  if (input.autoRespond) {
-    for (const line of sampleCodexOutputLines(`Executed request ${input.executes.length}.`)) {
+  const idempotencyMapKey = body.idempotency_key
+    ? `${threadKey}:${body.idempotency_key}`
+    : undefined
+  const existingExecutionId = idempotencyMapKey
+    ? input.idempotentExecutions.get(idempotencyMapKey)
+    : undefined
+  const executionId =
+    existingExecutionId ?? `exe-${input.idempotentExecutions.size + input.executes.length}`
+  if (idempotencyMapKey && !existingExecutionId) {
+    input.idempotentExecutions.set(idempotencyMapKey, executionId)
+  }
+  if (!existingExecutionId && input.autoRespond) {
+    for (const line of sampleCodexOutputLines(`Executed request ${input.idempotentExecutions.size}.`)) {
       emitMockSessionEvent({
         data: line,
         event: 'session.output.line',
@@ -1267,11 +1358,19 @@ async function handleMockCodexRequest(
       })
     }
   }
+  if (input.failNextExecuteAfterAccept) {
+    input.setFailNextExecuteAfterAccept(false)
+    await sendWebResponse(
+      res,
+      new Response('response lost after accept', { status: 503, statusText: 'Service Unavailable' })
+    )
+    return
+  }
   await sendWebResponse(
     res,
     Response.json({
       ok: true,
-      execution_id: `exe-${input.executes.length}`,
+      execution_id: executionId,
       thread_key: threadKey,
       status: 'completed'
     })

@@ -10,7 +10,8 @@ use centaur_sandbox_core::{
 };
 use centaur_sandbox_manager::SandboxManager;
 use centaur_session_core::{
-    HarnessType, Session, SessionEvent, SessionExecution, SessionMessageInput, ThreadKey,
+    ExecutionStatus, HarnessType, Session, SessionEvent, SessionExecution, SessionMessageInput,
+    ThreadKey,
 };
 use centaur_session_sqlx::{
     PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
@@ -61,6 +62,7 @@ pub enum SandboxWorkloadMode {
 
 #[derive(Debug)]
 pub struct ExecuteSessionInput {
+    pub idempotency_key: Option<String>,
     pub metadata: Option<Value>,
     pub input_lines: Vec<String>,
     pub idle_timeout_ms: Option<u64>,
@@ -127,12 +129,22 @@ impl SessionRuntime {
 
         let execution = self
             .store
-            .create_execution(thread_key, default_metadata(input.metadata))
+            .create_execution(
+                thread_key,
+                input.idempotency_key.as_deref(),
+                default_metadata(input.metadata),
+            )
             .await?;
+        if !execution.created && execution.execution.status != ExecutionStatus::Queued {
+            return Ok(execution.execution);
+        }
         let execution = self
             .store
-            .mark_execution_running(&execution.execution_id)
+            .mark_execution_running(&execution.execution.execution_id)
             .await?;
+        if execution.status != ExecutionStatus::Running {
+            return Ok(execution);
+        }
         let sandbox_id = self
             .ensure_session_sandbox(
                 thread_key,

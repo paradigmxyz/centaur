@@ -31,6 +31,7 @@ import type {
   ForwardSessionInput,
   SlackbotV2,
   SlackbotV2ApiMessage,
+  SlackbotV2ExecuteSessionResponse,
   SlackbotV2MessageMode,
   SlackbotV2Options,
   SlackbotV2RenderObligation,
@@ -48,6 +49,7 @@ export type {
   SlackbotV2AppendMessagesRequest,
   SlackbotV2CreateSessionRequest,
   SlackbotV2ExecuteSessionRequest,
+  SlackbotV2ExecuteSessionResponse,
   SlackbotV2Fetch,
   SlackbotV2Options,
   SlackbotV2SessionMessage,
@@ -269,7 +271,9 @@ async function syncThreadMessageToSession(
     })
   }
 
-  const commitExecutionStarted = async (): Promise<void> => {
+  const commitExecutionStarted = async (
+    execution: SlackbotV2ExecuteSessionResponse
+  ): Promise<void> => {
     const latest = (await thread.state) ?? {}
     const latestExecutedMessageIds = new Set(latest.executedMessageIds ?? [])
     latestExecutedMessageIds.add(serializedMessage.id)
@@ -279,6 +283,7 @@ async function syncThreadMessageToSession(
       lastEventId,
       renderObligation: {
         afterEventId: lastEventId,
+        executionId: execution.execution_id,
         message: serializedMessage
       }
     })
@@ -288,6 +293,7 @@ async function syncThreadMessageToSession(
       trace
     })
     traceLog(input.options, 'slackbotv2_forward_execution_committed', trace, {
+      execution_id: execution.execution_id,
       executed_message_count: Math.min(latestExecutedMessageIds.size, 1000)
     })
   }
