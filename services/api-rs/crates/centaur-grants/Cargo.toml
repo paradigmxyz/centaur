@@ -1,0 +1,21 @@
+[package]
+name = "centaur-grants"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "centaur-grants"
+path = "src/main.rs"
+
+[dependencies]
+centaur-iron-control.workspace = true
+centaur-iron-proxy.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+eyre.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

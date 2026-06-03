@@ -118,7 +118,22 @@ pub async fn register_role(
             labels: managed_labels(),
         })
         .await?;
+    grant_inputs_to_role(client, &role_record.id, inputs).await?;
+    Ok(role_record.id)
+}
 
+/// Upsert each secret in ``inputs`` and grant it to the role identified by
+/// ``role_oid``, returning the created grant OIDs in input order. Idempotent
+/// when the inputs carry stable ``foreign_id``s (re-running re-upserts and
+/// re-grants). This is the wire-driving half of [`register_role`], factored out
+/// so callers that build [`SecretInput`]s from a source other than an
+/// iron-proxy fragment (e.g. a tool's ``pyproject.toml``) can reuse it.
+pub async fn grant_inputs_to_role(
+    client: &IronControlClient,
+    role_oid: &str,
+    inputs: Vec<SecretInput>,
+) -> Result<Vec<String>, IronControlError> {
+    let mut grant_ids = Vec::with_capacity(inputs.len());
     for input in inputs {
         let secret = match input {
             SecretInput::Static(input) => {
@@ -134,11 +149,12 @@ pub async fn register_role(
                 GrantSecret::PgDsn(client.upsert_pg_dsn_secret(&input).await?.id)
             }
         };
-        client
-            .create_grant(&Grantee::Role(role_record.id.clone()), &secret)
+        let grant = client
+            .create_grant(&Grantee::Role(role_oid.to_owned()), &secret)
             .await?;
+        grant_ids.push(grant.id);
     }
-    Ok(role_record.id)
+    Ok(grant_ids)
 }
 
 /// Pure translation: a fragment's transforms → the secret resources to upsert.
@@ -303,10 +319,12 @@ fn source_from_secret(
     ))
 }
 
-/// Resolve a fragment placeholder into an iron-control source, honoring the
-/// deployment's [`SourcePolicy`] (env vs 1Password), mirroring how the proxy
-/// renderer resolves the same placeholder.
-fn source_from_placeholder(
+/// Resolve a placeholder into an iron-control source, honoring the deployment's
+/// [`SourcePolicy`] (env vs 1Password), mirroring how the proxy renderer
+/// resolves the same placeholder. Public so callers that build secret inputs
+/// from a source other than a fragment (e.g. a tool's ``pyproject.toml``)
+/// resolve ``secret_ref``s exactly as api-rs does.
+pub fn source_from_placeholder(
     policy: &SourcePolicy,
     placeholder: &str,
     json_key: Option<&str>,

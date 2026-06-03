@@ -4,7 +4,7 @@
 /// and trim leading/trailing dashes. Dashes are inserted lazily before the
 /// next alphanumeric, so the result never starts or ends with one. An input
 /// with no alphanumerics yields ``"x"`` so the slug is always non-empty.
-pub(crate) fn slugify(value: &str) -> String {
+pub fn slugify(value: &str) -> String {
     let mut out = String::new();
     let mut pending_dash = false;
     for ch in value.chars().flat_map(char::to_lowercase) {

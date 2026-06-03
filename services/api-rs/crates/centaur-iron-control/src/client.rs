@@ -74,6 +74,14 @@ impl IronControlClient {
         decode_data(resp, Method::GET, &path).await
     }
 
+    /// Fetch a principal by OID or ``foreign_id``. Read-only: unlike
+    /// [`Self::upsert_principal`] it never creates the principal.
+    pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
+        let path = format!("{API_PREFIX}/principals/{}", urlencoding::encode(principal));
+        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+        decode_data(resp, Method::GET, &path).await
+    }
+
     /// Assign a role (by OID) to a principal (by OID).
     pub async fn assign_role(&self, principal_id: &str, role_id: &str) -> Result<()> {
         let path = format!(
@@ -82,6 +90,27 @@ impl IronControlClient {
         );
         self.write_unit(Method::POST, &path, &json!({ "role_id": role_id }))
             .await
+    }
+
+    /// List the roles assigned to a principal (by OID or ``foreign_id``).
+    pub async fn list_principal_roles(&self, principal: &str) -> Result<Vec<Role>> {
+        let path = format!(
+            "{API_PREFIX}/principals/{}/roles",
+            urlencoding::encode(principal)
+        );
+        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+        decode_data(resp, Method::GET, &path).await
+    }
+
+    /// Unassign a role (by OID) from a principal (by OID).
+    pub async fn unassign_role(&self, principal_id: &str, role_id: &str) -> Result<()> {
+        let path = format!(
+            "{API_PREFIX}/principals/{}/roles/{}",
+            urlencoding::encode(principal_id),
+            urlencoding::encode(role_id)
+        );
+        let resp = self.send(Method::DELETE, &path, None::<&Value>).await?;
+        expect_success(resp, Method::DELETE, &path).await
     }
 
     // ----- secrets ---------------------------------------------------------
@@ -140,6 +169,14 @@ impl IronControlClient {
     pub async fn create_grant(&self, grantee: &Grantee, secret: &GrantSecret) -> Result<Grant> {
         self.write(Method::POST, &collection_path("grants"), &grant_body(grantee, secret))
             .await
+    }
+
+    /// Revoke a grant by OID. iron-control has no list-grants-by-grantee
+    /// endpoint, so callers must hold the ``grant_`` OID returned at creation.
+    pub async fn delete_grant(&self, id: &str) -> Result<()> {
+        let path = format!("{API_PREFIX}/grants/{}", urlencoding::encode(id));
+        let resp = self.send(Method::DELETE, &path, None::<&Value>).await?;
+        expect_success(resp, Method::DELETE, &path).await
     }
 
     // ----- proxies ---------------------------------------------------------

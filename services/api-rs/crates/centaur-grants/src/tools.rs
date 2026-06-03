@@ -1,0 +1,561 @@
+//! Tool discovery and ``pyproject.toml`` `[tool.centaur]` secret parsing.
+//!
+//! This is the CLI-side analogue of the API's `ToolManager._collect_tools` and
+//! `_parse_secret` (`services/api/api/tool_manager.py`). It resolves a tool by
+//! name across one or more (overlay-ordered) tool directories — later
+//! directories shadow earlier ones, exactly like the API — and parses the
+//! tool's declared secrets into a neutral [`ParsedSecret`] the translator turns
+//! into iron-control inputs. Only the secret *schema* is reimplemented here;
+//! the API's loader stays the source of truth for runtime tool loading.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use eyre::{Context, Result, bail, eyre};
+use toml::Value;
+
+/// Headers the legacy raw-string shim scans for a replace-mode placeholder,
+/// mirroring `DEFAULT_MATCH_HEADERS` in `tool_manager.py`. Typed entries name
+/// their own `match_headers` instead and never fall back to this set.
+const DEFAULT_MATCH_HEADERS: &[&str] = &[
+    "Authorization",
+    "Proxy-Authorization",
+    "Api-Key",
+    "Anthropic-Api-Key",
+    "Auth-Token",
+    "Jwt",
+    "Cookie",
+    "Apikey",
+    "AccessKey",
+    "Api-Access-Key",
+    "Api-Signature",
+    "FX-ACCESS-KEY",
+    "FX-ACCESS-SIGN",
+    "FX-ACCESS-PASSPHRASE",
+    "X-CB-ACCESS-PASSPHRASE",
+    "X-CB-ACCESS-SIGNATURE",
+    "/^x-[a-z0-9-]*(api-key|apikey|secret|token|auth|key)$/",
+];
+
+/// Per-grant `oauth_token` credential fields: `(grant, required, optional)`,
+/// mirroring `_OAUTH_GRANT_FIELDS`.
+const OAUTH_GRANT_FIELDS: &[(&str, &[&str], &[&str])] = &[
+    ("refresh_token", &["refresh_token", "client_id"], &["client_secret"]),
+    ("client_credentials", &["client_id", "client_secret"], &[]),
+    ("password", &["username", "password", "client_id"], &["client_secret"]),
+    ("jwt_bearer", &["issuer", "subject", "private_key"], &["private_key_id"]),
+];
+
+/// How an HTTP credential rides on the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretMode {
+    /// The tool writes `replacer`; iron-proxy swaps it for the resolved value.
+    Replace,
+    /// iron-proxy adds the credential itself; the tool never sees it.
+    Inject,
+}
+
+/// One credential field's source: a `secret_ref`, optionally pulling a single
+/// `json_key` out of a JSON-encoded secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldSource {
+    pub secret_ref: String,
+    pub json_key: Option<String>,
+}
+
+/// A `type = "http"` secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpSecret {
+    pub name: String,
+    pub secret_ref: String,
+    pub mode: SecretMode,
+    pub hosts: Vec<String>,
+    // replace mode
+    pub replacer: String,
+    pub match_headers: Vec<String>,
+    pub match_path: bool,
+    pub match_query: bool,
+    // inject mode
+    pub inject_header: Option<String>,
+    pub inject_formatter: Option<String>,
+    pub inject_query_param: Option<String>,
+}
+
+/// A `type = "oauth_token"` secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthTokenSecret {
+    pub name: String,
+    pub grant: String,
+    pub hosts: Vec<String>,
+    pub fields: Vec<(String, FieldSource)>,
+    pub scopes: Vec<String>,
+    pub token_endpoint: Option<String>,
+    pub token_endpoint_headers: Vec<(String, FieldSource)>,
+    pub audience: Option<String>,
+}
+
+/// A `type = "gcp_auth"` secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcpAuthSecret {
+    pub name: String,
+    pub secret_ref: String,
+    pub hosts: Vec<String>,
+    pub scopes: Vec<String>,
+}
+
+/// One parsed `[tool.centaur]` secret entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedSecret {
+    Http(HttpSecret),
+    OAuthToken(OAuthTokenSecret),
+    GcpAuth(GcpAuthSecret),
+    /// A declared secret type this CLI cannot represent as an iron-control
+    /// resource (`pg_dsn`, `hmac_sign`, `brokered_token`). Carried so the
+    /// caller can report it was skipped rather than dropping it silently.
+    Unsupported { name: String, kind: String },
+}
+
+impl ParsedSecret {
+    /// The declared secret name. Used by tests and callers that summarize a
+    /// tool's secrets.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn name(&self) -> &str {
+        match self {
+            ParsedSecret::Http(s) => &s.name,
+            ParsedSecret::OAuthToken(s) => &s.name,
+            ParsedSecret::GcpAuth(s) => &s.name,
+            ParsedSecret::Unsupported { name, .. } => name,
+        }
+    }
+}
+
+/// A resolved tool: its name, directory, and declared secrets.
+#[derive(Debug, Clone)]
+pub struct ToolManifest {
+    pub name: String,
+    pub dir: PathBuf,
+    pub secrets: Vec<ParsedSecret>,
+    pub optional_secrets: Vec<ParsedSecret>,
+}
+
+impl ToolManifest {
+    /// Required then optional secrets, in declaration order.
+    pub fn all_secrets(&self) -> impl Iterator<Item = &ParsedSecret> {
+        self.secrets.iter().chain(self.optional_secrets.iter())
+    }
+}
+
+/// Resolve the ordered tool directories from explicit `--tools-dir` values and
+/// the colon-separated `TOOL_DIRS` env var (explicit values first, then env).
+/// Later directories shadow earlier ones, matching the API's overlay order.
+pub fn resolve_tool_dirs(cli_dirs: &[PathBuf], tool_dirs_env: Option<&str>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = cli_dirs.to_vec();
+    if let Some(env) = tool_dirs_env {
+        for entry in env.split(':').map(str::trim).filter(|s| !s.is_empty()) {
+            dirs.push(PathBuf::from(entry));
+        }
+    }
+    dirs
+}
+
+/// Find a tool by directory name across `dirs`, honoring overlay shadowing
+/// (later dirs win) and one level of category subdirectories — the same scan
+/// `_collect_tools` performs. Errors if the name is not found in any dir.
+pub fn find_tool(dirs: &[PathBuf], name: &str) -> Result<ToolManifest> {
+    if dirs.is_empty() {
+        bail!("no tool directories configured; pass --tools-dir or set TOOL_DIRS");
+    }
+    let mut matched: Option<PathBuf> = None;
+    for base in dirs {
+        for candidate in collect_candidate_dirs(base) {
+            if candidate.file_name().and_then(|n| n.to_str()) == Some(name)
+                && candidate.join("pyproject.toml").is_file()
+            {
+                matched = Some(candidate);
+            }
+        }
+    }
+    let tool_dir = matched.ok_or_else(|| {
+        eyre!(
+            "tool {name:?} not found under any of: {}",
+            dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    parse_manifest(&tool_dir)
+}
+
+/// Candidate tool directories under `base`: direct children carrying a
+/// `pyproject.toml`, plus the children of category folders (one level deep).
+fn collect_candidate_dirs(base: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return candidates;
+    };
+    let mut children: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir() && !hidden(p))
+        .collect();
+    children.sort();
+    for child in children {
+        if child.join("pyproject.toml").is_file() {
+            candidates.push(child);
+        } else if let Ok(sub_entries) = std::fs::read_dir(&child) {
+            let mut subs: Vec<PathBuf> = sub_entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir() && !hidden(p))
+                .collect();
+            subs.sort();
+            candidates.extend(subs);
+        }
+    }
+    candidates
+}
+
+fn hidden(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.') || n.starts_with('_'))
+}
+
+/// Parse a tool directory's `pyproject.toml` `[tool.centaur]` block.
+pub fn parse_manifest(tool_dir: &Path) -> Result<ToolManifest> {
+    let name = tool_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| eyre!("tool dir {} has no name", tool_dir.display()))?
+        .to_owned();
+    let path = tool_dir.join("pyproject.toml");
+    let text = std::fs::read_to_string(&path)
+        .wrap_err_with(|| format!("reading {}", path.display()))?;
+    let doc: Value = text
+        .parse::<Value>()
+        .wrap_err_with(|| format!("parsing {}", path.display()))?;
+    let centaur = doc
+        .get("tool")
+        .and_then(|t| t.get("centaur"))
+        .and_then(Value::as_table);
+    let Some(centaur) = centaur else {
+        return Ok(ToolManifest { name, dir: tool_dir.to_owned(), secrets: vec![], optional_secrets: vec![] });
+    };
+    let default_hosts = str_array(centaur.get("hosts")).unwrap_or_default();
+    let secrets = parse_secret_list(centaur.get("secrets"), &default_hosts)
+        .wrap_err_with(|| format!("in {} [tool.centaur].secrets", path.display()))?;
+    let optional_secrets = parse_secret_list(centaur.get("optional_secrets"), &default_hosts)
+        .wrap_err_with(|| format!("in {} [tool.centaur].optional_secrets", path.display()))?;
+    Ok(ToolManifest { name, dir: tool_dir.to_owned(), secrets, optional_secrets })
+}
+
+fn parse_secret_list(entries: Option<&Value>, default_hosts: &[String]) -> Result<Vec<ParsedSecret>> {
+    let Some(entries) = entries else { return Ok(vec![]) };
+    let arr = entries
+        .as_array()
+        .ok_or_else(|| eyre!("'secrets'/'optional_secrets' must be an array"))?;
+    arr.iter().map(|e| parse_secret(e, default_hosts)).collect()
+}
+
+/// Port of `_parse_secret`: normalize one entry into a [`ParsedSecret`].
+pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSecret> {
+    // Legacy raw-string shim: a bare name is a replace-mode HTTP secret that
+    // scans the default header set and inherits the tool-level hosts.
+    if let Some(s) = entry.as_str() {
+        if s.is_empty() {
+            bail!("secret entry string must be non-empty");
+        }
+        return Ok(ParsedSecret::Http(HttpSecret {
+            name: s.to_owned(),
+            secret_ref: s.to_owned(),
+            mode: SecretMode::Replace,
+            hosts: default_hosts.to_vec(),
+            replacer: s.to_owned(),
+            match_headers: DEFAULT_MATCH_HEADERS.iter().map(|h| (*h).to_owned()).collect(),
+            match_path: false,
+            match_query: false,
+            inject_header: None,
+            inject_formatter: None,
+            inject_query_param: None,
+        }));
+    }
+    let table = entry
+        .as_table()
+        .ok_or_else(|| eyre!("secret entry must be a string or table"))?;
+    let name = req_str(table, "name").wrap_err("secret entry missing 'name'")?;
+    // `header` is a deprecated alias for `http`.
+    let secret_type = table.get("type").and_then(Value::as_str).unwrap_or("http");
+    let secret_ref = match table.get("secret_ref") {
+        Some(v) => v.as_str().filter(|s| !s.is_empty()).ok_or_else(|| {
+            eyre!("secret entry {name:?} has invalid 'secret_ref'")
+        })?.to_owned(),
+        None => name.clone(),
+    };
+    match secret_type {
+        "http" | "header" => {
+            Ok(ParsedSecret::Http(parse_http(table, &name, &secret_ref, default_hosts)?))
+        }
+        "oauth_token" => Ok(ParsedSecret::OAuthToken(parse_oauth(table, &name)?)),
+        "gcp_auth" => Ok(ParsedSecret::GcpAuth(parse_gcp(table, &name, &secret_ref)?)),
+        "pg_dsn" | "hmac_sign" | "brokered_token" => {
+            Ok(ParsedSecret::Unsupported { name, kind: secret_type.to_owned() })
+        }
+        other => bail!("unknown secret type {other:?} for secret {name:?}"),
+    }
+}
+
+fn parse_http(
+    table: &toml::Table,
+    name: &str,
+    secret_ref: &str,
+    default_hosts: &[String],
+) -> Result<HttpSecret> {
+    let mode = match table.get("mode").and_then(Value::as_str).unwrap_or("replace") {
+        "replace" => SecretMode::Replace,
+        "inject" => SecretMode::Inject,
+        other => bail!("HTTP secret {name:?} has unknown mode {other:?} (expected 'replace' or 'inject')"),
+    };
+    let hosts = str_array(table.get("hosts")).unwrap_or_else(|| default_hosts.to_vec());
+
+    match mode {
+        SecretMode::Replace => {
+            reject_keys(table, name, "replace", &["inject_header", "inject_formatter", "inject_query_param"])?;
+            let match_headers = str_array(table.get("match_headers")).unwrap_or_default();
+            let match_path = bool_field(table, name, "match_path")?;
+            let match_query = bool_field(table, name, "match_query")?;
+            if match_headers.is_empty() && !match_path && !match_query {
+                bail!(
+                    "replace-mode HTTP secret {name:?} must declare where iron-proxy \
+                     scans for it: 'match_headers', 'match_path', and/or 'match_query'"
+                );
+            }
+            let replacer = table
+                .get("replacer")
+                .map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+                .unwrap_or_else(|| Some(name.to_owned()))
+                .ok_or_else(|| eyre!("HTTP secret {name:?} has invalid 'replacer'"))?;
+            Ok(HttpSecret {
+                name: name.to_owned(),
+                secret_ref: secret_ref.to_owned(),
+                mode,
+                hosts,
+                replacer,
+                match_headers,
+                match_path,
+                match_query,
+                inject_header: None,
+                inject_formatter: None,
+                inject_query_param: None,
+            })
+        }
+        SecretMode::Inject => {
+            reject_keys(table, name, "inject", &["replacer", "match_headers", "match_path", "match_query"])?;
+            let inject_header = opt_str(table, "inject_header");
+            let inject_query_param = opt_str(table, "inject_query_param");
+            let inject_formatter = opt_str(table, "inject_formatter");
+            if inject_header.is_some() == inject_query_param.is_some() {
+                bail!(
+                    "inject-mode HTTP secret {name:?} must declare exactly one of \
+                     'inject_header' or 'inject_query_param'"
+                );
+            }
+            if inject_formatter.is_some() && inject_header.is_none() {
+                bail!(
+                    "inject-mode HTTP secret {name:?} sets 'inject_formatter', which \
+                     only applies alongside 'inject_header'"
+                );
+            }
+            Ok(HttpSecret {
+                name: name.to_owned(),
+                secret_ref: secret_ref.to_owned(),
+                mode,
+                hosts,
+                replacer: String::new(),
+                match_headers: vec![],
+                match_path: false,
+                match_query: false,
+                inject_header,
+                inject_formatter,
+                inject_query_param,
+            })
+        }
+    }
+}
+
+fn parse_oauth(table: &toml::Table, name: &str) -> Result<OAuthTokenSecret> {
+    let grant = req_str(table, "grant").wrap_err_with(|| format!("oauth_token entry {name:?}"))?;
+    let (_, required, optional) = OAUTH_GRANT_FIELDS
+        .iter()
+        .find(|(g, _, _)| *g == grant)
+        .ok_or_else(|| {
+            let grants: Vec<&str> = OAUTH_GRANT_FIELDS.iter().map(|(g, _, _)| *g).collect();
+            eyre!("oauth_token entry {name:?} 'grant' must be one of {grants:?}, got {grant:?}")
+        })?;
+
+    let hosts = non_empty_str_array(table.get("hosts"))
+        .ok_or_else(|| eyre!("oauth_token entry {name:?} 'hosts' must be a non-empty array of non-empty strings"))?;
+    let scopes = str_array(table.get("scopes")).unwrap_or_default();
+    let token_endpoint = match table.get("token_endpoint") {
+        Some(v) => Some(
+            v.as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| eyre!("oauth_token entry {name:?} 'token_endpoint' must be a non-empty string"))?
+                .to_owned(),
+        ),
+        None => None,
+    };
+
+    let fields = parse_field_map(table.get("fields"), name, "fields")?;
+    if fields.is_empty() {
+        bail!("oauth_token entry {name:?} 'fields' must be a non-empty table");
+    }
+    for (field, _) in &fields {
+        if !required.contains(&field.as_str()) && !optional.contains(&field.as_str()) {
+            bail!("oauth_token entry {name:?} field {field:?} is not valid for grant {grant:?}");
+        }
+    }
+    for req in *required {
+        if !fields.iter().any(|(f, _)| f == req) {
+            bail!("oauth_token entry {name:?} grant {grant:?} requires field {req:?}");
+        }
+    }
+
+    let token_endpoint_headers = match table.get("token_endpoint_headers") {
+        Some(v) => parse_field_map(Some(v), name, "token_endpoint_headers")?,
+        None => vec![],
+    };
+
+    let audience = opt_str(table, "audience");
+    if grant == "jwt_bearer" {
+        if audience.is_none() {
+            bail!("oauth_token entry {name:?} grant 'jwt_bearer' requires a non-empty 'audience'");
+        }
+    } else if audience.is_some() {
+        bail!("oauth_token entry {name:?} 'audience' is only valid for grant 'jwt_bearer'");
+    }
+
+    Ok(OAuthTokenSecret {
+        name: name.to_owned(),
+        grant,
+        hosts,
+        fields,
+        scopes,
+        token_endpoint,
+        token_endpoint_headers,
+        audience,
+    })
+}
+
+fn parse_gcp(table: &toml::Table, name: &str, secret_ref: &str) -> Result<GcpAuthSecret> {
+    let hosts = non_empty_str_array(table.get("hosts"))
+        .ok_or_else(|| eyre!("gcp_auth entry {name:?} 'hosts' must be a non-empty array of non-empty strings"))?;
+    let scopes = str_array(table.get("scopes")).unwrap_or_default();
+    Ok(GcpAuthSecret {
+        name: name.to_owned(),
+        secret_ref: secret_ref.to_owned(),
+        hosts,
+        scopes,
+    })
+}
+
+/// Parse a `{field = secret_ref | {secret_ref, json_key}}` table into ordered
+/// `(field, FieldSource)` pairs. Mirrors `_parse_oauth_field_source`.
+fn parse_field_map(value: Option<&Value>, secret: &str, what: &str) -> Result<Vec<(String, FieldSource)>> {
+    let Some(value) = value else { return Ok(vec![]) };
+    let table = value
+        .as_table()
+        .ok_or_else(|| eyre!("oauth_token entry {secret:?} {what:?} must be a table"))?;
+    let mut out = Vec::with_capacity(table.len());
+    for (field, raw) in table {
+        let src = if let Some(s) = raw.as_str() {
+            if s.is_empty() {
+                bail!("oauth_token entry {secret:?} field {field:?} 'secret_ref' must be non-empty");
+            }
+            FieldSource { secret_ref: s.to_owned(), json_key: None }
+        } else if let Some(t) = raw.as_table() {
+            let ref_ = req_str(t, "secret_ref")
+                .wrap_err_with(|| format!("oauth_token entry {secret:?} field {field:?}"))?;
+            let json_key = match t.get("json_key") {
+                Some(v) => Some(
+                    v.as_str()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| eyre!("oauth_token entry {secret:?} field {field:?} 'json_key' must be a non-empty string"))?
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            FieldSource { secret_ref: ref_, json_key }
+        } else {
+            bail!("oauth_token entry {secret:?} field {field:?} must be a string or table");
+        };
+        out.push((field.clone(), src));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// small toml helpers
+// ---------------------------------------------------------------------------
+
+fn req_str(table: &toml::Table, key: &str) -> Result<String> {
+    table
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| eyre!("missing non-empty {key:?}"))
+}
+
+fn opt_str(table: &toml::Table, key: &str) -> Option<String> {
+    table.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+fn bool_field(table: &toml::Table, name: &str, key: &str) -> Result<bool> {
+    match table.get(key) {
+        None => Ok(false),
+        Some(Value::Boolean(b)) => Ok(*b),
+        Some(_) => bail!("HTTP secret {name:?} has invalid {key:?} (expected a boolean)"),
+    }
+}
+
+/// An array of strings, or `None` if the key is absent. Non-string members are
+/// dropped (the API logs and skips them too); an empty/missing key yields `None`.
+fn str_array(value: Option<&Value>) -> Option<Vec<String>> {
+    let arr = value?.as_array()?;
+    Some(arr.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+}
+
+/// A non-empty array of non-empty strings, or `None` if absent/invalid.
+fn non_empty_str_array(value: Option<&Value>) -> Option<Vec<String>> {
+    let arr = value?.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let s = item.as_str().filter(|s| !s.is_empty())?;
+        out.push(s.to_owned());
+    }
+    Some(out)
+}
+
+fn reject_keys(table: &toml::Table, name: &str, mode: &str, keys: &[&str]) -> Result<()> {
+    for key in keys {
+        if table.contains_key(*key) {
+            bail!("{mode}-mode HTTP secret {name:?} must not declare {key:?}");
+        }
+    }
+    Ok(())
+}
+
+/// Deduplicate a foreign id against the set of ids already used in this batch,
+/// suffixing `-2`, `-3`, … on collision. Mirrors `registry.rs::unique_foreign_id`.
+pub fn unique_foreign_id(candidate: String, used: &mut BTreeSet<String>) -> String {
+    if used.insert(candidate.clone()) {
+        return candidate;
+    }
+    let mut counter = 2;
+    loop {
+        let next = format!("{candidate}-{counter}");
+        if used.insert(next.clone()) {
+            return next;
+        }
+        counter += 1;
+    }
+}
