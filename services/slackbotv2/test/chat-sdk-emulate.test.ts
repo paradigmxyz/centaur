@@ -866,6 +866,7 @@ function apiMessageFromSlackEvent(input: {
       type: input.isMention ? 'app_mention' : 'message',
       user: USER_ID
     },
+    teamId: TEAM_ID,
     text: input.text,
     threadId: input.threadId,
     timestamp: new Date().toISOString()

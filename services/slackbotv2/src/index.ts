@@ -3,12 +3,10 @@ import { randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import {
   Chat,
-  Message as ChatMessage,
   StreamingPlan,
-  ThreadImpl,
-  parseMarkdown,
   type Adapter,
   type Logger,
+  type Message as ChatMessage,
   type StateAdapter,
   type Thread
 } from 'chat'
@@ -464,7 +462,7 @@ async function recoverRenderObligation(
     startedAtMs: nowMs(),
     threadId
   }
-  const thread = recoveryThread(chat, state, options, obligation.message)
+  const thread = chat.thread(threadId)
   const threadState = (await thread.state) ?? {}
   let lastEventId = Math.max(threadState.lastEventId ?? 0, obligation.afterEventId)
   const input: ForwardSessionInput = {
@@ -495,7 +493,7 @@ async function recoverRenderObligation(
       activeExecution: true,
       lastEventId
     })
-    await renderExecutionStream(
+    await renderRecoveredExecutionStream(
       thread,
       streamOpenedSession(input, openedStream),
       obligation.message,
@@ -538,42 +536,6 @@ async function indexRenderObligation(
   traceLog(input.options, 'slackbotv2_render_obligation_indexed', input.trace)
 }
 
-function recoveryThread(
-  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
-  state: StateAdapter,
-  options: SlackbotV2Options,
-  message: SlackbotV2ApiMessage
-): Thread<SlackbotV2ThreadState> {
-  const baseThread = chat.thread(message.threadId)
-  const adapter = baseThread.adapter
-  const currentMessage = new ChatMessage({
-    attachments: [],
-    author: message.author,
-    formatted: parseMarkdown(message.text),
-    id: message.id,
-    isMention: message.isMention,
-    metadata: {
-      dateSent: validDateOrNow(message.timestamp),
-      edited: false
-    },
-    raw: message.raw,
-    text: message.text,
-    threadId: message.threadId
-  })
-  return new ThreadImpl<SlackbotV2ThreadState>({
-    adapter,
-    channelId: adapter.channelIdFromThreadId(message.threadId),
-    channelVisibility: adapter.getChannelVisibility?.(message.threadId) ?? 'unknown',
-    currentMessage,
-    id: message.threadId,
-    initialMessage: currentMessage,
-    isDM: adapter.isDM?.(message.threadId) ?? false,
-    isSubscribedContext: true,
-    logger: options.logger ?? noopLogger,
-    stateAdapter: state
-  })
-}
-
 async function* streamOpenedSession(
   input: Pick<ForwardSessionInput, 'threadId' | 'trace'>,
   stream: AsyncIterable<SlackbotV2RendererSource>
@@ -592,14 +554,10 @@ function canRecoverRenderObligation(value: SlackbotV2RenderObligation): boolean 
     typeof value.afterEventId === 'number' &&
     Boolean(message) &&
     typeof message.id === 'string' &&
+    typeof message.teamId === 'string' &&
     typeof message.text === 'string' &&
     typeof message.threadId === 'string'
   )
-}
-
-function validDateOrNow(value: string): Date {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? new Date() : date
 }
 
 async function renderExecutionStream(
@@ -625,6 +583,51 @@ async function renderExecutionStream(
   } finally {
     await setAssistantStatus(thread, '')
   }
+}
+
+async function renderRecoveredExecutionStream(
+  thread: Thread,
+  stream: AsyncIterable<SlackbotV2RendererSource>,
+  message: SlackbotV2ApiMessage,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  const recipient = slackStreamRecipient(message)
+  if (!recipient) {
+    throw new Error('Cannot recover Slack stream without recipient user/team context')
+  }
+  if (!thread.adapter.stream) {
+    throw new Error('Cannot recover Slack stream because adapter streaming is unavailable')
+  }
+
+  const titleStartedAtMs = nowMs()
+  await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
+  await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
+  traceLog(options, 'slackbotv2_render_slack_metadata_set', trace, {
+    phase_ms: elapsedMs(titleStartedAtMs)
+  })
+  try {
+    await thread.adapter.stream(
+      thread.id,
+      codexAppServerToChatSdkStream(stream, rendererOptions(thread, options)),
+      {
+        recipientTeamId: recipient.teamId,
+        recipientUserId: recipient.userId,
+        taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
+      }
+    )
+  } finally {
+    await setAssistantStatus(thread, '')
+  }
+}
+
+function slackStreamRecipient(
+  message: SlackbotV2ApiMessage
+): { teamId: string; userId: string } | null {
+  const teamId = message.teamId
+  const userId = message.author.userId
+  if (!teamId || !userId) return null
+  return { teamId, userId }
 }
 
 async function* streamSessionAfterHandoff(

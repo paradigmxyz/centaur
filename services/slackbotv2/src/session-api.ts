@@ -94,10 +94,24 @@ export async function serializeMessage(message: Message): Promise<SlackbotV2ApiM
     id: message.id,
     isMention: message.isMention === true,
     raw: message.raw,
+    teamId: slackTeamId(message.raw),
     text: message.text,
     threadId: message.threadId,
     timestamp: message.metadata.dateSent.toISOString()
   }
+}
+
+function slackTeamId(raw: unknown): string | undefined {
+  if (!isJsonObject(raw)) return undefined
+  const team = raw.team
+  if (typeof raw.team_id === 'string' && raw.team_id) return raw.team_id
+  if (typeof team === 'string' && team) return team
+  if (isJsonObject(team) && typeof team.id === 'string' && team.id) return team.id
+  const user = raw.user
+  if (isJsonObject(user) && typeof user.team_id === 'string' && user.team_id) {
+    return user.team_id
+  }
+  return undefined
 }
 
 export async function forwardToSessionApi(
