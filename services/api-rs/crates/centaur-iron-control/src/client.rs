@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::error::{IronControlError, Result};
 use crate::models::{
-    DataEnvelope, GcpAuthSecretInput, Grant, GrantSecret, Grantee, IdentityInput,
+    DataEnvelope, GcpAuthSecretInput, Grant, GrantSecret, Grantee, HmacSecretInput, IdentityInput,
     EffectiveConfig, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, Role,
     SecretRecord, StaticSecretInput,
 };
@@ -229,10 +229,20 @@ impl IronControlClient {
         .await
     }
 
+    /// Upsert an HMAC signing secret by ``foreign_id``.
+    pub async fn upsert_hmac_secret(&self, input: &HmacSecretInput) -> Result<SecretRecord> {
+        self.write(
+            Method::PUT,
+            &upsert_path("hmac_secrets", &input.foreign_id),
+            input,
+        )
+        .await
+    }
+
     /// Fetch a secret's identity (id, ``foreign_id``, ``name``) by OID. The
     /// ``collection`` is the resource path segment for the secret's type
     /// (``static_secrets``, ``oauth_token_secrets``, ``gcp_auth_secrets``,
-    /// ``pg_dsn_secrets``) — see [`Grant::secret_target`].
+    /// ``pg_dsn_secrets``, ``hmac_secrets``) — see [`Grant::secret_target`].
     pub async fn get_secret(&self, collection: &str, oid: &str) -> Result<SecretRecord> {
         let path = format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(oid));
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
@@ -360,6 +370,7 @@ fn grant_body(grantee: &Grantee, secret: &GrantSecret) -> Value {
         GrantSecret::GcpAuth(id) => ("gcp_auth_secret_id", id),
         GrantSecret::OAuthToken(id) => ("oauth_token_secret_id", id),
         GrantSecret::PgDsn(id) => ("pg_dsn_secret_id", id),
+        GrantSecret::Hmac(id) => ("hmac_secret_id", id),
     };
     map.insert(key.to_owned(), json!(id));
     Value::Object(map)

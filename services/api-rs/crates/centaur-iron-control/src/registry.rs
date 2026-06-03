@@ -23,8 +23,9 @@ use serde_yaml::Value as YamlValue;
 use crate::client::IronControlClient;
 use crate::error::IronControlError;
 use crate::models::{
-    GcpAuthSecretInput, GrantSecret, Grantee, IdentityInput, InjectConfig, OAuthTokenSecretInput,
-    PgDsnSecretInput, ReplaceConfig, RequestRule, SecretSource, StaticSecretInput,
+    GcpAuthSecretInput, GrantSecret, Grantee, HmacSecretInput, IdentityInput, InjectConfig,
+    OAuthTokenSecretInput, PgDsnSecretInput, ReplaceConfig, RequestRule, SecretSource,
+    StaticSecretInput,
 };
 use crate::util::slugify;
 
@@ -71,6 +72,7 @@ pub enum SecretInput {
     OAuthToken(OAuthTokenSecretInput),
     GcpAuth(GcpAuthSecretInput),
     PgDsn(PgDsnSecretInput),
+    Hmac(HmacSecretInput),
 }
 
 /// A fragment transform iron-control cannot represent, or a malformed entry.
@@ -163,6 +165,9 @@ pub async fn grant_inputs_to_role(
             SecretInput::PgDsn(input) => {
                 GrantSecret::PgDsn(client.upsert_pg_dsn_secret(&input).await?.id)
             }
+            SecretInput::Hmac(input) => {
+                GrantSecret::Hmac(client.upsert_hmac_secret(&input).await?.id)
+            }
         };
         let grant = client
             .create_grant(&Grantee::Role(role_oid.to_owned()), &secret)
@@ -176,9 +181,12 @@ pub async fn grant_inputs_to_role(
 ///
 /// Only the transform shapes Centaur uses are translated: the ``secrets``
 /// transform (replace and inject, including ``token_broker`` sources),
-/// ``oauth_token``, and ``gcp_auth``. ``hmac_sign`` and Postgres listeners
-/// have no iron-control representation and error out (no tool uses them).
-/// Postgres listeners translate to ``pg_dsn`` secrets (one per listener).
+/// ``oauth_token``, and ``gcp_auth``. Postgres listeners translate to
+/// ``pg_dsn`` secrets (one per listener). ``hmac_sign`` errors out here: it is
+/// represented in iron-control (see [`HmacSecretInput`]), but only the infra
+/// and harness fragments flow through this fragment translator and neither
+/// signs requests — tool ``hmac_sign`` secrets are operator-managed via the
+/// ``centaur-perms`` CLI, which parses ``pyproject.toml`` directly.
 pub fn secret_inputs_from_fragment(
     namespace: &str,
     role_foreign_id: &str,
@@ -220,8 +228,11 @@ pub fn secret_inputs_from_fragment(
                 inputs.push(SecretInput::GcpAuth(input));
             }
             "hmac_sign" => {
+                // Representable in iron-control, but never reached: only infra/
+                // harness fragments come through here and neither signs requests.
+                // Tool hmac_sign secrets are registered via the centaur-perms CLI.
                 return Err(TranslateError::Unsupported {
-                    what: "hmac_sign request signing".to_owned(),
+                    what: "hmac_sign request signing in an infra/harness fragment".to_owned(),
                 });
             }
             // Base-config transforms (allowlist, header_allowlist) and any

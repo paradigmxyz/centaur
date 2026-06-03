@@ -107,17 +107,71 @@ fn oauth_missing_required_field_errors() {
 
 #[test]
 fn unsupported_types_are_marked_not_errored() {
-    for kind in ["hmac_sign", "brokered_token"] {
-        let src = format!(r#"{{type = "{kind}", name = "X", hosts = ["x.com"], database = "db"}}"#);
-        let parsed = tools::parse_secret(&entry(&src), &[]).unwrap();
-        match parsed {
-            ParsedSecret::Unsupported { name, kind: k } => {
-                assert_eq!(name, "X");
-                assert_eq!(k, kind);
-            }
-            other => panic!("expected unsupported, got {other:?}"),
+    let parsed = tools::parse_secret(
+        &entry(r#"{type = "brokered_token", name = "X", hosts = ["x.com"]}"#),
+        &[],
+    )
+    .unwrap();
+    match parsed {
+        ParsedSecret::Unsupported { name, kind } => {
+            assert_eq!(name, "X");
+            assert_eq!(kind, "brokered_token");
         }
+        other => panic!("expected unsupported, got {other:?}"),
     }
+}
+
+const FALCONX_HMAC: &str = r#"{ type = "hmac_sign", name = "FALCONX_P1", hosts = ["api.falconx.io"], algorithm = "sha256", key_encoding = "base64", output_encoding = "base64", timestamp_format = "unix_seconds", message = "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}", credentials = { key = "FALCONX_P1_API_KEY", secret = "FALCONX_P1_SECRET_KEY", passphrase = "FALCONX_P1_PASSPHRASE" }, headers = [ { name = "FX-ACCESS-KEY", value = "{{.Credentials.key}}" }, { name = "FX-ACCESS-SIGN", value = "{{.Signature}}" }, { name = "FX-ACCESS-TIMESTAMP", value = "{{.Timestamp}}" }, { name = "FX-ACCESS-PASSPHRASE", value = "{{.Credentials.passphrase}}" } ] }"#;
+
+#[test]
+fn parses_hmac_sign_secret() {
+    let parsed = tools::parse_secret(&entry(FALCONX_HMAC), &[]).unwrap();
+    let ParsedSecret::Hmac(hmac) = parsed else { panic!("expected hmac") };
+    assert_eq!(hmac.name, "FALCONX_P1");
+    assert_eq!(hmac.hosts, vec!["api.falconx.io".to_owned()]);
+    assert_eq!(hmac.algorithm, "sha256");
+    assert_eq!(hmac.key_encoding, "base64");
+    assert_eq!(hmac.output_encoding, "base64");
+    assert_eq!(hmac.timestamp_format, "unix_seconds");
+    assert_eq!(hmac.message, "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}");
+    assert!(!hmac.allow_chunked_body);
+    // The signing key plus the two user-named credentials.
+    let secret = hmac.credentials.iter().find(|(f, _)| f == "secret").unwrap();
+    assert_eq!(secret.1.secret_ref, "FALCONX_P1_SECRET_KEY");
+    assert_eq!(hmac.credentials.len(), 3);
+    assert_eq!(hmac.headers.len(), 4);
+    assert_eq!(hmac.headers[0].name, "FX-ACCESS-KEY");
+    assert_eq!(hmac.headers[0].value, "{{.Credentials.key}}");
+}
+
+#[test]
+fn hmac_requires_secret_credential() {
+    let err = tools::parse_secret(
+        &entry(r#"{ type = "hmac_sign", name = "X", hosts = ["x.com"], algorithm = "sha256", key_encoding = "hex", output_encoding = "hex", timestamp_format = "unix_seconds", message = "{{.Body}}", credentials = { key = "K" }, headers = [ { name = "Sig", value = "{{.Signature}}" } ] }"#),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("must include \"secret\""), "{err}");
+}
+
+#[test]
+fn hmac_rejects_unknown_algorithm() {
+    let err = tools::parse_secret(
+        &entry(r#"{ type = "hmac_sign", name = "X", hosts = ["x.com"], algorithm = "md5", key_encoding = "hex", output_encoding = "hex", timestamp_format = "unix_seconds", message = "{{.Body}}", credentials = { secret = "S" }, headers = [ { name = "Sig", value = "{{.Signature}}" } ] }"#),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains(r#""algorithm" must be one of"#), "{err}");
+}
+
+#[test]
+fn hmac_requires_hosts() {
+    let err = tools::parse_secret(
+        &entry(r#"{ type = "hmac_sign", name = "X", algorithm = "sha256", key_encoding = "hex", output_encoding = "hex", timestamp_format = "unix_seconds", message = "{{.Body}}", credentials = { secret = "S" }, headers = [ { name = "Sig", value = "{{.Signature}}" } ] }"#),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("'hosts' must be a non-empty"), "{err}");
 }
 
 #[test]
@@ -246,11 +300,36 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
 }
 
 #[test]
+fn translates_hmac_to_input() {
+    let secrets = vec![tools::parse_secret(&entry(FALCONX_HMAC), &[]).unwrap()];
+    let out = translate::translate("default", "tool-falconx", &secrets, &SourcePolicy::env());
+    assert!(out.skipped.is_empty());
+    let SecretInput::Hmac(input) = &out.inputs[0] else { panic!("expected hmac") };
+    assert_eq!(input.foreign_id, "tool-falconx-hmac-falconx-p1");
+    assert_eq!(input.name, "FALCONX_P1");
+    assert_eq!(input.signature_algorithm, "sha256");
+    assert_eq!(input.signature_key_encoding, "base64");
+    assert_eq!(input.signature_output_encoding, "base64");
+    assert_eq!(input.timestamp_format, "unix_seconds");
+    assert_eq!(input.signature_message, "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}");
+    assert!(!input.allow_chunked_body);
+    assert_eq!(input.headers.len(), 4);
+    assert_eq!(input.headers[1].name, "FX-ACCESS-SIGN");
+    assert_eq!(input.headers[1].value, "{{.Signature}}");
+    // The HMAC key resolves via the deployment source policy (env here).
+    let secret = input.credentials.get("secret").unwrap();
+    assert_eq!(secret.source_type, "env");
+    assert_eq!(secret.config, serde_json::json!({ "var": "FALCONX_P1_SECRET_KEY" }));
+    assert_eq!(input.rules.len(), 1);
+    assert_eq!(input.rules[0].host.as_deref(), Some("api.falconx.io"));
+}
+
+#[test]
 fn unsupported_secret_is_reported_as_skipped() {
-    let secrets = vec![ParsedSecret::Unsupported { name: "SIG".to_owned(), kind: "hmac_sign".to_owned() }];
+    let secrets = vec![ParsedSecret::Unsupported { name: "TOK".to_owned(), kind: "brokered_token".to_owned() }];
     let out = translate::translate("default", "tool-x", &secrets, &SourcePolicy::env());
     assert!(out.inputs.is_empty());
-    assert_eq!(out.skipped, vec![("SIG".to_owned(), "hmac_sign".to_owned())]);
+    assert_eq!(out.skipped, vec![("TOK".to_owned(), "brokered_token".to_owned())]);
 }
 
 #[test]

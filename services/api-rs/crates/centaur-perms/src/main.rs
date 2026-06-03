@@ -152,7 +152,7 @@ struct PrincipalGrantArgs {
     #[arg(long = "role", value_name = "FOREIGN_ID")]
     roles: Vec<String>,
 
-    /// Secret OID (`ssr_`/`ots_`/`gas_`) to grant/revoke directly. Repeatable.
+    /// Secret OID (`ssr_`/`ots_`/`gas_`/`hms_`) to grant/revoke directly. Repeatable.
     #[arg(long = "secret", value_name = "OID")]
     secrets: Vec<String>,
 
@@ -172,7 +172,7 @@ struct RoleSecretArgs {
     /// Role `foreign_id` (e.g. `infra`, `tools`, `tool-github`) or OID.
     role: String,
 
-    /// Secret OID (`ssr_`/`ots_`/`gas_`) to grant/revoke. Repeatable.
+    /// Secret OID (`ssr_`/`ots_`/`gas_`/`hms_`) to grant/revoke. Repeatable.
     #[arg(long = "secret", value_name = "OID", required = true)]
     secrets: Vec<String>,
 }
@@ -182,7 +182,7 @@ struct RoleGrantArgs {
     /// Role `foreign_id` (e.g. `infra`, `tools`, `tool-github`) or OID.
     role: String,
 
-    /// Existing secret OID (`ssr_`/`ots_`/`gas_`) to grant. Repeatable.
+    /// Existing secret OID (`ssr_`/`ots_`/`gas_`/`hms_`) to grant. Repeatable.
     #[arg(long = "secret", value_name = "OID")]
     secrets: Vec<String>,
 
@@ -583,8 +583,10 @@ fn grant_secret_from_oid(oid: &str) -> Result<GrantSecret> {
         Ok(GrantSecret::OAuthToken(oid.to_owned()))
     } else if oid.starts_with("gas_") {
         Ok(GrantSecret::GcpAuth(oid.to_owned()))
+    } else if oid.starts_with("hms_") {
+        Ok(GrantSecret::Hmac(oid.to_owned()))
     } else {
-        bail!("--secret expects a secret OID (ssr_/ots_/gas_), got {oid:?}");
+        bail!("--secret expects a secret OID (ssr_/ots_/gas_/hms_), got {oid:?}");
     }
 }
 

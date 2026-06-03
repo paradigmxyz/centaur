@@ -3,7 +3,7 @@
 //! iron-control wraps every request and single-resource response in a
 //! ``{ "data": ... }`` envelope; [`DataEnvelope`] handles both directions.
 //! Object IDs are typed-prefix strings (``prn_``, ``role_``, ``ssr_``,
-//! ``gas_``, ``ots_``, ``grant_``, ``prx_``). Resources with a ``foreign_id``
+//! ``gas_``, ``ots_``, ``hms_``, ``grant_``, ``prx_``). Resources with a ``foreign_id``
 //! support upsert: a PUT whose path segment is a ``foreign_id`` (not an OID)
 //! creates the resource if absent and updates it otherwise.
 
@@ -236,6 +236,48 @@ pub struct PgDsnSecretInput {
 }
 
 // ---------------------------------------------------------------------------
+// HMAC signing secrets
+// ---------------------------------------------------------------------------
+
+/// One header iron-proxy writes onto the signed request. ``value`` is a Go
+/// template evaluated against the signing context (``.Timestamp``,
+/// ``.Signature``, ``.Credentials.<name>``).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HmacSecretHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// Request body for ``POST``/``PUT /api/v1/hmac_secrets``. iron-proxy resolves
+/// each entry in ``credentials`` from its own source, composes the
+/// ``signature_message`` template, HMACs it with the credential named
+/// ``secret`` (decoded per ``signature_key_encoding``), encodes the digest per
+/// ``signature_output_encoding``, and writes ``headers`` onto the upstream
+/// request. The credentials and signing key never reach the sandbox.
+// Not `Eq`: `credentials` holds `SecretSource` values (arbitrary `Value` config).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HmacSecretInput {
+    pub namespace: String,
+    pub foreign_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    pub timestamp_format: String,
+    pub signature_algorithm: String,
+    pub signature_key_encoding: String,
+    pub signature_output_encoding: String,
+    pub signature_message: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_chunked_body: bool,
+    pub headers: Vec<HmacSecretHeader>,
+    pub credentials: BTreeMap<String, SecretSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RequestRule>,
+}
+
+// ---------------------------------------------------------------------------
 // Principals and roles
 // ---------------------------------------------------------------------------
 
@@ -338,6 +380,7 @@ pub enum GrantSecret {
     GcpAuth(String),
     OAuthToken(String),
     PgDsn(String),
+    Hmac(String),
 }
 
 /// A grant as returned by ``POST /api/v1/grants`` and the grantee-scoped list
@@ -358,21 +401,24 @@ pub struct Grant {
     pub gcp_auth_secret_id: Option<String>,
     #[serde(default)]
     pub pg_dsn_secret_id: Option<String>,
+    #[serde(default)]
+    pub hmac_secret_id: Option<String>,
 }
 
 impl Grant {
-    /// The granted secret's OID, whichever of the four secret types it is.
+    /// The granted secret's OID, whichever secret type it is.
     pub fn secret_id(&self) -> Option<&str> {
         self.static_secret_id
             .as_deref()
             .or(self.oauth_token_secret_id.as_deref())
             .or(self.gcp_auth_secret_id.as_deref())
             .or(self.pg_dsn_secret_id.as_deref())
+            .or(self.hmac_secret_id.as_deref())
     }
 
-    /// The granted secret's ``(type label, REST collection, OID)``, whichever of
-    /// the four secret types it is. The collection is the path segment for
-    /// fetching the secret (e.g. to resolve its name).
+    /// The granted secret's ``(type label, REST collection, OID)``, whichever
+    /// secret type it is. The collection is the path segment for fetching the
+    /// secret (e.g. to resolve its name).
     pub fn secret_target(&self) -> Option<(&'static str, &'static str, &str)> {
         if let Some(id) = &self.static_secret_id {
             Some(("static", "static_secrets", id))
@@ -382,6 +428,8 @@ impl Grant {
             Some(("gcp_auth", "gcp_auth_secrets", id))
         } else if let Some(id) = &self.pg_dsn_secret_id {
             Some(("pg_dsn", "pg_dsn_secrets", id))
+        } else if let Some(id) = &self.hmac_secret_id {
+            Some(("hmac", "hmac_secrets", id))
         } else {
             None
         }

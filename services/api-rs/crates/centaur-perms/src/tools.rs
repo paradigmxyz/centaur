@@ -37,6 +37,16 @@ const DEFAULT_MATCH_HEADERS: &[&str] = &[
     "/^x-[a-z0-9-]*(api-key|apikey|secret|token|auth|key)$/",
 ];
 
+/// Enums iron-proxy's `hmac_sign` transform accepts, mirroring `_HMAC_*` in
+/// `tool_manager.py`. Centralized so parser errors list the same options.
+const HMAC_ALGORITHMS: &[&str] = &["sha256", "sha512", "sha1"];
+const HMAC_KEY_ENCODINGS: &[&str] = &["raw", "base64", "hex"];
+const HMAC_OUTPUT_ENCODINGS: &[&str] = &["base64", "hex"];
+const HMAC_TIMESTAMP_FORMATS: &[&str] = &["unix_seconds", "unix_millis", "unix_nanos", "rfc3339"];
+/// The required `credentials` entry: the HMAC key. Other keys are user-named
+/// and only referenced from `headers[].value` templates.
+const HMAC_REQUIRED_CREDENTIAL: &str = "secret";
+
 /// Per-grant `oauth_token` credential fields: `(grant, required, optional)`,
 /// mirroring `_OAUTH_GRANT_FIELDS`.
 const OAUTH_GRANT_FIELDS: &[(&str, &[&str], &[&str])] = &[
@@ -114,6 +124,35 @@ pub struct PgDsnSecret {
     pub database: String,
 }
 
+/// One header iron-proxy's `hmac_sign` transform writes onto the upstream
+/// request. `value` is a Go template evaluated against the signing context
+/// (`.Timestamp`, `.Signature`, `.Credentials.<name>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HmacHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// A `type = "hmac_sign"` secret: a per-request HMAC signature iron-proxy mints
+/// and writes onto the upstream request. `credentials` maps a name to its
+/// source; the entry named `secret` is the HMAC key and is required. The other
+/// keys are user-named and referenced from `headers[].value` templates as
+/// `{{.Credentials.<name>}}`. The credentials and signing key never reach the
+/// sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HmacSignSecret {
+    pub name: String,
+    pub hosts: Vec<String>,
+    pub credentials: Vec<(String, FieldSource)>,
+    pub headers: Vec<HmacHeader>,
+    pub algorithm: String,
+    pub key_encoding: String,
+    pub output_encoding: String,
+    pub message: String,
+    pub timestamp_format: String,
+    pub allow_chunked_body: bool,
+}
+
 /// One parsed `[tool.centaur]` secret entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedSecret {
@@ -121,9 +160,10 @@ pub enum ParsedSecret {
     OAuthToken(OAuthTokenSecret),
     GcpAuth(GcpAuthSecret),
     PgDsn(PgDsnSecret),
+    Hmac(HmacSignSecret),
     /// A declared secret type this CLI cannot represent as an iron-control
-    /// resource (`hmac_sign`, `brokered_token`). Carried so the caller can
-    /// report it was skipped rather than dropping it silently.
+    /// resource (`brokered_token`). Carried so the caller can report it was
+    /// skipped rather than dropping it silently.
     Unsupported { name: String, kind: String },
 }
 
@@ -135,6 +175,7 @@ impl ParsedSecret {
             ParsedSecret::OAuthToken(s) => &s.name,
             ParsedSecret::GcpAuth(s) => &s.name,
             ParsedSecret::PgDsn(s) => &s.name,
+            ParsedSecret::Hmac(s) => &s.name,
             ParsedSecret::Unsupported { name, .. } => name,
         }
     }
@@ -305,7 +346,8 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
         "oauth_token" => Ok(ParsedSecret::OAuthToken(parse_oauth(table, &name)?)),
         "gcp_auth" => Ok(ParsedSecret::GcpAuth(parse_gcp(table, &name, &secret_ref)?)),
         "pg_dsn" => Ok(ParsedSecret::PgDsn(parse_pg_dsn(table, &name, &secret_ref)?)),
-        "hmac_sign" | "brokered_token" => {
+        "hmac_sign" => Ok(ParsedSecret::Hmac(parse_hmac(table, &name)?)),
+        "brokered_token" => {
             Ok(ParsedSecret::Unsupported { name, kind: secret_type.to_owned() })
         }
         other => bail!("unknown secret type {other:?} for secret {name:?}"),
@@ -476,6 +518,108 @@ fn parse_pg_dsn(table: &toml::Table, name: &str, secret_ref: &str) -> Result<PgD
     })
 }
 
+/// Port of the `hmac_sign` branch of `_parse_secret`. `hosts` is required (no
+/// tool-level fallback, matching the Python loader), `credentials` must include
+/// the `secret` HMAC key, and the encoding/algorithm/timestamp fields are
+/// validated against the same enums iron-proxy accepts.
+fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
+    let hosts = non_empty_str_array(table.get("hosts")).ok_or_else(|| {
+        eyre!("hmac_sign entry {name:?} 'hosts' must be a non-empty array of non-empty strings")
+    })?;
+    let credentials = parse_hmac_credentials(table.get("credentials"), name)?;
+    let headers = parse_hmac_headers(table.get("headers"), name)?;
+    let algorithm = parse_hmac_enum(table, name, "algorithm", HMAC_ALGORITHMS)?;
+    let key_encoding = parse_hmac_enum(table, name, "key_encoding", HMAC_KEY_ENCODINGS)?;
+    let output_encoding = parse_hmac_enum(table, name, "output_encoding", HMAC_OUTPUT_ENCODINGS)?;
+    let timestamp_format = parse_hmac_enum(table, name, "timestamp_format", HMAC_TIMESTAMP_FORMATS)?;
+    let message = req_str(table, "message").wrap_err_with(|| {
+        format!("hmac_sign entry {name:?} 'message' must be a non-empty Go-template string")
+    })?;
+    let allow_chunked_body = bool_field_named("hmac_sign", table, name, "allow_chunked_body")?;
+    Ok(HmacSignSecret {
+        name: name.to_owned(),
+        hosts,
+        credentials,
+        headers,
+        algorithm,
+        key_encoding,
+        output_encoding,
+        message,
+        timestamp_format,
+        allow_chunked_body,
+    })
+}
+
+/// Parse the `credentials` table for an `hmac_sign` entry, requiring the
+/// `secret` HMAC key. Mirrors `_parse_hmac_credentials`.
+fn parse_hmac_credentials(value: Option<&Value>, name: &str) -> Result<Vec<(String, FieldSource)>> {
+    let table = value
+        .and_then(Value::as_table)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| eyre!("hmac_sign entry {name:?} 'credentials' must be a non-empty table"))?;
+    let mut out = Vec::with_capacity(table.len());
+    for (field, raw) in table {
+        let src = if let Some(s) = raw.as_str() {
+            if s.is_empty() {
+                bail!("hmac_sign entry {name:?} credential {field:?} 'secret_ref' must be non-empty");
+            }
+            FieldSource { secret_ref: s.to_owned(), json_key: None }
+        } else if let Some(t) = raw.as_table() {
+            let ref_ = req_str(t, "secret_ref")
+                .wrap_err_with(|| format!("hmac_sign entry {name:?} credential {field:?}"))?;
+            let json_key = match t.get("json_key") {
+                Some(v) => Some(
+                    v.as_str()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| eyre!("hmac_sign entry {name:?} credential {field:?} 'json_key' must be a non-empty string"))?
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            FieldSource { secret_ref: ref_, json_key }
+        } else {
+            bail!("hmac_sign entry {name:?} credential {field:?} must be a string or table");
+        };
+        out.push((field.clone(), src));
+    }
+    if !out.iter().any(|(field, _)| field == HMAC_REQUIRED_CREDENTIAL) {
+        bail!("hmac_sign entry {name:?} 'credentials' must include {HMAC_REQUIRED_CREDENTIAL:?} (the HMAC key)");
+    }
+    Ok(out)
+}
+
+/// Parse the ordered `headers` list iron-proxy writes onto the request.
+/// Mirrors `_parse_hmac_headers`.
+fn parse_hmac_headers(value: Option<&Value>, name: &str) -> Result<Vec<HmacHeader>> {
+    let arr = value
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| eyre!("hmac_sign entry {name:?} 'headers' must be a non-empty list"))?;
+    let mut headers = Vec::with_capacity(arr.len());
+    for (index, entry) in arr.iter().enumerate() {
+        let table = entry
+            .as_table()
+            .ok_or_else(|| eyre!("hmac_sign entry {name:?} header[{index}] must be a table"))?;
+        let header_name = req_str(table, "name").wrap_err_with(|| {
+            format!("hmac_sign entry {name:?} header[{index}] requires a non-empty 'name'")
+        })?;
+        let value = req_str(table, "value").wrap_err_with(|| {
+            format!("hmac_sign entry {name:?} header[{index}] requires a non-empty 'value' template")
+        })?;
+        headers.push(HmacHeader { name: header_name, value });
+    }
+    Ok(headers)
+}
+
+/// Validate one `hmac_sign` enum field against `allowed`. Mirrors
+/// `_parse_hmac_enum`.
+fn parse_hmac_enum(table: &toml::Table, name: &str, key: &str, allowed: &[&str]) -> Result<String> {
+    match table.get(key).and_then(Value::as_str) {
+        Some(value) if allowed.contains(&value) => Ok(value.to_owned()),
+        other => bail!("hmac_sign entry {name:?} {key:?} must be one of {allowed:?}, got {other:?}"),
+    }
+}
+
 /// Parse a `{field = secret_ref | {secret_ref, json_key}}` table into ordered
 /// `(field, FieldSource)` pairs. Mirrors `_parse_oauth_field_source`.
 fn parse_field_map(value: Option<&Value>, secret: &str, what: &str) -> Result<Vec<(String, FieldSource)>> {
@@ -529,10 +673,15 @@ fn opt_str(table: &toml::Table, key: &str) -> Option<String> {
 }
 
 fn bool_field(table: &toml::Table, name: &str, key: &str) -> Result<bool> {
+    bool_field_named("HTTP secret", table, name, key)
+}
+
+/// Like [`bool_field`] but labels the error with `kind` (e.g. `"hmac_sign"`).
+fn bool_field_named(kind: &str, table: &toml::Table, name: &str, key: &str) -> Result<bool> {
     match table.get(key) {
         None => Ok(false),
         Some(Value::Boolean(b)) => Ok(*b),
-        Some(_) => bail!("HTTP secret {name:?} has invalid {key:?} (expected a boolean)"),
+        Some(_) => bail!("{kind} entry {name:?} has invalid {key:?} (expected a boolean)"),
     }
 }
 

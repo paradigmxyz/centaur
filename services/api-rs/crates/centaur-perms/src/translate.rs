@@ -10,15 +10,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use centaur_iron_control::{
-    GcpAuthSecretInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput, ReplaceConfig,
-    RequestRule, SecretInput, SecretSource, StaticSecretInput, gcp_auth_scopes_or_default, slugify,
-    source_from_placeholder,
+    GcpAuthSecretInput, HmacSecretHeader, HmacSecretInput, InjectConfig, OAuthTokenSecretInput,
+    PgDsnSecretInput, ReplaceConfig, RequestRule, SecretInput, SecretSource, StaticSecretInput,
+    gcp_auth_scopes_or_default, slugify, source_from_placeholder,
 };
 use centaur_iron_proxy::SourcePolicy;
 
 use crate::tools::{
-    FieldSource, GcpAuthSecret, HttpSecret, OAuthTokenSecret, ParsedSecret, PgDsnSecret, SecretMode,
-    unique_foreign_id,
+    FieldSource, GcpAuthSecret, HmacSignSecret, HttpSecret, OAuthTokenSecret, ParsedSecret,
+    PgDsnSecret, SecretMode, unique_foreign_id,
 };
 
 /// The result of translating a tool's secrets: the iron-control inputs to
@@ -70,6 +70,15 @@ pub fn translate(
             ParsedSecret::PgDsn(pg) => {
                 out.inputs
                     .push(SecretInput::PgDsn(pg_dsn_input(namespace, pg, policy)));
+            }
+            ParsedSecret::Hmac(hmac) => {
+                out.inputs.push(SecretInput::Hmac(hmac_input(
+                    namespace,
+                    role_foreign_id,
+                    hmac,
+                    policy,
+                    &mut used,
+                )));
             }
             ParsedSecret::Unsupported { name, kind } => {
                 out.skipped.push((name.clone(), kind.clone()));
@@ -193,6 +202,39 @@ fn pg_dsn_foreign_id(name: &str) -> String {
         name
     };
     slugify(base)
+}
+
+/// Translate an `hmac_sign` secret into a [`HmacSecretInput`]. iron-control
+/// delivers each granted HMAC secret to iron-proxy as its own `hmac_sign`
+/// transform with its own rules (like a `gcp_auth` secret), so the `foreign_id`
+/// is role-prefixed and deduped (`{role}-hmac-{slug}`).
+fn hmac_input(
+    namespace: &str,
+    role: &str,
+    hmac: &HmacSignSecret,
+    policy: &SourcePolicy,
+    used: &mut BTreeSet<String>,
+) -> HmacSecretInput {
+    HmacSecretInput {
+        namespace: namespace.to_owned(),
+        foreign_id: unique_foreign_id(format!("{role}-hmac-{}", slugify(&hmac.name)), used),
+        name: hmac.name.clone(),
+        description: None,
+        labels: managed_labels(),
+        timestamp_format: hmac.timestamp_format.clone(),
+        signature_algorithm: hmac.algorithm.clone(),
+        signature_key_encoding: hmac.key_encoding.clone(),
+        signature_output_encoding: hmac.output_encoding.clone(),
+        signature_message: hmac.message.clone(),
+        allow_chunked_body: hmac.allow_chunked_body,
+        headers: hmac
+            .headers
+            .iter()
+            .map(|h| HmacSecretHeader { name: h.name.clone(), value: h.value.clone() })
+            .collect(),
+        credentials: field_sources(&hmac.credentials, policy),
+        rules: rules_from_hosts(&hmac.hosts),
+    }
 }
 
 fn field_sources(fields: &[(String, FieldSource)], policy: &SourcePolicy) -> BTreeMap<String, SecretSource> {
