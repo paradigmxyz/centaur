@@ -1,21 +1,10 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{IronProxyConfigError, ProxyFragment, Result};
 
-const DEFAULT_INFRA_FRAGMENT_PATH: &str = "services/iron-proxy/infra.yaml";
-
-pub fn load_fragment_file(path: impl AsRef<Path>) -> Result<ProxyFragment> {
-    let path = path.as_ref();
-    let contents = read_file(path)?;
-    serde_yaml::from_str(&contents).map_err(|source| IronProxyConfigError::ParseFragment {
-        path: path.to_path_buf(),
-        source,
-    })
-}
+/// The shared infra secrets, embedded at compile time so the binary carries no
+/// runtime config-file dependency.
+const INFRA_FRAGMENT: &str = include_str!("../../../../iron-proxy/infra.yaml");
 
 pub fn load_fragment_str(contents: &str) -> Result<ProxyFragment> {
     serde_yaml::from_str(contents).map_err(|source| IronProxyConfigError::ParseFragment {
@@ -109,7 +98,7 @@ broker_credentials:
 "#;
 
 pub fn infra_fragment() -> Result<ProxyFragment> {
-    load_fragment_file(repo_relative_path(DEFAULT_INFRA_FRAGMENT_PATH))
+    load_fragment_str(INFRA_FRAGMENT)
 }
 
 fn normalize_auth_mode(value: &str) -> String {
@@ -128,26 +117,3 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
         .collect()
 }
 
-fn repo_relative_path(relative: impl AsRef<Path>) -> PathBuf {
-    let relative = relative.as_ref();
-    let Ok(mut dir) = std::env::current_dir() else {
-        return relative.to_path_buf();
-    };
-    loop {
-        let candidate = dir.join(relative);
-        if candidate.exists() {
-            return candidate;
-        }
-        if !dir.pop() {
-            return relative.to_path_buf();
-        }
-    }
-}
-
-fn read_file(path: impl AsRef<Path>) -> Result<String> {
-    let path = path.as_ref();
-    fs::read_to_string(path).map_err(|source| IronProxyConfigError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })
-}

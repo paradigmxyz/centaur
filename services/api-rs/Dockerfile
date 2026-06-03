@@ -22,10 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
-# Infra secrets the server registers at boot. centaur-iron-proxy resolves this
-# by walking up from the working directory (fragment::repo_relative_path), so
-# keep the repo-relative layout under /app. Harness auth secrets are baked into
-# the binary; tool secrets are operator-managed in the control plane.
-COPY services/iron-proxy/infra.yaml services/iron-proxy/infra.yaml
+# Infra + harness auth secrets are embedded in the binary at compile time
+# (include_str! of services/iron-proxy/infra.yaml); tool secrets are
+# operator-managed in the control plane. No runtime config files needed.
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/centaur-api-server"]

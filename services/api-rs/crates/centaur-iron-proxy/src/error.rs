@@ -4,16 +4,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum IronProxyConfigError {
-    #[error("failed to read {path}: {source}")]
-    ReadFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("failed to read directory {path}: {source}")]
-    ReadDir {
-        path: PathBuf,
-        source: std::io::Error,
-    },
     #[error("failed to parse iron-proxy fragment {path}: {source}")]
     ParseFragment {
         path: PathBuf,
