@@ -1020,6 +1020,119 @@ async def test_first_incremental_run_seeds_historical_backfill_job(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_incremental_widens_completed_bootstrap_for_existing_checkpoint(db_pool):
+    from workflows import slack_sync
+
+    await db_pool.execute(
+        "INSERT INTO slack_sync_channels (channel_id, channel_name, is_syncable) "
+        "VALUES ('C_PUBLIC', 'ai-agent', TRUE)",
+    )
+    await db_pool.execute(
+        "INSERT INTO slack_sync_checkpoints (channel_id, watermark_ts) "
+        "VALUES ('C_PUBLIC', '3000000.000000')",
+    )
+    await db_pool.execute(
+        "INSERT INTO slack_sync_backfill_jobs ("
+        "job_key, job_type, payload_version, channel_id, payload_json, status, "
+        "last_completed_at"
+        ") VALUES ("
+        "'bootstrap:C_PUBLIC', 'channel_bootstrap', 1, 'C_PUBLIC', "
+        "$1::jsonb, 'completed', NOW())",
+        json.dumps(
+            {
+                "cursor": None,
+                "window_oldest": "2000000.000000",
+                "window_latest": "2900000.000000",
+                "lookback_days": 30,
+                "thread_lookback_days": 3,
+            }
+        ),
+    )
+    fake = FakeSlackClient(channels=[_public_channel()], messages=[], replies={})
+    ctx = FakeCtx(db_pool, run_id="wfr-bootstrap-widen")
+
+    with (
+        patch.object(slack_sync, "_client", return_value=fake),
+        patch.object(slack_sync, "_ts_now_minus_days", return_value="1000000.000000"),
+    ):
+        await slack_sync.handler(slack_sync.Input(lookback_days=365), ctx)
+
+    backfill = await db_pool.fetchrow(
+        "SELECT job_key, job_type, payload_version, payload_json, status, "
+        "last_completed_at "
+        "FROM slack_sync_backfill_jobs "
+        "WHERE channel_id = 'C_PUBLIC' AND job_key = 'bootstrap:C_PUBLIC'",
+    )
+    assert backfill is not None
+    payload = json.loads(str(backfill["payload_json"]))
+    assert backfill["job_type"] == "channel_bootstrap"
+    assert backfill["payload_version"] == 1
+    assert backfill["status"] == "pending"
+    assert backfill["last_completed_at"] is None
+    assert payload == {
+        "cursor": None,
+        "window_oldest": "1000000.000000",
+        "window_latest": "2000000.000000",
+        "lookback_days": 365,
+        "thread_lookback_days": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_active_bootstrap_cursor_is_not_widened(db_pool):
+    from workflows import slack_sync
+
+    await db_pool.execute(
+        "INSERT INTO slack_sync_channels (channel_id, channel_name, is_syncable) "
+        "VALUES ('C_PUBLIC', 'ai-agent', TRUE)",
+    )
+    await db_pool.execute(
+        "INSERT INTO slack_sync_checkpoints (channel_id, watermark_ts) "
+        "VALUES ('C_PUBLIC', '3000000.000000')",
+    )
+    await db_pool.execute(
+        "INSERT INTO slack_sync_backfill_jobs ("
+        "job_key, job_type, payload_version, channel_id, payload_json, status"
+        ") VALUES ("
+        "'bootstrap:C_PUBLIC', 'channel_bootstrap', 1, 'C_PUBLIC', "
+        "$1::jsonb, 'running')",
+        json.dumps(
+            {
+                "cursor": "cursor-2",
+                "window_oldest": "2000000.000000",
+                "window_latest": "2900000.000000",
+                "lookback_days": 30,
+                "thread_lookback_days": 3,
+            }
+        ),
+    )
+    fake = FakeSlackClient(channels=[_public_channel()], messages=[], replies={})
+    ctx = FakeCtx(db_pool, run_id="wfr-bootstrap-active-cursor")
+
+    with (
+        patch.object(slack_sync, "_client", return_value=fake),
+        patch.object(slack_sync, "_ts_now_minus_days", return_value="1000000.000000"),
+    ):
+        await slack_sync.handler(slack_sync.Input(lookback_days=365), ctx)
+
+    backfill = await db_pool.fetchrow(
+        "SELECT status, payload_json "
+        "FROM slack_sync_backfill_jobs "
+        "WHERE job_key = 'bootstrap:C_PUBLIC'",
+    )
+    assert backfill is not None
+    payload = json.loads(str(backfill["payload_json"]))
+    assert backfill["status"] == "running"
+    assert payload == {
+        "cursor": "cursor-2",
+        "window_oldest": "2000000.000000",
+        "window_latest": "2900000.000000",
+        "lookback_days": 30,
+        "thread_lookback_days": 3,
+    }
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_seed_is_one_row_per_channel_even_without_watermark(db_pool):
     from workflows import slack_sync
 

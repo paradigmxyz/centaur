@@ -1105,6 +1105,64 @@ async def seed_channel_bootstrap_job(
     return result == "INSERT 0 1"
 
 
+async def widen_channel_bootstrap_job(
+    pool,
+    *,
+    channel_id: str,
+    window_oldest: str,
+    lookback_days: int,
+    thread_lookback_days: int,
+    run_id: str,
+    priority: int = 150,
+) -> bool:
+    """Reopen or widen a bootstrap job when the configured lookback increases.
+
+    The update is intentionally limited to jobs without an active cursor. Running
+    or partially drained jobs keep their original Slack cursor/window until the
+    next incremental sync can safely revisit them.
+    """
+    if not channel_id or not window_oldest:
+        return False
+    result = await pool.execute(
+        "UPDATE slack_sync_backfill_jobs "
+        "SET status = 'pending', "
+        "    payload_json = jsonb_build_object("
+        "        'cursor', NULL, "
+        "        'window_oldest', $2::text, "
+        "        'window_latest', CASE "
+        "            WHEN status = 'completed' THEN payload_json->>'window_oldest' "
+        "            ELSE payload_json->>'window_latest' "
+        "        END, "
+        "        'lookback_days', $7::int, "
+        "        'thread_lookback_days', $8::int"
+        "    ), "
+        "    priority = $3, "
+        "    attempt_count = 0, "
+        "    last_run_id = $4, "
+        "    last_enqueued_at = NOW(), "
+        "    last_started_at = NULL, "
+        "    last_completed_at = NULL, "
+        "    last_error = '', "
+        "    updated_at = NOW() "
+        "WHERE job_key = $1 "
+        "  AND job_type = $5 "
+        "  AND payload_version = $6 "
+        "  AND (payload_json->>'lookback_days')::int < $7 "
+        "  AND COALESCE(payload_json->>'window_oldest', '') <> '' "
+        "  AND COALESCE(payload_json->>'cursor', '') = '' "
+        "  AND status IN ('pending', 'failed', 'completed')",
+        f"bootstrap:{channel_id}",
+        window_oldest,
+        priority,
+        run_id,
+        BACKFILL_JOB_CHANNEL_BOOTSTRAP,
+        BACKFILL_JOB_PAYLOAD_VERSION,
+        lookback_days,
+        thread_lookback_days,
+    )
+    return result == "UPDATE 1"
+
+
 async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
     """Claim a bounded batch of pending backfill jobs for one workflow run."""
     async with pool.acquire() as conn:

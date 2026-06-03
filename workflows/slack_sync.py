@@ -32,6 +32,7 @@ from workflows.slack_sync_shared import (
     record_run_start,
     seed_channel_bootstrap_job,
     upsert_messages,
+    widen_channel_bootstrap_job,
     workflow_run_id_to_sync_run_id,
 )
 
@@ -503,6 +504,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
             next_state = page.get("sync_state") or {}
             initial_backfill_seeded = False
+            bootstrap_widened = False
             if checkpoint_watermark is None and oldest and inp.oldest is None:
                 bootstrap_oldest = _ts_now_minus_days(lookback_days)
                 initial_backfill_seeded = await seed_channel_bootstrap_job(
@@ -528,6 +530,30 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                         bootstrap_recent_hours=DEFAULT_BOOTSTRAP_RECENT_HOURS,
                         window_oldest_ts=bootstrap_oldest,
                         window_latest_ts=oldest,
+                    )
+            elif checkpoint_watermark is not None and inp.oldest is None:
+                desired_oldest = _ts_now_minus_days(lookback_days)
+                bootstrap_widened = await widen_channel_bootstrap_job(
+                    ctx._pool,
+                    channel_id=channel_id,
+                    window_oldest=desired_oldest,
+                    lookback_days=lookback_days,
+                    thread_lookback_days=thread_lookback_days,
+                    run_id=run_id,
+                    priority=150,
+                )
+                if bootstrap_widened:
+                    record_etl_items_enqueued(
+                        "slack", "channel", "channel_bootstrap_widened_job", 1
+                    )
+                    ctx.log(
+                        "slack_sync_bootstrap_widened",
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                        job_type=BACKFILL_JOB_CHANNEL_BOOTSTRAP,
+                        job_key=_bootstrap_backfill_job_key(channel_id),
+                        lookback_days=lookback_days,
+                        window_oldest_ts=desired_oldest,
                     )
             if next_state.get("cursor"):
                 await enqueue_backfill_job(
@@ -581,6 +607,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 messages=len(message_rows),
                 threads=len(thread_roots),
                 backfill_seeded=initial_backfill_seeded,
+                bootstrap_widened=bootstrap_widened,
                 backfill_continuation=bool(next_state.get("cursor")),
             )
         except Exception as exc:
