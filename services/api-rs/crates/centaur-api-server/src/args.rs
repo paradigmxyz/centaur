@@ -199,9 +199,8 @@ struct SandboxArgs {
 }
 
 impl SandboxArgs {
-    /// Build the iron-control session registrar, registering shared roles up
-    /// front. The warm-pool bootstrap principal intentionally remains roleless;
-    /// real session principals get roles only when a sandbox is claimed.
+    /// Build the iron-control registrar. The warm-pool bootstrap principal
+    /// stays roleless until claim-time reassignment binds the session principal.
     async fn iron_control_runtime(&self) -> Result<Option<IronControlRuntime>, ServerError> {
         let Some(client) = self.iron_control.client() else {
             return Ok(None);

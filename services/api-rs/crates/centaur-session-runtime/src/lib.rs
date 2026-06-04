@@ -32,8 +32,8 @@ use tokio::{
     sync::Mutex,
     time::{Instant, Interval, MissedTickBehavior, interval_at, sleep},
 };
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::{Instrument, Span, error, info, info_span, warn};
+use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
