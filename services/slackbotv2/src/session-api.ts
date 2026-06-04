@@ -59,8 +59,13 @@ export async function collectInitialContext(
   currentMessage: Message
 ): Promise<SlackbotV2ApiMessage[]> {
   const messages: Message[] = []
-  for await (const message of thread.allMessages) {
-    messages.push(message)
+  try {
+    for await (const message of thread.allMessages) {
+      messages.push(message)
+    }
+  } catch (error) {
+    if (!isSlackThreadNotFoundError(error)) throw error
+    return [await serializeMessage(currentMessage)]
   }
 
   const currentIndex = messages.findIndex(message => message.id === currentMessage.id)
@@ -75,6 +80,18 @@ export async function collectInitialContext(
     serialized.push(await serializeMessage(message))
   }
   return serialized
+}
+
+function isSlackThreadNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+
+  const directError = (error as { error?: unknown }).error
+  if (directError === 'thread_not_found') return true
+
+  const data = (error as { data?: unknown }).data
+  if (isJsonObject(data) && data.error === 'thread_not_found') return true
+
+  return error instanceof Error && error.message.includes('thread_not_found')
 }
 
 export async function serializeMessage(message: Message): Promise<SlackbotV2ApiMessage> {

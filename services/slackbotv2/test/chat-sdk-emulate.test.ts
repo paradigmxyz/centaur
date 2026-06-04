@@ -265,6 +265,45 @@ describe('slackbotv2', () => {
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
+  it('executes a root app mention when Slack has no thread history yet', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> answer from a new root message`)
+    slackApi.failRepliesWithThreadNotFound(CHANNEL_ID, mention.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-mention-thread-not-found',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> answer from a new root message`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    expect(codexApi.creates.map(create => create.threadKey)).toEqual([threadKey(mention.ts)])
+    expect(codexApi.appends).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends[0]!.body.messages)).toEqual([
+      `@${BOT_USER_ID} answer from a new root message`
+    ])
+    expect(codexApi.executes).toHaveLength(1)
+    expect(JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines[0]!))).toContain(
+      'answer from a new root message'
+    )
+    expectSlackPlanStreamShape(slackApi.calls, {
+      answers: ['Executed request 1.'],
+      parentTs: mention.ts
+    })
+  })
+
   it('forwards subscribed messages to /messages without executing during a stream', async () => {
     codexApi.autoRespond = false
 
@@ -1634,6 +1673,7 @@ function writeMockSseEvent(stream: ServerResponse, event: MockSessionEvent): voi
 type PatchedSlackApi = {
   calls: StreamCall[]
   close(): Promise<void>
+  failRepliesWithThreadNotFound(channel: string, ts: string): void
   reset(): void
   url: string
 }
@@ -1667,6 +1707,7 @@ type SlackStreamTranscript = {
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
+  const threadNotFoundReplies = new Set<string>()
   const streams = new Map<string, StreamRecord>()
   const port = await availablePort(4053)
   const server = createServer((req, res) => {
@@ -1674,6 +1715,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       calls,
       port,
       streams,
+      threadNotFoundReplies,
       upstreamUrl
     }).catch(error => {
       res.writeHead(500, { 'content-type': 'application/json' })
@@ -1684,8 +1726,12 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   return {
     calls,
     url: `http://127.0.0.1:${port}`,
+    failRepliesWithThreadNotFound(channel: string, ts: string) {
+      threadNotFoundReplies.add(slackReplyKey(channel, ts))
+    },
     reset() {
       calls.length = 0
+      threadNotFoundReplies.clear()
       streams.clear()
     },
     close: () => closeServer(server)
@@ -1699,6 +1745,7 @@ async function handlePatchedSlackRequest(
     calls: StreamCall[]
     port: number
     streams: Map<string, StreamRecord>
+    threadNotFoundReplies: Set<string>
     upstreamUrl: string
   }
 ): Promise<void> {
@@ -1748,6 +1795,17 @@ async function handlePatchedSlackRequest(
       await stopStream(input.upstreamUrl, request, input.streams, input.calls)
     )
     return
+  }
+  if (path === '/api/conversations.replies') {
+    const body = await requestBody(request.clone())
+    if (
+      input.threadNotFoundReplies.has(
+        slackReplyKey(stringField(body.channel), stringField(body.ts))
+      )
+    ) {
+      await sendWebResponse(res, Response.json({ ok: false, error: 'thread_not_found' }))
+      return
+    }
   }
 
   const body = await request.arrayBuffer()
@@ -2148,6 +2206,10 @@ function normalizeApiPath(path: string): string {
 }
 
 function streamKey(channel: string, ts: string): string {
+  return `${channel}:${ts}`
+}
+
+function slackReplyKey(channel: string, ts: string): string {
   return `${channel}:${ts}`
 }
 
