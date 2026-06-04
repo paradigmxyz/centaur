@@ -247,6 +247,17 @@ impl SessionRuntime {
             match self.sandbox_runtime.manager.stop(&sandbox.id).await {
                 Ok(()) => {
                     self.sandbox_pipes.lock().await.remove(&id);
+                    if let Err(error) = self
+                        .store
+                        .mark_warm_sandbox_failed(&id, "sandbox drained")
+                        .await
+                    {
+                        warn!(sandbox_id = %id, %error, "drain failed to clear warm sandbox row");
+                        report.failed.push(DrainFailure {
+                            sandbox_id: id.clone(),
+                            error: error.to_string(),
+                        });
+                    }
                     report.stopped.push(id);
                 }
                 Err(error) => {
