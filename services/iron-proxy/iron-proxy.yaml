@@ -29,6 +29,7 @@ transforms:
         - "host"
         - "content-type"
         - "content-length"
+        - "content-encoding"
         - "accept"
         - "accept-encoding"
         - "accept-language"
