@@ -314,7 +314,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1 and status in ($3, $4)
-            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -366,7 +366,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1 and status in ($4, $5)
-            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
