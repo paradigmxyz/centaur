@@ -22,6 +22,33 @@ if [ -n "${TOOL_DIRS:-}" ]; then
     export TOOL_DIRS
 fi
 
+_add_pythonpath_entry() {
+    local entry="$1"
+    [ -d "$entry" ] || return 0
+    case ":${PYTHONPATH:-}:" in
+        *":$entry:"*) ;;
+        *) export PYTHONPATH="$entry${PYTHONPATH:+:$PYTHONPATH}" ;;
+    esac
+}
+
+_add_pythonpath_entry "/opt/centaur"
+if [ -n "${TOOL_DIRS:-}" ]; then
+    IFS=':' read -ra _centaur_tool_dirs <<< "$TOOL_DIRS"
+    for _centaur_tool_dir in "${_centaur_tool_dirs[@]}"; do
+        if [ -d "$_centaur_tool_dir" ]; then
+            _centaur_tool_root="$(cd "$_centaur_tool_dir/.." && pwd -P)"
+            _add_pythonpath_entry "$_centaur_tool_root"
+        fi
+    done
+    unset _centaur_tool_dir _centaur_tool_dirs _centaur_tool_root
+fi
+export CENTAUR_TOOL_PYTHONPATH="${PYTHONPATH:-}"
+unset -f _add_pythonpath_entry
+
+if [ -n "${TOOL_DIRS:-}" ]; then
+    install-tool-shims || echo "warning: failed to install Centaur tool CLI shims" >&2
+fi
+
 if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
     mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude"
     rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/uploads" "$HOME_DIR/branches"
