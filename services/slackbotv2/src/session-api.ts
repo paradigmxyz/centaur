@@ -187,24 +187,6 @@ export async function openSessionEventStream(
   return stream
 }
 
-export function startingStreamNotification(threadId: string): JsonObject {
-  return {
-    method: 'item/started',
-    params: {
-      threadId,
-      turnId: 'slackbotv2-starting-turn',
-      startedAtMs: Date.now(),
-      item: {
-        id: 'slackbotv2-starting',
-        memoryCitation: null,
-        phase: 'commentary',
-        text: '',
-        type: 'agentMessage'
-      }
-    }
-  }
-}
-
 export function sessionStreamError(error: unknown): RustSessionStreamEvent {
   return {
     data: { error: error instanceof Error ? error.message : String(error) },

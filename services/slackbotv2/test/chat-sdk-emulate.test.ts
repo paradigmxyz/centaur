@@ -1088,6 +1088,21 @@ function sampleCodexNotifications(answer: string): ServerNotification[] {
       }
     },
     {
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        startedAtMs: 4,
+        item: {
+          type: 'agentMessage',
+          id: 'answer-1',
+          text: '',
+          phase: 'final_answer',
+          memoryCitation: null
+        }
+      }
+    },
+    {
       method: 'item/agentMessage/delta',
       params: {
         threadId: 'thread-1',
@@ -2015,15 +2030,7 @@ function expectSlackPlanStreamShape(
     )
     expect(transcript.start.body.ts).toBeUndefined()
     expect(transcript.start.body.markdown_text).toBeUndefined()
-    expect(streamChunks(transcript.start.body.chunks)[0]).toEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        title: 'Thinking',
-        status: 'in_progress'
-      })
-    )
 
-    expect(transcript.appends.length).toBeGreaterThan(0)
     for (const append of transcript.appends) {
       expect(append.body).toEqual(
         expect.objectContaining({

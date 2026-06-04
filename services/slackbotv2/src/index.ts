@@ -23,8 +23,7 @@ import {
   isRetryableSessionApiError,
   openSessionEventStream,
   serializeMessage,
-  sessionStreamError,
-  startingStreamNotification
+  sessionStreamError
 } from './session-api'
 import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
 import type {
@@ -641,10 +640,9 @@ async function indexRenderObligation(
 }
 
 async function* streamOpenedSession(
-  input: Pick<ForwardSessionInput, 'threadId' | 'trace'>,
+  _input: Pick<ForwardSessionInput, 'threadId' | 'trace'>,
   stream: AsyncIterable<SlackbotV2RendererSource>
 ): AsyncIterable<SlackbotV2RendererSource> {
-  yield startingStreamNotification(input.threadId)
   for await (const event of stream) yield event
 }
 
@@ -721,8 +719,6 @@ async function* streamSessionAfterHandoff(
     return
   }
 
-  yield startingStreamNotification(input.threadId)
-  traceLog(options, 'slackbotv2_stream_heartbeat_emitted', input.trace)
   for await (const event of stream) yield event
 }
 
