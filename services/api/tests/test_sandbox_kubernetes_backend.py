@@ -257,6 +257,204 @@ def test_pod_resources_allows_explicitly_empty_memory_limit(
     }
 
 
+def test_resources_from_env_empty_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _resources_from_env
+
+    for suffix in ("CPU_REQUEST", "MEMORY_REQUEST", "CPU_LIMIT", "MEMORY_LIMIT"):
+        monkeypatch.delenv(f"KUBERNETES_API_PROXY_{suffix}", raising=False)
+
+    assert _resources_from_env("API_PROXY") == {}
+
+
+def test_api_proxy_resources_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.sandbox.kubernetes import _api_proxy_resources
+
+    monkeypatch.setenv("KUBERNETES_API_PROXY_CPU_REQUEST", "50m")
+    monkeypatch.setenv("KUBERNETES_API_PROXY_MEMORY_REQUEST", "64Mi")
+    monkeypatch.setenv("KUBERNETES_API_PROXY_CPU_LIMIT", "250m")
+    monkeypatch.setenv("KUBERNETES_API_PROXY_MEMORY_LIMIT", "64Mi")
+
+    assert _api_proxy_resources() == {
+        "requests": {"cpu": "50m", "memory": "64Mi"},
+        "limits": {"cpu": "250m", "memory": "64Mi"},
+    }
+
+
+def test_sandbox_proxy_resources_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.sandbox.kubernetes import _sandbox_proxy_resources
+
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_CPU_REQUEST", "100m")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_MEMORY_REQUEST", "768Mi")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_CPU_LIMIT", "500m")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_MEMORY_LIMIT", "768Mi")
+
+    assert _sandbox_proxy_resources() == {
+        "requests": {"cpu": "100m", "memory": "768Mi"},
+        "limits": {"cpu": "500m", "memory": "768Mi"},
+    }
+
+
+def test_workflow_run_resources_defaults_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _workflow_run_resources
+
+    for suffix in ("CPU_REQUEST", "MEMORY_REQUEST", "CPU_LIMIT", "MEMORY_LIMIT"):
+        monkeypatch.delenv(f"KUBERNETES_WORKFLOW_RUN_{suffix}", raising=False)
+
+    # Defaults match the sandbox so behavior is unchanged from when this pod
+    # reused _pod_resources().
+    assert _workflow_run_resources() == {"limits": {"cpu": "2", "memory": "4Gi"}}
+
+
+def test_workflow_run_resources_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.sandbox.kubernetes import _workflow_run_resources
+
+    monkeypatch.setenv("KUBERNETES_WORKFLOW_RUN_CPU_REQUEST", "250m")
+    monkeypatch.setenv("KUBERNETES_WORKFLOW_RUN_MEMORY_REQUEST", "1Gi")
+    monkeypatch.setenv("KUBERNETES_WORKFLOW_RUN_CPU_LIMIT", "1")
+    monkeypatch.setenv("KUBERNETES_WORKFLOW_RUN_MEMORY_LIMIT", "2Gi")
+
+    assert _workflow_run_resources() == {
+        "requests": {"cpu": "250m", "memory": "1Gi"},
+        "limits": {"cpu": "1", "memory": "2Gi"},
+    }
+
+
+def test_workflow_run_resources_allows_explicitly_empty_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _workflow_run_resources
+
+    # An explicitly-empty limit disables the default instead of falling back.
+    monkeypatch.setenv("KUBERNETES_WORKFLOW_RUN_CPU_LIMIT", "")
+    monkeypatch.setenv("KUBERNETES_WORKFLOW_RUN_MEMORY_LIMIT", "")
+    monkeypatch.setenv("KUBERNETES_WORKFLOW_RUN_CPU_REQUEST", "250m")
+    monkeypatch.delenv("KUBERNETES_WORKFLOW_RUN_MEMORY_REQUEST", raising=False)
+
+    assert _workflow_run_resources() == {"requests": {"cpu": "250m"}}
+
+
+def test_tool_server_resources_partial_memory_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _tool_server_resources
+
+    for suffix in ("CPU_REQUEST", "MEMORY_REQUEST", "CPU_LIMIT", "MEMORY_LIMIT"):
+        monkeypatch.delenv(f"KUBERNETES_TOOL_SERVER_{suffix}", raising=False)
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_MEMORY_REQUEST", "512Mi")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_MEMORY_LIMIT", "512Mi")
+
+    assert _tool_server_resources() == {
+        "requests": {"memory": "512Mi"},
+        "limits": {"memory": "512Mi"},
+    }
+
+
+def test_tool_server_container_includes_resources_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _build_tool_server_container
+
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-api:test")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_CPU_LIMIT", "500m")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_MEMORY_LIMIT", "512Mi")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_MEMORY_REQUEST", "512Mi")
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount=None,
+        database_url="postgresql://proxy/ai_v2",
+    )
+
+    assert container["resources"] == {
+        "requests": {"memory": "512Mi"},
+        "limits": {"cpu": "500m", "memory": "512Mi"},
+    }
+
+
+def test_tool_server_container_omits_resources_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _build_tool_server_container
+
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-api:test")
+    for suffix in ("CPU_REQUEST", "MEMORY_REQUEST", "CPU_LIMIT", "MEMORY_LIMIT"):
+        monkeypatch.delenv(f"KUBERNETES_TOOL_SERVER_{suffix}", raising=False)
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount=None,
+        database_url="postgresql://proxy/ai_v2",
+    )
+
+    assert "resources" not in container
+
+
+def test_sandbox_proxy_pod_spec_includes_resources_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A per-sandbox proxy reads SANDBOX_PROXY_*; API_PROXY_* must not leak in.
+    for suffix in ("CPU_REQUEST", "MEMORY_REQUEST", "CPU_LIMIT", "MEMORY_LIMIT"):
+        monkeypatch.delenv(f"KUBERNETES_API_PROXY_{suffix}", raising=False)
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_CPU_REQUEST", "100m")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_MEMORY_REQUEST", "768Mi")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_CPU_LIMIT", "500m")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_MEMORY_LIMIT", "768Mi")
+
+    backend = KubernetesExecutorBackend()
+    spec = backend._build_proxy_pod_spec("sandbox-id", [], {}, restart_policy="Never")
+
+    container = spec["containers"][0]
+    assert container["name"] == "iron-proxy"
+    assert container["resources"] == {
+        "requests": {"cpu": "100m", "memory": "768Mi"},
+        "limits": {"cpu": "500m", "memory": "768Mi"},
+    }
+
+
+def test_api_proxy_pod_spec_uses_api_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The API self-proxy reads API_PROXY_* and ignores SANDBOX_PROXY_*.
+    from api.sandbox.kubernetes import _API_PROXY_SANDBOX_ID
+
+    monkeypatch.setenv("KUBERNETES_API_PROXY_CPU_REQUEST", "50m")
+    monkeypatch.setenv("KUBERNETES_API_PROXY_MEMORY_REQUEST", "64Mi")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_CPU_REQUEST", "100m")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_PROXY_MEMORY_REQUEST", "768Mi")
+
+    backend = KubernetesExecutorBackend()
+    spec = backend._build_proxy_pod_spec(
+        _API_PROXY_SANDBOX_ID, [], {}, restart_policy="Always"
+    )
+
+    assert spec["containers"][0]["resources"] == {
+        "requests": {"cpu": "50m", "memory": "64Mi"},
+    }
+
+
+def test_proxy_pod_spec_omits_resources_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for prefix in ("API_PROXY", "SANDBOX_PROXY"):
+        for suffix in ("CPU_REQUEST", "MEMORY_REQUEST", "CPU_LIMIT", "MEMORY_LIMIT"):
+            monkeypatch.delenv(f"KUBERNETES_{prefix}_{suffix}", raising=False)
+
+    backend = KubernetesExecutorBackend()
+    spec = backend._build_proxy_pod_spec("sandbox-id", [], {}, restart_policy="Never")
+
+    assert "resources" not in spec["containers"][0]
+
+
 def test_container_env_includes_firewall_host_for_secret_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -563,7 +563,7 @@ def _build_tool_server_container(
     # 127.0.0.1 would block liveness probes — the kubelet runs on the node
     # and can't see the container's loopback interface — and the resulting
     # probe failures would kill the sidecar.
-    return {
+    container: dict[str, Any] = {
         "name": "tool-server",
         "image": image_ref,
         "imagePullPolicy": _tool_server_image_pull_policy(),
@@ -597,6 +597,10 @@ def _build_tool_server_container(
         },
         "volumeMounts": volume_mounts,
     }
+    tool_server_resources = _tool_server_resources()
+    if tool_server_resources:
+        container["resources"] = tool_server_resources
+    return container
 
 
 def _apply_tool_server_extra_env(env: list[dict[str, Any]], computed_no_proxy: str) -> None:
@@ -692,22 +696,32 @@ def _ensure_kubernetes_env() -> None:
         raise ValueError("AGENT_API_URL is required for kubernetes backend")
 
 
-def _pod_resources() -> dict[str, Any]:
+def _resources_from_env_with_default_limits(
+    prefix: str, *, default_cpu_limit: str, default_memory_limit: str
+) -> dict[str, Any]:
+    """Build a container ``resources`` dict, defaulting *limits* when unset.
+
+    For workloads that have historically run with implicit limits — the sandbox
+    container and the workflow-run pod (both cpu=2/memory=4Gi). An unset CPU/
+    memory limit falls back to the supplied default; an explicitly-empty env
+    value disables that limit. Requests have no default. Reads
+    ``KUBERNETES_<prefix>_{CPU,MEMORY}_{REQUEST,LIMIT}``.
+    """
     limits: dict[str, str] = {}
-    cpu_limit = os.environ.get("KUBERNETES_SANDBOX_CPU_LIMIT")
-    memory_limit = os.environ.get("KUBERNETES_SANDBOX_MEMORY_LIMIT")
+    cpu_limit = os.environ.get(f"KUBERNETES_{prefix}_CPU_LIMIT")
+    memory_limit = os.environ.get(f"KUBERNETES_{prefix}_MEMORY_LIMIT")
     if cpu_limit is None:
-        limits["cpu"] = "2"
+        limits["cpu"] = default_cpu_limit
     elif cpu_limit.strip():
         limits["cpu"] = cpu_limit.strip()
     if memory_limit is None:
-        limits["memory"] = "4Gi"
+        limits["memory"] = default_memory_limit
     elif memory_limit.strip():
         limits["memory"] = memory_limit.strip()
 
     requests: dict[str, str] = {}
-    cpu_request = (os.getenv("KUBERNETES_SANDBOX_CPU_REQUEST") or "").strip()
-    memory_request = (os.getenv("KUBERNETES_SANDBOX_MEMORY_REQUEST") or "").strip()
+    cpu_request = (os.getenv(f"KUBERNETES_{prefix}_CPU_REQUEST") or "").strip()
+    memory_request = (os.getenv(f"KUBERNETES_{prefix}_MEMORY_REQUEST") or "").strip()
     if cpu_request:
         requests["cpu"] = cpu_request
     if memory_request:
@@ -719,6 +733,73 @@ def _pod_resources() -> dict[str, Any]:
     if requests:
         resources["requests"] = requests
     return resources
+
+
+def _pod_resources() -> dict[str, Any]:
+    """Resources for the sandbox agent container (defaults cpu=2/memory=4Gi)."""
+    return _resources_from_env_with_default_limits(
+        "SANDBOX", default_cpu_limit="2", default_memory_limit="4Gi"
+    )
+
+
+def _resources_from_env(prefix: str) -> dict[str, Any]:
+    """Build a container ``resources`` dict from env, applying no defaults.
+
+    Reads ``KUBERNETES_<prefix>_{CPU,MEMORY}_{REQUEST,LIMIT}``. Unlike
+    :func:`_pod_resources` (the sandbox, which defaults to cpu=2/memory=4Gi),
+    an unset value contributes nothing, so the resulting dict is empty when
+    nothing is configured. Callers omit the ``resources`` key entirely in that
+    case, preserving the historical unconstrained behavior for these
+    API-managed containers.
+    """
+    requests: dict[str, str] = {}
+    limits: dict[str, str] = {}
+    cpu_request = (os.getenv(f"KUBERNETES_{prefix}_CPU_REQUEST") or "").strip()
+    memory_request = (os.getenv(f"KUBERNETES_{prefix}_MEMORY_REQUEST") or "").strip()
+    cpu_limit = (os.getenv(f"KUBERNETES_{prefix}_CPU_LIMIT") or "").strip()
+    memory_limit = (os.getenv(f"KUBERNETES_{prefix}_MEMORY_LIMIT") or "").strip()
+    if cpu_request:
+        requests["cpu"] = cpu_request
+    if memory_request:
+        requests["memory"] = memory_request
+    if cpu_limit:
+        limits["cpu"] = cpu_limit
+    if memory_limit:
+        limits["memory"] = memory_limit
+
+    resources: dict[str, Any] = {}
+    if requests:
+        resources["requests"] = requests
+    if limits:
+        resources["limits"] = limits
+    return resources
+
+
+def _api_proxy_resources() -> dict[str, Any]:
+    """Resources for the API self-proxy iron-proxy container."""
+    return _resources_from_env("API_PROXY")
+
+
+def _sandbox_proxy_resources() -> dict[str, Any]:
+    """Resources for each per-sandbox iron-proxy container."""
+    return _resources_from_env("SANDBOX_PROXY")
+
+
+def _tool_server_resources() -> dict[str, Any]:
+    """Resources for the tool-server sidecar injected into sandbox Pods."""
+    return _resources_from_env("TOOL_SERVER")
+
+
+def _workflow_run_resources() -> dict[str, Any]:
+    """Resources for the workflow-run pod.
+
+    Defaults match the sandbox (cpu=2/memory=4Gi), preserving the historical
+    behavior from when this pod reused ``_pod_resources()``, but sized via its
+    own ``KUBERNETES_WORKFLOW_RUN_*`` env so it can be tuned independently.
+    """
+    return _resources_from_env_with_default_limits(
+        "WORKFLOW_RUN", default_cpu_limit="2", default_memory_limit="4Gi"
+    )
 
 
 def _prompt_bundle(persona: str | None) -> str:
@@ -1241,63 +1322,74 @@ class KubernetesExecutorBackend(SandboxBackend):
             )
         if core is not None:
             proxy_ports.append({"containerPort": core["port"], "name": "pg-core"})
+        iron_proxy_container: dict[str, Any] = {
+            "name": "iron-proxy",
+            "image": _proxy_image(),
+            "imagePullPolicy": _proxy_image_pull_policy(),
+            "env": _proxy_iron_env(secret_name, pg_secrets, core=core),
+            "envFrom": env_from,
+            "ports": proxy_ports,
+            "readinessProbe": {
+                "httpGet": {
+                    "path": "/healthz",
+                    "port": _proxy_health_port(),
+                },
+                "periodSeconds": 5,
+                "failureThreshold": 30,
+            },
+            "livenessProbe": {
+                "httpGet": {
+                    "path": "/healthz",
+                    "port": _proxy_health_port(),
+                }
+            },
+            "securityContext": {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+            "volumeMounts": [
+                {
+                    "name": "iron-proxy-config-rendered",
+                    "mountPath": "/etc/iron-proxy-rendered",
+                    "readOnly": True,
+                },
+                {
+                    "name": "iron-proxy-config",
+                    "mountPath": "/etc/iron-proxy",
+                },
+                {"name": "iron-proxy-certs", "mountPath": "/certs"},
+                {
+                    "name": "iron-proxy-ca",
+                    "mountPath": "/etc/iron-proxy-ca",
+                    "readOnly": True,
+                },
+            ],
+            # Copy the read-only rendered config into the writable
+            # /etc/iron-proxy mount where the entrypoint expects it.
+            # iron-proxy's entrypoint script writes the CA cert/key
+            # into the same directory.
+            "command": ["/bin/sh", "-ec"],
+            "args": [
+                "cp /etc/iron-proxy-rendered/proxy.yaml /etc/iron-proxy/proxy.yaml && exec /entrypoint.sh"
+            ],
+        }
+        # The API self-proxy and per-sandbox proxies share this spec but are
+        # sized independently: the self-proxy is a single long-lived Pod while
+        # per-sandbox proxies are created one per sandbox.
+        proxy_resources = (
+            _api_proxy_resources()
+            if sandbox_id == _API_PROXY_SANDBOX_ID
+            else _sandbox_proxy_resources()
+        )
+        if proxy_resources:
+            iron_proxy_container["resources"] = proxy_resources
         return {
             "automountServiceAccountToken": False,
             "restartPolicy": restart_policy,
             "imagePullSecrets": _image_pull_secrets(),
             "containers": [
-                {
-                    "name": "iron-proxy",
-                    "image": _proxy_image(),
-                    "imagePullPolicy": _proxy_image_pull_policy(),
-                    "env": _proxy_iron_env(secret_name, pg_secrets, core=core),
-                    "envFrom": env_from,
-                    "ports": proxy_ports,
-                    "readinessProbe": {
-                        "httpGet": {
-                            "path": "/healthz",
-                            "port": _proxy_health_port(),
-                        },
-                        "periodSeconds": 5,
-                        "failureThreshold": 30,
-                    },
-                    "livenessProbe": {
-                        "httpGet": {
-                            "path": "/healthz",
-                            "port": _proxy_health_port(),
-                        }
-                    },
-                    "securityContext": {
-                        "allowPrivilegeEscalation": False,
-                        "capabilities": {"drop": ["ALL"]},
-                        "seccompProfile": {"type": "RuntimeDefault"},
-                    },
-                    "volumeMounts": [
-                        {
-                            "name": "iron-proxy-config-rendered",
-                            "mountPath": "/etc/iron-proxy-rendered",
-                            "readOnly": True,
-                        },
-                        {
-                            "name": "iron-proxy-config",
-                            "mountPath": "/etc/iron-proxy",
-                        },
-                        {"name": "iron-proxy-certs", "mountPath": "/certs"},
-                        {
-                            "name": "iron-proxy-ca",
-                            "mountPath": "/etc/iron-proxy-ca",
-                            "readOnly": True,
-                        },
-                    ],
-                    # Copy the read-only rendered config into the writable
-                    # /etc/iron-proxy mount where the entrypoint expects it.
-                    # iron-proxy's entrypoint script writes the CA cert/key
-                    # into the same directory.
-                    "command": ["/bin/sh", "-ec"],
-                    "args": [
-                        "cp /etc/iron-proxy-rendered/proxy.yaml /etc/iron-proxy/proxy.yaml && exec /entrypoint.sh"
-                    ],
-                },
+                iron_proxy_container,
             ],
             "volumes": [
                 {
@@ -2162,7 +2254,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                 "capabilities": {"drop": ["ALL"]},
                 "seccompProfile": {"type": "RuntimeDefault"},
             },
-            "resources": _pod_resources(),
+            "resources": _workflow_run_resources(),
             "volumeMounts": api_template["volumeMounts"],
         }
 

@@ -309,6 +309,46 @@ spec:
               value: {{ .Values.ironProxy.service.managementPort | quote }}
             - name: KUBERNETES_IRON_PROXY_HEALTH_PORT
               value: {{ .Values.ironProxy.service.healthPort | quote }}
+{{- with .Values.ironProxy.apiResources.limits }}
+{{- if .cpu }}
+            - name: KUBERNETES_API_PROXY_CPU_LIMIT
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_API_PROXY_MEMORY_LIMIT
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.ironProxy.apiResources.requests }}
+{{- if .cpu }}
+            - name: KUBERNETES_API_PROXY_CPU_REQUEST
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_API_PROXY_MEMORY_REQUEST
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.ironProxy.sandboxResources.limits }}
+{{- if .cpu }}
+            - name: KUBERNETES_SANDBOX_PROXY_CPU_LIMIT
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_SANDBOX_PROXY_MEMORY_LIMIT
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.ironProxy.sandboxResources.requests }}
+{{- if .cpu }}
+            - name: KUBERNETES_SANDBOX_PROXY_CPU_REQUEST
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_SANDBOX_PROXY_MEMORY_REQUEST
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
 {{- if .Values.toolServer.enabled }}
             # Tool-server runs as a sidecar against the API image; uvicorn
             # target is overridden to api.tool_server_app.
@@ -318,12 +358,52 @@ spec:
               value: {{ .Values.api.image.pullPolicy | quote }}
             - name: KUBERNETES_TOOL_SERVER_PORT
               value: {{ .Values.toolServer.port | quote }}
+{{- with .Values.toolServer.resources.limits }}
+{{- if .cpu }}
+            - name: KUBERNETES_TOOL_SERVER_CPU_LIMIT
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_TOOL_SERVER_MEMORY_LIMIT
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.toolServer.resources.requests }}
+{{- if .cpu }}
+            - name: KUBERNETES_TOOL_SERVER_CPU_REQUEST
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_TOOL_SERVER_MEMORY_REQUEST
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
 {{- end }}
             # Workflow-run pods reuse the API image and run python -m api.workflow_executor.
             - name: KUBERNETES_WORKFLOW_RUN_IMAGE
               value: {{ printf "%s:%s" .Values.api.image.repository .Values.api.image.tag | quote }}
             - name: KUBERNETES_WORKFLOW_RUN_IMAGE_PULL_POLICY
               value: {{ .Values.api.image.pullPolicy | quote }}
+{{- with .Values.workflowRun.resources.limits }}
+{{- if and .cpu (not (hasKey $apiExtraEnv "KUBERNETES_WORKFLOW_RUN_CPU_LIMIT")) }}
+            - name: KUBERNETES_WORKFLOW_RUN_CPU_LIMIT
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if and .memory (not (hasKey $apiExtraEnv "KUBERNETES_WORKFLOW_RUN_MEMORY_LIMIT")) }}
+            - name: KUBERNETES_WORKFLOW_RUN_MEMORY_LIMIT
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.workflowRun.resources.requests }}
+{{- if and .cpu (not (hasKey $apiExtraEnv "KUBERNETES_WORKFLOW_RUN_CPU_REQUEST")) }}
+            - name: KUBERNETES_WORKFLOW_RUN_CPU_REQUEST
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if and .memory (not (hasKey $apiExtraEnv "KUBERNETES_WORKFLOW_RUN_MEMORY_REQUEST")) }}
+            - name: KUBERNETES_WORKFLOW_RUN_MEMORY_REQUEST
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL

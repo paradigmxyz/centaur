@@ -31,6 +31,17 @@ ironProxy:
     pgPortRangeEnd: 5471
   secretSource: onepassword
   secretTtl: 10m
+  # Resource requests/limits for iron-proxy Pods, sized independently for the
+  # two kinds of proxy. Empty by default => unconstrained, preserving prior
+  # behavior. Standard k8s resources shape, e.g.:
+  #   apiResources:
+  #     requests: {cpu: 50m, memory: 64Mi}
+  #     limits:   {cpu: 250m, memory: 64Mi}
+  #
+  # The API self-proxy: one long-lived Pod alongside the API.
+  apiResources: {}
+  # Each per-sandbox proxy: one Pod per active sandbox (larger footprint).
+  sandboxResources: {}
 
 # Tool-server sidecar — runs alongside the sandbox container in each sandbox
 # Pod and exposes the same /tools/* surface the API used to. Same image as
@@ -41,6 +52,10 @@ ironProxy:
 toolServer:
   enabled: true
   port: 8001
+  # Resource requests/limits for the tool-server sidecar injected into each
+  # sandbox Pod. Empty by default => unconstrained. Standard k8s resources
+  # shape (see ironProxy.apiResources above).
+  resources: {}
 
 # iron-token-broker — race-free OAuth refresh-token coordinator. Enable when
 # any tool's `oauth_token` secret uses `grant=refresh_token` against an IdP
@@ -173,6 +188,18 @@ sandbox:
     enabled: false
     size: 10Gi
     storageClassName: ""
+  resources:
+    limits: {}
+    requests:
+      cpu: 100m
+      memory: 512Mi
+
+# Workflow-run pods run the API image executing `python -m api.workflow_executor`.
+# Sized independently from the sandbox; the defaults mirror it (requests
+# cpu=100m/memory=512Mi here, plus limits cpu=2/memory=4Gi applied by the API
+# when unset) to preserve the prior behavior from when this pod reused the
+# sandbox sizing.
+workflowRun:
   resources:
     limits: {}
     requests:
