@@ -278,6 +278,7 @@ impl SessionRuntime {
         input: ExecuteSessionInput,
     ) -> Result<SessionExecution, SessionRuntimeError> {
         let ExecuteSessionInput {
+            idempotency_key,
             metadata,
             input_lines,
             idle_timeout_ms,
@@ -291,7 +292,7 @@ impl SessionRuntime {
             .store
             .create_execution(
                 thread_key,
-                input.idempotency_key.as_deref(),
+                idempotency_key.as_deref(),
                 execution_metadata(metadata, idle_timeout_ms, max_duration_ms),
             )
             .await?;
@@ -2337,11 +2338,13 @@ mod tests {
         let thread_key = ThreadKey::parse("cli:test-steering").unwrap();
         let messages = vec![
             SessionMessageInput {
+                client_message_id: None,
                 role: MessageRole::User,
                 parts: vec![json!({"type": "text", "text": "steer now"})],
                 metadata: json!({"platform": "test"}),
             },
             SessionMessageInput {
+                client_message_id: None,
                 role: MessageRole::Assistant,
                 parts: vec![json!({"type": "text", "text": "do not echo assistant"})],
                 metadata: json!({}),
@@ -2519,6 +2522,7 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         SessionExecution {
             execution_id: execution_id.to_owned(),
+            idempotency_key: None,
             thread_key,
             status,
             metadata,
