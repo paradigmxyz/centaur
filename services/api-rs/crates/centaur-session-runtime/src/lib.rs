@@ -9,7 +9,9 @@ use centaur_sandbox_core::{
     Mount, SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
     SandboxStatus, SandboxWrite,
 };
-use centaur_sandbox_manager::SandboxManager;
+use centaur_sandbox_manager::{
+    SandboxManager, WarmPoolConfig, WarmPoolError, WarmPoolManager, WarmSandboxSpecFactory,
+};
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, Session, SessionEvent, SessionExecution,
     SessionMessageInput, ThreadKey,
@@ -24,11 +26,10 @@ use thiserror::Error;
 use tokio::{
     io,
     sync::Mutex,
-    time::sleep,
-    time::{Instant, Interval, MissedTickBehavior, interval, interval_at},
+    time::{Instant, Interval, MissedTickBehavior, interval_at, sleep},
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
@@ -38,7 +39,6 @@ const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
-type WarmSandboxSpecFactory = Arc<dyn Fn() -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 
 #[derive(Clone)]
@@ -47,8 +47,7 @@ pub struct SessionRuntime {
     sandbox_runtime: SandboxRuntime,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
     iron_control: Option<SessionRegistrar>,
-    warm_pool: Option<Arc<WarmPool>>,
-    warm_pool_bootstrap_principal: Option<String>,
+    warm_pool: Option<Arc<WarmPoolManager>>,
 }
 
 #[derive(Clone)]
@@ -94,22 +93,6 @@ pub struct ExecuteSessionInput {
     pub max_duration_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
-pub struct WarmPoolConfig {
-    pub target_size: usize,
-    pub replenish_interval: Duration,
-}
-
-struct WarmPool {
-    store: PgSessionStore,
-    manager: Arc<SandboxManager>,
-    spec_factory: WarmSandboxSpecFactory,
-    workload_key: String,
-    target_size: usize,
-    replenish_interval: Duration,
-    iron_control_bootstrap_principal: Option<String>,
-}
-
 #[derive(Clone)]
 struct SessionPipe {
     stdin: Arc<Mutex<SessionInputSink>>,
@@ -133,19 +116,13 @@ impl SessionRuntime {
             sandbox_pipes: Arc::new(Mutex::new(HashMap::new())),
             iron_control: None,
             warm_pool: None,
-            warm_pool_bootstrap_principal: None,
         }
     }
 
     /// Attach an iron-control registrar so each new session upserts its
     /// principal and assigns the configured roles.
-    pub fn with_iron_control(
-        mut self,
-        registrar: SessionRegistrar,
-        warm_pool_bootstrap_principal: impl Into<String>,
-    ) -> Self {
+    pub fn with_iron_control(mut self, registrar: SessionRegistrar) -> Self {
         self.iron_control = Some(registrar);
-        self.warm_pool_bootstrap_principal = Some(warm_pool_bootstrap_principal.into());
         self
     }
 
@@ -165,15 +142,13 @@ impl SessionRuntime {
             return self;
         };
 
-        let pool = Arc::new(WarmPool {
-            store: self.store.clone(),
-            manager: self.sandbox_runtime.manager.clone(),
+        let pool = Arc::new(WarmPoolManager::new(
+            self.sandbox_runtime.manager.clone(),
+            self.store.clone(),
             spec_factory,
             workload_key,
-            target_size: config.target_size,
-            replenish_interval: config.replenish_interval,
-            iron_control_bootstrap_principal: self.warm_pool_bootstrap_principal.clone(),
-        });
+            config,
+        ));
         pool.clone().spawn_replenisher();
         self.warm_pool = Some(pool);
         self
@@ -592,10 +567,26 @@ impl SessionRuntime {
             }
         }
 
-        if let Some(sandbox_id) = self
-            .claim_warm_sandbox(thread_key, iron_control_principal)
-            .await?
+        if let Some(warm_pool) = &self.warm_pool
+            && let Some(sandbox_id) = warm_pool
+                .claim(thread_key.as_str(), iron_control_principal)
+                .await?
         {
+            self.store
+                .update_sandbox_id(thread_key, Some(sandbox_id.as_str()))
+                .await?;
+            self.store
+                .append_event(
+                    thread_key,
+                    None,
+                    "session.warm_sandbox_claimed",
+                    json!({
+                        "sandbox_id": sandbox_id.as_str(),
+                        "workload_key": warm_pool.workload_key(),
+                        "iron_control_principal": iron_control_principal,
+                    }),
+                )
+                .await?;
             return Ok(sandbox_id);
         }
 
@@ -608,91 +599,6 @@ impl SessionRuntime {
             .update_sandbox_id(thread_key, Some(handle.id.as_str()))
             .await?;
         Ok(handle.id.into_string())
-    }
-
-    async fn claim_warm_sandbox(
-        &self,
-        thread_key: &ThreadKey,
-        iron_control_principal: Option<&str>,
-    ) -> Result<Option<String>, SessionRuntimeError> {
-        let Some(warm_pool) = &self.warm_pool else {
-            return Ok(None);
-        };
-
-        loop {
-            let Some(sandbox_id) = self
-                .store
-                .claim_ready_warm_sandbox(warm_pool.workload_key.as_str(), thread_key)
-                .await?
-            else {
-                return Ok(None);
-            };
-
-            let id = SandboxId::new(sandbox_id.as_str());
-            match self.sandbox_runtime.manager.status(&id).await {
-                Ok(SandboxStatus::Running | SandboxStatus::Created) => {
-                    if let Some(principal_id) = iron_control_principal {
-                        if let Err(error) = self
-                            .sandbox_runtime
-                            .manager
-                            .assign_iron_control_proxy_principal(&id, principal_id)
-                            .await
-                        {
-                            let error_message = error.to_string();
-                            let _ = self
-                                .store
-                                .mark_warm_sandbox_failed(&sandbox_id, &error_message)
-                                .await;
-                            return Err(SessionRuntimeError::Sandbox(error));
-                        }
-                    }
-                    self.store
-                        .update_sandbox_id(thread_key, Some(sandbox_id.as_str()))
-                        .await?;
-                    self.store
-                        .append_event(
-                            thread_key,
-                            None,
-                            "session.warm_sandbox_claimed",
-                            json!({
-                                "sandbox_id": sandbox_id,
-                                "workload_key": warm_pool.workload_key.as_str(),
-                                "iron_control_principal": iron_control_principal,
-                            }),
-                        )
-                        .await?;
-                    info!(
-                        %sandbox_id,
-                        thread_key = thread_key.as_str(),
-                        "claimed warm session sandbox"
-                    );
-                    return Ok(Some(sandbox_id));
-                }
-                Ok(status) => {
-                    let error = format!("claimed warm sandbox was not running: {status:?}");
-                    warn!(%sandbox_id, %error);
-                    self.store
-                        .mark_warm_sandbox_failed(&sandbox_id, &error)
-                        .await?;
-                }
-                Err(SandboxError::NotFound(_)) => {
-                    let error = "claimed warm sandbox was not found".to_owned();
-                    warn!(%sandbox_id, %error);
-                    self.store
-                        .mark_warm_sandbox_failed(&sandbox_id, &error)
-                        .await?;
-                }
-                Err(error) => {
-                    let error_message = error.to_string();
-                    warn!(%sandbox_id, error = %error_message);
-                    let _ = self
-                        .store
-                        .mark_warm_sandbox_failed(&sandbox_id, &error_message)
-                        .await;
-                    return Err(SessionRuntimeError::Sandbox(error));
-                }
-            }
-        }
     }
 
     async fn ensure_session_pipe_if_live(
@@ -839,76 +745,6 @@ impl SandboxRuntime {
             warm_spec_factory: Some(warm_spec_factory),
             workload_key: Some(workload_key),
         }
-    }
-}
-
-impl WarmPoolConfig {
-    pub fn new(target_size: usize) -> Self {
-        Self {
-            target_size,
-            replenish_interval: Duration::from_secs(5),
-        }
-    }
-
-    pub fn replenish_interval(mut self, replenish_interval: Duration) -> Self {
-        self.replenish_interval = replenish_interval;
-        self
-    }
-}
-
-impl WarmPool {
-    fn spawn_replenisher(self: Arc<Self>) {
-        tokio::spawn(async move {
-            let mut tick = interval(self.replenish_interval);
-            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-            loop {
-                tick.tick().await;
-                if let Err(error) = self.replenish_once().await {
-                    warn!(%error, "session sandbox warm pool replenishment failed");
-                }
-            }
-        });
-    }
-
-    async fn replenish_once(&self) -> Result<(), SessionRuntimeError> {
-        let ready = self
-            .store
-            .count_ready_warm_sandboxes(self.workload_key.as_str())
-            .await?;
-        let needed = self.target_size.saturating_sub(ready.max(0) as usize);
-        if needed == 0 {
-            debug!(
-                workload_key = self.workload_key.as_str(),
-                ready,
-                target_size = self.target_size,
-                "session sandbox warm pool is full"
-            );
-            return Ok(());
-        }
-
-        for _ in 0..needed {
-            let mut spec = (self.spec_factory)();
-            if let Some(principal_id) = &self.iron_control_bootstrap_principal {
-                spec.iron_control_principal = Some(principal_id.clone());
-            }
-            let handle = self.manager.create_running(spec).await?;
-            if let Err(error) = self
-                .store
-                .insert_ready_warm_sandbox(handle.id.as_str(), self.workload_key.as_str())
-                .await
-            {
-                let _ = self.manager.stop(&handle.id).await;
-                return Err(SessionRuntimeError::Store(error));
-            }
-            info!(
-                sandbox_id = handle.id.as_str(),
-                workload_key = self.workload_key.as_str(),
-                "created warm session sandbox"
-            );
-        }
-
-        Ok(())
     }
 }
 
@@ -2060,6 +1896,8 @@ pub enum SessionRuntimeError {
     Sandbox(#[from] SandboxError),
     #[error(transparent)]
     IronControl(#[from] centaur_iron_control::IronControlError),
+    #[error(transparent)]
+    WarmPool(#[from] WarmPoolError),
 }
 
 #[cfg(test)]

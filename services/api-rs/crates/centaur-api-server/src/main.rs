@@ -25,14 +25,14 @@ async fn main() -> Result<(), ServerError> {
     }
     let sandbox_runtime = args.sandbox_runtime().await?;
     let mut runtime = SessionRuntime::new(store, sandbox_runtime);
+    let mut warm_pool_bootstrap_principal = None;
     if let Some(iron_control) = args.iron_control_runtime().await? {
         info!("iron-control session registration enabled");
-        runtime = runtime.with_iron_control(
-            iron_control.registrar,
-            iron_control.warm_pool_bootstrap_principal,
-        );
+        warm_pool_bootstrap_principal = Some(iron_control.warm_pool_bootstrap_principal);
+        runtime = runtime.with_iron_control(iron_control.registrar);
     }
-    if let Some(config) = args.warm_pool_config() {
+    if let Some(mut config) = args.warm_pool_config() {
+        config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal;
         runtime = runtime.with_warm_pool(config);
     }
 

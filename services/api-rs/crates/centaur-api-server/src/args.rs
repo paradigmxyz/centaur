@@ -19,8 +19,9 @@ use centaur_sandbox_agent_k8s::{
 };
 use centaur_sandbox_core::{Mount, MountKind};
 use centaur_sandbox_local::LocalSandboxBackend;
+use centaur_sandbox_manager::WarmPoolConfig;
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::{SandboxWorkloadMode, WarmPoolConfig};
+use centaur_session_runtime::SandboxWorkloadMode;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::info;
 
@@ -198,9 +199,8 @@ struct SandboxArgs {
 }
 
 impl SandboxArgs {
-    /// Build the iron-control session registrar, registering shared roles up
-    /// front. The warm-pool bootstrap principal intentionally remains roleless;
-    /// real session principals get roles only when a sandbox is claimed.
+    /// Build the iron-control registrar. The warm-pool bootstrap principal
+    /// stays roleless until claim-time reassignment binds the session principal.
     async fn iron_control_runtime(&self) -> Result<Option<IronControlRuntime>, ServerError> {
         let Some(client) = self.iron_control.client() else {
             return Ok(None);
@@ -386,9 +386,10 @@ impl SandboxArgs {
     }
 
     fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
-        (self.warm_pool_size > 0).then(|| {
-            WarmPoolConfig::new(self.warm_pool_size)
-                .replenish_interval(Duration::from_secs(self.warm_pool_replenish_interval_secs))
+        (self.warm_pool_size > 0).then(|| WarmPoolConfig {
+            target_size: self.warm_pool_size,
+            replenish_interval: Duration::from_secs(self.warm_pool_replenish_interval_secs),
+            bootstrap_iron_control_principal: None,
         })
     }
 }

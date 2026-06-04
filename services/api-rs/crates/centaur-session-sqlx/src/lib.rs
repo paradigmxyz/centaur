@@ -513,7 +513,7 @@ impl PgSessionStore {
     pub async fn claim_ready_warm_sandbox(
         &self,
         workload_key: &str,
-        thread_key: &ThreadKey,
+        thread_key: &str,
     ) -> Result<Option<String>, SessionStoreError> {
         let sandbox_id = sqlx::query_scalar::<_, String>(
             r#"
@@ -537,7 +537,7 @@ impl PgSessionStore {
             "#,
         )
         .bind(workload_key)
-        .bind(thread_key.as_str())
+        .bind(thread_key)
         .fetch_optional(&self.pool)
         .await?;
         Ok(sandbox_id)

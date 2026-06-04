@@ -6,10 +6,12 @@
 mod manager;
 mod reconcile;
 mod store;
+mod warm_pool;
 
 pub use manager::{ManagedSandbox, SandboxManager};
 pub use reconcile::{DriftReason, ReconcileAction, ReconcileOutcome, ReconcilePlan};
 pub use store::{DesiredStateStore, InMemoryDesiredStateStore};
+pub use warm_pool::{WarmPoolConfig, WarmPoolError, WarmPoolManager, WarmSandboxSpecFactory};
 
 #[cfg(test)]
 mod tests {

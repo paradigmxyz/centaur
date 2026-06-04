@@ -268,6 +268,7 @@ dependencies = [
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
  "centaur-sandbox-local",
+ "centaur-sandbox-manager",
  "centaur-session-core",
  "centaur-session-runtime",
  "centaur-session-sqlx",
@@ -385,8 +386,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "centaur-sandbox-core",
+ "centaur-session-sqlx",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
