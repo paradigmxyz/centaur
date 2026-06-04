@@ -800,12 +800,15 @@ def handle_input(turn_input: dict[str, Any]) -> None:
     if turn_input.get("type") != "user":
         return
 
+    thread_key = str(turn_input.get("thread_key") or "").strip()
+    if thread_key:
+        os.environ["CENTAUR_THREAD_KEY"] = thread_key
     configure_trace_context_for_startup(turn_input.get("trace_id"))
     configure_traceparent(turn_input.get("traceparent"))
     configure_codex_otel_for_startup(
         _trace_id_from_traceparent(turn_input.get("traceparent"))
         or turn_input.get("trace_id"),
-        turn_input.get("thread_key"),
+        thread_key,
     )
     CURRENT_TRACE_METADATA = trace_metadata_from_input(turn_input)
     start_app_server()

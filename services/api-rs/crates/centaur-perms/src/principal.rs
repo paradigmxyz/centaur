@@ -12,7 +12,11 @@ use centaur_iron_control::{IdentityInput, derive_principal};
 /// what api-rs writes at session start. Any other value is used verbatim as a
 /// principal `foreign_id` (e.g. `slack-channel-t1-c9`), so an operator can name
 /// an already-registered principal directly.
-pub fn resolve_principal(principal: &str, slack_user: Option<&str>, namespace: &str) -> IdentityInput {
+pub fn resolve_principal(
+    principal: &str,
+    slack_user: Option<&str>,
+    namespace: &str,
+) -> IdentityInput {
     if principal.contains(':') {
         derive_principal(principal, slack_user).to_identity_input(namespace)
     } else {

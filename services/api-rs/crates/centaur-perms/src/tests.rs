@@ -19,9 +19,18 @@ fn entry(toml_src: &str) -> toml::Value {
 #[test]
 fn secret_type_routes_by_oid_prefix() {
     use crate::secret_type_for_oid;
-    assert_eq!(secret_type_for_oid("ssr_1").map(|t| t.1), Some("static_secrets"));
-    assert_eq!(secret_type_for_oid("ots_2").map(|t| t.1), Some("oauth_token_secrets"));
-    assert_eq!(secret_type_for_oid("gas_3").map(|t| t.1), Some("gcp_auth_secrets"));
+    assert_eq!(
+        secret_type_for_oid("ssr_1").map(|t| t.1),
+        Some("static_secrets")
+    );
+    assert_eq!(
+        secret_type_for_oid("ots_2").map(|t| t.1),
+        Some("oauth_token_secrets")
+    );
+    assert_eq!(
+        secret_type_for_oid("gas_3").map(|t| t.1),
+        Some("gcp_auth_secrets")
+    );
     assert_eq!(secret_type_for_oid("pgs_4").map(|t| t.0), Some("pg_dsn"));
     assert_eq!(secret_type_for_oid("hms_5").map(|t| t.0), Some("hmac"));
     // A bare foreign_id is not an OID — callers fall back to lookup.
@@ -37,7 +46,9 @@ fn parses_http_replace_secret() {
         &[],
     )
     .unwrap();
-    let ParsedSecret::Http(http) = parsed else { panic!("expected http") };
+    let ParsedSecret::Http(http) = parsed else {
+        panic!("expected http")
+    };
     assert_eq!(http.name, "SLACK_BOT_TOKEN");
     assert_eq!(http.secret_ref, "SLACK_BOT_TOKEN");
     assert_eq!(http.mode, SecretMode::Replace);
@@ -50,11 +61,22 @@ fn parses_http_replace_secret() {
 fn http_inherits_tool_level_hosts() {
     let parsed = tools::parse_secret(
         &entry(r#"{type = "http", name = "PARALLEL_API_KEY", match_headers = ["x-api-key"]}"#),
-        &["api.parallel.ai".to_owned(), "search.parallel.ai".to_owned()],
+        &[
+            "api.parallel.ai".to_owned(),
+            "search.parallel.ai".to_owned(),
+        ],
     )
     .unwrap();
-    let ParsedSecret::Http(http) = parsed else { panic!("expected http") };
-    assert_eq!(http.hosts, vec!["api.parallel.ai".to_owned(), "search.parallel.ai".to_owned()]);
+    let ParsedSecret::Http(http) = parsed else {
+        panic!("expected http")
+    };
+    assert_eq!(
+        http.hosts,
+        vec![
+            "api.parallel.ai".to_owned(),
+            "search.parallel.ai".to_owned()
+        ]
+    );
 }
 
 #[test]
@@ -64,7 +86,9 @@ fn parses_inject_secret() {
         &[],
     )
     .unwrap();
-    let ParsedSecret::Http(http) = parsed else { panic!("expected http") };
+    let ParsedSecret::Http(http) = parsed else {
+        panic!("expected http")
+    };
     assert_eq!(http.mode, SecretMode::Inject);
     assert_eq!(http.inject_header.as_deref(), Some("Authorization"));
     assert_eq!(http.inject_formatter.as_deref(), Some("Bearer {{.Value}}"));
@@ -99,12 +123,21 @@ fn parses_oauth_token_secret() {
         &[],
     )
     .unwrap();
-    let ParsedSecret::OAuthToken(oauth) = parsed else { panic!("expected oauth") };
+    let ParsedSecret::OAuthToken(oauth) = parsed else {
+        panic!("expected oauth")
+    };
     assert_eq!(oauth.grant, "refresh_token");
-    assert_eq!(oauth.token_endpoint.as_deref(), Some("https://oauth2.googleapis.com/token"));
+    assert_eq!(
+        oauth.token_endpoint.as_deref(),
+        Some("https://oauth2.googleapis.com/token")
+    );
     assert_eq!(oauth.hosts, vec!["gmail.googleapis.com".to_owned()]);
     assert_eq!(oauth.fields.len(), 2);
-    let refresh = oauth.fields.iter().find(|(f, _)| f == "refresh_token").unwrap();
+    let refresh = oauth
+        .fields
+        .iter()
+        .find(|(f, _)| f == "refresh_token")
+        .unwrap();
     assert_eq!(refresh.1.secret_ref, "GOOGLE_TOKEN_JSON");
     assert_eq!(refresh.1.json_key.as_deref(), Some("refresh_token"));
 }
@@ -140,17 +173,26 @@ const FALCONX_HMAC: &str = r#"{ type = "hmac_sign", name = "FALCONX_P1", hosts =
 #[test]
 fn parses_hmac_sign_secret() {
     let parsed = tools::parse_secret(&entry(FALCONX_HMAC), &[]).unwrap();
-    let ParsedSecret::Hmac(hmac) = parsed else { panic!("expected hmac") };
+    let ParsedSecret::Hmac(hmac) = parsed else {
+        panic!("expected hmac")
+    };
     assert_eq!(hmac.name, "FALCONX_P1");
     assert_eq!(hmac.hosts, vec!["api.falconx.io".to_owned()]);
     assert_eq!(hmac.algorithm, "sha256");
     assert_eq!(hmac.key_encoding, "base64");
     assert_eq!(hmac.output_encoding, "base64");
     assert_eq!(hmac.timestamp_format, "unix_seconds");
-    assert_eq!(hmac.message, "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}");
+    assert_eq!(
+        hmac.message,
+        "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}"
+    );
     assert!(!hmac.allow_chunked_body);
     // The signing key plus the two user-named credentials.
-    let secret = hmac.credentials.iter().find(|(f, _)| f == "secret").unwrap();
+    let secret = hmac
+        .credentials
+        .iter()
+        .find(|(f, _)| f == "secret")
+        .unwrap();
     assert_eq!(secret.1.secret_ref, "FALCONX_P1_SECRET_KEY");
     assert_eq!(hmac.credentials.len(), 3);
     assert_eq!(hmac.headers.len(), 4);
@@ -175,7 +217,10 @@ fn hmac_rejects_unknown_algorithm() {
         &[],
     )
     .unwrap_err();
-    assert!(err.to_string().contains(r#""algorithm" must be one of"#), "{err}");
+    assert!(
+        err.to_string().contains(r#""algorithm" must be one of"#),
+        "{err}"
+    );
 }
 
 #[test]
@@ -185,7 +230,10 @@ fn hmac_requires_hosts() {
         &[],
     )
     .unwrap_err();
-    assert!(err.to_string().contains("'hosts' must be a non-empty"), "{err}");
+    assert!(
+        err.to_string().contains("'hosts' must be a non-empty"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -195,7 +243,9 @@ fn parses_pg_dsn_secret() {
         &[],
     )
     .unwrap();
-    let ParsedSecret::PgDsn(pg) = parsed else { panic!("expected pg_dsn") };
+    let ParsedSecret::PgDsn(pg) = parsed else {
+        panic!("expected pg_dsn")
+    };
     assert_eq!(pg.name, "RESHIFT_DSN");
     assert_eq!(pg.database, "pmadmin");
     assert_eq!(pg.secret_ref, "RESHIFT_DSN");
@@ -203,11 +253,8 @@ fn parses_pg_dsn_secret() {
 
 #[test]
 fn pg_dsn_requires_database() {
-    let err = tools::parse_secret(
-        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN" }"#),
-        &[],
-    )
-    .unwrap_err();
+    let err = tools::parse_secret(&entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN" }"#), &[])
+        .unwrap_err();
     assert!(err.to_string().contains("database"), "{err}");
 }
 
@@ -219,8 +266,11 @@ fn unknown_type_errors() {
 
 #[test]
 fn legacy_string_shim_is_replace_secret() {
-    let parsed = tools::parse_secret(&entry(r#""FOO_TOKEN""#), &["api.example.com".to_owned()]).unwrap();
-    let ParsedSecret::Http(http) = parsed else { panic!("expected http") };
+    let parsed =
+        tools::parse_secret(&entry(r#""FOO_TOKEN""#), &["api.example.com".to_owned()]).unwrap();
+    let ParsedSecret::Http(http) = parsed else {
+        panic!("expected http")
+    };
     assert_eq!(http.name, "FOO_TOKEN");
     assert_eq!(http.mode, SecretMode::Replace);
     assert!(http.match_headers.contains(&"Authorization".to_owned()));
@@ -240,7 +290,9 @@ fn translates_http_replace_to_static_input() {
     ];
     let out = translate::translate("default", "tool-slack", &secrets, &SourcePolicy::env());
     assert!(out.skipped.is_empty());
-    let SecretInput::Static(input) = &out.inputs[0] else { panic!("expected static") };
+    let SecretInput::Static(input) = &out.inputs[0] else {
+        panic!("expected static")
+    };
     assert_eq!(input.foreign_id, "tool-slack-slack-bot-token");
     assert_eq!(input.name, "SLACK_BOT_TOKEN");
     let replace = input.replace_config.as_ref().unwrap();
@@ -248,7 +300,10 @@ fn translates_http_replace_to_static_input() {
     assert_eq!(replace.match_headers, vec!["Authorization".to_owned()]);
     assert!(input.inject_config.is_none());
     assert_eq!(input.source.source_type, "env");
-    assert_eq!(input.source.config, serde_json::json!({ "var": "SLACK_BOT_TOKEN" }));
+    assert_eq!(
+        input.source.config,
+        serde_json::json!({ "var": "SLACK_BOT_TOKEN" })
+    );
     assert_eq!(input.rules.len(), 1);
     assert_eq!(input.rules[0].host.as_deref(), Some("slack.com"));
 }
@@ -257,13 +312,17 @@ fn translates_http_replace_to_static_input() {
 fn translates_gcp_auth_defaults_scopes_when_unset() {
     let secrets = vec![
         tools::parse_secret(
-            &entry(r#"{ type = "gcp_auth", name = "GCP_CRED", hosts = ["storage.googleapis.com"] }"#),
+            &entry(
+                r#"{ type = "gcp_auth", name = "GCP_CRED", hosts = ["storage.googleapis.com"] }"#,
+            ),
             &[],
         )
         .unwrap(),
     ];
     let out = translate::translate("default", "tool-gcs", &secrets, &SourcePolicy::env());
-    let SecretInput::GcpAuth(input) = &out.inputs[0] else { panic!("expected gcp_auth") };
+    let SecretInput::GcpAuth(input) = &out.inputs[0] else {
+        panic!("expected gcp_auth")
+    };
     // No scopes declared -> the single default cloud-platform scope.
     assert_eq!(
         input.scopes,
@@ -283,12 +342,20 @@ fn translates_oauth_with_json_key_fields() {
         .unwrap(),
     ];
     let out = translate::translate("default", "tool-gsuite", &secrets, &SourcePolicy::env());
-    let SecretInput::OAuthToken(input) = &out.inputs[0] else { panic!("expected oauth") };
-    assert_eq!(input.foreign_id, "tool-gsuite-oauth-https-oauth2-googleapis-com-token");
+    let SecretInput::OAuthToken(input) = &out.inputs[0] else {
+        panic!("expected oauth")
+    };
+    assert_eq!(
+        input.foreign_id,
+        "tool-gsuite-oauth-https-oauth2-googleapis-com-token"
+    );
     assert_eq!(input.grant, "refresh_token");
     let refresh = input.credentials.get("refresh_token").unwrap();
     assert_eq!(refresh.source_type, "env");
-    assert_eq!(refresh.config, serde_json::json!({ "var": "GOOGLE_TOKEN_JSON", "json_key": "refresh_token" }));
+    assert_eq!(
+        refresh.config,
+        serde_json::json!({ "var": "GOOGLE_TOKEN_JSON", "json_key": "refresh_token" })
+    );
 }
 
 #[test]
@@ -302,7 +369,9 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
     ];
     let out = translate::translate("default", "tool-reshift", &secrets, &SourcePolicy::env());
     assert!(out.skipped.is_empty());
-    let SecretInput::PgDsn(input) = &out.inputs[0] else { panic!("expected pg_dsn") };
+    let SecretInput::PgDsn(input) = &out.inputs[0] else {
+        panic!("expected pg_dsn")
+    };
     // The foreign_id is not role-prefixed: it must round-trip back to the
     // sandbox DSN env var (`RESHIFT_DSN`) that api-rs derives from it.
     assert_eq!(input.foreign_id, "reshift");
@@ -310,7 +379,10 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
     assert_eq!(input.name, "RESHIFT_DSN");
     assert_eq!(input.database, "pmadmin");
     assert_eq!(input.dsn.source_type, "env");
-    assert_eq!(input.dsn.config, serde_json::json!({ "var": "RESHIFT_DSN" }));
+    assert_eq!(
+        input.dsn.config,
+        serde_json::json!({ "var": "RESHIFT_DSN" })
+    );
 }
 
 #[test]
@@ -318,14 +390,19 @@ fn translates_hmac_to_input() {
     let secrets = vec![tools::parse_secret(&entry(FALCONX_HMAC), &[]).unwrap()];
     let out = translate::translate("default", "tool-falconx", &secrets, &SourcePolicy::env());
     assert!(out.skipped.is_empty());
-    let SecretInput::Hmac(input) = &out.inputs[0] else { panic!("expected hmac") };
+    let SecretInput::Hmac(input) = &out.inputs[0] else {
+        panic!("expected hmac")
+    };
     assert_eq!(input.foreign_id, "tool-falconx-hmac-falconx-p1");
     assert_eq!(input.name, "FALCONX_P1");
     assert_eq!(input.signature_algorithm, "sha256");
     assert_eq!(input.signature_key_encoding, "base64");
     assert_eq!(input.signature_output_encoding, "base64");
     assert_eq!(input.timestamp_format, "unix_seconds");
-    assert_eq!(input.signature_message, "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}");
+    assert_eq!(
+        input.signature_message,
+        "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}"
+    );
     assert!(!input.allow_chunked_body);
     assert_eq!(input.headers.len(), 4);
     assert_eq!(input.headers[1].name, "FX-ACCESS-SIGN");
@@ -333,28 +410,53 @@ fn translates_hmac_to_input() {
     // The HMAC key resolves via the deployment source policy (env here).
     let secret = input.credentials.get("secret").unwrap();
     assert_eq!(secret.source_type, "env");
-    assert_eq!(secret.config, serde_json::json!({ "var": "FALCONX_P1_SECRET_KEY" }));
+    assert_eq!(
+        secret.config,
+        serde_json::json!({ "var": "FALCONX_P1_SECRET_KEY" })
+    );
     assert_eq!(input.rules.len(), 1);
     assert_eq!(input.rules[0].host.as_deref(), Some("api.falconx.io"));
 }
 
 #[test]
 fn unsupported_secret_is_reported_as_skipped() {
-    let secrets = vec![ParsedSecret::Unsupported { name: "TOK".to_owned(), kind: "brokered_token".to_owned() }];
+    let secrets = vec![ParsedSecret::Unsupported {
+        name: "TOK".to_owned(),
+        kind: "brokered_token".to_owned(),
+    }];
     let out = translate::translate("default", "tool-x", &secrets, &SourcePolicy::env());
     assert!(out.inputs.is_empty());
-    assert_eq!(out.skipped, vec![("TOK".to_owned(), "brokered_token".to_owned())]);
+    assert_eq!(
+        out.skipped,
+        vec![("TOK".to_owned(), "brokered_token".to_owned())]
+    );
 }
 
 #[test]
 fn duplicate_secret_names_get_unique_foreign_ids() {
     let secrets = vec![
-        tools::parse_secret(&entry(r#"{type="http", name="TOK", match_headers=["Authorization"], hosts=["a.com"]}"#), &[]).unwrap(),
-        tools::parse_secret(&entry(r#"{type="http", name="tok", match_headers=["Authorization"], hosts=["b.com"]}"#), &[]).unwrap(),
+        tools::parse_secret(
+            &entry(
+                r#"{type="http", name="TOK", match_headers=["Authorization"], hosts=["a.com"]}"#,
+            ),
+            &[],
+        )
+        .unwrap(),
+        tools::parse_secret(
+            &entry(
+                r#"{type="http", name="tok", match_headers=["Authorization"], hosts=["b.com"]}"#,
+            ),
+            &[],
+        )
+        .unwrap(),
     ];
     let out = translate::translate("default", "tool-x", &secrets, &SourcePolicy::env());
-    let SecretInput::Static(a) = &out.inputs[0] else { panic!() };
-    let SecretInput::Static(b) = &out.inputs[1] else { panic!() };
+    let SecretInput::Static(a) = &out.inputs[0] else {
+        panic!()
+    };
+    let SecretInput::Static(b) = &out.inputs[1] else {
+        panic!()
+    };
     assert_eq!(a.foreign_id, "tool-x-tok");
     assert_eq!(b.foreign_id, "tool-x-tok-2");
 }
@@ -427,9 +529,15 @@ fn missing_tool_errors() {
 
 #[test]
 fn parses_label_filters() {
-    assert_eq!(crate::parse_label("managed-by=centaur").unwrap(), ("managed-by".to_owned(), "centaur".to_owned()));
+    assert_eq!(
+        crate::parse_label("managed-by=centaur").unwrap(),
+        ("managed-by".to_owned(), "centaur".to_owned())
+    );
     // empty value is allowed (matches an explicitly-empty label)
-    assert_eq!(crate::parse_label("k=").unwrap(), ("k".to_owned(), String::new()));
+    assert_eq!(
+        crate::parse_label("k=").unwrap(),
+        ("k".to_owned(), String::new())
+    );
     assert!(crate::parse_label("noequals").is_err());
     assert!(crate::parse_label("=v").is_err());
 }
@@ -477,24 +585,45 @@ fn repo_tools_dir() -> Option<PathBuf> {
 
 #[test]
 fn real_slack_tool_parses_and_translates() {
-    let Some(tools_dir) = repo_tools_dir() else { return };
+    let Some(tools_dir) = repo_tools_dir() else {
+        return;
+    };
     let manifest = tools::find_tool(&[tools_dir], "slack").unwrap();
     assert_eq!(manifest.name, "slack");
-    let out = translate::translate("default", "tool-slack", &manifest.all_secrets().cloned().collect::<Vec<_>>(), &SourcePolicy::env());
-    assert!(out.skipped.is_empty(), "slack should have no unsupported secrets");
+    let out = translate::translate(
+        "default",
+        "tool-slack",
+        &manifest.all_secrets().cloned().collect::<Vec<_>>(),
+        &SourcePolicy::env(),
+    );
     assert!(
-        out.inputs.iter().any(|i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-slack-slack-bot-token")),
+        out.skipped.is_empty(),
+        "slack should have no unsupported secrets"
+    );
+    assert!(
+        out.inputs.iter().any(
+            |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-slack-slack-bot-token")
+        ),
         "expected the SLACK_BOT_TOKEN static secret"
     );
 }
 
 #[test]
 fn real_gsuite_tool_parses_oauth() {
-    let Some(tools_dir) = repo_tools_dir() else { return };
+    let Some(tools_dir) = repo_tools_dir() else {
+        return;
+    };
     let manifest = tools::find_tool(&[tools_dir], "gsuite").unwrap();
-    let out = translate::translate("default", "tool-gsuite", &manifest.all_secrets().cloned().collect::<Vec<_>>(), &SourcePolicy::env());
+    let out = translate::translate(
+        "default",
+        "tool-gsuite",
+        &manifest.all_secrets().cloned().collect::<Vec<_>>(),
+        &SourcePolicy::env(),
+    );
     assert!(
-        out.inputs.iter().any(|i| matches!(i, SecretInput::OAuthToken(_))),
+        out.inputs
+            .iter()
+            .any(|i| matches!(i, SecretInput::OAuthToken(_))),
         "expected gsuite's oauth_token secret"
     );
 }

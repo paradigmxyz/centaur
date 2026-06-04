@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use centaur_iron_control::IronControlClient;
-use tokio::sync::Mutex;
 use centaur_sandbox_core::{
     MountKind, ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
     SandboxResult, SandboxSpec, SandboxStatus,
@@ -21,6 +20,7 @@ use kube::api::{AttachParams, DeleteParams, ListParams, Patch, PatchParams, Post
 use kube::{Api, Client, Error};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
 pub use generated::agents_x_k8s_io as crd;
@@ -353,6 +353,14 @@ impl SandboxBackend for AgentSandboxBackend {
             }
             Err(err) => Err(map_kube_error("delete sandbox", err)),
         }
+    }
+
+    async fn assign_iron_control_proxy_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<()> {
+        self.assign_proxy_principal(id, principal_id).await
     }
 
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {

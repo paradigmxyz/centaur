@@ -1,4 +1,5 @@
 mod args;
+mod tool_discovery;
 
 use centaur_api_server::build_router_with_session_runtime;
 use centaur_session_runtime::SessionRuntime;
@@ -24,9 +25,15 @@ async fn main() -> Result<(), ServerError> {
     }
     let sandbox_runtime = args.sandbox_runtime().await?;
     let mut runtime = SessionRuntime::new(store, sandbox_runtime);
-    if let Some(registrar) = args.iron_control_registrar().await? {
+    if let Some(iron_control) = args.iron_control_runtime().await? {
         info!("iron-control session registration enabled");
-        runtime = runtime.with_iron_control(registrar);
+        runtime = runtime.with_iron_control(
+            iron_control.registrar,
+            iron_control.warm_pool_bootstrap_principal,
+        );
+    }
+    if let Some(config) = args.warm_pool_config() {
+        runtime = runtime.with_warm_pool(config);
     }
 
     let listener = TcpListener::bind(args.server.bind_addr).await?;
@@ -66,7 +73,11 @@ pub(crate) enum ServerError {
     #[error(transparent)]
     IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
     #[error(transparent)]
+    IronControl(#[from] centaur_iron_control::IronControlError),
+    #[error(transparent)]
     IronControlRegister(#[from] centaur_iron_control::RegisterError),
+    #[error(transparent)]
+    ToolDiscovery(#[from] tool_discovery::ToolDiscoveryError),
     #[error("iron-proxy requires both firewall CA cert and key Secret names")]
     MissingIronProxyCaSecret,
     #[error("{0}")]

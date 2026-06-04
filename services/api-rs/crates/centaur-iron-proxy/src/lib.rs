@@ -11,8 +11,8 @@ pub use broker::{
 pub use error::{IronProxyConfigError, Result};
 pub use fragment::{harness_auth_fragment, infra_fragment, load_fragment_str, placeholder_env};
 pub use model::{
-    BrokerCredential, PostgresClient, PostgresListener, PostgresUpstream, ProxyFragment, SandboxEnv,
-    Secret, SecretReplace, Transform, TransformConfig, pg_env_var, pg_foreign_id,
+    BrokerCredential, PostgresClient, PostgresListener, PostgresUpstream, ProxyFragment,
+    SandboxEnv, Secret, SecretReplace, Transform, TransformConfig, pg_env_var, pg_foreign_id,
     pg_sandbox_env_var,
 };
 pub use source::{SourceKind, SourcePolicy};

@@ -93,6 +93,16 @@ where
         Ok(())
     }
 
+    pub async fn assign_iron_control_proxy_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<()> {
+        self.backend
+            .assign_iron_control_proxy_principal(id, principal_id)
+            .await
+    }
+
     pub async fn reconcile_one(&self, id: &SandboxId) -> SandboxResult<ReconcileOutcome> {
         let Some(desired) = self.store.get(id) else {
             return Ok(ReconcileOutcome::Drift(DriftReason::NoDesiredState));

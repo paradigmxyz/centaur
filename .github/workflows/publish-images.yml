@@ -42,9 +42,17 @@ jobs:
             image: centaur-api
             dockerfile: services/api/Dockerfile
             target: ""
+          - service: api-rs
+            image: centaur-api-rs
+            dockerfile: services/api-rs/Dockerfile
+            target: ""
           - service: slackbot
             image: centaur-slackbot
             dockerfile: services/slackbot/Dockerfile
+            target: ""
+          - service: slackbotv2
+            image: centaur-slackbotv2
+            dockerfile: services/slackbotv2/Dockerfile
             target: ""
           - service: agent
             image: centaur-agent

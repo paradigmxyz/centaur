@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 
 use crate::error::{IronControlError, Result};
 use crate::models::{
-    DataEnvelope, GcpAuthSecretInput, Grant, GrantSecret, Grantee, HmacSecretInput, IdentityInput,
-    EffectiveConfig, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, Role,
-    SecretRecord, StaticSecretInput,
+    DataEnvelope, EffectiveConfig, GcpAuthSecretInput, Grant, GrantSecret, Grantee,
+    HmacSecretInput, IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy,
+    ProxyInput, Role, SecretRecord, StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -52,8 +52,12 @@ impl IronControlClient {
 
     /// Upsert a principal by ``foreign_id`` (create if absent, update if not).
     pub async fn upsert_principal(&self, input: &IdentityInput) -> Result<Principal> {
-        self.write(Method::PUT, &upsert_path("principals", &input.foreign_id), input)
-            .await
+        self.write(
+            Method::PUT,
+            &upsert_path("principals", &input.foreign_id),
+            input,
+        )
+        .await
     }
 
     /// Upsert a role by ``foreign_id``.
@@ -82,7 +86,11 @@ impl IronControlClient {
     }
 
     /// List every role in ``namespace``, optionally filtered by ``labels``.
-    pub async fn list_roles(&self, namespace: &str, labels: &[(String, String)]) -> Result<Vec<Role>> {
+    pub async fn list_roles(
+        &self,
+        namespace: &str,
+        labels: &[(String, String)],
+    ) -> Result<Vec<Role>> {
         self.list_collection("roles", namespace, labels).await
     }
 
@@ -93,7 +101,10 @@ impl IronControlClient {
         namespace: &str,
         labels: &[(String, String)],
     ) -> Result<Vec<R>> {
-        let mut base = format!("{API_PREFIX}/{collection}?namespace={}", urlencoding::encode(namespace));
+        let mut base = format!(
+            "{API_PREFIX}/{collection}?namespace={}",
+            urlencoding::encode(namespace)
+        );
         for (key, value) in labels {
             base.push_str(&format!(
                 "&labels[{}]={}",
@@ -131,8 +142,18 @@ impl IronControlClient {
     /// through the namespaced lookup endpoint, since the bare ``/:id`` form is
     /// OID-only). api-rs reads this to wire the sandbox's env for
     /// operator-managed secrets.
-    pub async fn effective_config(&self, namespace: &str, principal: &str) -> Result<EffectiveConfig> {
-        let path = resource_path("principals", "prn_", namespace, principal, "/effective_config");
+    pub async fn effective_config(
+        &self,
+        namespace: &str,
+        principal: &str,
+    ) -> Result<EffectiveConfig> {
+        let path = resource_path(
+            "principals",
+            "prn_",
+            namespace,
+            principal,
+            "/effective_config",
+        );
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
     }
@@ -209,8 +230,12 @@ impl IronControlClient {
     pub async fn upsert_gcp_auth_secret(&self, input: &GcpAuthSecretInput) -> Result<SecretRecord> {
         match &input.foreign_id {
             Some(foreign_id) => {
-                self.write(Method::PUT, &upsert_path("gcp_auth_secrets", foreign_id), input)
-                    .await
+                self.write(
+                    Method::PUT,
+                    &upsert_path("gcp_auth_secrets", foreign_id),
+                    input,
+                )
+                .await
             }
             None => {
                 self.write(Method::POST, &collection_path("gcp_auth_secrets"), input)
@@ -283,14 +308,21 @@ impl IronControlClient {
 
     /// Attach a secret to a grantee (principal or role).
     pub async fn create_grant(&self, grantee: &Grantee, secret: &GrantSecret) -> Result<Grant> {
-        self.write(Method::POST, &collection_path("grants"), &grant_body(grantee, secret))
-            .await
+        self.write(
+            Method::POST,
+            &collection_path("grants"),
+            &grant_body(grantee, secret),
+        )
+        .await
     }
 
     /// List the grants made directly to a principal (by OID; this sub-resource
     /// route does not resolve ``foreign_id``s).
     pub async fn list_principal_grants(&self, principal: &str) -> Result<Vec<Grant>> {
-        let base = format!("{API_PREFIX}/principals/{}/grants", urlencoding::encode(principal));
+        let base = format!(
+            "{API_PREFIX}/principals/{}/grants",
+            urlencoding::encode(principal)
+        );
         self.paginate(&base).await
     }
 
@@ -332,8 +364,12 @@ impl IronControlClient {
     /// checkout without a restart or token swap.
     pub async fn assign_proxy_principal(&self, id: &str, principal_id: &str) -> Result<Proxy> {
         let path = format!("{API_PREFIX}/proxies/{}", urlencoding::encode(id));
-        self.write(Method::PATCH, &path, &json!({ "principal_id": principal_id }))
-            .await
+        self.write(
+            Method::PATCH,
+            &path,
+            &json!({ "principal_id": principal_id }),
+        )
+        .await
     }
 
     /// Deregister a proxy by OID.
@@ -411,7 +447,10 @@ fn collection_path(collection: &str) -> String {
 }
 
 fn upsert_path(collection: &str, foreign_id: &str) -> String {
-    format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(foreign_id))
+    format!(
+        "{API_PREFIX}/{collection}/{}",
+        urlencoding::encode(foreign_id)
+    )
 }
 
 /// Path to a resource (or sub-resource) addressed by ``ident``: the bare
@@ -420,9 +459,18 @@ fn upsert_path(collection: &str, foreign_id: &str) -> String {
 /// only matches OIDs. ``suffix`` is appended after the id segment for
 /// sub-resources (e.g. ``"/effective_config"``); pass ``""`` for the resource
 /// itself.
-fn resource_path(collection: &str, oid_prefix: &str, namespace: &str, ident: &str, suffix: &str) -> String {
+fn resource_path(
+    collection: &str,
+    oid_prefix: &str,
+    namespace: &str,
+    ident: &str,
+    suffix: &str,
+) -> String {
     if ident.starts_with(oid_prefix) {
-        format!("{API_PREFIX}/{collection}/{}{suffix}", urlencoding::encode(ident))
+        format!(
+            "{API_PREFIX}/{collection}/{}{suffix}",
+            urlencoding::encode(ident)
+        )
     } else {
         format!(
             "{API_PREFIX}/{collection}/lookup/{}/{}{suffix}",
@@ -521,11 +569,23 @@ mod tests {
     #[test]
     fn resource_path_appends_subresource_suffix() {
         assert_eq!(
-            resource_path("principals", "prn_", "default", "prn_abc", "/effective_config"),
+            resource_path(
+                "principals",
+                "prn_",
+                "default",
+                "prn_abc",
+                "/effective_config"
+            ),
             "/api/v1/principals/prn_abc/effective_config"
         );
         assert_eq!(
-            resource_path("principals", "prn_", "ns1", "slack-channel-c9", "/effective_config"),
+            resource_path(
+                "principals",
+                "prn_",
+                "ns1",
+                "slack-channel-c9",
+                "/effective_config"
+            ),
             "/api/v1/principals/lookup/ns1/slack-channel-c9/effective_config"
         );
     }

@@ -399,7 +399,9 @@ impl GrantSecret {
     /// Route an OID to its grant variant by prefix (see [`SECRET_TYPES`]).
     /// `None` when the OID matches no known secret type.
     pub fn from_oid(oid: &str) -> Option<Self> {
-        let (label, ..) = SECRET_TYPES.iter().find(|(_, _, prefix)| oid.starts_with(prefix))?;
+        let (label, ..) = SECRET_TYPES
+            .iter()
+            .find(|(_, _, prefix)| oid.starts_with(prefix))?;
         let id = oid.to_owned();
         Some(match *label {
             "static" => Self::Static(id),

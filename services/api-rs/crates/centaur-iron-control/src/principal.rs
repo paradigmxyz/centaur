@@ -45,8 +45,12 @@ impl PrincipalRef {
 /// thread still maps to a deterministic, distinct principal.
 pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> PrincipalRef {
     let (team_id, conversation_id) = parse_slack_segments(thread_key);
-    let scope = team_id.map(|team| format!("{}-", slugify(team))).unwrap_or_default();
-    let team_suffix = team_id.map(|team| format!(" (team {team})")).unwrap_or_default();
+    let scope = team_id
+        .map(|team| format!("{}-", slugify(team)))
+        .unwrap_or_default();
+    let team_suffix = team_id
+        .map(|team| format!(" (team {team})"))
+        .unwrap_or_default();
 
     if is_direct_message(conversation_id)
         && let Some(user) = slack_user_id.map(str::trim).filter(|user| !user.is_empty())
@@ -152,6 +156,9 @@ mod tests {
         let input = derive_principal("chat:C1:ts", None).to_identity_input("default");
         assert_eq!(input.namespace, "default");
         assert_eq!(input.foreign_id, "slack-channel-c1");
-        assert_eq!(input.labels.get("managed-by").map(String::as_str), Some("centaur"));
+        assert_eq!(
+            input.labels.get("managed-by").map(String::as_str),
+            Some("centaur")
+        );
     }
 }

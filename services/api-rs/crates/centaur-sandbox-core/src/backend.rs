@@ -35,6 +35,19 @@ pub trait SandboxBackend: Send + Sync {
     /// Stop the sandbox and clean up backend-owned runtime resources.
     async fn stop(&self, id: &SandboxId) -> SandboxResult<()>;
 
+    /// Rebind a running sandbox's managed iron-proxy to a different
+    /// iron-control principal.
+    async fn assign_iron_control_proxy_principal(
+        &self,
+        _id: &SandboxId,
+        _principal_id: &str,
+    ) -> SandboxResult<()> {
+        Err(crate::SandboxError::Unsupported {
+            backend: self.name(),
+            operation: "assign_iron_control_proxy_principal",
+        })
+    }
+
     /// Suspend the sandbox while preserving any backend-supported runtime state.
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()>;
 

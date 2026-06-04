@@ -240,6 +240,8 @@ apiRs:
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90
+  sandboxWarmPoolSize: 0
+  sandboxWarmPoolReplenishIntervalSecs: 5
   ironProxy:
     mode: enabled
   # 1Password vault the iron-proxy secret source reads from when

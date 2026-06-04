@@ -4,9 +4,9 @@
 //! Today the proxy config is rendered from fragments and baked into a
 //! per-sandbox ConfigMap. Under iron-control the same fragments become durable
 //! control-plane state: each fragment's secrets are upserted as typed secret
-//! resources and granted to a role. The fragment's *origin* decides the role —
-//! the infra fragment grants to the single infra role, and each tool/harness
-//! fragment grants to its own per-tool role.
+//! resources and granted to a role. api-rs currently folds infra, harness, and
+//! discovered tool fragments into the single shared infra role so each sandbox
+//! principal only needs one assignment.
 //!
 //! [`secret_inputs_from_fragment`] is the pure translation (fragment → secret
 //! inputs) and is unit-tested without a server; [`register_role`] drives the
@@ -46,20 +46,11 @@ impl RoleSpec {
         }
     }
 
-    /// The single shared tools role, holding every secret the harness and tool
-    /// fragments declare.
-    pub fn tools() -> Self {
-        Self {
-            foreign_id: "tools".to_owned(),
-            name: "Tools".to_owned(),
-        }
-    }
-
-    /// A per-tool (or per-harness) role keyed by tool name.
+    /// A role scoped to one discovered tool.
     pub fn tool(name: &str) -> Self {
         Self {
             foreign_id: format!("tool-{}", slugify(name)),
-            name: format!("Tool: {name}"),
+            name: format!("Tool {name}"),
         }
     }
 }
@@ -254,7 +245,10 @@ fn static_secret_from_secret(
             return Err(malformed(role, "secret declares both inject and replace"));
         }
         (None, None) => {
-            return Err(malformed(role, "secret declares neither inject nor replace"));
+            return Err(malformed(
+                role,
+                "secret declares neither inject nor replace",
+            ));
         }
     };
     let rules = rules_from_values(role, &secret.rules)?;
@@ -284,6 +278,9 @@ fn replace_proxy_value(secret: &Secret) -> Option<&str> {
 /// A stable, human-meaningful identity for a static secret, used for both the
 /// foreign-id slug and the display name.
 fn static_secret_identity(secret: &Secret) -> String {
+    if let Some(id) = &secret.id {
+        return id.to_owned();
+    }
     if let Some(proxy_value) = replace_proxy_value(secret) {
         return proxy_value.to_owned();
     }
@@ -317,8 +314,12 @@ fn token_broker_source(
     if yaml_str(value, "type") != Some("token_broker") {
         return Ok(None);
     }
-    let credential_id = yaml_str(value, "credential_id")
-        .ok_or_else(|| malformed(role, &format!("{what}token_broker source missing credential_id")))?;
+    let credential_id = yaml_str(value, "credential_id").ok_or_else(|| {
+        malformed(
+            role,
+            &format!("{what}token_broker source missing credential_id"),
+        )
+    })?;
     Ok(Some(SecretSource::token_broker(credential_id)))
 }
 
@@ -403,7 +404,10 @@ fn insert_json_key(config: &mut JsonValue, json_key: Option<&str>) {
     }
 }
 
-fn inject_config_from_value(role: &str, inject: &YamlValue) -> Result<InjectConfig, TranslateError> {
+fn inject_config_from_value(
+    role: &str,
+    inject: &YamlValue,
+) -> Result<InjectConfig, TranslateError> {
     let header = yaml_str(inject, "header").map(ToOwned::to_owned);
     let query_param = yaml_str(inject, "query_param").map(ToOwned::to_owned);
     if header.is_none() && query_param.is_none() {
@@ -419,7 +423,10 @@ fn inject_config_from_value(role: &str, inject: &YamlValue) -> Result<InjectConf
     })
 }
 
-fn replace_config_from(role: &str, replace: &SecretReplace) -> Result<ReplaceConfig, TranslateError> {
+fn replace_config_from(
+    role: &str,
+    replace: &SecretReplace,
+) -> Result<ReplaceConfig, TranslateError> {
     let proxy_value = replace
         .proxy_value
         .clone()
@@ -473,7 +480,12 @@ fn pg_dsn_from_listener(
         .upstream
         .as_ref()
         .and_then(|upstream| upstream.dsn.as_ref())
-        .ok_or_else(|| malformed(role, &format!("postgres listener {name} missing upstream.dsn")))?;
+        .ok_or_else(|| {
+            malformed(
+                role,
+                &format!("postgres listener {name} missing upstream.dsn"),
+            )
+        })?;
     let dsn = pg_dsn_source(role, dsn_value, policy)?;
     let database = listener
         .sandbox_env
@@ -482,7 +494,10 @@ fn pg_dsn_from_listener(
         .map(str::trim)
         .filter(|database| !database.is_empty())
         .ok_or_else(|| {
-            malformed(role, &format!("postgres listener {name} missing sandbox_env.database"))
+            malformed(
+                role,
+                &format!("postgres listener {name} missing sandbox_env.database"),
+            )
         })?
         .to_owned();
     let role_to_set = listener
@@ -517,8 +532,8 @@ fn pg_dsn_source(
         return Ok(broker);
     }
     if yaml_str(dsn, "type") == Some("env") {
-        let var = yaml_str(dsn, "var")
-            .ok_or_else(|| malformed(role, "pg_dsn env source missing var"))?;
+        let var =
+            yaml_str(dsn, "var").ok_or_else(|| malformed(role, "pg_dsn env source missing var"))?;
         return Ok(SecretSource::env(var));
     }
     if let Some(placeholder) = yaml_str(dsn, "placeholder").or_else(|| dsn.as_str()) {
@@ -579,10 +594,16 @@ fn oauth_token_from_value(
         if OAUTH_RESERVED_KEYS.contains(&field) {
             continue;
         }
-        credentials.insert(field.to_owned(), oauth_field_source(role, field, value, policy)?);
+        credentials.insert(
+            field.to_owned(),
+            oauth_field_source(role, field, value, policy)?,
+        );
     }
     if credentials.is_empty() {
-        return Err(malformed(role, "oauth_token entry has no credential fields"));
+        return Err(malformed(
+            role,
+            "oauth_token entry has no credential fields",
+        ));
     }
 
     let mut token_endpoint_headers = BTreeMap::new();
@@ -590,8 +611,10 @@ fn oauth_token_from_value(
     {
         for (key, value) in headers {
             if let Some(name) = key.as_str() {
-                token_endpoint_headers
-                    .insert(name.to_owned(), oauth_field_source(role, name, value, policy)?);
+                token_endpoint_headers.insert(
+                    name.to_owned(),
+                    oauth_field_source(role, name, value, policy)?,
+                );
             }
         }
     }
@@ -756,8 +779,8 @@ transforms:
 "#,
         )
         .unwrap();
-        let inputs = secret_inputs_from_fragment("default", "infra", &fragment, &env_policy())
-            .unwrap();
+        let inputs =
+            secret_inputs_from_fragment("default", "infra", &fragment, &env_policy()).unwrap();
         assert_eq!(inputs.len(), 1);
         let SecretInput::Static(input) = &inputs[0] else {
             panic!("expected a static secret");
@@ -799,7 +822,10 @@ transforms:
         };
         assert_eq!(input.foreign_id, "tool-codex-openai-codex");
         assert_eq!(input.source.source_type, "token_broker");
-        assert_eq!(input.source.config, json!({ "credential_id": "openai-codex" }));
+        assert_eq!(
+            input.source.config,
+            json!({ "credential_id": "openai-codex" })
+        );
         let inject = input.inject_config.as_ref().unwrap();
         assert_eq!(inject.header.as_deref(), Some("Authorization"));
         assert_eq!(inject.formatter.as_deref(), Some("Bearer {{.Value}}"));
@@ -828,7 +854,10 @@ transforms:
             panic!("expected a static secret");
         };
         assert_eq!(input.source.source_type, "env");
-        assert_eq!(input.source.config, json!({ "var": "OPENAI_CODEX_ACCOUNT_ID" }));
+        assert_eq!(
+            input.source.config,
+            json!({ "var": "OPENAI_CODEX_ACCOUNT_ID" })
+        );
         // Identity comes from the placeholder (the actual secret), not the header.
         assert_eq!(input.foreign_id, "tool-codex-openai-codex-account-id");
         assert_eq!(input.name, "OPENAI_CODEX_ACCOUNT_ID");
@@ -850,8 +879,7 @@ transforms:
         )
         .unwrap();
         let policy = SourcePolicy::onepassword_connect("ai-agents", "10m");
-        let inputs =
-            secret_inputs_from_fragment("default", "infra", &fragment, &policy).unwrap();
+        let inputs = secret_inputs_from_fragment("default", "infra", &fragment, &policy).unwrap();
         let SecretInput::Static(input) = &inputs[0] else {
             panic!("expected a static secret");
         };
@@ -904,16 +932,25 @@ transforms:
 "#,
         )
         .unwrap();
-        let err = secret_inputs_from_fragment("default", "tool-x", &fragment, &env_policy())
-            .unwrap_err();
+        let err =
+            secret_inputs_from_fragment("default", "tool-x", &fragment, &env_policy()).unwrap_err();
         assert!(matches!(err, TranslateError::Unsupported { .. }));
     }
 
     #[test]
     fn duplicate_identities_get_unique_foreign_ids() {
         let mut used = BTreeSet::new();
-        assert_eq!(unique_foreign_id("infra-x".to_owned(), &mut used), "infra-x");
-        assert_eq!(unique_foreign_id("infra-x".to_owned(), &mut used), "infra-x-2");
-        assert_eq!(unique_foreign_id("infra-x".to_owned(), &mut used), "infra-x-3");
+        assert_eq!(
+            unique_foreign_id("infra-x".to_owned(), &mut used),
+            "infra-x"
+        );
+        assert_eq!(
+            unique_foreign_id("infra-x".to_owned(), &mut used),
+            "infra-x-2"
+        );
+        assert_eq!(
+            unique_foreign_id("infra-x".to_owned(), &mut used),
+            "infra-x-3"
+        );
     }
 }

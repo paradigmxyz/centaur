@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use centaur_iron_control::{
-    Grant, GrantSecret, Grantee, IdentityInput, IronControlClient, IronControlError, Role, RoleSpec,
-    SECRET_TYPES, grant_inputs_to_role, managed_labels,
+    Grant, GrantSecret, Grantee, IdentityInput, IronControlClient, IronControlError, Role,
+    RoleSpec, SECRET_TYPES, grant_inputs_to_role, managed_labels,
 };
 use centaur_iron_proxy::SourcePolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -252,7 +252,9 @@ async fn principals_list(cli: &Cli, client: &IronControlClient, args: &FilterArg
     });
     found.sort_by(|a, b| a.foreign_id.cmp(&b.foreign_id));
     print_identities(
-        found.iter().map(|p| (p.foreign_id.as_deref(), p.id.as_str(), p.name.as_str())),
+        found
+            .iter()
+            .map(|p| (p.foreign_id.as_deref(), p.id.as_str(), p.name.as_str())),
         &cli.namespace,
         "principal",
     );
@@ -279,8 +281,13 @@ async fn describe_grant(client: &IronControlClient, grant: &Grant) -> Option<Str
     Some(format!("{kind} {label} ({oid})"))
 }
 
-async fn principals_show(cli: &Cli, client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
-    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
+async fn principals_show(
+    cli: &Cli,
+    client: &IronControlClient,
+    args: &PrincipalSelector,
+) -> Result<()> {
+    let identity =
+        principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
     let principal = get_principal_or_fail(client, &cli.namespace, &identity.foreign_id).await?;
     println!(
         "principal: {} ({}) — {}",
@@ -295,7 +302,11 @@ async fn principals_show(cli: &Cli, client: &IronControlClient, args: &Principal
     } else {
         println!("roles:");
         for role in &roles {
-            println!("  {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
+            println!(
+                "  {} ({})",
+                role.foreign_id.as_deref().unwrap_or("-"),
+                role.id
+            );
             for grant in client.list_role_grants(&role.id).await? {
                 if let Some(desc) = describe_grant(client, &grant).await {
                     println!("    grants {desc}");
@@ -316,7 +327,9 @@ async fn principals_show(cli: &Cli, client: &IronControlClient, args: &Principal
         }
     }
 
-    let effective = client.effective_config(&cli.namespace, &principal.id).await?;
+    let effective = client
+        .effective_config(&cli.namespace, &principal.id)
+        .await?;
     let placeholders: Vec<&str> = effective
         .secrets
         .iter()
@@ -333,7 +346,11 @@ async fn principals_show(cli: &Cli, client: &IronControlClient, args: &Principal
     Ok(())
 }
 
-async fn principals_grant(cli: &Cli, client: &IronControlClient, args: &PrincipalGrantArgs) -> Result<()> {
+async fn principals_grant(
+    cli: &Cli,
+    client: &IronControlClient,
+    args: &PrincipalGrantArgs,
+) -> Result<()> {
     if args.tools.is_empty() && args.roles.is_empty() && args.secrets.is_empty() {
         bail!("nothing to grant: pass at least one --tool, --role, or --secret");
     }
@@ -341,15 +358,20 @@ async fn principals_grant(cli: &Cli, client: &IronControlClient, args: &Principa
         bail!("--grant-id is only valid for `principals revoke`");
     }
     let policy = build_source_policy(cli)?;
-    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
+    let identity =
+        principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
     let principal_id = ensure_principal(client, &identity).await?;
     println!("principal: {} ({principal_id})", identity.foreign_id);
 
-    let dirs = tools::resolve_tool_dirs(&cli.tools_dirs, std::env::var("TOOL_DIRS").ok().as_deref());
+    let dirs =
+        tools::resolve_tool_dirs(&cli.tools_dirs, std::env::var("TOOL_DIRS").ok().as_deref());
     for tool in &args.tools {
         let manifest = tools::find_tool(&dirs, tool)?;
         let role = RoleSpec::tool(&manifest.name);
-        let role_id = client.upsert_role(&role_identity(&role, &cli.namespace)).await?.id;
+        let role_id = client
+            .upsert_role(&role_identity(&role, &cli.namespace))
+            .await?
+            .id;
         let secrets: Vec<_> = manifest.all_secrets().cloned().collect();
         let translation = translate::translate(&cli.namespace, &role.foreign_id, &secrets, &policy);
         let granted = grant_inputs_to_role(client, &role_id, translation.inputs).await?;
@@ -372,15 +394,29 @@ async fn principals_grant(cli: &Cli, client: &IronControlClient, args: &Principa
         println!("  role {role_fid} ({}): assigned", role.id);
     }
 
-    grant_secrets(client, &Grantee::Principal(principal_id.clone()), &args.secrets).await?;
+    grant_secrets(
+        client,
+        &Grantee::Principal(principal_id.clone()),
+        &args.secrets,
+    )
+    .await?;
     Ok(())
 }
 
-async fn principals_revoke(cli: &Cli, client: &IronControlClient, args: &PrincipalGrantArgs) -> Result<()> {
-    if args.tools.is_empty() && args.roles.is_empty() && args.secrets.is_empty() && args.grant_ids.is_empty() {
+async fn principals_revoke(
+    cli: &Cli,
+    client: &IronControlClient,
+    args: &PrincipalGrantArgs,
+) -> Result<()> {
+    if args.tools.is_empty()
+        && args.roles.is_empty()
+        && args.secrets.is_empty()
+        && args.grant_ids.is_empty()
+    {
         bail!("nothing to revoke: pass at least one --tool, --role, --secret, or --grant-id");
     }
-    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
+    let identity =
+        principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
     let principal = get_principal_or_fail(client, &cli.namespace, &identity.foreign_id).await?;
     println!("principal: {} ({})", identity.foreign_id, principal.id);
 
@@ -391,7 +427,10 @@ async fn principals_revoke(cli: &Cli, client: &IronControlClient, args: &Princip
         .map(|t| (t.as_str(), RoleSpec::tool(t).foreign_id))
         .chain(args.roles.iter().map(|r| (r.as_str(), r.clone())));
     for (label, role_fid) in role_targets {
-        match assigned.iter().find(|r| r.foreign_id.as_deref() == Some(role_fid.as_str())) {
+        match assigned
+            .iter()
+            .find(|r| r.foreign_id.as_deref() == Some(role_fid.as_str()))
+        {
             Some(role) => {
                 client.unassign_role(&principal.id, &role.id).await?;
                 println!("  {label}: role {role_fid} unassigned");
@@ -430,7 +469,9 @@ async fn roles_list(cli: &Cli, client: &IronControlClient, args: &FilterArgs) ->
     });
     found.sort_by(|a, b| a.foreign_id.cmp(&b.foreign_id));
     print_identities(
-        found.iter().map(|r| (r.foreign_id.as_deref(), r.id.as_str(), r.name.as_str())),
+        found
+            .iter()
+            .map(|r| (r.foreign_id.as_deref(), r.id.as_str(), r.name.as_str())),
         &cli.namespace,
         "role",
     );
@@ -439,7 +480,12 @@ async fn roles_list(cli: &Cli, client: &IronControlClient, args: &FilterArgs) ->
 
 async fn roles_show(cli: &Cli, client: &IronControlClient, args: &RoleSelector) -> Result<()> {
     let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
-    println!("role: {} ({}) — {}", role.foreign_id.as_deref().unwrap_or("-"), role.id, role.name);
+    println!(
+        "role: {} ({}) — {}",
+        role.foreign_id.as_deref().unwrap_or("-"),
+        role.id,
+        role.name
+    );
     let grants = client.list_role_grants(&role.id).await?;
     if grants.is_empty() {
         println!("secrets: (none)");
@@ -459,15 +505,23 @@ async fn roles_grant(cli: &Cli, client: &IronControlClient, args: &RoleGrantArgs
         bail!("nothing to grant: pass at least one --secret <OID> or --tool <NAME>");
     }
     let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
-    println!("role: {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
+    println!(
+        "role: {} ({})",
+        role.foreign_id.as_deref().unwrap_or("-"),
+        role.id
+    );
 
     grant_secrets(client, &Grantee::Role(role.id.clone()), &args.secrets).await?;
 
     if let Some(tool) = &args.tool {
         let policy = build_source_policy(cli)?;
-        let dirs = tools::resolve_tool_dirs(&cli.tools_dirs, std::env::var("TOOL_DIRS").ok().as_deref());
+        let dirs =
+            tools::resolve_tool_dirs(&cli.tools_dirs, std::env::var("TOOL_DIRS").ok().as_deref());
         let manifest = tools::find_tool(&dirs, tool)?;
-        let selected = select_secrets(manifest.all_secrets().cloned().collect(), &args.secret_names)?;
+        let selected = select_secrets(
+            manifest.all_secrets().cloned().collect(),
+            &args.secret_names,
+        )?;
         // Key the secret resources on the tool's canonical role so the same
         // secret object is shared no matter which role it's granted to.
         let tool_role = RoleSpec::tool(&manifest.name).foreign_id;
@@ -509,7 +563,11 @@ fn select_secrets(all: Vec<ParsedSecret>, names: &[String]) -> Result<Vec<Parsed
 
 async fn roles_revoke(cli: &Cli, client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {
     let role = get_role_or_fail(client, &cli.namespace, &args.role).await?;
-    println!("role: {} ({})", role.foreign_id.as_deref().unwrap_or("-"), role.id);
+    println!(
+        "role: {} ({})",
+        role.foreign_id.as_deref().unwrap_or("-"),
+        role.id
+    );
     let grants = client.list_role_grants(&role.id).await?;
     revoke_secrets(
         client,
@@ -530,7 +588,10 @@ async fn secrets_list(cli: &Cli, client: &IronControlClient, args: &FilterArgs) 
     // One row per secret across every type: (type, foreign_id, oid, name).
     let mut rows: Vec<(&'static str, Option<String>, String, String)> = Vec::new();
     for (label, collection, _) in SECRET_TYPES {
-        match client.list_secrets(collection, &cli.namespace, &labels).await {
+        match client
+            .list_secrets(collection, &cli.namespace, &labels)
+            .await
+        {
             Ok(found) => rows.extend(
                 found
                     .into_iter()
@@ -566,11 +627,16 @@ async fn fetch_secret_detail(
     ident: &str,
 ) -> Result<(&'static str, serde_json::Value)> {
     if let Some((label, collection, prefix)) = secret_type_for_oid(ident) {
-        let detail = client.get_secret_detail(collection, prefix, namespace, ident).await?;
+        let detail = client
+            .get_secret_detail(collection, prefix, namespace, ident)
+            .await?;
         return Ok((label, detail));
     }
     for (label, collection, prefix) in SECRET_TYPES {
-        match client.get_secret_detail(collection, prefix, namespace, ident).await {
+        match client
+            .get_secret_detail(collection, prefix, namespace, ident)
+            .await
+        {
             Ok(detail) => return Ok((label, detail)),
             Err(e) if is_status(&e, 404) => continue,
             Err(e) => return Err(e.into()),
@@ -583,7 +649,10 @@ async fn fetch_secret_detail(
 /// prefix. `None` when `ident` is not a recognized secret OID — callers then
 /// treat it as a `foreign_id`.
 fn secret_type_for_oid(ident: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    SECRET_TYPES.iter().copied().find(|(_, _, prefix)| ident.starts_with(prefix))
+    SECRET_TYPES
+        .iter()
+        .copied()
+        .find(|(_, _, prefix)| ident.starts_with(prefix))
 }
 
 fn print_secrets(rows: &[(&str, Option<String>, String, String)], namespace: &str) {
@@ -616,7 +685,11 @@ fn print_secrets(rows: &[(&str, Option<String>, String, String)], namespace: &st
 // ---------------------------------------------------------------------------
 
 fn filter_labels(args: &FilterArgs) -> Result<Vec<(String, String)>> {
-    let mut labels = args.labels.iter().map(|l| parse_label(l)).collect::<Result<Vec<_>>>()?;
+    let mut labels = args
+        .labels
+        .iter()
+        .map(|l| parse_label(l))
+        .collect::<Result<Vec<_>>>()?;
     if args.managed {
         labels.push(("managed-by".to_owned(), "centaur".to_owned()));
     }
@@ -643,9 +716,19 @@ fn print_identities<'a>(
         println!("no {noun}s found in namespace {namespace:?}");
         return;
     }
-    let width = rows.iter().map(|(fid, _, _)| fid.unwrap_or("-").len()).max().unwrap_or(0);
+    let width = rows
+        .iter()
+        .map(|(fid, _, _)| fid.unwrap_or("-").len())
+        .max()
+        .unwrap_or(0);
     for (fid, id, name) in &rows {
-        println!("{:<width$}  {}  {}", fid.unwrap_or("-"), id, name, width = width);
+        println!(
+            "{:<width$}  {}  {}",
+            fid.unwrap_or("-"),
+            id,
+            name,
+            width = width
+        );
     }
     println!("({} {noun}(s))", rows.len());
 }
@@ -654,10 +737,9 @@ fn build_source_policy(cli: &Cli) -> Result<SourcePolicy> {
     Ok(match cli.source_policy {
         SourcePolicyArg::Env => SourcePolicy::env(),
         SourcePolicyArg::Onepassword | SourcePolicyArg::OnepasswordConnect => {
-            let vault = cli
-                .op_vault
-                .clone()
-                .ok_or_else(|| eyre::eyre!("--op-vault is required for --source-policy onepassword*"))?;
+            let vault = cli.op_vault.clone().ok_or_else(|| {
+                eyre::eyre!("--op-vault is required for --source-policy onepassword*")
+            })?;
             if cli.source_policy == SourcePolicyArg::Onepassword {
                 SourcePolicy::onepassword(vault, cli.op_ttl.clone())
             } else {
@@ -677,7 +759,11 @@ fn role_identity(role: &RoleSpec, namespace: &str) -> IdentityInput {
 }
 
 /// Grant each secret OID to `grantee`, printing one line per grant.
-async fn grant_secrets(client: &IronControlClient, grantee: &Grantee, oids: &[String]) -> Result<()> {
+async fn grant_secrets(
+    client: &IronControlClient,
+    grantee: &Grantee,
+    oids: &[String],
+) -> Result<()> {
     for oid in oids {
         let secret = grant_secret_from_oid(oid)?;
         let grant = client.create_grant(grantee, &secret).await?;
@@ -726,7 +812,10 @@ fn parse_label(raw: &str) -> Result<(String, String)> {
 /// existing principal (e.g. one a session created) is never clobbered; creates
 /// it only when absent.
 async fn ensure_principal(client: &IronControlClient, identity: &IdentityInput) -> Result<String> {
-    match client.get_principal(&identity.namespace, &identity.foreign_id).await {
+    match client
+        .get_principal(&identity.namespace, &identity.foreign_id)
+        .await
+    {
         Ok(p) => Ok(p.id),
         Err(e) if is_status(&e, 404) => Ok(client.upsert_principal(identity).await?.id),
         Err(e) => Err(e.into()),
@@ -754,7 +843,11 @@ async fn get_role_or_fail(client: &IronControlClient, namespace: &str, role: &st
 }
 
 /// Assign the role, treating an already-assigned conflict as success.
-async fn assign_role_idempotent(client: &IronControlClient, principal_id: &str, role_id: &str) -> Result<()> {
+async fn assign_role_idempotent(
+    client: &IronControlClient,
+    principal_id: &str,
+    role_id: &str,
+) -> Result<()> {
     match client.assign_role(principal_id, role_id).await {
         Ok(()) => Ok(()),
         Err(e) if is_status(&e, 409) || is_status(&e, 422) => Ok(()),

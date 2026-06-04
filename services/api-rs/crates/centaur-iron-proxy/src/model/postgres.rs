@@ -80,7 +80,10 @@ fn normalize_foreign_id(foreign_id: &str) -> String {
 /// The managed proxy reads each listener's local config from
 /// `IRON_PROXY_PG_<FOREIGN_ID>_<SUFFIX>` (foreign_id normalized).
 pub fn pg_env_var(foreign_id: &str, suffix: &str) -> String {
-    format!("IRON_PROXY_PG_{}_{suffix}", normalize_foreign_id(foreign_id))
+    format!(
+        "IRON_PROXY_PG_{}_{suffix}",
+        normalize_foreign_id(foreign_id)
+    )
 }
 
 /// The sandbox env var that receives a listener's proxied DSN:

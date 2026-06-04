@@ -204,6 +204,48 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    pub async fn active_execution_for_thread(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            select execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            from session_executions
+            where thread_key = $1 and status in ($2, $3)
+            order by created_at desc, execution_id desc
+            limit 1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn latest_execution_for_thread(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            select execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            from session_executions
+            where thread_key = $1
+            order by created_at desc, execution_id desc
+            limit 1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
     pub async fn mark_execution_running(
         &self,
         execution_id: &str,
@@ -263,6 +305,33 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    pub async fn complete_execution_if_active(
+        &self,
+        execution_id: &str,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2, completed_at = coalesce(completed_at, now()), updated_at = now()
+            where execution_id = $1 and status in ($3, $4)
+            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Completed.as_ref())
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.set_session_status(&row.thread_key, SessionStatus::Idle)
+            .await?;
+        row.try_into().map(Some)
+    }
+
     pub async fn fail_execution(
         &self,
         execution_id: &str,
@@ -285,6 +354,35 @@ impl PgSessionStore {
         self.set_session_status(&row.thread_key, SessionStatus::Failed)
             .await?;
         row.try_into()
+    }
+
+    pub async fn fail_execution_if_active(
+        &self,
+        execution_id: &str,
+        error: &str,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
+            where execution_id = $1 and status in ($4, $5)
+            returning execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Failed.as_ref())
+        .bind(error)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.set_session_status(&row.thread_key, SessionStatus::Failed)
+            .await?;
+        row.try_into().map(Some)
     }
 
     pub async fn append_event(
@@ -375,6 +473,93 @@ impl PgSessionStore {
         .await?;
 
         row.try_into()
+    }
+
+    pub async fn insert_ready_warm_sandbox(
+        &self,
+        sandbox_id: &str,
+        workload_key: &str,
+    ) -> Result<(), SessionStoreError> {
+        sqlx::query(
+            r#"
+            insert into session_warm_sandboxes (sandbox_id, workload_key, status)
+            values ($1, $2, 'ready')
+            "#,
+        )
+        .bind(sandbox_id)
+        .bind(workload_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn count_ready_warm_sandboxes(
+        &self,
+        workload_key: &str,
+    ) -> Result<i64, SessionStoreError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            select count(*)::bigint
+            from session_warm_sandboxes
+            where workload_key = $1 and status = 'ready'
+            "#,
+        )
+        .bind(workload_key)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    pub async fn claim_ready_warm_sandbox(
+        &self,
+        workload_key: &str,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<String>, SessionStoreError> {
+        let sandbox_id = sqlx::query_scalar::<_, String>(
+            r#"
+            with candidate as (
+                select sandbox_id
+                from session_warm_sandboxes
+                where workload_key = $1 and status = 'ready'
+                order by created_at, sandbox_id
+                for update skip locked
+                limit 1
+            )
+            update session_warm_sandboxes warm
+            set
+                status = 'claimed',
+                claimed_thread_key = $2,
+                claimed_at = now(),
+                updated_at = now()
+            from candidate
+            where warm.sandbox_id = candidate.sandbox_id
+            returning warm.sandbox_id
+            "#,
+        )
+        .bind(workload_key)
+        .bind(thread_key.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(sandbox_id)
+    }
+
+    pub async fn mark_warm_sandbox_failed(
+        &self,
+        sandbox_id: &str,
+        error: &str,
+    ) -> Result<(), SessionStoreError> {
+        sqlx::query(
+            r#"
+            update session_warm_sandboxes
+            set status = 'failed', last_error = $2, updated_at = now()
+            where sandbox_id = $1
+            "#,
+        )
+        .bind(sandbox_id)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn update_harness_thread_id(

@@ -49,10 +49,22 @@ const HMAC_REQUIRED_CREDENTIAL: &str = "secret";
 /// Per-grant `oauth_token` credential fields: `(grant, required, optional)`,
 /// mirroring `_OAUTH_GRANT_FIELDS`.
 const OAUTH_GRANT_FIELDS: &[(&str, &[&str], &[&str])] = &[
-    ("refresh_token", &["refresh_token", "client_id"], &["client_secret"]),
+    (
+        "refresh_token",
+        &["refresh_token", "client_id"],
+        &["client_secret"],
+    ),
     ("client_credentials", &["client_id", "client_secret"], &[]),
-    ("password", &["username", "password", "client_id"], &["client_secret"]),
-    ("jwt_bearer", &["issuer", "subject", "private_key"], &["private_key_id"]),
+    (
+        "password",
+        &["username", "password", "client_id"],
+        &["client_secret"],
+    ),
+    (
+        "jwt_bearer",
+        &["issuer", "subject", "private_key"],
+        &["private_key_id"],
+    ),
 ];
 
 /// How an HTTP credential rides on the request.
@@ -163,7 +175,10 @@ pub enum ParsedSecret {
     /// A declared secret type this CLI cannot represent as an iron-control
     /// resource (`brokered_token`). Carried so the caller can report it was
     /// skipped rather than dropping it silently.
-    Unsupported { name: String, kind: String },
+    Unsupported {
+        name: String,
+        kind: String,
+    },
 }
 
 impl ParsedSecret {
@@ -229,7 +244,10 @@ pub fn find_tool(dirs: &[PathBuf], name: &str) -> Result<ToolManifest> {
     let tool_dir = matched.ok_or_else(|| {
         eyre!(
             "tool {name:?} not found under any of: {}",
-            dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+            dirs.iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })?;
     parse_manifest(&tool_dir)
@@ -276,8 +294,8 @@ pub fn parse_manifest(tool_dir: &Path) -> Result<ToolManifest> {
         .ok_or_else(|| eyre!("tool dir {} has no name", tool_dir.display()))?
         .to_owned();
     let path = tool_dir.join("pyproject.toml");
-    let text = std::fs::read_to_string(&path)
-        .wrap_err_with(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?;
     let doc: Value = text
         .parse::<Value>()
         .wrap_err_with(|| format!("parsing {}", path.display()))?;
@@ -286,18 +304,33 @@ pub fn parse_manifest(tool_dir: &Path) -> Result<ToolManifest> {
         .and_then(|t| t.get("centaur"))
         .and_then(Value::as_table);
     let Some(centaur) = centaur else {
-        return Ok(ToolManifest { name, dir: tool_dir.to_owned(), secrets: vec![], optional_secrets: vec![] });
+        return Ok(ToolManifest {
+            name,
+            dir: tool_dir.to_owned(),
+            secrets: vec![],
+            optional_secrets: vec![],
+        });
     };
     let default_hosts = str_array(centaur.get("hosts")).unwrap_or_default();
     let secrets = parse_secret_list(centaur.get("secrets"), &default_hosts)
         .wrap_err_with(|| format!("in {} [tool.centaur].secrets", path.display()))?;
     let optional_secrets = parse_secret_list(centaur.get("optional_secrets"), &default_hosts)
         .wrap_err_with(|| format!("in {} [tool.centaur].optional_secrets", path.display()))?;
-    Ok(ToolManifest { name, dir: tool_dir.to_owned(), secrets, optional_secrets })
+    Ok(ToolManifest {
+        name,
+        dir: tool_dir.to_owned(),
+        secrets,
+        optional_secrets,
+    })
 }
 
-fn parse_secret_list(entries: Option<&Value>, default_hosts: &[String]) -> Result<Vec<ParsedSecret>> {
-    let Some(entries) = entries else { return Ok(vec![]) };
+fn parse_secret_list(
+    entries: Option<&Value>,
+    default_hosts: &[String],
+) -> Result<Vec<ParsedSecret>> {
+    let Some(entries) = entries else {
+        return Ok(vec![]);
+    };
     let arr = entries
         .as_array()
         .ok_or_else(|| eyre!("'secrets'/'optional_secrets' must be an array"))?;
@@ -318,7 +351,10 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
             mode: SecretMode::Replace,
             hosts: default_hosts.to_vec(),
             replacer: s.to_owned(),
-            match_headers: DEFAULT_MATCH_HEADERS.iter().map(|h| (*h).to_owned()).collect(),
+            match_headers: DEFAULT_MATCH_HEADERS
+                .iter()
+                .map(|h| (*h).to_owned())
+                .collect(),
             match_path: false,
             match_query: false,
             inject_header: None,
@@ -333,22 +369,32 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
     // `header` is a deprecated alias for `http`.
     let secret_type = table.get("type").and_then(Value::as_str).unwrap_or("http");
     let secret_ref = match table.get("secret_ref") {
-        Some(v) => v.as_str().filter(|s| !s.is_empty()).ok_or_else(|| {
-            eyre!("secret entry {name:?} has invalid 'secret_ref'")
-        })?.to_owned(),
+        Some(v) => v
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| eyre!("secret entry {name:?} has invalid 'secret_ref'"))?
+            .to_owned(),
         None => name.clone(),
     };
     match secret_type {
-        "http" | "header" => {
-            Ok(ParsedSecret::Http(parse_http(table, &name, &secret_ref, default_hosts)?))
-        }
+        "http" | "header" => Ok(ParsedSecret::Http(parse_http(
+            table,
+            &name,
+            &secret_ref,
+            default_hosts,
+        )?)),
         "oauth_token" => Ok(ParsedSecret::OAuthToken(parse_oauth(table, &name)?)),
         "gcp_auth" => Ok(ParsedSecret::GcpAuth(parse_gcp(table, &name, &secret_ref)?)),
-        "pg_dsn" => Ok(ParsedSecret::PgDsn(parse_pg_dsn(table, &name, &secret_ref)?)),
+        "pg_dsn" => Ok(ParsedSecret::PgDsn(parse_pg_dsn(
+            table,
+            &name,
+            &secret_ref,
+        )?)),
         "hmac_sign" => Ok(ParsedSecret::Hmac(parse_hmac(table, &name)?)),
-        "brokered_token" => {
-            Ok(ParsedSecret::Unsupported { name, kind: secret_type.to_owned() })
-        }
+        "brokered_token" => Ok(ParsedSecret::Unsupported {
+            name,
+            kind: secret_type.to_owned(),
+        }),
         other => bail!("unknown secret type {other:?} for secret {name:?}"),
     }
 }
@@ -359,16 +405,27 @@ fn parse_http(
     secret_ref: &str,
     default_hosts: &[String],
 ) -> Result<HttpSecret> {
-    let mode = match table.get("mode").and_then(Value::as_str).unwrap_or("replace") {
+    let mode = match table
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("replace")
+    {
         "replace" => SecretMode::Replace,
         "inject" => SecretMode::Inject,
-        other => bail!("HTTP secret {name:?} has unknown mode {other:?} (expected 'replace' or 'inject')"),
+        other => bail!(
+            "HTTP secret {name:?} has unknown mode {other:?} (expected 'replace' or 'inject')"
+        ),
     };
     let hosts = str_array(table.get("hosts")).unwrap_or_else(|| default_hosts.to_vec());
 
     match mode {
         SecretMode::Replace => {
-            reject_keys(table, name, "replace", &["inject_header", "inject_formatter", "inject_query_param"])?;
+            reject_keys(
+                table,
+                name,
+                "replace",
+                &["inject_header", "inject_formatter", "inject_query_param"],
+            )?;
             let match_headers = str_array(table.get("match_headers")).unwrap_or_default();
             let match_path = bool_field(table, name, "match_path")?;
             let match_query = bool_field(table, name, "match_query")?;
@@ -398,7 +455,12 @@ fn parse_http(
             })
         }
         SecretMode::Inject => {
-            reject_keys(table, name, "inject", &["replacer", "match_headers", "match_path", "match_query"])?;
+            reject_keys(
+                table,
+                name,
+                "inject",
+                &["replacer", "match_headers", "match_path", "match_query"],
+            )?;
             let inject_header = opt_str(table, "inject_header");
             let inject_query_param = opt_str(table, "inject_query_param");
             let inject_formatter = opt_str(table, "inject_formatter");
@@ -441,14 +503,17 @@ fn parse_oauth(table: &toml::Table, name: &str) -> Result<OAuthTokenSecret> {
             eyre!("oauth_token entry {name:?} 'grant' must be one of {grants:?}, got {grant:?}")
         })?;
 
-    let hosts = non_empty_str_array(table.get("hosts"))
-        .ok_or_else(|| eyre!("oauth_token entry {name:?} 'hosts' must be a non-empty array of non-empty strings"))?;
+    let hosts = non_empty_str_array(table.get("hosts")).ok_or_else(|| {
+        eyre!("oauth_token entry {name:?} 'hosts' must be a non-empty array of non-empty strings")
+    })?;
     let scopes = str_array(table.get("scopes")).unwrap_or_default();
     let token_endpoint = match table.get("token_endpoint") {
         Some(v) => Some(
             v.as_str()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| eyre!("oauth_token entry {name:?} 'token_endpoint' must be a non-empty string"))?
+                .ok_or_else(|| {
+                    eyre!("oauth_token entry {name:?} 'token_endpoint' must be a non-empty string")
+                })?
                 .to_owned(),
         ),
         None => None,
@@ -496,8 +561,9 @@ fn parse_oauth(table: &toml::Table, name: &str) -> Result<OAuthTokenSecret> {
 }
 
 fn parse_gcp(table: &toml::Table, name: &str, secret_ref: &str) -> Result<GcpAuthSecret> {
-    let hosts = non_empty_str_array(table.get("hosts"))
-        .ok_or_else(|| eyre!("gcp_auth entry {name:?} 'hosts' must be a non-empty array of non-empty strings"))?;
+    let hosts = non_empty_str_array(table.get("hosts")).ok_or_else(|| {
+        eyre!("gcp_auth entry {name:?} 'hosts' must be a non-empty array of non-empty strings")
+    })?;
     let scopes = str_array(table.get("scopes")).unwrap_or_default();
     Ok(GcpAuthSecret {
         name: name.to_owned(),
@@ -530,7 +596,8 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
     let algorithm = parse_hmac_enum(table, name, "algorithm", HMAC_ALGORITHMS)?;
     let key_encoding = parse_hmac_enum(table, name, "key_encoding", HMAC_KEY_ENCODINGS)?;
     let output_encoding = parse_hmac_enum(table, name, "output_encoding", HMAC_OUTPUT_ENCODINGS)?;
-    let timestamp_format = parse_hmac_enum(table, name, "timestamp_format", HMAC_TIMESTAMP_FORMATS)?;
+    let timestamp_format =
+        parse_hmac_enum(table, name, "timestamp_format", HMAC_TIMESTAMP_FORMATS)?;
     let message = req_str(table, "message").wrap_err_with(|| {
         format!("hmac_sign entry {name:?} 'message' must be a non-empty Go-template string")
     })?;
@@ -557,7 +624,10 @@ fn parse_field_source(raw: &Value, ctx: &str) -> Result<FieldSource> {
         if s.is_empty() {
             bail!("{ctx} 'secret_ref' must be non-empty");
         }
-        Ok(FieldSource { secret_ref: s.to_owned(), json_key: None })
+        Ok(FieldSource {
+            secret_ref: s.to_owned(),
+            json_key: None,
+        })
     } else if let Some(t) = raw.as_table() {
         let ref_ = req_str(t, "secret_ref").wrap_err_with(|| ctx.to_owned())?;
         let json_key = match t.get("json_key") {
@@ -569,7 +639,10 @@ fn parse_field_source(raw: &Value, ctx: &str) -> Result<FieldSource> {
             ),
             None => None,
         };
-        Ok(FieldSource { secret_ref: ref_, json_key })
+        Ok(FieldSource {
+            secret_ref: ref_,
+            json_key,
+        })
     } else {
         bail!("{ctx} must be a string or table");
     }
@@ -584,11 +657,19 @@ fn parse_hmac_credentials(value: Option<&Value>, name: &str) -> Result<Vec<(Stri
         .ok_or_else(|| eyre!("hmac_sign entry {name:?} 'credentials' must be a non-empty table"))?;
     let mut out = Vec::with_capacity(table.len());
     for (field, raw) in table {
-        let src = parse_field_source(raw, &format!("hmac_sign entry {name:?} credential {field:?}"))?;
+        let src = parse_field_source(
+            raw,
+            &format!("hmac_sign entry {name:?} credential {field:?}"),
+        )?;
         out.push((field.clone(), src));
     }
-    if !out.iter().any(|(field, _)| field == HMAC_REQUIRED_CREDENTIAL) {
-        bail!("hmac_sign entry {name:?} 'credentials' must include {HMAC_REQUIRED_CREDENTIAL:?} (the HMAC key)");
+    if !out
+        .iter()
+        .any(|(field, _)| field == HMAC_REQUIRED_CREDENTIAL)
+    {
+        bail!(
+            "hmac_sign entry {name:?} 'credentials' must include {HMAC_REQUIRED_CREDENTIAL:?} (the HMAC key)"
+        );
     }
     Ok(out)
 }
@@ -609,9 +690,14 @@ fn parse_hmac_headers(value: Option<&Value>, name: &str) -> Result<Vec<HmacHeade
             format!("hmac_sign entry {name:?} header[{index}] requires a non-empty 'name'")
         })?;
         let value = req_str(table, "value").wrap_err_with(|| {
-            format!("hmac_sign entry {name:?} header[{index}] requires a non-empty 'value' template")
+            format!(
+                "hmac_sign entry {name:?} header[{index}] requires a non-empty 'value' template"
+            )
         })?;
-        headers.push(HmacHeader { name: header_name, value });
+        headers.push(HmacHeader {
+            name: header_name,
+            value,
+        });
     }
     Ok(headers)
 }
@@ -621,20 +707,31 @@ fn parse_hmac_headers(value: Option<&Value>, name: &str) -> Result<Vec<HmacHeade
 fn parse_hmac_enum(table: &toml::Table, name: &str, key: &str, allowed: &[&str]) -> Result<String> {
     match table.get(key).and_then(Value::as_str) {
         Some(value) if allowed.contains(&value) => Ok(value.to_owned()),
-        other => bail!("hmac_sign entry {name:?} {key:?} must be one of {allowed:?}, got {other:?}"),
+        other => {
+            bail!("hmac_sign entry {name:?} {key:?} must be one of {allowed:?}, got {other:?}")
+        }
     }
 }
 
 /// Parse a `{field = secret_ref | {secret_ref, json_key}}` table into ordered
 /// `(field, FieldSource)` pairs. Mirrors `_parse_oauth_field_source`.
-fn parse_field_map(value: Option<&Value>, secret: &str, what: &str) -> Result<Vec<(String, FieldSource)>> {
-    let Some(value) = value else { return Ok(vec![]) };
+fn parse_field_map(
+    value: Option<&Value>,
+    secret: &str,
+    what: &str,
+) -> Result<Vec<(String, FieldSource)>> {
+    let Some(value) = value else {
+        return Ok(vec![]);
+    };
     let table = value
         .as_table()
         .ok_or_else(|| eyre!("oauth_token entry {secret:?} {what:?} must be a table"))?;
     let mut out = Vec::with_capacity(table.len());
     for (field, raw) in table {
-        let src = parse_field_source(raw, &format!("oauth_token entry {secret:?} field {field:?}"))?;
+        let src = parse_field_source(
+            raw,
+            &format!("oauth_token entry {secret:?} field {field:?}"),
+        )?;
         out.push((field.clone(), src));
     }
     Ok(out)
@@ -654,7 +751,11 @@ fn req_str(table: &toml::Table, key: &str) -> Result<String> {
 }
 
 fn opt_str(table: &toml::Table, key: &str) -> Option<String> {
-    table.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
+    table
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 fn bool_field(table: &toml::Table, name: &str, key: &str) -> Result<bool> {
@@ -674,7 +775,12 @@ fn bool_field_named(kind: &str, table: &toml::Table, name: &str, key: &str) -> R
 /// dropped (the API logs and skips them too); an empty/missing key yields `None`.
 fn str_array(value: Option<&Value>) -> Option<Vec<String>> {
     let arr = value?.as_array()?;
-    Some(arr.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+    Some(
+        arr.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// A non-empty array of non-empty strings, or `None` if absent/invalid.
@@ -699,4 +805,3 @@ fn reject_keys(table: &toml::Table, name: &str, mode: &str, keys: &[&str]) -> Re
     }
     Ok(())
 }
-

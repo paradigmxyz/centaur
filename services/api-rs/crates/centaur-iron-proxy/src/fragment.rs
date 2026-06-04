@@ -34,9 +34,12 @@ transforms:
   - name: secrets
     config:
       secrets:
-        - replace:
-            proxy_value: OPENAI_API_KEY
-            match_headers: ["Authorization"]
+        - id: OPENAI_API_KEY_AUTHORIZATION
+          source:
+            placeholder: OPENAI_API_KEY
+          inject:
+            header: Authorization
+            formatter: "Bearer {{.Value}}"
           rules: [{ host: api.openai.com }]
 "#;
 
@@ -117,4 +120,3 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
         .map(|value| (value.to_owned(), value.to_owned()))
         .collect()
 }
-

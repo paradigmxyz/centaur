@@ -2,23 +2,34 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     net::SocketAddr,
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
 
 use centaur_api_server::SandboxRuntime;
-use centaur_iron_control::{IronControlClient, RoleSpec, SessionRegistrar, register_role};
-use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy, harness_auth_fragment, infra_fragment};
+use centaur_iron_control::{
+    IdentityInput, IronControlClient, RoleSpec, SessionRegistrar, register_role,
+};
+use centaur_iron_proxy::{
+    ProxyFragment, SourceKind, SourcePolicy, harness_auth_fragment, infra_fragment,
+};
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, IronControlSettings, IronProxyConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::SandboxWorkloadMode;
+use centaur_session_runtime::{SandboxWorkloadMode, WarmPoolConfig};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
+use tracing::info;
 
-use crate::ServerError;
+use crate::{
+    ServerError,
+    tool_discovery::{
+        DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_tool_proxy_fragment,
+    },
+};
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 
@@ -36,11 +47,20 @@ impl Args {
         self.sandbox.runtime().await
     }
 
-    pub(crate) async fn iron_control_registrar(
+    pub(crate) async fn iron_control_runtime(
         &self,
-    ) -> Result<Option<SessionRegistrar>, ServerError> {
-        self.sandbox.iron_control_registrar().await
+    ) -> Result<Option<IronControlRuntime>, ServerError> {
+        self.sandbox.iron_control_runtime().await
     }
+
+    pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
+        self.sandbox.warm_pool_config()
+    }
+}
+
+pub(crate) struct IronControlRuntime {
+    pub(crate) registrar: SessionRegistrar,
+    pub(crate) warm_pool_bootstrap_principal: String,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -136,6 +156,19 @@ struct SandboxArgs {
     )]
     ready_timeout_secs: u64,
     #[arg(
+        long = "session-sandbox-warm-pool-size",
+        env = "SESSION_SANDBOX_WARM_POOL_SIZE",
+        default_value_t = 0
+    )]
+    warm_pool_size: usize,
+    #[arg(
+        long = "session-sandbox-warm-pool-replenish-interval-secs",
+        env = "SESSION_SANDBOX_WARM_POOL_REPLENISH_INTERVAL_SECS",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    warm_pool_replenish_interval_secs: u64,
+    #[arg(
         long = "session-sandbox-k8s-context",
         alias = "kubernetes-context",
         env = "SESSION_SANDBOX_K8S_CONTEXT"
@@ -157,27 +190,44 @@ struct SandboxArgs {
     )]
     passthrough_env: Vec<String>,
     #[command(flatten)]
+    tools: ToolDiscoveryArgs,
+    #[command(flatten)]
     iron_proxy: IronProxyArgs,
     #[command(flatten)]
     iron_control: IronControlArgs,
 }
 
 impl SandboxArgs {
-    /// Build the iron-control session registrar, registering the infra,
-    /// harness, and tool roles up front. Returns ``None`` when iron-control is
-    /// not configured (no URL/API key), leaving the legacy proxy path intact.
-    async fn iron_control_registrar(&self) -> Result<Option<SessionRegistrar>, ServerError> {
+    /// Build the iron-control session registrar, registering the shared infra
+    /// role up front. Returns ``None`` when iron-control is not configured
+    /// (no URL/API key), leaving the legacy proxy path intact.
+    async fn iron_control_runtime(&self) -> Result<Option<IronControlRuntime>, ServerError> {
         let Some(client) = self.iron_control.client() else {
             return Ok(None);
         };
         let namespace = self.iron_control.namespace.clone();
         let policy = self.iron_proxy.source_policy();
-        let roles = self.iron_proxy.roles_to_register()?;
+        let tool_fragment = self.discover_tool_proxy_fragment()?;
+        let roles = self.iron_proxy.roles_to_register(tool_fragment.as_ref())?;
         let mut role_ids = Vec::with_capacity(roles.len());
         for (spec, fragment) in &roles {
             role_ids.push(register_role(&client, &namespace, spec, fragment, &policy).await?);
         }
-        Ok(Some(SessionRegistrar::new(client, namespace, role_ids)))
+        let bootstrap = client
+            .upsert_principal(&IdentityInput {
+                namespace: namespace.clone(),
+                foreign_id: "warm-pool-bootstrap".to_owned(),
+                name: "Warm pool bootstrap".to_owned(),
+                labels: BTreeMap::from([
+                    ("managed-by".to_owned(), "centaur".to_owned()),
+                    ("purpose".to_owned(), "warm-pool-bootstrap".to_owned()),
+                ]),
+            })
+            .await?;
+        Ok(Some(IronControlRuntime {
+            registrar: SessionRegistrar::new(client, namespace, role_ids),
+            warm_pool_bootstrap_principal: bootstrap.id,
+        }))
     }
 
     async fn runtime(&self) -> Result<SandboxRuntime, ServerError> {
@@ -233,8 +283,10 @@ impl SandboxArgs {
         match self.workload {
             SandboxWorkloadKind::Mock => Ok(SandboxWorkloadMode::mock_app_server(image)),
             SandboxWorkloadKind::CodexAppServer => {
-                let mut workload =
-                    SandboxWorkloadMode::codex_app_server(image, self.codex_app_server_env_template()?);
+                let mut workload = SandboxWorkloadMode::codex_app_server(
+                    image,
+                    self.codex_app_server_env_template()?,
+                );
                 if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
                     workload = workload.mount(
                         Mount::new(
@@ -252,6 +304,7 @@ impl SandboxArgs {
     }
 
     fn codex_app_server_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
+        let tool_fragment = self.discover_tool_proxy_fragment()?;
         let mut envs = vec![(
             "CENTAUR_API_URL".to_owned(),
             self.centaur_api_url_override
@@ -267,12 +320,11 @@ impl SandboxArgs {
         // CODEX_AUTH_MODE to register the iron-control fragment. Codex defaults
         // to api_key so the agent never silently falls back to the ChatGPT
         // auth.json; CLAUDE_CODE_AUTH_MODE rides along when set.
-        envs.push((
-            "CODEX_AUTH_MODE".to_owned(),
-            clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
-                .unwrap_or_else(|| "api_key".to_owned()),
-        ));
-        if let Some(mode) = clean_optional_value(env::var("CLAUDE_CODE_AUTH_MODE").ok().as_deref()) {
+        let codex_auth_mode = clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
+            .unwrap_or_else(|| "api_key".to_owned());
+        envs.push(("CODEX_AUTH_MODE".to_owned(), codex_auth_mode.clone()));
+        if let Some(mode) = clean_optional_value(env::var("CLAUDE_CODE_AUTH_MODE").ok().as_deref())
+        {
             envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
         }
 
@@ -281,10 +333,20 @@ impl SandboxArgs {
         // secret: codex's OPENAI_API_KEY (api_key mode → codex logs in and
         // hits api.openai.com instead of falling back to the ChatGPT
         // auth.json), git's GITHUB_TOKEN, and the rest of the infra/tool set.
-        for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
+        for (name, value) in self
+            .iron_proxy
+            .sandbox_placeholder_env(tool_fragment.as_ref())?
+        {
             if !envs.iter().any(|(existing, _)| existing == &name) {
                 envs.push((name, value));
             }
+        }
+        if codex_auth_mode == "api_key"
+            && !envs
+                .iter()
+                .any(|(existing, _)| existing == "OPENAI_API_KEY")
+        {
+            envs.push(("OPENAI_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()));
         }
 
         for name in &self.passthrough_env {
@@ -305,6 +367,56 @@ impl SandboxArgs {
         }
 
         Ok(envs)
+    }
+
+    fn discover_tool_proxy_fragment(
+        &self,
+    ) -> Result<Option<DiscoveredToolProxyFragment>, ServerError> {
+        let tool_dirs = self.tools.resolve_tool_dirs()?;
+        let discovered = discover_tool_proxy_fragment(&tool_dirs)?;
+        if discovered.secret_count == 0 {
+            return Ok(None);
+        }
+        info!(
+            tool_count = discovered.tool_count,
+            secret_count = discovered.secret_count,
+            "api-rs tool proxy fragment enabled"
+        );
+        Ok(Some(discovered))
+    }
+
+    fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
+        (self.warm_pool_size > 0).then(|| {
+            WarmPoolConfig::new(self.warm_pool_size)
+                .replenish_interval(Duration::from_secs(self.warm_pool_replenish_interval_secs))
+        })
+    }
+}
+
+#[derive(Debug, ClapArgs)]
+struct ToolDiscoveryArgs {
+    #[arg(long = "tool-dirs", env = "TOOL_DIRS")]
+    tool_dirs: Option<String>,
+    #[arg(long = "tools-path", env = "TOOLS_PATH")]
+    tools_path: Option<PathBuf>,
+    #[arg(long = "tools-overlay-path", env = "TOOLS_OVERLAY_PATH")]
+    tools_overlay_path: Option<PathBuf>,
+    #[arg(long = "plugins-dir", env = "PLUGINS_DIR")]
+    plugins_dir: Option<PathBuf>,
+    #[arg(long = "tools-config", env = "TOOLS_CONFIG")]
+    tools_config: Option<PathBuf>,
+}
+
+impl ToolDiscoveryArgs {
+    fn resolve_tool_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
+        Ok(ToolDiscoveryConfig {
+            tool_dirs: self.tool_dirs.clone(),
+            tools_path: self.tools_path.clone(),
+            tools_overlay_path: self.tools_overlay_path.clone(),
+            plugins_dir: self.plugins_dir.clone(),
+            tools_config: self.tools_config.clone(),
+        }
+        .resolve_tool_dirs()?)
     }
 }
 
@@ -422,32 +534,43 @@ impl IronProxyArgs {
         self.source.policy()
     }
 
-    /// The roles to register in iron-control at startup: just the shared
-    /// `infra` role (infra secrets plus harness auth). Tool secrets are
-    /// operator-managed in the control plane via `centaur-perms`, not
-    /// bootstrapped here. A session's principal is granted the infra role
-    /// (see [`SessionRegistrar`]).
-    fn roles_to_register(&self) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
-        Ok(vec![(RoleSpec::infra(), self.infra_fragment()?)])
+    /// The role to register in iron-control. The shared `infra` role contains
+    /// infra, harness, and discovered tool secrets, and every session principal
+    /// is granted that single role (see [`SessionRegistrar`]).
+    fn roles_to_register(
+        &self,
+        tool_fragment: Option<&DiscoveredToolProxyFragment>,
+    ) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
+        let mut infra = self.infra_fragment()?;
+        if let Some(tool_fragment) = tool_fragment {
+            merge_fragment(&mut infra, tool_fragment.fragment.clone());
+        }
+        Ok(vec![(RoleSpec::infra(), infra)])
     }
 
     /// The full infra fragment: the shared infra secrets plus the harness auth
-    /// (also infra), selected by auth mode. Tool secrets are operator-managed
-    /// in the control plane, not bootstrapped here.
+    /// (also infra), selected by auth mode. Discovered tool secrets are folded
+    /// into the same infra role at registration time.
     fn infra_fragment(&self) -> Result<ProxyFragment, ServerError> {
         let mut infra = infra_fragment()?;
         merge_fragment(&mut infra, self.harness.fragment()?);
         Ok(infra)
     }
 
-    /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the infra
-    /// fragment declares — infra secrets plus harness auth — so env-based
-    /// consumers in the sandbox send the proxy_value iron-proxy replaces with
-    /// the real credential (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …).
-    /// Mirrors the infra role registered in iron-control. Tool secrets are
-    /// granted out of band and carry their own placeholders.
-    fn sandbox_placeholder_env(&self) -> Result<BTreeMap<String, String>, ServerError> {
-        Ok(centaur_iron_proxy::placeholder_env(&[self.infra_fragment()?]))
+    /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the proxy
+    /// fragments declare — infra, harness, and tools — so env-based consumers
+    /// in the sandbox send the proxy_value iron-proxy replaces with the real
+    /// credential (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …). Mirrors
+    /// the full fragment set registered as iron-control roles.
+    fn sandbox_placeholder_env(
+        &self,
+        tool_fragment: Option<&DiscoveredToolProxyFragment>,
+    ) -> Result<BTreeMap<String, String>, ServerError> {
+        let mut fragments = vec![self.infra_fragment()?];
+        if let Some(tool_fragment) = tool_fragment {
+            fragments.push(tool_fragment.fragment.clone());
+        }
+        Ok(centaur_iron_proxy::placeholder_env(&fragments))
     }
 
     fn env_from_secret_names(&self) -> Vec<String> {
@@ -560,7 +683,7 @@ impl IronProxySourceArgs {
     }
 
     fn uses_bootstrap_secret(&self) -> bool {
-        matches!(self.source, SourceKind::OnePassword)
+        matches!(self.source, SourceKind::Env | SourceKind::OnePassword)
     }
 }
 
@@ -804,6 +927,92 @@ mod tests {
             env.iter()
                 .any(|(name, value)| name == "OPENAI_API_KEY" && value == "OPENAI_API_KEY")
         );
+    }
+
+    #[test]
+    fn env_secret_source_mounts_bootstrap_secret_into_iron_proxy() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "enabled",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-firewall-manager-secret-source",
+            "env",
+            "--kubernetes-bootstrap-secret-name",
+            "centaur-infra-env",
+            "--kubernetes-secret-env-name",
+            "centaur-secret-env",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.iron_proxy.env_from_secret_names(),
+            vec![
+                "centaur-infra-env".to_owned(),
+                "centaur-secret-env".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn iron_control_registers_discovered_tool_secrets_on_infra_role() {
+        use centaur_iron_proxy::{Secret, SecretReplace, Transform, TransformConfig};
+
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-iron-proxy-harness-auth-mode",
+            "api_key",
+        ])
+        .unwrap();
+        let tool_fragment = DiscoveredToolProxyFragment {
+            fragment: ProxyFragment {
+                transforms: vec![Transform {
+                    name: "secrets".to_owned(),
+                    config: TransformConfig {
+                        secrets: vec![Secret {
+                            id: Some("TOOL_API_KEY".to_owned()),
+                            replace: Some(SecretReplace {
+                                proxy_value: Some("TOOL_API_KEY".to_owned()),
+                                ..Default::default()
+                            }),
+                            rules: vec![serde_yaml::from_str("{host: api.tool.test}").unwrap()],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            tool_count: 1,
+            secret_count: 1,
+        };
+
+        let roles = args
+            .sandbox
+            .iron_proxy
+            .roles_to_register(Some(&tool_fragment))
+            .unwrap();
+
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].0.foreign_id, "infra");
+        assert!(roles[0].1.transforms.iter().any(|transform| {
+            transform.config.secrets.iter().any(|secret| {
+                secret.id.as_deref() == Some("TOOL_API_KEY")
+                    && secret
+                        .replace
+                        .as_ref()
+                        .and_then(|replace| replace.proxy_value.as_deref())
+                        == Some("TOOL_API_KEY")
+            })
+        }));
     }
 
     #[test]

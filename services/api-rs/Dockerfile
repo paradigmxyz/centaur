@@ -13,7 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY services/api-rs/ ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
     cargo build --release -p centaur-api-server \
     && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server
 
@@ -22,8 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
+# api-rs discovers tool secret metadata from pyproject.toml at startup so it can
+# register the full tool secret set with iron-control before sandboxes claim.
+COPY tools/ /app/tools/
 # Infra + harness auth secrets are embedded in the binary at compile time
-# (include_str! of the in-crate infra.yaml); tool secrets are operator-managed
-# in the control plane. No runtime config files needed.
+# (include_str! of the in-crate infra.yaml); tool secrets are discovered from
+# /app/tools plus any mounted overlay tools.
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/centaur-api-server"]

@@ -5,9 +5,9 @@ use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy, pg_env_var, pg
 use centaur_sandbox_core::{SandboxError, SandboxId, SandboxResult, SandboxSpec};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{
-    Capabilities, ConfigMap, Container, ContainerPort, EmptyDirVolumeSource,
-    EnvFromSource, EnvVar as K8sEnvVar, HTTPGetAction, Pod, PodSpec, Probe, SecretEnvSource,
-    SecretVolumeSource, SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
+    Capabilities, ConfigMap, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
+    EnvVar as K8sEnvVar, HTTPGetAction, Pod, PodSpec, Probe, SecretEnvSource, SecretVolumeSource,
+    SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
     NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
@@ -27,6 +27,7 @@ use crate::{
 };
 
 const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
+const IRON_CONTROL_PROXY_ID_ANNOTATION: &str = "centaur.ai/iron-control-proxy-id";
 const TOKEN_BROKER_LABEL: &str = "centaur.ai/iron-token-broker";
 const TOKEN_BROKER_CONFIG_KEY: &str = "iron-token-broker.yaml";
 const FIREWALL_CA_MOUNT_PATH: &str = "/firewall-certs";
@@ -50,6 +51,10 @@ const PROXY_LOG_LEVEL: &str = "info";
 // the sandbox connects as PG_SANDBOX_USER with a per-sandbox generated password.
 const PG_LISTENER_PORT_BASE: u16 = 5432;
 const PG_SANDBOX_USER: &str = "app_user";
+// Managed iron-proxy instances pick up principal/config changes on their next
+// /proxy/sync poll. Claiming a warm sandbox must not return before the proxy
+// has had a chance to stop serving the bootstrap principal's empty config.
+const PROXY_REASSIGN_SYNC_DELAY: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Debug)]
 pub struct IronProxyConfig {
@@ -138,6 +143,7 @@ struct ResolvedPgListener {
 /// Env injected into a managed proxy pod so iron-proxy pulls its config from
 /// iron-control instead of any local file.
 struct ProxySyncEnv {
+    proxy_id: String,
     control_url: String,
     token: String,
 }
@@ -331,8 +337,9 @@ impl AgentSandboxBackend {
         self.proxy_ids
             .lock()
             .await
-            .insert(id.as_str().to_owned(), proxy.id);
+            .insert(id.as_str().to_owned(), proxy.id.clone());
         Ok(ProxySyncEnv {
+            proxy_id: proxy.id,
             control_url: iron_control.control_url.clone(),
             token,
         })
@@ -364,6 +371,91 @@ impl AgentSandboxBackend {
                 .await;
         }
         Ok(())
+    }
+
+    pub(crate) async fn assign_proxy_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<()> {
+        let iron_control =
+            self.config
+                .iron_control
+                .as_ref()
+                .ok_or_else(|| SandboxError::Unsupported {
+                    backend: crate::BACKEND_NAME,
+                    operation: "assign_iron_control_proxy_principal",
+                })?;
+        let proxy_id = self.proxy_id_for_sandbox(id).await?.ok_or_else(|| {
+            SandboxError::Backend(format!(
+                "iron-control proxy id for sandbox {} was not found",
+                id.as_str()
+            ))
+        })?;
+        let proxy = iron_control
+            .client
+            .assign_proxy_principal(&proxy_id, principal_id)
+            .await
+            .map_err(|err| SandboxError::Backend(format!("iron-control assign proxy: {err}")))?;
+        self.proxy_ids
+            .lock()
+            .await
+            .insert(id.as_str().to_owned(), proxy.id);
+        self.patch_iron_control_principal_annotation(id, principal_id)
+            .await?;
+        sleep(PROXY_REASSIGN_SYNC_DELAY).await;
+        Ok(())
+    }
+
+    async fn proxy_id_for_sandbox(&self, id: &SandboxId) -> SandboxResult<Option<String>> {
+        if let Some(proxy_id) = self.proxy_ids.lock().await.get(id.as_str()).cloned() {
+            return Ok(Some(proxy_id));
+        }
+        let params = ListParams::default().labels(&format!(
+            "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+            id.as_str()
+        ));
+        let pods = self
+            .pods()
+            .list(&params)
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
+        for pod in pods.items {
+            if let Some(proxy_id) = pod
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(IRON_CONTROL_PROXY_ID_ANNOTATION))
+                .filter(|value| !value.trim().is_empty())
+            {
+                let proxy_id = proxy_id.to_owned();
+                self.proxy_ids
+                    .lock()
+                    .await
+                    .insert(id.as_str().to_owned(), proxy_id.clone());
+                return Ok(Some(proxy_id));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn patch_iron_control_principal_annotation(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<()> {
+        let patch = Patch::Merge(json!({
+            "metadata": {
+                "annotations": {
+                    crate::IRON_CONTROL_PRINCIPAL_ANNOTATION: principal_id,
+                },
+            },
+        }));
+        self.sandboxes()
+            .patch(id.as_str(), &PatchParams::default(), &patch)
+            .await
+            .map(|_| ())
+            .map_err(|err| map_kube_error("patch sandbox iron-control principal", err))
     }
 
     fn config_maps(&self) -> Api<ConfigMap> {
@@ -575,8 +667,22 @@ fn build_iron_proxy_pod(
     resolved: &ResolvedIronProxy,
     sync: &ProxySyncEnv,
 ) -> Pod {
+    let annotations = BTreeMap::from([
+        (
+            IRON_CONTROL_PROXY_ID_ANNOTATION.to_owned(),
+            sync.proxy_id.clone(),
+        ),
+        (
+            crate::IRON_CONTROL_PRINCIPAL_ANNOTATION.to_owned(),
+            resolved.principal_id.clone(),
+        ),
+    ]);
     Pod {
-        metadata: object_meta(resolved.proxy_pod_name.clone(), iron_proxy_labels(id)),
+        metadata: object_meta_with_annotations(
+            resolved.proxy_pod_name.clone(),
+            iron_proxy_labels(id),
+            annotations,
+        ),
         spec: Some(PodSpec {
             automount_service_account_token: Some(false),
             restart_policy: Some("Never".to_owned()),
@@ -781,11 +887,19 @@ fn build_iron_proxy_network_policies(
 
 fn sandbox_to_proxy_ports(resolved: &ResolvedIronProxy) -> Vec<NetworkPolicyPort> {
     std::iter::once(network_port(resolved.proxy_port))
-        .chain(resolved.pg_listeners.iter().map(|listener| network_port(listener.port)))
+        .chain(
+            resolved
+                .pg_listeners
+                .iter()
+                .map(|listener| network_port(listener.port)),
+        )
         .collect()
 }
 
-fn proxy_egress_rules(iron_proxy: &IronProxyConfig, control_port: u16) -> Vec<NetworkPolicyEgressRule> {
+fn proxy_egress_rules(
+    iron_proxy: &IronProxyConfig,
+    control_port: u16,
+) -> Vec<NetworkPolicyEgressRule> {
     // Upstream egress: 443/5432 for normal traffic, plus the iron-control port
     // (deduped) so a sync-mode proxy can reach the control plane.
     let mut upstream_ports = vec![network_port(443), network_port(5432)];
@@ -985,9 +1099,18 @@ fn pod_stopped(pod: &Pod) -> bool {
 }
 
 fn object_meta(name: impl Into<String>, labels: BTreeMap<String, String>) -> ObjectMeta {
+    object_meta_with_annotations(name, labels, BTreeMap::new())
+}
+
+fn object_meta_with_annotations(
+    name: impl Into<String>,
+    labels: BTreeMap<String, String>,
+    annotations: BTreeMap<String, String>,
+) -> ObjectMeta {
     ObjectMeta {
         name: Some(name.into()),
         labels: Some(labels),
+        annotations: (!annotations.is_empty()).then_some(annotations),
         ..Default::default()
     }
 }
@@ -1093,7 +1216,10 @@ fn container_ports(resolved: &ResolvedIronProxy) -> Vec<ContainerPort> {
         container_port("health", PROXY_HEALTH_PORT),
     ];
     for listener in &resolved.pg_listeners {
-        ports.push(container_port(format!("pg-{}", listener.port), listener.port));
+        ports.push(container_port(
+            format!("pg-{}", listener.port),
+            listener.port,
+        ));
     }
     ports
 }

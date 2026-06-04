@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use centaur_iron_control::{
     GcpAuthSecretInput, HmacSecretHeader, HmacSecretInput, InjectConfig, OAuthTokenSecretInput,
     PgDsnSecretInput, ReplaceConfig, RequestRule, SecretInput, SecretSource, StaticSecretInput,
-    gcp_auth_scopes_or_default, managed_labels, slugify, source_from_placeholder, unique_foreign_id,
+    gcp_auth_scopes_or_default, managed_labels, slugify, source_from_placeholder,
+    unique_foreign_id,
 };
 use centaur_iron_proxy::SourcePolicy;
 
@@ -47,8 +48,13 @@ pub fn translate(
     for secret in secrets {
         match secret {
             ParsedSecret::Http(http) => {
-                out.inputs
-                    .push(SecretInput::Static(static_input(namespace, role_foreign_id, http, policy, &mut used)));
+                out.inputs.push(SecretInput::Static(static_input(
+                    namespace,
+                    role_foreign_id,
+                    http,
+                    policy,
+                    &mut used,
+                )));
             }
             ParsedSecret::OAuthToken(oauth) => {
                 out.inputs.push(SecretInput::OAuthToken(oauth_input(
@@ -60,8 +66,13 @@ pub fn translate(
                 )));
             }
             ParsedSecret::GcpAuth(gcp) => {
-                out.inputs
-                    .push(SecretInput::GcpAuth(gcp_input(namespace, role_foreign_id, gcp, policy, &mut used)));
+                out.inputs.push(SecretInput::GcpAuth(gcp_input(
+                    namespace,
+                    role_foreign_id,
+                    gcp,
+                    policy,
+                    &mut used,
+                )));
             }
             ParsedSecret::PgDsn(pg) => {
                 out.inputs
@@ -156,7 +167,10 @@ fn gcp_input(
 ) -> GcpAuthSecretInput {
     GcpAuthSecretInput {
         namespace: namespace.to_owned(),
-        foreign_id: Some(unique_foreign_id(format!("{role}-gcp-{}", slugify(&gcp.name)), used)),
+        foreign_id: Some(unique_foreign_id(
+            format!("{role}-gcp-{}", slugify(&gcp.name)),
+            used,
+        )),
         name: Some(format!("GCP Auth ({role})")),
         scopes: gcp_auth_scopes_or_default(gcp.scopes.clone()),
         subject: None,
@@ -226,14 +240,20 @@ fn hmac_input(
         headers: hmac
             .headers
             .iter()
-            .map(|h| HmacSecretHeader { name: h.name.clone(), value: h.value.clone() })
+            .map(|h| HmacSecretHeader {
+                name: h.name.clone(),
+                value: h.value.clone(),
+            })
             .collect(),
         credentials: field_sources(&hmac.credentials, policy),
         rules: rules_from_hosts(&hmac.hosts),
     }
 }
 
-fn field_sources(fields: &[(String, FieldSource)], policy: &SourcePolicy) -> BTreeMap<String, SecretSource> {
+fn field_sources(
+    fields: &[(String, FieldSource)],
+    policy: &SourcePolicy,
+) -> BTreeMap<String, SecretSource> {
     fields
         .iter()
         .map(|(field, src)| {

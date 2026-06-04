@@ -1,5 +1,9 @@
 {{- if .Values.apiRs.enabled }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $reposPath := .Values.sandbox.reposPath -}}
+{{- if and .Values.repoCache.enabled (not $reposPath) -}}
+{{- $reposPath = .Values.repoCache.hostPath -}}
+{{- end -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -74,6 +78,7 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+        checksum/overlay: {{ toJson .Values.overlay | sha256sum }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 8 }}
     spec:
@@ -84,6 +89,25 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{- if .Values.overlay.image.repository }}
+      initContainers:
+        - name: overlay-bootstrap
+          image: {{ printf "%s:%s" .Values.overlay.image.repository .Values.overlay.image.tag | quote }}
+          imagePullPolicy: {{ .Values.overlay.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              src={{ .Values.overlay.image.sourcePath | quote }}
+              target={{ .Values.overlay.mountPath | quote }}
+              mkdir -p "$target"
+              cp -R "$src"/. "$target"/
+          volumeMounts:
+            - name: overlay-root
+              mountPath: {{ dir .Values.overlay.mountPath | quote }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- end }}
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
@@ -100,12 +124,22 @@ spec:
               value: {{ .Values.apiRs.runMigrations | quote }}
             - name: RUST_LOG
               value: info
+            - name: TOOL_DIRS
+{{- if .Values.overlay.image.repository }}
+              value: {{ printf "/app/tools:%s/tools" .Values.overlay.mountPath | quote }}
+{{- else }}
+              value: /app/tools
+{{- end }}
             - name: SESSION_SANDBOX_BACKEND
               value: {{ .Values.apiRs.sandboxBackend | quote }}
             - name: SESSION_SANDBOX_WORKLOAD
               value: {{ .Values.apiRs.sandboxWorkload | quote }}
             - name: SESSION_SANDBOX_READY_TIMEOUT_SECS
               value: {{ .Values.apiRs.sandboxReadyTimeoutSecs | quote }}
+            - name: SESSION_SANDBOX_WARM_POOL_SIZE
+              value: {{ .Values.apiRs.sandboxWarmPoolSize | quote }}
+            - name: SESSION_SANDBOX_WARM_POOL_REPLENISH_INTERVAL_SECS
+              value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: SESSION_SANDBOX_IMAGE
@@ -115,6 +149,10 @@ spec:
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+{{- if $reposPath }}
+            - name: REPOS_PATH
+              value: {{ $reposPath | quote }}
+{{- end }}
             - name: KUBERNETES_SANDBOX_IRON_PROXY_MODE
               value: {{ .Values.apiRs.ironProxy.mode | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE
@@ -214,6 +252,16 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
+{{- if .Values.overlay.image.repository }}
+          volumeMounts:
+            - name: overlay-root
+              mountPath: {{ dir .Values.overlay.mountPath | quote }}
+{{- end }}
+{{- if .Values.overlay.image.repository }}
+      volumes:
+        - name: overlay-root
+          emptyDir: {}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

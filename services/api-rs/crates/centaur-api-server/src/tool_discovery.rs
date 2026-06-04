@@ -1,0 +1,1081 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use centaur_iron_proxy::{
+    PostgresListener, PostgresUpstream, ProxyFragment, Secret, SecretReplace, Transform,
+    TransformConfig,
+};
+use serde::Serialize;
+use serde_yaml::Value as YamlValue;
+use thiserror::Error;
+use toml::Value as TomlValue;
+use tracing::{info, warn};
+
+const DEFAULT_MATCH_HEADERS: &[&str] = &[
+    "Authorization",
+    "Proxy-Authorization",
+    "Api-Key",
+    "Anthropic-Api-Key",
+    "Auth-Token",
+    "Jwt",
+    "Cookie",
+    "Apikey",
+    "AccessKey",
+    "Api-Access-Key",
+    "Api-Signature",
+    "FX-ACCESS-KEY",
+    "FX-ACCESS-SIGN",
+    "FX-ACCESS-PASSPHRASE",
+    "X-CB-ACCESS-PASSPHRASE",
+    "X-CB-ACCESS-SIGNATURE",
+    "/^x-[a-z0-9-]*(api-key|apikey|secret|token|auth|key)$/",
+];
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToolDiscoveryConfig {
+    pub(crate) tool_dirs: Option<String>,
+    pub(crate) tools_path: Option<PathBuf>,
+    pub(crate) tools_overlay_path: Option<PathBuf>,
+    pub(crate) plugins_dir: Option<PathBuf>,
+    pub(crate) tools_config: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiscoveredToolProxyFragment {
+    pub(crate) fragment: ProxyFragment,
+    pub(crate) tool_count: usize,
+    pub(crate) secret_count: usize,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ToolDiscoveryError {
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to parse TOML {path}: {source}")]
+    Toml {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("failed to serialize tool proxy fragment: {0}")]
+    Serialize(#[from] serde_yaml::Error),
+    #[error("{0}")]
+    Invalid(String),
+}
+
+impl ToolDiscoveryConfig {
+    pub(crate) fn resolve_tool_dirs(&self) -> Result<Vec<PathBuf>, ToolDiscoveryError> {
+        if let Some(tool_dirs) = clean_optional_str(self.tool_dirs.as_deref()) {
+            return Ok(split_tool_dirs(&tool_dirs));
+        }
+
+        let mut sandbox_style_dirs = Vec::new();
+        if let Some(path) = clean_optional_path(self.tools_path.as_deref()) {
+            sandbox_style_dirs.push(path);
+        }
+        if let Some(path) = clean_optional_path(self.tools_overlay_path.as_deref()) {
+            sandbox_style_dirs.push(path);
+        }
+        if !sandbox_style_dirs.is_empty() {
+            return Ok(sandbox_style_dirs);
+        }
+
+        if let Some(config_path) = self
+            .tools_config
+            .as_deref()
+            .map(Path::to_path_buf)
+            .or_else(default_tools_config)
+        {
+            let dirs = load_plugins_config(&config_path)?;
+            if !dirs.is_empty() {
+                return Ok(dirs);
+            }
+        }
+
+        if let Some(path) = clean_optional_path(self.plugins_dir.as_deref()) {
+            return Ok(vec![path]);
+        }
+
+        let root = default_repo_root().unwrap_or_else(|| {
+            env::current_dir()
+                .ok()
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+        Ok(vec![root.join("tools")])
+    }
+}
+
+pub(crate) fn discover_tool_proxy_fragment(
+    tool_dirs: &[PathBuf],
+) -> Result<DiscoveredToolProxyFragment, ToolDiscoveryError> {
+    let tools = collect_tools(tool_dirs)?;
+    let mut secrets = Vec::new();
+    for tool in &tools {
+        secrets.extend(tool.secrets.iter().cloned());
+    }
+    let secret_count = secrets.len();
+    let fragment = fragment_from_secrets(secrets)?;
+    info!(
+        tool_dirs = ?tool_dirs,
+        tool_count = tools.len(),
+        secret_count,
+        "discovered api-rs tool proxy secrets"
+    );
+    Ok(DiscoveredToolProxyFragment {
+        fragment,
+        tool_count: tools.len(),
+        secret_count,
+    })
+}
+
+fn split_tool_dirs(value: &str) -> Vec<PathBuf> {
+    value
+        .split(':')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn clean_optional_str(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn clean_optional_path(value: Option<&Path>) -> Option<PathBuf> {
+    value.and_then(|path| {
+        let value = path.to_string_lossy();
+        (!value.trim().is_empty()).then(|| path.to_path_buf())
+    })
+}
+
+fn default_tools_config() -> Option<PathBuf> {
+    let cwd = env::current_dir().ok()?;
+    find_ancestor_file(&cwd, "tools.toml")
+}
+
+fn default_repo_root() -> Option<PathBuf> {
+    default_tools_config().and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+fn find_ancestor_file(start: &Path, name: &str) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn load_plugins_config(config_path: &Path) -> Result<Vec<PathBuf>, ToolDiscoveryError> {
+    if !config_path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(config_path).map_err(|source| ToolDiscoveryError::Read {
+        path: config_path.to_path_buf(),
+        source,
+    })?;
+    let data = parse_toml(config_path, &contents)?;
+    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(data
+        .get("plugin_dirs")
+        .and_then(TomlValue::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(TomlValue::as_str)
+                .map(|entry| {
+                    let path = PathBuf::from(entry);
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        base.join(path)
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn parse_toml(path: &Path, contents: &str) -> Result<TomlValue, ToolDiscoveryError> {
+    toml::from_str(contents).map_err(|source| ToolDiscoveryError::Toml {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct LoadedToolMeta {
+    name: String,
+    secrets: Vec<ToolSecret>,
+}
+
+fn collect_tools(tool_dirs: &[PathBuf]) -> Result<Vec<LoadedToolMeta>, ToolDiscoveryError> {
+    let mut seen = BTreeMap::<String, usize>::new();
+    let mut tools = Vec::<LoadedToolMeta>::new();
+    let mut existing = false;
+
+    for (dir_idx, base_dir) in tool_dirs.iter().enumerate() {
+        if !base_dir.exists() {
+            continue;
+        }
+        existing = true;
+        for tool_dir in candidate_tool_dirs(base_dir)? {
+            let pyproject_path = tool_dir.join("pyproject.toml");
+            if !pyproject_path.exists() {
+                continue;
+            }
+            let Some(meta) = load_tool_meta(&tool_dir, &pyproject_path)? else {
+                continue;
+            };
+            if let Some(prev_dir_idx) = seen.insert(meta.name.clone(), dir_idx) {
+                if let Some(prev_pos) = tools.iter().position(|tool| tool.name == meta.name) {
+                    warn!(
+                        tool = %meta.name,
+                        shadowed_dir = ?tool_dirs.get(prev_dir_idx),
+                        by_dir = ?base_dir,
+                        "api-rs tool metadata shadowed"
+                    );
+                    tools[prev_pos] = meta;
+                }
+            } else {
+                tools.push(meta);
+            }
+        }
+    }
+
+    if !existing {
+        info!(tool_dirs = ?tool_dirs, "api-rs tool dirs missing");
+    }
+    Ok(tools)
+}
+
+fn candidate_tool_dirs(base_dir: &Path) -> Result<Vec<PathBuf>, ToolDiscoveryError> {
+    let mut candidates = Vec::new();
+    let mut children = read_dirs_sorted(base_dir)?;
+    children.retain(|path| is_visible_dir(path));
+    for child in children {
+        if child.join("pyproject.toml").exists() {
+            candidates.push(child);
+            continue;
+        }
+        let mut grandchildren = read_dirs_sorted(&child)?;
+        grandchildren.retain(|path| is_visible_dir(path));
+        for grandchild in grandchildren {
+            if grandchild.join("pyproject.toml").exists() {
+                candidates.push(grandchild);
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn read_dirs_sorted(path: &Path) -> Result<Vec<PathBuf>, ToolDiscoveryError> {
+    let mut dirs = fs::read_dir(path)
+        .map_err(|source| ToolDiscoveryError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Vec<_>>();
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn is_visible_dir(path: &Path) -> bool {
+    path.is_dir()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !name.starts_with('.') && !name.starts_with('_'))
+}
+
+fn load_tool_meta(
+    tool_dir: &Path,
+    pyproject_path: &Path,
+) -> Result<Option<LoadedToolMeta>, ToolDiscoveryError> {
+    let contents =
+        fs::read_to_string(pyproject_path).map_err(|source| ToolDiscoveryError::Read {
+            path: pyproject_path.to_path_buf(),
+            source,
+        })?;
+    let pyproject = match parse_toml(pyproject_path, &contents) {
+        Ok(pyproject) => pyproject,
+        Err(error) => {
+            warn!(
+                tool_dir = ?tool_dir,
+                error = %error,
+                "api-rs tool pyproject parse failed"
+            );
+            return Ok(None);
+        }
+    };
+    let default_tool_conf = TomlValue::Table(Default::default());
+    let tool_conf = pyproject
+        .get("tool")
+        .and_then(|value| value.get("centaur"))
+        .unwrap_or(&default_tool_conf);
+    if tool_conf.get("type").and_then(TomlValue::as_str) == Some("persona") {
+        return Ok(None);
+    }
+    let name = tool_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            ToolDiscoveryError::Invalid(format!("invalid tool path {}", tool_dir.display()))
+        })?
+        .to_owned();
+    let default_hosts = string_array(tool_conf.get("hosts"));
+    let secrets =
+        match parse_secret_list(tool_conf.get("secrets"), &default_hosts).and_then(|mut secrets| {
+            secrets.extend(parse_secret_list(
+                tool_conf.get("optional_secrets"),
+                &default_hosts,
+            )?);
+            Ok(secrets)
+        }) {
+            Ok(secrets) => secrets,
+            Err(error) => {
+                warn!(
+                    tool = %name,
+                    error = %error,
+                    "api-rs tool invalid secret metadata"
+                );
+                return Ok(None);
+            }
+        };
+    Ok(Some(LoadedToolMeta { name, secrets }))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ToolSecret {
+    Http(HttpSecret),
+    OAuthToken(OAuthTokenSecret),
+    GcpAuth(GcpAuthSecret),
+    PgDsn(PgDsnSecret),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct HttpSecret {
+    name: String,
+    secret_ref: String,
+    mode: HttpSecretMode,
+    hosts: Vec<String>,
+    replacer: String,
+    match_headers: Vec<String>,
+    match_path: bool,
+    match_query: bool,
+    inject_header: String,
+    inject_formatter: String,
+    inject_query_param: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum HttpSecretMode {
+    Replace,
+    Inject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct OAuthFieldSource {
+    secret_ref: String,
+    json_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct OAuthTokenSecret {
+    name: String,
+    grant: String,
+    hosts: Vec<String>,
+    fields: Vec<(String, OAuthFieldSource)>,
+    scopes: Vec<String>,
+    token_endpoint: Option<String>,
+    token_endpoint_headers: Vec<(String, OAuthFieldSource)>,
+    audience: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GcpAuthSecret {
+    name: String,
+    secret_ref: String,
+    hosts: Vec<String>,
+    scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PgDsnSecret {
+    name: String,
+    secret_ref: String,
+    database: String,
+}
+
+fn parse_secret_list(
+    value: Option<&TomlValue>,
+    default_hosts: &[String],
+) -> Result<Vec<ToolSecret>, ToolDiscoveryError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let entries = value
+        .as_array()
+        .ok_or_else(|| ToolDiscoveryError::Invalid("'secrets' must be an array".to_owned()))?;
+    entries
+        .iter()
+        .map(|entry| parse_secret(entry, default_hosts))
+        .collect()
+}
+
+fn parse_secret(
+    value: &TomlValue,
+    default_hosts: &[String],
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    if let Some(name) = value.as_str() {
+        let name = nonempty(name, "secret name")?.to_owned();
+        return Ok(ToolSecret::Http(HttpSecret {
+            name: name.clone(),
+            secret_ref: name.clone(),
+            mode: HttpSecretMode::Replace,
+            hosts: default_hosts.to_vec(),
+            replacer: name,
+            match_headers: DEFAULT_MATCH_HEADERS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            match_path: false,
+            match_query: false,
+            inject_header: String::new(),
+            inject_formatter: String::new(),
+            inject_query_param: String::new(),
+        }));
+    }
+    let table = value.as_table().ok_or_else(|| {
+        ToolDiscoveryError::Invalid("secret entry must be a string or table".to_owned())
+    })?;
+    let name = required_str(table, "name")?.to_owned();
+    let secret_ref = optional_str(table, "secret_ref")
+        .unwrap_or(name.as_str())
+        .to_owned();
+    match optional_str(table, "type").unwrap_or("http") {
+        "http" | "header" => parse_http_secret(table, name, secret_ref, default_hosts),
+        "oauth_token" => parse_oauth_token_secret(table, name),
+        "gcp_auth" => parse_gcp_auth_secret(table, name, secret_ref),
+        "pg_dsn" => parse_pg_dsn_secret(table, name, secret_ref),
+        "brokered_token" | "hmac_sign" => Err(ToolDiscoveryError::Invalid(format!(
+            "api-rs iron-control tool discovery does not yet support secret type {:?}",
+            optional_str(table, "type").unwrap_or("unknown")
+        ))),
+        other => Err(ToolDiscoveryError::Invalid(format!(
+            "unknown secret type {other:?}"
+        ))),
+    }
+}
+
+fn parse_http_secret(
+    table: &toml::Table,
+    name: String,
+    secret_ref: String,
+    default_hosts: &[String],
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    let hosts =
+        optional_string_array(table.get("hosts"))?.unwrap_or_else(|| default_hosts.to_vec());
+    let mode = optional_str(table, "mode").unwrap_or("replace");
+    match mode {
+        "replace" => {
+            let match_headers =
+                optional_string_array(table.get("match_headers"))?.unwrap_or_default();
+            let match_path = optional_bool(table, "match_path")?.unwrap_or(false);
+            let match_query = optional_bool(table, "match_query")?.unwrap_or(false);
+            if match_headers.is_empty() && !match_path && !match_query {
+                return Err(ToolDiscoveryError::Invalid(format!(
+                    "replace-mode HTTP secret {name:?} must declare match_headers, match_path, or match_query"
+                )));
+            }
+            let replacer = optional_str(table, "replacer").unwrap_or(&name).to_owned();
+            Ok(ToolSecret::Http(HttpSecret {
+                name,
+                secret_ref,
+                mode: HttpSecretMode::Replace,
+                hosts,
+                replacer,
+                match_headers,
+                match_path,
+                match_query,
+                inject_header: String::new(),
+                inject_formatter: String::new(),
+                inject_query_param: String::new(),
+            }))
+        }
+        "inject" => {
+            let inject_header = optional_str(table, "inject_header")
+                .unwrap_or_default()
+                .to_owned();
+            let inject_query_param = optional_str(table, "inject_query_param")
+                .unwrap_or_default()
+                .to_owned();
+            let inject_formatter = optional_str(table, "inject_formatter")
+                .unwrap_or_default()
+                .to_owned();
+            if inject_header.is_empty() == inject_query_param.is_empty() {
+                return Err(ToolDiscoveryError::Invalid(format!(
+                    "inject-mode HTTP secret {name:?} must declare exactly one of inject_header or inject_query_param"
+                )));
+            }
+            if !inject_formatter.is_empty() && inject_header.is_empty() {
+                return Err(ToolDiscoveryError::Invalid(format!(
+                    "inject-mode HTTP secret {name:?} sets inject_formatter without inject_header"
+                )));
+            }
+            Ok(ToolSecret::Http(HttpSecret {
+                name,
+                secret_ref,
+                mode: HttpSecretMode::Inject,
+                hosts,
+                replacer: String::new(),
+                match_headers: Vec::new(),
+                match_path: false,
+                match_query: false,
+                inject_header,
+                inject_formatter,
+                inject_query_param,
+            }))
+        }
+        other => Err(ToolDiscoveryError::Invalid(format!(
+            "unknown HTTP secret mode {other:?}"
+        ))),
+    }
+}
+
+fn parse_oauth_token_secret(
+    table: &toml::Table,
+    name: String,
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    let grant = required_str(table, "grant")?.to_owned();
+    let hosts = required_string_array(table.get("hosts"), "hosts")?;
+    let scopes = optional_string_array(table.get("scopes"))?.unwrap_or_default();
+    let token_endpoint = optional_str(table, "token_endpoint").map(ToOwned::to_owned);
+    let fields = parse_oauth_fields(table.get("fields"), &name)?;
+    let token_endpoint_headers = parse_oauth_fields(table.get("token_endpoint_headers"), &name)?
+        .into_iter()
+        .collect();
+    let audience = optional_str(table, "audience").map(ToOwned::to_owned);
+    Ok(ToolSecret::OAuthToken(OAuthTokenSecret {
+        name,
+        grant,
+        hosts,
+        fields,
+        scopes,
+        token_endpoint,
+        token_endpoint_headers,
+        audience,
+    }))
+}
+
+fn parse_gcp_auth_secret(
+    table: &toml::Table,
+    name: String,
+    secret_ref: String,
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    Ok(ToolSecret::GcpAuth(GcpAuthSecret {
+        name,
+        secret_ref,
+        hosts: optional_string_array(table.get("hosts"))?.unwrap_or_default(),
+        scopes: optional_string_array(table.get("scopes"))?.unwrap_or_default(),
+    }))
+}
+
+fn parse_pg_dsn_secret(
+    table: &toml::Table,
+    name: String,
+    secret_ref: String,
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    let database = required_str(table, "database")?.to_owned();
+    Ok(ToolSecret::PgDsn(PgDsnSecret {
+        name,
+        secret_ref,
+        database,
+    }))
+}
+
+fn parse_oauth_fields(
+    value: Option<&TomlValue>,
+    secret_name: &str,
+) -> Result<Vec<(String, OAuthFieldSource)>, ToolDiscoveryError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let table = value.as_table().ok_or_else(|| {
+        ToolDiscoveryError::Invalid(format!(
+            "oauth_token entry {secret_name:?} fields must be a table"
+        ))
+    })?;
+    let mut fields = Vec::new();
+    for (field_name, value) in table {
+        let source = if let Some(secret_ref) = value.as_str() {
+            OAuthFieldSource {
+                secret_ref: nonempty(secret_ref, "oauth secret_ref")?.to_owned(),
+                json_key: None,
+            }
+        } else {
+            let table = value.as_table().ok_or_else(|| {
+                ToolDiscoveryError::Invalid(format!(
+                    "oauth field {field_name:?} must be a string or table"
+                ))
+            })?;
+            OAuthFieldSource {
+                secret_ref: required_str(table, "secret_ref")?.to_owned(),
+                json_key: optional_str(table, "json_key").map(ToOwned::to_owned),
+            }
+        };
+        fields.push((field_name.clone(), source));
+    }
+    fields.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(fields)
+}
+
+fn fragment_from_secrets(secrets: Vec<ToolSecret>) -> Result<ProxyFragment, ToolDiscoveryError> {
+    let mut fragment = ProxyFragment::default();
+    let http = http_secret_transform(&secrets)?;
+    if let Some(transform) = http {
+        fragment.transforms.push(transform);
+    }
+    fragment.transforms.extend(gcp_auth_transforms(&secrets)?);
+    if let Some(transform) = oauth_token_transform(&secrets)? {
+        fragment.transforms.push(transform);
+    }
+    fragment.postgres.extend(postgres_listeners(&secrets)?);
+    Ok(fragment)
+}
+
+fn http_secret_transform(secrets: &[ToolSecret]) -> Result<Option<Transform>, ToolDiscoveryError> {
+    let mut grouped = BTreeMap::<HttpSecretKey, BTreeSet<String>>::new();
+    for secret in secrets {
+        let ToolSecret::Http(secret) = secret else {
+            continue;
+        };
+        grouped
+            .entry(HttpSecretKey::from(secret))
+            .or_default()
+            .extend(secret.hosts.iter().cloned());
+    }
+    if grouped.is_empty() {
+        return Ok(None);
+    }
+    let mut entries = Vec::new();
+    for (key, hosts) in grouped {
+        let mut extra = BTreeMap::new();
+        let mut entry = Secret {
+            id: Some(key.name.clone()),
+            source: Some(yaml_map([("placeholder", yaml_string(&key.secret_ref))])?),
+            rules: host_rules(hosts)?,
+            ..Default::default()
+        };
+        match key.mode {
+            HttpSecretMode::Replace => {
+                extra.insert("match_headers".to_owned(), yaml_value(&key.match_headers)?);
+                if key.match_path {
+                    extra.insert("match_path".to_owned(), yaml_value(true)?);
+                }
+                if key.match_query {
+                    extra.insert("match_query".to_owned(), yaml_value(true)?);
+                }
+                entry.replace = Some(SecretReplace {
+                    proxy_value: Some(key.replacer),
+                    extra,
+                });
+            }
+            HttpSecretMode::Inject => {
+                let mut inject = BTreeMap::new();
+                if !key.inject_header.is_empty() {
+                    inject.insert("header", yaml_string(&key.inject_header));
+                }
+                if !key.inject_formatter.is_empty() {
+                    inject.insert("formatter", yaml_string(&key.inject_formatter));
+                }
+                if !key.inject_query_param.is_empty() {
+                    inject.insert("query_param", yaml_string(&key.inject_query_param));
+                }
+                entry.inject = Some(yaml_value(inject)?);
+            }
+        }
+        entries.push(entry);
+    }
+    Ok(Some(Transform {
+        name: "secrets".to_owned(),
+        config: TransformConfig {
+            secrets: entries,
+            ..Default::default()
+        },
+        ..Default::default()
+    }))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct HttpSecretKey {
+    name: String,
+    secret_ref: String,
+    mode: HttpSecretMode,
+    replacer: String,
+    match_headers: Vec<String>,
+    match_path: bool,
+    match_query: bool,
+    inject_header: String,
+    inject_formatter: String,
+    inject_query_param: String,
+}
+
+impl From<&HttpSecret> for HttpSecretKey {
+    fn from(secret: &HttpSecret) -> Self {
+        Self {
+            name: secret.name.clone(),
+            secret_ref: secret.secret_ref.clone(),
+            mode: secret.mode.clone(),
+            replacer: secret.replacer.clone(),
+            match_headers: secret.match_headers.clone(),
+            match_path: secret.match_path,
+            match_query: secret.match_query,
+            inject_header: secret.inject_header.clone(),
+            inject_formatter: secret.inject_formatter.clone(),
+            inject_query_param: secret.inject_query_param.clone(),
+        }
+    }
+}
+
+fn gcp_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDiscoveryError> {
+    let mut by_ref = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
+    for secret in secrets {
+        let ToolSecret::GcpAuth(secret) = secret else {
+            continue;
+        };
+        let entry = by_ref.entry(secret.secret_ref.clone()).or_default();
+        entry.0.extend(secret.hosts.iter().cloned());
+        entry.1.extend(secret.scopes.iter().cloned());
+    }
+    let mut transforms = Vec::new();
+    for (secret_ref, (hosts, scopes)) in by_ref {
+        let mut config = BTreeMap::new();
+        config.insert(
+            "keyfile".to_owned(),
+            yaml_map([("placeholder", yaml_string(&secret_ref))])?,
+        );
+        config.insert(
+            "scopes".to_owned(),
+            yaml_value(if scopes.is_empty() {
+                vec!["https://www.googleapis.com/auth/cloud-platform".to_owned()]
+            } else {
+                scopes.into_iter().collect()
+            })?,
+        );
+        let hosts = if hosts.is_empty() {
+            BTreeSet::from(["*.googleapis.com".to_owned()])
+        } else {
+            hosts
+        };
+        config.insert("rules".to_owned(), yaml_value(host_rules(hosts)?)?);
+        transforms.push(Transform {
+            name: "gcp_auth".to_owned(),
+            config: TransformConfig {
+                extra: config,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    Ok(transforms)
+}
+
+fn oauth_token_transform(secrets: &[ToolSecret]) -> Result<Option<Transform>, ToolDiscoveryError> {
+    let mut tokens = Vec::new();
+    for secret in secrets {
+        let ToolSecret::OAuthToken(secret) = secret else {
+            continue;
+        };
+        let mut token = BTreeMap::new();
+        token.insert("grant".to_owned(), yaml_string(&secret.grant));
+        for (field_name, source) in &secret.fields {
+            token.insert(field_name.clone(), oauth_field_source(source)?);
+        }
+        token.insert(
+            "rules".to_owned(),
+            yaml_value(host_rules_set(&secret.hosts)?)?,
+        );
+        if !secret.scopes.is_empty() {
+            token.insert("scopes".to_owned(), yaml_value(&secret.scopes)?);
+        }
+        if let Some(token_endpoint) = &secret.token_endpoint {
+            token.insert("token_endpoint".to_owned(), yaml_string(token_endpoint));
+        }
+        if let Some(audience) = &secret.audience {
+            token.insert("audience".to_owned(), yaml_string(audience));
+        }
+        if !secret.token_endpoint_headers.is_empty() {
+            let mut headers = BTreeMap::new();
+            for (header_name, source) in &secret.token_endpoint_headers {
+                headers.insert(header_name.clone(), oauth_field_source(source)?);
+            }
+            token.insert("token_endpoint_headers".to_owned(), yaml_value(headers)?);
+        }
+        tokens.push(yaml_value(token)?);
+    }
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let mut extra = BTreeMap::new();
+    extra.insert("tokens".to_owned(), YamlValue::Sequence(tokens));
+    Ok(Some(Transform {
+        name: "oauth_token".to_owned(),
+        config: TransformConfig {
+            extra,
+            ..Default::default()
+        },
+        ..Default::default()
+    }))
+}
+
+fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, ToolDiscoveryError> {
+    let mut by_name = BTreeMap::<String, PgDsnSecret>::new();
+    for secret in secrets {
+        let ToolSecret::PgDsn(secret) = secret else {
+            continue;
+        };
+        by_name.entry(secret.name.clone()).or_insert(secret.clone());
+    }
+    by_name
+        .into_values()
+        .map(|secret| {
+            Ok(PostgresListener {
+                name: Some(secret.name.to_lowercase()),
+                upstream: Some(PostgresUpstream {
+                    dsn: Some(yaml_map([(
+                        "placeholder",
+                        yaml_string(&secret.secret_ref),
+                    )])?),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn oauth_field_source(source: &OAuthFieldSource) -> Result<YamlValue, ToolDiscoveryError> {
+    let mut value = BTreeMap::new();
+    value.insert("placeholder", yaml_string(&source.secret_ref));
+    if let Some(json_key) = &source.json_key {
+        value.insert("json_key", yaml_string(json_key));
+    }
+    yaml_value(value)
+}
+
+fn host_rules(hosts: BTreeSet<String>) -> Result<Vec<YamlValue>, ToolDiscoveryError> {
+    hosts
+        .into_iter()
+        .map(|host| yaml_map([("host", yaml_string(&host))]))
+        .collect()
+}
+
+fn host_rules_set(hosts: &[String]) -> Result<Vec<YamlValue>, ToolDiscoveryError> {
+    host_rules(hosts.iter().cloned().collect())
+}
+
+fn yaml_string(value: &str) -> YamlValue {
+    YamlValue::String(value.to_owned())
+}
+
+fn yaml_map<const N: usize>(
+    values: [(&str, YamlValue); N],
+) -> Result<YamlValue, ToolDiscoveryError> {
+    let map = values
+        .into_iter()
+        .map(|(key, value)| (YamlValue::String(key.to_owned()), value))
+        .collect();
+    Ok(YamlValue::Mapping(map))
+}
+
+fn yaml_value<T: Serialize>(value: T) -> Result<YamlValue, ToolDiscoveryError> {
+    serde_yaml::to_value(value).map_err(ToolDiscoveryError::Serialize)
+}
+
+fn required_str<'a>(table: &'a toml::Table, key: &str) -> Result<&'a str, ToolDiscoveryError> {
+    let value = table
+        .get(key)
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| ToolDiscoveryError::Invalid(format!("missing required string {key:?}")))?;
+    nonempty(value, key)
+}
+
+fn optional_str<'a>(table: &'a toml::Table, key: &str) -> Option<&'a str> {
+    table
+        .get(key)
+        .and_then(TomlValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn nonempty<'a>(value: &'a str, key: &str) -> Result<&'a str, ToolDiscoveryError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ToolDiscoveryError::Invalid(format!(
+            "{key} must be non-empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn string_array(value: Option<&TomlValue>) -> Vec<String> {
+    optional_string_array(value)
+        .unwrap_or_default()
+        .unwrap_or_default()
+}
+
+fn required_string_array(
+    value: Option<&TomlValue>,
+    key: &str,
+) -> Result<Vec<String>, ToolDiscoveryError> {
+    optional_string_array(value)?.ok_or_else(|| {
+        ToolDiscoveryError::Invalid(format!("missing required string array {key:?}"))
+    })
+}
+
+fn optional_string_array(
+    value: Option<&TomlValue>,
+) -> Result<Option<Vec<String>>, ToolDiscoveryError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| ToolDiscoveryError::Invalid("expected string array".to_owned()))?;
+    let mut out = Vec::new();
+    for item in array {
+        let Some(value) = item
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(ToolDiscoveryError::Invalid(
+                "expected non-empty string array".to_owned(),
+            ));
+        };
+        out.push(value.to_owned());
+    }
+    Ok(Some(out))
+}
+
+fn optional_bool(table: &toml::Table, key: &str) -> Result<Option<bool>, ToolDiscoveryError> {
+    match table.get(key) {
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| ToolDiscoveryError::Invalid(format!("{key:?} must be boolean"))),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn resolves_tool_dirs_from_explicit_env_string() {
+        let config = ToolDiscoveryConfig {
+            tool_dirs: Some("/base:/overlay".to_owned()),
+            tools_path: Some(PathBuf::from("/ignored")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.resolve_tool_dirs().unwrap(),
+            vec![PathBuf::from("/base"), PathBuf::from("/overlay")]
+        );
+    }
+
+    #[test]
+    fn resolves_sandbox_style_tools_path_and_overlay_path() {
+        let config = ToolDiscoveryConfig {
+            tools_path: Some(PathBuf::from("/base")),
+            tools_overlay_path: Some(PathBuf::from("/overlay")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.resolve_tool_dirs().unwrap(),
+            vec![PathBuf::from("/base"), PathBuf::from("/overlay")]
+        );
+    }
+
+    #[test]
+    fn discovers_http_oauth_and_overlay_shadowing() {
+        let temp = temp_dir("api-rs-tools");
+        let base = temp.join("base");
+        let overlay = temp.join("overlay");
+        write_tool(
+            &base.join("category").join("alpha"),
+            r#"
+[project]
+description = "base alpha"
+
+[tool.centaur]
+secrets = [{type = "http", name = "BASE_TOKEN", match_headers = ["Authorization"], hosts = ["api.base.test"]}]
+"#,
+        );
+        write_tool(
+            &overlay.join("alpha"),
+            r#"
+[project]
+description = "overlay alpha"
+
+[tool.centaur]
+secrets = [{type = "http", name = "OVERLAY_TOKEN", match_query = true, hosts = ["api.overlay.test"]}]
+"#,
+        );
+        write_tool(
+            &base.join("gsuite"),
+            r#"
+[project]
+description = "oauth"
+
+[tool.centaur]
+secrets = [
+  {type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = ["gmail.googleapis.com"], fields = { refresh_token = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "refresh_token" }, client_id = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_id" } } },
+]
+"#,
+        );
+
+        let discovered = discover_tool_proxy_fragment(&[base.clone(), overlay.clone()]).unwrap();
+
+        assert_eq!(discovered.tool_count, 2);
+        assert_eq!(discovered.secret_count, 2);
+        let secrets = discovered.fragment.transforms[0].config.secrets.clone();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].id.as_deref(), Some("OVERLAY_TOKEN"));
+        assert_eq!(
+            discovered.fragment.transforms[1].name,
+            "oauth_token".to_owned()
+        );
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()))
+    }
+
+    fn write_tool(path: &Path, pyproject: &str) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("pyproject.toml"), pyproject).unwrap();
+    }
+}
