@@ -198,9 +198,9 @@ struct SandboxArgs {
 }
 
 impl SandboxArgs {
-    /// Build the iron-control session registrar, registering the shared infra
-    /// role up front. Returns ``None`` when iron-control is not configured
-    /// (no URL/API key), leaving the legacy proxy path intact.
+    /// Build the iron-control session registrar, registering shared roles up
+    /// front. The warm-pool bootstrap principal intentionally remains roleless;
+    /// real session principals get roles only when a sandbox is claimed.
     async fn iron_control_runtime(&self) -> Result<Option<IronControlRuntime>, ServerError> {
         let Some(client) = self.iron_control.client() else {
             return Ok(None);
@@ -224,9 +224,6 @@ impl SandboxArgs {
                 ]),
             })
             .await?;
-        for role_id in &role_ids {
-            client.assign_role(&bootstrap.id, role_id).await?;
-        }
         Ok(Some(IronControlRuntime {
             registrar: SessionRegistrar::new(client, namespace, role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
