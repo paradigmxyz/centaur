@@ -210,7 +210,7 @@ impl PgSessionStore {
     ) -> Result<Option<SessionExecution>, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
-            select execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             from session_executions
             where thread_key = $1 and status in ($2, $3)
             order by created_at desc, execution_id desc
@@ -232,7 +232,7 @@ impl PgSessionStore {
     ) -> Result<Option<SessionExecution>, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
-            select execution_id, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             from session_executions
             where thread_key = $1
             order by created_at desc, execution_id desc
