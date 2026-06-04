@@ -224,6 +224,9 @@ impl SandboxArgs {
                 ]),
             })
             .await?;
+        for role_id in &role_ids {
+            client.assign_role(&bootstrap.id, role_id).await?;
+        }
         Ok(Some(IronControlRuntime {
             registrar: SessionRegistrar::new(client, namespace, role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
