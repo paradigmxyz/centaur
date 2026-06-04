@@ -135,6 +135,10 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "repositoryRefs": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
         "syncIntervalSeconds": { "type": "integer" },
         "image": {
           "type": "object",

@@ -194,6 +194,7 @@ repoCache:
   enabled: false
   hostPath: /var/lib/centaur/repos
   repositories: []
+  repositoryRefs: {}
   syncIntervalSeconds: 300
   image:
     repository: ""
