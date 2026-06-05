@@ -755,6 +755,104 @@ describe('slackbotv2', () => {
     ).toHaveLength(1)
   })
 
+  it('truncates large structured task output so final markdown still delivers', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before large task output.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> keep final text visible`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-large-task-output',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> keep final text visible`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const largeOutput = 'large-context-line\n'.repeat(600)
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({
+        type: 'item.started',
+        item: {
+          id: 'cmd-large',
+          type: 'commandExecution',
+          command: 'slack thread --json',
+          status: 'inProgress'
+        }
+      })
+    )
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-large',
+          type: 'commandExecution',
+          command: 'slack thread --json',
+          status: 'completed',
+          aggregatedOutput: largeOutput
+        }
+      })
+    )
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({
+        type: 'item.started',
+        item: {
+          id: 'answer-large',
+          type: 'agentMessage',
+          text: '',
+          phase: 'final_answer'
+        }
+      })
+    )
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({
+        type: 'item.agentMessage.delta',
+        itemId: 'answer-large',
+        delta: 'LARGE_TASK_FINAL_VISIBLE'
+      })
+    )
+    codexApi.emitSessionEvent(threadKey(parent.ts), 'session.execution_completed', {
+      execution_id: 'exe-large-task-output',
+      status: 'completed'
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    const taskOutputs = transcripts[0]!.chunks
+      .filter(chunk => chunk.type === 'task_update')
+      .map(chunk => stringField(chunk.output))
+      .filter(Boolean)
+    expect(taskOutputs.some(output => output.includes('[truncated'))).toBe(true)
+    expect(taskOutputs.every(output => output.length <= 2500)).toBe(true)
+    const markdownChunks = transcripts[0]!.chunks.filter(chunk => chunk.type === 'markdown_text')
+    expect(markdownChunks).toEqual([
+      {
+        type: 'markdown_text',
+        text: 'LARGE_TASK_FINAL_VISIBLE'
+      }
+    ])
+  })
+
   it('waits for a slow session execute before acknowledging Slack and starting the stream', async () => {
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
