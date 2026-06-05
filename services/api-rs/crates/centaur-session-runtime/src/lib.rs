@@ -102,6 +102,7 @@ struct EventStreamState {
     store: PgSessionStore,
     thread_key: ThreadKey,
     after_event_id: i64,
+    execution_id: Option<String>,
     pending: VecDeque<SessionEvent>,
     listener: SessionEventListener,
     safety_tick: Interval,
@@ -486,6 +487,7 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         after_event_id: i64,
+        execution_id: Option<&str>,
     ) -> Result<
         impl Stream<Item = Result<SessionEvent, SessionRuntimeError>> + use<>,
         SessionRuntimeError,
@@ -502,6 +504,7 @@ impl SessionRuntime {
             self.store.clone(),
             thread_key.clone(),
             after_event_id,
+            execution_id.map(ToOwned::to_owned),
             listener,
         ))
     }
@@ -836,6 +839,7 @@ fn session_event_stream(
     store: PgSessionStore,
     thread_key: ThreadKey,
     after_event_id: i64,
+    execution_id: Option<String>,
     listener: SessionEventListener,
 ) -> impl Stream<Item = Result<SessionEvent, SessionRuntimeError>> {
     stream::unfold(
@@ -843,6 +847,7 @@ fn session_event_stream(
             store,
             thread_key,
             after_event_id,
+            execution_id,
             pending: VecDeque::new(),
             listener,
             safety_tick: {
@@ -866,7 +871,12 @@ fn session_event_stream(
                 }
                 match state
                     .store
-                    .list_events_after(&state.thread_key, state.after_event_id, 100)
+                    .list_events_after(
+                        &state.thread_key,
+                        state.after_event_id,
+                        state.execution_id.as_deref(),
+                        100,
+                    )
                     .await
                 {
                     Ok(events) if events.is_empty() => loop {

@@ -133,6 +133,7 @@ export type SlackbotV2Trace = {
 
 export type ForwardSessionInput = {
   afterEventId: number
+  executionId?: string
   executeMessage?: SlackbotV2ApiMessage
   messages: SlackbotV2ApiMessage[]
   onEventId(eventId: number): void

@@ -126,7 +126,11 @@ async fn stream_events(
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let events = state
         .runtime
-        .stream_events(&thread_key, query.after_event_id.unwrap_or(0))
+        .stream_events(
+            &thread_key,
+            query.after_event_id.unwrap_or(0),
+            query.execution_id.as_deref(),
+        )
         .await?;
     let stream = events.map(|result| {
         let sse = match result {

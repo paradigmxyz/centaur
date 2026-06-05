@@ -40,9 +40,10 @@ pub struct ExecuteSessionResponse {
     pub status: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct EventsQuery {
     pub after_event_id: Option<i64>,
+    pub execution_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

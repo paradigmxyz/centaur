@@ -278,6 +278,7 @@ async function syncThreadMessageToSession(
     const latest = (await thread.state) ?? {}
     const latestExecutedMessageIds = new Set(latest.executedMessageIds ?? [])
     latestExecutedMessageIds.add(serializedMessage.id)
+    forwardInput.executionId = execution.execution_id
     await thread.setState({
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
@@ -562,6 +563,7 @@ async function recoverRenderObligation(
   let lastEventId = Math.max(threadState.lastEventId ?? 0, obligation.afterEventId)
   const input: ForwardSessionInput = {
     afterEventId: lastEventId,
+    executionId: obligation.executionId,
     messages: [],
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)

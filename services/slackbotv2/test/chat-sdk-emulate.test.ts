@@ -942,7 +942,9 @@ describe('slackbotv2', () => {
     expect(codexApi.creates).toHaveLength(0)
     expect(codexApi.appends).toHaveLength(0)
     expect(codexApi.executes).toHaveLength(0)
-    expect(codexApi.eventRequests).toEqual([{ afterEventId: 0, threadKey: key }])
+    expect(codexApi.eventRequests).toEqual([
+      { afterEventId: 0, executionId: 'exe-recovery', threadKey: key }
+    ])
     expectSlackPlanStreamShape(slackApi.calls, {
       answers: ['Recovered request.'],
       parentTs: parent.ts
@@ -1014,8 +1016,8 @@ describe('slackbotv2', () => {
 
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.eventRequests).toEqual([
-      { afterEventId: 0, threadKey: key },
-      { afterEventId: 0, threadKey: key }
+      { afterEventId: 0, executionId: 'exe-1', threadKey: key },
+      { afterEventId: 0, executionId: 'exe-1', threadKey: key }
     ])
     expect(await threadText(parent.ts)).toContain('Recovered after stream retry.')
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
@@ -1553,12 +1555,14 @@ type MockSessionRequest<T> = {
 
 type MockSessionEventRequest = {
   afterEventId: number
+  executionId?: string
   threadKey: string
 }
 
 type MockSessionEvent = {
   data: string
   event: string
+  executionId?: string
   id: number
   threadKey: string
 }
@@ -1569,9 +1573,9 @@ type MockSessionApi = {
   close(): Promise<void>
   closeStreams(): void
   creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
-  emitOutputLine(threadKey: string, line: string): void
-  emitOutputLines(threadKey: string, lines: string[]): void
-  emitSessionEvent(threadKey: string, event: string, data: unknown): void
+  emitOutputLine(threadKey: string, line: string, executionId?: string): void
+  emitOutputLines(threadKey: string, lines: string[], executionId?: string): void
+  emitSessionEvent(threadKey: string, event: string, data: unknown, executionId?: string): void
   eventRequests: MockSessionEventRequest[]
   executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
   failNextEvents: boolean
@@ -1711,23 +1715,25 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     get streamCount() {
       return streams.size
     },
-    emitOutputLine(threadKey: string, line: string) {
+    emitOutputLine(threadKey: string, line: string, executionId?: string) {
       emitMockSessionEvent({
         data: line,
         event: 'session.output.line',
+        executionId,
         events,
         id: ++eventId,
         streams,
         threadKey
       })
     },
-    emitOutputLines(threadKey: string, lines: string[]) {
-      for (const line of lines) api.emitOutputLine(threadKey, line)
+    emitOutputLines(threadKey: string, lines: string[], executionId?: string) {
+      for (const line of lines) api.emitOutputLine(threadKey, line, executionId)
     },
-    emitSessionEvent(threadKey: string, event: string, data: unknown) {
+    emitSessionEvent(threadKey: string, event: string, data: unknown, executionId?: string) {
       emitMockSessionEvent({
         data: typeof data === 'string' ? data : JSON.stringify(data),
         event,
+        executionId,
         events,
         id: ++eventId,
         streams,
@@ -1793,7 +1799,8 @@ async function handleMockCodexRequest(
 
   if (endpoint === 'events') {
     const afterEventId = Number.parseInt(url.searchParams.get('after_event_id') ?? '0', 10) || 0
-    input.eventRequests.push({ threadKey, afterEventId })
+    const executionId = url.searchParams.get('execution_id') || undefined
+    input.eventRequests.push({ threadKey, afterEventId, executionId })
     if (input.failNextEvents) {
       input.setFailNextEvents(false)
       await sendWebResponse(
@@ -1809,7 +1816,13 @@ async function handleMockCodexRequest(
     })
     input.streams.add(res)
     for (const event of input.events) {
-      if (event.threadKey === threadKey && event.id > afterEventId) writeMockSseEvent(res, event)
+      if (
+        event.threadKey === threadKey
+        && event.id > afterEventId
+        && (!executionId || !event.executionId || event.executionId === executionId)
+      ) {
+        writeMockSseEvent(res, event)
+      }
     }
     req.once('close', () => {
       input.streams.delete(res)
@@ -1849,6 +1862,7 @@ async function handleMockCodexRequest(
       emitMockSessionEvent({
         data: line,
         event: 'session.output.line',
+        executionId,
         events: input.events,
         id: input.nextEventId(),
         streams: input.streams,
@@ -1878,6 +1892,7 @@ async function handleMockCodexRequest(
 function emitMockSessionEvent(input: {
   data: string
   event: string
+  executionId?: string
   events: MockSessionEvent[]
   id: number
   streams: Set<ServerResponse>
@@ -1886,6 +1901,7 @@ function emitMockSessionEvent(input: {
   const event: MockSessionEvent = {
     data: input.data,
     event: input.event,
+    executionId: input.executionId,
     id: input.id,
     threadKey: input.threadKey
   }

@@ -171,17 +171,19 @@ export async function forwardToSessionApi(
 
 export async function openSessionEventStream(
   options: SlackbotV2Options,
-  input: Pick<ForwardSessionInput, 'afterEventId' | 'onEventId' | 'threadId' | 'trace'>
+  input: Pick<ForwardSessionInput, 'afterEventId' | 'executionId' | 'onEventId' | 'threadId' | 'trace'>
 ): Promise<AsyncIterable<SlackbotV2RendererSource>> {
   const streamStartedAtMs = nowMs()
   const stream = await streamSessionNotifications(
     options,
     input.threadId,
     input.afterEventId,
+    input.executionId,
     input.onEventId
   )
   traceLog(options, 'slackbotv2_session_events_opened', input.trace, {
     after_event_id: input.afterEventId,
+    execution_id: input.executionId,
     phase_ms: elapsedMs(streamStartedAtMs)
   })
   return stream
@@ -307,11 +309,15 @@ async function streamSessionNotifications(
   options: SlackbotV2Options,
   threadId: string,
   afterEventId: number,
+  executionId: string | undefined,
   onEventId: (eventId: number) => void
 ): Promise<AsyncIterable<SlackbotV2RendererSource>> {
   const fetchFn = options.fetch ?? fetch
+  const url = new URL(apiSessionUrl(options.apiUrl, threadId, 'events'))
+  url.searchParams.set('after_event_id', String(afterEventId))
+  if (executionId) url.searchParams.set('execution_id', executionId)
   const response = await fetchFn(
-    `${apiSessionUrl(options.apiUrl, threadId, 'events')}?after_event_id=${afterEventId}`,
+    url.toString(),
     {
       method: 'GET',
       headers: apiHeaders(options, false)

@@ -413,19 +413,23 @@ impl PgSessionStore {
         &self,
         thread_key: &ThreadKey,
         after_event_id: i64,
+        execution_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<SessionEvent>, SessionStoreError> {
         let rows = sqlx::query_as::<_, SessionEventRow>(
             r#"
             select event_id, thread_key, execution_id, event_type, payload, created_at
             from session_events
-            where thread_key = $1 and event_id > $2
+            where thread_key = $1
+              and event_id > $2
+              and ($3::text is null or execution_id = $3)
             order by event_id
-            limit $3
+            limit $4
             "#,
         )
         .bind(thread_key.as_str())
         .bind(after_event_id)
+        .bind(execution_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
