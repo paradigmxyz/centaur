@@ -394,11 +394,12 @@ pub struct EffectiveReplace {
     pub proxy_value: String,
 }
 
-/// One synced Postgres upstream. iron-control returns the `foreign_id` (the
-/// listener binding key) and the `database` to connect to on both the proxied
-/// and upstream connection. The `dsn`/`role` are proxy-side, so they're not
-/// captured here; api-rs keys the remaining local knobs (port, user, password,
-/// sandbox env var name) off `foreign_id`.
+/// One synced Postgres upstream. iron-control returns the `foreign_id` and the
+/// `database` to connect to on both the proxied and upstream connection; the
+/// proxy multiplexes every upstream through a single listener, routing by
+/// `database`. The `dsn`/`role` are proxy-side, so they're not captured here;
+/// api-rs derives the sandbox DSN env var name from `foreign_id` and assigns the
+/// listener's shared local port and client credential.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct EffectivePgDsn {
     pub foreign_id: String,

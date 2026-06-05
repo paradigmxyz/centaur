@@ -48,8 +48,8 @@ pub struct SandboxEnv {
 }
 
 /// The iron-control `pg_dsn` secret foreign_id for a listener name. Shared so
-/// the control-plane registration and the managed proxy's `IRON_PROXY_PG_*`
-/// env derive the same key. foreign_id is restricted to `[A-Za-z0-9-._~]`.
+/// the control-plane registration and the sandbox DSN env var derive the same
+/// key. foreign_id is restricted to `[A-Za-z0-9-._~]`.
 pub fn pg_foreign_id(name: &str) -> String {
     let mut slug = String::new();
     let mut prev_dash = false;
@@ -75,15 +75,6 @@ fn normalize_foreign_id(foreign_id: &str) -> String {
             other => other.to_ascii_uppercase(),
         })
         .collect()
-}
-
-/// The managed proxy reads each listener's local config from
-/// `IRON_PROXY_PG_<FOREIGN_ID>_<SUFFIX>` (foreign_id normalized).
-pub fn pg_env_var(foreign_id: &str, suffix: &str) -> String {
-    format!(
-        "IRON_PROXY_PG_{}_{suffix}",
-        normalize_foreign_id(foreign_id)
-    )
 }
 
 /// The sandbox env var that receives a listener's proxied DSN:

@@ -140,7 +140,7 @@ spec:
         - protocol: TCP
           port: 5432
 {{- end }}
-    # Per-sandbox iron-proxy listeners (HTTP proxy + postgres port range).
+    # Per-sandbox iron-proxy listeners (HTTP proxy + postgres port).
     - to:
         - podSelector:
             matchLabels:
@@ -149,8 +149,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.proxyPort }}
         - protocol: TCP
-          port: {{ .Values.ironProxy.service.pgPortRangeStart }}
-          endPort: {{ .Values.ironProxy.service.pgPortRangeEnd }}
+          port: {{ .Values.ironProxy.service.pgPort }}
 {{- if .Values.ironControl.enabled }}
     # iron-control control plane: register principals/roles/grants and per-sandbox proxies.
     - to:
@@ -291,8 +290,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.proxyPort }}
         - protocol: TCP
-          port: {{ .Values.ironProxy.service.pgPortRangeStart }}
-          endPort: {{ .Values.ironProxy.service.pgPortRangeEnd }}
+          port: {{ .Values.ironProxy.service.pgPort }}
     - ports:
         - protocol: TCP
           port: 443
@@ -406,8 +404,7 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ .Values.ironProxy.service.pgPortRangeStart }}
-          endPort: {{ .Values.ironProxy.service.pgPortRangeEnd }}
+          port: {{ .Values.ironProxy.service.pgPort }}
   egress:
     - ports:
         - protocol: TCP
