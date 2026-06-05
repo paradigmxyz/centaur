@@ -925,7 +925,21 @@ async fn run_stdout_pump(
     );
     let mut output_state = StdoutPumpState::default();
     while let Some(line) = stdout.next().await {
-        let line = line.map_err(codec_error_to_runtime)?;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                record_stdout_pump_failure(
+                    &store,
+                    manager,
+                    sandbox_pipes,
+                    &thread_key,
+                    sandbox_id,
+                    stdout_pump_error_message(&error),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
         if let Some(harness_thread_id) = harness_thread_id_from_output_line(&line)
             && let Err(error) = store
                 .update_harness_thread_id(&thread_key, Some(&harness_thread_id))
@@ -982,6 +996,46 @@ async fn run_stdout_pump(
             }),
         )
         .await?;
+    Ok(())
+}
+
+async fn record_stdout_pump_failure(
+    store: &PgSessionStore,
+    manager: Arc<SandboxManager>,
+    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    thread_key: &ThreadKey,
+    sandbox_id: &str,
+    error: String,
+) -> Result<(), SessionRuntimeError> {
+    let active_execution = store.active_execution_for_thread(thread_key).await?;
+    let execution_id = active_execution
+        .as_ref()
+        .map(|execution| execution.execution_id.as_str());
+    store
+        .append_event(
+            thread_key,
+            execution_id,
+            "session.stdout_pump_failed",
+            json!({
+                "sandbox_id": sandbox_id,
+                "error": error.as_str(),
+                "max_line_bytes": MAX_SESSION_OUTPUT_LINE_BYTES,
+                "terminalized_execution": execution_id.is_some(),
+            }),
+        )
+        .await?;
+    if let Some(execution) = active_execution {
+        record_terminal_output(
+            store,
+            manager,
+            sandbox_pipes,
+            thread_key,
+            sandbox_id,
+            &execution.execution_id,
+            TerminalOutput::Failed { error },
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -1916,6 +1970,15 @@ fn validate_input_lines(lines: &[String]) -> Result<(), SessionRuntimeError> {
     Ok(())
 }
 
+fn stdout_pump_error_message(error: &LinesCodecError) -> String {
+    match error {
+        LinesCodecError::MaxLineLengthExceeded => format!(
+            "sandbox stdout line exceeded maximum length of {MAX_SESSION_OUTPUT_LINE_BYTES} bytes"
+        ),
+        LinesCodecError::Io(error) => format!("sandbox stdout I/O failed: {error}"),
+    }
+}
+
 fn codec_error_to_runtime(error: LinesCodecError) -> SessionRuntimeError {
     SessionRuntimeError::Sandbox(SandboxError::Io(error.to_string()))
 }
@@ -1993,6 +2056,14 @@ mod tests {
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
+
+    #[test]
+    fn stdout_pump_max_line_error_is_stable() {
+        assert_eq!(
+            stdout_pump_error_message(&LinesCodecError::MaxLineLengthExceeded),
+            "sandbox stdout line exceeded maximum length of 1048576 bytes"
+        );
+    }
 
     #[test]
     fn turn_completed_without_answer_text_is_terminal() {
