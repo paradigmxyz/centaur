@@ -153,19 +153,40 @@ fn oauth_missing_required_field_errors() {
 }
 
 #[test]
-fn unsupported_types_are_marked_not_errored() {
+fn brokered_token_parses_consumer_side_with_defaults() {
     let parsed = tools::parse_secret(
-        &entry(r#"{type = "brokered_token", name = "X", hosts = ["x.com"]}"#),
+        &entry(r#"{type = "brokered_token", name = "openai-codex", hosts = ["chatgpt.com"]}"#),
         &[],
     )
     .unwrap();
     match parsed {
-        ParsedSecret::Unsupported { name, kind } => {
-            assert_eq!(name, "X");
-            assert_eq!(kind, "brokered_token");
+        ParsedSecret::BrokerToken(broker) => {
+            assert_eq!(broker.name, "openai-codex");
+            // credential defaults to name; inject defaults to Bearer Authorization.
+            assert_eq!(broker.credential, "openai-codex");
+            assert_eq!(broker.hosts, vec!["chatgpt.com".to_owned()]);
+            assert_eq!(broker.inject_header, "Authorization");
+            assert_eq!(broker.inject_formatter, "Bearer {{.Value}}");
         }
-        other => panic!("expected unsupported, got {other:?}"),
+        other => panic!("expected broker token, got {other:?}"),
     }
+}
+
+#[test]
+fn brokered_token_honors_credential_and_inject_overrides() {
+    let parsed = tools::parse_secret(
+        &entry(
+            r#"{type = "brokered_token", name = "CODEX", credential = "openai-codex", hosts = ["chatgpt.com"], inject_header = "X-Token", inject_formatter = "{{.Value}}"}"#,
+        ),
+        &[],
+    )
+    .unwrap();
+    let ParsedSecret::BrokerToken(broker) = parsed else {
+        panic!("expected broker token");
+    };
+    assert_eq!(broker.credential, "openai-codex");
+    assert_eq!(broker.inject_header, "X-Token");
+    assert_eq!(broker.inject_formatter, "{{.Value}}");
 }
 
 const FALCONX_HMAC: &str = r#"{ type = "hmac_sign", name = "FALCONX_P1", hosts = ["api.falconx.io"], algorithm = "sha256", key_encoding = "base64", output_encoding = "base64", timestamp_format = "unix_seconds", message = "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}", credentials = { key = "FALCONX_P1_API_KEY", secret = "FALCONX_P1_SECRET_KEY", passphrase = "FALCONX_P1_PASSPHRASE" }, headers = [ { name = "FX-ACCESS-KEY", value = "{{.Credentials.key}}" }, { name = "FX-ACCESS-SIGN", value = "{{.Signature}}" }, { name = "FX-ACCESS-TIMESTAMP", value = "{{.Timestamp}}" }, { name = "FX-ACCESS-PASSPHRASE", value = "{{.Credentials.passphrase}}" } ] }"#;
@@ -289,10 +310,7 @@ fn translates_http_replace_to_static_input() {
         .unwrap(),
     ];
     let out = translate::translate("default", "tool-slack", &secrets, &SourcePolicy::env());
-    assert!(out.skipped.is_empty());
-    let SecretInput::Static(input) = &out.inputs[0] else {
-        panic!("expected static")
-    };
+    let SecretInput::Static(input) = &out.inputs[0] else { panic!("expected static") };
     assert_eq!(input.foreign_id, "tool-slack-slack-bot-token");
     assert_eq!(input.name, "SLACK_BOT_TOKEN");
     let replace = input.replace_config.as_ref().unwrap();
@@ -368,10 +386,7 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
         .unwrap(),
     ];
     let out = translate::translate("default", "tool-reshift", &secrets, &SourcePolicy::env());
-    assert!(out.skipped.is_empty());
-    let SecretInput::PgDsn(input) = &out.inputs[0] else {
-        panic!("expected pg_dsn")
-    };
+    let SecretInput::PgDsn(input) = &out.inputs[0] else { panic!("expected pg_dsn") };
     // The foreign_id is not role-prefixed: it must round-trip back to the
     // sandbox DSN env var (`RESHIFT_DSN`) that api-rs derives from it.
     assert_eq!(input.foreign_id, "reshift");
@@ -389,10 +404,7 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
 fn translates_hmac_to_input() {
     let secrets = vec![tools::parse_secret(&entry(FALCONX_HMAC), &[]).unwrap()];
     let out = translate::translate("default", "tool-falconx", &secrets, &SourcePolicy::env());
-    assert!(out.skipped.is_empty());
-    let SecretInput::Hmac(input) = &out.inputs[0] else {
-        panic!("expected hmac")
-    };
+    let SecretInput::Hmac(input) = &out.inputs[0] else { panic!("expected hmac") };
     assert_eq!(input.foreign_id, "tool-falconx-hmac-falconx-p1");
     assert_eq!(input.name, "FALCONX_P1");
     assert_eq!(input.signature_algorithm, "sha256");
@@ -419,17 +431,29 @@ fn translates_hmac_to_input() {
 }
 
 #[test]
-fn unsupported_secret_is_reported_as_skipped() {
-    let secrets = vec![ParsedSecret::Unsupported {
-        name: "TOK".to_owned(),
-        kind: "brokered_token".to_owned(),
-    }];
-    let out = translate::translate("default", "tool-x", &secrets, &SourcePolicy::env());
-    assert!(out.inputs.is_empty());
+fn translates_brokered_token_to_token_broker_static_secret() {
+    let secrets = vec![
+        tools::parse_secret(
+            &entry(r#"{type = "brokered_token", name = "openai-codex", hosts = ["chatgpt.com"]}"#),
+            &[],
+        )
+        .unwrap(),
+    ];
+    let out = translate::translate("default", "tool-codex", &secrets, &SourcePolicy::env());
+    let SecretInput::Static(input) = &out.inputs[0] else { panic!("expected static") };
+    assert_eq!(input.foreign_id, "tool-codex-openai-codex");
+    assert_eq!(input.name, "openai-codex");
+    // Sourced from the broker credential (created out of band), not env/1password.
+    assert_eq!(input.source.source_type, "token_broker");
     assert_eq!(
-        out.skipped,
-        vec![("TOK".to_owned(), "brokered_token".to_owned())]
+        input.source.config,
+        serde_json::json!({ "credential_id": "openai-codex", "credential_namespace": "default" })
     );
+    let inject = input.inject_config.as_ref().unwrap();
+    assert_eq!(inject.header.as_deref(), Some("Authorization"));
+    assert_eq!(inject.formatter.as_deref(), Some("Bearer {{.Value}}"));
+    assert!(input.replace_config.is_none());
+    assert_eq!(input.rules[0].host.as_deref(), Some("chatgpt.com"));
 }
 
 #[test]
@@ -590,16 +614,7 @@ fn real_slack_tool_parses_and_translates() {
     };
     let manifest = tools::find_tool(&[tools_dir], "slack").unwrap();
     assert_eq!(manifest.name, "slack");
-    let out = translate::translate(
-        "default",
-        "tool-slack",
-        &manifest.all_secrets().cloned().collect::<Vec<_>>(),
-        &SourcePolicy::env(),
-    );
-    assert!(
-        out.skipped.is_empty(),
-        "slack should have no unsupported secrets"
-    );
+    let out = translate::translate("default", "tool-slack", &manifest.all_secrets().cloned().collect::<Vec<_>>(), &SourcePolicy::env());
     assert!(
         out.inputs.iter().any(
             |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-slack-slack-bot-token")

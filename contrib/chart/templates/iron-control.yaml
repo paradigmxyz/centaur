@@ -1,6 +1,7 @@
 {{- if .Values.ironControl.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
+{{- $dbName := .Values.ironControl.database.name }}
 # iron-control — Rails control plane for authenticated API access and encrypted
 # secret storage. The chart owns the Deployment shape (image, port, env,
 # security context) so operators tune it via `helm upgrade`. It runs against a
@@ -49,10 +50,13 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        # Create the dedicated logical DB on the bundled Postgres. Idempotent:
-        # guarded by a pg_database existence check, and the CREATE tolerates a
-        # lost race against a concurrent replica. Connects as the admin (ai_v2)
-        # DSN, whose `tempo` superuser can create databases.
+        # Create the iron-control logical databases on the bundled Postgres: the
+        # primary plus the Solid Cache/Queue/Cable databases (see
+        # config/database.yml). The image entrypoint's `db:prepare` loads schema
+        # and migrates each one but does not create them, so they are provisioned
+        # here as the admin (ai_v2) DSN whose `tempo` superuser can create
+        # databases. Idempotent: each CREATE is guarded by a pg_database check and
+        # tolerates a lost race against a concurrent replica.
         - name: create-db
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
@@ -60,19 +64,31 @@ spec:
             - /bin/sh
             - -ec
             - |
-              exists=$(psql "$ADMIN_DATABASE_URL" -tAc \
-                "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")
-              if [ "$exists" != "1" ]; then
-                psql "$ADMIN_DATABASE_URL" -c "CREATE DATABASE \"$DB_NAME\"" || true
-              fi
+              # Wait until Postgres accepts connections. A still-starting Postgres
+              # — or a Service with no ready endpoint yet — surfaces as connection
+              # refused; retry rather than failing (and crash-looping) the init.
+              until psql "$ADMIN_DATABASE_URL" -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for postgres to accept connections..."
+                sleep 2
+              done
+              # Create each database idempotently.
+              for db in $DB_NAMES; do
+                exists=$(psql "$ADMIN_DATABASE_URL" -tAc \
+                  "SELECT 1 FROM pg_database WHERE datname = '$db'")
+                if [ "$exists" != "1" ]; then
+                  echo "creating database $db"
+                  psql "$ADMIN_DATABASE_URL" -c "CREATE DATABASE \"$db\"" || true
+                fi
+              done
           env:
             - name: ADMIN_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            - name: DB_NAME
-              value: {{ .Values.ironControl.database.name | quote }}
+            # Primary + Solid Cache/Queue/Cable, matching config/database.yml.
+            - name: DB_NAMES
+              value: {{ printf "%s %s_cache %s_queue %s_cable" $dbName $dbName $dbName $dbName | quote }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             seccompProfile:

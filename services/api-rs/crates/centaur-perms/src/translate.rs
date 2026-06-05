@@ -18,17 +18,14 @@ use centaur_iron_control::{
 use centaur_iron_proxy::SourcePolicy;
 
 use crate::tools::{
-    FieldSource, GcpAuthSecret, HmacSignSecret, HttpSecret, OAuthTokenSecret, ParsedSecret,
-    PgDsnSecret, SecretMode,
+    BrokerTokenSecret, FieldSource, GcpAuthSecret, HmacSignSecret, HttpSecret, OAuthTokenSecret,
+    ParsedSecret, PgDsnSecret, SecretMode,
 };
 
-/// The result of translating a tool's secrets: the iron-control inputs to
-/// upsert, plus any entries that have no iron-control representation here.
+/// The result of translating a tool's secrets: the iron-control inputs to upsert.
 #[derive(Debug, Default)]
 pub struct Translation {
     pub inputs: Vec<SecretInput>,
-    /// `(name, type)` of secrets skipped because the type is unsupported.
-    pub skipped: Vec<(String, String)>,
 }
 
 fn rules_from_hosts(hosts: &[String]) -> Vec<RequestRule> {
@@ -87,8 +84,13 @@ pub fn translate(
                     &mut used,
                 )));
             }
-            ParsedSecret::Unsupported { name, kind } => {
-                out.skipped.push((name.clone(), kind.clone()));
+            ParsedSecret::BrokerToken(broker) => {
+                out.inputs.push(SecretInput::Static(broker_token_input(
+                    namespace,
+                    role_foreign_id,
+                    broker,
+                    &mut used,
+                )));
             }
         }
     }
@@ -247,6 +249,35 @@ fn hmac_input(
             .collect(),
         credentials: field_sources(&hmac.credentials, policy),
         rules: rules_from_hosts(&hmac.hosts),
+    }
+}
+
+/// Translate a `brokered_token` secret into a [`StaticSecretInput`] whose source
+/// is a `token_broker` reference to the named broker credential. iron-control
+/// mints the access token from the broker credential and iron-proxy injects it
+/// per `inject_config`. The broker credential is provisioned out of band (see
+/// `centaur-perms broker create`); nothing here creates it. The `foreign_id` is
+/// role-prefixed and deduped like the other secret types.
+fn broker_token_input(
+    namespace: &str,
+    role: &str,
+    broker: &BrokerTokenSecret,
+    used: &mut BTreeSet<String>,
+) -> StaticSecretInput {
+    StaticSecretInput {
+        namespace: namespace.to_owned(),
+        foreign_id: unique_foreign_id(format!("{role}-{}", slugify(&broker.name)), used),
+        name: broker.name.clone(),
+        description: None,
+        labels: managed_labels(),
+        inject_config: Some(InjectConfig {
+            header: Some(broker.inject_header.clone()),
+            query_param: None,
+            formatter: Some(broker.inject_formatter.clone()),
+        }),
+        replace_config: None,
+        source: SecretSource::token_broker(&broker.credential, namespace),
+        rules: rules_from_hosts(&broker.hosts),
     }
 }
 

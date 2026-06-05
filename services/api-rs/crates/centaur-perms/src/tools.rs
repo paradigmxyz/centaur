@@ -164,6 +164,22 @@ pub struct HmacSignSecret {
     pub allow_chunked_body: bool,
 }
 
+/// A `type = "brokered_token"` secret: the *consumer* side of an iron-control
+/// broker credential. The broker credential itself (the OAuth refresh loop) is
+/// provisioned out of band via `centaur-perms broker create`; this entry just
+/// registers a static secret that injects the broker's current access token.
+/// `credential` is the broker credential's `foreign_id` to reference (defaults
+/// to `name`); `inject_header`/`inject_formatter` default to an
+/// `Authorization: Bearer {{.Value}}` injection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerTokenSecret {
+    pub name: String,
+    pub credential: String,
+    pub hosts: Vec<String>,
+    pub inject_header: String,
+    pub inject_formatter: String,
+}
+
 /// One parsed `[tool.centaur]` secret entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedSecret {
@@ -172,13 +188,7 @@ pub enum ParsedSecret {
     GcpAuth(GcpAuthSecret),
     PgDsn(PgDsnSecret),
     Hmac(HmacSignSecret),
-    /// A declared secret type this CLI cannot represent as an iron-control
-    /// resource (`brokered_token`). Carried so the caller can report it was
-    /// skipped rather than dropping it silently.
-    Unsupported {
-        name: String,
-        kind: String,
-    },
+    BrokerToken(BrokerTokenSecret),
 }
 
 impl ParsedSecret {
@@ -190,7 +200,7 @@ impl ParsedSecret {
             ParsedSecret::GcpAuth(s) => &s.name,
             ParsedSecret::PgDsn(s) => &s.name,
             ParsedSecret::Hmac(s) => &s.name,
-            ParsedSecret::Unsupported { name, .. } => name,
+            ParsedSecret::BrokerToken(s) => &s.name,
         }
     }
 }
@@ -391,10 +401,9 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
             &secret_ref,
         )?)),
         "hmac_sign" => Ok(ParsedSecret::Hmac(parse_hmac(table, &name)?)),
-        "brokered_token" => Ok(ParsedSecret::Unsupported {
-            name,
-            kind: secret_type.to_owned(),
-        }),
+        "brokered_token" => {
+            Ok(ParsedSecret::BrokerToken(parse_broker_token(table, &name, default_hosts)?))
+        }
         other => bail!("unknown secret type {other:?} for secret {name:?}"),
     }
 }
@@ -613,6 +622,43 @@ fn parse_hmac(table: &toml::Table, name: &str) -> Result<HmacSignSecret> {
         message,
         timestamp_format,
         allow_chunked_body,
+    })
+}
+
+/// The default injection for a `brokered_token` secret: the broker's current
+/// access token written as a Bearer `Authorization` header. Mirrors the Python
+/// loader's `_build_token_broker_entries`.
+const BROKER_TOKEN_DEFAULT_HEADER: &str = "Authorization";
+const BROKER_TOKEN_DEFAULT_FORMATTER: &str = "Bearer {{.Value}}";
+
+/// Parse a `type = "brokered_token"` entry. Only the consumer side is modeled:
+/// the broker credential referenced by `credential` (default `name`) is created
+/// out of band via `centaur-perms broker create`. Legacy keys (`fields`,
+/// `token_endpoint`, `scopes`) that described the broker credential are ignored.
+fn parse_broker_token(
+    table: &toml::Table,
+    name: &str,
+    default_hosts: &[String],
+) -> Result<BrokerTokenSecret> {
+    let hosts = match non_empty_str_array(table.get("hosts")) {
+        Some(hosts) => hosts,
+        None if !default_hosts.is_empty() => default_hosts.to_vec(),
+        None => bail!(
+            "brokered_token entry {name:?} 'hosts' must be a non-empty array of non-empty \
+             strings (or the tool must declare top-level hosts)"
+        ),
+    };
+    let credential = opt_str(table, "credential").unwrap_or_else(|| name.to_owned());
+    let inject_header =
+        opt_str(table, "inject_header").unwrap_or_else(|| BROKER_TOKEN_DEFAULT_HEADER.to_owned());
+    let inject_formatter = opt_str(table, "inject_formatter")
+        .unwrap_or_else(|| BROKER_TOKEN_DEFAULT_FORMATTER.to_owned());
+    Ok(BrokerTokenSecret {
+        name: name.to_owned(),
+        credential,
+        hosts,
+        inject_header,
+        inject_formatter,
     })
 }
 

@@ -12,6 +12,7 @@ import {
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
 import { createPostgresState } from '@chat-adapter/state-pg'
+import pg from 'pg'
 import {
   codexAppServerToChatSdkStream,
   type CodexAppServerToChatStreamOptions,
@@ -84,6 +85,8 @@ const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const SLACK_TASK_DETAILS_MAX_CHARS = 500
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
+const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
+const POSTGRES_CONNECT_MAX_DELAY_MS = 10_000
 
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
@@ -175,11 +178,51 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 }
 
 function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAdapter {
-  return createPostgresState({
-    url: options.postgresUrl,
-    keyPrefix: options.stateKeyPrefix ?? 'centaur-slackbotv2',
-    logger: logger.child('postgres-state')
+  const stateLogger = logger.child('postgres-state')
+  // Own the pool so we can attach an error handler. pg.Pool emits 'error' for
+  // idle clients whose connection drops (Postgres restart, or a transient blip
+  // while the pod's network is still being programmed at startup). With no
+  // listener, node-postgres rethrows it as an uncaught exception and the process
+  // crashes/spews. Logging and swallowing lets the pool reconnect on the next query.
+  const pool = new pg.Pool({ connectionString: options.postgresUrl })
+  pool.on('error', error => {
+    stateLogger.warn('postgres pool error', { error: errorMessage(error) })
   })
+  return createPostgresState({
+    client: pool,
+    keyPrefix: options.stateKeyPrefix ?? 'centaur-slackbotv2',
+    logger: stateLogger
+  })
+}
+
+/**
+ * Blocks until the state backend accepts a connection, retrying with exponential
+ * backoff. The first DB connection fires within milliseconds of process start and
+ * can lose a race with the pod's network programming (a one-off ECONNREFUSED).
+ * Retrying instead of throwing absorbs that race; the first successful connect
+ * also flips the adapter's `connected` flag, so the message path comes alive too.
+ */
+async function ensureStateConnected(state: StateAdapter, options: SlackbotV2Options): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await state.connect()
+      if (attempt > 0) {
+        traceLog(options, 'slackbotv2_postgres_connected', undefined, { attempts: attempt + 1 })
+      }
+      return
+    } catch (error) {
+      const delayMs = Math.min(
+        POSTGRES_CONNECT_INITIAL_DELAY_MS * 2 ** attempt,
+        POSTGRES_CONNECT_MAX_DELAY_MS
+      )
+      traceLog(options, 'slackbotv2_postgres_connect_retry', undefined, {
+        attempt: attempt + 1,
+        delay_ms: delayMs,
+        error: errorMessage(error)
+      })
+      await sleep(delayMs)
+    }
+  }
 }
 
 /**
@@ -476,6 +519,9 @@ async function recoverRenderObligationsWithRetry(
   state: StateAdapter,
   options: SlackbotV2Options
 ): Promise<void> {
+  // Wait for Postgres before scanning for obligations. This is also what warms the
+  // shared pool at startup, so transient connect failures don't wedge the bot.
+  await ensureStateConnected(state, options)
   let attempt = 0
   while (true) {
     try {

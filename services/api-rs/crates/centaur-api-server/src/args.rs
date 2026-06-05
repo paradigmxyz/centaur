@@ -481,21 +481,6 @@ struct IronProxyArgs {
     bootstrap_secret_name: Option<String>,
     #[arg(long = "kubernetes-api-pod-label-selector", env = "KUBERNETES_API_POD_LABEL_SELECTOR", value_parser = parse_label_selector_arg)]
     api_pod_label_selector: Option<BTreeMap<String, String>>,
-    #[arg(
-        long = "kubernetes-token-broker-name",
-        env = "KUBERNETES_TOKEN_BROKER_NAME"
-    )]
-    token_broker_name: Option<String>,
-    #[arg(
-        long = "kubernetes-token-broker-url",
-        env = "KUBERNETES_TOKEN_BROKER_URL"
-    )]
-    token_broker_url: Option<String>,
-    #[arg(
-        long = "kubernetes-token-broker-configmap-name",
-        env = "KUBERNETES_TOKEN_BROKER_CONFIGMAP_NAME"
-    )]
-    token_broker_configmap_name: Option<String>,
 }
 
 impl IronProxyArgs {
@@ -515,12 +500,8 @@ impl IronProxyArgs {
             IronProxyConfig::new(self.image.clone(), ca_cert_secret_name, ca_key_secret_name);
         config.image_pull_policy = self.image_pull_policy.clone();
         self.source.apply_to_config(&mut config);
-        config.fragments = vec![harness_fragment.clone()];
-        config.token_broker_fragments = vec![harness_fragment];
+        config.fragments = vec![harness_fragment];
         config.env_from_secret_names = self.env_from_secret_names();
-        config.token_broker_name = self.token_broker_name.clone();
-        config.token_broker_url = clean_optional_value(self.token_broker_url.as_deref());
-        config.token_broker_configmap_name = self.token_broker_configmap_name.clone();
         if let Some(labels) = self
             .api_pod_label_selector
             .as_ref()
@@ -633,12 +614,6 @@ struct IronProxySourceArgs {
     )]
     secret_ttl: String,
     #[arg(
-        long = "kubernetes-firewall-manager-token-broker-ttl",
-        env = "FIREWALL_MANAGER_TOKEN_BROKER_TTL",
-        default_value = "1m"
-    )]
-    token_broker_ttl: String,
-    #[arg(
         long = "kubernetes-op-connect-host",
         env = "KUBERNETES_OP_CONNECT_HOST"
     )]
@@ -661,7 +636,6 @@ impl IronProxySourceArgs {
             kind: self.source,
             op_vault: self.op_vault.clone(),
             ttl: self.secret_ttl.clone(),
-            token_broker_ttl: self.token_broker_ttl.clone(),
         }
     }
 
@@ -772,12 +746,11 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
 }
 
 /// Fold ``source`` into ``target`` so several fragments register under one
-/// role: concatenate transforms, postgres listeners, and broker credentials,
-/// and merge top-level keys (later fragments win on conflict).
+/// role: concatenate transforms and postgres listeners, and merge top-level
+/// keys (later fragments win on conflict).
 fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
     target.transforms.extend(source.transforms);
     target.postgres.extend(source.postgres);
-    target.broker_credentials.extend(source.broker_credentials);
     target.top_level.extend(source.top_level);
 }
 

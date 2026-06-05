@@ -3,9 +3,8 @@ use std::time::Duration;
 
 use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy, pg_env_var, pg_sandbox_env_var};
 use centaur_sandbox_core::{SandboxError, SandboxId, SandboxResult, SandboxSpec};
-use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{
-    Capabilities, ConfigMap, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
+    Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
     EnvVar as K8sEnvVar, HTTPGetAction, Pod, PodSpec, Probe, SecretEnvSource, SecretVolumeSource,
     SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
@@ -18,7 +17,6 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::Api;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::time::{Instant, sleep};
 
 use crate::{
@@ -28,8 +26,6 @@ use crate::{
 
 const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
 const IRON_CONTROL_PROXY_ID_ANNOTATION: &str = "centaur.ai/iron-control-proxy-id";
-const TOKEN_BROKER_LABEL: &str = "centaur.ai/iron-token-broker";
-const TOKEN_BROKER_CONFIG_KEY: &str = "iron-token-broker.yaml";
 const FIREWALL_CA_MOUNT_PATH: &str = "/firewall-certs";
 const FIREWALL_CA_CERT_PATH: &str = "/firewall-certs/ca-cert.pem";
 const PROXY_MANAGEMENT_PORT: u16 = 9092;
@@ -69,10 +65,6 @@ pub struct IronProxyConfig {
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
-    pub token_broker_name: Option<String>,
-    pub token_broker_url: Option<String>,
-    pub token_broker_configmap_name: Option<String>,
-    pub token_broker_fragments: Vec<ProxyFragment>,
 }
 
 impl IronProxyConfig {
@@ -96,10 +88,6 @@ impl IronProxyConfig {
                 "app.kubernetes.io/component".to_owned(),
                 "api".to_owned(),
             )]),
-            token_broker_name: None,
-            token_broker_url: None,
-            token_broker_configmap_name: None,
-            token_broker_fragments: Vec::new(),
         }
     }
 }
@@ -288,7 +276,6 @@ impl AgentSandboxBackend {
         let (Some(resolved), Some(iron_proxy)) = (resolved, self.config.iron_proxy.as_ref()) else {
             return Ok(());
         };
-        self.reconcile_token_broker(iron_proxy).await?;
         self.delete_iron_proxy_resources(id).await?;
         let sync = self.register_sync_proxy(id, resolved).await?;
         self.services()
@@ -458,19 +445,11 @@ impl AgentSandboxBackend {
             .map_err(|err| map_kube_error("patch sandbox iron-control principal", err))
     }
 
-    fn config_maps(&self) -> Api<ConfigMap> {
-        Api::namespaced(self.client.clone(), &self.config.namespace)
-    }
-
     fn services(&self) -> Api<Service> {
         Api::namespaced(self.client.clone(), &self.config.namespace)
     }
 
     fn network_policies(&self) -> Api<NetworkPolicy> {
-        Api::namespaced(self.client.clone(), &self.config.namespace)
-    }
-
-    fn deployments(&self) -> Api<Deployment> {
         Api::namespaced(self.client.clone(), &self.config.namespace)
     }
 
@@ -525,97 +504,6 @@ impl AgentSandboxBackend {
         }
     }
 
-    async fn reconcile_token_broker(&self, iron_proxy: &IronProxyConfig) -> SandboxResult<()> {
-        let Some(token_broker_name) = iron_proxy.token_broker_name.as_deref() else {
-            return Ok(());
-        };
-        let mut fragments = iron_proxy.token_broker_fragments.clone();
-        fragments.extend(iron_proxy.fragments.clone());
-        let rendered = centaur_iron_proxy::render_token_broker_yaml_with_source_policy(
-            &fragments,
-            &iron_proxy.source_policy,
-        )
-        .map_err(|err| SandboxError::InvalidSpec(format!("iron-token-broker config: {err}")))?;
-        if self
-            .apply_token_broker_configmap(iron_proxy, &rendered)
-            .await?
-        {
-            self.patch_token_broker_config_hash(token_broker_name, &short_sha256(&rendered))
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn apply_token_broker_configmap(
-        &self,
-        iron_proxy: &IronProxyConfig,
-        rendered: &str,
-    ) -> SandboxResult<bool> {
-        let name = iron_token_broker_configmap_name(iron_proxy)?;
-        let data = BTreeMap::from([(TOKEN_BROKER_CONFIG_KEY.to_owned(), rendered.to_owned())]);
-        match self.config_maps().get(&name).await {
-            Ok(existing)
-                if existing
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get(TOKEN_BROKER_CONFIG_KEY))
-                    .is_some_and(|value| value == rendered) =>
-            {
-                Ok(false)
-            }
-            Ok(_) => {
-                let patch = Patch::Merge(json!({
-                    "metadata": {"labels": token_broker_labels()},
-                    "data": data,
-                }));
-                self.config_maps()
-                    .patch(&name, &PatchParams::default(), &patch)
-                    .await
-                    .map(|_| true)
-                    .map_err(|err| map_kube_error("patch iron-token-broker configmap", err))
-            }
-            Err(err) if is_not_found(&err) => {
-                let body = ConfigMap {
-                    metadata: object_meta(name, token_broker_labels()),
-                    data: Some(data),
-                    ..Default::default()
-                };
-                self.config_maps()
-                    .create(&PostParams::default(), &body)
-                    .await
-                    .map(|_| true)
-                    .map_err(|err| map_kube_error("create iron-token-broker configmap", err))
-            }
-            Err(err) => Err(map_kube_error("get iron-token-broker configmap", err)),
-        }
-    }
-
-    async fn patch_token_broker_config_hash(
-        &self,
-        token_broker_name: &str,
-        config_hash: &str,
-    ) -> SandboxResult<()> {
-        let patch = Patch::Merge(json!({
-            "spec": {
-                "template": {
-                    "metadata": {
-                        "annotations": {
-                            "centaur.ai/config-hash": config_hash,
-                        },
-                    },
-                },
-            },
-        }));
-        match self
-            .deployments()
-            .patch(token_broker_name, &PatchParams::default(), &patch)
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(err) if is_not_found(&err) => Ok(()),
-            Err(err) => Err(map_kube_error("patch iron-token-broker deployment", err)),
-        }
-    }
 }
 
 pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronProxy) {
@@ -772,12 +660,6 @@ fn iron_proxy_env_vars(
     for (name, value) in &iron_proxy.extra_env {
         env.insert(name.clone(), env_var(name, value));
     }
-    if let Some(url) = &iron_proxy.token_broker_url {
-        env.insert(
-            "IRON_BROKER_URL".to_owned(),
-            env_var("IRON_BROKER_URL", url),
-        );
-    }
     // Per-listener Postgres local config. The control plane owns the upstream
     // DSN + role (the pg_dsn secret); the proxy reads these keyed by foreign_id.
     for listener in &resolved.pg_listeners {
@@ -917,12 +799,6 @@ fn proxy_egress_rules(
             ..Default::default()
         },
     ];
-    if let Some(url) = iron_proxy.token_broker_url.as_deref() {
-        rules.push(egress_to(
-            vec![pod_peer(token_broker_pod_labels())],
-            vec![network_port(token_broker_port(url))],
-        ));
-    }
     if matches!(
         iron_proxy.source_policy.kind,
         SourceKind::OnePasswordConnect
@@ -1063,10 +939,6 @@ fn host_from_url(value: String) -> Option<String> {
         .split_once(':')
         .map_or(host_port, |(host, _)| host);
     (!host.is_empty()).then(|| host.to_owned())
-}
-
-fn token_broker_port(url: &str) -> u16 {
-    url_port(url).unwrap_or(centaur_iron_proxy::DEFAULT_BROKER_LISTEN_PORT)
 }
 
 fn url_port(value: &str) -> Option<u16> {
@@ -1255,43 +1127,10 @@ fn iron_proxy_labels(id: &SandboxId) -> BTreeMap<String, String> {
     ])
 }
 
-fn iron_token_broker_configmap_name(iron_proxy: &IronProxyConfig) -> SandboxResult<String> {
-    if let Some(name) = iron_proxy.token_broker_configmap_name.as_deref() {
-        return Ok(name.to_owned());
-    }
-    let Some(name) = iron_proxy.token_broker_name.as_deref() else {
-        return Err(SandboxError::InvalidSpec(
-            "iron-token-broker configmap requires token_broker_name".to_owned(),
-        ));
-    };
-    Ok(format!("{name}-config"))
-}
-
-fn token_broker_labels() -> BTreeMap<String, String> {
-    let mut labels = token_broker_pod_labels();
-    labels.insert(TOKEN_BROKER_LABEL.to_owned(), "true".to_owned());
-    labels
-}
-
-fn token_broker_pod_labels() -> BTreeMap<String, String> {
-    BTreeMap::from([(
-        "app.kubernetes.io/component".to_owned(),
-        "token-broker".to_owned(),
-    )])
-}
-
 fn unique_suffix() -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     format!("{millis}")
-}
-
-fn short_sha256(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }

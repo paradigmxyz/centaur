@@ -70,6 +70,12 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
+{{- if .Values.ironControl.worker.enabled }}
+        # iron-control Solid Queue worker (bin/jobs) reaches the app + queue DBs.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control-worker") | nindent 14 }}
+{{- end }}
 {{- end }}
         - podSelector:
             matchLabels:
@@ -441,11 +447,6 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-{{- if .Values.tokenBroker.enabled }}
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 14 }}
-{{- end }}
       ports:
         - protocol: TCP
           port: {{ include "centaur.onepasswordConnectPort" . }}

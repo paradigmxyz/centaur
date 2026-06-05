@@ -42,27 +42,6 @@ toolServer:
   enabled: true
   port: 8001
 
-# iron-token-broker — race-free OAuth refresh-token coordinator. Enable when
-# any tool's `oauth_token` secret uses `grant=refresh_token` against an IdP
-# that rotates refresh tokens with strict reuse detection (OpenAI Codex,
-# Anthropic Claude Code OAuth). Requires ironProxy.secretSource to be a
-# writable backend (onepassword or onepassword-connect) because the broker
-# rewrites the refresh-token blob on every rotation.
-tokenBroker:
-  enabled: false
-  image:
-    repository: ironsh/iron-token-broker
-    tag: 0.0.1-rc.2
-    pullPolicy: IfNotPresent
-  service:
-    httpPort: 8181
-    metricsPort: 9091
-  # iron-proxy caches each broker-issued access token for this long before
-  # re-fetching. Must be strictly less than the IdP's token lifetime or the
-  # broker resolver rejects the response.
-  ttl: 1m
-  resources: {}
-
 # iron-control — Rails control plane for authenticated API access + encrypted
 # secret storage. Off by default; enable per-environment. Uses a dedicated
 # `iron_control_production` database on the bundled Postgres (its own logical DB so its
@@ -77,7 +56,9 @@ ironControl:
   image:
     repository: ironsh/iron-control
     tag: latest
-    pullPolicy: IfNotPresent
+    # Default Always: the image is published under the mutable `latest` tag, so
+    # IfNotPresent would pin pods to whatever digest a node already cached.
+    pullPolicy: Always
   railsEnv: production
   database:
     # Logical DB created on the bundled Postgres by the create-db init
@@ -88,6 +69,15 @@ ironControl:
   service:
     httpPort: 3000
   resources: {}
+  # Solid Queue worker (`bin/jobs`) that runs iron-control's background jobs —
+  # most importantly the broker-credential OAuth refresh loop that mints and
+  # refreshes the access tokens delivered inline via `token_broker` sources
+  # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
+  # without this those jobs never execute. Active only when ironControl.enabled.
+  worker:
+    enabled: true
+    replicaCount: 1
+    resources: {}
 
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).

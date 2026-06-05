@@ -573,10 +573,12 @@ Commands are resource-first — `centaur-perms <noun> <verb>`:
 | `roles revoke <role> --secret OID` | Revoke one or more secrets from a role (`--secret` required, repeatable). |
 | `secrets list [--filter S] [--label k=v] [--managed]` | List secrets across every type, one row per secret. |
 | `secrets show <secret>` | Show one secret's full config by OID or `foreign_id` (values are never shown — only the source). |
+| `broker create --foreign-id F --token-endpoint URL --client-id ID [--client-secret S] [--refresh-token SEED] [--scope SC]…` | Create or update an iron-control broker credential. Values are passed literally; iron-control owns the OAuth refresh loop. Re-supplying `--refresh-token` re-bootstraps it. |
+| `broker list / show <credential> / delete <credential>` | List broker credentials, show one (status/expiry; secret material is never returned), or delete one (by `bcr_` OID or `foreign_id`). |
 
 A `<principal>` argument is treated as a Slack thread key when it contains `:` (e.g. `slack:T123:C456:1700000000.0001`) and run through `derive_principal` — pass `--slack-user` so a DM thread keys to the user. Any value without a `:` is used verbatim as a `foreign_id` (e.g. `slack-channel-t123-c456`) or an OID. Grant/revoke operations are idempotent: re-granting an assigned role or revoking a missing grant is a no-op, reported as such.
 
-Tool secret types that iron-control can't represent (`brokered_token`) are skipped and reported, never dropped silently.
+A tool's `brokered_token` secret registers the *consumer* side — a static secret that injects the access token from a `token_broker` source. The broker credential itself (the managed OAuth refresh loop) is provisioned out of band with `broker create`; the tool's `brokered_token` references it by `foreign_id` (its `credential`, defaulting to the secret `name`).
 
 #### Common workflows
 
@@ -615,6 +617,14 @@ Revoke a tool from a channel (unassigns the `tool-<slug>` role; shared secrets o
 
 ```bash
 centaur-perms principals revoke slack-channel-t123-c456 --tool github
+```
+
+Provision a managed broker credential a `brokered_token` secret (or a harness fragment) references — e.g. the Codex/Claude Code access-token harnesses reference `openai-codex` / `anthropic-claude`:
+
+```bash
+centaur-perms broker create --foreign-id openai-codex \
+  --token-endpoint https://auth.openai.com/oauth/token \
+  --client-id "$OPENAI_CODEX_CLIENT_ID" --refresh-token "$OPENAI_CODEX_REFRESH_TOKEN"
 ```
 
 Audit Centaur-managed secrets and inspect one:

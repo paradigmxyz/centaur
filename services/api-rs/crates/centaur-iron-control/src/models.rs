@@ -3,7 +3,7 @@
 //! iron-control wraps every request and single-resource response in a
 //! ``{ "data": ... }`` envelope; [`DataEnvelope`] handles both directions.
 //! Object IDs are typed-prefix strings (``prn_``, ``role_``, ``ssr_``,
-//! ``gas_``, ``ots_``, ``hms_``, ``grant_``, ``prx_``). Resources with a ``foreign_id``
+//! ``gas_``, ``ots_``, ``hms_``, ``bcr_``, ``grant_``, ``prx_``). Resources with a ``foreign_id``
 //! support upsert: a PUT whose path segment is a ``foreign_id`` (not an OID)
 //! creates the resource if absent and updates it otherwise.
 
@@ -69,12 +69,17 @@ impl SecretSource {
     }
 
     /// A token-broker source; ``credential_id`` names the broker credential
-    /// whose current access token iron-proxy injects.
-    pub fn token_broker(credential_id: impl Into<String>) -> Self {
+    /// whose current access token iron-control delivers inline. When
+    /// ``credential_id`` is a ``foreign_id`` (rather than a ``bcr_`` OID),
+    /// ``credential_namespace`` is required so iron-control can resolve it.
+    pub fn token_broker(credential_id: impl Into<String>, credential_namespace: impl Into<String>) -> Self {
         Self {
             source_type: "token_broker".to_owned(),
             secret: None,
-            config: serde_json::json!({ "credential_id": credential_id.into() }),
+            config: serde_json::json!({
+                "credential_id": credential_id.into(),
+                "credential_namespace": credential_namespace.into(),
+            }),
         }
     }
 }
@@ -275,6 +280,67 @@ pub struct HmacSecretInput {
     pub credentials: BTreeMap<String, SecretSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<RequestRule>,
+}
+
+// ---------------------------------------------------------------------------
+// Broker credentials
+// ---------------------------------------------------------------------------
+
+/// Request body for ``POST``/``PUT /api/v1/broker_credentials``. iron-control
+/// owns the OAuth refresh loop for this credential and delivers the current
+/// access token inline to proxies that reference it through a ``token_broker``
+/// source. Unlike the secret resources, ``client_id`` is a literal value (not a
+/// [`SecretSource`]) and is echoed back in responses; ``client_secret`` and
+/// ``refresh_token`` are write-only literals (the latter a seed that, when set,
+/// (re)bootstraps the credential). Tuning fields default in iron-control when
+/// omitted.
+// Not `Eq`: `early_refresh_fraction` is an `f64`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BrokerCredentialInput {
+    pub namespace: String,
+    pub foreign_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    pub token_endpoint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    pub client_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub token_endpoint_headers: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub early_refresh_slack_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub early_refresh_fraction: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_refresh_interval_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_timeout_seconds: Option<u64>,
+}
+
+/// A broker credential as returned by iron-control. Only identity and the
+/// read-only health fields callers display are captured; secret material is
+/// never echoed. Unknown fields are ignored.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct BrokerCredentialRecord {
+    pub id: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub foreign_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Lifecycle state (``bootstrapping``, ``live``, ``dead``).
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

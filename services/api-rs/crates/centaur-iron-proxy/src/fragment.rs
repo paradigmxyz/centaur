@@ -43,6 +43,8 @@ transforms:
           rules: [{ host: api.openai.com }]
 "#;
 
+// The `openai-codex` broker credential this references is managed by
+// iron-control and provisioned out of band (see `centaur-perms broker create`).
 const CODEX_ACCESS_TOKEN_FRAGMENT: &str = r#"
 transforms:
   - name: secrets
@@ -60,13 +62,6 @@ transforms:
           inject:
             header: chatgpt-account-id
           rules: [{ host: chatgpt.com }]
-broker_credentials:
-  - id: openai-codex
-    token_endpoint: https://auth.openai.com/oauth/token
-    client_id:
-      placeholder: OPENAI_CODEX_CLIENT_ID
-    store:
-      placeholder: OPENAI_CODEX_BLOB
 "#;
 
 const CLAUDE_CODE_API_KEY_FRAGMENT: &str = r#"
@@ -80,6 +75,8 @@ transforms:
           rules: [{ host: api.anthropic.com }]
 "#;
 
+// The `anthropic-claude` broker credential this references is managed by
+// iron-control and provisioned out of band (see `centaur-perms broker create`).
 const CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT: &str = r#"
 transforms:
   - name: secrets
@@ -92,13 +89,6 @@ transforms:
             header: Authorization
             formatter: "Bearer {{.Value}}"
           rules: [{ host: api.anthropic.com }]
-broker_credentials:
-  - id: anthropic-claude
-    token_endpoint: https://console.anthropic.com/v1/oauth/token
-    client_id:
-      placeholder: CLAUDE_CODE_CLIENT_ID
-    store:
-      placeholder: CLAUDE_CODE_BLOB
 "#;
 
 pub fn infra_fragment() -> Result<ProxyFragment> {

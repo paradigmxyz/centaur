@@ -13,9 +13,10 @@ use serde_json::{Value, json};
 
 use crate::error::{IronControlError, Result};
 use crate::models::{
-    DataEnvelope, EffectiveConfig, GcpAuthSecretInput, Grant, GrantSecret, Grantee,
-    HmacSecretInput, IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy,
-    ProxyInput, Role, SecretRecord, StaticSecretInput,
+    BrokerCredentialInput, BrokerCredentialRecord, DataEnvelope, EffectiveConfig,
+    GcpAuthSecretInput, Grant, GrantSecret, Grantee, HmacSecretInput, IdentityInput,
+    OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, Role, SecretRecord,
+    StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -302,6 +303,49 @@ impl IronControlClient {
         let path = resource_path(collection, oid_prefix, namespace, ident, "");
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
+    }
+
+    // ----- broker credentials ---------------------------------------------
+
+    /// Upsert a broker credential by ``foreign_id`` (create if absent, update
+    /// if not). Re-supplying ``refresh_token`` re-bootstraps the credential.
+    pub async fn upsert_broker_credential(
+        &self,
+        input: &BrokerCredentialInput,
+    ) -> Result<BrokerCredentialRecord> {
+        self.write(
+            Method::PUT,
+            &upsert_path("broker_credentials", &input.foreign_id),
+            input,
+        )
+        .await
+    }
+
+    /// List every broker credential in ``namespace``, optionally filtered by
+    /// ``labels``. Pages are fetched transparently.
+    pub async fn list_broker_credentials(
+        &self,
+        namespace: &str,
+        labels: &[(String, String)],
+    ) -> Result<Vec<BrokerCredentialRecord>> {
+        self.list_collection("broker_credentials", namespace, labels).await
+    }
+
+    /// Fetch a broker credential's full resource object (every field
+    /// iron-control returns; secret material is never echoed) by OID (``bcr_``)
+    /// or ``foreign_id``. Returned as a raw [`Value`] so callers can render the
+    /// read-only health fields without modeling them all.
+    pub async fn get_broker_credential_detail(&self, namespace: &str, ident: &str) -> Result<Value> {
+        let path = resource_path("broker_credentials", "bcr_", namespace, ident, "");
+        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
+        decode_data(resp, Method::GET, &path).await
+    }
+
+    /// Delete a broker credential by OID (``bcr_``) or ``foreign_id``.
+    pub async fn delete_broker_credential(&self, namespace: &str, ident: &str) -> Result<()> {
+        let path = resource_path("broker_credentials", "bcr_", namespace, ident, "");
+        let resp = self.send(Method::DELETE, &path, None::<&Value>).await?;
+        expect_success(resp, Method::DELETE, &path).await
     }
 
     // ----- grants ----------------------------------------------------------

@@ -6,11 +6,12 @@
 //! canonical mappings (`derive_principal`, `RoleSpec::tool`) so the principal
 //! and role `foreign_id`s it writes match exactly what api-rs registers.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use centaur_iron_control::{
-    Grant, GrantSecret, Grantee, IdentityInput, IronControlClient, IronControlError, Role,
-    RoleSpec, SECRET_TYPES, grant_inputs_to_role, managed_labels,
+    BrokerCredentialInput, Grant, GrantSecret, Grantee, IdentityInput, IronControlClient,
+    IronControlError, Role, RoleSpec, SECRET_TYPES, grant_inputs_to_role, managed_labels,
 };
 use centaur_iron_proxy::SourcePolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -83,6 +84,10 @@ enum Command {
     /// Inspect the secrets registered in iron-control.
     #[command(subcommand)]
     Secrets(SecretsCmd),
+    /// Manage iron-control broker credentials (managed OAuth refresh tokens
+    /// delivered inline to proxies via a `token_broker` source).
+    #[command(subcommand)]
+    Broker(BrokerCmd),
 }
 
 #[derive(Subcommand, Debug)]
@@ -123,6 +128,86 @@ struct SecretSelector {
     /// Secret OID (`ssr_`/`ots_`/`gas_`/`pgs_`/`hms_`) or `foreign_id`. A
     /// `foreign_id` is resolved by trying each secret type in turn.
     secret: String,
+}
+
+#[derive(Subcommand, Debug)]
+enum BrokerCmd {
+    /// Create or update a broker credential. iron-control owns the OAuth refresh
+    /// loop and delivers the current access token inline to proxies. Values are
+    /// passed literally; re-supplying `--refresh-token` re-bootstraps the
+    /// credential.
+    Create(Box<BrokerCreateArgs>),
+    /// List broker credentials registered in iron-control.
+    List(FilterArgs),
+    /// Show one broker credential's full record (status/expiry/etc.). Secret
+    /// material is never returned by iron-control.
+    Show(BrokerSelector),
+    /// Delete a broker credential.
+    Delete(BrokerSelector),
+}
+
+#[derive(Args, Debug)]
+struct BrokerSelector {
+    /// Broker credential OID (`bcr_`) or `foreign_id`.
+    credential: String,
+}
+
+#[derive(Args, Debug)]
+struct BrokerCreateArgs {
+    /// Stable upsert key for the credential (also what a `token_broker` source
+    /// references via `credential_id`), e.g. `openai-codex`.
+    #[arg(long)]
+    foreign_id: String,
+
+    /// OAuth token endpoint iron-control POSTs the refresh against.
+    #[arg(long)]
+    token_endpoint: String,
+
+    /// OAuth client id (literal, not secret; echoed back by iron-control).
+    #[arg(long)]
+    client_id: String,
+
+    /// OAuth client secret (literal; write-only, encrypted at rest). Omit for
+    /// public clients.
+    #[arg(long)]
+    client_secret: Option<String>,
+
+    /// Seed refresh token (literal; write-only). Supplying it (re)bootstraps the
+    /// credential and triggers an immediate refresh.
+    #[arg(long)]
+    refresh_token: Option<String>,
+
+    /// OAuth scope to request. Repeatable.
+    #[arg(long = "scope", value_name = "SCOPE")]
+    scopes: Vec<String>,
+
+    /// Human-readable name.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Human-readable description.
+    #[arg(long)]
+    description: Option<String>,
+
+    /// Extra header sent on the refresh POST (write-only). `--token-endpoint-header key=value`. Repeatable.
+    #[arg(long = "token-endpoint-header", value_name = "KEY=VALUE")]
+    token_endpoint_headers: Vec<String>,
+
+    /// Refresh this many seconds before expiry (iron-control default 300).
+    #[arg(long)]
+    early_refresh_slack_seconds: Option<u64>,
+
+    /// Refresh once this fraction of lifetime remains, in [0,1) (default 0.2).
+    #[arg(long)]
+    early_refresh_fraction: Option<f64>,
+
+    /// Refresh at least this often (default 86400).
+    #[arg(long)]
+    max_refresh_interval_seconds: Option<u64>,
+
+    /// Per-attempt token endpoint timeout (default 30).
+    #[arg(long)]
+    refresh_timeout_seconds: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -236,6 +321,12 @@ async fn main() -> Result<()> {
         Command::Secrets(cmd) => match cmd {
             SecretsCmd::List(args) => secrets_list(&cli, &client, args).await,
             SecretsCmd::Show(args) => secrets_show(&cli, &client, args).await,
+        },
+        Command::Broker(cmd) => match cmd {
+            BrokerCmd::Create(args) => broker_create(&cli, &client, args).await,
+            BrokerCmd::List(args) => broker_list(&cli, &client, args).await,
+            BrokerCmd::Show(args) => broker_show(&cli, &client, args).await,
+            BrokerCmd::Delete(args) => broker_delete(&cli, &client, args).await,
         },
     }
 }
@@ -383,9 +474,6 @@ async fn principals_grant(
             role.foreign_id,
             granted.len()
         );
-        for (name, kind) in &translation.skipped {
-            println!("    skipped {name} (unsupported secret type {kind:?})");
-        }
     }
 
     for role_fid in &args.roles {
@@ -534,9 +622,6 @@ async fn roles_grant(cli: &Cli, client: &IronControlClient, args: &RoleGrantArgs
             granted.len(),
             role.foreign_id.as_deref().unwrap_or(&role.id)
         );
-        for (name, kind) in &translation.skipped {
-            println!("    skipped {name} (unsupported secret type {kind:?})");
-        }
     }
     Ok(())
 }
@@ -681,6 +766,86 @@ fn print_secrets(rows: &[(&str, Option<String>, String, String)], namespace: &st
 }
 
 // ---------------------------------------------------------------------------
+// broker credentials
+// ---------------------------------------------------------------------------
+
+async fn broker_create(cli: &Cli, client: &IronControlClient, args: &BrokerCreateArgs) -> Result<()> {
+    let token_endpoint_headers = args
+        .token_endpoint_headers
+        .iter()
+        .map(|raw| parse_kv(raw, "--token-endpoint-header"))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let input = BrokerCredentialInput {
+        namespace: cli.namespace.clone(),
+        foreign_id: args.foreign_id.clone(),
+        name: args.name.clone(),
+        description: args.description.clone(),
+        labels: managed_labels(),
+        token_endpoint: args.token_endpoint.clone(),
+        scopes: args.scopes.clone(),
+        client_id: args.client_id.clone(),
+        client_secret: args.client_secret.clone(),
+        refresh_token: args.refresh_token.clone(),
+        token_endpoint_headers,
+        early_refresh_slack_seconds: args.early_refresh_slack_seconds,
+        early_refresh_fraction: args.early_refresh_fraction,
+        max_refresh_interval_seconds: args.max_refresh_interval_seconds,
+        refresh_timeout_seconds: args.refresh_timeout_seconds,
+    };
+    let record = client.upsert_broker_credential(&input).await?;
+    println!(
+        "broker credential {} ({}) upserted{}",
+        record.foreign_id.as_deref().unwrap_or(&args.foreign_id),
+        record.id,
+        record.status.as_deref().map(|s| format!(" — status {s}")).unwrap_or_default(),
+    );
+    Ok(())
+}
+
+async fn broker_list(cli: &Cli, client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+    let labels = filter_labels(args)?;
+    let mut found = client.list_broker_credentials(&cli.namespace, &labels).await?;
+    apply_filter(&mut found, args.filter.as_deref(), |c| {
+        (c.foreign_id.clone().unwrap_or_default(), c.name.clone().unwrap_or_default())
+    });
+    found.sort_by(|a, b| a.foreign_id.cmp(&b.foreign_id));
+    if found.is_empty() {
+        println!("no broker credentials found in namespace {:?}", cli.namespace);
+        return Ok(());
+    }
+    let width = found
+        .iter()
+        .map(|c| c.foreign_id.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(0);
+    for c in &found {
+        println!(
+            "{:<width$}  {}  {}  {}",
+            c.foreign_id.as_deref().unwrap_or("-"),
+            c.id,
+            c.status.as_deref().unwrap_or("-"),
+            c.name.as_deref().unwrap_or(""),
+            width = width,
+        );
+    }
+    println!("({} broker credential(s))", found.len());
+    Ok(())
+}
+
+async fn broker_show(cli: &Cli, client: &IronControlClient, args: &BrokerSelector) -> Result<()> {
+    let detail = client.get_broker_credential_detail(&cli.namespace, &args.credential).await?;
+    println!("broker credential: {}", args.credential);
+    println!("{}", serde_json::to_string_pretty(&detail)?);
+    Ok(())
+}
+
+async fn broker_delete(cli: &Cli, client: &IronControlClient, args: &BrokerSelector) -> Result<()> {
+    client.delete_broker_credential(&cli.namespace, &args.credential).await?;
+    println!("broker credential {}: deleted", args.credential);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -802,9 +967,14 @@ fn grant_secret_from_oid(oid: &str) -> Result<GrantSecret> {
 
 /// Parse a `key=value` label filter.
 fn parse_label(raw: &str) -> Result<(String, String)> {
+    parse_kv(raw, "--label")
+}
+
+/// Parse a `key=value` pair for `flag`, requiring a non-empty key.
+fn parse_kv(raw: &str, flag: &str) -> Result<(String, String)> {
     match raw.split_once('=') {
         Some((k, v)) if !k.is_empty() => Ok((k.to_owned(), v.to_owned())),
-        _ => bail!("--label must be key=value, got {raw:?}"),
+        _ => bail!("{flag} must be key=value, got {raw:?}"),
     }
 }
 

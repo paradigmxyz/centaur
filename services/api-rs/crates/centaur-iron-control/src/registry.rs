@@ -237,7 +237,7 @@ fn static_secret_from_secret(
     secret: &Secret,
     policy: &SourcePolicy,
 ) -> Result<StaticSecretInput, TranslateError> {
-    let source = source_from_secret(role, secret, policy)?;
+    let source = source_from_secret(namespace, role, secret, policy)?;
     let (inject_config, replace_config) = match (&secret.inject, &secret.replace) {
         (Some(inject), None) => (Some(inject_config_from_value(role, inject)?), None),
         (None, Some(replace)) => (None, Some(replace_config_from(role, replace)?)),
@@ -307,6 +307,7 @@ fn static_secret_identity(secret: &Secret) -> String {
 /// ``value`` is not a token_broker source. ``what`` prefixes the error so the
 /// caller's context (e.g. ``"pg_dsn "``) appears in malformed messages.
 fn token_broker_source(
+    namespace: &str,
     role: &str,
     value: &YamlValue,
     what: &str,
@@ -320,16 +321,17 @@ fn token_broker_source(
             &format!("{what}token_broker source missing credential_id"),
         )
     })?;
-    Ok(Some(SecretSource::token_broker(credential_id)))
+    Ok(Some(SecretSource::token_broker(credential_id, namespace)))
 }
 
 fn source_from_secret(
+    namespace: &str,
     role: &str,
     secret: &Secret,
     policy: &SourcePolicy,
 ) -> Result<SecretSource, TranslateError> {
     if let Some(source) = &secret.source {
-        if let Some(broker) = token_broker_source(role, source, "")? {
+        if let Some(broker) = token_broker_source(namespace, role, source, "")? {
             return Ok(broker);
         }
         if let Some(placeholder) = yaml_str(source, "placeholder") {
@@ -486,7 +488,7 @@ fn pg_dsn_from_listener(
                 &format!("postgres listener {name} missing upstream.dsn"),
             )
         })?;
-    let dsn = pg_dsn_source(role, dsn_value, policy)?;
+    let dsn = pg_dsn_source(namespace, role, dsn_value, policy)?;
     let database = listener
         .sandbox_env
         .as_ref()
@@ -524,11 +526,12 @@ fn pg_dsn_from_listener(
 /// placeholder (resolved against the deployment's [`SourcePolicy`], like any
 /// other secret).
 fn pg_dsn_source(
+    namespace: &str,
     role: &str,
     dsn: &YamlValue,
     policy: &SourcePolicy,
 ) -> Result<SecretSource, TranslateError> {
-    if let Some(broker) = token_broker_source(role, dsn, "pg_dsn ")? {
+    if let Some(broker) = token_broker_source(namespace, role, dsn, "pg_dsn ")? {
         return Ok(broker);
     }
     if yaml_str(dsn, "type") == Some("env") {
@@ -824,7 +827,7 @@ transforms:
         assert_eq!(input.source.source_type, "token_broker");
         assert_eq!(
             input.source.config,
-            json!({ "credential_id": "openai-codex" })
+            json!({ "credential_id": "openai-codex", "credential_namespace": "default" })
         );
         let inject = input.inject_config.as_ref().unwrap();
         assert_eq!(inject.header.as_deref(), Some("Authorization"));
