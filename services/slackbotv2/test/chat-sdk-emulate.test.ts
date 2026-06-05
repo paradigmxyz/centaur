@@ -640,6 +640,71 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
+  it('posts a visible final-answer fallback when Slack rejects the stream as too long', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+    slackApi.failStreamStopsLongerThan(120)
+
+    const parent = await postUserMessage('Context before an oversized Slack render.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> generate noisy progress`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-msg-too-long-fallback',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> generate noisy progress`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-oversized',
+          type: 'commandExecution',
+          command: 'printf noisy',
+          status: 'completed',
+          aggregatedOutput: 'x'.repeat(20_000)
+        }
+      })
+    )
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-msg-too-long-fallback',
+      status: 'completed',
+      result_text: 'TOO_LONG_FALLBACK_VISIBLE'
+    })
+
+    await Promise.all(waits)
+    expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
+    expect(await threadText(parent.ts)).toContain('TOO_LONG_FALLBACK_VISIBLE')
+    const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(threadState).toEqual(
+      expect.objectContaining({
+        activeExecution: false,
+        renderObligation: null
+      })
+    )
+  })
+
   it('does not create an empty Slack stream before the first visible renderer chunk', async () => {
     codexApi.autoRespond = false
 
@@ -1922,6 +1987,7 @@ type PatchedSlackApi = {
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
+  failStreamStopsLongerThan(maxChars: number): void
   reset(): void
   url: string
 }
@@ -1956,11 +2022,13 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
   const threadNotFoundReplies = new Set<string>()
+  let maxStreamStopChars: number | null = null
   const streams = new Map<string, StreamRecord>()
   const port = await availablePort(4053)
   const server = createServer((req, res) => {
     void handlePatchedSlackRequest(req, res, {
       calls,
+      maxStreamStopChars,
       port,
       streams,
       threadNotFoundReplies,
@@ -1977,8 +2045,12 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
     },
+    failStreamStopsLongerThan(maxChars: number) {
+      maxStreamStopChars = maxChars
+    },
     reset() {
       calls.length = 0
+      maxStreamStopChars = null
       threadNotFoundReplies.clear()
       streams.clear()
     },
@@ -1991,6 +2063,7 @@ async function handlePatchedSlackRequest(
   res: ServerResponse,
   input: {
     calls: StreamCall[]
+    maxStreamStopChars: number | null
     port: number
     streams: Map<string, StreamRecord>
     threadNotFoundReplies: Set<string>
@@ -2040,7 +2113,13 @@ async function handlePatchedSlackRequest(
   if (path === '/api/chat.stopStream') {
     await sendWebResponse(
       res,
-      await stopStream(input.upstreamUrl, request, input.streams, input.calls)
+      await stopStream(
+        input.upstreamUrl,
+        request,
+        input.streams,
+        input.calls,
+        input.maxStreamStopChars
+      )
     )
     return
   }
@@ -2175,7 +2254,8 @@ async function stopStream(
   emulatorUrl: string,
   request: Request,
   streams: Map<string, StreamRecord>,
-  calls: StreamCall[]
+  calls: StreamCall[],
+  maxStreamStopChars: number | null
 ): Promise<Response> {
   const body = await requestBody(request)
   const channel = stringField(body.channel)
@@ -2184,6 +2264,9 @@ async function stopStream(
   const key = streamKey(channel, ts)
   const record = streams.get(key) ?? { channel, ts, text: '' }
   const text = [record.text, streamBodyText(body)].filter(part => part.trim()).join('\n')
+  if (maxStreamStopChars !== null && text.length > maxStreamStopChars) {
+    return Response.json({ ok: false, error: 'msg_too_long' })
+  }
   await postSlack(emulatorUrl, request, '/api/chat.update', {
     channel,
     ts,

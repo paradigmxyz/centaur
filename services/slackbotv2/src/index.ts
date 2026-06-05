@@ -83,6 +83,7 @@ const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const SLACK_TASK_DETAILS_MAX_CHARS = 500
+const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
@@ -661,6 +662,7 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
 ): Promise<void> {
+  const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
@@ -669,7 +671,14 @@ async function renderExecutionStream(
   })
   try {
     const visibleStream = await streamAfterFirstChunk(
-      slackSafeChatSdkStream(codexAppServerToChatSdkStream(stream, rendererOptions(thread, options)))
+      fallback.collectChatSdk(
+        slackSafeChatSdkStream(
+          codexAppServerToChatSdkStream(
+            fallback.collectSource(stream),
+            rendererOptions(thread, options)
+          )
+        )
+      )
     )
     if (!visibleStream) return
     await thread.post(
@@ -678,6 +687,9 @@ async function renderExecutionStream(
         { groupTasks: options.streamTaskDisplayMode ?? 'plan' }
       )
     )
+  } catch (error) {
+    if (!isSlackMessageTooLongError(error)) throw error
+    await postSlackTooLongFallback(thread, fallback, options, trace)
   } finally {
     await setAssistantStatus(thread, '')
   }
@@ -690,6 +702,7 @@ async function renderRecoveredExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
 ): Promise<void> {
+  const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
@@ -698,7 +711,14 @@ async function renderRecoveredExecutionStream(
   })
   try {
     const visibleStream = await streamAfterFirstChunk(
-      slackSafeChatSdkStream(codexAppServerToChatSdkStream(stream, rendererOptions(thread, options)))
+      fallback.collectChatSdk(
+        slackSafeChatSdkStream(
+          codexAppServerToChatSdkStream(
+            fallback.collectSource(stream),
+            rendererOptions(thread, options)
+          )
+        )
+      )
     )
     if (!visibleStream) return
     await thread.adapter.stream!(
@@ -710,9 +730,75 @@ async function renderRecoveredExecutionStream(
         taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
       }
     )
+  } catch (error) {
+    if (!isSlackMessageTooLongError(error)) throw error
+    await postSlackTooLongFallback(thread, fallback, options, trace)
   } finally {
     await setAssistantStatus(thread, '')
   }
+}
+
+class SlackRenderFallback {
+  private markdownText = ''
+  private terminalText = ''
+
+  async *collectSource(
+    stream: AsyncIterable<SlackbotV2RendererSource>
+  ): AsyncIterable<SlackbotV2RendererSource> {
+    for await (const event of stream) {
+      this.captureTerminalText(event)
+      yield event
+    }
+  }
+
+  async *collectChatSdk(
+    stream: AsyncIterable<ChatSDKStreamChunk>
+  ): AsyncIterable<ChatSDKStreamChunk> {
+    for await (const chunk of stream) {
+      if (chunk.type === 'markdown_text') this.markdownText += chunk.text
+      yield chunk
+    }
+  }
+
+  text(): string {
+    return (this.terminalText || this.markdownText).trim()
+  }
+
+  private captureTerminalText(event: SlackbotV2RendererSource): void {
+    if (!event || typeof event !== 'object') return
+    const eventKind = String(
+      'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+    )
+    if (
+      eventKind !== 'session.execution_completed' &&
+      eventKind !== 'session.execution_cancelled' &&
+      !isTerminalCodexAppServerEvent(event)
+    ) {
+      return
+    }
+    const data = 'data' in event && event.data && typeof event.data === 'object'
+      ? event.data
+      : event
+    const text = terminalResultText(data)
+    if (text) this.terminalText = text
+  }
+}
+
+async function postSlackTooLongFallback(
+  thread: Thread,
+  fallback: SlackRenderFallback,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  const text = truncateSlackText(
+    fallback.text() || 'Execution completed, but Slack rejected the detailed render as too large.',
+    SLACK_FALLBACK_TEXT_MAX_CHARS,
+    'Slack final answer'
+  )
+  traceLog(options, 'slackbotv2_render_too_long_fallback', trace, {
+    fallback_chars: text.length
+  })
+  await thread.post(text)
 }
 
 async function* slackSafeChatSdkStream(
@@ -734,11 +820,19 @@ function slackSafeChatSdkChunk(chunk: ChatSDKStreamChunk): ChatSDKStreamChunk {
 }
 
 function truncateSlackTaskField(value: string): string {
-  if (value.length <= SLACK_TASK_DETAILS_MAX_CHARS) return value
-  const omitted = value.length - SLACK_TASK_DETAILS_MAX_CHARS
-  const suffix = `\n[truncated ${omitted} chars from Slack task details]`
-  const keep = Math.max(0, SLACK_TASK_DETAILS_MAX_CHARS - suffix.length)
-  return `${value.slice(0, keep).trimEnd()}${suffix}`
+  return truncateSlackText(value, SLACK_TASK_DETAILS_MAX_CHARS, 'Slack task details')
+}
+
+function truncateSlackText(value: string, maxChars: number, label: string): string {
+  if (value.length <= maxChars) return value
+  let omitted = value.length - maxChars
+  while (true) {
+    const suffix = `\n[truncated ${omitted} chars from ${label}]`
+    const keep = Math.max(0, maxChars - suffix.length)
+    const actualOmitted = value.length - keep
+    if (actualOmitted === omitted) return `${value.slice(0, keep).trimEnd()}${suffix}`
+    omitted = actualOmitted
+  }
 }
 
 async function streamAfterFirstChunk(
@@ -758,6 +852,36 @@ async function streamAfterFirstChunk(
       }
     }
   }
+}
+
+function isTerminalCodexAppServerEvent(event: unknown): boolean {
+  if (!event || typeof event !== 'object') return false
+  const type = (event as { type?: unknown }).type
+  return type === 'result' || type === 'turn.done' || type === 'turn.completed'
+}
+
+function terminalResultText(event: unknown): string {
+  if (!event || typeof event !== 'object') return ''
+  for (const key of ['result', 'result_text', 'text', 'final_text']) {
+    const value = (event as Record<string, unknown>)[key]
+    if (typeof value !== 'string') continue
+    const resultText = value.trim()
+    if (resultText) return resultText
+  }
+  return ''
+}
+
+function isSlackMessageTooLongError(error: unknown): boolean {
+  if (error instanceof Error && error.message.includes('msg_too_long')) return true
+  if (!error || typeof error !== 'object') return false
+  const fields = error as Record<string, unknown>
+  if (fields.error === 'msg_too_long') return true
+  const data = fields.data
+  return (
+    Boolean(data) &&
+    typeof data === 'object' &&
+    (data as Record<string, unknown>).error === 'msg_too_long'
+  )
 }
 
 async function* streamSessionAfterHandoff(
