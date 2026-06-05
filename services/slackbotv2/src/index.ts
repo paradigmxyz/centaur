@@ -708,6 +708,10 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
 ): Promise<void> {
+  if (isPlainTextOnlyRequest(message.text)) {
+    await renderPlainTextExecutionStream(thread, stream, message, options, trace)
+    return
+  }
   const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
@@ -748,6 +752,10 @@ async function renderRecoveredExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
 ): Promise<void> {
+  if (isPlainTextOnlyRequest(message.text)) {
+    await renderPlainTextExecutionStream(thread, stream, message, options, trace)
+    return
+  }
   const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
@@ -779,6 +787,46 @@ async function renderRecoveredExecutionStream(
   } catch (error) {
     if (!isSlackMessageTooLongError(error)) throw error
     await postSlackTooLongFallback(thread, fallback, options, trace)
+  } finally {
+    await setAssistantStatus(thread, '')
+  }
+}
+
+async function renderPlainTextExecutionStream(
+  thread: Thread,
+  stream: AsyncIterable<SlackbotV2RendererSource>,
+  message: SlackbotV2ApiMessage,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  const fallback = new SlackRenderFallback()
+  const titleStartedAtMs = nowMs()
+  await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
+  await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
+  traceLog(options, 'slackbotv2_render_plain_text_metadata_set', trace, {
+    phase_ms: elapsedMs(titleStartedAtMs)
+  })
+  try {
+    const chatStream = fallback.collectChatSdk(
+      slackSafeChatSdkStream(
+        codexAppServerToChatSdkStream(
+          fallback.collectSource(stream),
+          rendererOptions(thread, options)
+        )
+      )
+    )
+    for await (const _chunk of chatStream) {
+      void _chunk
+    }
+    const text = truncateSlackText(
+      fallback.text() || 'Execution completed, but no final text was captured.',
+      SLACK_FALLBACK_TEXT_MAX_CHARS,
+      'Slack final answer'
+    )
+    traceLog(options, 'slackbotv2_render_plain_text_final', trace, {
+      chars: text.length
+    })
+    await thread.post(text)
   } finally {
     await setAssistantStatus(thread, '')
   }
@@ -870,6 +918,15 @@ function isCommandExecutionTask(
   chunk: Extract<ChatSDKStreamChunk, { type: 'task_update' }>
 ): boolean {
   return chunk.id.startsWith('call_') || chunk.title.toLowerCase().includes('command execution')
+}
+
+function isPlainTextOnlyRequest(text: string): boolean {
+  const normalized = text.toLowerCase()
+  return (
+    /\bplain\s+text\s+only\b/.test(normalized)
+    || /\bno\s+interactive\s+blocks?\b/.test(normalized)
+    || /\bno\s+dashboards?\b/.test(normalized)
+  )
 }
 
 function truncateSlackTaskField(value: string): string {

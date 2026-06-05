@@ -924,6 +924,45 @@ describe('slackbotv2', () => {
     ])
   })
 
+  it('honors plain-text-only requests without Slack plan blocks', async () => {
+    const parent = await postUserMessage('Context before a plain text request.')
+    const mention = await postUserMessage(
+      `<@${BOT_USER_ID}> Answer from context only. Plain text only, no interactive blocks or dashboards. Include id plain-text-regression.`,
+      parent.ts
+    )
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-plain-text-only',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> Answer from context only. Plain text only, no interactive blocks or dashboards. Include id plain-text-regression.`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
+    expect(slackApi.calls.some(call => call.method === 'chat.appendStream')).toBe(false)
+    expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(false)
+
+    const text = await threadText(parent.ts)
+    expect(text).toContain('Executed request 1.')
+    expect(text).not.toContain('Implementation plan')
+    expect(text).not.toContain('Command execution')
+    expect(text).not.toContain('pnpm test')
+  })
+
   it('waits for a slow session execute before acknowledging Slack and starting the stream', async () => {
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
