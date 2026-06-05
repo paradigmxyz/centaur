@@ -1067,8 +1067,13 @@ impl StdoutPumpState {
 
 #[derive(Debug, Eq, PartialEq)]
 enum TerminalOutput {
-    Completed { reason: &'static str },
-    Failed { error: String },
+    Completed {
+        reason: &'static str,
+        result_text: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 async fn record_terminal_output(
@@ -1081,20 +1086,29 @@ async fn record_terminal_output(
     terminal: TerminalOutput,
 ) -> Result<(), SessionRuntimeError> {
     let terminal_execution = match terminal {
-        TerminalOutput::Completed { reason } => {
+        TerminalOutput::Completed {
+            reason,
+            result_text,
+        } => {
             let Some(execution) = store.complete_execution_if_active(execution_id).await? else {
                 return Ok(());
             };
+            let mut payload = json!({
+                "execution_id": execution_id,
+                "thread_key": thread_key.as_str(),
+                "completion_reason": reason,
+            });
+            if let (Some(result_text), Some(object)) =
+                (result_text.as_deref(), payload.as_object_mut())
+            {
+                object.insert("result_text".to_owned(), json!(result_text));
+            }
             store
                 .append_event(
                     thread_key,
                     Some(execution_id),
                     "session.execution_completed",
-                    json!({
-                        "execution_id": execution_id,
-                        "thread_key": thread_key.as_str(),
-                        "completion_reason": reason,
-                    }),
+                    payload,
                 )
                 .await?;
             execution
@@ -1406,16 +1420,14 @@ fn terminal_output(value: &Value, saw_final_answer_text: bool) -> Option<Termina
         Some("turn.completed") => {
             Some(completed_turn_terminal_output(value, saw_final_answer_text))
         }
-        Some("turn.done") => Some(TerminalOutput::Completed {
-            reason: "turn_done",
-        }),
+        Some("turn.done") => Some(completed_terminal_output(value, "turn_done")),
         Some("result") => {
             if result_is_failure(value) {
                 Some(TerminalOutput::Failed {
                     error: terminal_error_text(value),
                 })
             } else {
-                Some(TerminalOutput::Completed { reason: "result" })
+                Some(completed_terminal_output(value, "result"))
             }
         }
         _ => None,
@@ -1424,15 +1436,23 @@ fn terminal_output(value: &Value, saw_final_answer_text: bool) -> Option<Termina
 
 fn completed_turn_terminal_output(value: &Value, saw_final_answer_text: bool) -> TerminalOutput {
     match turn_completion_status(value).as_deref() {
-        Some("completed" | "succeeded" | "success") | None => TerminalOutput::Completed {
-            reason: "turn_completed",
-        },
-        Some(_status) if saw_final_answer_text => TerminalOutput::Completed {
-            reason: "turn_completed",
-        },
+        Some("completed" | "succeeded" | "success") | None => {
+            completed_terminal_output(value, "turn_completed")
+        }
+        Some(_status) if saw_final_answer_text => {
+            completed_terminal_output(value, "turn_completed")
+        }
         Some(status) => TerminalOutput::Failed {
             error: format!("turn completed with status {status} before final answer"),
         },
+    }
+}
+
+fn completed_terminal_output(value: &Value, reason: &'static str) -> TerminalOutput {
+    let result_text = terminal_payload_text(value).trim().to_owned();
+    TerminalOutput::Completed {
+        reason,
+        result_text: (!result_text.is_empty()).then_some(result_text),
     }
 }
 
@@ -1918,7 +1938,8 @@ mod tests {
         assert_eq!(
             terminal_output(&event, false),
             Some(TerminalOutput::Completed {
-                reason: "turn_completed"
+                reason: "turn_completed",
+                result_text: None
             })
         );
     }
@@ -1938,7 +1959,8 @@ mod tests {
         assert_eq!(
             terminal_output(&terminal, true),
             Some(TerminalOutput::Completed {
-                reason: "turn_completed"
+                reason: "turn_completed",
+                result_text: None
             })
         );
     }
@@ -1968,7 +1990,8 @@ mod tests {
         assert_eq!(
             terminal_output(&event, true),
             Some(TerminalOutput::Completed {
-                reason: "turn_completed"
+                reason: "turn_completed",
+                result_text: None
             })
         );
     }
@@ -1982,7 +2005,26 @@ mod tests {
 
         assert_eq!(
             terminal_output(&event, false),
-            Some(TerminalOutput::Completed { reason: "result" })
+            Some(TerminalOutput::Completed {
+                reason: "result",
+                result_text: Some("Final answer".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn turn_done_carries_terminal_result_text() {
+        let event = json!({
+            "type": "turn.done",
+            "result": "Final answer",
+        });
+
+        assert_eq!(
+            terminal_output(&event, false),
+            Some(TerminalOutput::Completed {
+                reason: "turn_done",
+                result_text: Some("Final answer".to_owned())
+            })
         );
     }
 
