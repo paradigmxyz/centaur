@@ -1,6 +1,7 @@
 """SimilarWeb API client."""
 
 from datetime import date
+from typing import Any
 from typing import Literal
 
 import httpx
@@ -21,6 +22,20 @@ def _clean_secret(value: str | None) -> str | None:
             continue
         return line
     return None
+
+
+def _add_months(d: date, months: int) -> date:
+    """Return the first day of the month offset by ``months``."""
+    month_index = d.year * 12 + d.month - 1 + months
+    return date(month_index // 12, month_index % 12 + 1, 1)
+
+
+def default_app_download_window(today: date | None = None) -> tuple[date, date]:
+    """Return six monthly periods ending two months before today."""
+    today = today or date.today()
+    end = _add_months(today.replace(day=1), -2)
+    start = _add_months(end, -5)
+    return start, end
 
 
 class SimilarWebClient:
@@ -55,6 +70,23 @@ class SimilarWebClient:
             )
         return key
 
+    @staticmethod
+    def _error_message(response: httpx.Response) -> str:
+        """Extract a readable SimilarWeb error message."""
+        try:
+            body: Any = response.json()
+        except ValueError:
+            return response.text
+
+        if isinstance(body, dict):
+            for key in ("error_message", "message", "error", "detail"):
+                value = body.get(key)
+                if value:
+                    return str(value)
+            return response.text
+
+        return response.text
+
     def _request(
         self,
         endpoint: str,
@@ -79,7 +111,8 @@ class SimilarWebClient:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"API error: {e.response.status_code} - {e.response.text}")
+            message = self._error_message(e.response)
+            raise RuntimeError(f"API error: {e.response.status_code} - {message}")
         except httpx.RequestError as e:
             raise RuntimeError(f"Request failed: {e}")
 
@@ -348,12 +381,15 @@ class SimilarWebClient:
         granularity: Literal["daily", "weekly", "monthly"] = "monthly",
     ) -> dict:
         """Get app download estimates."""
+        if start_date is None or end_date is None:
+            default_start, default_end = default_app_download_window()
+            start_date = start_date or default_start
+            end_date = end_date or default_end
+
         params = {"country": country, "granularity": granularity}
-        if start_date:
-            params["start_date"] = self._format_date(start_date)
-        if end_date:
-            params["end_date"] = self._format_date(end_date)
-        return self._request(f"/v1/app/{store}/{app_id}/downloads", params=params)
+        params["start_date"] = self._format_date(start_date)
+        params["end_date"] = self._format_date(end_date)
+        return self._request(f"/v5/apps/{store}/downloads", params={**params, "app_id": app_id})
 
     def get_app_rank(
         self,
