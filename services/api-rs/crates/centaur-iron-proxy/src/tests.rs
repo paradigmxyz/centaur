@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use super::*;
 
 #[test]
@@ -21,6 +19,37 @@ fn harness_auth_fragments_are_baked_in() {
     for name in ["AMP_API_KEY", "GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
         assert_eq!(placeholders.get(name).map(String::as_str), Some(name));
     }
+}
+
+#[test]
+fn pg_sandbox_dsns_reads_name_and_database_from_fragments() {
+    // A listener with a sandbox_env (the api-rs-internal annotation api-rs
+    // stamps from each tool's declared pg_dsn name/database) is surfaced; a
+    // listener without one (proxy-only) is skipped. Results are sorted/deduped.
+    let fragment = load_fragment_str(
+        r#"
+postgres:
+  - name: reshift_dsn
+    sandbox_env:
+      name: RESHIFT_DSN
+      database: warehouse
+  - name: analytics_dsn
+    sandbox_env:
+      name: ANALYTICS_DSN
+      database: analytics
+  - name: proxy_only
+"#,
+    )
+    .unwrap();
+
+    let dsns = pg_sandbox_dsns(&[fragment.clone(), fragment]);
+    assert_eq!(
+        dsns,
+        vec![
+            ("ANALYTICS_DSN".to_owned(), "analytics".to_owned()),
+            ("RESHIFT_DSN".to_owned(), "warehouse".to_owned()),
+        ]
+    );
 }
 
 #[test]

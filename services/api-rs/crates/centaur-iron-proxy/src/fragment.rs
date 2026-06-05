@@ -110,3 +110,27 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
         .map(|value| (value.to_owned(), value.to_owned()))
         .collect()
 }
+
+/// The static catalog of sandbox Postgres DSN env vars declared across
+/// ``fragments``: ``(env_var_name, database)``. The companion of
+/// [`placeholder_env`] for `pg_dsn` secrets — each tool declares the DSN env
+/// var `name` and `database` verbatim in its `pyproject.toml`, so the shape is
+/// fixed at startup (tools don't hot-reload). iron-proxy multiplexes every
+/// upstream through one listener (routing by database), so the DSNs differ only
+/// by database; api-rs stamps the shared per-sandbox host/credential at create.
+/// This lets every sandbox (warm/bootstrap included) be born with the full DSN
+/// set without resolving a principal — the reassignable proxy enforces
+/// per-principal access at runtime. Sorted and deduped for stable env ordering.
+pub fn pg_sandbox_dsns(fragments: &[ProxyFragment]) -> Vec<(String, String)> {
+    let mut dsns: Vec<(String, String)> = fragments
+        .iter()
+        .flat_map(|fragment| &fragment.postgres)
+        .filter_map(|listener| {
+            let sandbox_env = listener.sandbox_env.as_ref()?;
+            Some((sandbox_env.name.clone()?, sandbox_env.database.clone()?))
+        })
+        .collect();
+    dsns.sort();
+    dsns.dedup();
+    dsns
+}

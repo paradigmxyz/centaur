@@ -5,7 +5,7 @@ use std::{
 };
 
 use centaur_iron_proxy::{
-    PostgresListener, PostgresUpstream, ProxyFragment, Secret, SecretReplace, Transform,
+    PostgresListener, PostgresUpstream, ProxyFragment, SandboxEnv, Secret, SecretReplace, Transform,
     TransformConfig,
 };
 use serde::Serialize;
@@ -859,6 +859,15 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
                     )])?),
                     ..Default::default()
                 }),
+                // Retain the declared DSN env var name + database so api-rs can
+                // bake the sandbox PG DSNs from the static fragment catalog
+                // (see `pg_sandbox_dsns`). This is an api-rs-internal annotation
+                // (`skip_serializing`) and never reaches the proxy.
+                sandbox_env: Some(SandboxEnv {
+                    name: Some(secret.name.clone()),
+                    database: Some(secret.database.clone()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             })
         })
@@ -1011,6 +1020,22 @@ mod tests {
             config.resolve_tool_dirs().unwrap(),
             vec![PathBuf::from("/base"), PathBuf::from("/overlay")]
         );
+    }
+
+    #[test]
+    fn postgres_listeners_retain_sandbox_env_name_and_database() {
+        // api-rs bakes the sandbox PG DSNs from `sandbox_env`, so the listener
+        // must carry the tool's declared env var name and database verbatim.
+        let listeners = postgres_listeners(&[ToolSecret::PgDsn(PgDsnSecret {
+            name: "RESHIFT_DSN".to_owned(),
+            secret_ref: "RESHIFT_DSN".to_owned(),
+            database: "warehouse".to_owned(),
+        })])
+        .unwrap();
+
+        let sandbox_env = listeners[0].sandbox_env.as_ref().unwrap();
+        assert_eq!(sandbox_env.name.as_deref(), Some("RESHIFT_DSN"));
+        assert_eq!(sandbox_env.database.as_deref(), Some("warehouse"));
     }
 
     #[test]
