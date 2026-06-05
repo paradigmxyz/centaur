@@ -571,6 +571,75 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('renders api-rs completion result text when no final answer delta streamed', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a terminal completion.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> complete from terminal payload`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-terminal-result-text',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> complete from terminal payload`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({
+        type: 'item.started',
+        item: {
+          id: 'cmd-1',
+          type: 'commandExecution',
+          command: 'true',
+          status: 'inProgress'
+        }
+      })
+    )
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-1',
+          type: 'commandExecution',
+          command: 'true',
+          status: 'completed',
+          aggregatedOutput: ''
+        }
+      })
+    )
+    codexApi.emitSessionEvent(threadKey(parent.ts), 'session.execution_completed', {
+      execution_id: 'exe-terminal-result',
+      status: 'completed',
+      result_text: 'TERMINAL_RESULT_VISIBLE'
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    const renderedText = transcripts[0]!.chunks.map(chunkText).filter(Boolean).join('\n')
+    expect(renderedText).toContain('Command execution')
+    expect(renderedText).toContain('TERMINAL_RESULT_VISIBLE')
+    expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
+  })
+
   it('does not duplicate final text when execution completion follows final answer deltas', async () => {
     codexApi.autoRespond = false
 

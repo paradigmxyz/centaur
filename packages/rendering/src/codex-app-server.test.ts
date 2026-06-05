@@ -116,6 +116,36 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('hydrates final answer text from Rust execution completion payloads', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    mapper.process({
+      eventKind: 'session.output.line',
+      data: JSON.stringify({
+        type: 'item.started',
+        item: { id: 'cmd-1', type: 'commandExecution', command: 'true' }
+      })
+    })
+
+    const events = mapper.process({
+      eventKind: 'session.execution_completed',
+      data: {
+        execution_id: 'exe-1',
+        result_text: 'TERMINAL_RESULT_OK'
+      }
+    })
+
+    expect(events).toContainEqual({
+      type: 'renderer.message.delta',
+      delta: 'TERMINAL_RESULT_OK',
+      force: true,
+      planPrefix: true
+    })
+    expect(events.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'TERMINAL_RESULT_OK'
+    })
+  })
+
   it('maps app-server agent message deltas keyed by turnId', () => {
     const mapper = new CodexAppServerRendererEventMapper()
     const events = mapper.process({

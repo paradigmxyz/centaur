@@ -96,7 +96,7 @@ export class CodexAppServerRendererEventMapper
 
     const rustMapped = rustSessionEventToServerNotification(source)
     if (rustMapped?.kind === 'failed') return this.fail(rustMapped.error)
-    if (rustMapped?.kind === 'completed') return this.flush()
+    if (rustMapped?.kind === 'completed') return this.complete(rustMapped.resultText)
     if (rustMapped?.kind === 'notification') return this.processNotification(rustMapped.notification)
 
     if (!isRecord(source)) return []
@@ -120,6 +120,20 @@ export class CodexAppServerRendererEventMapper
       threadId: this.state.threadId || undefined
     })
     return out
+  }
+
+  private complete(resultText?: string): RendererEvent[] {
+    if (this.state.done) return []
+    const normalized = resultText?.trim() ?? ''
+    if (normalized && !this.state.answerText.trim()) {
+      const out: RendererEvent[] = []
+      this.state.harnessAnswerText += normalized
+      recomposeBuffers(this.state)
+      this.emitPendingAssistantText(out, { force: true })
+      out.push(...this.flush())
+      return out
+    }
+    return this.flush()
   }
 
   isDone(): boolean {
@@ -593,7 +607,7 @@ async function* renderChatSdkChunks(
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
-  | { kind: 'completed' }
+  | { kind: 'completed'; resultText?: string }
   | null
 
 export function rustSessionEventToServerNotification(source: unknown): RustSessionMappingResult {
@@ -634,7 +648,12 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
     eventKind === 'session.execution_completed' ||
     eventKind === 'session.execution_cancelled'
   ) {
-    return { kind: 'completed' }
+    const data = isRecord(source.data) ? source.data : source
+    const resultText = terminalResultText(data).trim()
+    return {
+      kind: 'completed',
+      ...(resultText ? { resultText } : {})
+    }
   }
 
   return null
