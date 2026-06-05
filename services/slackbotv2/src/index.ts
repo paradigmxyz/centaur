@@ -15,6 +15,7 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import {
   codexAppServerToChatSdkStream,
   type CodexAppServerToChatStreamOptions,
+  type ChatSDKStreamChunk,
   type RendererEvent
 } from '@centaur/rendering'
 import {
@@ -664,9 +665,13 @@ async function renderExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   try {
+    const visibleStream = await streamAfterFirstChunk(
+      codexAppServerToChatSdkStream(stream, rendererOptions(thread, options))
+    )
+    if (!visibleStream) return
     await thread.post(
       new StreamingPlan(
-        codexAppServerToChatSdkStream(stream, rendererOptions(thread, options)),
+        visibleStream,
         { groupTasks: options.streamTaskDisplayMode ?? 'plan' }
       )
     )
@@ -689,9 +694,13 @@ async function renderRecoveredExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   try {
+    const visibleStream = await streamAfterFirstChunk(
+      codexAppServerToChatSdkStream(stream, rendererOptions(thread, options))
+    )
+    if (!visibleStream) return
     await thread.adapter.stream!(
       thread.id,
-      codexAppServerToChatSdkStream(stream, rendererOptions(thread, options)),
+      visibleStream,
       {
         recipientTeamId: message.teamId,
         recipientUserId: message.author.userId,
@@ -700,6 +709,25 @@ async function renderRecoveredExecutionStream(
     )
   } finally {
     await setAssistantStatus(thread, '')
+  }
+}
+
+async function streamAfterFirstChunk(
+  stream: AsyncIterable<ChatSDKStreamChunk>
+): Promise<AsyncIterable<ChatSDKStreamChunk> | null> {
+  const iterator = stream[Symbol.asyncIterator]()
+  const first = await iterator.next()
+  if (first.done) return null
+
+  return {
+    async *[Symbol.asyncIterator](): AsyncIterator<ChatSDKStreamChunk> {
+      yield first.value
+      for (;;) {
+        const next = await iterator.next()
+        if (next.done) return
+        yield next.value
+      }
+    }
   }
 }
 

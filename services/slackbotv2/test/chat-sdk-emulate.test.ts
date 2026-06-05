@@ -640,6 +640,50 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
+  it('does not create an empty Slack stream before the first visible renderer chunk', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a silent execution.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> wait for actual output`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-no-empty-stream-before-output',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> wait for actual output`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+    await sleep(50)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
+
+    codexApi.emitSessionEvent(threadKey(parent.ts), 'session.execution_completed', {
+      execution_id: 'exe-delayed-visible-output',
+      status: 'completed',
+      result_text: 'DELAYED_VISIBLE_OUTPUT'
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    const renderedText = transcripts[0]!.chunks.map(chunkText).filter(Boolean).join('\n')
+    expect(renderedText).toContain('DELAYED_VISIBLE_OUTPUT')
+  })
+
   it('does not duplicate final text when execution completion follows final answer deltas', async () => {
     codexApi.autoRespond = false
 
