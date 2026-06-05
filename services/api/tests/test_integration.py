@@ -714,6 +714,33 @@ class TestBuildSessionContext:
         assert await _get_latest_thread_user_id(thread_key) == "U789"
 
     @pytest.mark.asyncio
+    async def test_latest_thread_user_id_ignores_history_backfill_root(
+        self, db_pool
+    ):
+        from api.agent import _get_latest_thread_user_id
+
+        thread_key = "test:requester-history-root"
+        await db_pool.execute(
+            "INSERT INTO workflow_runs ("
+            "run_id, workflow_name, workflow_version, request_hash, root_run_id, "
+            "thread_key, status, input_json, created_at"
+            ") VALUES ($1, 'slack_thread_turn', 'test', 'hash', $1, $2, 'queued', "
+            "$3::jsonb, NOW() - INTERVAL '1 minute')",
+            "wfr-requester-history-root",
+            thread_key,
+            '{"user_id": "U_PROMPTER"}',
+        )
+        await db_pool.execute(
+            "INSERT INTO chat_messages (id, thread_key, role, parts, user_id, metadata, created_at) "
+            "VALUES ($1, $2, 'user', '[]'::jsonb, 'U_THREAD_OP', $3::jsonb, NOW())",
+            "msg-history-root",
+            thread_key,
+            '{"history_backfill": true, "platform": "slack"}',
+        )
+
+        assert await _get_latest_thread_user_id(thread_key) == "U_PROMPTER"
+
+    @pytest.mark.asyncio
     async def test_insert_system_message_uses_thread_user_id_fallback(
         self, db_pool, monkeypatch
     ):
@@ -847,6 +874,66 @@ class TestBuildSessionContext:
 
         assert first_created_at is not None
         assert refreshed_created_at == expected_created_at
+
+    @pytest.mark.asyncio
+    async def test_insert_system_message_requeues_context_when_requester_changes(
+        self, db_pool, monkeypatch
+    ):
+        from api import agent
+
+        thread_key = "test:requester-context-user-change"
+        system_msg_id = f"system-{thread_key}-slack"
+        cursor_id = "msg-requester-context-cursor"
+        handles = {
+            "U_THREAD_OP": "@old-user",
+            "U_PROMPTER": "@new-user",
+        }
+
+        async def fake_resolve_requester_identity(*, platform, user_id):
+            return {
+                "slack_user_id": user_id,
+                "slack_mention": f"<@{user_id}>",
+                "github_handle": handles[user_id],
+                "github_handle_source": 'Slack profile custom field "GitHub"',
+                "github_handle_verified": True,
+            }
+
+        monkeypatch.setattr(
+            agent,
+            "_resolve_requester_identity",
+            fake_resolve_requester_identity,
+        )
+
+        await agent._insert_system_message(thread_key, "slack", user_id="U_THREAD_OP")
+        await db_pool.execute(
+            "UPDATE chat_messages SET created_at = NOW() - INTERVAL '10 minutes' "
+            "WHERE id = $1",
+            system_msg_id,
+        )
+        await db_pool.execute(
+            "INSERT INTO chat_messages (id, thread_key, role, parts, user_id, metadata, created_at) "
+            "VALUES ($1, $2, 'user', '[]'::jsonb, 'U_THREAD_OP', '{}'::jsonb, "
+            "NOW() - INTERVAL '5 minutes')",
+            cursor_id,
+            thread_key,
+        )
+
+        await agent._insert_system_message(thread_key, "slack", user_id="U_PROMPTER")
+
+        pending = await agent._flush_pending(thread_key, cursor_id)
+
+        assert [row["id"] for row in pending] == [system_msg_id]
+        metadata = pending[0]["metadata"]
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        assert metadata["prompt_requester_user_id"] == "U_PROMPTER"
+
+        parts = pending[0]["parts"]
+        if isinstance(parts, str):
+            parts = json.loads(parts)
+        text = parts[0]["text"]
+        assert "Slack user ID: U_PROMPTER" in text
+        assert "Prompted by: @new-user" in text
 
 
 # ── Test 7: Status endpoint ──────────────────────────────────────────────────

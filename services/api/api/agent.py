@@ -551,6 +551,9 @@ async def _get_latest_thread_user_id(thread_key: str) -> str | None:
     where execution is when prompt context is assembled. Prefer the newest row
     across those sources so the session context does not depend on one caller
     preserving one specific delivery field.
+
+    Slack history backfill rows preserve thread context and may include the
+    thread root author. They are not the requester for the active prompt.
     """
     pool = _get_pool()
     row = await pool.fetchrow(
@@ -558,6 +561,7 @@ async def _get_latest_thread_user_id(thread_key: str) -> str | None:
         "  SELECT COALESCE(user_id, metadata->>'user_id') AS user_id, created_at, 1 AS source_rank "
         "  FROM chat_messages "
         "  WHERE thread_key = $1 AND role = 'user' "
+        "    AND COALESCE(metadata->>'history_backfill', 'false') <> 'true' "
         "  UNION ALL "
         "  SELECT COALESCE(metadata->>'user_id', delivery->>'recipient_user_id', delivery->>'user_id') "
         "    AS user_id, created_at, 2 AS source_rank "
@@ -722,6 +726,12 @@ async def _insert_system_message(
         platform=effective_platform,
         user_id=effective_user_id,
     )
+    context_metadata = {
+        "session_context": True,
+        "platform": effective_platform or "generic",
+    }
+    if effective_user_id:
+        context_metadata["prompt_requester_user_id"] = effective_user_id
     context = _build_session_context(
         thread_key,
         platform=effective_platform,
@@ -741,13 +751,22 @@ async def _insert_system_message(
     )
     await pool.execute(
         "INSERT INTO chat_messages (id, thread_key, role, parts, metadata) "
-        "VALUES ($1, $2, 'system', $3::jsonb, '{}'::jsonb) "
-        "ON CONFLICT (id) DO UPDATE SET parts = EXCLUDED.parts "
+        "VALUES ($1, $2, 'system', $3::jsonb, $5::jsonb) "
+        "ON CONFLICT (id) DO UPDATE SET "
+        "  parts = EXCLUDED.parts, "
+        "  metadata = EXCLUDED.metadata, "
+        "  created_at = CASE "
+        "    WHEN chat_messages.metadata->>'prompt_requester_user_id' "
+        "      IS DISTINCT FROM EXCLUDED.metadata->>'prompt_requester_user_id' "
+        "    THEN NOW() "
+        "    ELSE chat_messages.created_at "
+        "  END "
         "WHERE $4::boolean",
         msg_id,
         thread_key,
         json.dumps([{"type": "text", "text": context}]),
         bool(effective_user_id),
+        json.dumps(context_metadata),
     )
 
 
