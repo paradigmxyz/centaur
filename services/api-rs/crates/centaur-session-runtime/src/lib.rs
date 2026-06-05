@@ -977,7 +977,7 @@ async fn run_stdout_pump(
 
 #[derive(Default)]
 struct StdoutPumpState {
-    saw_final_answer_by_execution: HashMap<String, bool>,
+    final_answer_text_by_execution: HashMap<String, String>,
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
 }
@@ -999,10 +999,10 @@ impl StdoutPumpState {
             }
             if terminal_output(
                 &value,
-                self.saw_final_answer_by_execution
+                self.final_answer_text_by_execution
                     .get(&known_execution_id)
-                    .copied()
-                    .unwrap_or(false),
+                    .map(String::as_str)
+                    .unwrap_or(""),
             )
             .is_some()
             {
@@ -1018,21 +1018,27 @@ impl StdoutPumpState {
 
     fn observe(&mut self, execution_id: &str, line: &str) -> Option<TerminalOutput> {
         let value: Value = serde_json::from_str(line).ok()?;
-        if output_line_carries_final_answer_text(&value) {
-            self.saw_final_answer_by_execution
-                .insert(execution_id.to_owned(), true);
+        if let Some(update) = output_line_final_answer_text(&value) {
+            let text = self
+                .final_answer_text_by_execution
+                .entry(execution_id.to_owned())
+                .or_default();
+            match update {
+                FinalAnswerTextUpdate::Append(delta) => text.push_str(&delta),
+                FinalAnswerTextUpdate::Replace(canonical) => *text = canonical,
+            }
         }
         terminal_output(
             &value,
-            self.saw_final_answer_by_execution
+            self.final_answer_text_by_execution
                 .get(execution_id)
-                .copied()
-                .unwrap_or(false),
+                .map(String::as_str)
+                .unwrap_or(""),
         )
     }
 
     fn forget(&mut self, execution_id: &str) {
-        self.saw_final_answer_by_execution.remove(execution_id);
+        self.final_answer_text_by_execution.remove(execution_id);
         self.turn_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
         self.item_execution_by_id
@@ -1400,7 +1406,7 @@ fn is_event_stream_attach_race(error: &SessionRuntimeError) -> bool {
     )
 }
 
-fn terminal_output(value: &Value, saw_final_answer_text: bool) -> Option<TerminalOutput> {
+fn terminal_output(value: &Value, prior_final_answer_text: &str) -> Option<TerminalOutput> {
     let method = value.get("method").and_then(Value::as_str);
     let event_type = value.get("type").and_then(Value::as_str);
 
@@ -1413,13 +1419,17 @@ fn terminal_output(value: &Value, saw_final_answer_text: bool) -> Option<Termina
     }
 
     if method == Some("turn/completed") {
-        return Some(completed_turn_terminal_output(value, saw_final_answer_text));
+        return Some(completed_turn_terminal_output(
+            value,
+            prior_final_answer_text,
+        ));
     }
 
     match event_type {
-        Some("turn.completed") => {
-            Some(completed_turn_terminal_output(value, saw_final_answer_text))
-        }
+        Some("turn.completed") => Some(completed_turn_terminal_output(
+            value,
+            prior_final_answer_text,
+        )),
         Some("turn.done") => Some(completed_terminal_output(value, "turn_done")),
         Some("result") => {
             if result_is_failure(value) {
@@ -1434,13 +1444,21 @@ fn terminal_output(value: &Value, saw_final_answer_text: bool) -> Option<Termina
     }
 }
 
-fn completed_turn_terminal_output(value: &Value, saw_final_answer_text: bool) -> TerminalOutput {
+fn completed_turn_terminal_output(value: &Value, prior_final_answer_text: &str) -> TerminalOutput {
     match turn_completion_status(value).as_deref() {
         Some("completed" | "succeeded" | "success") | None => {
-            completed_terminal_output(value, "turn_completed")
+            completed_terminal_output_with_fallback(
+                value,
+                "turn_completed",
+                prior_final_answer_text,
+            )
         }
-        Some(_status) if saw_final_answer_text => {
-            completed_terminal_output(value, "turn_completed")
+        Some(_status) if !prior_final_answer_text.trim().is_empty() => {
+            completed_terminal_output_with_fallback(
+                value,
+                "turn_completed",
+                prior_final_answer_text,
+            )
         }
         Some(status) => TerminalOutput::Failed {
             error: format!("turn completed with status {status} before final answer"),
@@ -1449,7 +1467,20 @@ fn completed_turn_terminal_output(value: &Value, saw_final_answer_text: bool) ->
 }
 
 fn completed_terminal_output(value: &Value, reason: &'static str) -> TerminalOutput {
+    completed_terminal_output_with_fallback(value, reason, "")
+}
+
+fn completed_terminal_output_with_fallback(
+    value: &Value,
+    reason: &'static str,
+    fallback_text: &str,
+) -> TerminalOutput {
     let result_text = terminal_payload_text(value).trim().to_owned();
+    let result_text = if result_text.is_empty() {
+        fallback_text.trim().to_owned()
+    } else {
+        result_text
+    };
     TerminalOutput::Completed {
         reason,
         result_text: (!result_text.is_empty()).then_some(result_text),
@@ -1468,18 +1499,43 @@ fn turn_completion_status(value: &Value) -> Option<String> {
     .next()
 }
 
-fn output_line_carries_final_answer_text(value: &Value) -> bool {
+enum FinalAnswerTextUpdate {
+    Append(String),
+    Replace(String),
+}
+
+fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate> {
     let method = value.get("method").and_then(Value::as_str);
     let event_type = value.get("type").and_then(Value::as_str);
     if matches!(method, Some("item/agentMessage/delta"))
         || matches!(event_type, Some("item.agentMessage.delta"))
     {
-        return !terminal_payload_text(value).trim().is_empty();
+        let text = terminal_payload_text(value).trim().to_owned();
+        return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Append(text));
     }
     if event_type == Some("assistant") {
-        return !terminal_payload_text(value).trim().is_empty();
+        let text = terminal_payload_text(value).trim().to_owned();
+        return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
     }
-    false
+    if matches!(method, Some("item/completed")) || matches!(event_type, Some("item.completed")) {
+        let item = value
+            .get("item")
+            .or_else(|| value.get("params").and_then(|params| params.get("item")));
+        if let Some(item) = item
+            && matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("agentMessage" | "agent_message")
+            )
+            && matches!(
+                item.get("phase").and_then(Value::as_str),
+                Some("final_answer" | "answer") | None
+            )
+        {
+            let text = terminal_payload_text(item).trim().to_owned();
+            return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
+        }
+    }
+    None
 }
 
 fn turn_ids(value: &Value) -> Vec<String> {
@@ -1936,7 +1992,7 @@ mod tests {
         });
 
         assert_eq!(
-            terminal_output(&event, false),
+            terminal_output(&event, ""),
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
                 result_text: None
@@ -1955,12 +2011,45 @@ mod tests {
             "params": {"turn": {"id": "turn-1", "status": "completed"}},
         });
 
-        assert!(output_line_carries_final_answer_text(&delta));
+        assert!(matches!(
+            output_line_final_answer_text(&delta),
+            Some(FinalAnswerTextUpdate::Append(_))
+        ));
         assert_eq!(
-            terminal_output(&terminal, true),
+            terminal_output(&terminal, "Final answer"),
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
-                result_text: None
+                result_text: Some("Final answer".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn turn_completed_uses_completed_agent_message_text_when_terminal_is_empty() {
+        let completed = json!({
+            "type": "item.completed",
+            "item": {
+                "id": "msg-final",
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "1. No new findings.\n\n2. No writes were used."
+            }
+        });
+        let terminal = json!({
+            "type": "turn.completed",
+            "turn": {"id": "turn-1", "status": "completed"},
+        });
+
+        let Some(FinalAnswerTextUpdate::Replace(final_text)) =
+            output_line_final_answer_text(&completed)
+        else {
+            panic!("completed agentMessage should replace final answer text")
+        };
+        assert_eq!(
+            terminal_output(&terminal, &final_text),
+            Some(TerminalOutput::Completed {
+                reason: "turn_completed",
+                result_text: Some("1. No new findings.\n\n2. No writes were used.".to_owned())
             })
         );
     }
@@ -1973,7 +2062,7 @@ mod tests {
         });
 
         assert_eq!(
-            terminal_output(&event, false),
+            terminal_output(&event, ""),
             Some(TerminalOutput::Failed {
                 error: "turn completed with status interrupted before final answer".to_owned()
             })
@@ -1988,10 +2077,10 @@ mod tests {
         });
 
         assert_eq!(
-            terminal_output(&event, true),
+            terminal_output(&event, "Final answer"),
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
-                result_text: None
+                result_text: Some("Final answer".to_owned())
             })
         );
     }
@@ -2004,7 +2093,7 @@ mod tests {
         });
 
         assert_eq!(
-            terminal_output(&event, false),
+            terminal_output(&event, ""),
             Some(TerminalOutput::Completed {
                 reason: "result",
                 result_text: Some("Final answer".to_owned())
@@ -2020,7 +2109,7 @@ mod tests {
         });
 
         assert_eq!(
-            terminal_output(&event, false),
+            terminal_output(&event, ""),
             Some(TerminalOutput::Completed {
                 reason: "turn_done",
                 result_text: Some("Final answer".to_owned())
@@ -2036,7 +2125,7 @@ mod tests {
         });
 
         assert_eq!(
-            terminal_output(&event, false),
+            terminal_output(&event, ""),
             Some(TerminalOutput::Failed {
                 error: "sandbox exited".to_owned()
             })
@@ -2211,6 +2300,30 @@ mod tests {
         );
         assert_eq!(state.execution_for_line(None, delta), None);
         assert_eq!(state.execution_for_line(Some("exe-new"), delta), None);
+    }
+
+    #[test]
+    fn stdout_state_uses_final_agent_message_when_turn_completed_is_textless() {
+        let mut state = StdoutPumpState::default();
+        let started = r#"{"type":"turn.started","turn_id":"turn-1"}"#;
+        let delta = r#"{"type":"item.agentMessage.delta","turnId":"turn-1","itemId":"msg-final","delta":"draft"}"#;
+        let completed = r#"{"type":"item.completed","item":{"id":"msg-final","type":"agentMessage","phase":"final_answer","text":"Final canonical answer."}}"#;
+        let terminal =
+            r#"{"type":"turn.completed","turn":{"id":"turn-1","status":"completed"},"usage":null}"#;
+
+        assert_eq!(
+            state.execution_for_line(Some("exe-1"), started),
+            Some("exe-1".to_owned())
+        );
+        assert_eq!(state.observe("exe-1", delta), None);
+        assert_eq!(state.observe("exe-1", completed), None);
+        assert_eq!(
+            state.observe("exe-1", terminal),
+            Some(TerminalOutput::Completed {
+                reason: "turn_completed",
+                result_text: Some("Final canonical answer.".to_owned())
+            })
+        );
     }
 
     #[test]
