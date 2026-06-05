@@ -82,7 +82,7 @@ const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
-const SLACK_TASK_FIELD_MAX_CHARS = 2_500
+const SLACK_TASK_DETAILS_MAX_CHARS = 500
 
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
@@ -723,18 +723,19 @@ async function* slackSafeChatSdkStream(
 
 function slackSafeChatSdkChunk(chunk: ChatSDKStreamChunk): ChatSDKStreamChunk {
   if (chunk.type !== 'task_update') return chunk
+  const { output: _output, details, ...safeChunk } = chunk
+  void _output
   return {
-    ...chunk,
-    ...(chunk.details ? { details: truncateSlackTaskField(chunk.details) } : {}),
-    ...(chunk.output ? { output: truncateSlackTaskField(chunk.output) } : {})
+    ...safeChunk,
+    ...(details ? { details: truncateSlackTaskField(details) } : {})
   }
 }
 
 function truncateSlackTaskField(value: string): string {
-  if (value.length <= SLACK_TASK_FIELD_MAX_CHARS) return value
-  const omitted = value.length - SLACK_TASK_FIELD_MAX_CHARS
-  const suffix = `\n[truncated ${omitted} chars from Slack task output]`
-  const keep = Math.max(0, SLACK_TASK_FIELD_MAX_CHARS - suffix.length)
+  if (value.length <= SLACK_TASK_DETAILS_MAX_CHARS) return value
+  const omitted = value.length - SLACK_TASK_DETAILS_MAX_CHARS
+  const suffix = `\n[truncated ${omitted} chars from Slack task details]`
+  const keep = Math.max(0, SLACK_TASK_DETAILS_MAX_CHARS - suffix.length)
   return `${value.slice(0, keep).trimEnd()}${suffix}`
 }
 

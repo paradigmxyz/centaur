@@ -253,7 +253,7 @@ describe('slackbotv2', () => {
     expect(text).toContain('Inspecting the event stream')
     expect(text).toContain('Command execution')
     expect(text).toContain('pnpm test')
-    expect(text).toContain('tests passed')
+    expect(text).not.toContain('tests passed')
     expect(text).toContain('Executed request 1.')
     expect(text).toContain('Executed request 2.')
 
@@ -755,7 +755,7 @@ describe('slackbotv2', () => {
     ).toHaveLength(1)
   })
 
-  it('truncates large structured task output so final markdown still delivers', async () => {
+  it('omits large structured task output so final markdown still delivers', async () => {
     codexApi.autoRespond = false
 
     const parent = await postUserMessage('Context before large task output.')
@@ -785,31 +785,33 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
 
     const largeOutput = 'large-context-line\n'.repeat(600)
-    codexApi.emitOutputLine(
-      threadKey(parent.ts),
-      JSON.stringify({
-        type: 'item.started',
-        item: {
-          id: 'cmd-large',
-          type: 'commandExecution',
-          command: 'slack thread --json',
-          status: 'inProgress'
-        }
-      })
-    )
-    codexApi.emitOutputLine(
-      threadKey(parent.ts),
-      JSON.stringify({
-        type: 'item.completed',
-        item: {
-          id: 'cmd-large',
-          type: 'commandExecution',
-          command: 'slack thread --json',
-          status: 'completed',
-          aggregatedOutput: largeOutput
-        }
-      })
-    )
+    for (let index = 0; index < 6; index += 1) {
+      codexApi.emitOutputLine(
+        threadKey(parent.ts),
+        JSON.stringify({
+          type: 'item.started',
+          item: {
+            id: `cmd-large-${index}`,
+            type: 'commandExecution',
+            command: `slack thread --json --page ${index}`,
+            status: 'inProgress'
+          }
+        })
+      )
+      codexApi.emitOutputLine(
+        threadKey(parent.ts),
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: `cmd-large-${index}`,
+            type: 'commandExecution',
+            command: `slack thread --json --page ${index}`,
+            status: 'completed',
+            aggregatedOutput: largeOutput
+          }
+        })
+      )
+    }
     codexApi.emitOutputLine(
       threadKey(parent.ts),
       JSON.stringify({
@@ -838,12 +840,16 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
     const transcripts = slackStreamTranscripts(slackApi.calls)
     expect(transcripts).toHaveLength(1)
-    const taskOutputs = transcripts[0]!.chunks
-      .filter(chunk => chunk.type === 'task_update')
-      .map(chunk => stringField(chunk.output))
-      .filter(Boolean)
-    expect(taskOutputs.some(output => output.includes('[truncated'))).toBe(true)
-    expect(taskOutputs.every(output => output.length <= 2500)).toBe(true)
+    const taskChunks = transcripts[0]!.chunks.filter(chunk => chunk.type === 'task_update')
+    expect(taskChunks).not.toHaveLength(0)
+    expect(taskChunks.every(chunk => stringField(chunk.output) === '')).toBe(true)
+    expect(taskChunks.every(chunk => !chunkText(chunk).includes('large-context-line'))).toBe(true)
+    expect(
+      taskChunks
+        .map(chunk => stringField(chunk.details))
+        .filter(Boolean)
+        .every(details => details.length <= 500)
+    ).toBe(true)
     const markdownChunks = transcripts[0]!.chunks.filter(chunk => chunk.type === 'markdown_text')
     expect(markdownChunks).toEqual([
       {
@@ -2336,14 +2342,11 @@ function expectSlackPlanStreamShape(
         details: expect.stringContaining('pnpm test')
       })
     )
-    expect(progressChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        id: 'cmd-1',
-        title: '1. Command execution',
-        output: expect.stringContaining('tests passed')
-      })
-    )
+    expect(
+      progressChunks
+        .filter(chunk => chunk.type === 'task_update')
+        .every(chunk => stringField(chunk.output) === '')
+    ).toBe(true)
 
     expect(renderedText).toContain('Implementation plan')
     expect(renderedText).toContain('Inspect App Server events')
@@ -2352,7 +2355,7 @@ function expectSlackPlanStreamShape(
     expect(renderedText).toContain('Inspecting the event stream')
     expect(renderedText).toContain('Command execution')
     expect(renderedText).toContain('pnpm test')
-    expect(renderedText).toContain('tests passed')
+    expect(renderedText).not.toContain('tests passed')
     expect(renderedText.trim().endsWith(answer)).toBe(true)
   }
 }
@@ -2366,7 +2369,7 @@ function expectSlackRenderedReply(text: string, answer: string): void {
   expect(text).toContain('Inspecting the event stream')
   expect(text).toContain('Command execution')
   expect(text).toContain('pnpm test')
-  expect(text).toContain('tests passed')
+  expect(text).not.toContain('tests passed')
   expect(text.trim().endsWith(answer)).toBe(true)
 }
 
