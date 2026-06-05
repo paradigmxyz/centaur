@@ -8,6 +8,7 @@ use thiserror::Error;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateSessionRequest {
     pub harness_type: HarnessType,
+    pub persona_id: Option<String>,
     pub metadata: Option<Value>,
 }
 

@@ -63,17 +63,19 @@ impl PgSessionStore {
         &self,
         thread_key: &ThreadKey,
         harness_type: &HarnessType,
+        persona_id: Option<&str>,
         metadata: Value,
     ) -> Result<Session, SessionStoreError> {
         sqlx::query(
             r#"
-            insert into sessions (thread_key, harness_type, status, metadata)
-            values ($1, $2, $3, $4)
+            insert into sessions (thread_key, harness_type, persona_id, status, metadata)
+            values ($1, $2, $3, $4, $5)
             on conflict (thread_key) do nothing
             "#,
         )
         .bind(thread_key.as_str())
         .bind(harness_type.as_ref())
+        .bind(persona_id)
         .bind(SessionStatus::Idle.as_ref())
         .bind(metadata)
         .execute(&self.pool)
@@ -87,13 +89,20 @@ impl PgSessionStore {
                 requested: harness_type.as_ref().to_owned(),
             });
         }
+        if session.persona_id.as_deref() != persona_id {
+            return Err(SessionStoreError::PersonaConflict {
+                thread_key: thread_key.as_str().to_owned(),
+                existing: session.persona_id,
+                requested: persona_id.map(str::to_owned),
+            });
+        }
         Ok(session)
     }
 
     pub async fn get_session(&self, thread_key: &ThreadKey) -> Result<Session, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
-            select thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
+            select thread_key, sandbox_id, harness_type, harness_thread_id, persona_id, status, iron_control_principal, created_at, updated_at
             from sessions
             where thread_key = $1
             "#,
@@ -447,7 +456,7 @@ impl PgSessionStore {
             update sessions
             set sandbox_id = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
+            returning thread_key, sandbox_id, harness_type, harness_thread_id, persona_id, status, iron_control_principal, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -468,7 +477,7 @@ impl PgSessionStore {
             update sessions
             set iron_control_principal = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
+            returning thread_key, sandbox_id, harness_type, harness_thread_id, persona_id, status, iron_control_principal, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -576,7 +585,7 @@ impl PgSessionStore {
             update sessions
             set harness_thread_id = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, sandbox_id, harness_type, harness_thread_id, status, iron_control_principal, created_at, updated_at
+            returning thread_key, sandbox_id, harness_type, harness_thread_id, persona_id, status, iron_control_principal, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -649,6 +658,14 @@ pub enum SessionStoreError {
         existing: String,
         requested: String,
     },
+    #[error(
+        "session {thread_key} already exists with persona_id {existing:?}, requested {requested:?}"
+    )]
+    PersonaConflict {
+        thread_key: String,
+        existing: Option<String>,
+        requested: Option<String>,
+    },
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),
     #[error("invalid notification payload on {channel}: {payload}: {error}")]
@@ -669,6 +686,7 @@ struct SessionRow {
     sandbox_id: Option<String>,
     harness_type: String,
     harness_thread_id: Option<String>,
+    persona_id: Option<String>,
     status: String,
     iron_control_principal: Option<String>,
     created_at: OffsetDateTime,
@@ -684,6 +702,7 @@ impl TryFrom<SessionRow> for Session {
             sandbox_id: row.sandbox_id,
             harness_type: parse_persisted(row.harness_type)?,
             harness_thread_id: row.harness_thread_id,
+            persona_id: row.persona_id,
             status: parse_persisted(row.status)?,
             iron_control_principal: row.iron_control_principal,
             created_at: row.created_at,

@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
             &thread_key,
             CreateSessionRequest {
                 harness_type: args.harness_type.into(),
+                persona_id: None,
                 metadata: Some(json!({
                     "source": "centaur-session-cli",
                 })),

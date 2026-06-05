@@ -159,6 +159,7 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         harness_type: &HarnessType,
+        persona_id: Option<&str>,
         metadata: Option<Value>,
     ) -> Result<Session, SessionRuntimeError> {
         // Read slack_user_id before `metadata` is consumed below; it keys the
@@ -170,7 +171,12 @@ impl SessionRuntime {
             .map(ToOwned::to_owned);
         let session = self
             .store
-            .create_or_get_session(thread_key, harness_type, default_metadata(metadata))
+            .create_or_get_session(
+                thread_key,
+                harness_type,
+                persona_id,
+                default_metadata(metadata),
+            )
             .await?;
         if let Some(registrar) = &self.iron_control {
             // iron-control is the source of truth for the session's egress
@@ -2580,6 +2586,7 @@ mod tests {
             sandbox_id: Some(sandbox_id.to_owned()),
             harness_type: HarnessType::Codex,
             harness_thread_id: None,
+            persona_id: None,
             status: SessionStatus::Idle,
             iron_control_principal: None,
             created_at: now,

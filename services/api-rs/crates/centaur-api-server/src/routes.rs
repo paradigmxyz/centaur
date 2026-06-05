@@ -55,7 +55,12 @@ async fn create_or_get_session(
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let session = state
         .runtime
-        .create_or_get_session(&thread_key, &request.harness_type, request.metadata)
+        .create_or_get_session(
+            &thread_key,
+            &request.harness_type,
+            request.persona_id.as_deref(),
+            request.metadata,
+        )
         .await?;
     Ok(Json(session))
 }
