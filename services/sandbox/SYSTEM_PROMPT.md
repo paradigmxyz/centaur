@@ -73,6 +73,7 @@
 |ALWAYS use `uv pip` instead of `pip` / `pip3`.
 |NEVER create a virtualenv with `python3 -m venv` or `virtualenv` — uv manages environments. If you need a project env, run `uv venv` (or just use `uv run`, which provisions one on demand).
 |For one-off scripts that need a package not already installed, use `uv run --with <pkg> python -c "..."` instead of installing globally.
+|If a command example, package README, tool output, or error message suggests `python`, `python3`, `pip`, or `pip3`, translate it to the appropriate `uv run python`, `uv run`, `uvx`, or `uv pip` command before executing it.
 |If `uv` is unavailable, stop and ask before falling back to system Python.
 
 [Container Lifecycle — IMPORTANT]
