@@ -413,7 +413,7 @@ describe('AgentSessionRenderer', () => {
     expect(stop?.params.blocks?.length ?? 0).toBeLessThanOrEqual(50)
   })
 
-  it('does not duplicate live plan or streamed answer markdown on finalize', async () => {
+  it('keeps streamed final answers in the durable stopStream layout', async () => {
     const calls: Array<{ method: string; params: any }> = []
     const client = {
       assistant: {
@@ -460,7 +460,10 @@ describe('AgentSessionRenderer', () => {
     const stop = calls.find(call => call.method === 'chat.stopStream')
     const blocks = stop?.params.blocks ?? []
     expect(blocks.some((block: any) => block.type === 'plan')).toBe(false)
-    expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
+    const answerBlocks = blocks.filter(
+      (block: any) => block.type === 'markdown' && block.text.includes('Live answer body.')
+    )
+    expect(answerBlocks).toHaveLength(1)
     expect(stop?.params.chunks).toBeUndefined()
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
     expect(stopStreamFallbackText(stop?.params).trim()).toBe('')

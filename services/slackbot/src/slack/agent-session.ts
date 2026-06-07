@@ -295,19 +295,22 @@ export class AgentSessionRenderer {
     const tasks = compactFinalTasks(originalTasks)
     const answerSource =
       state.finalAnswerMarkdown?.trim() || segment.streamedText.trim() || segment.textParts.join('')
-    const answerMarkdown = finalMarkdownForFinalBlocks(answerSource, segment, {
-      includeStreamedText: originalTasks.length >= DURABLE_STREAMED_ANSWER_TASK_THRESHOLD
-    })
+    const explicitFinalAnswer = state.finalAnswerMarkdown?.trim()
+    const answerMarkdown = explicitFinalAnswer
+      ? clipText(explicitFinalAnswer, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+      : finalMarkdownForFinalBlocks(answerSource, segment, {
+          includeStreamedText: originalTasks.length >= DURABLE_STREAMED_ANSWER_TASK_THRESHOLD
+        })
     const streamedTextLive =
       Boolean(segment.streamedText.trim()) && segment.streamedText.length < MAX_LIVE_TEXT_CHARS
-    // Slack accumulates appendStream chunks; stopStream blocks are the composed final layout.
-    // Only add blocks for content that was not streamed live; live task_update chunks carry
-    // fenced details/output, and the header has already been streamed as the first chunk.
+    // chat.stopStream is the durable final layout users see after Slack collapses the
+    // live stream. Always include the final answer in that layout. Relying on
+    // streamed chunks alone can leave a completed message with only the plan card.
     const blocks = sanitizeFinalMessagePayload([
       ...(tasks.length && !segment.planStarted
         ? [planBlock(planTitle(state.title, originalTasks), tasks, EXECUTION_PLAN_ID)]
         : []),
-      ...(!streamedTextLive && answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
+      ...(answerMarkdown ? renderMarkdownBlocks(answerMarkdown) : [])
     ] as AnyBlock[])
     const fallbackText = buildFinalFallbackText({
       title: state.title,
@@ -322,6 +325,31 @@ export class AgentSessionRenderer {
       ...(blocks.length ? { blocks } : {})
     })
     if (!stopResponse.ok) throw new Error(stopResponse.error ?? 'chat.stopStream failed')
+    if (blocks.length) {
+      try {
+        const updateResponse = await this.client.chat.update({
+          channel: state.channel,
+          ts: segment.streamTs,
+          text: fallbackText || ' ',
+          blocks
+        })
+        if (!updateResponse.ok) {
+          logWarn('slack_stream_final_update_failed', {
+            channel_id: state.channel,
+            thread_ts: state.parentTs,
+            stream_ts: segment.streamTs,
+            error: updateResponse.error ?? 'unknown_error'
+          })
+        }
+      } catch (error) {
+        logWarn('slack_stream_final_update_failed', {
+          channel_id: state.channel,
+          thread_ts: state.parentTs,
+          stream_ts: segment.streamTs,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
     segment.closed = true
   }
 

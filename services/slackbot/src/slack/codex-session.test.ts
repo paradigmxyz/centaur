@@ -247,7 +247,8 @@ describe('CodexSessionRenderer', () => {
     expect(richTextPlain(cmd?.output)).toContain('one\ntwo')
     expect(calls.filter(call => call.method === 'chat.startStream')).toHaveLength(1)
     expect(calls.some(call => call.method === 'chat.appendStream')).toBe(true)
-    expect(calls.some(call => call.method === 'chat.update')).toBe(false)
+    const finalUpdate = calls.find(call => call.method === 'chat.update')
+    expect(finalUpdate?.params.blocks).toBeTruthy()
   })
 
   it('renders multiple command executions as one visible activity task', async () => {
@@ -1734,7 +1735,10 @@ describe('CodexSessionRenderer', () => {
     const blocks = stop?.params.blocks ?? []
     expect(stop?.params.chunks).toBeUndefined()
     expect(blocks.some((block: any) => block.type === 'context')).toBe(false)
-    expect(blocks.some((block: any) => block.type === 'markdown')).toBe(false)
+    const answerBlocks = blocks.filter(
+      (block: any) => block.type === 'markdown' && block.text.includes('Done: five tools called.')
+    )
+    expect(answerBlocks).toHaveLength(1)
   })
 
   it('treats an unphased terminal agent message after tool use as the final answer', async () => {
@@ -1938,7 +1942,7 @@ function visibleMarkdown(calls: Array<{ method: string; params: any }>): string 
     .filter((block: any) => block.type === 'markdown')
     .map((block: any) => String(block.text ?? ''))
     .join('')
-  return streamed + stopMarkdown
+  return stopMarkdown || streamed
 }
 
 function makeFakeSlackClient(
