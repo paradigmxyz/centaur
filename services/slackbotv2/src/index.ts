@@ -907,17 +907,10 @@ function slackSafeChatSdkChunk(chunk: ChatSDKStreamChunk): ChatSDKStreamChunk {
   if (chunk.type !== 'task_update') return chunk
   const { output: _output, details, ...safeChunk } = chunk
   void _output
-  if (isCommandExecutionTask(chunk)) return safeChunk
   return {
     ...safeChunk,
     ...(details ? { details: truncateSlackTaskField(details) } : {})
   }
-}
-
-function isCommandExecutionTask(
-  chunk: Extract<ChatSDKStreamChunk, { type: 'task_update' }>
-): boolean {
-  return chunk.id.startsWith('call_') || chunk.title.toLowerCase().includes('command execution')
 }
 
 function isPlainTextOnlyRequest(text: string): boolean {
