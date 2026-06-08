@@ -643,7 +643,12 @@ function normalizeCodexEvent(event: Record<string, unknown>): CanonicalEvent[] {
   }
 
   if (eventType === 'error') {
-    const message = asString(event.message) || 'Unknown error'
+    const error = asRecord(event.error)
+    const message =
+      asString(event.error) ||
+      asString(error.message) ||
+      asString(event.message) ||
+      'Unknown error'
     return [{ type: 'error', error: message }]
   }
 

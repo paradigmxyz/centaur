@@ -164,6 +164,16 @@ class TestCodex:
         )
         assert result == [{"type": "error", "error": "boom"}]
 
+    def test_error_event_string_error(self):
+        result = normalize_harness_event(
+            "codex",
+            {
+                "type": "error",
+                "error": "Error running remote compact task",
+            },
+        )
+        assert result == [{"type": "error", "error": "Error running remote compact task"}]
+
 
 class TestPiMono:
     def test_session(self):

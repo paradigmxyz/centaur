@@ -2898,6 +2898,7 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     slackbot_live_failure_streak = 0
     slackbot_live_failure_limit = 5
     latest_terminal_result_text = ""
+    latest_harness_error_text = ""
     slackbot_streamed_answer_chars = 0
 
     async def _finalize_execution(
@@ -3186,11 +3187,14 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
                 )
             canonical_events = normalize_harness_event(engine, payload)
             for canonical_event in canonical_events:
-                if canonical_event.get("type") != "result":
-                    continue
-                extracted = extract_result(engine, canonical_event)
-                if extracted:
-                    latest_terminal_result_text = extracted
+                if canonical_event.get("type") == "error":
+                    raw_error = canonical_event.get("error")
+                    if isinstance(raw_error, str) and raw_error.strip():
+                        latest_harness_error_text = raw_error.strip()
+                if canonical_event.get("type") == "result":
+                    extracted = extract_result(engine, canonical_event)
+                    if extracted:
+                        latest_terminal_result_text = extracted
             if slackbot_session_id and slackbot_forward_live:
                 slack_events = canonical_events or [payload]
                 for slack_event in slack_events:
@@ -3497,6 +3501,9 @@ async def _process_execution_impl(pool, row: dict[str, Any]) -> None:
     error_text = turn_done_event.get("error")
     if not isinstance(error_text, str):
         error_text = ""
+    if latest_harness_error_text and not result_text.strip():
+        error_text = error_text or latest_harness_error_text
+        result_text = latest_harness_error_text
     is_error = bool(turn_done_event.get("is_error")) or bool(error_text)
     if is_error:
         terminal_reason = "harness_error"

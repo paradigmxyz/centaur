@@ -625,8 +625,14 @@ def _normalize_codex_event(event: dict) -> list[dict]:
         return [event]
 
     if event_type == "error":
+        error = event.get("error")
+        if isinstance(error, dict):
+            message = _as_str(error.get("message"))
+        else:
+            message = _as_str(error)
+        message = message or _as_str(event.get("message")) or "Unknown error"
         return [
-            {"type": "error", "error": _as_str(event.get("message")) or "Unknown error"}
+            {"type": "error", "error": message}
         ]
 
     if event_type == "turn.failed":
