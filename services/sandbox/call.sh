@@ -104,6 +104,31 @@ request() {
   return 1
 }
 
+tool_request() {
+  local http_method="$1"
+  local path="$2"
+  local data="${3:-}"
+  local response
+
+  response="$(request "$http_method" "$TU$path" "$data")" && {
+    printf '%s\n' "$response"
+    return 0
+  }
+
+  if [ "$TU" != "$U" ]; then
+    local error status
+    error="$(printf '%s' "$response" | jq -r '.error // empty' 2>/dev/null)"
+    status="$(printf '%s' "$response" | jq -r '.status // empty' 2>/dev/null)"
+    if [ "$error" = "transport_error" ] || [ "$status" = "404" ] || [ "$status" = "405" ]; then
+      request "$http_method" "$U$path" "$data"
+      return $?
+    fi
+  fi
+
+  printf '%s\n' "$response"
+  return 1
+}
+
 agent_execute() {
   local payload="$1"
 
@@ -202,7 +227,7 @@ case "$tool" in
     ;;
   tools)
     # Inject the built-in agent sub-command into the tool listing
-    response="$(request "GET" "$TU/tools")" || { printf '%s\n' "$response"; exit 1; }
+    response="$(tool_request "GET" "/tools")" || { printf '%s\n' "$response"; exit 1; }
     printf '%s' "$response" | jq -c '. + {"agent":{"description":"Sub-agent dispatch (built-in). Use: call agent execute, call agent status, call agent runtime, call agent stop","methods":["execute","status","runtime","stop"]}}'
     printf '\n'
     ;;
@@ -210,7 +235,7 @@ case "$tool" in
     if [ "$2" = "agent" ]; then
       printf '%s\n' '{"tool":"agent","description":"Sub-agent dispatch (built-in, not a tool plugin)","methods":[{"name":"execute","description":"Spawn a sub-agent. Body: {\"thread_key\":\"task:<purpose>-<id>\",\"message\":\"...\",\"harness\":\"<persona>\"}. Returns {execution_id, status}."},{"name":"status","description":"Poll sub-agent. Usage: call agent status '\''?key=<thread_key>'\''"},{"name":"runtime","description":"Inspect active persona/overlay/available personas for a thread. Usage: call agent runtime '\''?key=<thread_key>'\''"},{"name":"stop","description":"Stop sub-agent. Body: {\"thread_key\":\"...\"}"}]}'
     else
-      request "GET" "$TU/tools/$2"
+      tool_request "GET" "/tools/$2"
     fi
     ;;
   agent)
@@ -251,9 +276,9 @@ case "$tool" in
     ;;
   *)
     if [ -z "$body" ]; then
-      request "POST" "$TU/tools/$tool/$method"
+      tool_request "POST" "/tools/$tool/$method"
     else
-      request "POST" "$TU/tools/$tool/$method" "$body"
+      tool_request "POST" "/tools/$tool/$method" "$body"
     fi
     ;;
 esac

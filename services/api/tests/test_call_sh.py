@@ -35,6 +35,9 @@ class _AgentHandler(BaseHTTPRequestHandler):
         elif self.path == "/agent/execute":
             response = {"ok": True, "execution_id": "exe-123", "status": "queued"}
             status = 202
+        elif self.path == "/tools/alpha/sync_echo":
+            response = {"ok": True, "source": "api", "payload": payload}
+            status = 200
         else:
             response = {"error": f"unexpected POST path {self.path}"}
             status = 404
@@ -44,6 +47,12 @@ class _AgentHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         self.__class__.requests.append(("GET", self.path, {}))
         self.__class__.headers_seen.append(dict(self.headers.items()))
+        if self.path == "/tools":
+            self._respond(
+                200,
+                {"alpha": {"description": "Alpha", "methods": ["sync_echo"]}},
+            )
+            return
         if self.path.startswith("/agent/runtime"):
             self._respond(
                 200,
@@ -78,7 +87,7 @@ def _run_call_args(
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
-        "PATH": "/usr/bin:/bin",
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "CENTAUR_API_URL": f"http://127.0.0.1:{server.server_port}",
         "CENTAUR_API_KEY": "test-token",
     }
@@ -291,4 +300,81 @@ def test_call_bypasses_proxy_for_centaur_internal_hosts():
     assert result.returncode == 0, result.stderr or result.stdout
     assert [(method, path) for method, path, _ in _AgentHandler.requests] == [
         ("GET", "/agent/runtime?key=task:legal-review-123"),
+    ]
+
+
+def test_call_tool_falls_back_to_api_when_tool_server_refuses_connection():
+    _AgentHandler.requests = []
+    _AgentHandler.headers_seen = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        result = _run_call_args(
+            ["alpha", "sync_echo", json.dumps({"text": "hello"})],
+            server,
+            extra_env={"CENTAUR_TOOLS_URL": "http://127.0.0.1:9"},
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert json.loads(result.stdout) == {
+        "ok": True,
+        "source": "api",
+        "payload": {"text": "hello"},
+    }
+    assert [(method, path) for method, path, _ in _AgentHandler.requests] == [
+        ("POST", "/tools/alpha/sync_echo"),
+    ]
+
+
+def test_call_tools_falls_back_to_api_when_tool_server_route_is_missing():
+    _AgentHandler.requests = []
+    _AgentHandler.headers_seen = []
+
+    class _MissingToolsHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:  # noqa: A003
+            return
+
+        def do_GET(self) -> None:  # noqa: N802
+            body = json.dumps({"detail": "not found"}).encode("utf-8")
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    api_server = ThreadingHTTPServer(("127.0.0.1", 0), _AgentHandler)
+    tools_server = ThreadingHTTPServer(("127.0.0.1", 0), _MissingToolsHandler)
+    api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
+    tools_thread = threading.Thread(target=tools_server.serve_forever, daemon=True)
+    api_thread.start()
+    tools_thread.start()
+
+    try:
+        result = _run_call_args(
+            ["tools"],
+            api_server,
+            extra_env={
+                "CENTAUR_TOOLS_URL": f"http://127.0.0.1:{tools_server.server_port}"
+            },
+        )
+    finally:
+        tools_server.shutdown()
+        tools_thread.join(timeout=5)
+        tools_server.server_close()
+        api_server.shutdown()
+        api_thread.join(timeout=5)
+        api_server.server_close()
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    body = json.loads(result.stdout)
+    assert body["alpha"] == {"description": "Alpha", "methods": ["sync_echo"]}
+    assert "agent" in body
+    assert [(method, path) for method, path, _ in _AgentHandler.requests] == [
+        ("GET", "/tools"),
     ]
