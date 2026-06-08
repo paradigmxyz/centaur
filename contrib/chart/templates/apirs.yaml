@@ -4,6 +4,11 @@
 {{- if and .Values.repoCache.enabled (not $reposPath) -}}
 {{- $reposPath = .Values.repoCache.hostPath -}}
 {{- end -}}
+{{- $apiRsMetricsAnnotations := dict -}}
+{{- if .Values.apiRs.metrics.scrapeAnnotations -}}
+{{- $apiRsMetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.apiRs.metrics.path "prometheus.io/port" (printf "%v" .Values.apiRs.port) -}}
+{{- $apiRsMetricsAnnotations = mergeOverwrite $apiRsMetricsAnnotations (.Values.apiRs.metrics.annotations | default dict) -}}
+{{- end -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -79,6 +84,9 @@ spec:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
         checksum/overlay: {{ toJson .Values.overlay | sha256sum }}
+{{- with $apiRsMetricsAnnotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 8 }}
     spec:
@@ -259,6 +267,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ $apiRsName }}
+{{- with $apiRsMetricsAnnotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+{{- end }}
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "api-rs") | nindent 4 }}
 spec:

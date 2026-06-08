@@ -4,6 +4,8 @@ use centaur_sandbox_core::{
     DesiredSandboxState, ObservedSandbox, SandboxBackend, SandboxHandle, SandboxId, SandboxIo,
     SandboxResult, SandboxSpec, SandboxStatus,
 };
+use centaur_telemetry::record_sandbox_operation;
+use tracing::{Instrument, error, info, info_span};
 
 use crate::{
     DesiredStateStore, DriftReason, InMemoryDesiredStateStore, ReconcileAction, ReconcileOutcome,
@@ -42,14 +44,99 @@ where
     }
 
     pub async fn create_running(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
-        let handle = self.backend.create(spec.clone()).await?;
-        self.store
-            .set(handle.id.clone(), DesiredSandboxState::Running(spec));
-        Ok(handle)
+        let backend = self.backend.name();
+        let span = info_span!(
+            "centaur.api_rs.sandbox.create",
+            component = "sandbox_manager",
+            event = "sandbox_create",
+            "centaur.sandbox.backend" = backend,
+            "centaur.sandbox_id" = tracing::field::Empty,
+            sandbox_id = tracing::field::Empty,
+        );
+
+        async {
+            info!(
+                component = "sandbox_manager",
+                event = "sandbox_create_started",
+                backend,
+                "creating sandbox"
+            );
+            let handle = match self.backend.create(spec.clone()).await {
+                Ok(handle) => handle,
+                Err(error) => {
+                    record_sandbox_operation(backend, "create", "error");
+                    error!(
+                        component = "sandbox_manager",
+                        event = "sandbox_create_failed",
+                        backend,
+                        %error,
+                        "failed to create sandbox"
+                    );
+                    return Err(error);
+                }
+            };
+            span.record("centaur.sandbox_id", handle.id.as_str());
+            span.record("sandbox_id", handle.id.as_str());
+            self.store
+                .set(handle.id.clone(), DesiredSandboxState::Running(spec));
+            record_sandbox_operation(backend, "create", "success");
+            info!(
+                component = "sandbox_manager",
+                event = "sandbox_create_completed",
+                backend,
+                sandbox_id = %handle.id.as_str(),
+                "sandbox created"
+            );
+            Ok(handle)
+        }
+        .instrument(span.clone())
+        .await
     }
 
     pub async fn open_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
-        self.backend.open_io(id).await
+        let backend = self.backend.name();
+        async {
+            info!(
+                component = "sandbox_manager",
+                event = "sandbox_open_io_started",
+                backend,
+                sandbox_id = %id.as_str(),
+                "opening sandbox I/O"
+            );
+            let io = match self.backend.open_io(id).await {
+                Ok(io) => io,
+                Err(error) => {
+                    record_sandbox_operation(backend, "open_io", "error");
+                    error!(
+                        component = "sandbox_manager",
+                        event = "sandbox_open_io_failed",
+                        backend,
+                        sandbox_id = %id.as_str(),
+                        %error,
+                        "failed to open sandbox I/O"
+                    );
+                    return Err(error);
+                }
+            };
+            record_sandbox_operation(backend, "open_io", "success");
+            info!(
+                component = "sandbox_manager",
+                event = "sandbox_open_io_completed",
+                backend,
+                sandbox_id = %id.as_str(),
+                "sandbox I/O opened"
+            );
+            Ok(io)
+        }
+        .instrument(info_span!(
+            "centaur.api_rs.sandbox.open_io",
+            component = "sandbox_manager",
+            event = "sandbox_open_io",
+            "centaur.sandbox.backend" = backend,
+            "centaur.sandbox_id" = id.as_str(),
+            sandbox_id = %id.as_str(),
+        ))
+        .await
     }
 
     pub async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus> {
@@ -66,7 +153,14 @@ where
     }
 
     pub async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.backend.pause(id).await?;
+        let backend = self.backend.name();
+        match self.backend.pause(id).await {
+            Ok(()) => record_sandbox_operation(backend, "pause", "success"),
+            Err(error) => {
+                record_sandbox_operation(backend, "pause", "error");
+                return Err(error);
+            }
+        }
         if let Some(DesiredSandboxState::Running(spec) | DesiredSandboxState::Suspended(spec)) =
             self.store.get(id)
         {
@@ -77,7 +171,14 @@ where
     }
 
     pub async fn resume(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.backend.resume(id).await?;
+        let backend = self.backend.name();
+        match self.backend.resume(id).await {
+            Ok(()) => record_sandbox_operation(backend, "resume", "success"),
+            Err(error) => {
+                record_sandbox_operation(backend, "resume", "error");
+                return Err(error);
+            }
+        }
         if let Some(DesiredSandboxState::Running(spec) | DesiredSandboxState::Suspended(spec)) =
             self.store.get(id)
         {
@@ -88,9 +189,34 @@ where
     }
 
     pub async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.backend.stop(id).await?;
-        self.store.set(id.clone(), DesiredSandboxState::Stopped);
-        Ok(())
+        let backend = self.backend.name();
+        async {
+            match self.backend.stop(id).await {
+                Ok(()) => record_sandbox_operation(backend, "stop", "success"),
+                Err(error) => {
+                    record_sandbox_operation(backend, "stop", "error");
+                    return Err(error);
+                }
+            }
+            self.store.set(id.clone(), DesiredSandboxState::Stopped);
+            info!(
+                component = "sandbox_manager",
+                event = "sandbox_stop_completed",
+                backend,
+                sandbox_id = %id.as_str(),
+                "sandbox stopped"
+            );
+            Ok(())
+        }
+        .instrument(info_span!(
+            "centaur.api_rs.sandbox.stop",
+            component = "sandbox_manager",
+            event = "sandbox_stop",
+            "centaur.sandbox.backend" = backend,
+            "centaur.sandbox_id" = id.as_str(),
+            sandbox_id = %id.as_str(),
+        ))
+        .await
     }
 
     pub async fn assign_iron_control_proxy_principal(
@@ -117,18 +243,37 @@ where
         id: &SandboxId,
         plan: ReconcilePlan,
     ) -> SandboxResult<ReconcileOutcome> {
+        let backend = self.backend.name();
         match plan.action {
             ReconcileAction::None => Ok(ReconcileOutcome::Noop),
             ReconcileAction::Pause => {
-                self.backend.pause(id).await?;
+                match self.backend.pause(id).await {
+                    Ok(()) => record_sandbox_operation(backend, "pause", "success"),
+                    Err(error) => {
+                        record_sandbox_operation(backend, "pause", "error");
+                        return Err(error);
+                    }
+                }
                 Ok(ReconcileOutcome::Paused)
             }
             ReconcileAction::Resume => {
-                self.backend.resume(id).await?;
+                match self.backend.resume(id).await {
+                    Ok(()) => record_sandbox_operation(backend, "resume", "success"),
+                    Err(error) => {
+                        record_sandbox_operation(backend, "resume", "error");
+                        return Err(error);
+                    }
+                }
                 Ok(ReconcileOutcome::Resumed)
             }
             ReconcileAction::Stop => {
-                self.backend.stop(id).await?;
+                match self.backend.stop(id).await {
+                    Ok(()) => record_sandbox_operation(backend, "stop", "success"),
+                    Err(error) => {
+                        record_sandbox_operation(backend, "stop", "error");
+                        return Err(error);
+                    }
+                }
                 Ok(ReconcileOutcome::Stopped)
             }
             ReconcileAction::ReportDrift(reason) => Ok(ReconcileOutcome::Drift(reason)),

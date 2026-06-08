@@ -13,6 +13,7 @@ members = [
     "crates/centaur-session-core",
     "crates/centaur-session-runtime",
     "crates/centaur-session-sqlx",
+    "crates/centaur-telemetry",
 ]
 resolver = "3"
 
@@ -36,6 +37,7 @@ centaur-sandbox-manager = { path = "crates/centaur-sandbox-manager" }
 centaur-session-core = { path = "crates/centaur-session-core" }
 centaur-session-runtime = { path = "crates/centaur-session-runtime" }
 centaur-session-sqlx = { path = "crates/centaur-session-sqlx" }
+centaur-telemetry = { path = "crates/centaur-telemetry" }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 crossterm = "0.28"
 eventsource-stream = "0.2.3"
@@ -50,6 +52,11 @@ sha2 = "0.10"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 ratatui = "0.29"
 rustls = "0.23"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["trace"] }
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 sqlx = { version = "0.8.6", default-features = false, features = ["derive", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "time"] }
 strum = { version = "0.28", features = ["derive"] }
 test-case = "3.3.1"
@@ -58,7 +65,10 @@ time = { version = "0.3", features = ["serde"] }
 tokio = "1"
 tokio-util = "0.7"
 toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6.11", features = ["trace"] }
 tracing = "0.1"
+tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3"
 urlencoding = "2"
 uuid = { version = "1", features = ["serde", "v4"] }

@@ -4,18 +4,18 @@ mod tool_discovery;
 use centaur_api_server::build_router_with_session_runtime;
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
+use centaur_telemetry::{TelemetryConfig, init_telemetry};
 use clap::Parser;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::info;
-use tracing_subscriber::{EnvFilter, fmt as tracing_fmt};
 
 use args::Args;
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
     init_crypto_provider();
-    init_tracing();
+    let telemetry = init_telemetry(TelemetryConfig::from_env())?;
 
     let args = Args::parse();
 
@@ -42,16 +42,12 @@ async fn main() -> Result<(), ServerError> {
     axum::serve(listener, build_router_with_session_runtime(runtime))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    telemetry.shutdown();
     Ok(())
 }
 
 fn init_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_fmt().with_env_filter(filter).json().init();
 }
 
 async fn shutdown_signal() {
@@ -76,6 +72,8 @@ pub(crate) enum ServerError {
     IronControl(#[from] centaur_iron_control::IronControlError),
     #[error(transparent)]
     IronControlRegister(#[from] centaur_iron_control::RegisterError),
+    #[error(transparent)]
+    Telemetry(#[from] centaur_telemetry::TelemetryError),
     #[error(transparent)]
     ToolDiscovery(#[from] tool_discovery::ToolDiscoveryError),
     #[error("iron-proxy requires both firewall CA cert and key Secret names")]

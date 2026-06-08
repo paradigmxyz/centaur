@@ -234,6 +234,13 @@ apiRs:
   sandboxWarmPoolReplenishIntervalSecs: 5
   ironProxy:
     mode: enabled
+  metrics:
+    # The Rust API always serves Prometheus text metrics at /metrics. This flag
+    # only controls scrape annotations for Prometheus/VictoriaMetrics-style
+    # discovery.
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
   # 1Password vault the iron-proxy secret source reads from when
   # ironProxy.secretSource is "onepassword". Empty falls back to the binary
   # default ("ai-agents").

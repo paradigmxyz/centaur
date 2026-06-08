@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 centaur-sandbox-core.workspace = true
 centaur-session-sqlx.workspace = true
+centaur-telemetry.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 tracing.workspace = true

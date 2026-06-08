@@ -19,6 +19,10 @@ use centaur_session_core::{
 use centaur_session_sqlx::{
     PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
 };
+use centaur_telemetry::{
+    record_sandbox_warm_pool_claim, record_session_execution_finished,
+    record_session_execution_started,
+};
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -29,7 +33,7 @@ use tokio::{
     time::{Instant, Interval, MissedTickBehavior, interval_at, sleep},
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
-use tracing::warn;
+use tracing::{Instrument, Span, error, info, info_span, warn};
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
@@ -37,15 +41,18 @@ const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
+const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
+type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 
 #[derive(Clone)]
 pub struct SessionRuntime {
     store: PgSessionStore,
     sandbox_runtime: SandboxRuntime,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    execution_spans: ExecutionSpanRegistry,
     iron_control: Option<SessionRegistrar>,
     warm_pool: Option<Arc<WarmPoolManager>>,
 }
@@ -107,6 +114,8 @@ struct EventStreamState {
     listener: SessionEventListener,
     safety_tick: Interval,
     done: bool,
+    emitted_count: u64,
+    span: Span,
 }
 
 impl SessionRuntime {
@@ -115,6 +124,7 @@ impl SessionRuntime {
             store,
             sandbox_runtime,
             sandbox_pipes: Arc::new(Mutex::new(HashMap::new())),
+            execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: None,
             warm_pool: None,
         }
@@ -162,38 +172,91 @@ impl SessionRuntime {
         persona_id: Option<&str>,
         metadata: Option<Value>,
     ) -> Result<Session, SessionRuntimeError> {
-        // Read slack_user_id before `metadata` is consumed below; it keys the
-        // 1:1 DM principal and is only known here at session creation.
-        let slack_user_id = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("slack_user_id"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-        let session = self
-            .store
-            .create_or_get_session(
-                thread_key,
-                harness_type,
-                persona_id,
-                default_metadata(metadata),
-            )
-            .await?;
-        if let Some(registrar) = &self.iron_control {
-            // iron-control is the source of truth for the session's egress
-            // proxy: without a registered principal the proxy has no identity
-            // to bind to, so a registration failure must fail session creation
-            // rather than silently boot a sandbox with a non-functional proxy.
-            let principal = registrar
-                .register_session(thread_key.as_str(), slack_user_id.as_deref())
-                .await?;
-            // Persist the principal OID on the session row so a resumed session
-            // can recreate its sandbox after a restart without re-deriving it.
-            return Ok(self
+        let span = info_span!(
+            "centaur.api_rs.session.create_or_get",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_create_or_get",
+            "centaur.thread_key" = thread_key.as_str(),
+            "centaur.harness_type" = %harness_type,
+            thread_key = %thread_key,
+            harness_type = %harness_type,
+            iron_control_enabled = self.iron_control.is_some(),
+        );
+        let result = async {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_create_or_get_started",
+                thread_key = %thread_key,
+                harness_type = %harness_type,
+                iron_control_enabled = self.iron_control.is_some(),
+                "creating or loading session"
+            );
+            // Read slack_user_id before `metadata` is consumed below; it keys the
+            // 1:1 DM principal and is only known here at session creation.
+            let slack_user_id = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("slack_user_id"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let session = self
                 .store
-                .set_iron_control_principal(thread_key, Some(&principal.id))
-                .await?);
+                .create_or_get_session(
+                    thread_key,
+                    harness_type,
+                    persona_id,
+                    default_metadata(metadata),
+                )
+                .await?;
+            if let Some(registrar) = &self.iron_control {
+                // iron-control is the source of truth for the session's egress
+                // proxy: without a registered principal the proxy has no identity
+                // to bind to, so a registration failure must fail session creation
+                // rather than silently boot a sandbox with a non-functional proxy.
+                let principal = registrar
+                    .register_session(thread_key.as_str(), slack_user_id.as_deref())
+                    .await?;
+                // Persist the principal OID on the session row so a resumed session
+                // can recreate its sandbox after a restart without re-deriving it.
+                let session = self
+                    .store
+                    .set_iron_control_principal(thread_key, Some(&principal.id))
+                    .await?;
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_create_or_get_completed",
+                    thread_key = %thread_key,
+                    harness_type = %harness_type,
+                    status = %session.status,
+                    iron_control_principal_persisted = true,
+                    "session ready"
+                );
+                return Ok(session);
+            }
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_create_or_get_completed",
+                thread_key = %thread_key,
+                harness_type = %harness_type,
+                status = %session.status,
+                iron_control_principal_persisted = session.iron_control_principal.is_some(),
+                "session ready"
+            );
+            Ok(session)
         }
-        Ok(session)
+        .instrument(span)
+        .await;
+
+        if let Err(error) = &result {
+            error!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_create_or_get_failed",
+                thread_key = %thread_key,
+                harness_type = %harness_type,
+                %error,
+                "failed to create or load session"
+            );
+        }
+        result
     }
 
     pub async fn append_messages(
@@ -201,12 +264,55 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         messages: &[SessionMessageInput],
     ) -> Result<Vec<String>, SessionRuntimeError> {
-        if messages.is_empty() {
-            return Err(SessionRuntimeError::BadRequest(
-                "messages must not be empty".to_owned(),
-            ));
+        let span = info_span!(
+            "centaur.api_rs.session.messages.append",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_messages_append",
+            "centaur.thread_key" = thread_key.as_str(),
+            thread_key = %thread_key,
+            message_count = messages.len(),
+        );
+        let result = async {
+            if messages.is_empty() {
+                return Err(SessionRuntimeError::BadRequest(
+                    "messages must not be empty".to_owned(),
+                ));
+            }
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_messages_append_started",
+                thread_key = %thread_key,
+                message_count = messages.len(),
+                "appending session messages"
+            );
+            let message_ids = self.store.append_messages(thread_key, messages).await?;
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_messages_append_completed",
+                thread_key = %thread_key,
+                message_count = messages.len(),
+                message_id_count = message_ids.len(),
+                "session messages appended"
+            );
+            Ok(message_ids)
         }
-        let message_ids = self.store.append_messages(thread_key, messages).await?;
+        .instrument(span)
+        .await;
+
+        let message_ids = match result {
+            Ok(message_ids) => message_ids,
+            Err(error) => {
+                error!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_messages_append_failed",
+                    thread_key = %thread_key,
+                    message_count = messages.len(),
+                    %error,
+                    "failed to append session messages"
+                );
+                return Err(error);
+            }
+        };
         self.forward_messages_to_active_execution(thread_key, messages, &message_ids)
             .await;
         Ok(message_ids)
@@ -266,89 +372,191 @@ impl SessionRuntime {
             idle_timeout_ms,
             max_duration_ms,
         } = input;
-        let session = self.store.get_session(thread_key).await?;
-        validate_input_lines(&input_lines)?;
-        let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
+        let input_line_count = input_lines.len();
+        let idempotency_key_present = idempotency_key.is_some();
+        let span = info_span!(
+            "centaur.api_rs.session.execute",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_execute",
+            "centaur.thread_key" = thread_key.as_str(),
+            "centaur.execution_id" = tracing::field::Empty,
+            "centaur.sandbox_id" = tracing::field::Empty,
+            thread_key = %thread_key,
+            execution_id = tracing::field::Empty,
+            sandbox_id = tracing::field::Empty,
+            input_line_count,
+            idempotency_key_present,
+        );
+        let result = async {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_execute_started",
+                thread_key = %thread_key,
+                input_line_count,
+                idempotency_key_present,
+                "starting session execution"
+            );
+            let session = self.store.get_session(thread_key).await?;
+            let harness_label = session.harness_type.to_string();
+            validate_input_lines(&input_lines)?;
+            let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
 
-        let execution = self
-            .store
-            .create_execution(
-                thread_key,
-                idempotency_key.as_deref(),
-                execution_metadata(metadata, idle_timeout_ms, max_duration_ms),
-            )
-            .await?;
-        if !execution.created && execution.execution.status != ExecutionStatus::Queued {
-            return Ok(execution.execution);
-        }
-        let execution = self
-            .store
-            .mark_execution_running(&execution.execution.execution_id)
-            .await?;
-        if execution.status != ExecutionStatus::Running {
-            return Ok(execution);
-        }
-        self.store
-            .append_event(
-                thread_key,
-                Some(&execution.execution_id),
-                "session.execution_started",
-                json!({
-                    "execution_id": execution.execution_id,
-                    "thread_key": thread_key.as_str(),
-                    "input_line_count": input_lines.len(),
-                    "idle_timeout_ms": idle_timeout_ms,
-                    "max_duration_ms": max_duration_ms,
-                }),
-            )
-            .await?;
+            let execution = self
+                .store
+                .create_execution(
+                    thread_key,
+                    idempotency_key.as_deref(),
+                    execution_metadata(metadata, idle_timeout_ms, max_duration_ms),
+                )
+                .await?;
+            span.record(
+                "centaur.execution_id",
+                execution.execution.execution_id.as_str(),
+            );
+            span.record("execution_id", execution.execution.execution_id.as_str());
+            if !execution.created && execution.execution.status != ExecutionStatus::Queued {
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_execute_idempotent_replay",
+                    thread_key = %thread_key,
+                    execution_id = %execution.execution.execution_id,
+                    status = %execution.execution.status,
+                    "returning existing execution"
+                );
+                return Ok(execution.execution);
+            }
+            let execution = self
+                .store
+                .mark_execution_running(&execution.execution.execution_id)
+                .await?;
+            span.record("centaur.execution_id", execution.execution_id.as_str());
+            span.record("execution_id", execution.execution_id.as_str());
+            if execution.status != ExecutionStatus::Running {
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_execute_not_running",
+                    thread_key = %thread_key,
+                    execution_id = %execution.execution_id,
+                    status = %execution.status,
+                    "execution is not running after claim"
+                );
+                return Ok(execution);
+            }
+            let execution_trace_span = info_span!(
+                "centaur.api_rs.session.execution",
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_execution",
+                "centaur.thread_key" = thread_key.as_str(),
+                "centaur.execution_id" = execution.execution_id.as_str(),
+                "centaur.sandbox_id" = tracing::field::Empty,
+                thread_key = %thread_key,
+                execution_id = %execution.execution_id,
+                sandbox_id = tracing::field::Empty,
+            );
+            self.execution_spans
+                .lock()
+                .await
+                .insert(execution.execution_id.clone(), execution_trace_span.clone());
+            record_session_execution_started(&harness_label);
+            self.store
+                .append_event(
+                    thread_key,
+                    Some(&execution.execution_id),
+                    "session.execution_started",
+                    json!({
+                        "execution_id": execution.execution_id,
+                        "thread_key": thread_key.as_str(),
+                        "input_line_count": input_line_count,
+                        "idle_timeout_ms": idle_timeout_ms,
+                        "max_duration_ms": max_duration_ms,
+                    }),
+                )
+                .await?;
 
-        let sandbox_id = match self
-            .ensure_session_sandbox(
+            let sandbox_id = match self
+                .ensure_session_sandbox(
+                    thread_key,
+                    session.sandbox_id.as_deref(),
+                    session.iron_control_principal.as_deref(),
+                    &execution.execution_id,
+                )
+                .await
+            {
+                Ok(sandbox_id) => sandbox_id,
+                Err(error) => {
+                    self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
+            span.record("centaur.sandbox_id", sandbox_id.as_str());
+            span.record("sandbox_id", sandbox_id.as_str());
+            execution_trace_span.record("centaur.sandbox_id", sandbox_id.as_str());
+            execution_trace_span.record("sandbox_id", sandbox_id.as_str());
+
+            let pipe = match self.ensure_session_pipe(thread_key, &sandbox_id).await {
+                Ok(pipe) => pipe,
+                Err(error) => {
+                    self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
+
+            let input_lines = input_lines_with_thread_key(thread_key, &input_lines);
+            if let Err(error) = write_input_lines(
+                &pipe,
+                &input_lines,
                 thread_key,
-                session.sandbox_id.as_deref(),
-                session.iron_control_principal.as_deref(),
                 &execution.execution_id,
+                Some(&sandbox_id),
             )
             .await
-        {
-            Ok(sandbox_id) => sandbox_id,
-            Err(error) => {
+            {
                 self.record_execution_failure(thread_key, &execution.execution_id, &error)
                     .await;
                 return Err(error);
             }
-        };
 
-        let pipe = match self.ensure_session_pipe(thread_key, &sandbox_id).await {
-            Ok(pipe) => pipe,
-            Err(error) => {
-                self.record_execution_failure(thread_key, &execution.execution_id, &error)
-                    .await;
-                return Err(error);
+            if let Some(max_duration) = max_duration {
+                spawn_max_duration_failure(
+                    self.store.clone(),
+                    self.sandbox_runtime.manager.clone(),
+                    self.sandbox_pipes.clone(),
+                    self.execution_spans.clone(),
+                    thread_key.clone(),
+                    execution.execution_id.clone(),
+                    max_duration,
+                    idle_timeout,
+                );
             }
-        };
 
-        let input_lines = input_lines_with_thread_key(thread_key, &input_lines);
-        if let Err(error) = write_input_lines(&pipe, &input_lines).await {
-            self.record_execution_failure(thread_key, &execution.execution_id, &error)
-                .await;
-            return Err(error);
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_execute_completed",
+                thread_key = %thread_key,
+                execution_id = %execution.execution_id,
+                sandbox_id = %sandbox_id,
+                status = %execution.status,
+                completion_reason = "input_accepted",
+                "session execution accepted input"
+            );
+            Ok(execution)
         }
+        .instrument(span.clone())
+        .await;
 
-        if let Some(max_duration) = max_duration {
-            spawn_max_duration_failure(
-                self.store.clone(),
-                self.sandbox_runtime.manager.clone(),
-                self.sandbox_pipes.clone(),
-                thread_key.clone(),
-                execution.execution_id.clone(),
-                max_duration,
-                idle_timeout,
+        if let Err(error) = &result {
+            error!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_execute_failed",
+                thread_key = %thread_key,
+                input_line_count,
+                %error,
+                "session execution failed"
             );
         }
-
-        Ok(execution)
+        result
     }
 
     async fn record_execution_failure(
@@ -357,6 +565,7 @@ impl SessionRuntime {
         execution_id: &str,
         error: &SessionRuntimeError,
     ) {
+        self.execution_spans.lock().await.remove(execution_id);
         let error_message = error.to_string();
         let _ = self
             .store
@@ -371,10 +580,13 @@ impl SessionRuntime {
                 }),
             )
             .await;
-        let _ = self
+        if let Ok(execution) = self
             .store
             .fail_execution(execution_id, &error_message)
-            .await;
+            .await
+        {
+            record_finished_execution_metric(&self.store, thread_key, &execution, "failed").await;
+        }
     }
 
     async fn forward_messages_to_active_execution(
@@ -410,7 +622,15 @@ impl SessionRuntime {
             }
         };
 
-        if let Err(error) = write_input_lines(&pipe, &input_lines).await {
+        if let Err(error) = write_input_lines(
+            &pipe,
+            &input_lines,
+            thread_key,
+            &execution.execution_id,
+            None,
+        )
+        .await
+        {
             self.record_steering_failure(thread_key, &execution.execution_id, error.to_string())
                 .await;
             return;
@@ -498,21 +718,55 @@ impl SessionRuntime {
         impl Stream<Item = Result<SessionEvent, SessionRuntimeError>> + use<>,
         SessionRuntimeError,
     > {
-        let session = self.store.get_session(thread_key).await?;
-        if let Some(sandbox_id) = session.sandbox_id.as_deref() {
-            self.ensure_session_pipe_if_live(thread_key, sandbox_id)
-                .await?;
-        }
-
-        let listener = self.store.listen_session_events().await?;
-
-        Ok(session_event_stream(
-            self.store.clone(),
-            thread_key.clone(),
+        let span = info_span!(
+            "centaur.api_rs.session.events.stream",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_events_stream",
+            "centaur.thread_key" = thread_key.as_str(),
+            thread_key = %thread_key,
             after_event_id,
-            execution_id.map(ToOwned::to_owned),
-            listener,
-        ))
+            execution_id = execution_id.unwrap_or(""),
+        );
+        let result = async {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_events_stream_started",
+                thread_key = %thread_key,
+                after_event_id,
+                execution_id = execution_id.unwrap_or(""),
+                "opening session event stream"
+            );
+            let session = self.store.get_session(thread_key).await?;
+            if let Some(sandbox_id) = session.sandbox_id.as_deref() {
+                self.ensure_session_pipe_if_live(thread_key, sandbox_id)
+                    .await?;
+            }
+
+            let listener = self.store.listen_session_events().await?;
+
+            Ok(session_event_stream(
+                self.store.clone(),
+                thread_key.clone(),
+                after_event_id,
+                execution_id.map(ToOwned::to_owned),
+                listener,
+                span.clone(),
+            ))
+        }
+        .instrument(span.clone())
+        .await;
+
+        if let Err(error) = &result {
+            error!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_events_stream_failed",
+                thread_key = %thread_key,
+                after_event_id,
+                %error,
+                "failed to open session event stream"
+            );
+        }
+        result
     }
 
     async fn ensure_session_sandbox(
@@ -522,92 +776,194 @@ impl SessionRuntime {
         iron_control_principal: Option<&str>,
         execution_id: &str,
     ) -> Result<String, SessionRuntimeError> {
-        if let Some(sandbox_id) = existing_sandbox_id {
-            let id = SandboxId::new(sandbox_id);
-            match self.sandbox_runtime.manager.status(&id).await {
-                Ok(status) => match existing_sandbox_action(&status) {
-                    ExistingSandboxAction::Reuse => return Ok(sandbox_id.to_owned()),
-                    ExistingSandboxAction::ResumeOrReplace => {
-                        self.sandbox_pipes.lock().await.remove(sandbox_id);
-                        match self.sandbox_runtime.manager.resume(&id).await {
-                            Ok(()) => {
-                                self.store
-                                    .append_event(
-                                        thread_key,
-                                        Some(execution_id),
-                                        "session.sandbox_resumed",
-                                        json!({
-                                            "execution_id": execution_id,
-                                            "thread_key": thread_key.as_str(),
-                                            "sandbox_id": sandbox_id,
-                                        }),
-                                    )
-                                    .await?;
-                                return Ok(sandbox_id.to_owned());
-                            }
-                            Err(error) => {
-                                warn!(
-                                    %thread_key,
-                                    %execution_id,
-                                    %sandbox_id,
-                                    %error,
-                                    "replacing sandbox after resume failed"
-                                );
-                                self.store
-                                    .append_event(
-                                        thread_key,
-                                        Some(execution_id),
-                                        "session.sandbox_resume_failed",
-                                        json!({
-                                            "execution_id": execution_id,
-                                            "thread_key": thread_key.as_str(),
-                                            "sandbox_id": sandbox_id,
-                                            "error": error.to_string(),
-                                        }),
-                                    )
-                                    .await?;
+        let span = info_span!(
+            "centaur.api_rs.sandbox.ensure",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "sandbox_ensure",
+            "centaur.thread_key" = thread_key.as_str(),
+            "centaur.execution_id" = execution_id,
+            "centaur.sandbox_id" = tracing::field::Empty,
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id = tracing::field::Empty,
+            existing_sandbox_id = existing_sandbox_id.unwrap_or(""),
+            iron_control_principal_present = iron_control_principal.is_some(),
+        );
+        let result = async {
+            if let Some(sandbox_id) = existing_sandbox_id {
+                let id = SandboxId::new(sandbox_id);
+                match self.sandbox_runtime.manager.status(&id).await {
+                    Ok(status) => match existing_sandbox_action(&status) {
+                        ExistingSandboxAction::Reuse => {
+                            span.record("centaur.sandbox_id", sandbox_id);
+                            span.record("sandbox_id", sandbox_id);
+                            info!(
+                                component = COMPONENT_SESSION_RUNTIME,
+                                event = "sandbox_ensure_reused",
+                                thread_key = %thread_key,
+                                execution_id,
+                                sandbox_id,
+                                "reusing existing session sandbox"
+                            );
+                            return Ok(sandbox_id.to_owned());
+                        }
+                        ExistingSandboxAction::ResumeOrReplace => {
+                            self.sandbox_pipes.lock().await.remove(sandbox_id);
+                            match self.sandbox_runtime.manager.resume(&id).await {
+                                Ok(()) => {
+                                    span.record("centaur.sandbox_id", sandbox_id);
+                                    span.record("sandbox_id", sandbox_id);
+                                    self.store
+                                        .append_event(
+                                            thread_key,
+                                            Some(execution_id),
+                                            "session.sandbox_resumed",
+                                            json!({
+                                                "execution_id": execution_id,
+                                                "thread_key": thread_key.as_str(),
+                                                "sandbox_id": sandbox_id,
+                                            }),
+                                        )
+                                        .await?;
+                                    info!(
+                                        component = COMPONENT_SESSION_RUNTIME,
+                                        event = "sandbox_ensure_resumed",
+                                        thread_key = %thread_key,
+                                        execution_id,
+                                        sandbox_id,
+                                        "resumed existing session sandbox"
+                                    );
+                                    return Ok(sandbox_id.to_owned());
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        component = COMPONENT_SESSION_RUNTIME,
+                                        event = "sandbox_ensure_resume_failed",
+                                        %thread_key,
+                                        %execution_id,
+                                        %sandbox_id,
+                                        %error,
+                                        "replacing sandbox after resume failed"
+                                    );
+                                    self.store
+                                        .append_event(
+                                            thread_key,
+                                            Some(execution_id),
+                                            "session.sandbox_resume_failed",
+                                            json!({
+                                                "execution_id": execution_id,
+                                                "thread_key": thread_key.as_str(),
+                                                "sandbox_id": sandbox_id,
+                                                "error": error.to_string(),
+                                            }),
+                                        )
+                                        .await?;
+                                }
                             }
                         }
+                        ExistingSandboxAction::Replace => {
+                            info!(
+                                component = COMPONENT_SESSION_RUNTIME,
+                                event = "sandbox_ensure_replacing",
+                                thread_key = %thread_key,
+                                execution_id,
+                                sandbox_id,
+                                status = ?status,
+                                "existing sandbox is not reusable"
+                            );
+                        }
+                    },
+                    Err(SandboxError::NotFound(_)) => {
+                        info!(
+                            component = COMPONENT_SESSION_RUNTIME,
+                            event = "sandbox_ensure_missing",
+                            thread_key = %thread_key,
+                            execution_id,
+                            sandbox_id,
+                            "existing sandbox is missing"
+                        );
                     }
-                    ExistingSandboxAction::Replace => {}
-                },
-                Err(SandboxError::NotFound(_)) => {}
-                Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+                    Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+                }
             }
-        }
 
-        if let Some(warm_pool) = &self.warm_pool
-            && let Some(sandbox_id) = warm_pool
-                .claim(thread_key.as_str(), iron_control_principal)
-                .await?
-        {
-            self.store
-                .update_sandbox_id(thread_key, Some(sandbox_id.as_str()))
-                .await?;
-            self.store
-                .append_event(
-                    thread_key,
-                    None,
-                    "session.warm_sandbox_claimed",
-                    json!({
-                        "sandbox_id": sandbox_id.as_str(),
-                        "workload_key": warm_pool.workload_key(),
-                        "iron_control_principal": iron_control_principal,
-                    }),
-                )
-                .await?;
-            return Ok(sandbox_id);
-        }
+            if let Some(warm_pool) = &self.warm_pool {
+                match warm_pool
+                    .claim(thread_key.as_str(), iron_control_principal)
+                    .await
+                {
+                    Ok(Some(sandbox_id)) => {
+                        record_sandbox_warm_pool_claim("hit");
+                        span.record("centaur.sandbox_id", sandbox_id.as_str());
+                        span.record("sandbox_id", sandbox_id.as_str());
+                        self.store
+                            .update_sandbox_id(thread_key, Some(sandbox_id.as_str()))
+                            .await?;
+                        self.store
+                            .append_event(
+                                thread_key,
+                                None,
+                                "session.warm_sandbox_claimed",
+                                json!({
+                                    "sandbox_id": sandbox_id.as_str(),
+                                    "workload_key": warm_pool.workload_key(),
+                                    "iron_control_principal": iron_control_principal,
+                                }),
+                            )
+                            .await?;
+                        info!(
+                            component = COMPONENT_SESSION_RUNTIME,
+                            event = "sandbox_ensure_warm_claimed",
+                            thread_key = %thread_key,
+                            execution_id,
+                            sandbox_id = %sandbox_id,
+                            workload_key = warm_pool.workload_key(),
+                            "claimed warm session sandbox"
+                        );
+                        return Ok(sandbox_id);
+                    }
+                    Ok(None) => record_sandbox_warm_pool_claim("miss"),
+                    Err(error) => {
+                        record_sandbox_warm_pool_claim("error");
+                        return Err(SessionRuntimeError::WarmPool(error));
+                    }
+                }
+            }
 
-        let mut spec = (self.sandbox_runtime.spec_factory)(thread_key, execution_id);
-        if let Some(principal) = iron_control_principal {
-            spec.iron_control_principal = Some(principal.to_owned());
+            let mut spec = (self.sandbox_runtime.spec_factory)(thread_key, execution_id);
+            if let Some(principal) = iron_control_principal {
+                spec.iron_control_principal = Some(principal.to_owned());
+            }
+            let handle = self.sandbox_runtime.manager.create_running(spec).await?;
+            span.record("centaur.sandbox_id", handle.id.as_str());
+            span.record("sandbox_id", handle.id.as_str());
+            self.store
+                .update_sandbox_id(thread_key, Some(handle.id.as_str()))
+                .await?;
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "sandbox_ensure_created",
+                thread_key = %thread_key,
+                execution_id,
+                sandbox_id = %handle.id.as_str(),
+                "created new session sandbox"
+            );
+            Ok(handle.id.into_string())
         }
-        let handle = self.sandbox_runtime.manager.create_running(spec).await?;
-        self.store
-            .update_sandbox_id(thread_key, Some(handle.id.as_str()))
-            .await?;
-        Ok(handle.id.into_string())
+        .instrument(span.clone())
+        .await;
+
+        if let Err(error) = &result {
+            error!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "sandbox_ensure_failed",
+                thread_key = %thread_key,
+                execution_id,
+                %error,
+                "failed to ensure session sandbox"
+            );
+        }
+        result
     }
 
     async fn ensure_session_pipe_if_live(
@@ -636,72 +992,127 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         sandbox_id: &str,
     ) -> Result<SessionPipe, SessionRuntimeError> {
-        if let Some(pipe) = self.sandbox_pipes.lock().await.get(sandbox_id).cloned() {
-            return Ok(pipe);
+        let span = info_span!(
+            "centaur.api_rs.session.pipe.ensure",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_pipe_ensure",
+            "centaur.thread_key" = thread_key.as_str(),
+            "centaur.sandbox_id" = sandbox_id,
+            thread_key = %thread_key,
+            sandbox_id,
+        );
+        let result = async {
+            if let Some(pipe) = self.sandbox_pipes.lock().await.get(sandbox_id).cloned() {
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_pipe_reused",
+                    thread_key = %thread_key,
+                    sandbox_id,
+                    "reusing session pipe"
+                );
+                return Ok(pipe);
+            }
+
+            let io = self
+                .sandbox_runtime
+                .manager
+                .open_io(&SandboxId::new(sandbox_id))
+                .await?
+                .into_parts();
+            let pipe = SessionPipe {
+                stdin: Arc::new(Mutex::new(FramedWrite::new(
+                    io.stdin,
+                    LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
+                ))),
+            };
+
+            self.sandbox_pipes
+                .lock()
+                .await
+                .insert(sandbox_id.to_owned(), pipe.clone());
+            let store = self.store.clone();
+            let manager = self.sandbox_runtime.manager.clone();
+            let execution_spans = self.execution_spans.clone();
+            let thread_key = thread_key.clone();
+            let pump_thread_key = thread_key.clone();
+            let pump_key = sandbox_id.to_owned();
+            let sandbox_pipes = self.sandbox_pipes.clone();
+            let stdout = io.stdout;
+            let stderr = io.stderr;
+            let guard = io.guard;
+            let stderr_key = pump_key.clone();
+
+            tokio::spawn(async move {
+                let result = run_stdout_pump(
+                    store.clone(),
+                    manager,
+                    sandbox_pipes.clone(),
+                    execution_spans.clone(),
+                    pump_thread_key.clone(),
+                    &pump_key,
+                    stdout,
+                    guard,
+                )
+                .await;
+                if let Err(error) = result {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_stdout_pump_failed",
+                        thread_key = %pump_thread_key,
+                        sandbox_id = %pump_key,
+                        %error,
+                        "session stdout pump failed"
+                    );
+                    let _ = store
+                        .append_event(
+                            &pump_thread_key,
+                            None,
+                            "session.stdout_pump_failed",
+                            json!({
+                                "sandbox_id": pump_key.as_str(),
+                                "error": error.to_string(),
+                            }),
+                        )
+                        .await;
+                }
+                sandbox_pipes.lock().await.remove(&pump_key);
+            });
+
+            tokio::spawn(async move {
+                if let Err(error) = drain_stderr(stderr).await {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_stderr_drain_failed",
+                        sandbox_id = %stderr_key,
+                        %error,
+                        "session stderr drain failed"
+                    );
+                }
+            });
+
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_pipe_opened",
+                thread_key = %thread_key,
+                sandbox_id,
+                "session pipe opened"
+            );
+            Ok(pipe)
         }
+        .instrument(span.clone())
+        .await;
 
-        let io = self
-            .sandbox_runtime
-            .manager
-            .open_io(&SandboxId::new(sandbox_id))
-            .await?
-            .into_parts();
-        let pipe = SessionPipe {
-            stdin: Arc::new(Mutex::new(FramedWrite::new(
-                io.stdin,
-                LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
-            ))),
-        };
-
-        self.sandbox_pipes
-            .lock()
-            .await
-            .insert(sandbox_id.to_owned(), pipe.clone());
-        let store = self.store.clone();
-        let manager = self.sandbox_runtime.manager.clone();
-        let thread_key = thread_key.clone();
-        let pump_key = sandbox_id.to_owned();
-        let sandbox_pipes = self.sandbox_pipes.clone();
-        let stdout = io.stdout;
-        let stderr = io.stderr;
-        let guard = io.guard;
-        let stderr_key = pump_key.clone();
-
-        tokio::spawn(async move {
-            let result = run_stdout_pump(
-                store.clone(),
-                manager,
-                sandbox_pipes.clone(),
-                thread_key.clone(),
-                &pump_key,
-                stdout,
-                guard,
-            )
-            .await;
-            if let Err(error) = result {
-                warn!(%pump_key, %error, "session stdout pump failed");
-                let _ = store
-                    .append_event(
-                        &thread_key,
-                        None,
-                        "session.stdout_pump_failed",
-                        json!({
-                            "sandbox_id": pump_key.as_str(),
-                            "error": error.to_string(),
-                        }),
-                    )
-                    .await;
-            }
-            sandbox_pipes.lock().await.remove(&pump_key);
-        });
-
-        tokio::spawn(async move {
-            if let Err(error) = drain_stderr(stderr).await {
-                warn!(%stderr_key, %error, "session stderr drain failed");
-            }
-        });
-
-        Ok(pipe)
+        if let Err(error) = &result {
+            error!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_pipe_ensure_failed",
+                thread_key = %thread_key,
+                sandbox_id,
+                %error,
+                "failed to ensure session pipe"
+            );
+        }
+        result
     }
 }
 
@@ -847,6 +1258,7 @@ fn session_event_stream(
     after_event_id: i64,
     execution_id: Option<String>,
     listener: SessionEventListener,
+    span: Span,
 ) -> impl Stream<Item = Result<SessionEvent, SessionRuntimeError>> {
     stream::unfold(
         EventStreamState {
@@ -865,53 +1277,67 @@ fn session_event_stream(
                 tick
             },
             done: false,
+            emitted_count: 0,
+            span,
         },
-        |mut state| async move {
-            loop {
-                if let Some(event) = state.pending.pop_front() {
-                    state.after_event_id = event.event_id;
-                    return Some((Ok(event), state));
-                }
-                if state.done {
-                    return None;
-                }
-                match state
-                    .store
-                    .list_events_after(
-                        &state.thread_key,
-                        state.after_event_id,
-                        state.execution_id.as_deref(),
-                        100,
-                    )
-                    .await
-                {
-                    Ok(events) if events.is_empty() => loop {
-                        tokio::select! {
-                            notification = state.listener.recv() => {
-                                match notification {
-                                    Ok(notification)
-                                        if notification.thread_key == state.thread_key.as_str()
-                                            && notification.event_id > state.after_event_id =>
-                                    {
-                                        break;
-                                    }
-                                    Ok(_) => {}
-                                    Err(error) => {
-                                        state.done = true;
-                                        return Some((Err(SessionRuntimeError::Store(error)), state));
+        |mut state| {
+            let span = state.span.clone();
+            async move {
+                loop {
+                    if let Some(event) = state.pending.pop_front() {
+                        state.after_event_id = event.event_id;
+                        state.emitted_count += 1;
+                        return Some((Ok(event), state));
+                    }
+                    if state.done {
+                        info!(
+                            component = COMPONENT_SESSION_RUNTIME,
+                            event = "session_events_stream_completed",
+                            thread_key = %state.thread_key,
+                            emitted_count = state.emitted_count,
+                            "session event stream completed"
+                        );
+                        return None;
+                    }
+                    match state
+                        .store
+                        .list_events_after(
+                            &state.thread_key,
+                            state.after_event_id,
+                            state.execution_id.as_deref(),
+                            100,
+                        )
+                        .await
+                    {
+                        Ok(events) if events.is_empty() => loop {
+                            tokio::select! {
+                                notification = state.listener.recv() => {
+                                    match notification {
+                                        Ok(notification)
+                                            if notification.thread_key == state.thread_key.as_str()
+                                                && notification.event_id > state.after_event_id =>
+                                        {
+                                            break;
+                                        }
+                                        Ok(_) => {}
+                                        Err(error) => {
+                                            state.done = true;
+                                            return Some((Err(SessionRuntimeError::Store(error)), state));
+                                        }
                                     }
                                 }
+                                _ = state.safety_tick.tick() => break,
                             }
-                            _ = state.safety_tick.tick() => break,
                         }
-                    },
-                    Ok(events) => state.pending = events.into(),
-                    Err(error) => {
-                        state.done = true;
-                        return Some((Err(SessionRuntimeError::Store(error)), state));
+                        Ok(events) => state.pending = events.into(),
+                        Err(error) => {
+                            state.done = true;
+                            return Some((Err(SessionRuntimeError::Store(error)), state));
+                        }
                     }
                 }
             }
+            .instrument(span)
         },
     )
 }
@@ -920,95 +1346,170 @@ async fn run_stdout_pump(
     store: PgSessionStore,
     manager: Arc<SandboxManager>,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    execution_spans: ExecutionSpanRegistry,
     thread_key: ThreadKey,
     sandbox_id: &str,
     stdout: SandboxRead,
     _guard: SandboxIoGuard,
 ) -> Result<(), SessionRuntimeError> {
-    let mut stdout = FramedRead::new(
-        stdout,
-        LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
+    let span = info_span!(
+        "centaur.api_rs.session.stdout_pump",
+        component = COMPONENT_SESSION_RUNTIME,
+        event = "session_stdout_pump",
+        "centaur.thread_key" = thread_key.as_str(),
+        "centaur.sandbox_id" = sandbox_id,
+        thread_key = %thread_key,
+        sandbox_id,
     );
-    let mut output_state = StdoutPumpState::default();
-    while let Some(line) = stdout.next().await {
-        let line = match line {
-            Ok(line) => line,
-            Err(error) => {
-                record_stdout_pump_failure(
-                    &store,
-                    manager,
-                    sandbox_pipes,
-                    &thread_key,
-                    sandbox_id,
-                    stdout_pump_error_message(&error),
-                )
-                .await?;
-                return Ok(());
+    async {
+        let mut stdout = FramedRead::new(
+            stdout,
+            LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
+        );
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_stdout_pump_started",
+            thread_key = %thread_key,
+            sandbox_id,
+            "session stdout pump started"
+        );
+        let mut output_state = StdoutPumpState::default();
+        let mut line_count = 0_u64;
+        while let Some(line) = stdout.next().await {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    record_stdout_pump_failure(
+                        &store,
+                        manager.clone(),
+                        sandbox_pipes.clone(),
+                        execution_spans.clone(),
+                        &thread_key,
+                        sandbox_id,
+                        stdout_pump_error_message(&error),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            line_count += 1;
+            let output_value = serde_json::from_str::<Value>(&line).ok();
+            if let Some(harness_thread_id) = harness_thread_id_from_output_line(&line)
+                && let Err(error) = store
+                    .update_harness_thread_id(&thread_key, Some(&harness_thread_id))
+                    .await
+            {
+                warn!(%thread_key, %harness_thread_id, %error, "failed to persist harness thread id");
             }
-        };
-        if let Some(harness_thread_id) = harness_thread_id_from_output_line(&line)
-            && let Err(error) = store
-                .update_harness_thread_id(&thread_key, Some(&harness_thread_id))
+            let active_execution = store.active_execution_for_thread(&thread_key).await?;
+            let execution_id = active_execution
+                .as_ref()
+                .map(|execution| execution.execution_id.as_str());
+            let Some(output_execution_id) = output_state.execution_for_line(execution_id, &line)
+            else {
+                continue;
+            };
+            let execution_span = execution_spans
+                .lock()
                 .await
-        {
-            warn!(%thread_key, %harness_thread_id, %error, "failed to persist harness thread id");
-        }
-        let active_execution = store.active_execution_for_thread(&thread_key).await?;
-        let execution_id = active_execution
-            .as_ref()
-            .map(|execution| execution.execution_id.as_str());
-        let Some(output_execution_id) = output_state.execution_for_line(execution_id, &line) else {
-            continue;
-        };
-        append_output_line(&store, &thread_key, Some(&output_execution_id), &line).await?;
-        if let Some(execution) = active_execution
-            && execution.execution_id == output_execution_id
-            && let Some(terminal) = output_state.observe(&output_execution_id, &line)
-        {
-            record_terminal_output(
-                &store,
-                manager.clone(),
-                sandbox_pipes.clone(),
+                .get(&output_execution_id)
+                .cloned();
+            let output_span = output_state.stdout_span_for_execution(
+                execution_span.as_ref(),
                 &thread_key,
                 sandbox_id,
                 &output_execution_id,
-                terminal,
+            );
+            append_output_line(&store, &thread_key, Some(&output_execution_id), &line)
+                .instrument(output_span.clone())
+                .await?;
+            if let Some(value) = output_value.as_ref() {
+                output_state.record_codex_app_server_spans(
+                    &output_span,
+                    &thread_key,
+                    sandbox_id,
+                    &output_execution_id,
+                    value,
+                );
+            }
+            if let Some(execution) = active_execution
+                && execution.execution_id == output_execution_id
+                && let Some(terminal) = output_state.observe(&output_execution_id, &line)
+            {
+                record_terminal_output(
+                    &store,
+                    manager.clone(),
+                    sandbox_pipes.clone(),
+                    execution_spans.clone(),
+                    &thread_key,
+                    sandbox_id,
+                    &output_execution_id,
+                    terminal,
+                )
+                .instrument(output_span)
+                .await?;
+                execution_spans.lock().await.remove(&output_execution_id);
+                output_state.forget(&output_execution_id);
+            }
+        }
+        if let Some(execution) = store.active_execution_for_thread(&thread_key).await? {
+            let execution_span = execution_spans
+                .lock()
+                .await
+                .get(&execution.execution_id)
+                .cloned();
+            let output_span = output_state.stdout_span_for_execution(
+                execution_span.as_ref(),
+                &thread_key,
+                sandbox_id,
+                &execution.execution_id,
+            );
+            record_terminal_output(
+                &store,
+                manager,
+                sandbox_pipes,
+                execution_spans.clone(),
+                &thread_key,
+                sandbox_id,
+                &execution.execution_id,
+                TerminalOutput::Failed {
+                    error: "sandbox stdout closed before terminal output".to_owned(),
+                },
+            )
+            .instrument(output_span)
+            .await?;
+            execution_spans.lock().await.remove(&execution.execution_id);
+            output_state.forget(&execution.execution_id);
+        }
+        store
+            .append_event(
+                &thread_key,
+                None,
+                "session.stdout_eof",
+                json!({
+                    "sandbox_id": sandbox_id,
+                }),
             )
             .await?;
-            output_state.forget(&output_execution_id);
-        }
-    }
-    if let Some(execution) = store.active_execution_for_thread(&thread_key).await? {
-        record_terminal_output(
-            &store,
-            manager,
-            sandbox_pipes,
-            &thread_key,
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_stdout_pump_completed",
+            thread_key = %thread_key,
             sandbox_id,
-            &execution.execution_id,
-            TerminalOutput::Failed {
-                error: "sandbox stdout closed before terminal output".to_owned(),
-            },
-        )
-        .await?;
+            output_line_count = line_count,
+            "session stdout pump completed"
+        );
+        Ok(())
     }
-    store
-        .append_event(
-            &thread_key,
-            None,
-            "session.stdout_eof",
-            json!({
-                "sandbox_id": sandbox_id,
-            }),
-        )
-        .await?;
-    Ok(())
+    .instrument(span)
+    .await
 }
 
 async fn record_stdout_pump_failure(
     store: &PgSessionStore,
     manager: Arc<SandboxManager>,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    execution_spans: ExecutionSpanRegistry,
     thread_key: &ThreadKey,
     sandbox_id: &str,
     error: String,
@@ -1035,6 +1536,7 @@ async fn record_stdout_pump_failure(
             store,
             manager,
             sandbox_pipes,
+            execution_spans,
             thread_key,
             sandbox_id,
             &execution.execution_id,
@@ -1050,6 +1552,8 @@ struct StdoutPumpState {
     final_answer_text_by_execution: HashMap<String, String>,
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
+    tool_call_by_id: HashMap<String, ToolCallLabels>,
+    stdout_span_by_execution: HashMap<String, Span>,
 }
 
 impl StdoutPumpState {
@@ -1109,10 +1613,51 @@ impl StdoutPumpState {
 
     fn forget(&mut self, execution_id: &str) {
         self.final_answer_text_by_execution.remove(execution_id);
+        let tool_ids_to_forget = self
+            .item_execution_by_id
+            .iter()
+            .filter_map(|(item_id, mapped_execution_id)| {
+                (mapped_execution_id == execution_id).then(|| item_id.clone())
+            })
+            .collect::<Vec<_>>();
         self.turn_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
         self.item_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
+        self.stdout_span_by_execution.remove(execution_id);
+        for item_id in tool_ids_to_forget {
+            self.tool_call_by_id.remove(&item_id);
+        }
+    }
+
+    fn stdout_span_for_execution(
+        &mut self,
+        parent: Option<&Span>,
+        thread_key: &ThreadKey,
+        sandbox_id: &str,
+        execution_id: &str,
+    ) -> Span {
+        if let Some(span) = self.stdout_span_by_execution.get(execution_id) {
+            return span.clone();
+        }
+        let span = new_stdout_pump_span(parent, thread_key, sandbox_id, execution_id);
+        self.stdout_span_by_execution
+            .insert(execution_id.to_owned(), span.clone());
+        span
+    }
+
+    fn record_codex_app_server_spans(
+        &mut self,
+        parent: &Span,
+        thread_key: &ThreadKey,
+        sandbox_id: &str,
+        execution_id: &str,
+        value: &Value,
+    ) {
+        record_codex_app_server_event_span(parent, thread_key, sandbox_id, execution_id, value);
+        for event in tool_call_span_events(value, &mut self.tool_call_by_id) {
+            record_codex_app_server_tool_span(parent, thread_key, sandbox_id, execution_id, &event);
+        }
     }
 
     fn known_execution_for_value(&self, value: &Value) -> Option<String> {
@@ -1141,6 +1686,442 @@ impl StdoutPumpState {
     }
 }
 
+fn new_stdout_pump_span(
+    parent: Option<&Span>,
+    thread_key: &ThreadKey,
+    sandbox_id: &str,
+    execution_id: &str,
+) -> Span {
+    if let Some(parent) = parent {
+        info_span!(
+            parent: parent,
+            "centaur.api_rs.session.stdout_pump",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_stdout_pump",
+            "centaur.thread_key" = thread_key.as_str(),
+            "centaur.execution_id" = execution_id,
+            "centaur.sandbox_id" = sandbox_id,
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id,
+        )
+    } else {
+        info_span!(
+            "centaur.api_rs.session.stdout_pump",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_stdout_pump",
+            "centaur.thread_key" = thread_key.as_str(),
+            "centaur.execution_id" = execution_id,
+            "centaur.sandbox_id" = sandbox_id,
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToolCallLabels {
+    kind: String,
+    name: String,
+    method: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ToolCallSpanEvent {
+    labels: ToolCallLabels,
+    status: &'static str,
+    duration: Option<Duration>,
+}
+
+fn record_codex_app_server_event_span(
+    parent: &Span,
+    thread_key: &ThreadKey,
+    sandbox_id: &str,
+    execution_id: &str,
+    value: &Value,
+) {
+    let event_type = sandbox_output_event_type(value);
+    let source = sandbox_output_source(value);
+    let item = protocol_item(value);
+    let item_type = item
+        .and_then(|item| string_at_path(item, &["type"]))
+        .unwrap_or_default();
+    let turn_id = turn_ids(value).into_iter().next().unwrap_or_default();
+    let item_id = item_ids(value).into_iter().next().unwrap_or_default();
+
+    let span = info_span!(
+        parent: parent,
+        "centaur.api_rs.codex_app_server.event",
+        component = COMPONENT_SESSION_RUNTIME,
+        event = "codex_app_server_event",
+        "centaur.thread_key" = thread_key.as_str(),
+        "centaur.execution_id" = execution_id,
+        "centaur.sandbox_id" = sandbox_id,
+        "codex_app_server.source" = source,
+        "codex_app_server.event_type" = event_type,
+        "codex_app_server.item_type" = item_type.as_str(),
+        "codex_app_server.turn_id" = turn_id.as_str(),
+        "codex_app_server.item_id" = item_id.as_str(),
+    );
+    let _entered = span.enter();
+}
+
+fn record_codex_app_server_tool_span(
+    parent: &Span,
+    thread_key: &ThreadKey,
+    sandbox_id: &str,
+    execution_id: &str,
+    event: &ToolCallSpanEvent,
+) {
+    let duration_ms = event
+        .duration
+        .map(|duration| duration.as_secs_f64() * 1000.0);
+    let span = info_span!(
+        parent: parent,
+        "centaur.api_rs.codex_app_server.tool_call",
+        component = COMPONENT_SESSION_RUNTIME,
+        event = "codex_app_server_tool_call",
+        "centaur.thread_key" = thread_key.as_str(),
+        "centaur.execution_id" = execution_id,
+        "centaur.sandbox_id" = sandbox_id,
+        "tool.kind" = event.labels.kind.as_str(),
+        "tool.name" = event.labels.name.as_str(),
+        "tool.method" = event.labels.method.as_str(),
+        "tool.status" = event.status,
+        "tool.duration_ms" = tracing::field::Empty,
+    );
+    if let Some(duration_ms) = duration_ms {
+        span.record("tool.duration_ms", duration_ms);
+    }
+    let _entered = span.enter();
+}
+
+fn sandbox_output_event_type(value: &Value) -> &str {
+    value
+        .get("method")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("type").and_then(Value::as_str))
+        .filter(|event_type| !event_type.trim().is_empty())
+        .unwrap_or("json")
+}
+
+fn sandbox_output_source(value: &Value) -> &str {
+    if value.get("method").and_then(Value::as_str).is_some() {
+        return "codex_app_server";
+    }
+    match value.get("type").and_then(Value::as_str) {
+        Some(event_type)
+            if event_type.starts_with("item.")
+                || event_type.starts_with("turn.")
+                || event_type.starts_with("thread.") =>
+        {
+            "codex_app_server"
+        }
+        Some("system")
+            if value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .is_some_and(|subtype| subtype.starts_with("wrapper_")) =>
+        {
+            "codex_app_server"
+        }
+        Some("assistant" | "user" | "tool") => "harness",
+        Some(_) | None => "sandbox",
+    }
+}
+
+fn tool_call_span_events(
+    value: &Value,
+    known_tool_calls: &mut HashMap<String, ToolCallLabels>,
+) -> Vec<ToolCallSpanEvent> {
+    let mut events = Vec::new();
+    let event_type = sandbox_output_event_type(value);
+
+    if matches!(event_type, "item/started" | "item.started")
+        && let Some(item) = protocol_item(value)
+        && let Some(labels) = tool_labels_from_item(item)
+    {
+        remember_tool_call_labels(item, &labels, known_tool_calls);
+        events.push(ToolCallSpanEvent {
+            labels,
+            status: "started",
+            duration: None,
+        });
+    }
+
+    if matches!(event_type, "item/completed" | "item.completed")
+        && let Some(item) = protocol_item(value)
+    {
+        let item_id = string_at_path(item, &["id"]);
+        let labels = tool_labels_from_item(item).or_else(|| {
+            item_id
+                .as_deref()
+                .and_then(|item_id| known_tool_calls.get(item_id).cloned())
+        });
+        if let Some(labels) = labels {
+            let status = completed_tool_status(item);
+            if let Some(item_id) = item_id {
+                known_tool_calls.remove(&item_id);
+            }
+            events.push(ToolCallSpanEvent {
+                labels,
+                status,
+                duration: duration_from_ms_value(
+                    item.get("durationMs").or_else(|| item.get("duration_ms")),
+                ),
+            });
+        }
+    }
+
+    if matches!(
+        event_type,
+        "item/mcpToolCall/progress" | "item.mcpToolCall.progress"
+    ) {
+        let labels = progress_item_id(value)
+            .and_then(|item_id| known_tool_calls.get(&item_id).cloned())
+            .unwrap_or_else(|| ToolCallLabels {
+                kind: "mcp".to_owned(),
+                name: "unknown".to_owned(),
+                method: "unknown".to_owned(),
+            });
+        events.push(ToolCallSpanEvent {
+            labels,
+            status: "progress",
+            duration: None,
+        });
+    }
+
+    for tool_use in anthropic_tool_uses(value) {
+        let labels = ToolCallLabels {
+            kind: "anthropic".to_owned(),
+            name: string_at_path(tool_use, &["name"]).unwrap_or_else(|| "unknown".to_owned()),
+            method: "call".to_owned(),
+        };
+        if let Some(tool_id) = string_at_path(tool_use, &["id"]) {
+            known_tool_calls.insert(tool_id, labels.clone());
+        }
+        events.push(ToolCallSpanEvent {
+            labels,
+            status: "started",
+            duration: None,
+        });
+    }
+
+    for tool_result in anthropic_tool_results(value) {
+        let labels = string_at_path(tool_result, &["tool_use_id"])
+            .and_then(|tool_use_id| known_tool_calls.remove(&tool_use_id))
+            .unwrap_or_else(|| ToolCallLabels {
+                kind: "anthropic".to_owned(),
+                name: "unknown".to_owned(),
+                method: "call".to_owned(),
+            });
+        events.push(ToolCallSpanEvent {
+            labels,
+            status: if tool_result
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "failed"
+            } else {
+                "completed"
+            },
+            duration: None,
+        });
+    }
+
+    events
+}
+
+fn protocol_item(value: &Value) -> Option<&Value> {
+    value
+        .get("params")
+        .and_then(|params| params.get("item"))
+        .or_else(|| value.get("item"))
+}
+
+fn tool_labels_from_item(item: &Value) -> Option<ToolCallLabels> {
+    let item_type = string_at_path(item, &["type"])?;
+    match item_type.as_str() {
+        "mcpToolCall" | "mcp_tool_call" => Some(ToolCallLabels {
+            kind: "mcp".to_owned(),
+            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "unknown".to_owned()),
+            method: string_at_path(item, &["server"]).unwrap_or_else(|| "call".to_owned()),
+        }),
+        "dynamicToolCall" | "dynamic_tool_call" => Some(ToolCallLabels {
+            kind: "dynamic".to_owned(),
+            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "unknown".to_owned()),
+            method: string_at_path(item, &["namespace"]).unwrap_or_else(|| "call".to_owned()),
+        }),
+        "collabAgentToolCall" | "collab_agent_tool_call" => Some(ToolCallLabels {
+            kind: "collab_agent".to_owned(),
+            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "agent".to_owned()),
+            method: "call".to_owned(),
+        }),
+        "commandExecution" | "command_execution" => centaur_call_labels_from_command_item(item),
+        _ => None,
+    }
+}
+
+fn remember_tool_call_labels(
+    item: &Value,
+    labels: &ToolCallLabels,
+    known_tool_calls: &mut HashMap<String, ToolCallLabels>,
+) {
+    if let Some(item_id) = string_at_path(item, &["id"]) {
+        known_tool_calls.insert(item_id, labels.clone());
+    }
+}
+
+fn completed_tool_status(item: &Value) -> &'static str {
+    if item
+        .get("success")
+        .and_then(Value::as_bool)
+        .is_some_and(|success| !success)
+        || item.get("error").is_some()
+    {
+        return "failed";
+    }
+
+    if let Some(exit_code) = item.get("exitCode").and_then(Value::as_i64) {
+        return if exit_code == 0 {
+            "completed"
+        } else {
+            "failed"
+        };
+    }
+
+    match item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed")
+    {
+        "failed" | "error" | "cancelled" | "declined" => "failed",
+        "inProgress" | "in_progress" | "running" => "started",
+        _ => "completed",
+    }
+}
+
+fn duration_from_ms_value(value: Option<&Value>) -> Option<Duration> {
+    let millis = value.and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_u64().map(|millis| millis as f64))
+            .or_else(|| value.as_i64().map(|millis| millis as f64))
+    })?;
+    if millis.is_finite() && millis >= 0.0 {
+        Some(Duration::from_secs_f64(millis / 1000.0))
+    } else {
+        None
+    }
+}
+
+fn progress_item_id(value: &Value) -> Option<String> {
+    [
+        &["params", "itemId"][..],
+        &["params", "item_id"][..],
+        &["itemId"][..],
+        &["item_id"][..],
+    ]
+    .into_iter()
+    .filter_map(|path| string_at_path(value, path))
+    .next()
+}
+
+fn anthropic_tool_uses(value: &Value) -> Vec<&Value> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+    content_blocks(value)
+        .into_iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .collect()
+}
+
+fn anthropic_tool_results(value: &Value) -> Vec<&Value> {
+    if !matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("user" | "tool")
+    ) {
+        return Vec::new();
+    }
+    content_blocks(value)
+        .into_iter()
+        .filter(|part| {
+            part.get("type").and_then(Value::as_str) == Some("tool_result")
+                || part.get("tool_use_id").and_then(Value::as_str).is_some()
+        })
+        .collect()
+}
+
+fn content_blocks(value: &Value) -> Vec<&Value> {
+    value
+        .get("content")
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("content"))
+        })
+        .and_then(Value::as_array)
+        .map(|values| values.iter().collect())
+        .unwrap_or_default()
+}
+
+fn centaur_call_labels_from_command_item(item: &Value) -> Option<ToolCallLabels> {
+    let command = string_at_path(item, &["command"])?;
+    let (name, method) = parse_centaur_call_command(&command)?;
+    Some(ToolCallLabels {
+        kind: "centaur_call".to_owned(),
+        name,
+        method,
+    })
+}
+
+fn parse_centaur_call_command(command: &str) -> Option<(String, String)> {
+    let call_start = command
+        .match_indices("call")
+        .find_map(|(index, _)| is_call_command_token(command, index).then_some(index))?;
+    let after_call = command[call_start + "call".len()..]
+        .trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\'' || ch == '"');
+    let mut parts = after_call
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '\'' | '"' | ';'))
+        .filter(|part| !part.is_empty());
+    let first = parts.next()?;
+    match first {
+        "tools" => Some(("tools".to_owned(), "list".to_owned())),
+        "discover" => Some((
+            parts.next().unwrap_or("unknown").to_owned(),
+            "discover".to_owned(),
+        )),
+        "agent" => Some((
+            "agent".to_owned(),
+            parts.next().unwrap_or("unknown").to_owned(),
+        )),
+        tool => Some((
+            tool.to_owned(),
+            parts.next().unwrap_or("unknown").to_owned(),
+        )),
+    }
+}
+
+fn is_call_command_token(command: &str, index: usize) -> bool {
+    let before = command[..index].chars().next_back();
+    let after = command[index + "call".len()..].chars().next();
+
+    let before_is_boundary = before.is_none_or(|ch| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '\'' | '"' | '`' | ';' | '&' | '|' | '(' | ')' | '{' | '}' | '/'
+            )
+    });
+    let after_is_boundary =
+        after.is_some_and(|ch| ch.is_whitespace() || matches!(ch, '\'' | '"' | ';'));
+
+    before_is_boundary && after_is_boundary
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum TerminalOutput {
     Completed {
@@ -1156,12 +2137,13 @@ async fn record_terminal_output(
     store: &PgSessionStore,
     manager: Arc<SandboxManager>,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    execution_spans: ExecutionSpanRegistry,
     thread_key: &ThreadKey,
     sandbox_id: &str,
     execution_id: &str,
     terminal: TerminalOutput,
 ) -> Result<(), SessionRuntimeError> {
-    let terminal_execution = match terminal {
+    let (terminal_execution, terminal_status) = match terminal {
         TerminalOutput::Completed {
             reason,
             result_text,
@@ -1187,7 +2169,7 @@ async fn record_terminal_output(
                     payload,
                 )
                 .await?;
-            execution
+            (execution, "completed")
         }
         TerminalOutput::Failed { error } => {
             let Some(execution) = store.fail_execution_if_active(execution_id, &error).await?
@@ -1206,9 +2188,11 @@ async fn record_terminal_output(
                     }),
                 )
                 .await?;
-            execution
+            (execution, "failed")
         }
     };
+    execution_spans.lock().await.remove(execution_id);
+    record_finished_execution_metric(store, thread_key, &terminal_execution, terminal_status).await;
     if let Some(idle_timeout) = idle_timeout_from_execution(&terminal_execution) {
         spawn_idle_pause(
             store.clone(),
@@ -1227,6 +2211,7 @@ fn spawn_max_duration_failure(
     store: PgSessionStore,
     manager: Arc<SandboxManager>,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    execution_spans: ExecutionSpanRegistry,
     thread_key: ThreadKey,
     execution_id: String,
     max_duration: Duration,
@@ -1238,6 +2223,7 @@ fn spawn_max_duration_failure(
             &store,
             manager,
             sandbox_pipes,
+            execution_spans,
             &thread_key,
             &execution_id,
             max_duration,
@@ -1254,6 +2240,7 @@ async fn record_max_duration_failure(
     store: &PgSessionStore,
     manager: Arc<SandboxManager>,
     sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    execution_spans: ExecutionSpanRegistry,
     thread_key: &ThreadKey,
     execution_id: &str,
     max_duration: Duration,
@@ -1264,6 +2251,7 @@ async fn record_max_duration_failure(
     let Some(execution) = store.fail_execution_if_active(execution_id, &error).await? else {
         return Ok(());
     };
+    execution_spans.lock().await.remove(execution_id);
     store
         .append_event(
             thread_key,
@@ -1278,6 +2266,7 @@ async fn record_max_duration_failure(
             }),
         )
         .await?;
+    record_finished_execution_metric(store, thread_key, &execution, "failed").await;
     if let Some(idle_timeout) = idle_timeout.or_else(|| idle_timeout_from_execution(&execution))
         && let Some(sandbox_id) = store.get_session(thread_key).await?.sandbox_id
     {
@@ -1446,6 +2435,28 @@ fn should_pause_idle_sandbox(
 
 fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+async fn record_finished_execution_metric(
+    store: &PgSessionStore,
+    thread_key: &ThreadKey,
+    execution: &SessionExecution,
+    status: &'static str,
+) {
+    let harness_label = match store.get_session(thread_key).await {
+        Ok(session) => session.harness_type.to_string(),
+        Err(error) => {
+            warn!(%thread_key, %error, "failed to load session for execution metric labels");
+            "unknown".to_owned()
+        }
+    };
+    record_session_execution_finished(&harness_label, status, execution_duration(execution));
+}
+
+fn execution_duration(execution: &SessionExecution) -> Option<Duration> {
+    let started_at = execution.started_at.unwrap_or(execution.created_at);
+    let completed_at = execution.completed_at?;
+    (completed_at - started_at).try_into().ok()
 }
 
 fn should_attach_session_pipe(status: &SandboxStatus) -> bool {
@@ -1721,12 +2732,41 @@ async fn drain_stderr(mut stderr: SandboxRead) -> Result<(), SessionRuntimeError
 async fn write_input_lines(
     pipe: &SessionPipe,
     input_lines: &[String],
+    thread_key: &ThreadKey,
+    execution_id: &str,
+    sandbox_id: Option<&str>,
 ) -> Result<(), SessionRuntimeError> {
-    let mut stdin = pipe.stdin.lock().await;
-    for line in input_lines {
-        stdin.send(line).await.map_err(codec_error_to_runtime)?;
+    let sandbox_id = sandbox_id.unwrap_or("");
+    let span = info_span!(
+        "centaur.api_rs.sandbox.write_input",
+        component = COMPONENT_SESSION_RUNTIME,
+        event = "sandbox_write_input",
+        "centaur.thread_key" = thread_key.as_str(),
+        "centaur.execution_id" = execution_id,
+        "centaur.sandbox_id" = sandbox_id,
+        thread_key = %thread_key,
+        execution_id,
+        sandbox_id,
+        input_line_count = input_lines.len(),
+    );
+    async {
+        let mut stdin = pipe.stdin.lock().await;
+        for line in input_lines {
+            stdin.send(line).await.map_err(codec_error_to_runtime)?;
+        }
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "sandbox_write_input_completed",
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id,
+            input_line_count = input_lines.len(),
+            "sandbox input written"
+        );
+        Ok(())
     }
-    Ok(())
+    .instrument(span)
+    .await
 }
 
 fn input_lines_with_thread_key(thread_key: &ThreadKey, input_lines: &[String]) -> Vec<String> {
@@ -2273,6 +3313,210 @@ mod tests {
         assert!(redacted.contains("Authorization: Bearer [REDACTED_TOKEN]"));
         assert!(redacted.contains("CENTAUR_API_KEY=[REDACTED_TOKEN]"));
         assert!(redacted.contains("SLACK_BOT_TOKEN=[REDACTED_TOKEN]"));
+    }
+
+    #[test]
+    fn codex_app_server_event_source_and_type_are_classified() {
+        let app_server = json!({
+            "method": "item/agentMessage/delta",
+            "params": {"turnId": "turn-1", "itemId": "item-1"},
+        });
+        let harness = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "redacted"}]},
+        });
+        let sandbox = json!({
+            "type": "custom.wrapper.event",
+        });
+
+        assert_eq!(
+            sandbox_output_event_type(&app_server),
+            "item/agentMessage/delta"
+        );
+        assert_eq!(sandbox_output_source(&app_server), "codex_app_server");
+        assert_eq!(sandbox_output_source(&harness), "harness");
+        assert_eq!(sandbox_output_source(&sandbox), "sandbox");
+    }
+
+    #[test]
+    fn codex_app_server_mcp_tool_events_emit_tool_spans() {
+        let started = json!({
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "id": "tool-1",
+                    "type": "mcpToolCall",
+                    "server": "github",
+                    "tool": "list_issues"
+                }
+            }
+        });
+        let progress = json!({
+            "method": "item/mcpToolCall/progress",
+            "params": {"itemId": "tool-1"}
+        });
+        let completed = json!({
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "id": "tool-1",
+                    "durationMs": 125
+                }
+            }
+        });
+        let mut known = HashMap::new();
+
+        assert_eq!(
+            tool_call_span_events(&started, &mut known),
+            vec![ToolCallSpanEvent {
+                labels: ToolCallLabels {
+                    kind: "mcp".to_owned(),
+                    name: "list_issues".to_owned(),
+                    method: "github".to_owned(),
+                },
+                status: "started",
+                duration: None,
+            }]
+        );
+        assert_eq!(
+            tool_call_span_events(&progress, &mut known),
+            vec![ToolCallSpanEvent {
+                labels: ToolCallLabels {
+                    kind: "mcp".to_owned(),
+                    name: "list_issues".to_owned(),
+                    method: "github".to_owned(),
+                },
+                status: "progress",
+                duration: None,
+            }]
+        );
+        assert_eq!(
+            tool_call_span_events(&completed, &mut known),
+            vec![ToolCallSpanEvent {
+                labels: ToolCallLabels {
+                    kind: "mcp".to_owned(),
+                    name: "list_issues".to_owned(),
+                    method: "github".to_owned(),
+                },
+                status: "completed",
+                duration: Some(Duration::from_millis(125)),
+            }]
+        );
+        assert!(known.is_empty());
+    }
+
+    #[test]
+    fn command_execution_centaur_call_events_emit_tool_spans() {
+        let started = json!({
+            "type": "item.started",
+            "item": {
+                "id": "cmd-1",
+                "type": "commandExecution",
+                "command": "/bin/bash -lc 'call websearch search {\"query\":\"redacted\"}'"
+            }
+        });
+        let completed = json!({
+            "type": "item.completed",
+            "item": {
+                "id": "cmd-1",
+                "type": "commandExecution",
+                "command": "/usr/local/bin/call discover grafana",
+                "exitCode": 0,
+                "durationMs": 42
+            }
+        });
+        let mut known = HashMap::new();
+
+        assert_eq!(
+            tool_call_span_events(&started, &mut known),
+            vec![ToolCallSpanEvent {
+                labels: ToolCallLabels {
+                    kind: "centaur_call".to_owned(),
+                    name: "websearch".to_owned(),
+                    method: "search".to_owned(),
+                },
+                status: "started",
+                duration: None,
+            }]
+        );
+        assert_eq!(
+            tool_call_span_events(&completed, &mut known),
+            vec![ToolCallSpanEvent {
+                labels: ToolCallLabels {
+                    kind: "centaur_call".to_owned(),
+                    name: "grafana".to_owned(),
+                    method: "discover".to_owned(),
+                },
+                status: "completed",
+                duration: Some(Duration::from_millis(42)),
+            }]
+        );
+    }
+
+    #[test]
+    fn anthropic_tool_use_and_result_events_emit_tool_spans() {
+        let assistant = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "use-1", "name": "todo_write", "input": {"redacted": true}}
+                ]
+            }
+        });
+        let result = json!({
+            "type": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "use-1", "content": "redacted"}
+            ]
+        });
+        let mut known = HashMap::new();
+
+        assert_eq!(
+            tool_call_span_events(&assistant, &mut known),
+            vec![ToolCallSpanEvent {
+                labels: ToolCallLabels {
+                    kind: "anthropic".to_owned(),
+                    name: "todo_write".to_owned(),
+                    method: "call".to_owned(),
+                },
+                status: "started",
+                duration: None,
+            }]
+        );
+        assert_eq!(
+            tool_call_span_events(&result, &mut known),
+            vec![ToolCallSpanEvent {
+                labels: ToolCallLabels {
+                    kind: "anthropic".to_owned(),
+                    name: "todo_write".to_owned(),
+                    method: "call".to_owned(),
+                },
+                status: "completed",
+                duration: None,
+            }]
+        );
+        assert!(known.is_empty());
+    }
+
+    #[test]
+    fn centaur_call_command_parser_matches_only_call_tokens() {
+        assert_eq!(
+            parse_centaur_call_command("call websearch search '{}'"),
+            Some(("websearch".to_owned(), "search".to_owned()))
+        );
+        assert_eq!(
+            parse_centaur_call_command("/bin/bash -lc 'call discover grafana'"),
+            Some(("grafana".to_owned(), "discover".to_owned()))
+        );
+        assert_eq!(
+            parse_centaur_call_command("/usr/local/bin/call agent runtime"),
+            Some(("agent".to_owned(), "runtime".to_owned()))
+        );
+        assert_eq!(
+            parse_centaur_call_command("callback websearch search"),
+            None
+        );
+        assert_eq!(parse_centaur_call_command("recall websearch search"), None);
     }
 
     #[test]

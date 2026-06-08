@@ -15,6 +15,10 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
     use centaur_sandbox_core::{
         ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
         SandboxResult, SandboxSpec, SandboxStatus,
@@ -22,6 +26,7 @@ mod tests {
     use centaur_session_runtime::SandboxRuntime;
     use centaur_session_sqlx::PgSessionStore;
     use sqlx::PgPool;
+    use tower::ServiceExt;
 
     use super::build_router_with_runtime;
 
@@ -32,6 +37,52 @@ mod tests {
         let _router = build_router_with_runtime(
             PgSessionStore::new(pool),
             SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_renders_http_request_metrics() {
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let app = build_router_with_runtime(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+
+        let app = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(app.status(), StatusCode::OK);
+
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let app = build_router_with_runtime(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains(
+                r#"http_server_requests_total{method="GET",route="/healthz",status="200"}"#
+            )
         );
     }
 

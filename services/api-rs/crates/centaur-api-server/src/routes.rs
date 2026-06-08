@@ -1,10 +1,16 @@
-use std::{convert::Infallible, convert::TryFrom};
+use std::{
+    convert::Infallible,
+    convert::TryFrom,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    body::Body,
+    extract::{MatchedPath, Path, Query, Request, State},
+    middleware::{self, Next},
     response::{
-        Sse,
+        IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
     routing::{get, post},
@@ -12,8 +18,14 @@ use axum::{
 use centaur_session_core::{Session, ThreadKey};
 use centaur_session_runtime::{ExecuteSessionInput, SandboxRuntime, SessionRuntime};
 use centaur_session_sqlx::PgSessionStore;
+use centaur_telemetry::{
+    PrometheusHandle, http_status_class, prometheus_handle, record_http_request_finished,
+    record_http_request_started,
+};
 use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
+use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 use crate::{
     ApiError,
@@ -26,6 +38,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     runtime: SessionRuntime,
+    metrics: PrometheusHandle,
 }
 
 pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Router {
@@ -33,18 +46,95 @@ pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: Sandbox
 }
 
 pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {
+    let metrics_handle =
+        prometheus_handle().expect("failed to initialize Prometheus metrics recorder");
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics))
         .route("/api/session/{thread_key}", post(create_or_get_session))
         .route("/api/session/{thread_key}/messages", post(append_messages))
         .route("/api/session/{thread_key}/execute", post(execute_session))
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
-        .with_state(AppState { runtime })
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    let route = matched_route(request);
+                    tracing::info_span!(
+                        "centaur.api_rs.http_request",
+                        "otel.kind" = "server",
+                        "otel.status_code" = tracing::field::Empty,
+                        "http.request.method" = request.method().as_str(),
+                        "http.route" = route.as_str(),
+                        "http.response.status_code" = tracing::field::Empty,
+                    )
+                })
+                .on_request(())
+                .on_response(|response: &Response, latency: Duration, span: &Span| {
+                    let status = response.status();
+                    span.record("http.response.status_code", status.as_u16());
+                    span.record(
+                        "otel.status_code",
+                        if status.is_server_error() {
+                            "ERROR"
+                        } else {
+                            "OK"
+                        },
+                    );
+
+                    tracing::info!(
+                        component = "api_server",
+                        event = "http_request",
+                        status = status.as_u16(),
+                        status_class = http_status_class(status.as_u16()),
+                        duration_ms = (latency.as_secs_f64() * 1000.0),
+                        "http request completed"
+                    );
+                }),
+        )
+        .layer(middleware::from_fn(http_metrics))
+        .with_state(AppState {
+            runtime,
+            metrics: metrics_handle,
+        })
 }
 
 async fn healthz() -> Json<Value> {
     Json(json!({"ok": true}))
+}
+
+async fn metrics(State(state): State<AppState>) -> Response {
+    (
+        [("Content-Type", "text/plain; version=0.0.4; charset=utf-8")],
+        Body::from(state.metrics.render()),
+    )
+        .into_response()
+}
+
+async fn http_metrics(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let route = matched_route(&req);
+
+    if route == "/metrics" {
+        return next.run(req).await;
+    }
+
+    let start = Instant::now();
+    record_http_request_started();
+    let response = next.run(req).await;
+    let status = response.status();
+    let duration = start.elapsed();
+    record_http_request_finished(method.as_str(), route.as_str(), status.as_u16(), duration);
+
+    response
+}
+
+fn matched_route<B>(request: &Request<B>) -> String {
+    request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|path| path.as_str().to_owned())
+        .unwrap_or_else(|| "__unmatched__".to_owned())
 }
 
 async fn create_or_get_session(

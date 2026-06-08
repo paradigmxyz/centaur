@@ -794,10 +794,11 @@ def drain_until_turn_done() -> None:
 def handle_input(turn_input: dict[str, Any]) -> None:
     global ACTIVE_TURN_ID, CURRENT_LLM_INPUT_TEXT, CURRENT_LLM_OUTPUT_TEXT
     global CURRENT_TRACE_METADATA
-    if turn_input.get("type") == "interrupt":
+    input_type = turn_input.get("type")
+    if input_type == "interrupt":
         interrupt_active_turn()
         return
-    if turn_input.get("type") != "user":
+    if input_type not in {"user", "turn.start"}:
         return
 
     thread_key = str(turn_input.get("thread_key") or "").strip()
