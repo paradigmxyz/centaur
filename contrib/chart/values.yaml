@@ -31,6 +31,11 @@ ironProxy:
     pgPortRangeEnd: 5471
   secretSource: onepassword
   secretTtl: 10m
+  # Applied by the API to runtime-created iron-proxy Pods and the API proxy
+  # Deployment.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 # Tool-server sidecar — runs alongside the sandbox container in each sandbox
 # Pod and exposes the same /tools/* surface the API used to. Same image as
@@ -62,6 +67,9 @@ tokenBroker:
   # broker resolver rejects the response.
   ttl: 1m
   resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 # iron-control — Rails control plane for authenticated API access + encrypted
 # secret storage. Off by default; enable per-environment. Uses a dedicated
@@ -88,6 +96,9 @@ ironControl:
   service:
     httpPort: 3000
   resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
@@ -150,6 +161,9 @@ api:
   terminationGracePeriodSeconds: 35
   extraEnv: {}
   resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 overlay:
   mountPath: /app/overlay/org
@@ -178,6 +192,16 @@ sandbox:
     requests:
       cpu: 100m
       memory: 512Mi
+  # Applied by the API to runtime-created sandbox Pods.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+workflowRun:
+  # Applied by the API to runtime-created one-shot workflow execution Pods.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 repoCache:
   enabled: false
@@ -221,6 +245,9 @@ slackbot:
   runtimeErrorAlertChannel: ""
   extraEnv: {}
   resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 postgres:
   enabled: true
@@ -243,6 +270,9 @@ postgres:
     storageClassName: ""
     subPath: ""
   resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 ingress:
   enabled: false

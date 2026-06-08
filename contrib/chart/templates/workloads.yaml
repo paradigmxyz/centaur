@@ -28,6 +28,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{ include "centaur.podScheduling" .Values.postgres | nindent 6 }}
       containers:
         - name: postgres
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
@@ -131,6 +132,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{ include "centaur.podScheduling" .Values.api | nindent 6 }}
 {{- if .Values.overlay.image.repository }}
       initContainers:
         - name: overlay-bootstrap
@@ -303,6 +305,18 @@ spec:
               value: {{ printf "%s:%s" .Values.ironProxy.image.repository .Values.ironProxy.image.tag | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_IRON_PROXY_NODE_SELECTOR") }}
+            - name: KUBERNETES_IRON_PROXY_NODE_SELECTOR
+              value: {{ toJson .Values.ironProxy.nodeSelector | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_IRON_PROXY_AFFINITY") }}
+            - name: KUBERNETES_IRON_PROXY_AFFINITY
+              value: {{ toJson .Values.ironProxy.affinity | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_IRON_PROXY_TOLERATIONS") }}
+            - name: KUBERNETES_IRON_PROXY_TOLERATIONS
+              value: {{ toJson .Values.ironProxy.tolerations | quote }}
+{{- end }}
             - name: KUBERNETES_IRON_PROXY_PORT
               value: {{ .Values.ironProxy.service.proxyPort | quote }}
             - name: KUBERNETES_IRON_PROXY_MANAGEMENT_PORT
@@ -324,6 +338,18 @@ spec:
               value: {{ printf "%s:%s" .Values.api.image.repository .Values.api.image.tag | quote }}
             - name: KUBERNETES_WORKFLOW_RUN_IMAGE_PULL_POLICY
               value: {{ .Values.api.image.pullPolicy | quote }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_WORKFLOW_RUN_NODE_SELECTOR") }}
+            - name: KUBERNETES_WORKFLOW_RUN_NODE_SELECTOR
+              value: {{ toJson .Values.workflowRun.nodeSelector | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_WORKFLOW_RUN_AFFINITY") }}
+            - name: KUBERNETES_WORKFLOW_RUN_AFFINITY
+              value: {{ toJson .Values.workflowRun.affinity | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_WORKFLOW_RUN_TOLERATIONS") }}
+            - name: KUBERNETES_WORKFLOW_RUN_TOLERATIONS
+              value: {{ toJson .Values.workflowRun.tolerations | quote }}
+{{- end }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
@@ -377,6 +403,18 @@ spec:
 {{- if .Values.sandbox.runtimeClassName }}
             - name: KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME
               value: {{ .Values.sandbox.runtimeClassName | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_SANDBOX_NODE_SELECTOR") }}
+            - name: KUBERNETES_SANDBOX_NODE_SELECTOR
+              value: {{ toJson .Values.sandbox.nodeSelector | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_SANDBOX_AFFINITY") }}
+            - name: KUBERNETES_SANDBOX_AFFINITY
+              value: {{ toJson .Values.sandbox.affinity | quote }}
+{{- end }}
+{{- if not (hasKey $apiExtraEnv "KUBERNETES_SANDBOX_TOLERATIONS") }}
+            - name: KUBERNETES_SANDBOX_TOLERATIONS
+              value: {{ toJson .Values.sandbox.tolerations | quote }}
 {{- end }}
 {{- if $reposPath }}
             - name: REPOS_PATH
@@ -494,6 +532,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{ include "centaur.podScheduling" .Values.slackbot | nindent 6 }}
       containers:
         - name: slackbot
           image: {{ printf "%s:%s" .Values.slackbot.image.repository .Values.slackbot.image.tag | quote }}

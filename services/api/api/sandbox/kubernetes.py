@@ -69,6 +69,8 @@ _API_PROXY_SANDBOX_ID = "api"
 # Helm upgrade. The label keeps the chart-side NetworkPolicy selector
 # wired up.
 _TOKEN_BROKER_LABEL = "centaur.ai/iron-token-broker"
+
+
 def _get_rt(session: SandboxSession):
     return runtime_for_session(session)
 
@@ -511,7 +513,10 @@ def _build_tool_server_container(
         {"name": "SSL_CERT_FILE", "value": "/firewall-certs/ca-cert.pem"},
         {"name": "NODE_EXTRA_CA_CERTS", "value": "/firewall-certs/ca-cert.pem"},
         {"name": "CENTAUR_API_URL", "value": api_url},
-        {"name": "CENTAUR_API_KEY", "value": mint_sandbox_token(thread_key, container_name)},
+        {
+            "name": "CENTAUR_API_KEY",
+            "value": mint_sandbox_token(thread_key, container_name),
+        },
         {"name": "TOOL_DIRS", "value": _tool_server_tool_dirs()},
         {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
     ]
@@ -599,7 +604,9 @@ def _build_tool_server_container(
     }
 
 
-def _apply_tool_server_extra_env(env: list[dict[str, Any]], computed_no_proxy: str) -> None:
+def _apply_tool_server_extra_env(
+    env: list[dict[str, Any]], computed_no_proxy: str
+) -> None:
     """Let the sidecar see operator sandbox env without breaking its wiring."""
     pinned = {
         "DATABASE_URL",
@@ -719,6 +726,44 @@ def _pod_resources() -> dict[str, Any]:
     if requests:
         resources["requests"] = requests
     return resources
+
+
+def _json_env(name: str, default: Any) -> Any:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must contain valid JSON") from exc
+
+
+def _json_object_env(name: str) -> dict[str, Any]:
+    value = _json_env(name, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return value
+
+
+def _json_array_env(name: str) -> list[Any]:
+    value = _json_env(name, [])
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a JSON array")
+    return value
+
+
+def _pod_scheduling(prefix: str) -> dict[str, Any]:
+    scheduling: dict[str, Any] = {}
+    node_selector = _json_object_env(f"{prefix}_NODE_SELECTOR")
+    if node_selector:
+        scheduling["nodeSelector"] = node_selector
+    affinity = _json_object_env(f"{prefix}_AFFINITY")
+    if affinity:
+        scheduling["affinity"] = affinity
+    tolerations = _json_array_env(f"{prefix}_TOLERATIONS")
+    if tolerations:
+        scheduling["tolerations"] = tolerations
+    return scheduling
 
 
 def _prompt_bundle(persona: str | None) -> str:
@@ -1241,7 +1286,7 @@ class KubernetesExecutorBackend(SandboxBackend):
             )
         if core is not None:
             proxy_ports.append({"containerPort": core["port"], "name": "pg-core"})
-        return {
+        spec = {
             "automountServiceAccountToken": False,
             "restartPolicy": restart_policy,
             "imagePullSecrets": _image_pull_secrets(),
@@ -1312,6 +1357,8 @@ class KubernetesExecutorBackend(SandboxBackend):
                 },
             ],
         }
+        spec.update(_pod_scheduling("KUBERNETES_IRON_PROXY"))
+        return spec
 
     async def _create_proxy_pod(
         self,
@@ -1660,9 +1707,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                     container_name=pod_name,
                     firewall_host=firewall_host,
                     api_url=os.getenv("AGENT_API_URL", "http://api:8000"),
-                    overlay_mount=(
-                        _SANDBOX_OVERLAY_ROOT if overlay_image else None
-                    ),
+                    overlay_mount=(_SANDBOX_OVERLAY_ROOT if overlay_image else None),
                     database_url=core_pg["dsn"],
                     pg_dsns=sandbox_pg_dsns,
                 )
@@ -1698,6 +1743,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         service_account_name = _service_account_name()
         if service_account_name:
             pod_spec["spec"]["serviceAccountName"] = service_account_name
+        pod_spec["spec"].update(_pod_scheduling("KUBERNETES_SANDBOX"))
 
         await self._delete_existing_workload(pod_name)
         await self._delete_proxy_resources(pod_name)
@@ -2064,9 +2110,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         clones the API container's runtime config — same secrets, same
         ``HTTPS_PROXY`` pointing at the shared API iron-proxy, same CA mount.
         """
-        selector = ",".join(
-            f"{k}={v}" for k, v in _api_pod_match_labels().items()
-        )
+        selector = ",".join(f"{k}={v}" for k, v in _api_pod_match_labels().items())
         pods = await self._core_api().list_namespaced_pod(
             _namespace(), label_selector=selector
         )
@@ -2120,8 +2164,14 @@ class KubernetesExecutorBackend(SandboxBackend):
         # disabling them defensively makes the env unambiguous if a handler
         # imports module-level code that reads these.
         overrides: dict[str, dict[str, Any]] = {
-            "EXECUTION_WORKER_ENABLED": {"name": "EXECUTION_WORKER_ENABLED", "value": "0"},
-            "WORKFLOW_WORKER_ENABLED": {"name": "WORKFLOW_WORKER_ENABLED", "value": "0"},
+            "EXECUTION_WORKER_ENABLED": {
+                "name": "EXECUTION_WORKER_ENABLED",
+                "value": "0",
+            },
+            "WORKFLOW_WORKER_ENABLED": {
+                "name": "WORKFLOW_WORKER_ENABLED",
+                "value": "0",
+            },
             "WARM_POOL_ENABLED": {"name": "WARM_POOL_ENABLED", "value": "0"},
             "PLUGIN_WATCHER_ENABLED": {"name": "PLUGIN_WATCHER_ENABLED", "value": "0"},
             # Already running inside the per-run pod; never recurse.
@@ -2175,9 +2225,12 @@ class KubernetesExecutorBackend(SandboxBackend):
             "containers": [container],
             "volumes": api_template["volumes"],
         }
-        service_account = api_template.get("serviceAccountName") or _service_account_name()
+        service_account = (
+            api_template.get("serviceAccountName") or _service_account_name()
+        )
         if service_account:
             spec["serviceAccountName"] = service_account
+        spec.update(_pod_scheduling("KUBERNETES_WORKFLOW_RUN"))
 
         return {
             "apiVersion": "v1",
@@ -2206,9 +2259,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         await self._ensure_clients()
         pod_name = _workflow_run_pod_name(run_id)
         api_template = await self._load_api_container_template()
-        pod_spec = self._build_workflow_run_pod_spec(
-            run_id, api_template=api_template
-        )
+        pod_spec = self._build_workflow_run_pod_spec(run_id, api_template=api_template)
 
         # If a previous attempt for this run_id left a pod behind, clear it.
         await self._delete_pod(pod_name)
@@ -2228,9 +2279,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         backoff = 0.5
         while True:
             try:
-                pod = await self._core_api().read_namespaced_pod(
-                    pod_name, _namespace()
-                )
+                pod = await self._core_api().read_namespaced_pod(pod_name, _namespace())
             except Exception as exc:
                 if self._is_not_found(exc):
                     return "gone"

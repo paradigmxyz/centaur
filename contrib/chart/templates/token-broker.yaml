@@ -73,6 +73,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{ include "centaur.podScheduling" .Values.tokenBroker | nindent 6 }}
       containers:
         - name: iron-token-broker
           image: {{ printf "%s:%s" .Values.tokenBroker.image.repository .Values.tokenBroker.image.tag | quote }}

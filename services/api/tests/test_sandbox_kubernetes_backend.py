@@ -693,10 +693,7 @@ def test_tool_server_tool_dirs_points_overlay_at_sandbox_mount(
     monkeypatch.delenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS", raising=False)
     monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test")
 
-    assert (
-        _tool_server_tool_dirs()
-        == "/app/tools:/home/agent/overlay/org/tools"
-    )
+    assert _tool_server_tool_dirs() == "/app/tools:/home/agent/overlay/org/tools"
 
 
 def test_tool_server_tool_dirs_without_overlay_is_base_only(
@@ -738,6 +735,36 @@ async def test_create_builds_pod_and_prompt_secret(
     monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
     monkeypatch.setenv("KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME", "gvisor")
     monkeypatch.setenv("KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME", "sandbox-runner")
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_NODE_SELECTOR",
+        json.dumps({"kubernetes.io/arch": "arm64"}),
+    )
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_AFFINITY",
+        json.dumps(
+            {
+                "nodeAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [
+                            {
+                                "matchExpressions": [
+                                    {
+                                        "key": "pool",
+                                        "operator": "In",
+                                        "values": ["sandboxes"],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+    )
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_TOLERATIONS",
+        json.dumps([{"key": "sandboxes", "operator": "Exists"}]),
+    )
     monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "ghcr.io/tempoxyz/centaur-tempo:latest")
     monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE_PULL_POLICY", "Always")
     monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE_SOURCE_PATH", "/overlay")
@@ -791,6 +818,17 @@ async def test_create_builds_pod_and_prompt_secret(
 
     assert pod_body["spec"]["runtimeClassName"] == "gvisor"
     assert pod_body["spec"]["serviceAccountName"] == "sandbox-runner"
+    assert pod_body["spec"]["nodeSelector"] == {"kubernetes.io/arch": "arm64"}
+    assert pod_body["spec"]["affinity"]["nodeAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"
+    ]["nodeSelectorTerms"][0]["matchExpressions"][0] == {
+        "key": "pool",
+        "operator": "In",
+        "values": ["sandboxes"],
+    }
+    assert pod_body["spec"]["tolerations"] == [
+        {"key": "sandboxes", "operator": "Exists"}
+    ]
     assert container["image"] == "centaur-agent:test"
     assert "command" not in container
     assert container["args"] == ["amp-wrapper"]
@@ -878,6 +916,20 @@ async def test_create_builds_per_sandbox_proxy_resources(
     monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
     monkeypatch.setenv("KUBERNETES_IRON_PROXY_IMAGE", "centaur-iron-proxy:test")
     monkeypatch.setenv(
+        "KUBERNETES_IRON_PROXY_NODE_SELECTOR",
+        json.dumps({"kubernetes.io/arch": "arm64"}),
+    )
+    monkeypatch.setenv(
+        "KUBERNETES_IRON_PROXY_AFFINITY",
+        json.dumps(
+            {"podAntiAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": []}}
+        ),
+    )
+    monkeypatch.setenv(
+        "KUBERNETES_IRON_PROXY_TOLERATIONS",
+        json.dumps([{"key": "proxies", "operator": "Exists"}]),
+    )
+    monkeypatch.setenv(
         "KUBERNETES_FIREWALL_MANAGER_IMAGE", "centaur-firewall-manager:test"
     )
     monkeypatch.setattr(
@@ -933,6 +985,13 @@ async def test_create_builds_per_sandbox_proxy_resources(
     assert [container["name"] for container in proxy_pod["spec"]["containers"]] == [
         "iron-proxy",
     ]
+    assert proxy_pod["spec"]["nodeSelector"] == {"kubernetes.io/arch": "arm64"}
+    assert proxy_pod["spec"]["affinity"] == {
+        "podAntiAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": []}
+    }
+    assert proxy_pod["spec"]["tolerations"] == [
+        {"key": "proxies", "operator": "Exists"}
+    ]
     assert proxy_pod["spec"]["containers"][0]["image"] == "centaur-iron-proxy:test"
     assert proxy_pod["spec"]["containers"][0]["readinessProbe"]["periodSeconds"] == 5
     assert (
@@ -977,6 +1036,44 @@ async def test_create_builds_per_sandbox_proxy_resources(
     )
 
 
+def test_workflow_run_pod_uses_configured_scheduling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    monkeypatch.setenv(
+        "KUBERNETES_WORKFLOW_RUN_NODE_SELECTOR",
+        json.dumps({"kubernetes.io/arch": "arm64"}),
+    )
+    monkeypatch.setenv(
+        "KUBERNETES_WORKFLOW_RUN_AFFINITY",
+        json.dumps(
+            {"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": []}}
+        ),
+    )
+    monkeypatch.setenv(
+        "KUBERNETES_WORKFLOW_RUN_TOLERATIONS",
+        json.dumps([{"key": "workflow", "operator": "Exists"}]),
+    )
+
+    pod = backend._build_workflow_run_pod_spec(
+        "run_123",
+        api_template={
+            "env": [],
+            "envFrom": [],
+            "volumeMounts": [],
+            "volumes": [],
+            "imagePullSecrets": [],
+            "serviceAccountName": "centaur-api",
+        },
+    )
+
+    assert pod["spec"]["nodeSelector"] == {"kubernetes.io/arch": "arm64"}
+    assert pod["spec"]["affinity"] == {
+        "nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": []}
+    }
+    assert pod["spec"]["tolerations"] == [{"key": "workflow", "operator": "Exists"}]
+
+
 class FakeAppsApi:
     """Minimal AppsV1Api stand-in. Records create/replace/patch and exposes
     pre-seeded reads via ``deployments_to_read`` (FIFO; Exception items are
@@ -990,9 +1087,7 @@ class FakeAppsApi:
 
     async def read_namespaced_deployment(self, name: str, namespace: str):  # noqa: ANN201, ARG002
         if not self.deployments_to_read:
-            raise AssertionError(
-                f"unexpected read_namespaced_deployment({name})"
-            )
+            raise AssertionError(f"unexpected read_namespaced_deployment({name})")
         item = self.deployments_to_read.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -1020,9 +1115,7 @@ async def test_ensure_token_broker_writes_configmap_and_patches_deployment(
     from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
 
     monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
-    monkeypatch.setenv(
-        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
-    )
+    monkeypatch.setenv("KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker")
     monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
 
     backend = KubernetesExecutorBackend()
@@ -1083,9 +1176,7 @@ async def test_ensure_token_broker_skips_rollout_when_config_unchanged(
     from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
 
     monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
-    monkeypatch.setenv(
-        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
-    )
+    monkeypatch.setenv("KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker")
     monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
 
     secrets = [
@@ -1136,9 +1227,7 @@ async def test_ensure_token_broker_tolerates_missing_deployment(
     from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
 
     monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
-    monkeypatch.setenv(
-        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
-    )
+    monkeypatch.setenv("KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker")
     monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
 
     backend = KubernetesExecutorBackend()
@@ -1205,9 +1294,7 @@ def test_proxy_iron_env_injects_broker_when_url_set(
     )
     env = _proxy_iron_env("centaur-infra-env", [])
     by_name = {e["name"]: e for e in env}
-    assert by_name["IRON_BROKER_URL"]["value"] == (
-        "http://centaur-token-broker:8181"
-    )
+    assert by_name["IRON_BROKER_URL"]["value"] == ("http://centaur-token-broker:8181")
     assert by_name["IRON_BROKER_TOKEN"]["valueFrom"]["secretKeyRef"] == {
         "name": "centaur-infra-env",
         "key": "IRON_BROKER_TOKEN",
@@ -1223,7 +1310,12 @@ def test_tool_server_container_exposes_aws_region_not_credentials(
     monkeypatch.setenv("KUBERNETES_SECRET_ENV_NAME", "centaur-infra-env")
 
     container = _build_tool_server_container(
-        firewall_host="fw", api_url="http://api:8000", overlay_mount=None
+        thread_key="slack:C123:123.456",
+        container_name="centaur-centaur-sandbox-test",
+        firewall_host="fw",
+        api_url="http://api:8000",
+        overlay_mount=None,
+        database_url="postgres://user:pass@fw:5432/centaur",
     )
     by_name = {e["name"]: e for e in container["env"]}
 

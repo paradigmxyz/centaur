@@ -39,6 +39,21 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-%s" (include "centaur.fullname" .root) .component | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "centaur.podScheduling" -}}
+{{- with .nodeSelector }}
+nodeSelector:
+{{ toYaml . | nindent 2 }}
+{{- end }}
+{{- with .affinity }}
+affinity:
+{{ toYaml . | nindent 2 }}
+{{- end }}
+{{- with .tolerations }}
+tolerations:
+{{ toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
 {{- define "centaur.secretEnvName" -}}
 {{- required "secretManager.existingSecretName is required" .Values.secretManager.existingSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

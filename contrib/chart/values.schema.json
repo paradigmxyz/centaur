@@ -38,7 +38,36 @@
           }
         },
         "secretSource": { "type": "string" },
-        "secretTtl": { "type": "string" }
+        "secretTtl": { "type": "string" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
+      }
+    },
+    "tokenBroker": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "httpPort": { "type": "integer" },
+            "metricsPort": { "type": "integer" }
+          }
+        },
+        "ttl": { "type": "string" },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
       }
     },
     "toolServer": {
@@ -74,7 +103,10 @@
             "httpPort": { "type": "integer" }
           }
         },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
       }
     },
     "secrets": {
@@ -103,7 +135,10 @@
         "googleDriveSyncIntervalSeconds": { "type": "integer" },
         "googleCalendarEtlEnabled": { "type": "boolean" },
         "googleCalendarSyncIntervalSeconds": { "type": "integer" },
-        "companyContextDocumentsIntervalSeconds": { "type": "integer" }
+        "companyContextDocumentsIntervalSeconds": { "type": "integer" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
       }
     },
     "overlay": {
@@ -127,7 +162,18 @@
       "properties": {
         "runtimeClassName": { "type": "string" },
         "reposPath": { "type": "string" },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
+      }
+    },
+    "workflowRun": {
+      "type": "object",
+      "properties": {
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
       }
     },
     "repoCache": {
@@ -196,7 +242,10 @@
     "slackbot": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
       }
     },
     "postgres": {
@@ -207,7 +256,10 @@
           "properties": {
             "subPath": { "type": "string" }
           }
-        }
+        },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
       }
     },
     "runnerAccess": {

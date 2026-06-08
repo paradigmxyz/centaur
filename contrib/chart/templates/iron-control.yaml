@@ -48,6 +48,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{ include "centaur.podScheduling" .Values.ironControl | nindent 6 }}
       initContainers:
         # Create the dedicated logical DB on the bundled Postgres. Idempotent:
         # guarded by a pg_database existence check, and the CREATE tolerates a
