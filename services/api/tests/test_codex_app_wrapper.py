@@ -344,6 +344,270 @@ def test_emit_notification_collects_agent_message_delta_output(monkeypatch) -> N
     assert emitted[0]["type"] == "item.agentMessage.delta"
 
 
+def test_emit_notification_suppresses_foreign_thread_turn(monkeypatch) -> None:
+    """A background turn on another thread (the memories agent) must not reach
+    the stream or terminate the durable turn.
+
+    Regression test for the incident: the memories consolidation agent ran in
+    its own thread (confirmed from prod pod logs) and its "What do you want me
+    to work on in /home/agent/.codex/memories?" final answer was relayed to
+    Slack while its turn/completed prematurely ended the user's turn, dropping
+    the real answer.
+    """
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+
+    wrapper.THREAD_ID = "thread-main"
+    wrapper.THREAD_ID_AUTHORITATIVE = True
+    wrapper.ACTIVE_TURN_ID = "turn-main"
+    wrapper.CURRENT_LLM_OUTPUT_TEXT = ""
+    wrapper.LLM_OUTPUTS_BY_TURN_ID = {}
+
+    foreign = {"threadId": "thread-mem", "turnId": "turn-mem"}
+    assert (
+        wrapper.emit_notification({"method": "turn/started", "params": {**foreign}})
+        is False
+    )
+    assert (
+        wrapper.emit_notification(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    **foreign,
+                    "itemId": "msg-mem",
+                    "delta": "What do you want me to work on",
+                },
+            }
+        )
+        is False
+    )
+    assert (
+        wrapper.emit_notification(
+            {
+                "method": "item/completed",
+                "params": {
+                    **foreign,
+                    "item": {
+                        "id": "msg-mem",
+                        "type": "agentMessage",
+                        "text": "I only have the environment context, not a task.",
+                        "phase": "final_answer",
+                    },
+                },
+            }
+        )
+        is False
+    )
+    done = wrapper.emit_notification(
+        {"method": "turn/completed", "params": {**foreign, "turn": {"id": "turn-mem"}}}
+    )
+
+    assert done is False
+    assert emitted == []
+    assert wrapper.ACTIVE_TURN_ID == "turn-main"
+    assert wrapper.CURRENT_LLM_OUTPUT_TEXT == ""
+    assert wrapper.LLM_OUTPUTS_BY_TURN_ID == {}
+
+
+def test_emit_notification_relays_primary_thread_turn(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+
+    wrapper.THREAD_ID = "thread-main"
+    wrapper.THREAD_ID_AUTHORITATIVE = True
+    wrapper.ACTIVE_TURN_ID = "turn-main"
+    wrapper.CURRENT_LLM_OUTPUT_TEXT = ""
+    wrapper.LLM_OUTPUTS_BY_TURN_ID = {}
+
+    wrapper.emit_notification(
+        {
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-main",
+                "turnId": "turn-main",
+                "itemId": "msg-1",
+                "delta": "PONG",
+            },
+        }
+    )
+    done = wrapper.emit_notification(
+        {
+            "method": "turn/completed",
+            "params": {"threadId": "thread-main", "turn": {"id": "turn-main"}},
+        }
+    )
+
+    assert done is True
+    assert [event["type"] for event in emitted] == [
+        "item.agentMessage.delta",
+        "turn.completed",
+    ]
+    assert wrapper.CURRENT_LLM_OUTPUT_TEXT == "PONG"
+    assert wrapper.ACTIVE_TURN_ID is None
+
+
+def test_emit_notification_suppresses_foreign_thread_error(monkeypatch) -> None:
+    """`error` is the protocol's turn-failure path and carries threadId, so a
+    background turn's error must not terminate the durable turn."""
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+
+    wrapper.THREAD_ID = "thread-main"
+    wrapper.THREAD_ID_AUTHORITATIVE = True
+    wrapper.ACTIVE_TURN_ID = "turn-main"
+
+    done = wrapper.emit_notification(
+        {
+            "method": "error",
+            "params": {
+                "threadId": "thread-mem",
+                "turnId": "turn-mem",
+                "willRetry": False,
+                "error": {"message": "background turn failed"},
+            },
+        }
+    )
+
+    assert done is False
+    assert emitted == []
+    assert wrapper.ACTIVE_TURN_ID == "turn-main"
+
+
+def test_emit_notification_keeps_global_error_terminal(monkeypatch) -> None:
+    """An error without a threadId is process-global and stays terminal."""
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+
+    wrapper.THREAD_ID = "thread-main"
+    wrapper.ACTIVE_TURN_ID = "turn-main"
+
+    done = wrapper.emit_notification(
+        {"method": "error", "params": {"message": "app-server crashed"}}
+    )
+
+    assert done is True
+    assert [event["type"] for event in emitted] == ["turn.failed"]
+
+
+def test_emit_notification_ignores_foreign_thread_started(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+
+    wrapper.THREAD_ID = None
+    wrapper.emit_notification(
+        {"method": "thread/started", "params": {"thread": {"id": "thread-main"}}}
+    )
+    wrapper.emit_notification(
+        {"method": "thread/started", "params": {"thread": {"id": "thread-mem"}}}
+    )
+
+    assert wrapper.THREAD_ID == "thread-main"
+    assert [event["type"] for event in emitted] == ["thread.started"]
+
+
+def test_emit_notification_fails_open_when_thread_id_not_authoritative(
+    monkeypatch,
+) -> None:
+    """If our own thread id is a uuid fallback (server returned none), the
+    filter must NOT run — otherwise the primary turn's own events, which carry
+    the real thread id, would all be dropped, producing zero output.
+    """
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+
+    wrapper.THREAD_ID = "00000000-0000-4000-8000-000000000000"  # uuid fallback
+    wrapper.THREAD_ID_AUTHORITATIVE = False
+    wrapper.ACTIVE_TURN_ID = "turn-real"
+    wrapper.CURRENT_LLM_OUTPUT_TEXT = ""
+    wrapper.LLM_OUTPUTS_BY_TURN_ID = {}
+
+    # The real turn's events carry the server's actual thread id, which differs
+    # from our fabricated one. They must still be relayed.
+    wrapper.emit_notification(
+        {
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "real-server-thread",
+                "turnId": "turn-real",
+                "itemId": "msg-1",
+                "delta": "answer",
+            },
+        }
+    )
+    done = wrapper.emit_notification(
+        {
+            "method": "turn/completed",
+            "params": {"threadId": "real-server-thread", "turn": {"id": "turn-real"}},
+        }
+    )
+
+    assert done is True
+    assert [event["type"] for event in emitted] == [
+        "item.agentMessage.delta",
+        "turn.completed",
+    ]
+    assert wrapper.CURRENT_LLM_OUTPUT_TEXT == "answer"
+
+
+def test_emit_notification_fails_open_without_thread_id(monkeypatch) -> None:
+    """Events that omit threadId keep the original relay behavior."""
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+
+    wrapper.THREAD_ID = "thread-main"
+    wrapper.THREAD_ID_AUTHORITATIVE = True
+    wrapper.ACTIVE_TURN_ID = None
+    wrapper.CURRENT_LLM_OUTPUT_TEXT = ""
+    wrapper.LLM_OUTPUTS_BY_TURN_ID = {}
+
+    wrapper.emit_notification(
+        {"method": "turn/started", "params": {"turn": {"id": "turn-1"}}}
+    )
+    done = wrapper.emit_notification(
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-1"}}}
+    )
+
+    assert done is True
+    assert [event["type"] for event in emitted] == ["turn.started", "turn.completed"]
+
+
+def test_start_or_resume_thread_marks_server_id_authoritative(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    monkeypatch.setattr(wrapper, "emit", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        wrapper, "request", lambda *_a, **_k: {"thread": {"id": "thread-srv"}}
+    )
+
+    wrapper.THREAD_ID = None
+    wrapper.THREAD_ID_AUTHORITATIVE = False
+    wrapper.start_or_resume_thread()
+
+    assert wrapper.THREAD_ID == "thread-srv"
+    assert wrapper.THREAD_ID_AUTHORITATIVE is True
+
+
+def test_start_or_resume_thread_uuid_fallback_not_authoritative(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    monkeypatch.delenv("CODEX_CONTINUE_THREAD_ID", raising=False)
+    monkeypatch.delenv("AMP_CONTINUE_THREAD_ID", raising=False)
+    monkeypatch.setattr(wrapper, "emit", lambda *_a, **_k: None)
+    monkeypatch.setattr(wrapper, "request", lambda *_a, **_k: {})  # no thread id
+
+    wrapper.THREAD_ID = None
+    wrapper.THREAD_ID_AUTHORITATIVE = True  # must be cleared by the fallback
+    wrapper.start_or_resume_thread()
+
+    assert wrapper.THREAD_ID  # a uuid was generated for stream labelling
+    assert wrapper.THREAD_ID_AUTHORITATIVE is False
+
+
 def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     wrapper = _load_wrapper()
     requests: list[tuple[str, dict]] = []

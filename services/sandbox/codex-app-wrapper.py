@@ -37,6 +37,9 @@ RESPONSES: dict[int, queue.Queue[dict[str, Any]]] = {}
 EVENTS: queue.Queue[dict[str, Any] | None] = queue.Queue()
 INPUTS: queue.Queue[dict[str, Any] | None] = queue.Queue()
 THREAD_ID: str | None = None
+# True only when THREAD_ID is the real thread id (from the server or a resume
+# id), so it is safe to filter on. See _is_foreign_thread_event.
+THREAD_ID_AUTHORITATIVE = False
 ACTIVE_TURN_ID: str | None = None
 SHUTTING_DOWN = False
 CONFIGURED_OTEL_TRACE_ID: str | None = None
@@ -672,7 +675,7 @@ def configure_trace_context_for_startup(trace_id: str | None) -> None:
 
 
 def start_or_resume_thread() -> str:
-    global THREAD_ID
+    global THREAD_ID, THREAD_ID_AUTHORITATIVE
     if THREAD_ID:
         return THREAD_ID
     resume = (
@@ -688,8 +691,24 @@ def start_or_resume_thread() -> str:
         result = request("thread/start", {"cwd": os.getcwd()}, timeout=60)
     thread = result.get("thread") or {}
     THREAD_ID = str(thread.get("id") or resume or uuid.uuid4())
+    # Authoritative only with a server/resume id; a uuid fallback matches no real
+    # event, so the foreign-thread filter must fail open instead of dropping ours.
+    THREAD_ID_AUTHORITATIVE = bool(thread.get("id") or resume)
     emit({"type": "thread.started", "thread_id": THREAD_ID})
     return THREAD_ID
+
+
+def _is_foreign_thread_event(params: dict[str, Any]) -> bool:
+    """Return True for events from a thread we did not start (e.g. the memories
+    agent, which app-server runs in its own thread on the shared channel).
+
+    Fail open when ``threadId`` is absent or our id is non-authoritative, so we
+    never drop the primary turn's own events.
+    """
+    if not THREAD_ID_AUTHORITATIVE:
+        return False
+    thread_id = str(params.get("threadId") or "")
+    return bool(thread_id and THREAD_ID and thread_id != THREAD_ID)
 
 
 def emit_notification(msg: dict[str, Any]) -> bool:
@@ -700,9 +719,14 @@ def emit_notification(msg: dict[str, Any]) -> bool:
     if method == "thread/started":
         thread = params.get("thread") or {}
         tid = thread.get("id") or params.get("threadId")
-        if tid:
+        # Adopt only the first id; a later foreign thread/started must not clobber it.
+        if tid and THREAD_ID is None:
             THREAD_ID = str(tid)
             emit({"type": "thread.started", "thread_id": THREAD_ID})
+        return False
+
+    # Every event below is scoped to a thread: suppress anything foreign.
+    if _is_foreign_thread_event(params):
         return False
 
     if method == "turn/started":
