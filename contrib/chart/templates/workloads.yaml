@@ -378,6 +378,12 @@ spec:
             - name: KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME
               value: {{ .Values.sandbox.runtimeClassName | quote }}
 {{- end }}
+{{- if .Values.sandbox.serviceAccountName }}
+            - name: KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME
+              value: {{ .Values.sandbox.serviceAccountName | quote }}
+{{- end }}
+            - name: KUBERNETES_SANDBOX_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN
+              value: {{ ternary "1" "0" .Values.sandbox.automountServiceAccountToken | quote }}
 {{- if $reposPath }}
             - name: REPOS_PATH
               value: {{ $reposPath | quote }}

@@ -126,6 +126,8 @@
       "type": "object",
       "properties": {
         "runtimeClassName": { "type": "string" },
+        "serviceAccountName": { "type": "string" },
+        "automountServiceAccountToken": { "type": "boolean" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" }
       }

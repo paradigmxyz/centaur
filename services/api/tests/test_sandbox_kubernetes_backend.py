@@ -791,6 +791,7 @@ async def test_create_builds_pod_and_prompt_secret(
 
     assert pod_body["spec"]["runtimeClassName"] == "gvisor"
     assert pod_body["spec"]["serviceAccountName"] == "sandbox-runner"
+    assert pod_body["spec"]["automountServiceAccountToken"] is False
     assert container["image"] == "centaur-agent:test"
     assert "command" not in container
     assert container["args"] == ["amp-wrapper"]
@@ -859,6 +860,25 @@ async def test_create_builds_pod_and_prompt_secret(
         mount["name"] == "overlay-root" and mount["mountPath"] == "/home/agent/overlay"
         for mount in container["volumeMounts"]
     )
+
+
+@pytest.mark.asyncio
+async def test_create_can_opt_into_sandbox_service_account_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(monkeypatch, backend)
+    monkeypatch.setenv("KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME", "sandbox-reader")
+    monkeypatch.setenv("KUBERNETES_SANDBOX_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN", "1")
+
+    await backend.create("slack:C123:123.456", "amp", "amp")
+
+    pod_body = fake_core.created_pods[1][1]
+    assert pod_body["spec"]["serviceAccountName"] == "sandbox-reader"
+    assert pod_body["spec"]["automountServiceAccountToken"] is True
 
 
 @pytest.mark.asyncio

@@ -114,6 +114,11 @@ def _service_account_name() -> str | None:
     return value or None
 
 
+def _service_account_token_enabled() -> bool:
+    value = (os.getenv("KUBERNETES_SANDBOX_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _state_volume_enabled() -> bool:
     value = (os.getenv("KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED") or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
@@ -1663,7 +1668,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                 },
             },
             "spec": {
-                "automountServiceAccountToken": False,
+                "automountServiceAccountToken": _service_account_token_enabled(),
                 "restartPolicy": "Never",
                 "initContainers": init_containers,
                 "containers": containers,
@@ -2150,7 +2155,7 @@ class KubernetesExecutorBackend(SandboxBackend):
 
         spec: dict[str, Any] = {
             "restartPolicy": "Never",
-            "automountServiceAccountToken": False,
+            "automountServiceAccountToken": _service_account_token_enabled(),
             "imagePullSecrets": (
                 api_template["imagePullSecrets"] or _image_pull_secrets()
             ),

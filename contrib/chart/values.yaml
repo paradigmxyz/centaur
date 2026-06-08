@@ -167,6 +167,8 @@ sandbox:
     tag: latest
     pullPolicy: Always
   runtimeClassName: ""
+  serviceAccountName: ""
+  automountServiceAccountToken: false
   reposPath: ""
   extraEnv: {}
   stateVolume:
