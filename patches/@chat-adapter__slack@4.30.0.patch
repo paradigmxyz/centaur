@@ -1,14 +1,15 @@
 diff --git a/dist/index.js b/dist/index.js
-index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e8172180e1e 100644
+index 53a35e4..8fc9ebd 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -31,6 +31,122 @@ import {
+@@ -31,6 +31,123 @@ import {
    toModalElement,
    toPlainText
  } from "chat";
 +var STREAM_BUFFER_SIZE = 256;
 +var STREAM_SEGMENT_LIMIT = 11500;
 +var STREAM_CHUNK_LIMIT = 256;
++var STREAM_STRUCTURED_CHUNK_LIMIT = 45;
 +var STREAM_FENCE_RESERVE = 64;
 +var FENCE_PATTERN = /^(`{3,}|~{3,})/;
 +var Fence = class {
@@ -125,7 +126,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e81
  
  // src/cards.ts
  import {
-@@ -3434,24 +3550,91 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3434,24 +3551,89 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -141,6 +142,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e81
 +      hasContent: false,
 +      length: 0,
 +      stopped: false,
++      structuredChunks: 0,
 +      streamer: this._client.chatStream({
 +        channel,
 +        thread_ts: threadTs,
@@ -153,7 +155,6 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e81
 +      })
      });
 +    let current = createSegment();
-+    let structured;
 +    let lastResult;
      let lastAppended = "";
 +    const taskParts = /* @__PURE__ */ new Map();
@@ -178,9 +179,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e81
 +        current.hasContent = true;
 +        current.length += closing.length;
 +      }
-+      if (current !== structured) {
-+        await stopSegment(current);
-+      }
++      await stopSegment(current);
 +      current = createSegment();
 +      if (opening) {
 +        await current.streamer.append({ markdown_text: opening, token });
@@ -226,12 +225,11 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e81
      };
      let structuredChunksSupported = true;
      const sendStructuredChunk = async (chunk) => {
-@@ -3463,7 +3646,20 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3463,7 +3645,23 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
 -        await streamer.append({ chunks: [chunk], token });
-+        structured ??= current;
 +        const chunks = chunk.type === "task_update" ? splitTask(chunk, taskParts.get(chunk.id) ?? 0) : [
 +          {
 +            ...chunk,
@@ -242,13 +240,17 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e81
 +          taskParts.set(chunk.id, chunks.length);
 +        }
 +        for (const normalized of chunks) {
-+          await structured.streamer.append({ chunks: [normalized], token });
-+          structured.hasContent = true;
++          if (current.structuredChunks >= STREAM_STRUCTURED_CHUNK_LIMIT) {
++            await rotateSegment(fence.closing, fence.opening);
++          }
++          await current.streamer.append({ chunks: [normalized], token });
++          current.hasContent = true;
++          current.structuredChunks += 1;
 +        }
        } catch (error) {
          structuredChunksSupported = false;
          this.logger.warn(
-@@ -3479,31 +3675,70 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3479,31 +3677,67 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };
@@ -282,16 +284,13 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..49bb6c8b5a5361663a1a3160ec9d0e81
 +        current.hasContent = true;
 +        current.length += fence.closing.length;
 +      }
-+      if (structured && structured !== current) {
-+        await stopSegment(structured);
-+      }
 +      lastResult = await stopSegment(
 +        current,
 +        options?.stopBlocks,
 +        true
 +      );
 +    } catch (error) {
-+      const segments = /* @__PURE__ */ new Set([structured, current]);
++      const segments = /* @__PURE__ */ new Set([current]);
 +      fence.finish();
 +      for (const segment of segments) {
 +        if (!segment?.hasContent) {
