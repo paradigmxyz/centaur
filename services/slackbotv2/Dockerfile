@@ -9,6 +9,7 @@ RUN bun install -g pnpm@10.28.1
 # depends on the @centaur/* workspace packages, so they must be present for
 # pnpm to link the `workspace:*` ranges.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
 COPY packages/ packages/
 COPY services/slackbotv2/package.json services/slackbotv2/package.json
 RUN pnpm install --filter slackbotv2 --prod --frozen-lockfile

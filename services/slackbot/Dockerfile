@@ -6,6 +6,7 @@ ENV NODE_ENV=production
 RUN bun install -g pnpm@10.28.1
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
 COPY services/slackbot/package.json services/slackbot/package.json
 RUN pnpm install --filter slackbot --prod --frozen-lockfile
 

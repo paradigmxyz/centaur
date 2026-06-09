@@ -1,4 +1,7 @@
 packages:
-  - 'packages/*'
-  - 'services/slackbot'
-  - 'services/slackbotv2'
+  - packages/*
+  - services/slackbot
+  - services/slackbotv2
+
+patchedDependencies:
+  '@chat-adapter/slack@4.30.0': patches/@chat-adapter__slack@4.30.0.patch

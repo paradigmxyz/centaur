@@ -705,6 +705,51 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('continues oversized final answers across Slack stream replies', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a long final answer.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> write a long visible answer`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-stream-continuation',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> write a long visible answer`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const answer = `STREAM_CONTINUATION_START ${'x'.repeat(14_000)} STREAM_CONTINUATION_END`
+    codexApi.emitOutputLines(key, sampleCodexOutputLines(answer))
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-stream-continuation',
+      status: 'completed',
+      result_text: answer
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts.length).toBeGreaterThan(1)
+    expect(await threadText(parent.ts)).toContain('STREAM_CONTINUATION_START')
+    expect(await threadText(parent.ts)).toContain('STREAM_CONTINUATION_END')
+  })
+
   it('does not create an empty Slack stream before the first visible renderer chunk', async () => {
     codexApi.autoRespond = false
 
