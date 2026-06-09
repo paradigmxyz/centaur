@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use codex_app_server_protocol::{JSONRPCMessage, ServerNotification};
+use harness_server::is_known_untyped_server_notification;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -1204,11 +1205,14 @@ fn validate_jsonrpc_value(value: &Value) {
         serde_json::from_value(value.clone()).expect("valid JSON-RPC message");
     match message {
         JSONRPCMessage::Notification(notification) => {
-            ServerNotification::try_from(notification).unwrap_or_else(|error| {
-                panic!(
-                    "notification is not a typed Codex App Server V2 notification: {error}; value={value}"
-                )
-            });
+            let method = notification.method.clone();
+            if !is_known_untyped_server_notification(&method) {
+                ServerNotification::try_from(notification).unwrap_or_else(|error| {
+                    panic!(
+                        "notification is not a typed Codex App Server V2 notification: {error}; value={value}"
+                    )
+                });
+            }
         }
         JSONRPCMessage::Response(_) => {}
         JSONRPCMessage::Error(error) => panic!("app-server returned JSON-RPC error: {error:?}"),

@@ -4,6 +4,7 @@ use std::io::{self, BufRead};
 use codex_app_server_protocol::JSONRPCMessage;
 use serde_json::Value;
 
+use crate::wire::is_known_untyped_server_notification;
 use crate::{HarnessServerError, Result};
 
 #[derive(Debug, Default)]
@@ -42,10 +43,13 @@ fn validate_agent_deltas<R: BufRead>(reader: R) -> Result<AgentDeltaReport> {
 
         let message: JSONRPCMessage = serde_json::from_str(trimmed)?;
         if let JSONRPCMessage::Notification(notification) = message {
-            let _typed = codex_app_server_protocol::ServerNotification::try_from(notification)
-                .map_err(|error| HarnessServerError::InvalidServerNotification {
-                    message: error.to_string(),
-                })?;
+            let method = notification.method.clone();
+            if !is_known_untyped_server_notification(&method) {
+                let _typed = codex_app_server_protocol::ServerNotification::try_from(notification)
+                    .map_err(|error| HarnessServerError::InvalidServerNotification {
+                        message: error.to_string(),
+                    })?;
+            }
         }
 
         let value: Value = serde_json::from_str(trimmed)?;

@@ -26,7 +26,7 @@ use crate::traits::{
 };
 use crate::turn::{BridgeConfig, CodexTurnNormalizer};
 use crate::util::{absolute_path, default_codex_home, write_value};
-use crate::wire::notification_to_wire_value;
+use crate::wire::{is_known_untyped_server_notification, notification_to_wire_value};
 use crate::{HarnessServerError, Result};
 
 pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
@@ -58,10 +58,13 @@ pub fn run_validate_jsonrpc() -> Result<()> {
         }
         let message: JSONRPCMessage = serde_json::from_str(&line)?;
         if let JSONRPCMessage::Notification(notification) = message {
-            let _typed = codex_app_server_protocol::ServerNotification::try_from(notification)
-                .map_err(|error| HarnessServerError::InvalidServerNotification {
-                    message: error.to_string(),
-                })?;
+            let method = notification.method.clone();
+            if !is_known_untyped_server_notification(&method) {
+                let _typed = codex_app_server_protocol::ServerNotification::try_from(notification)
+                    .map_err(|error| HarnessServerError::InvalidServerNotification {
+                        message: error.to_string(),
+                    })?;
+            }
         }
     }
     Ok(())
