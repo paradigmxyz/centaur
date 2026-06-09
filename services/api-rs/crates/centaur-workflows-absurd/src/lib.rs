@@ -94,7 +94,9 @@ pub struct WorkflowRun {
     pub result: Option<Value>,
     pub failure: Option<Value>,
     pub attempts: i32,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -2326,5 +2328,26 @@ mod tests {
         assert_eq!(value["tool"], json!("time"));
         assert_eq!(value["method"], json!("now"));
         assert!(value.pointer("/output/utc").is_some());
+    }
+
+    #[test]
+    fn workflow_run_timestamps_serialize_as_rfc3339() {
+        let at = OffsetDateTime::from_unix_timestamp(1_781_012_105).unwrap()
+            + time::Duration::nanoseconds(44_019_000);
+        let run = WorkflowRun {
+            run_id: "run".to_owned(),
+            task_id: "task".to_owned(),
+            workflow_name: "workflow".to_owned(),
+            status: "completed".to_owned(),
+            input: json!({}),
+            result: None,
+            failure: None,
+            attempts: 1,
+            created_at: at,
+            updated_at: at,
+        };
+        let value = serde_json::to_value(run).unwrap();
+        assert_eq!(value["created_at"], json!("2026-06-09T13:35:05.044019Z"));
+        assert_eq!(value["updated_at"], json!("2026-06-09T13:35:05.044019Z"));
     }
 }

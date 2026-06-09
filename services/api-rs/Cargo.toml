@@ -71,7 +71,7 @@ sqlx = { version = "0.8.6", default-features = false, features = ["derive", "jso
 strum = { version = "0.28", features = ["derive"] }
 test-case = "3.3.1"
 thiserror = "2"
-time = { version = "0.3", features = ["serde"] }
+time = { version = "0.3", features = ["serde", "serde-well-known"] }
 tokio = "1"
 tokio-util = "0.7"
 toml = "0.8"
