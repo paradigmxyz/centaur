@@ -106,7 +106,13 @@ spec:
                 repo="$1"
                 repo_url="https://github.com/${repo}.git"
                 target="/cache/${repo}"
-                tmp="${target}.tmp.$$"
+                # Deterministic temp name. This script runs as a Kubernetes
+                # container command, and Kubernetes collapses a doubled dollar
+                # sign to a single one during its own $(VAR) expansion before
+                # bash sees it, so a PID-based suffix is neither unique nor
+                # valid. Sync is sequential per pod, so a fixed name plus the
+                # rm -rf below is enough.
+                tmp="${target}.tmp"
 
                 mkdir -p "$(dirname "$target")"
                 if git -C "$target" rev-parse --git-dir >/dev/null 2>&1; then
@@ -119,7 +125,9 @@ spec:
                   git -C "$target" clean -fd
                 else
                   echo "Cloning $repo"
-                  rm -rf "$tmp" "$target"
+                  # Also sweep any stale "${target}.tmp.*" dirs left by the
+                  # previous PID-suffix scheme so they don't accumulate on disk.
+                  rm -rf "${target}".tmp* "$target"
                   git clone --quiet "$repo_url" "$tmp"
                   git -C "$tmp" config gc.auto 0
                   git -C "$tmp" -c gc.auto=0 fetch --prune --tags origin
