@@ -308,7 +308,9 @@ impl SandboxArgs {
                 env::var("PYTHON_WORKFLOW_HOST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
             format!("exec {interpreter} {path}")
         });
-        let mut spec = SandboxSpec::new(image).env("CENTAUR_WORKLOAD", "workflow-host");
+        let mut spec = SandboxSpec::new(image)
+            .label("centaur.ai/component", "workflow-run")
+            .env("CENTAUR_WORKLOAD", "workflow-host");
         spec = match self.backend {
             SandboxBackendKind::Local => spec.command(["/bin/sh", "-lc"]).args([command]),
             SandboxBackendKind::AgentK8s => spec.command(["/entrypoint.sh"]).args([

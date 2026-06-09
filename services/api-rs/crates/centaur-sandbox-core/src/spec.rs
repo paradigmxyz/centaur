@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SandboxSpec {
     pub image: String,
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
     pub command: Option<Vec<String>>,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
@@ -20,6 +22,7 @@ impl SandboxSpec {
     pub fn new(image: impl Into<String>) -> Self {
         Self {
             image: image.into(),
+            labels: std::collections::BTreeMap::new(),
             command: None,
             args: Vec::new(),
             env: Vec::new(),
@@ -32,6 +35,11 @@ impl SandboxSpec {
 
     pub fn iron_control_principal(mut self, principal_foreign_id: impl Into<String>) -> Self {
         self.iron_control_principal = Some(principal_foreign_id.into());
+        self
+    }
+
+    pub fn label(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.insert(name.into(), value.into());
         self
     }
 

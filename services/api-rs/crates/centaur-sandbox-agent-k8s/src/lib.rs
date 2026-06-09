@@ -423,6 +423,7 @@ fn build_agent_sandbox(
     config: &AgentSandboxConfig,
 ) -> SandboxResult<crd::Sandbox> {
     let mut labels = config.labels.clone();
+    labels.extend(spec.labels.clone());
     labels.insert(MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned());
     labels.insert(SANDBOX_ID_LABEL.to_owned(), id.as_str().to_owned());
 
