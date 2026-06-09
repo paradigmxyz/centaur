@@ -23,6 +23,8 @@ pub enum HarnessServerError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid blocks-mode input: {message}")]
+    InvalidBlocksInput { message: String },
     #[error("unknown threadId {thread_id}")]
     UnknownThread { thread_id: String },
     #[error("cwd must be absolute: {path}")]

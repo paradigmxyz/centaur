@@ -11,7 +11,7 @@ mod validation;
 pub mod wire;
 
 pub use error::{HarnessServerError, Result};
-pub use server::{run_harness_server, run_validate_jsonrpc, server_for};
+pub use server::{run_blocks_server, run_harness_server, run_validate_jsonrpc, server_for};
 pub use traits::{
     AppServerNormalizer, AppServerRuntime, HarnessKind, HarnessServer, NormalizedContent,
     NormalizedEvent, NormalizedToolResult, ThreadState,

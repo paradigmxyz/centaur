@@ -296,9 +296,9 @@ fi
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
 cd "$WORKSPACE_DIR"
 
-HARNESS_ADAPTER="${CENTAUR_HARNESS_ADAPTER:-/usr/local/bin/harness-adapter}"
-if [ -x "$HARNESS_ADAPTER" ]; then
-    "$HARNESS_ADAPTER" "${1:-}" "$TARGET_PROMPT"
+if [ "${1:-}" = "harness-server" ] && [ "${2:-}" = "amp" ] && [ -f "$TARGET_PROMPT" ]; then
+    rm -f "$WORKSPACE_DIR/AGENT.md"
+    ln -s "$(basename "$TARGET_PROMPT")" "$WORKSPACE_DIR/AGENT.md"
 fi
 
 # Codex reads its auth file when the app server starts. Complete this before

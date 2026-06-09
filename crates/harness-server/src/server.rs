@@ -13,6 +13,7 @@ use codex_app_server_protocol::{
     ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse, TurnStatus, TurnSteerParams, TurnSteerResponse, UserInput,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -40,6 +41,14 @@ pub fn run_harness_server(kind: HarnessKind) -> Result<()> {
     server_for(kind).run_stdio()
 }
 
+pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
+    match kind {
+        HarnessKind::Codex => crate::codex::run_codex_blocks_server(),
+        HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
+        HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
+    }
+}
+
 pub fn run_validate_jsonrpc() -> Result<()> {
     let stdin = io::stdin();
     for raw in stdin.lock().lines() {
@@ -55,6 +64,49 @@ pub fn run_validate_jsonrpc() -> Result<()> {
                 })?;
         }
     }
+    Ok(())
+}
+
+pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+    let mut state = initial_blocks_thread_state(harness)?;
+    let (_request_tx, request_rx) = mpsc::channel();
+
+    for raw in stdin.lock().lines() {
+        let line = raw?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        match parse_blocks_line(trimmed) {
+            Ok(BlocksCommand::User {
+                input,
+                client_user_message_id,
+            }) => {
+                if let Err(error) = run_blocks_turn(
+                    harness,
+                    &mut state,
+                    input,
+                    client_user_message_id,
+                    &mut stdout,
+                    &request_rx,
+                ) {
+                    eprintln!("blocks turn failed: {error:#}");
+                    write_blocks_error(&mut stdout, &state.id, "turn", error.to_string())?;
+                }
+            }
+            Ok(BlocksCommand::Interrupt) => {
+                eprintln!("blocks interrupt ignored: no active stdin reader while a turn runs");
+            }
+            Err(error) => {
+                eprintln!("invalid blocks input: {error:#}");
+                write_blocks_error(&mut stdout, &state.id, "input", error.to_string())?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -97,6 +149,148 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn initial_blocks_thread_state<H: HarnessServer>(harness: &H) -> Result<ThreadState> {
+    let cwd = env::current_dir()?;
+    let params = ThreadStartParams::default();
+    Ok(harness.thread_state(&params, cwd))
+}
+
+fn run_blocks_turn<H: HarnessServer, W: Write>(
+    harness: &H,
+    state: &mut ThreadState,
+    input: Vec<UserInput>,
+    client_user_message_id: Option<String>,
+    stdout: &mut W,
+    request_rx: &Receiver<JSONRPCRequest>,
+) -> Result<()> {
+    let turn_id = format!("turn-{}", Uuid::new_v4().simple());
+    let mut normalizer = normalizer_for(harness, state, &turn_id);
+    for notification in normalizer.start_notifications(!state.thread_started_sent)? {
+        if matches!(notification, ServerNotification::ThreadStarted(_)) {
+            state.thread_started_sent = true;
+        }
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    for notification in normalizer.emit_user_message(client_user_message_id, input.clone())? {
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+
+    let outcome = run_harness_turn(harness, state, &input, &mut normalizer, stdout, request_rx);
+    match outcome {
+        Ok(Some(turn)) => state.completed_turns.push(turn),
+        Ok(None) => {}
+        Err(error) => {
+            let message = error.to_string();
+            let normalized = NormalizedEvent::Error {
+                message: message.clone(),
+            };
+            for notification in normalizer.process_event(&normalized)? {
+                write_value(stdout, &notification_to_wire_value(&notification)?)?;
+            }
+            if let Some(notification) = normalizer.finish_turn(Some(message))? {
+                if let ServerNotification::TurnCompleted(completed) = &notification {
+                    state.completed_turns.push(completed.turn.clone());
+                }
+                write_value(stdout, &notification_to_wire_value(&notification)?)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) enum BlocksCommand {
+    User {
+        input: Vec<UserInput>,
+        client_user_message_id: Option<String>,
+    },
+    Interrupt,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlocksLine {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    message: Option<BlocksMessage>,
+    #[serde(default)]
+    content: Option<BlocksContent>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    client_user_message_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlocksMessage {
+    #[serde(default)]
+    content: Option<BlocksContent>,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BlocksContent {
+    Inputs(Vec<UserInput>),
+    Text(String),
+}
+
+pub(crate) fn parse_blocks_line(line: &str) -> Result<BlocksCommand> {
+    let parsed: BlocksLine =
+        serde_json::from_str(line).map_err(|source| HarnessServerError::InvalidBlocksInput {
+            message: source.to_string(),
+        })?;
+
+    match parsed.kind.as_str() {
+        "user" => {
+            let content = parsed
+                .message
+                .as_ref()
+                .and_then(|message| message.content.as_ref())
+                .or(parsed.content.as_ref());
+            let mut input = match content {
+                Some(content) => blocks_content_to_user_input(content),
+                None => parsed
+                    .text
+                    .map(|text| {
+                        vec![UserInput::Text {
+                            text,
+                            text_elements: Vec::new(),
+                        }]
+                    })
+                    .unwrap_or_default(),
+            };
+            if input.is_empty() {
+                input.push(UserInput::Text {
+                    text: "continue".to_string(),
+                    text_elements: Vec::new(),
+                });
+            }
+            Ok(BlocksCommand::User {
+                input,
+                client_user_message_id: parsed
+                    .client_user_message_id
+                    .or_else(|| parsed.message.and_then(|message| message.id)),
+            })
+        }
+        "interrupt" => Ok(BlocksCommand::Interrupt),
+        kind => Err(HarnessServerError::InvalidBlocksInput {
+            message: format!("unsupported blocks input type `{kind}`"),
+        }),
+    }
+}
+
+fn blocks_content_to_user_input(content: &BlocksContent) -> Vec<UserInput> {
+    match content {
+        BlocksContent::Inputs(input) => input.clone(),
+        BlocksContent::Text(text) => vec![UserInput::Text {
+            text: text.clone(),
+            text_elements: Vec::new(),
+        }],
+    }
 }
 
 fn handle_request<H: HarnessServer, W: Write>(
@@ -580,5 +774,29 @@ fn write_error<W: Write>(stdout: &mut W, id: RequestId, code: i64, message: Stri
                 data: None,
             },
         }))?,
+    )
+}
+
+pub(crate) fn write_blocks_error<W: Write>(
+    stdout: &mut W,
+    thread_id: &str,
+    turn_id: &str,
+    message: String,
+) -> Result<()> {
+    write_value(
+        stdout,
+        &json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "message": message,
+                    "codexErrorInfo": null,
+                    "additionalDetails": null
+                },
+                "willRetry": false,
+                "threadId": thread_id,
+                "turnId": turn_id
+            }
+        }),
     )
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -29,6 +30,14 @@ impl Harness {
     }
 
     fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => &["claude-code", "--mode", "jsonrpc"],
+            Self::Amp => &["amp", "--mode", "jsonrpc"],
+            Self::Codex => &["codex", "--mode", "jsonrpc"],
+        }
+    }
+
+    fn blocks_args(self) -> &'static [&'static str] {
         match self {
             Self::ClaudeCode => &["claude-code"],
             Self::Amp => &["amp"],
@@ -117,6 +126,123 @@ fn fake_amp_app_server_streams_codex_v2_notifications() {
     assert_completed_turn(&run.turn);
     assert_eq!(run.turn.text_from_deltas, "amp");
     assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
+fn fake_claude_blocks_mode_accepts_user_blocks_by_default() {
+    let fake_claude = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"blo\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"blocks\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"blocks\"}]}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"blocks\"}'"
+    );
+
+    let run = run_blocks_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude.to_string()),
+        prompt: "say blocks".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "blocks");
+    assert_codex_v2_turn(&run.turn);
+    assert!(
+        run.stdout_lines
+            .iter()
+            .all(|line| response_id(&serde_json::from_str(line).expect("JSON stdout")).is_none()),
+        "blocks mode should emit notifications only, not JSON-RPC responses"
+    );
+}
+
+#[test]
+fn fake_amp_blocks_mode_accepts_user_blocks_by_default() {
+    let fake_amp = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"T-amp-session\"}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"bl\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":true,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"block amp\"}]}}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"block amp\"}]}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"block amp\"}'"
+    );
+
+    let run = run_blocks_turn(BridgeTurnConfig {
+        harness: Harness::Amp,
+        command_override: Some(fake_amp.to_string()),
+        prompt: "say block amp".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "block amp");
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
+fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
+    let fake_codex = temp_path("fake-codex.sh");
+    let fake_codex_log = temp_path("fake-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+    );
+    let turn = bridge.run_blocks_user_turn("say codex blocks", Duration::from_secs(10));
+    let stdout_lines = bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "codex blocks");
+    assert_codex_v2_turn(&turn);
+    assert!(
+        stdout_lines
+            .iter()
+            .all(|line| response_id(&serde_json::from_str(line).expect("JSON stdout")).is_none()),
+        "blocks mode should emit notifications only, not JSON-RPC responses"
+    );
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    assert!(
+        requests
+            .iter()
+            .any(|value| value.get("method").and_then(Value::as_str) == Some("thread/start")),
+        "blocks mode should start a Codex app-server thread; requests={requests:?}"
+    );
+    let turn_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send turn/start; requests={requests:?}"));
+    assert_eq!(
+        turn_start
+            .pointer("/params/threadId")
+            .and_then(Value::as_str),
+        Some("thread-1")
+    );
+    assert_eq!(
+        turn_start
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str),
+        Some("say codex blocks")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
 }
 
 #[test]
@@ -303,7 +429,7 @@ fn real_harnesses_basic_steer_and_resume() {
             harness,
             command_override: None,
             start_prompt:
-                "If a steering update arrives, follow it. Otherwise reply exactly INITIAL."
+                "Before answering, run a shell command that sleeps for 8 seconds. If a steering update arrives while you are waiting, follow it. Otherwise reply exactly INITIAL."
                     .to_string(),
             steer_prompt: format!("Steering update: reply exactly {marker} and nothing else."),
             timeout: Duration::from_secs(240),
@@ -407,6 +533,14 @@ fn run_bridge_turn(config: BridgeTurnConfig) -> BridgeRun {
     BridgeRun { stdout_lines, turn }
 }
 
+fn run_blocks_turn(config: BridgeTurnConfig) -> BridgeRun {
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(config.harness, config.command_override, None);
+    let turn = bridge.run_blocks_user_turn(&config.prompt, config.timeout);
+    let stdout_lines = bridge.finish_successfully();
+    BridgeRun { stdout_lines, turn }
+}
+
 fn run_bridge_two_turns(config: BridgeTwoTurnConfig) -> BridgeTwoTurnRun {
     let mut bridge = BridgeProcess::spawn_harness(config.harness, config.command_override, None);
     let thread_id = bridge.initialize_and_start_thread(config.harness, config.timeout);
@@ -481,6 +615,37 @@ impl BridgeProcess {
         let mut command = Command::new(bin);
         command
             .args(harness.args())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        for env_key in [
+            "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
+            "CENTAUR_AMP_APP_BRIDGE_COMMAND",
+        ] {
+            command.env_remove(env_key);
+        }
+        if let Some(env_key) = harness.command_override_env()
+            && let Some(raw) = command_override
+        {
+            command.env(env_key, raw);
+        }
+        if let Some((key, value)) = extra_env {
+            command.env(key, value);
+        }
+
+        Self::spawn_command(command)
+    }
+
+    fn spawn_harness_blocks(
+        harness: Harness,
+        command_override: Option<String>,
+        extra_env: Option<(&str, &str)>,
+    ) -> Self {
+        let bin = env!("CARGO_BIN_EXE_harness-server");
+        let mut command = Command::new(bin);
+        command
+            .args(harness.blocks_args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -605,6 +770,7 @@ impl BridgeProcess {
         let deadline = Instant::now() + timeout;
         let mut capture = TurnCapture::default();
         let mut steer_sent = false;
+        let mut turn_started = false;
 
         loop {
             let value = self.read_json(deadline);
@@ -615,20 +781,6 @@ impl BridgeProcess {
                         .and_then(Value::as_str)
                         .unwrap_or_else(|| panic!("turn/start did not return turn id: {value}"))
                         .to_string();
-                    if let Some(plan) = steer.as_ref()
-                        && !steer_sent
-                    {
-                        self.send(json!({
-                            "id": plan.request_id,
-                            "method": "turn/steer",
-                            "params": {
-                                "threadId": thread_id,
-                                "expectedTurnId": capture.turn_id,
-                                "input": [{"type": "text", "text": plan.prompt, "text_elements": []}],
-                            },
-                        }));
-                        steer_sent = true;
-                    }
                 } else if let Some(plan) = steer.as_mut()
                     && id == plan.request_id
                 {
@@ -642,6 +794,65 @@ impl BridgeProcess {
 
             if let Some(method) = value.get("method").and_then(Value::as_str) {
                 assert_notification_thread_id(&value, thread_id);
+                capture.consume_notification(method, &value);
+                if method == "turn/started"
+                    && capture.turn_id.is_empty()
+                    && let Some(turn_id) = value.pointer("/params/turn/id").and_then(Value::as_str)
+                {
+                    capture.turn_id = turn_id.to_string();
+                }
+                if method == "turn/started" {
+                    turn_started = true;
+                }
+                if let Some(plan) = steer.as_ref()
+                    && !steer_sent
+                    && turn_started
+                    && !capture.turn_id.is_empty()
+                {
+                    self.send(json!({
+                        "id": plan.request_id,
+                        "method": "turn/steer",
+                        "params": {
+                            "threadId": thread_id,
+                            "expectedTurnId": capture.turn_id,
+                            "input": [{"type": "text", "text": plan.prompt, "text_elements": []}],
+                        },
+                    }));
+                    steer_sent = true;
+                }
+                if method == "turn/completed" {
+                    break;
+                }
+            }
+        }
+
+        capture
+    }
+
+    fn run_blocks_user_turn(&mut self, prompt: &str, timeout: Duration) -> TurnCapture {
+        self.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "slackbotv2",
+                "action": "execute"
+            },
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+        }));
+
+        let deadline = Instant::now() + timeout;
+        let mut capture = TurnCapture::default();
+
+        loop {
+            let value = self.read_json(deadline);
+            assert!(
+                response_id(&value).is_none(),
+                "blocks mode emitted JSON-RPC response: {value}"
+            );
+            if let Some(method) = value.get("method").and_then(Value::as_str) {
                 capture.consume_notification(method, &value);
                 if method == "turn/started"
                     && capture.turn_id.is_empty()
@@ -1125,6 +1336,61 @@ fn codex_bin() -> String {
         }
     }
     "codex".to_string()
+}
+
+fn fake_codex_app_server_script(log_path: &Path) -> String {
+    let mut script = String::new();
+    script.push_str("#!/bin/sh\n");
+    script.push_str("log=");
+    script.push_str(&shell_quote(log_path));
+    script.push_str(
+        r#"
+touch "$log"
+if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "--help" ]; then
+  printf '%s\n' '--listen stdio://'
+  exit 0
+fi
+if [ "${1:-}" != "app-server" ]; then
+  printf '%s\n' 'expected app-server command' >&2
+  exit 64
+fi
+
+request_id() {
+  printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'
+}
+
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  case "$line" in
+    *'"method":"initialize"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"userAgent":"fake-codex"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}'
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"answer-1","delta":"codex blocks"}}'
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null},"completedAtMs":2}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null}],"itemsView":"full","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}'
+      ;;
+    *)
+      printf '%s\n' "unexpected request: $line" >&2
+      exit 65
+      ;;
+  esac
+done
+"#,
+    );
+    script
 }
 
 fn temp_path(name: &str) -> PathBuf {
