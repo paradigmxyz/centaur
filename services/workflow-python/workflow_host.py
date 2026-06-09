@@ -15,6 +15,7 @@ import inspect
 import json
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 import types
@@ -145,6 +146,18 @@ def resolve_tool_shim() -> str | None:
     fallback = Path("/home/agent/.local/bin/centaur-tools")
     if fallback.exists():
         return str(fallback)
+    installer = Path("/usr/local/bin/install-tool-shims")
+    if installer.exists():
+        subprocess.run(
+            [str(installer)],
+            check=False,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+        )
+        if tool_shim := shutil.which("centaur-tools"):
+            return tool_shim
+        if fallback.exists():
+            return str(fallback)
     return None
 
 
