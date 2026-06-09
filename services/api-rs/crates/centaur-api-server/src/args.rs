@@ -72,6 +72,7 @@ impl Args {
 pub(crate) struct IronControlRuntime {
     pub(crate) registrar: SessionRegistrar,
     pub(crate) warm_pool_bootstrap_principal: String,
+    pub(crate) workflow_host_principal: String,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -250,9 +251,24 @@ impl SandboxArgs {
                 ]),
             })
             .await?;
+        let workflow_host = client
+            .upsert_principal(&IdentityInput {
+                namespace: namespace.clone(),
+                foreign_id: "workflow-host".to_owned(),
+                name: "Workflow host".to_owned(),
+                labels: BTreeMap::from([
+                    ("managed-by".to_owned(), "centaur".to_owned()),
+                    ("purpose".to_owned(), "workflow-host".to_owned()),
+                ]),
+            })
+            .await?;
+        for role_id in &role_ids {
+            client.assign_role(&workflow_host.id, role_id).await?;
+        }
         Ok(Some(IronControlRuntime {
             registrar: SessionRegistrar::new(client, namespace, role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
+            workflow_host_principal: workflow_host.id,
         }))
     }
 

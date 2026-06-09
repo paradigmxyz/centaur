@@ -27,9 +27,11 @@ async fn main() -> Result<(), ServerError> {
     let sandbox_runtime = args.sandbox_runtime().await?;
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime);
     let mut warm_pool_bootstrap_principal = None;
+    let mut workflow_host_principal = None;
     if let Some(iron_control) = args.iron_control_runtime().await? {
         info!("iron-control session registration enabled");
         warm_pool_bootstrap_principal = Some(iron_control.warm_pool_bootstrap_principal);
+        workflow_host_principal = Some(iron_control.workflow_host_principal);
         runtime = runtime.with_iron_control(iron_control.registrar);
     }
     if let Some(mut config) = args.warm_pool_config() {
@@ -37,7 +39,7 @@ async fn main() -> Result<(), ServerError> {
         runtime = runtime.with_warm_pool(config);
     }
     let workflow_host_sandbox = args
-        .workflow_host_sandbox_runtime(warm_pool_bootstrap_principal.as_deref())
+        .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
         .await?;
     let workflows = Some(
         WorkflowRuntime::new_with_workflow_host_sandbox(
