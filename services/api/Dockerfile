@@ -1,13 +1,16 @@
+# syntax=docker/dockerfile:1.7
+
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     git curl openssh-client \
     ripgrep fd-find jq yq tree gettext-base \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && ARCH=$(dpkg --print-architecture) \
     && curl -fsSL -o /usr/local/bin/dbmate "https://github.com/amacneil/dbmate/releases/download/v2.32.0/dbmate-linux-${ARCH}" \
-    && chmod +x /usr/local/bin/dbmate \
-    && rm -rf /var/lib/apt/lists/*
+    && chmod +x /usr/local/bin/dbmate
 
 COPY --from=ghcr.io/astral-sh/uv:0.7@sha256:629240833dd25d03949509fc01ceff56ae74f5e5f0fd264da634dd2f70e9cc70 /uv /uvx /usr/local/bin/
 
