@@ -612,30 +612,7 @@ impl BridgeProcess {
         command_override: Option<String>,
         extra_env: Option<(&str, &str)>,
     ) -> Self {
-        let bin = env!("CARGO_BIN_EXE_harness-server");
-        let mut command = Command::new(bin);
-        command
-            .args(harness.args())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        for env_key in [
-            "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
-            "CENTAUR_AMP_APP_BRIDGE_COMMAND",
-        ] {
-            command.env_remove(env_key);
-        }
-        if let Some(env_key) = harness.command_override_env()
-            && let Some(raw) = command_override
-        {
-            command.env(env_key, raw);
-        }
-        if let Some((key, value)) = extra_env {
-            command.env(key, value);
-        }
-
-        Self::spawn_command(command)
+        Self::spawn_harness_with_args(harness, harness.args(), command_override, extra_env)
     }
 
     fn spawn_harness_blocks(
@@ -643,10 +620,19 @@ impl BridgeProcess {
         command_override: Option<String>,
         extra_env: Option<(&str, &str)>,
     ) -> Self {
+        Self::spawn_harness_with_args(harness, harness.blocks_args(), command_override, extra_env)
+    }
+
+    fn spawn_harness_with_args(
+        harness: Harness,
+        args: &'static [&'static str],
+        command_override: Option<String>,
+        extra_env: Option<(&str, &str)>,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_harness-server");
         let mut command = Command::new(bin);
         command
-            .args(harness.blocks_args())
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

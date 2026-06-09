@@ -170,37 +170,15 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
 ) -> Result<()> {
     let turn_id = format!("turn-{}", Uuid::new_v4().simple());
     let mut normalizer = normalizer_for(harness, state, &turn_id);
-    for notification in normalizer.start_notifications(!state.thread_started_sent)? {
-        if matches!(notification, ServerNotification::ThreadStarted(_)) {
-            state.thread_started_sent = true;
-        }
-        write_value(stdout, &notification_to_wire_value(&notification)?)?;
-    }
-    for notification in normalizer.emit_user_message(client_user_message_id, input.clone())? {
-        write_value(stdout, &notification_to_wire_value(&notification)?)?;
-    }
-
-    let outcome = run_harness_turn(harness, state, &input, &mut normalizer, stdout, request_rx);
-    match outcome {
-        Ok(Some(turn)) => state.completed_turns.push(turn),
-        Ok(None) => {}
-        Err(error) => {
-            let message = error.to_string();
-            let normalized = NormalizedEvent::Error {
-                message: message.clone(),
-            };
-            for notification in normalizer.process_event(&normalized)? {
-                write_value(stdout, &notification_to_wire_value(&notification)?)?;
-            }
-            if let Some(notification) = normalizer.finish_turn(Some(message))? {
-                if let ServerNotification::TurnCompleted(completed) = &notification {
-                    state.completed_turns.push(completed.turn.clone());
-                }
-                write_value(stdout, &notification_to_wire_value(&notification)?)?;
-            }
-        }
-    }
-    Ok(())
+    run_normalized_turn(
+        harness,
+        state,
+        &input,
+        client_user_message_id,
+        &mut normalizer,
+        stdout,
+        request_rx,
+    )
 }
 
 #[derive(Debug)]
@@ -418,45 +396,15 @@ fn handle_request<H: HarnessServer, W: Write>(
                     response,
                 },
             )?;
-            for notification in normalizer.start_notifications(!state.thread_started_sent)? {
-                if matches!(notification, ServerNotification::ThreadStarted(_)) {
-                    state.thread_started_sent = true;
-                }
-                write_value(stdout, &notification_to_wire_value(&notification)?)?;
-            }
-            for notification in normalizer
-                .emit_user_message(params.client_user_message_id.clone(), params.input.clone())?
-            {
-                write_value(stdout, &notification_to_wire_value(&notification)?)?;
-            }
-            let outcome = run_harness_turn(
+            run_normalized_turn(
                 harness,
                 state,
                 &params.input,
+                params.client_user_message_id.clone(),
                 &mut normalizer,
                 stdout,
                 request_rx,
-            );
-            match outcome {
-                Ok(Some(turn)) => state.completed_turns.push(turn),
-                Ok(None) => {}
-                Err(error) => {
-                    let message = error.to_string();
-                    let normalized = NormalizedEvent::Error {
-                        message: message.clone(),
-                    };
-                    for notification in normalizer.process_event(&normalized)? {
-                        write_value(stdout, &notification_to_wire_value(&notification)?)?;
-                    }
-                    if let Some(notification) = normalizer.finish_turn(Some(message))? {
-                        if let ServerNotification::TurnCompleted(completed) = &notification {
-                            state.completed_turns.push(completed.turn.clone());
-                        }
-                        write_value(stdout, &notification_to_wire_value(&notification)?)?;
-                    }
-                }
-            }
-            Ok(())
+            )
         }
         "turn/interrupt" => {
             let _params: TurnInterruptParams = request_params(request.params)?;
@@ -621,6 +569,55 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             Ok(())
         }
     }
+}
+
+fn run_normalized_turn<H: HarnessServer, W: Write>(
+    harness: &H,
+    state: &mut ThreadState,
+    input: &[UserInput],
+    client_user_message_id: Option<String>,
+    normalizer: &mut CodexTurnNormalizer,
+    stdout: &mut W,
+    request_rx: &Receiver<JSONRPCRequest>,
+) -> Result<()> {
+    for notification in normalizer.start_notifications(!state.thread_started_sent)? {
+        if matches!(notification, ServerNotification::ThreadStarted(_)) {
+            state.thread_started_sent = true;
+        }
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    for notification in normalizer.emit_user_message(client_user_message_id, input.to_vec())? {
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+
+    match run_harness_turn(harness, state, input, normalizer, stdout, request_rx) {
+        Ok(Some(turn)) => state.completed_turns.push(turn),
+        Ok(None) => {}
+        Err(error) => finish_turn_with_error(state, normalizer, stdout, error)?,
+    }
+    Ok(())
+}
+
+fn finish_turn_with_error<W: Write>(
+    state: &mut ThreadState,
+    normalizer: &mut CodexTurnNormalizer,
+    stdout: &mut W,
+    error: HarnessServerError,
+) -> Result<()> {
+    let message = error.to_string();
+    let normalized = NormalizedEvent::Error {
+        message: message.clone(),
+    };
+    for notification in normalizer.process_event(&normalized)? {
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    if let Some(notification) = normalizer.finish_turn(Some(message))? {
+        if let ServerNotification::TurnCompleted(completed) = &notification {
+            state.completed_turns.push(completed.turn.clone());
+        }
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    Ok(())
 }
 
 fn run_harness_turn<H: HarnessServer, W: Write>(
