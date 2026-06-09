@@ -160,6 +160,12 @@ struct SandboxArgs {
     )]
     agent_image_pull_policy: Option<String>,
     #[arg(
+        long = "session-sandbox-image-pull-secrets",
+        env = "SESSION_SANDBOX_IMAGE_PULL_SECRETS",
+        value_delimiter = ','
+    )]
+    image_pull_secrets: Vec<String>,
+    #[arg(
         long = "session-sandbox-ready-timeout-secs",
         alias = "kubernetes-sandbox-ready-timeout-s",
         env = "SESSION_SANDBOX_READY_TIMEOUT_SECS",
@@ -554,6 +560,13 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
     fn try_from(args: &SandboxArgs) -> Result<Self, Self::Error> {
         let mut config = AgentSandboxConfig::new(args.k8s_namespace.clone());
         config.image_pull_policy = args.agent_image_pull_policy.clone();
+        config.image_pull_secrets = args
+            .image_pull_secrets
+            .iter()
+            .map(|secret| secret.trim())
+            .filter(|secret| !secret.is_empty())
+            .map(str::to_owned)
+            .collect();
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         config.iron_proxy = args.iron_proxy.to_config()?;
         if let Some(proxy) = config.iron_proxy.as_mut() {
@@ -1042,6 +1055,8 @@ mod tests {
             "centaur-test",
             "--session-sandbox-image-pull-policy",
             "IfNotPresent",
+            "--session-sandbox-image-pull-secrets",
+            "github-access-token-read-packages, extra-secret ",
             "--session-sandbox-ready-timeout-secs",
             "42",
             "--kubernetes-sandbox-iron-proxy-mode",
@@ -1052,6 +1067,10 @@ mod tests {
         let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
         assert_eq!(config.namespace, "centaur-test");
         assert_eq!(config.image_pull_policy.as_deref(), Some("IfNotPresent"));
+        assert_eq!(
+            config.image_pull_secrets,
+            vec!["github-access-token-read-packages", "extra-secret"]
+        );
         assert_eq!(config.ready_timeout, Duration::from_secs(42));
         assert!(config.iron_proxy.is_none());
     }

@@ -172,6 +172,10 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- if .Values.global.imagePullSecrets }}
+            - name: SESSION_SANDBOX_IMAGE_PULL_SECRETS
+              value: "{{- range $index, $secret := .Values.global.imagePullSecrets }}{{- if $index }},{{ end -}}{{ $secret.name }}{{- end }}"
+{{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
