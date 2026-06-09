@@ -80,8 +80,9 @@ class WorkflowContext:
         return await self.agent_turn(text, **kwargs)
 
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
-        if shutil.which("centaur-tools"):
-            return await call_tool_shim(tool, method, args or {})
+        tool_shim = resolve_tool_shim()
+        if tool_shim is not None:
+            return await call_tool_shim(tool_shim, tool, method, args or {})
         return await self._rpc.request(
             {
                 "type": "ctx.call_tool",
@@ -138,9 +139,20 @@ class RpcClient:
             fut.set_exception(RuntimeError(str(response.get("error") or "context RPC failed")))
 
 
-async def call_tool_shim(tool: str, method: str, args: dict[str, Any]) -> Any:
+def resolve_tool_shim() -> str | None:
+    if tool_shim := shutil.which("centaur-tools"):
+        return tool_shim
+    fallback = Path("/home/agent/.local/bin/centaur-tools")
+    if fallback.exists():
+        return str(fallback)
+    return None
+
+
+async def call_tool_shim(
+    tool_shim: str, tool: str, method: str, args: dict[str, Any]
+) -> Any:
     proc = await asyncio.create_subprocess_exec(
-        "centaur-tools",
+        tool_shim,
         "call",
         tool,
         method,
