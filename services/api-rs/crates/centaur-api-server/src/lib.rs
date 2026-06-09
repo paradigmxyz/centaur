@@ -5,7 +5,10 @@ pub mod types;
 
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
 pub use error::ApiError;
-pub use routes::{build_router_with_runtime, build_router_with_session_runtime};
+pub use routes::{
+    build_router_with_runtime, build_router_with_session_and_workflow_runtime,
+    build_router_with_session_runtime,
+};
 
 #[cfg(test)]
 mod tests {

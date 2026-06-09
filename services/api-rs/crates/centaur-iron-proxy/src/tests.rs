@@ -57,6 +57,8 @@ fn access_token_fragment_carries_no_broker_credentials_block() {
     // Broker credentials now live in iron-control, not the proxy fragment. The
     // access-token fragment still references the credential via a token_broker
     // source, but the unknown `broker_credentials:` key (if any) is ignored.
-    let codex = harness_auth_fragment("codex", "access_token").unwrap().unwrap();
+    let codex = harness_auth_fragment("codex", "access_token")
+        .unwrap()
+        .unwrap();
     assert!(!codex.top_level.contains_key("broker_credentials"));
 }

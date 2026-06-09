@@ -517,7 +517,6 @@ impl AgentSandboxBackend {
             }
         }
     }
-
 }
 
 pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronProxy) {

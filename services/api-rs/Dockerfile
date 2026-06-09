@@ -17,13 +17,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
 # api-rs discovers tool secret metadata from pyproject.toml at startup so it can
 # register the full tool secret set with iron-control before sandboxes claim.
 COPY tools/ /app/tools/
+COPY services/workflow-python/ /app/workflow-python/
+COPY workflows/ /app/workflows/
+ENV PYTHON_WORKFLOW_HOST_PATH=/app/workflow-python/workflow_host.py
+ENV WORKFLOW_DIRS=/app/workflows
 # Infra + harness auth secrets are embedded in the binary at compile time
 # (include_str! of the in-crate infra.yaml); tool secrets are discovered from
 # /app/tools plus any mounted overlay tools.

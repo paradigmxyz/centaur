@@ -5,8 +5,8 @@ use std::{
 };
 
 use centaur_iron_proxy::{
-    PostgresListener, PostgresUpstream, ProxyFragment, SandboxEnv, Secret, SecretReplace, Transform,
-    TransformConfig,
+    PostgresListener, PostgresUpstream, ProxyFragment, SandboxEnv, Secret, SecretReplace,
+    Transform, TransformConfig,
 };
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;

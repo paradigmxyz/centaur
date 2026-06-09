@@ -17,11 +17,12 @@ use centaur_iron_proxy::{
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, IronControlSettings, IronProxyConfig,
 };
-use centaur_sandbox_core::{Mount, MountKind};
+use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::WarmPoolConfig;
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::SandboxWorkloadMode;
+use centaur_workflows_absurd::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::info;
 
@@ -56,6 +57,15 @@ impl Args {
 
     pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
         self.sandbox.warm_pool_config()
+    }
+
+    pub(crate) async fn workflow_host_sandbox_runtime(
+        &self,
+        bootstrap_iron_control_principal: Option<&str>,
+    ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
+        self.sandbox
+            .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
+            .await
     }
 }
 
@@ -196,6 +206,16 @@ struct SandboxArgs {
     iron_proxy: IronProxyArgs,
     #[command(flatten)]
     iron_control: IronControlArgs,
+    #[arg(
+        long = "workflow-host-sandbox",
+        env = "WORKFLOW_HOST_SANDBOX",
+        default_value_t = true
+    )]
+    workflow_host_sandbox: bool,
+    #[arg(long = "workflow-host-image", env = "WORKFLOW_HOST_IMAGE")]
+    workflow_host_image: Option<String>,
+    #[arg(long = "workflow-host-command", env = "WORKFLOW_HOST_COMMAND")]
+    workflow_host_command: Option<String>,
 }
 
 impl SandboxArgs {
@@ -246,6 +266,95 @@ impl SandboxArgs {
                     self.container_workload_mode()?,
                 ))
             }
+        }
+    }
+
+    async fn workflow_host_sandbox_runtime(
+        &self,
+        bootstrap_iron_control_principal: Option<&str>,
+    ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
+        if !self.workflow_host_sandbox {
+            return Ok(None);
+        }
+        let spec = self.workflow_host_spec(bootstrap_iron_control_principal);
+        let runtime = match self.backend {
+            SandboxBackendKind::Local => {
+                SandboxRuntime::backend(Arc::new(LocalSandboxBackend::new()), spec.clone())
+            }
+            SandboxBackendKind::AgentK8s => SandboxRuntime::backend(
+                Arc::new(AgentSandboxBackend::new(
+                    self.kube_client().await?,
+                    AgentSandboxConfig::try_from(self)?,
+                )),
+                spec.clone(),
+            ),
+        };
+        Ok(Some(WorkflowHostSandboxRuntime::new(runtime, spec)))
+    }
+
+    fn workflow_host_spec(&self, bootstrap_iron_control_principal: Option<&str>) -> SandboxSpec {
+        let image = self
+            .workflow_host_image
+            .clone()
+            .or_else(|| self.agent_image.clone())
+            .unwrap_or_else(|| "centaur-agent:latest".to_owned());
+        let command = self.workflow_host_command.clone().unwrap_or_else(|| {
+            let path = match self.backend {
+                SandboxBackendKind::Local => env::var("PYTHON_WORKFLOW_HOST_PATH")
+                    .unwrap_or_else(|_| self.default_workflow_host_path()),
+                SandboxBackendKind::AgentK8s => self.default_workflow_host_path(),
+            };
+            let interpreter =
+                env::var("PYTHON_WORKFLOW_HOST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+            format!("exec {interpreter} {path}")
+        });
+        let mut spec = SandboxSpec::new(image).env("CENTAUR_WORKLOAD", "workflow-host");
+        spec = match self.backend {
+            SandboxBackendKind::Local => spec.command(["/bin/sh", "-lc"]).args([command]),
+            SandboxBackendKind::AgentK8s => spec.command(["/entrypoint.sh"]).args([
+                "/bin/sh".to_owned(),
+                "-lc".to_owned(),
+                command,
+            ]),
+        };
+        if env::var_os("WORKFLOW_DIRS").is_none()
+            && matches!(self.backend, SandboxBackendKind::AgentK8s)
+        {
+            spec = spec.env("WORKFLOW_DIRS", "/opt/centaur/workflows");
+        }
+        if let Ok(value) =
+            env::var("WORKFLOW_HOST_DATABASE_URL").or_else(|_| env::var("DATABASE_URL"))
+        {
+            spec = spec.env("DATABASE_URL", value);
+        }
+        for name in [
+            "WORKFLOW_DIRS",
+            "PYTHON_WORKFLOW_HOST_PATH",
+            "PYTHON_WORKFLOW_HOST_PYTHON",
+        ] {
+            if let Ok(value) = env::var(name) {
+                let value = match (name, self.backend) {
+                    ("WORKFLOW_DIRS", SandboxBackendKind::AgentK8s) => {
+                        "/opt/centaur/workflows".to_owned()
+                    }
+                    ("PYTHON_WORKFLOW_HOST_PATH", SandboxBackendKind::AgentK8s) => {
+                        self.default_workflow_host_path()
+                    }
+                    _ => value,
+                };
+                spec = spec.env(name, value);
+            }
+        }
+        if let Some(principal) = bootstrap_iron_control_principal {
+            spec = spec.iron_control_principal(principal);
+        }
+        spec
+    }
+
+    fn default_workflow_host_path(&self) -> String {
+        match self.backend {
+            SandboxBackendKind::Local => default_workflow_host_path(),
+            SandboxBackendKind::AgentK8s => "/usr/local/bin/workflow-host".to_owned(),
         }
     }
 
@@ -747,6 +856,17 @@ fn default_sandbox_image(workload: SandboxWorkloadKind) -> &'static str {
         SandboxWorkloadKind::Mock => "busybox:1.36",
         SandboxWorkloadKind::CodexAppServer => "centaur-agent:latest",
     }
+}
+
+fn default_workflow_host_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("workflow-python")
+        .join("workflow_host.py")
+        .to_string_lossy()
+        .to_string()
 }
 
 fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
