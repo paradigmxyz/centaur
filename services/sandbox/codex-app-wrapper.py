@@ -681,9 +681,24 @@ def start_or_resume_thread() -> str:
         or ""
     ).strip()
     if resume:
-        result = request(
-            "thread/resume", {"threadId": resume, "cwd": os.getcwd()}, timeout=60
-        )
+        try:
+            result = request(
+                "thread/resume", {"threadId": resume, "cwd": os.getcwd()}, timeout=60
+            )
+        except Exception as exc:
+            # The rollout file lives only on the sandbox filesystem; after a pod
+            # replacement it is gone and resume can never succeed. Fall back to a
+            # fresh thread so the turn proceeds instead of bricking the session.
+            emit(
+                {
+                    "type": "system",
+                    "subtype": "thread_resume_failed",
+                    "message": str(exc),
+                    "resume_thread_id": resume,
+                }
+            )
+            resume = ""
+            result = request("thread/start", {"cwd": os.getcwd()}, timeout=60)
     else:
         result = request("thread/start", {"cwd": os.getcwd()}, timeout=60)
     thread = result.get("thread") or {}

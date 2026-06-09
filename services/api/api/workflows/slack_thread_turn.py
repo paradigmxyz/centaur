@@ -7,8 +7,12 @@ import json
 import re
 from typing import Any
 
+import structlog
+
 from api.runtime_control import ControlPlaneError
 from api.workflow_engine import Delivery, WorkflowContext
+
+log = structlog.get_logger()
 
 WORKFLOW_NAME = "slack_thread_turn"
 
@@ -247,15 +251,14 @@ def _with_prompt_switch_context_note(
     return [{"type": "text", "text": _PROMPT_SWITCH_CONTEXT_NOTE}, *parts]
 
 
-async def _release_for_prompt_switch(
+async def _release_and_reset_session(
     ctx: WorkflowContext,
     *,
     thread_key: str,
-    message_id: str | None,
+    release_id: str,
 ) -> None:
     from api.runtime_control import release_assignment
 
-    release_id = f"prompt-switch:{message_id or ctx.run_id}"
     await release_assignment(
         ctx._pool,
         thread_key=thread_key,
@@ -271,6 +274,53 @@ async def _release_for_prompt_switch(
         "last_result = NULL, last_result_at = NULL, updated_at = NOW() "
         "WHERE thread_key = $1",
         thread_key,
+    )
+
+
+async def _release_for_prompt_switch(
+    ctx: WorkflowContext,
+    *,
+    thread_key: str,
+    message_id: str | None,
+) -> None:
+    await _release_and_reset_session(
+        ctx,
+        thread_key=thread_key,
+        release_id=f"prompt-switch:{message_id or ctx.run_id}",
+    )
+
+
+async def _reset_session_for_recovery(
+    ctx: WorkflowContext,
+    *,
+    thread_key: str,
+    message_id: str | None,
+) -> None:
+    """Reset a broken session when the user explicitly asks for a retry.
+
+    The harness session id (agent_thread_id) survives sandbox replacement, but
+    harness-local state (e.g. codex rollout files) does not — a thread whose
+    last execution failed permanently can be stuck re-attempting an impossible
+    resume forever. An explicit recovery command after a permanent failure
+    releases the assignment and clears the session so the turn runs on a fresh
+    runtime with history backfill instead.
+    """
+    row = await ctx._pool.fetchrow(
+        "SELECT status, terminal_reason FROM agent_execution_requests "
+        "WHERE thread_key = $1 ORDER BY created_at DESC LIMIT 1",
+        thread_key,
+    )
+    if row is None or row["status"] != "failed_permanent":
+        return
+    log.info(
+        "recovery_session_reset",
+        thread_key=thread_key,
+        last_terminal_reason=row["terminal_reason"],
+    )
+    await _release_and_reset_session(
+        ctx,
+        thread_key=thread_key,
+        release_id=f"recovery-reset:{message_id or ctx.run_id}",
     )
 
 
@@ -481,6 +531,12 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     selection_changed = bool(selection.harness or selection.persona)
     if selection_changed:
         await _release_for_prompt_switch(
+            ctx,
+            thread_key=thread_key,
+            message_id=inp.message_id,
+        )
+    elif _is_recovery_turn(selection.parts):
+        await _reset_session_for_recovery(
             ctx,
             thread_key=thread_key,
             message_id=inp.message_id,

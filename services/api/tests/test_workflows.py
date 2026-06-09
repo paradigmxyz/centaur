@@ -2520,3 +2520,169 @@ async def test_wait_for_workflow_returns_completed_child_after_deadline(db_pool)
     assert child["run_id"] == child_run_id
     assert child["status"] == "completed"
     assert child["output_json"] == {"ok": True}
+
+
+async def _insert_session_and_execution(
+    db_pool, *, thread_key: str, status: str, terminal_reason: str | None
+) -> None:
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions ("
+        "thread_key, sandbox_id, harness, engine, state, agent_thread_id"
+        ") VALUES ($1, 'sbx-old', 'codex', 'codex', 'stopped', 'broken-agent-thread')",
+        thread_key,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, "
+        "status, terminal_reason"
+        ") VALUES ($1, $2, 1, $3, 'hash', $4, $5)",
+        f"exe_{uuid.uuid4().hex[:16]}",
+        thread_key,
+        f"exec:{uuid.uuid4().hex[:8]}",
+        status,
+        terminal_reason,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_turn_resets_session_after_permanent_failure(db_pool):
+    """An explicit retry after a failed_permanent execution must clear the
+    stale harness session (e.g. a codex thread whose rollout file died with
+    the old sandbox) so the turn runs on a fresh runtime."""
+    from api.workflow_engine import WorkflowContext
+    from api.workflows.slack_thread_turn import Input, handler
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    await _insert_session_and_execution(
+        db_pool, thread_key=thread_key, status="failed_permanent",
+        terminal_reason="harness_error",
+    )
+
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    do_agent_turn_mock = AsyncMock(return_value={"ok": True, "execution_id": "exe-1"})
+    release_assignment_mock = AsyncMock(return_value={"ok": True, "released": True})
+
+    with (
+        patch("api.workflow_engine.do_agent_turn", new=do_agent_turn_mock),
+        patch("api.runtime_control.release_assignment", new=release_assignment_mock),
+    ):
+        await handler(
+            Input(
+                thread_key=thread_key,
+                parts=[{"type": "text", "text": "retry"}],
+                message_id="slack:current",
+            ),
+            ctx,
+        )
+
+    release_assignment_mock.assert_awaited_once_with(
+        db_pool,
+        thread_key=thread_key,
+        release_id="recovery-reset:slack:current",
+        cancel_inflight=True,
+        stop_runtime_background=True,
+    )
+    row = await db_pool.fetchrow(
+        "SELECT state, agent_thread_id FROM sandbox_sessions WHERE thread_key = $1",
+        thread_key,
+    )
+    assert row is not None
+    assert row["state"] == "stopped"
+    assert row["agent_thread_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_turn_keeps_session_after_completed_execution(db_pool):
+    """Retry/continue on a healthy thread must not discard the live harness
+    session and its context."""
+    from api.workflow_engine import WorkflowContext
+    from api.workflows.slack_thread_turn import Input, handler
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    await _insert_session_and_execution(
+        db_pool, thread_key=thread_key, status="completed",
+        terminal_reason="completed",
+    )
+
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    do_agent_turn_mock = AsyncMock(return_value={"ok": True, "execution_id": "exe-1"})
+    release_assignment_mock = AsyncMock(return_value={"ok": True, "released": True})
+
+    with (
+        patch("api.workflow_engine.do_agent_turn", new=do_agent_turn_mock),
+        patch("api.runtime_control.release_assignment", new=release_assignment_mock),
+    ):
+        await handler(
+            Input(
+                thread_key=thread_key,
+                parts=[{"type": "text", "text": "retry"}],
+                message_id="slack:current",
+            ),
+            ctx,
+        )
+
+    release_assignment_mock.assert_not_awaited()
+    row = await db_pool.fetchrow(
+        "SELECT agent_thread_id FROM sandbox_sessions WHERE thread_key = $1",
+        thread_key,
+    )
+    assert row["agent_thread_id"] == "broken-agent-thread"
+
+
+@pytest.mark.asyncio
+async def test_non_recovery_turn_keeps_session_after_permanent_failure(db_pool):
+    """Ordinary messages never force a reset; in-sandbox recovery (resume
+    fallback) handles those without discarding state."""
+    from api.workflow_engine import WorkflowContext
+    from api.workflows.slack_thread_turn import Input, handler
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    await _insert_session_and_execution(
+        db_pool, thread_key=thread_key, status="failed_permanent",
+        terminal_reason="harness_error",
+    )
+
+    ctx = WorkflowContext(
+        pool=db_pool,
+        run_id=run_id,
+        checkpoints={},
+        lease_s=30.0,
+        worker_id="w1",
+    )
+    do_agent_turn_mock = AsyncMock(return_value={"ok": True, "execution_id": "exe-1"})
+    release_assignment_mock = AsyncMock(return_value={"ok": True, "released": True})
+
+    with (
+        patch("api.workflow_engine.do_agent_turn", new=do_agent_turn_mock),
+        patch("api.runtime_control.release_assignment", new=release_assignment_mock),
+    ):
+        await handler(
+            Input(
+                thread_key=thread_key,
+                parts=[{"type": "text", "text": "Summarize this thread"}],
+                message_id="slack:current",
+            ),
+            ctx,
+        )
+
+    release_assignment_mock.assert_not_awaited()
+    row = await db_pool.fetchrow(
+        "SELECT agent_thread_id FROM sandbox_sessions WHERE thread_key = $1",
+        thread_key,
+    )
+    assert row["agent_thread_id"] == "broken-agent-thread"

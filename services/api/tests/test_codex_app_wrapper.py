@@ -435,3 +435,79 @@ def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     )
     assert {"type": "thread.started", "thread_id": "thread-123"} in emitted
     assert {"type": "turn.completed"} in emitted
+
+
+def test_start_or_resume_thread_falls_back_to_fresh_thread_on_resume_failure(
+    monkeypatch,
+) -> None:
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    requests: list[str] = []
+
+    def fake_request(method: str, params: dict, timeout: float | None = None) -> dict:
+        requests.append(method)
+        if method == "thread/resume":
+            raise RuntimeError(
+                "no rollout found for thread id 019ead10-eee3-74c3-a9fc-aa3e8bc53783"
+            )
+        assert method == "thread/start"
+        return {"thread": {"id": "fresh-thread-id"}}
+
+    monkeypatch.setenv(
+        "CODEX_CONTINUE_THREAD_ID", "019ead10-eee3-74c3-a9fc-aa3e8bc53783"
+    )
+    monkeypatch.setattr(wrapper, "request", fake_request)
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+    wrapper.THREAD_ID = None
+
+    assert wrapper.start_or_resume_thread() == "fresh-thread-id"
+    assert requests == ["thread/resume", "thread/start"]
+    failure_events = [
+        event for event in emitted if event.get("subtype") == "thread_resume_failed"
+    ]
+    assert len(failure_events) == 1
+    assert "no rollout found" in failure_events[0]["message"]
+    assert (
+        failure_events[0]["resume_thread_id"]
+        == "019ead10-eee3-74c3-a9fc-aa3e8bc53783"
+    )
+    assert {"type": "thread.started", "thread_id": "fresh-thread-id"} in emitted
+
+
+def test_start_or_resume_thread_fallback_never_reuses_dead_resume_id(
+    monkeypatch,
+) -> None:
+    wrapper = _load_wrapper()
+
+    def fake_request(method: str, params: dict, timeout: float | None = None) -> dict:
+        if method == "thread/resume":
+            raise RuntimeError("no rollout found for thread id dead-thread-id")
+        return {}
+
+    monkeypatch.setenv("CODEX_CONTINUE_THREAD_ID", "dead-thread-id")
+    monkeypatch.setattr(wrapper, "request", fake_request)
+    monkeypatch.setattr(wrapper, "emit", lambda _event: None)
+    wrapper.THREAD_ID = None
+
+    assert wrapper.start_or_resume_thread() != "dead-thread-id"
+
+
+def test_start_or_resume_thread_resumes_existing_thread(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    requests: list[str] = []
+
+    def fake_request(method: str, params: dict, timeout: float | None = None) -> dict:
+        requests.append(method)
+        assert method == "thread/resume"
+        assert params["threadId"] == "existing-thread-id"
+        return {"thread": {"id": "existing-thread-id"}}
+
+    monkeypatch.setenv("CODEX_CONTINUE_THREAD_ID", "existing-thread-id")
+    monkeypatch.setattr(wrapper, "request", fake_request)
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+    wrapper.THREAD_ID = None
+
+    assert wrapper.start_or_resume_thread() == "existing-thread-id"
+    assert requests == ["thread/resume"]
+    assert {"type": "thread.started", "thread_id": "existing-thread-id"} in emitted
