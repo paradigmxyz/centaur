@@ -42,6 +42,10 @@ def _discover_scripts(tool_dirs: list[Path]) -> dict[str, dict[str, str]]:
                     "project_dir": str(pyproject.parent),
                     "package": str(project.get("name") or pyproject.parent.name),
                     "entrypoint": str(project_scripts[name]),
+                    "client_module": str(
+                        ((data.get("tool") or {}).get("centaur") or {}).get("module")
+                        or "client.py"
+                    ),
                 }
     return scripts
 
@@ -67,15 +71,18 @@ exec uvx --from {shlex.quote(script["project_dir"])} {shlex.quote(script["name"]
     _write_executable(path, content)
 
 
-def _write_catalog(path: Path, index_path: Path) -> None:
+def _write_catalog(path: Path, index_path: Path, pythonpath: str) -> None:
     content = f"""#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import subprocess
 import sys
 
 INDEX = {str(index_path)!r}
+PYTHONPATH_VALUE = {pythonpath!r}
 
 
 def load():
@@ -84,8 +91,73 @@ def load():
 
 
 def usage():
-    print("usage: centaur-tools [list|json|which <name>|run <name> [args...]]", file=sys.stderr)
+    print("usage: centaur-tools [list|json|which <name>|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
     return 2
+
+
+CALL_RUNNER = r'''
+import asyncio
+import importlib.util
+import inspect
+import json
+from pathlib import Path
+import sys
+
+module_path = Path(sys.argv[1])
+method = sys.argv[2]
+payload = json.loads(sys.argv[3])
+
+spec = importlib.util.spec_from_file_location("_centaur_tool_client", module_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError(f"cannot load client module from {{module_path}}")
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+target = getattr(module, method, None)
+if target is None and hasattr(module, "_client"):
+    target = getattr(module._client(), method, None)
+if target is None:
+    raise RuntimeError(f"tool has no method {{method}}")
+
+if isinstance(payload, dict):
+    result = target(**payload)
+elif payload is None:
+    result = target()
+else:
+    result = target(payload)
+if inspect.isawaitable(result):
+    result = asyncio.run(result)
+print(json.dumps(result, default=str, separators=(",", ":")))
+'''
+
+
+def call_tool(tool, method, payload):
+    project_dir = Path(tool["project_dir"])
+    module_path = project_dir / tool.get("client_module", "client.py")
+    env = os.environ.copy()
+    if PYTHONPATH_VALUE:
+        if env.get("PYTHONPATH"):
+            env["PYTHONPATH"] = f"{{PYTHONPATH_VALUE}}:{{env['PYTHONPATH']}}"
+        else:
+            env["PYTHONPATH"] = PYTHONPATH_VALUE
+    return subprocess.run(
+        [
+            "uvx",
+            "--from",
+            str(project_dir),
+            "python",
+            "-c",
+            CALL_RUNNER,
+            str(module_path),
+            method,
+            json.dumps(payload, separators=(",", ":")),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
 
 
 def main(argv):
@@ -112,6 +184,25 @@ def main(argv):
             print(f"unknown tool: {{name}}", file=sys.stderr)
             return 1
         return subprocess.call([name, *argv[3:]])
+    if command == "call" and len(argv) >= 4:
+        name = argv[2]
+        method = argv[3]
+        if name not in by_name:
+            print(f"unknown tool: {{name}}", file=sys.stderr)
+            return 1
+        try:
+            payload = json.loads(argv[4]) if len(argv) >= 5 else {{}}
+            result = call_tool(by_name[name], method, payload)
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.returncode != 0:
+                if result.stderr:
+                    print(result.stderr, file=sys.stderr, end="")
+                return result.returncode
+            return 0
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     return usage()
 
 
@@ -134,7 +225,7 @@ def main() -> int:
 
     index_path = bin_dir / ".centaur-tools.json"
     index_path.write_text(json.dumps(list(scripts.values()), indent=2, sort_keys=True) + "\n")
-    _write_catalog(bin_dir / "centaur-tools", index_path)
+    _write_catalog(bin_dir / "centaur-tools", index_path, pythonpath)
     print(f"installed {len(scripts)} Centaur tool CLI shims into {bin_dir}")
     return 0
 

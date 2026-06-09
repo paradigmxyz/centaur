@@ -14,6 +14,7 @@ import importlib.util
 import inspect
 import json
 import os
+import shutil
 import sys
 import traceback
 import types
@@ -79,6 +80,8 @@ class WorkflowContext:
         return await self.agent_turn(text, **kwargs)
 
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
+        if shutil.which("centaur-tools"):
+            return await call_tool_shim(tool, method, args or {})
         return await self._rpc.request(
             {
                 "type": "ctx.call_tool",
@@ -133,6 +136,27 @@ class RpcClient:
             fut.set_result(response.get("value"))
         else:
             fut.set_exception(RuntimeError(str(response.get("error") or "context RPC failed")))
+
+
+async def call_tool_shim(tool: str, method: str, args: dict[str, Any]) -> Any:
+    proc = await asyncio.create_subprocess_exec(
+        "centaur-tools",
+        "call",
+        tool,
+        method,
+        json.dumps(args, separators=(",", ":"), default=str),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    text = stdout.decode(errors="replace").strip()
+    err = stderr.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        detail = err or text or f"exit code {proc.returncode}"
+        raise RuntimeError(f"centaur-tools call {tool}.{method} failed: {detail}")
+    if not text:
+        return None
+    return json.loads(text)
 
 
 @dataclasses.dataclass
