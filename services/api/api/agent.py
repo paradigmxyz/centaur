@@ -1184,6 +1184,32 @@ async def _stream_stdout(
                     sandbox=session.sandbox_id[:12],
                 )
 
+            if evt_type == "system" and evt.get("subtype") == "thread_resume_failed":
+                # The harness lost its local session state and fell back to a
+                # fresh thread mid-turn. This turn already ran with
+                # cursor-delta input only, so clear the delivery cursor: the
+                # next flush replays the full durable transcript into the new
+                # thread (at the cost of re-sending this turn's messages once).
+                try:
+                    pool = _get_pool()
+                    await pool.execute(
+                        "UPDATE sandbox_sessions SET last_delivered_id = NULL, updated_at = NOW() "
+                        "WHERE thread_key = $1",
+                        session.thread_key,
+                    )
+                    session.last_delivered_id = ""
+                    log.info(
+                        "thread_resume_failed_cursor_cleared",
+                        thread_key=session.thread_key,
+                        sandbox=session.sandbox_id[:12],
+                        resume_thread_id=evt.get("resume_thread_id"),
+                    )
+                except Exception:
+                    log.warning(
+                        "thread_resume_failed_cursor_clear_failed",
+                        thread_key=session.thread_key,
+                    )
+
             tid = extract_thread_id(session.engine, evt)
             if tid:
                 agent_thread_id = tid

@@ -249,3 +249,63 @@ async def test_reconcile_tick_isolates_row_failures() -> None:
         if len(args) >= 2 and "UPDATE sandbox_sessions SET state" in args[0]
     ]
     assert "thread-2" in touched_threads
+
+
+class _ResumeFailedBackend:
+    async def stream_stdout(self, _session):
+        yield json.dumps(
+            {
+                "type": "system",
+                "subtype": "thread_resume_failed",
+                "message": "no rollout found for thread id dead-thread-id",
+                "resume_thread_id": "dead-thread-id",
+            }
+        )
+        yield json.dumps({"type": "thread.started", "thread_id": "fresh-thread-id"})
+        yield json.dumps({"type": "turn.completed", "turn": {}})
+
+    async def status(self, _session):
+        return "gone"
+
+
+@pytest.mark.asyncio
+async def test_stream_stdout_clears_delivery_cursor_on_thread_resume_failed() -> None:
+    """When the harness falls back to a fresh thread after a failed resume,
+    the delivery cursor must be cleared so the next flush replays the full
+    durable transcript into the new thread."""
+    from api.agent import _stream_stdout
+
+    session = SandboxSession(
+        sandbox_id="sbx-resume-failed",
+        thread_key="test:resume-failed",
+        harness="codex",
+        engine="codex",
+        last_delivered_id="msg-old",
+    )
+    rt = RuntimeState()
+    pool = AsyncMock()
+
+    with (
+        patch("api.agent._persist_turn_messages", new_callable=AsyncMock),
+        patch("api.agent._db_complete_inflight_turn", new_callable=AsyncMock),
+        patch("api.agent._get_pool", return_value=pool),
+    ):
+        [
+            event
+            async for event in _stream_stdout(
+                session,
+                _ResumeFailedBackend(),
+                rt,
+                turn_id=1,
+                t0=time.monotonic(),
+            )
+        ]
+
+    assert session.last_delivered_id == ""
+    cursor_updates = [
+        call
+        for call in pool.execute.await_args_list
+        if "last_delivered_id = NULL" in call.args[0]
+    ]
+    assert len(cursor_updates) == 1
+    assert cursor_updates[0].args[1] == "test:resume-failed"
