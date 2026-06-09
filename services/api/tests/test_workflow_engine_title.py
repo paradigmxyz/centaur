@@ -138,7 +138,7 @@ async def test_title_handles_non_dict_active_assignment(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_header_uses_base_when_no_persona_paradigm_claude(monkeypatch):
-    """Paradigm + no persona + claude-code → ``base · claude-opus-4-8``."""
+    """Paradigm + no persona + claude-code → ``base · claude-fable-5``."""
     get_active = AsyncMock(return_value={"persona_id": None, "harness": "claude-code", "engine": "claude-code"})
     monkeypatch.setattr(workflow_engine, "get_active_assignment", get_active)
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
@@ -147,7 +147,7 @@ async def test_header_uses_base_when_no_persona_paradigm_claude(monkeypatch):
     header = await workflow_engine._compute_agent_session_header(
         pool=object(), thread_key="slack:T:C:1.0", selector=selector,
     )
-    assert header == "base · claude-opus-4-8"
+    assert header == "base · claude-fable-5"
 
 
 @pytest.mark.asyncio

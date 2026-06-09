@@ -40,7 +40,7 @@ def test_build_claude_cmd_defaults(monkeypatch) -> None:
     assert "--include-hook-events" not in cmd
     assert "--append-system-prompt-file" not in cmd
     assert "--model" in cmd
-    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
+    assert cmd[cmd.index("--model") + 1] == "claude-fable-5"
     assert "--resume" not in cmd
 
 

@@ -27,7 +27,7 @@ import sys
 import threading
 from typing import Any
 
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_CLAUDE_MODEL = "claude-fable-5"
 
 APP: subprocess.Popen[str] | None = None
 WRITE_LOCK = threading.Lock()

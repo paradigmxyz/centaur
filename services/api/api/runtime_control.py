@@ -216,17 +216,18 @@ def _agent_session_title(
 
 # ── Per-message header (rendered italic at the top of every assistant message) ──
 
-_DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+_DEFAULT_CLAUDE_MODEL = "claude-fable-5"
 
 _CLAUDE_MODEL_ALIASES: dict[str, str] = {
-    "opus": _DEFAULT_CLAUDE_MODEL,
+    "fable": "claude-fable-5",
+    "opus": "claude-opus-4-8",
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5",
 }
 
 
 def _resolve_claude_model_label(model: str | None) -> str:
-    raw = (model or os.getenv("CLAUDE_MODEL") or "opus").strip().lower()
+    raw = (model or os.getenv("CLAUDE_MODEL") or _DEFAULT_CLAUDE_MODEL).strip().lower()
     if raw.startswith("claude-"):
         return raw
     return _CLAUDE_MODEL_ALIASES.get(raw, raw or _DEFAULT_CLAUDE_MODEL)
