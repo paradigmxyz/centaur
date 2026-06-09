@@ -68,6 +68,9 @@ _SLACKBOT_LIVE_DELIVERY_METADATA_KEY = "slackbot_live_delivery"
 _LEGACY_SLACKBOT_LIVE_DELIVERY_METADATA_KEY = "slackbot" + "_v" + "2_live_delivery"
 
 EXECUTION_SILENCE_TIMEOUT_S = int(os.getenv("EXECUTION_SILENCE_TIMEOUT_S", "600"))
+EXECUTION_SILENCE_TIMEOUT_MAX_S = int(
+    os.getenv("EXECUTION_SILENCE_TIMEOUT_MAX_S", "2400")
+)
 EXECUTION_TOOL_SILENCE_TIMEOUT_S = int(
     os.getenv("EXECUTION_TOOL_SILENCE_TIMEOUT_S", "1800")
 )
@@ -129,6 +132,7 @@ _RAW_HARNESS_AUTH_SAFE_FAILURE_MESSAGE = (
     "The agent hit a temporary runtime startup issue and could not complete the turn. "
     "Please retry in a moment."
 )
+_SILENCE_TIMEOUT_METADATA_KEY = "silence_timeout_s"
 _OTEL_METADATA_KEY = "_otel"
 _OTEL_EXECUTION_SPAN_CONTEXT_KEY = "execution_span_context"
 
@@ -178,6 +182,36 @@ def _matches_user_cancelled(*values: str | None) -> bool:
         if "user cancelled (sigint/sigterm)" in value.casefold():
             return True
     return False
+
+
+def _silence_timeout_streak(rows: list[Any]) -> int:
+    """Count silence-deadline failures since the thread's last completed turn.
+
+    *rows* is the thread's execution history, most recent first. The streak
+    feeds the exponential timeout escalation: a task that timed out making no
+    visible progress will likely need longer on retry, so each retry doubles
+    the silence window (capped by EXECUTION_SILENCE_TIMEOUT_MAX_S). A
+    completed execution resets the streak; other failure reasons (e.g.
+    harness_error) neither count nor reset it.
+    """
+    streak = 0
+    for row in rows:
+        if row["status"] == "completed":
+            break
+        if row["terminal_reason"] == "silence_deadline_exceeded":
+            streak += 1
+    return streak
+
+
+def _escalated_silence_timeout_s(streak: int) -> float:
+    if streak <= 0:
+        return float(EXECUTION_SILENCE_TIMEOUT_S)
+    timeout_s = float(EXECUTION_SILENCE_TIMEOUT_S) * (2**streak)
+    return min(
+        timeout_s,
+        float(EXECUTION_SILENCE_TIMEOUT_MAX_S),
+        float(EXECUTION_HARD_TIMEOUT_S),
+    )
 
 
 def _raw_harness_auth_retry_attempt(metadata: dict[str, Any]) -> int:
@@ -1378,6 +1412,27 @@ async def _enqueue_execution_impl(
                     409,
                 )
 
+            recent_executions = await conn.fetch(
+                "SELECT status, terminal_reason FROM agent_execution_requests "
+                "WHERE thread_key = $1 ORDER BY created_at DESC LIMIT 8",
+                thread_key,
+            )
+            timeout_streak = _silence_timeout_streak(recent_executions)
+            if timeout_streak:
+                silence_timeout_s = _escalated_silence_timeout_s(timeout_streak)
+                metadata = {
+                    **metadata,
+                    _SILENCE_TIMEOUT_METADATA_KEY: silence_timeout_s,
+                }
+                silence_deadline = now + dt.timedelta(seconds=silence_timeout_s)
+                log.info(
+                    "execution_silence_timeout_escalated",
+                    execution_id=execution_id,
+                    thread_key=thread_key,
+                    timeout_streak=timeout_streak,
+                    silence_timeout_s=silence_timeout_s,
+                )
+
             await conn.execute(
                 "INSERT INTO agent_execution_requests ("
                 "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
@@ -2398,7 +2453,8 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
                     "claimed_at = NOW(), "
                     "started_at = COALESCE(er.started_at, NOW()), "
                     "last_progress_at = NOW(), "
-                    "silence_deadline_at = NOW() + make_interval(secs => $1::double precision), "
+                    "silence_deadline_at = NOW() + make_interval(secs => COALESCE("
+                    "  (er.metadata->>'silence_timeout_s')::double precision, $1)), "
                     "hard_deadline_at = CASE "
                     "  WHEN er.claimed_at IS NULL THEN NOW() + make_interval(secs => $5::double precision) "
                     "  ELSE er.hard_deadline_at "

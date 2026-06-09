@@ -7,12 +7,8 @@ import json
 import re
 from typing import Any
 
-import structlog
-
 from api.runtime_control import ControlPlaneError
 from api.workflow_engine import Delivery, WorkflowContext
-
-log = structlog.get_logger()
 
 WORKFLOW_NAME = "slack_thread_turn"
 
@@ -306,17 +302,12 @@ async def _reset_session_for_recovery(
     runtime with history backfill instead.
     """
     row = await ctx._pool.fetchrow(
-        "SELECT status, terminal_reason FROM agent_execution_requests "
+        "SELECT status FROM agent_execution_requests "
         "WHERE thread_key = $1 ORDER BY created_at DESC LIMIT 1",
         thread_key,
     )
     if row is None or row["status"] != "failed_permanent":
         return
-    log.info(
-        "recovery_session_reset",
-        thread_key=thread_key,
-        last_terminal_reason=row["terminal_reason"],
-    )
     await _release_and_reset_session(
         ctx,
         thread_key=thread_key,

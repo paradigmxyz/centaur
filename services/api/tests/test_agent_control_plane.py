@@ -4180,3 +4180,148 @@ async def test_bootstrap_service_api_keys_includes_local_dev_key(db_pool, monkey
     assert list(row["scopes"]) == ["admin", "agent", "threads", "tools:*"]
     assert row["revoked_at"] is None
     assert row["created_by"] == "service-bootstrap"
+
+
+def test_silence_timeout_streak_counts_until_last_completed():
+    from api.runtime_control import _silence_timeout_streak
+
+    def row(status: str, terminal_reason: str | None) -> dict:
+        return {"status": status, "terminal_reason": terminal_reason}
+
+    assert _silence_timeout_streak([]) == 0
+    assert _silence_timeout_streak([row("completed", "completed")]) == 0
+    # Other failure reasons neither count nor reset the streak.
+    assert (
+        _silence_timeout_streak(
+            [
+                row("failed_permanent", "harness_error"),
+                row("failed_permanent", "harness_error"),
+                row("failed_permanent", "silence_deadline_exceeded"),
+            ]
+        )
+        == 1
+    )
+    assert (
+        _silence_timeout_streak(
+            [
+                row("failed_permanent", "silence_deadline_exceeded"),
+                row("failed_permanent", "silence_deadline_exceeded"),
+                row("completed", "completed"),
+                row("failed_permanent", "silence_deadline_exceeded"),
+            ]
+        )
+        == 2
+    )
+
+
+def test_escalated_silence_timeout_doubles_and_caps():
+    from api.runtime_control import (
+        EXECUTION_HARD_TIMEOUT_S,
+        EXECUTION_SILENCE_TIMEOUT_MAX_S,
+        EXECUTION_SILENCE_TIMEOUT_S,
+        _escalated_silence_timeout_s,
+    )
+
+    base = float(EXECUTION_SILENCE_TIMEOUT_S)
+    cap = min(float(EXECUTION_SILENCE_TIMEOUT_MAX_S), float(EXECUTION_HARD_TIMEOUT_S))
+    assert _escalated_silence_timeout_s(0) == base
+    assert _escalated_silence_timeout_s(1) == min(base * 2, cap)
+    assert _escalated_silence_timeout_s(2) == min(base * 4, cap)
+    assert _escalated_silence_timeout_s(10) == cap
+
+
+@pytest.mark.asyncio
+async def test_enqueue_after_silence_timeout_escalates_silence_deadline(db_pool):
+    from api.runtime_control import (
+        EXECUTION_SILENCE_TIMEOUT_S,
+        enqueue_execution,
+    )
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:timeout-retry"
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, 'sbx-1', 'codex', 'codex', 'harness:codex', 'sha', 'active')",
+        thread_key,
+    )
+    # Prior turn timed out long ago (outside the failure-loop window).
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, "
+        "status, terminal_reason, created_at, completed_at"
+        ") VALUES ($1, $2, 1, 'exec-timed-out', 'hash-1', "
+        "'failed_permanent', 'silence_deadline_exceeded', "
+        "NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours')",
+        f"exe-{uuid.uuid4().hex[:12]}",
+        thread_key,
+    )
+
+    before = dt.datetime.now(dt.timezone.utc)
+    result = await enqueue_execution(
+        db_pool,
+        thread_key=thread_key,
+        assignment_generation=1,
+        execute_id="exec-retry",
+        harness="codex",
+        delivery={},
+        metadata={},
+    )
+
+    row = await db_pool.fetchrow(
+        "SELECT metadata, silence_deadline_at FROM agent_execution_requests "
+        "WHERE execution_id = $1",
+        result["execution_id"],
+    )
+    metadata = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+    assert metadata["silence_timeout_s"] == EXECUTION_SILENCE_TIMEOUT_S * 2
+    assert row["silence_deadline_at"] > before + dt.timedelta(
+        seconds=EXECUTION_SILENCE_TIMEOUT_S * 2 - 5
+    )
+
+    # Don't leave a claimable queued execution behind for other tests.
+    await db_pool.execute(
+        "DELETE FROM agent_execution_requests WHERE execution_id = $1",
+        result["execution_id"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_next_execution_honors_escalated_silence_timeout(db_pool):
+    from api.runtime_control import (
+        EXECUTION_SILENCE_TIMEOUT_S,
+        _claim_next_execution,
+    )
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:escalated-claim"
+    execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+    escalated_s = EXECUTION_SILENCE_TIMEOUT_S * 2
+
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, created_at, last_progress_at, silence_deadline_at, hard_deadline_at"
+        ") VALUES ("
+        "$1, $2, 1, 'exec-escalated', 'hash-escalated', 'queued', "
+        "'{}'::jsonb, $3::jsonb, NOW(), NOW(), NOW() + INTERVAL '20 minutes', "
+        "NOW() + INTERVAL '60 minutes')",
+        execution_id,
+        thread_key,
+        json.dumps({"silence_timeout_s": escalated_s}),
+    )
+
+    before_claim = dt.datetime.now(dt.timezone.utc)
+    # Earlier tests can leave claimable rows behind; keep claiming until ours.
+    claimed = None
+    for _ in range(20):
+        candidate = await _claim_next_execution(db_pool)
+        if candidate is None:
+            break
+        if candidate["execution_id"] == execution_id:
+            claimed = candidate
+            break
+
+    assert claimed is not None
+    assert claimed["silence_deadline_at"] > before_claim + dt.timedelta(
+        seconds=escalated_s - 5
+    )
