@@ -750,6 +750,66 @@ describe('slackbotv2', () => {
     expect(await threadText(parent.ts)).toContain('STREAM_CONTINUATION_END')
   })
 
+  it('continues large task streams across Slack stream replies', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before many tool steps.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> run many small steps`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-task-stream-continuation',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> run many small steps`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    for (let index = 1; index <= 60; index += 1) {
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: `cmd-${index}`,
+            type: 'commandExecution',
+            command: `printf step-${index}`,
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        })
+      )
+    }
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('TASK_STREAM_CONTINUATION_OK'))
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-task-stream-continuation',
+      status: 'completed',
+      result_text: 'TASK_STREAM_CONTINUATION_OK'
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts.length).toBeGreaterThan(1)
+    expect(transcripts.flatMap(transcript => transcript.chunks).filter(chunk => chunk.type === 'task_update').length)
+      .toBeGreaterThan(50)
+    expect(await threadText(parent.ts)).toContain('TASK_STREAM_CONTINUATION_OK')
+  })
+
   it('does not create an empty Slack stream before the first visible renderer chunk', async () => {
     codexApi.autoRespond = false
 
