@@ -282,7 +282,7 @@ impl SandboxArgs {
         if !self.workflow_host_sandbox {
             return Ok(None);
         }
-        let spec = self.workflow_host_spec(bootstrap_iron_control_principal);
+        let spec = self.workflow_host_spec(bootstrap_iron_control_principal)?;
         let runtime = match self.backend {
             SandboxBackendKind::Local => {
                 SandboxRuntime::backend(Arc::new(LocalSandboxBackend::new()), spec.clone())
@@ -298,7 +298,10 @@ impl SandboxArgs {
         Ok(Some(WorkflowHostSandboxRuntime::new(runtime, spec)))
     }
 
-    fn workflow_host_spec(&self, bootstrap_iron_control_principal: Option<&str>) -> SandboxSpec {
+    fn workflow_host_spec(
+        &self,
+        bootstrap_iron_control_principal: Option<&str>,
+    ) -> Result<SandboxSpec, ServerError> {
         let image = self
             .workflow_host_image
             .clone()
@@ -355,14 +358,28 @@ impl SandboxArgs {
             }
         }
         if matches!(self.backend, SandboxBackendKind::AgentK8s) {
+            if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
+                spec = spec.mount(
+                    Mount::new(
+                        MountKind::Bind {
+                            source_path: repos_path,
+                        },
+                        SANDBOX_REPOS_MOUNT_PATH,
+                    )
+                    .read_only(),
+                );
+            }
             if let Some(overlay) = workflow_overlay_image_from_env() {
                 spec = spec.overlay_image(overlay);
             }
         }
+        for (name, value) in self.workflow_host_env_template()? {
+            upsert_spec_env(&mut spec, name, value);
+        }
         if let Some(principal) = bootstrap_iron_control_principal {
             spec = spec.iron_control_principal(principal);
         }
-        spec
+        Ok(spec)
     }
 
     fn agent_k8s_workflow_dirs(&self) -> String {
@@ -480,6 +497,59 @@ impl SandboxArgs {
                 .any(|(existing, _)| existing == "OPENAI_API_KEY")
         {
             envs.push(("OPENAI_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()));
+        }
+
+        for name in &self.passthrough_env {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(value) = env::var(name) {
+                if let Some((_, existing_value)) = envs
+                    .iter_mut()
+                    .find(|(existing_name, _)| existing_name == name)
+                {
+                    *existing_value = value;
+                } else {
+                    envs.push((name.to_owned(), value));
+                }
+            }
+        }
+
+        Ok(envs)
+    }
+
+    fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
+        let tool_fragment = self.discover_tool_proxy_fragment()?;
+        let mut envs = Vec::new();
+
+        for (name, value) in self
+            .iron_proxy
+            .sandbox_placeholder_env(tool_fragment.as_ref())?
+        {
+            envs.push((name, value));
+        }
+
+        if let Some(value) = clean_optional_value(self.tools.tool_dirs.as_deref()) {
+            envs.push(("TOOL_DIRS".to_owned(), value));
+        }
+        if let Some(value) = self
+            .tools
+            .tools_path
+            .as_deref()
+            .map(|path| path.to_string_lossy().to_string())
+            .and_then(|value| clean_optional_value(Some(value.as_str())))
+        {
+            envs.push(("TOOLS_PATH".to_owned(), value));
+        }
+        if let Some(value) = self
+            .tools
+            .tools_overlay_path
+            .as_deref()
+            .map(|path| path.to_string_lossy().to_string())
+            .and_then(|value| clean_optional_value(Some(value.as_str())))
+        {
+            envs.push(("TOOLS_OVERLAY_PATH".to_owned(), value));
         }
 
         for name in &self.passthrough_env {
@@ -944,6 +1014,15 @@ fn clean_optional_value(value: Option<&str>) -> Option<String> {
     non_empty(value).map(ToOwned::to_owned)
 }
 
+fn upsert_spec_env(spec: &mut SandboxSpec, name: String, value: String) {
+    if let Some(existing) = spec.env.iter_mut().find(|env| env.name == name) {
+        existing.value = value;
+    } else {
+        spec.env
+            .push(centaur_sandbox_core::EnvVar::new(name, value));
+    }
+}
+
 fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, String> {
     let mut labels = BTreeMap::new();
     for item in value
@@ -1093,7 +1172,7 @@ mod tests {
         ])
         .unwrap();
 
-        let spec = args.sandbox.workflow_host_spec(None);
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
 
         assert_eq!(
             spec.env
@@ -1107,6 +1186,53 @@ mod tests {
         assert_eq!(overlay.source_path, "/overlay");
         assert_eq!(overlay.mount_path, "/opt/centaur/overlay");
         assert_eq!(overlay.image_pull_policy.as_deref(), Some("Always"));
+    }
+
+    #[test]
+    fn agent_k8s_workflow_host_mounts_repos_and_tool_env() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+            "--tools-path",
+            "/home/agent/github/paradigmxyz/centaur/tools",
+            "--tools-overlay-path",
+            "/home/agent/github/tempoxyz/centaur-tempo/tools",
+            "--session-sandbox-passthrough-env",
+            "TOOLS_PATH,TOOLS_OVERLAY_PATH",
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_REPOS_MOUNT_PATH
+                && mount.read_only
+                && mount.kind
+                    == MountKind::Bind {
+                        source_path: "/var/lib/centaur/repos".to_owned(),
+                    }
+        }));
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "TOOLS_PATH")
+                .map(|env| env.value.as_str()),
+            Some("/home/agent/github/paradigmxyz/centaur/tools")
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "TOOLS_OVERLAY_PATH")
+                .map(|env| env.value.as_str()),
+            Some("/home/agent/github/tempoxyz/centaur-tempo/tools")
+        );
     }
 
     #[test]
