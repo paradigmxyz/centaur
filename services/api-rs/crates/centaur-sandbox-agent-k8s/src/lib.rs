@@ -465,6 +465,7 @@ fn build_agent_sandbox(
     insert_optional(&mut container, "resources", resources_json(spec));
 
     let (mut volumes, mut volume_mounts) = mount_json(spec);
+    let init_containers = overlay_json(spec, &mut volumes, &mut volume_mounts);
     if let Some(state_volume) = &config.state_volume {
         volume_mounts.push(json!({
             "name": "state",
@@ -490,6 +491,11 @@ fn build_agent_sandbox(
         &mut pod_spec,
         "volumes",
         (!volumes.is_empty()).then(|| std::mem::take(&mut volumes)),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "initContainers",
+        (!init_containers.is_empty()).then_some(init_containers),
     );
 
     let mut agent_spec = json!({
@@ -524,6 +530,53 @@ fn build_agent_sandbox(
     sandbox.metadata.labels = Some(labels);
     sandbox.metadata.annotations = Some(annotations);
     Ok(sandbox)
+}
+
+fn overlay_json(
+    spec: &SandboxSpec,
+    volumes: &mut Vec<Value>,
+    volume_mounts: &mut Vec<Value>,
+) -> Vec<Value> {
+    let Some(overlay) = &spec.overlay else {
+        return Vec::new();
+    };
+
+    let volume_name = "overlay-root";
+    let init_mount_path = "/centaur-overlay-target";
+    volumes.push(json!({
+        "name": volume_name,
+        "emptyDir": {},
+    }));
+    volume_mounts.push(json!({
+        "name": volume_name,
+        "mountPath": overlay.mount_path,
+        "readOnly": true,
+    }));
+
+    let mut init_container = json!({
+        "name": "overlay-bootstrap",
+        "image": overlay.image,
+        "command": ["/bin/sh", "-ec"],
+        "args": [format!(
+            "src={}; target={}; mkdir -p \"$target\"; cp -R \"$src\"/. \"$target\"/",
+            shell_quote(&overlay.source_path),
+            shell_quote(init_mount_path),
+        )],
+        "volumeMounts": [{
+            "name": volume_name,
+            "mountPath": init_mount_path,
+        }],
+    });
+    insert_optional(
+        &mut init_container,
+        "imagePullPolicy",
+        overlay.image_pull_policy.clone(),
+    );
+    vec![init_container]
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
 fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
@@ -629,7 +682,7 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{ResourceLimits, SandboxSpec};
+    use centaur_sandbox_core::{OverlayImage, ResourceLimits, SandboxSpec};
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
 
     use super::*;
@@ -669,6 +722,55 @@ mod tests {
         assert_eq!(container.stdin, Some(true));
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);
         assert!(container.resources.as_ref().unwrap().limits.is_some());
+    }
+
+    #[test]
+    fn builds_agent_sandbox_spec_with_overlay_image() {
+        let spec = SandboxSpec::new("centaur-agent:latest").overlay_image(
+            OverlayImage::new(
+                "ghcr.io/example/centaur-overlay:test",
+                "/overlay",
+                "/opt/centaur/overlay",
+            )
+            .image_pull_policy("Always"),
+        );
+        let config = AgentSandboxConfig::new("centaur");
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        let pod_spec = &sandbox.spec.pod_template.spec;
+        let init = &pod_spec.init_containers.as_ref().unwrap()[0];
+        assert_eq!(init.name, "overlay-bootstrap");
+        assert_eq!(
+            init.image.as_deref(),
+            Some("ghcr.io/example/centaur-overlay:test")
+        );
+        assert_eq!(init.image_pull_policy.as_deref(), Some("Always"));
+        assert!(
+            init.args
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|arg| arg.contains("src='/overlay'"))
+        );
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|volume| volume.name == "overlay-root")
+        );
+        let container = &pod_spec.containers[0];
+        let overlay_mount = container
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|mount| mount.name == "overlay-root")
+            .expect("main container overlay mount");
+        assert_eq!(overlay_mount.mount_path, "/opt/centaur/overlay");
+        assert_eq!(overlay_mount.read_only, Some(true));
     }
 
     #[test]
