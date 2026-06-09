@@ -39,11 +39,11 @@ const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
 const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
-struct WorkflowHostHeartbeatGuard {
+struct WorkflowTaskHeartbeatGuard {
     task: JoinHandle<()>,
 }
 
-impl Drop for WorkflowHostHeartbeatGuard {
+impl Drop for WorkflowTaskHeartbeatGuard {
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -1259,6 +1259,9 @@ async fn run_centaur_workflow(
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
 ) -> absurd::Result<WorkflowResult> {
+    let _heartbeat_guard = start_workflow_task_heartbeat(ctx.clone())
+        .await
+        .map_err(absurd_error)?;
     match input.workflow_name.as_str() {
         "echo" => {
             let output = ctx
@@ -1424,26 +1427,25 @@ async fn run_python_workflow_host(
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let _heartbeat_guard = start_workflow_host_heartbeat(ctx.clone()).await?;
     if let Some(sandbox) = workflow_host_sandbox {
         return run_python_workflow_host_in_sandbox(input, ctx, session_runtime, sandbox).await;
     }
     run_python_workflow_host_local(input, ctx, session_runtime).await
 }
 
-async fn start_workflow_host_heartbeat(
+async fn start_workflow_task_heartbeat(
     ctx: TaskContext,
-) -> Result<WorkflowHostHeartbeatGuard, WorkflowRuntimeError> {
+) -> Result<WorkflowTaskHeartbeatGuard, WorkflowRuntimeError> {
     ctx.heartbeat(Some(WORKFLOW_HOST_CLAIM_EXTENSION)).await?;
     let task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(WORKFLOW_HOST_HEARTBEAT_INTERVAL).await;
             if let Err(error) = ctx.heartbeat(Some(WORKFLOW_HOST_CLAIM_EXTENSION)).await {
-                warn!(%error, "failed to extend Python workflow host task claim");
+                warn!(%error, "failed to extend workflow task claim");
             }
         }
     });
-    Ok(WorkflowHostHeartbeatGuard { task })
+    Ok(WorkflowTaskHeartbeatGuard { task })
 }
 
 async fn run_python_workflow_host_local(
