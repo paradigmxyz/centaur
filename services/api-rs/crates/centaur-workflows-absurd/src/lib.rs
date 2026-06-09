@@ -36,6 +36,18 @@ const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
+const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
+const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+struct WorkflowHostHeartbeatGuard {
+    task: JoinHandle<()>,
+}
+
+impl Drop for WorkflowHostHeartbeatGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 #[derive(Clone)]
 pub struct WorkflowRuntime {
@@ -1412,10 +1424,26 @@ async fn run_python_workflow_host(
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
 ) -> Result<Value, WorkflowRuntimeError> {
+    let _heartbeat_guard = start_workflow_host_heartbeat(ctx.clone()).await?;
     if let Some(sandbox) = workflow_host_sandbox {
         return run_python_workflow_host_in_sandbox(input, ctx, session_runtime, sandbox).await;
     }
     run_python_workflow_host_local(input, ctx, session_runtime).await
+}
+
+async fn start_workflow_host_heartbeat(
+    ctx: TaskContext,
+) -> Result<WorkflowHostHeartbeatGuard, WorkflowRuntimeError> {
+    ctx.heartbeat(Some(WORKFLOW_HOST_CLAIM_EXTENSION)).await?;
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(WORKFLOW_HOST_HEARTBEAT_INTERVAL).await;
+            if let Err(error) = ctx.heartbeat(Some(WORKFLOW_HOST_CLAIM_EXTENSION)).await {
+                warn!(%error, "failed to extend Python workflow host task claim");
+            }
+        }
+    });
+    Ok(WorkflowHostHeartbeatGuard { task })
 }
 
 async fn run_python_workflow_host_local(
