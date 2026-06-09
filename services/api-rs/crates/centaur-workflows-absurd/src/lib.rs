@@ -34,6 +34,8 @@ pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
 const PYTHON_HOST_ENV: &str = "PYTHON_WORKFLOW_HOST_PATH";
 const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
+const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
 
 #[derive(Clone)]
 pub struct WorkflowRuntime {
@@ -1294,12 +1296,12 @@ async fn run_centaur_workflow(
                 .input
                 .get("idle_timeout_ms")
                 .and_then(Value::as_u64)
-                .unwrap_or(1_000);
+                .unwrap_or(DEFAULT_AGENT_IDLE_TIMEOUT_MS);
             let max_duration_ms = input
                 .input
                 .get("max_duration_ms")
                 .and_then(Value::as_u64)
-                .unwrap_or(60_000);
+                .unwrap_or(DEFAULT_AGENT_MAX_DURATION_MS);
             let agent = ctx
                 .step("agent_turn", || {
                     let session_runtime = session_runtime.clone();
@@ -1823,11 +1825,11 @@ async fn run_python_agent_turn(
     let idle_timeout_ms = args
         .get("idle_timeout_ms")
         .and_then(Value::as_u64)
-        .unwrap_or(1_000);
+        .unwrap_or(DEFAULT_AGENT_IDLE_TIMEOUT_MS);
     let max_duration_ms = args
         .get("max_duration_ms")
         .and_then(Value::as_u64)
-        .unwrap_or(60_000);
+        .unwrap_or(DEFAULT_AGENT_MAX_DURATION_MS);
     let execution_idempotency_key = args
         .get("idempotency_key")
         .or_else(|| args.get("execution_idempotency_key"))
@@ -2182,13 +2184,17 @@ async fn run_agent_session_turn(
                 });
             }
             "session.execution_failed" | "session.execution_cancelled" => {
-                return Ok(AgentTurnResult {
+                let result = AgentTurnResult {
                     thread_key: thread_key.into_string(),
                     execution_id: execution.execution_id,
                     status: event.event_type,
                     result_text: result_text_from_output_lines(&output_lines),
                     output_lines,
-                });
+                };
+                return Err(WorkflowRuntimeError::BadRequest(format!(
+                    "agent turn {} for thread {} ended with {}",
+                    result.execution_id, result.thread_key, result.status
+                )));
             }
             _ => {}
         }
