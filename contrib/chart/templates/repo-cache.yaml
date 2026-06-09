@@ -71,7 +71,7 @@ spec:
               umask 022
 
               repo_ref() {
-                repo="$1"
+                local repo="$1"
                 for entry in $REPOSITORY_REFS; do
                   case "$entry" in
                     "$repo="*) printf '%s\n' "${entry#*=}"; return 0 ;;
@@ -80,8 +80,10 @@ spec:
               }
 
               checkout_repo() {
-                repo="$1"
-                target="$2"
+                local repo="$1"
+                local target="$2"
+                local requested_ref
+                local default_branch
                 requested_ref="$(repo_ref "$repo")"
                 if [ -n "$requested_ref" ]; then
                   if git -C "$target" rev-parse --verify --quiet "origin/${requested_ref}^{commit}" >/dev/null; then
@@ -103,9 +105,10 @@ spec:
               }
 
               sync_repo() {
-                repo="$1"
-                repo_url="https://github.com/${repo}.git"
-                target="/cache/${repo}"
+                local repo="$1"
+                local repo_url="https://github.com/${repo}.git"
+                local target="/cache/${repo}"
+                local tmp
                 # Deterministic temp name. This script runs as a Kubernetes
                 # container command, and Kubernetes collapses a doubled dollar
                 # sign to a single one during its own $(VAR) expansion before
