@@ -9,7 +9,7 @@ index 53a35e4..8fc9ebd 100644
 +var STREAM_BUFFER_SIZE = 256;
 +var STREAM_SEGMENT_LIMIT = 11500;
 +var STREAM_CHUNK_LIMIT = 256;
-+var STREAM_STRUCTURED_CHUNK_LIMIT = 45;
++var STREAM_TASK_LIMIT = 48;
 +var STREAM_FENCE_RESERVE = 64;
 +var FENCE_PATTERN = /^(`{3,}|~{3,})/;
 +function isOpenTaskStatus(status) {
@@ -129,7 +129,7 @@ index 53a35e4..8fc9ebd 100644
  
  // src/cards.ts
  import {
-@@ -3434,24 +3551,101 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3434,24 +3551,102 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -146,7 +146,7 @@ index 53a35e4..8fc9ebd 100644
 +      length: 0,
 +      openTasks: /* @__PURE__ */ new Set(),
 +      stopped: false,
-+      structuredChunks: 0,
++      visibleTasks: /* @__PURE__ */ new Set(),
 +      streamer: this._client.chatStream({
 +        channel,
 +        thread_ts: threadTs,
@@ -191,11 +191,12 @@ index 53a35e4..8fc9ebd 100644
 +        current.length += opening.length;
 +      }
 +    };
-+    const shouldRotateSegment = () => current.structuredChunks >= STREAM_STRUCTURED_CHUNK_LIMIT && current.openTasks.size === 0;
++    const shouldRotateSegment = () => current.visibleTasks.size >= STREAM_TASK_LIMIT && current.openTasks.size === 0;
 +    const rememberTaskStatus = (chunk) => {
 +      if (chunk.type !== "task_update") {
 +        return;
 +      }
++      current.visibleTasks.add(chunk.id);
 +      if (isOpenTaskStatus(chunk.status)) {
 +        current.openTasks.add(chunk.id);
 +      } else {
@@ -240,7 +241,7 @@ index 53a35e4..8fc9ebd 100644
      };
      let structuredChunksSupported = true;
      const sendStructuredChunk = async (chunk) => {
-@@ -3463,7 +3645,24 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3463,7 +3645,23 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
@@ -260,7 +261,6 @@ index 53a35e4..8fc9ebd 100644
 +          }
 +          await current.streamer.append({ chunks: [normalized], token });
 +          current.hasContent = true;
-+          current.structuredChunks += 1;
 +          rememberTaskStatus(normalized);
 +        }
        } catch (error) {
