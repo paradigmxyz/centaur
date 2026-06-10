@@ -892,7 +892,7 @@ describe('slackbotv2', () => {
           .filter(chunk => chunk.type === 'task_update')
           .map(chunk => stringField(chunk.id))
       ).size
-    ).toBe(48)
+    ).toBe(50)
     expect(await threadText(parent.ts)).toContain('TASK_STREAM_CONTINUATION_OK')
   })
 

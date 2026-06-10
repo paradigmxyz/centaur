@@ -19,6 +19,7 @@ use uuid::Uuid;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
+const DEFAULT_MAX_CONNECTIONS: u32 = 500;
 
 #[derive(Clone, Debug)]
 pub struct CreateExecutionResult {
@@ -47,7 +48,7 @@ impl PgSessionStore {
 
     pub async fn connect(database_url: &str) -> Result<Self, SessionStoreError> {
         let pool = PgPoolOptions::new()
-            .max_connections(50)
+            .max_connections(DEFAULT_MAX_CONNECTIONS)
             .connect(database_url)
             .await?;
         Ok(Self::new(pool))
