@@ -201,6 +201,11 @@ spec:
               value: {{ .Values.sandbox.codexAuthMode | quote }}
             - name: CLAUDE_CODE_AUTH_MODE
               value: {{ .Values.sandbox.claudeCodeAuthMode | quote }}
+            # Which harness's auth fragment iron-proxy registers (and therefore
+            # which placeholder credential lands in the sandbox env). Must agree
+            # with the harness the sandbox image CMD actually runs.
+            - name: KUBERNETES_IRON_PROXY_HARNESS_ENGINE
+              value: {{ .Values.sandbox.harnessEngine | quote }}
 {{- $sandboxEnvList := list }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}
