@@ -25,6 +25,8 @@ class _FakeWebClient:
         self.history_pages: list[dict] = []
         self.reply_calls: list[dict] = []
         self.reply_pages: list[dict] = []
+        self.open_calls: list[dict] = []
+        self.open_response: dict = {"channel": {"id": "D123"}}
         self.users_calls: list[dict] = []
         self.users_pages: list[dict] = []
         self.list_calls: list[dict] = []
@@ -56,6 +58,10 @@ class _FakeWebClient:
     def conversations_replies(self, **kwargs):
         self.reply_calls.append(kwargs)
         return self.reply_pages.pop(0)
+
+    def conversations_open(self, **kwargs):
+        self.open_calls.append(kwargs)
+        return self.open_response
 
     def users_list(self, **kwargs):
         self.users_calls.append(kwargs)
@@ -161,6 +167,30 @@ def test_send_message_omits_unfurl_flags_by_default() -> None:
     assert fake_web_client.last_kwargs is not None
     assert "unfurl_links" not in fake_web_client.last_kwargs
     assert "unfurl_media" not in fake_web_client.last_kwargs
+
+
+def test_send_message_opens_dm_for_user_id_destination() -> None:
+    client, fake_web_client = _make_client()
+
+    result = client.send_message("<@U123ABC>", "hello", no_attribution=True)
+
+    assert fake_web_client.open_calls == [{"users": "U123ABC"}]
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["channel"] == "D123"
+    assert fake_web_client.last_kwargs["text"] == "hello"
+    assert result["channel"] == "D123"
+    assert result["permalink"] == "https://slack.com/archives/D123/p123456"
+
+
+def test_send_dm_opens_dm_and_posts_message() -> None:
+    client, fake_web_client = _make_client()
+
+    client.send_dm("U234ABC", "hello", no_attribution=True, unfurl_links=False)
+
+    assert fake_web_client.open_calls == [{"users": "U234ABC"}]
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["channel"] == "D123"
+    assert fake_web_client.last_kwargs["unfurl_links"] is False
 
 
 def test_retry_on_ratelimit_honors_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:

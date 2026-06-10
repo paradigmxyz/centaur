@@ -16,7 +16,7 @@ stderr_console = Console(stderr=True)
 
 @app.command()
 def send(
-    channel: str = typer.Argument(..., help="Channel name (with or without #)"),
+    channel: str = typer.Argument(..., help="Channel name, channel ID, or Slack user ID"),
     message: str = typer.Argument(..., help="Message text to send"),
     thread: str = typer.Option(None, "--thread", "-t", help="Thread timestamp to reply to"),
     no_attribution: bool = typer.Option(
@@ -25,11 +25,12 @@ def send(
         help="Skip auto-adding requester attribution (from SLACK_REQUESTER_ID)",
     ),
 ):
-    """Send a message to a channel.
+    """Send a message to a channel or Slack user DM.
 
     Examples:
         slack send "#eng-ai" "Hello from the CLI!"
         slack send eng-ai "Reply in thread" --thread 1234567890.123456
+        slack send U12345678 "Direct follow-up"
     """
     from .client import send_message
 
@@ -38,6 +39,32 @@ def send(
         console.print("[green]✓ Message sent[/]")
         console.print(f"[dim]{result['permalink']}[/]")
     except RuntimeError as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def dm(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U12345678"),
+    message: str = typer.Argument(..., help="Message text to send"),
+    no_attribution: bool = typer.Option(
+        False,
+        "--no-attribution",
+        help="Skip auto-adding requester attribution (from SLACK_REQUESTER_ID)",
+    ),
+):
+    """Send a direct message to a Slack user.
+
+    Examples:
+        slack dm U12345678 "Remember to update the CRM"
+    """
+    from .client import send_dm
+
+    try:
+        result = send_dm(user_id, message, no_attribution=no_attribution)
+        console.print("[green]✓ DM sent[/]")
+        console.print(f"[dim]{result['permalink']}[/]")
+    except (RuntimeError, ValueError) as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
