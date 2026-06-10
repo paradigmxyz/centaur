@@ -787,6 +787,18 @@ describe('slackbotv2', () => {
       codexApi.emitOutputLine(
         key,
         JSON.stringify({
+          type: 'item.started',
+          item: {
+            id: `cmd-${index}`,
+            type: 'commandExecution',
+            command: `printf step-${index}`,
+            status: 'inProgress'
+          }
+        })
+      )
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
           type: 'item.completed',
           item: {
             id: `cmd-${index}`,
@@ -810,6 +822,13 @@ describe('slackbotv2', () => {
     expect(transcripts.length).toBeGreaterThan(1)
     expect(transcripts.flatMap(transcript => transcript.chunks).filter(chunk => chunk.type === 'task_update').length)
       .toBeGreaterThan(50)
+    expect(
+      new Set(
+        transcripts[0]!.chunks
+          .filter(chunk => chunk.type === 'task_update')
+          .map(chunk => stringField(chunk.id))
+      ).size
+    ).toBe(48)
     expect(await threadText(parent.ts)).toContain('TASK_STREAM_CONTINUATION_OK')
   })
 
@@ -843,7 +862,7 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.eventRequests.length === 1)
     await waitFor(() => codexApi.streamCount === 1)
 
-    for (let index = 1; index <= 43; index += 1) {
+    for (let index = 1; index <= 47; index += 1) {
       codexApi.emitOutputLine(
         key,
         JSON.stringify({
@@ -870,7 +889,7 @@ describe('slackbotv2', () => {
         }
       })
     )
-    for (let index = 1; index <= 8; index += 1) {
+    for (let index = 1; index <= 3; index += 1) {
       codexApi.emitOutputLine(
         key,
         JSON.stringify({
@@ -893,6 +912,19 @@ describe('slackbotv2', () => {
           id: 'cmd-open',
           type: 'commandExecution',
           command: 'sleep 1 && true',
+          status: 'completed',
+          aggregatedOutput: ''
+        }
+      })
+    )
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-after-open',
+          type: 'commandExecution',
+          command: 'printf after-open',
           status: 'completed',
           aggregatedOutput: ''
         }
