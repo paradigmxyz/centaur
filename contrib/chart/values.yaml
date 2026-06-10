@@ -305,6 +305,8 @@ postgres:
   args:
     - "-c"
     - "shared_preload_libraries=pg_search,pg_cron"
+    - "-c"
+    - "max_connections=500"
   auth:
     database: ai_v2
     username: tempo

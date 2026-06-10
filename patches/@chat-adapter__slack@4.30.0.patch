@@ -1,20 +1,17 @@
 diff --git a/dist/index.js b/dist/index.js
-index 53a35e4..8fc9ebd 100644
+index 53a35e40d7dc03dea57f965325728761467ad7c7..3e63db3d328688a104cf408ff97f8e984b25ba93 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -31,6 +31,126 @@ import {
+@@ -31,6 +31,123 @@ import {
    toModalElement,
    toPlainText
  } from "chat";
 +var STREAM_BUFFER_SIZE = 256;
 +var STREAM_SEGMENT_LIMIT = 11500;
 +var STREAM_CHUNK_LIMIT = 256;
-+var STREAM_TASK_LIMIT = 48;
++var STREAM_TASK_LIMIT = 50;
 +var STREAM_FENCE_RESERVE = 64;
 +var FENCE_PATTERN = /^(`{3,}|~{3,})/;
-+function isOpenTaskStatus(status) {
-+  return status === "pending" || status === "in_progress";
-+}
 +var Fence = class {
 +  constructor() {
 +    this.buffer = "";
@@ -129,7 +126,7 @@ index 53a35e4..8fc9ebd 100644
  
  // src/cards.ts
  import {
-@@ -3434,24 +3551,102 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3434,26 +3551,122 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -142,11 +139,10 @@ index 53a35e4..8fc9ebd 100644
 -        task_display_mode: options.taskDisplayMode
 -      }
 +    const createSegment = () => ({
++      cards: 0,
 +      hasContent: false,
 +      length: 0,
-+      openTasks: /* @__PURE__ */ new Set(),
 +      stopped: false,
-+      visibleTasks: /* @__PURE__ */ new Set(),
 +      streamer: this._client.chatStream({
 +        channel,
 +        thread_ts: threadTs,
@@ -159,9 +155,12 @@ index 53a35e4..8fc9ebd 100644
 +      })
      });
 +    let current = createSegment();
++    const structured = /* @__PURE__ */ new Set();
 +    let lastResult;
      let lastAppended = "";
++    let plan;
 +    const taskParts = /* @__PURE__ */ new Map();
++    const taskSegments = /* @__PURE__ */ new Map();
 +    const fence = new Fence();
      const renderer = new StreamingMarkdownRenderer({
        wrapTablesForAppend: false
@@ -183,24 +182,14 @@ index 53a35e4..8fc9ebd 100644
 +        current.hasContent = true;
 +        current.length += closing.length;
 +      }
-+      await stopSegment(current);
++      if (!structured.has(current)) {
++        await stopSegment(current);
++      }
 +      current = createSegment();
 +      if (opening) {
 +        await current.streamer.append({ markdown_text: opening, token });
 +        current.hasContent = true;
 +        current.length += opening.length;
-+      }
-+    };
-+    const shouldRotateSegment = () => current.visibleTasks.size >= STREAM_TASK_LIMIT && current.openTasks.size === 0;
-+    const rememberTaskStatus = (chunk) => {
-+      if (chunk.type !== "task_update") {
-+        return;
-+      }
-+      current.visibleTasks.add(chunk.id);
-+      if (isOpenTaskStatus(chunk.status)) {
-+        current.openTasks.add(chunk.id);
-+      } else {
-+        current.openTasks.delete(chunk.id);
 +      }
 +    };
      const flushMarkdownDelta = async (delta) => {
@@ -240,33 +229,63 @@ index 53a35e4..8fc9ebd 100644
 +      }
      };
      let structuredChunksSupported = true;
++    const appendStructuredChunk = async (segment, chunk) => {
++      await segment.streamer.append({ chunks: [chunk], token });
++      segment.hasContent = true;
++    };
++    const createStructuredSegment = async () => {
++      current = createSegment();
++      structured.add(current);
++      if (plan) {
++        await appendStructuredChunk(current, plan);
++      }
++      return current;
++    };
++    const getTaskSegment = async (id) => {
++      const existing = taskSegments.get(id);
++      if (existing) {
++        return existing;
++      }
++      if (current.cards >= STREAM_TASK_LIMIT) {
++        await createStructuredSegment();
++      } else {
++        structured.add(current);
++      }
++      current.cards += 1;
++      taskSegments.set(id, current);
++      return current;
++    };
      const sendStructuredChunk = async (chunk) => {
-@@ -3463,7 +3645,23 @@ var SlackAdapter = class _SlackAdapter {
+       if (!structuredChunksSupported) {
+         return;
+@@ -3463,7 +3676,25 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
 -        await streamer.append({ chunks: [chunk], token });
-+        const chunks = chunk.type === "task_update" ? splitTask(chunk, taskParts.get(chunk.id) ?? 0) : [
-+          {
++        if (chunk.type === "plan_update") {
++          plan = {
 +            ...chunk,
 +            title: truncateText(chunk.title, STREAM_CHUNK_LIMIT)
++          };
++          if (structured.size === 0) {
++            structured.add(current);
 +          }
-+        ];
-+        if (chunk.type === "task_update") {
-+          taskParts.set(chunk.id, chunks.length);
++          for (const segment of structured) {
++            await appendStructuredChunk(segment, plan);
++          }
++          return;
 +        }
++        const chunks = splitTask(chunk, taskParts.get(chunk.id) ?? 0);
++        taskParts.set(chunk.id, chunks.length);
 +        for (const normalized of chunks) {
-+          if (shouldRotateSegment()) {
-+            await rotateSegment(fence.closing, fence.opening);
-+          }
-+          await current.streamer.append({ chunks: [normalized], token });
-+          current.hasContent = true;
-+          rememberTaskStatus(normalized);
++          const segment = await getTaskSegment(normalized.id);
++          await appendStructuredChunk(segment, normalized);
 +        }
        } catch (error) {
          structuredChunksSupported = false;
          this.logger.warn(
-@@ -3479,31 +3677,67 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3479,31 +3710,72 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };
@@ -286,7 +305,7 @@ index 53a35e4..8fc9ebd 100644
 +        } else {
 +          await sendStructuredChunk(chunk);
 +        }
-+      }
+       }
 +      renderer.finish();
 +      const finalCommittable = renderer.getCommittableText();
 +      const finalDelta = finalCommittable.slice(lastAppended.length);
@@ -300,16 +319,21 @@ index 53a35e4..8fc9ebd 100644
 +        current.hasContent = true;
 +        current.length += fence.closing.length;
 +      }
++      for (const segment of structured) {
++        if (segment !== current) {
++          await stopSegment(segment);
++        }
++      }
 +      lastResult = await stopSegment(
 +        current,
 +        options?.stopBlocks,
 +        true
 +      );
 +    } catch (error) {
-+      const segments = /* @__PURE__ */ new Set([current]);
++      const segments = /* @__PURE__ */ new Set([...structured, current]);
 +      fence.finish();
 +      for (const segment of segments) {
-+        if (!segment?.hasContent) {
++        if (!segment.hasContent) {
 +          continue;
 +        }
 +        try {
@@ -326,7 +350,7 @@ index 53a35e4..8fc9ebd 100644
 +            error: stopError
 +          });
 +        }
-       }
++      }
 +      throw error;
      }
 -    renderer.finish();
