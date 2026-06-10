@@ -458,6 +458,12 @@ fn parse_secret(
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     if let Some(name) = value.as_str() {
         let name = nonempty(name, "secret name")?.to_owned();
+        if default_hosts.is_empty() {
+            return Err(ToolDiscoveryError::Invalid(format!(
+                "secret entry {name:?} requires the tool to declare non-empty top-level \
+                 'hosts'; a secret without hosts would be unscoped in iron-proxy"
+            )));
+        }
         return Ok(ToolSecret::Http(HttpSecret {
             name: name.clone(),
             secret_ref: name.clone(),
@@ -506,6 +512,13 @@ fn parse_http_secret(
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     let hosts =
         optional_string_array(table.get("hosts"))?.unwrap_or_else(|| default_hosts.to_vec());
+    if hosts.is_empty() || hosts.iter().any(String::is_empty) {
+        return Err(ToolDiscoveryError::Invalid(format!(
+            "HTTP secret {name:?} 'hosts' must be a non-empty array of non-empty strings \
+             (entry-level or tool-level); a secret without hosts would be unscoped in \
+             iron-proxy"
+        )));
+    }
     let mode = optional_str(table, "mode").unwrap_or("replace");
     match mode {
         "replace" => {

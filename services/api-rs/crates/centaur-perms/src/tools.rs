@@ -376,6 +376,12 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
         if s.is_empty() {
             bail!("secret entry string must be non-empty");
         }
+        if default_hosts.is_empty() {
+            bail!(
+                "secret entry {s:?} requires the tool to declare non-empty top-level \
+                 'hosts'; a secret without hosts would be unscoped in iron-proxy"
+            );
+        }
         return Ok(ParsedSecret::Http(HttpSecret {
             name: s.to_owned(),
             secret_ref: s.to_owned(),
@@ -449,7 +455,15 @@ fn parse_http(
             "HTTP secret {name:?} has unknown mode {other:?} (expected 'replace' or 'inject')"
         ),
     };
-    let hosts = str_array(table.get("hosts")).unwrap_or_else(|| default_hosts.to_vec());
+    let hosts = match non_empty_str_array(table.get("hosts")) {
+        Some(hosts) => hosts,
+        None if !default_hosts.is_empty() => default_hosts.to_vec(),
+        None => bail!(
+            "HTTP secret {name:?} 'hosts' must be a non-empty array of non-empty strings \
+             (or the tool must declare top-level hosts); a secret without hosts would be \
+             unscoped in iron-proxy"
+        ),
+    };
 
     match mode {
         SecretMode::Replace => {
