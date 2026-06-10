@@ -75,7 +75,11 @@ impl WarmPoolManager {
 
             let id = SandboxId::new(sandbox_id.as_str());
             let failure = match self.manager.status(&id).await {
-                Ok(SandboxStatus::Running | SandboxStatus::Created) => {
+                // Only `Running` accepts `open_io`. `Created` means the
+                // runtime regressed after the replenisher saw it running
+                // (backends wait for readiness before returning from create),
+                // so claiming it would fail at I/O attach.
+                Ok(SandboxStatus::Running) => {
                     if let Some(principal_id) = iron_control_principal
                         && let Err(error) = self
                             .manager
