@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import {
   Chat,
   StreamingPlan,
@@ -129,7 +129,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
   const app = new Hono()
   app.get('/health', c => c.json({ ok: true, service: 'slackbotv2' }))
-  app.post('/api/webhooks/slack', async c => {
+  const handleSlackWebhook = async (c: Context) => {
     const rawBody = await c.req.raw.clone().text()
     if (!isAllowedSlackWebhookBody(rawBody, options, logger)) {
       return new globalThis.Response('ok', { status: 200 })
@@ -168,7 +168,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       headers: response.headers,
       status: response.status
     })
-  })
+  }
+  app.post('/api/webhooks/slack', handleSlackWebhook)
+  app.post('/api/slack/events', handleSlackWebhook)
 
   if (options.recoverRenderObligationsOnStart !== false) {
     scheduleRenderObligationRecovery(chat, state, options)
