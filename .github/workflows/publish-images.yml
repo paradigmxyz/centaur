@@ -118,6 +118,8 @@ jobs:
           cache-from: |
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:buildcache
             type=gha,scope=${{ matrix.image }}
+          # Fork PRs run with a read-only GITHUB_TOKEN: exporting the registry
+          # cache would fail the build, so only export it when we can push.
           cache-to: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:buildcache,mode=max
+            ${{ !github.event.pull_request.head.repo.fork && format('type=registry,ref={0}/{1}/{2}:buildcache,mode=max', env.REGISTRY, env.IMAGE_NAMESPACE, matrix.image) || '' }}
             type=gha,mode=max,scope=${{ matrix.image }}
