@@ -30,6 +30,10 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: paradigmxyz/centaur
   IMAGE_SOURCE: https://github.com/paradigmxyz/centaur
+  # Main/tags keep optimized release images. PRs and manual branch publishes
+  # use debug builds so staging/dev iteration does not spend minutes optimizing
+  # Rust binaries that are immediately replaced by the next test build.
+  RUST_BUILD_PROFILE: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && 'debug' || 'release' }}
 
 jobs:
   publish:
@@ -109,5 +113,11 @@ jobs:
           push: ${{ !github.event.pull_request.head.repo.fork }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          build-args: |
+            RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:buildcache
+            type=gha,scope=${{ matrix.image }}
+          cache-to: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:buildcache,mode=max
+            type=gha,mode=max,scope=${{ matrix.image }}

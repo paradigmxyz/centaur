@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
 centaur-iron-control.workspace = true
 centaur-iron-proxy.workspace = true
 centaur-sandbox-agent-k8s.workspace = true
@@ -17,15 +18,19 @@ centaur-session-core.workspace = true
 centaur-session-runtime.workspace = true
 centaur-session-sqlx.workspace = true
 centaur-telemetry.workspace = true
+centaur-workflows.workspace = true
 clap.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true
+hmac.workspace = true
+hex.workspace = true
 kube.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }

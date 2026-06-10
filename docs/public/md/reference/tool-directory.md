@@ -33,7 +33,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `notion` | Search and update Notion pages, databases, blocks, and comments | `NOTION_API_KEY` |
 | `slack` | Search Slack, read threads, inspect channels/users, and send or upload messages | `SLACK_BOT_TOKEN`; optional: `SLACK_SEARCH_TOKEN`, `SLACK_ETL_TOKEN` |
 | `gsuite` | Use Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
-| `websearch` | Run web search and deeper research | `EXA_API_KEY`, `ANTHROPIC_API_KEY` |
+| `websearch` | Free web search via Parallel and deep research | None; `PARALLEL_API_KEY` for `deep_research`; `ANTHROPIC_API_KEY` for search synthesis |
 | `company_context` | Search indexed company history across internal sources | None |
 | `grafana` | Query dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
 | `posthog` | Query product analytics, events, pageviews, breakdowns, and user agents | `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` |
@@ -66,7 +66,6 @@ These are broadly useful across most deployments and are good candidates to conf
 | `profslice` | Extract Firefox Profiler data for analysis | None |
 | `reth` | Reth execution timing and performance metrics | None |
 | `reth-log-analyzer` | Parse Reth logs and generate performance graphs | None |
-| `sentry` | Browse Sentry issues, issue details, events, stacktraces, and tag values (read-only) | `SENTRY_AUTH_TOKEN` |
 | `vlogs` | VictoriaLogs queries, fields, streams, and log analytics | None |
 | `vmetrics` | VictoriaMetrics PromQL/MetricsQL queries and metric discovery | None |
 
@@ -105,7 +104,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `plural` | State legislation, legislators, committees, events, and jurisdictions | `PLURAL_API_KEY` |
 | `sensortower` | Mobile app analytics, publisher data, charts, and sales estimates | `SENSOR_TOWER_AUTH_TOKEN` |
 | `similarweb` | Web traffic, rankings, referrals, keywords, geography, and app data | `SIMILARWEB_API_KEY` |
-| `websearch` | Web search and deep research | `EXA_API_KEY`, `ANTHROPIC_API_KEY` |
+| `websearch` | Free web search via Parallel and deep research | None; `PARALLEL_API_KEY` for `deep_research`; `ANTHROPIC_API_KEY` for search synthesis |
 | `youtube` | YouTube video, channel, transcript, and search data | `YOUTUBE_API_KEY`, `GOOGLE_API_KEY` |
 
 ## Media

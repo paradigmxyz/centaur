@@ -1,10 +1,11 @@
 mod args;
 mod tool_discovery;
 
-use centaur_api_server::build_router_with_session_runtime;
+use centaur_api_server::build_router_with_session_and_workflow_runtime;
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{TelemetryConfig, init_telemetry};
+use centaur_workflows::WorkflowRuntime;
 use clap::Parser;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -24,24 +25,40 @@ async fn main() -> Result<(), ServerError> {
         store.run_migrations().await?;
     }
     let sandbox_runtime = args.sandbox_runtime().await?;
-    let mut runtime = SessionRuntime::new(store, sandbox_runtime);
+    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime);
     let mut warm_pool_bootstrap_principal = None;
+    let mut workflow_host_principal = None;
     if let Some(iron_control) = args.iron_control_runtime().await? {
         info!("iron-control session registration enabled");
         warm_pool_bootstrap_principal = Some(iron_control.warm_pool_bootstrap_principal);
+        workflow_host_principal = Some(iron_control.workflow_host_principal);
         runtime = runtime.with_iron_control(iron_control.registrar);
     }
     if let Some(mut config) = args.warm_pool_config() {
-        config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal;
+        config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
         runtime = runtime.with_warm_pool(config);
     }
+    let workflow_host_sandbox = args
+        .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
+        .await?;
+    let workflows = Some(
+        WorkflowRuntime::new_with_workflow_host_sandbox(
+            store,
+            runtime.clone(),
+            workflow_host_sandbox,
+        )
+        .await?,
+    );
 
     let listener = TcpListener::bind(args.server.bind_addr).await?;
     info!(bind_addr = %args.server.bind_addr, "starting centaur api-rs server");
 
-    axum::serve(listener, build_router_with_session_runtime(runtime))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        build_router_with_session_and_workflow_runtime(runtime, workflows),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     telemetry.shutdown();
     Ok(())
 }
@@ -60,6 +77,8 @@ pub(crate) enum ServerError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Store(#[from] centaur_session_sqlx::SessionStoreError),
+    #[error(transparent)]
+    Workflows(#[from] centaur_workflows::WorkflowRuntimeError),
     #[error(transparent)]
     KubeConfig(#[from] kube::config::KubeconfigError),
     #[error(transparent)]

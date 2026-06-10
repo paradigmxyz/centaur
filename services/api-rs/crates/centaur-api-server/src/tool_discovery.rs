@@ -5,8 +5,8 @@ use std::{
 };
 
 use centaur_iron_proxy::{
-    PostgresListener, PostgresUpstream, ProxyFragment, SandboxEnv, Secret, SecretReplace, Transform,
-    TransformConfig,
+    PostgresListener, PostgresUpstream, ProxyFragment, SandboxEnv, Secret, SecretReplace,
+    Transform, TransformConfig,
 };
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
@@ -864,8 +864,10 @@ fn aws_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
         entry.2.extend(secret.allowed_services.iter().cloned());
     }
     let mut transforms = Vec::new();
-    for ((access_key_id_ref, secret_access_key_ref, session_token_ref), (hosts, regions, services)) in
-        by_cred
+    for (
+        (access_key_id_ref, secret_access_key_ref, session_token_ref),
+        (hosts, regions, services),
+    ) in by_cred
     {
         let mut config = BTreeMap::new();
         config.insert(
@@ -1267,7 +1269,9 @@ secrets = [
             Some("AWS_ACCESS_KEY_ID")
         );
         assert_eq!(
-            placeholders.get("AWS_SECRET_ACCESS_KEY").map(String::as_str),
+            placeholders
+                .get("AWS_SECRET_ACCESS_KEY")
+                .map(String::as_str),
             Some("AWS_SECRET_ACCESS_KEY")
         );
 

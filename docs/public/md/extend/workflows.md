@@ -14,6 +14,9 @@ Put organization workflows in an overlay repo under `workflows/`. See
 [Using an overlay](/extend/overlay) for packaging, mount paths, and chart
 configuration.
 
+Migrating existing workflows to the api-rs Absurd runtime? See
+[Workflows v2 Migration](/extend/workflows-v2).
+
 Workflows are loaded from `WORKFLOW_DIRS`. In an overlay deployment, workflow
 files must exist under `/app/overlay/org/workflows` in the API container. Files
 in those directories are loaded the same way as built-in workflows.

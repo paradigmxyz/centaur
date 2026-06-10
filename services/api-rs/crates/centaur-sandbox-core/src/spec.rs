@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SandboxSpec {
     pub image: String,
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub overlay: Option<OverlayImage>,
     pub command: Option<Vec<String>>,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
@@ -20,6 +24,8 @@ impl SandboxSpec {
     pub fn new(image: impl Into<String>) -> Self {
         Self {
             image: image.into(),
+            labels: std::collections::BTreeMap::new(),
+            overlay: None,
             command: None,
             args: Vec::new(),
             env: Vec::new(),
@@ -32,6 +38,16 @@ impl SandboxSpec {
 
     pub fn iron_control_principal(mut self, principal_foreign_id: impl Into<String>) -> Self {
         self.iron_control_principal = Some(principal_foreign_id.into());
+        self
+    }
+
+    pub fn label(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn overlay_image(mut self, overlay: OverlayImage) -> Self {
+        self.overlay = Some(overlay);
         self
     }
 
@@ -62,6 +78,34 @@ impl SandboxSpec {
 
     pub fn resources(mut self, resources: ResourceLimits) -> Self {
         self.resources = Some(resources);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OverlayImage {
+    pub image: String,
+    pub source_path: String,
+    pub mount_path: String,
+    pub image_pull_policy: Option<String>,
+}
+
+impl OverlayImage {
+    pub fn new(
+        image: impl Into<String>,
+        source_path: impl Into<String>,
+        mount_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            image: image.into(),
+            source_path: source_path.into(),
+            mount_path: mount_path.into(),
+            image_pull_policy: None,
+        }
+    }
+
+    pub fn image_pull_policy(mut self, image_pull_policy: impl Into<String>) -> Self {
+        self.image_pull_policy = Some(image_pull_policy.into());
         self
     }
 }

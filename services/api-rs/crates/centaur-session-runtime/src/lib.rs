@@ -1117,6 +1117,20 @@ impl SessionRuntime {
 }
 
 impl SandboxRuntime {
+    pub async fn create_running_io(
+        &self,
+        spec: SandboxSpec,
+    ) -> Result<(SandboxId, centaur_sandbox_core::SandboxIoParts), SessionRuntimeError> {
+        let handle = self.manager.create_running(spec).await?;
+        let io = self.manager.open_io(&handle.id).await?.into_parts();
+        Ok((handle.id, io))
+    }
+
+    pub async fn stop_sandbox(&self, sandbox_id: &SandboxId) -> Result<(), SessionRuntimeError> {
+        self.manager.stop(sandbox_id).await?;
+        Ok(())
+    }
+
     pub fn backend(backend: Arc<dyn SandboxBackend>, spec: SandboxSpec) -> Self {
         let warm_spec = spec.clone();
         let spec_factory = move |_thread_key: &ThreadKey, _execution_id: &str| spec.clone();

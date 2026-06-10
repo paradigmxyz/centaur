@@ -138,6 +138,24 @@ spec:
 {{- else }}
               value: /app/tools
 {{- end }}
+            - name: WORKFLOW_DIRS
+{{- if .Values.overlay.image.repository }}
+              value: {{ printf "/app/workflows:%s/workflows" .Values.overlay.mountPath | quote }}
+{{- else }}
+              value: /app/workflows
+{{- end }}
+{{- if or .Values.overlay.systemPrompt .Values.overlay.image.repository }}
+            - name: CENTAUR_OVERLAY_DIR
+              value: {{ .Values.overlay.mountPath | quote }}
+{{- end }}
+{{- if .Values.overlay.image.repository }}
+            - name: CENTAUR_OVERLAY_IMAGE
+              value: {{ printf "%s:%s" .Values.overlay.image.repository .Values.overlay.image.tag | quote }}
+            - name: CENTAUR_OVERLAY_IMAGE_PULL_POLICY
+              value: {{ .Values.overlay.image.pullPolicy | quote }}
+            - name: CENTAUR_OVERLAY_IMAGE_SOURCE_PATH
+              value: {{ .Values.overlay.image.sourcePath | quote }}
+{{- end }}
             - name: SESSION_SANDBOX_BACKEND
               value: {{ .Values.apiRs.sandboxBackend | quote }}
             - name: SESSION_SANDBOX_WORKLOAD
@@ -154,6 +172,10 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- if .Values.global.imagePullSecrets }}
+            - name: SESSION_SANDBOX_IMAGE_PULL_SECRETS
+              value: "{{- range $index, $secret := .Values.global.imagePullSecrets }}{{- if $index }},{{ end -}}{{ $secret.name }}{{- end }}"
+{{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}

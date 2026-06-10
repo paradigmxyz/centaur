@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/absurd-sdk",
     "crates/centaur-api-server",
     "crates/centaur-iron-control",
     "crates/centaur-iron-proxy",
@@ -14,6 +15,7 @@ members = [
     "crates/centaur-session-runtime",
     "crates/centaur-session-sqlx",
     "crates/centaur-telemetry",
+    "crates/centaur-workflows",
 ]
 resolver = "3"
 
@@ -25,6 +27,7 @@ repository = "https://github.com/paradigmxyz/centaur"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+absurd-sdk = { path = "crates/absurd-sdk" }
 axum = "0.8.9"
 bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }
@@ -38,11 +41,18 @@ centaur-session-core = { path = "crates/centaur-session-core" }
 centaur-session-runtime = { path = "crates/centaur-session-runtime" }
 centaur-session-sqlx = { path = "crates/centaur-session-sqlx" }
 centaur-telemetry = { path = "crates/centaur-telemetry" }
+centaur-workflows = { path = "crates/centaur-workflows" }
 clap = { version = "4.6.1", features = ["derive", "env"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono-tz = "0.10.4"
+cron = "0.16.0"
 crossterm = "0.28"
 eventsource-stream = "0.2.3"
 eyre = "0.6"
+base64 = "0.22"
 futures-util = { version = "0.3", features = ["sink"] }
+hmac = "0.12"
+hex = "0.4"
 k8s-openapi = { version = "0.27.1", features = ["latest"] }
 kube = "3.1.0"
 serde = { version = "1", features = ["derive"] }
@@ -61,7 +71,7 @@ sqlx = { version = "0.8.6", default-features = false, features = ["derive", "jso
 strum = { version = "0.28", features = ["derive"] }
 test-case = "3.3.1"
 thiserror = "2"
-time = { version = "0.3", features = ["serde"] }
+time = { version = "0.3", features = ["serde", "serde-well-known"] }
 tokio = "1"
 tokio-util = "0.7"
 toml = "0.8"

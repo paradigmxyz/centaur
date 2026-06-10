@@ -47,6 +47,18 @@ pub struct EventsQuery {
     pub execution_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct ListWorkflowRunsQuery {
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EmitWorkflowEventRequest {
+    pub event_name: String,
+    #[serde(default)]
+    pub payload: Value,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEventName {
     OutputLine,

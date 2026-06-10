@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # Build context is the repo root (see Justfile `_build-api-rs`) so the runtime
 # stage can bake the shared `tools/` tree used for iron-proxy fragment discovery.
 
@@ -7,23 +7,35 @@ FROM rust:1-bookworm AS builder
 # needs cmake + a C toolchain. No DATABASE_URL is required at build time:
 # centaur-session-sqlx only uses sqlx::migrate! (compile-time file embedding),
 # not the query-checking macros.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake perl build-essential pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        cmake perl build-essential pkg-config
 WORKDIR /build
 COPY services/api-rs/ ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release -p centaur-api-server \
-    && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server
+ARG RUST_BUILD_PROFILE=release
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    case "$RUST_BUILD_PROFILE" in \
+      release) cargo build --release -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
+      debug|dev) cargo build -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
+      *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
+    esac
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates python3
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
 # api-rs discovers tool secret metadata from pyproject.toml at startup so it can
 # register the full tool secret set with iron-control before sandboxes claim.
 COPY tools/ /app/tools/
+COPY services/workflow-python/ /app/workflow-python/
+COPY workflows/ /app/workflows/
+ENV PYTHON_WORKFLOW_HOST_PATH=/app/workflow-python/workflow_host.py
+ENV WORKFLOW_DIRS=/app/workflows
 # Infra + harness auth secrets are embedded in the binary at compile time
 # (include_str! of the in-crate infra.yaml); tool secrets are discovered from
 # /app/tools plus any mounted overlay tools.

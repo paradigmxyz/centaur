@@ -17,11 +17,12 @@ use centaur_iron_proxy::{
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, IronControlSettings, IronProxyConfig,
 };
-use centaur_sandbox_core::{Mount, MountKind};
+use centaur_sandbox_core::{Mount, MountKind, OverlayImage, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::WarmPoolConfig;
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::SandboxWorkloadMode;
+use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::info;
 
@@ -57,11 +58,21 @@ impl Args {
     pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
         self.sandbox.warm_pool_config()
     }
+
+    pub(crate) async fn workflow_host_sandbox_runtime(
+        &self,
+        bootstrap_iron_control_principal: Option<&str>,
+    ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
+        self.sandbox
+            .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
+            .await
+    }
 }
 
 pub(crate) struct IronControlRuntime {
     pub(crate) registrar: SessionRegistrar,
     pub(crate) warm_pool_bootstrap_principal: String,
+    pub(crate) workflow_host_principal: String,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -150,6 +161,12 @@ struct SandboxArgs {
     )]
     agent_image_pull_policy: Option<String>,
     #[arg(
+        long = "session-sandbox-image-pull-secrets",
+        env = "SESSION_SANDBOX_IMAGE_PULL_SECRETS",
+        value_delimiter = ','
+    )]
+    image_pull_secrets: Vec<String>,
+    #[arg(
         long = "session-sandbox-ready-timeout-secs",
         alias = "kubernetes-sandbox-ready-timeout-s",
         env = "SESSION_SANDBOX_READY_TIMEOUT_SECS",
@@ -196,6 +213,16 @@ struct SandboxArgs {
     iron_proxy: IronProxyArgs,
     #[command(flatten)]
     iron_control: IronControlArgs,
+    #[arg(
+        long = "workflow-host-sandbox",
+        env = "WORKFLOW_HOST_SANDBOX",
+        default_value_t = true
+    )]
+    workflow_host_sandbox: bool,
+    #[arg(long = "workflow-host-image", env = "WORKFLOW_HOST_IMAGE")]
+    workflow_host_image: Option<String>,
+    #[arg(long = "workflow-host-command", env = "WORKFLOW_HOST_COMMAND")]
+    workflow_host_command: Option<String>,
 }
 
 impl SandboxArgs {
@@ -224,9 +251,24 @@ impl SandboxArgs {
                 ]),
             })
             .await?;
+        let workflow_host = client
+            .upsert_principal(&IdentityInput {
+                namespace: namespace.clone(),
+                foreign_id: "workflow-host".to_owned(),
+                name: "Workflow host".to_owned(),
+                labels: BTreeMap::from([
+                    ("managed-by".to_owned(), "centaur".to_owned()),
+                    ("purpose".to_owned(), "workflow-host".to_owned()),
+                ]),
+            })
+            .await?;
+        for role_id in &role_ids {
+            client.assign_role(&workflow_host.id, role_id).await?;
+        }
         Ok(Some(IronControlRuntime {
             registrar: SessionRegistrar::new(client, namespace, role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
+            workflow_host_principal: workflow_host.id,
         }))
     }
 
@@ -246,6 +288,130 @@ impl SandboxArgs {
                     self.container_workload_mode()?,
                 ))
             }
+        }
+    }
+
+    async fn workflow_host_sandbox_runtime(
+        &self,
+        bootstrap_iron_control_principal: Option<&str>,
+    ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
+        if !self.workflow_host_sandbox {
+            return Ok(None);
+        }
+        let spec = self.workflow_host_spec(bootstrap_iron_control_principal)?;
+        let runtime = match self.backend {
+            SandboxBackendKind::Local => {
+                SandboxRuntime::backend(Arc::new(LocalSandboxBackend::new()), spec.clone())
+            }
+            SandboxBackendKind::AgentK8s => SandboxRuntime::backend(
+                Arc::new(AgentSandboxBackend::new(
+                    self.kube_client().await?,
+                    AgentSandboxConfig::try_from(self)?,
+                )),
+                spec.clone(),
+            ),
+        };
+        Ok(Some(WorkflowHostSandboxRuntime::new(runtime, spec)))
+    }
+
+    fn workflow_host_spec(
+        &self,
+        bootstrap_iron_control_principal: Option<&str>,
+    ) -> Result<SandboxSpec, ServerError> {
+        let image = self
+            .workflow_host_image
+            .clone()
+            .or_else(|| self.agent_image.clone())
+            .unwrap_or_else(|| "centaur-agent:latest".to_owned());
+        let command = self.workflow_host_command.clone().unwrap_or_else(|| {
+            let path = match self.backend {
+                SandboxBackendKind::Local => env::var("PYTHON_WORKFLOW_HOST_PATH")
+                    .unwrap_or_else(|_| self.default_workflow_host_path()),
+                SandboxBackendKind::AgentK8s => self.default_workflow_host_path(),
+            };
+            let interpreter =
+                env::var("PYTHON_WORKFLOW_HOST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+            format!("exec {interpreter} {path}")
+        });
+        let mut spec = SandboxSpec::new(image)
+            .label("centaur.ai/component", "workflow-run")
+            .env("CENTAUR_WORKLOAD", "workflow-host");
+        spec = match self.backend {
+            SandboxBackendKind::Local => spec.command(["/bin/sh", "-lc"]).args([command]),
+            SandboxBackendKind::AgentK8s => spec.command(["/entrypoint.sh"]).args([
+                "/bin/sh".to_owned(),
+                "-lc".to_owned(),
+                command,
+            ]),
+        };
+        let agent_k8s_workflow_dirs = self.agent_k8s_workflow_dirs();
+        if env::var_os("WORKFLOW_DIRS").is_none()
+            && matches!(self.backend, SandboxBackendKind::AgentK8s)
+        {
+            spec = spec.env("WORKFLOW_DIRS", agent_k8s_workflow_dirs.clone());
+        }
+        if let Ok(value) =
+            env::var("WORKFLOW_HOST_DATABASE_URL").or_else(|_| env::var("DATABASE_URL"))
+        {
+            spec = spec.env("DATABASE_URL", value);
+        }
+        for name in [
+            "WORKFLOW_DIRS",
+            "PYTHON_WORKFLOW_HOST_PATH",
+            "PYTHON_WORKFLOW_HOST_PYTHON",
+        ] {
+            if let Ok(value) = env::var(name) {
+                let value = match (name, self.backend) {
+                    ("WORKFLOW_DIRS", SandboxBackendKind::AgentK8s) => {
+                        agent_k8s_workflow_dirs.clone()
+                    }
+                    ("PYTHON_WORKFLOW_HOST_PATH", SandboxBackendKind::AgentK8s) => {
+                        self.default_workflow_host_path()
+                    }
+                    _ => value,
+                };
+                spec = spec.env(name, value);
+            }
+        }
+        if matches!(self.backend, SandboxBackendKind::AgentK8s) {
+            if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
+                spec = spec.mount(
+                    Mount::new(
+                        MountKind::Bind {
+                            source_path: repos_path,
+                        },
+                        SANDBOX_REPOS_MOUNT_PATH,
+                    )
+                    .read_only(),
+                );
+            }
+            if let Some(overlay) = workflow_overlay_image_from_env() {
+                spec = spec.overlay_image(overlay);
+            }
+        }
+        for (name, value) in self.workflow_host_env_template()? {
+            upsert_spec_env(&mut spec, name, value);
+        }
+        if let Some(principal) = bootstrap_iron_control_principal {
+            spec = spec.iron_control_principal(principal);
+        }
+        Ok(spec)
+    }
+
+    fn agent_k8s_workflow_dirs(&self) -> String {
+        if matches!(self.backend, SandboxBackendKind::AgentK8s)
+            && env::var_os("CENTAUR_OVERLAY_IMAGE").is_some()
+        {
+            "/opt/centaur/workflows:/opt/centaur/overlay/workflows".to_owned()
+        } else {
+            "/opt/centaur/workflows".to_owned()
+        }
+    }
+
+    fn default_workflow_host_path(&self) -> String {
+        match self.backend {
+            SandboxBackendKind::Local => default_workflow_host_path(),
+            SandboxBackendKind::AgentK8s => "/usr/local/bin/workflow-host".to_owned(),
         }
     }
 
@@ -369,6 +535,59 @@ impl SandboxArgs {
         Ok(envs)
     }
 
+    fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
+        let tool_fragment = self.discover_tool_proxy_fragment()?;
+        let mut envs = Vec::new();
+
+        for (name, value) in self
+            .iron_proxy
+            .sandbox_placeholder_env(tool_fragment.as_ref())?
+        {
+            envs.push((name, value));
+        }
+
+        if let Some(value) = clean_optional_value(self.tools.tool_dirs.as_deref()) {
+            envs.push(("TOOL_DIRS".to_owned(), value));
+        }
+        if let Some(value) = self
+            .tools
+            .tools_path
+            .as_deref()
+            .map(|path| path.to_string_lossy().to_string())
+            .and_then(|value| clean_optional_value(Some(value.as_str())))
+        {
+            envs.push(("TOOLS_PATH".to_owned(), value));
+        }
+        if let Some(value) = self
+            .tools
+            .tools_overlay_path
+            .as_deref()
+            .map(|path| path.to_string_lossy().to_string())
+            .and_then(|value| clean_optional_value(Some(value.as_str())))
+        {
+            envs.push(("TOOLS_OVERLAY_PATH".to_owned(), value));
+        }
+
+        for name in &self.passthrough_env {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(value) = env::var(name) {
+                if let Some((_, existing_value)) = envs
+                    .iter_mut()
+                    .find(|(existing_name, _)| existing_name == name)
+                {
+                    *existing_value = value;
+                } else {
+                    envs.push((name.to_owned(), value));
+                }
+            }
+        }
+
+        Ok(envs)
+    }
+
     fn discover_tool_proxy_fragment(
         &self,
     ) -> Result<Option<DiscoveredToolProxyFragment>, ServerError> {
@@ -427,6 +646,13 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
     fn try_from(args: &SandboxArgs) -> Result<Self, Self::Error> {
         let mut config = AgentSandboxConfig::new(args.k8s_namespace.clone());
         config.image_pull_policy = args.agent_image_pull_policy.clone();
+        config.image_pull_secrets = args
+            .image_pull_secrets
+            .iter()
+            .map(|secret| secret.trim())
+            .filter(|secret| !secret.is_empty())
+            .map(str::to_owned)
+            .collect();
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         config.iron_proxy = args.iron_proxy.to_config()?;
         if let Some(proxy) = config.iron_proxy.as_mut() {
@@ -749,6 +975,28 @@ fn default_sandbox_image(workload: SandboxWorkloadKind) -> &'static str {
     }
 }
 
+fn default_workflow_host_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("workflow-python")
+        .join("workflow_host.py")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn workflow_overlay_image_from_env() -> Option<OverlayImage> {
+    let image = env::var("CENTAUR_OVERLAY_IMAGE").ok()?;
+    let source_path =
+        env::var("CENTAUR_OVERLAY_IMAGE_SOURCE_PATH").unwrap_or_else(|_| "/overlay".to_owned());
+    let mut overlay = OverlayImage::new(image, source_path, "/opt/centaur/overlay");
+    if let Ok(image_pull_policy) = env::var("CENTAUR_OVERLAY_IMAGE_PULL_POLICY") {
+        overlay = overlay.image_pull_policy(image_pull_policy);
+    }
+    Some(overlay)
+}
+
 fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
     match engine {
         HarnessType::Codex => "codex",
@@ -782,6 +1030,15 @@ fn clean_optional_value(value: Option<&str>) -> Option<String> {
     non_empty(value).map(ToOwned::to_owned)
 }
 
+fn upsert_spec_env(spec: &mut SandboxSpec, name: String, value: String) {
+    if let Some(existing) = spec.env.iter_mut().find(|env| env.name == name) {
+        existing.value = value;
+    } else {
+        spec.env
+            .push(centaur_sandbox_core::EnvVar::new(name, value));
+    }
+}
+
 fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, String> {
     let mut labels = BTreeMap::new();
     for item in value
@@ -805,6 +1062,32 @@ fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvGuard {
+        name: &'static str,
+        old_value: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let old_value = env::var(name).ok();
+            unsafe {
+                env::set_var(name, value);
+            }
+            Self { name, old_value }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.old_value {
+                    Some(value) => env::set_var(self.name, value),
+                    None => env::remove_var(self.name),
+                }
+            }
+        }
+    }
 
     #[test]
     fn parses_session_sandbox_flags() {
@@ -867,6 +1150,8 @@ mod tests {
             "centaur-test",
             "--session-sandbox-image-pull-policy",
             "IfNotPresent",
+            "--session-sandbox-image-pull-secrets",
+            "github-access-token-read-packages, extra-secret ",
             "--session-sandbox-ready-timeout-secs",
             "42",
             "--kubernetes-sandbox-iron-proxy-mode",
@@ -877,8 +1162,93 @@ mod tests {
         let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
         assert_eq!(config.namespace, "centaur-test");
         assert_eq!(config.image_pull_policy.as_deref(), Some("IfNotPresent"));
+        assert_eq!(
+            config.image_pull_secrets,
+            vec!["github-access-token-read-packages", "extra-secret"]
+        );
         assert_eq!(config.ready_timeout, Duration::from_secs(42));
         assert!(config.iron_proxy.is_none());
+    }
+
+    #[test]
+    fn agent_k8s_workflow_host_mounts_overlay_workflows() {
+        let _overlay_image = EnvGuard::set("CENTAUR_OVERLAY_IMAGE", "ghcr.io/example/overlay:test");
+        let _overlay_pull_policy = EnvGuard::set("CENTAUR_OVERLAY_IMAGE_PULL_POLICY", "Always");
+        let _overlay_source_path = EnvGuard::set("CENTAUR_OVERLAY_IMAGE_SOURCE_PATH", "/overlay");
+        let _workflow_dirs =
+            EnvGuard::set("WORKFLOW_DIRS", "/app/workflows:/app/overlay/workflows");
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "WORKFLOW_DIRS")
+                .map(|env| env.value.as_str()),
+            Some("/opt/centaur/workflows:/opt/centaur/overlay/workflows")
+        );
+        let overlay = spec.overlay.as_ref().expect("overlay image configured");
+        assert_eq!(overlay.image, "ghcr.io/example/overlay:test");
+        assert_eq!(overlay.source_path, "/overlay");
+        assert_eq!(overlay.mount_path, "/opt/centaur/overlay");
+        assert_eq!(overlay.image_pull_policy.as_deref(), Some("Always"));
+    }
+
+    #[test]
+    fn agent_k8s_workflow_host_mounts_repos_and_tool_env() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+            "--tools-path",
+            "/home/agent/github/paradigmxyz/centaur/tools",
+            "--tools-overlay-path",
+            "/home/agent/github/tempoxyz/centaur-tempo/tools",
+            "--session-sandbox-passthrough-env",
+            "TOOLS_PATH,TOOLS_OVERLAY_PATH",
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_REPOS_MOUNT_PATH
+                && mount.read_only
+                && mount.kind
+                    == MountKind::Bind {
+                        source_path: "/var/lib/centaur/repos".to_owned(),
+                    }
+        }));
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "TOOLS_PATH")
+                .map(|env| env.value.as_str()),
+            Some("/home/agent/github/paradigmxyz/centaur/tools")
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "TOOLS_OVERLAY_PATH")
+                .map(|env| env.value.as_str()),
+            Some("/home/agent/github/tempoxyz/centaur-tempo/tools")
+        );
     }
 
     #[test]
