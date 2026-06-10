@@ -197,6 +197,9 @@ export function sessionStreamError(error: unknown): RustSessionStreamEvent {
   }
 }
 
+/** Largest attachment we are willing to buffer in memory and inline as base64. */
+export const MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024
+
 async function serializeAttachment(attachment: Attachment): Promise<SlackbotV2ApiAttachment> {
   const serialized: SlackbotV2ApiAttachment = {
     fetchMetadata: attachment.fetchMetadata,
@@ -209,9 +212,20 @@ async function serializeAttachment(attachment: Attachment): Promise<SlackbotV2Ap
     width: attachment.width
   }
 
+  if (typeof attachment.size === 'number' && attachment.size > MAX_INLINE_ATTACHMENT_BYTES) {
+    serialized.fetchError = attachmentTooLargeError(attachment.size)
+    return serialized
+  }
+
   try {
     const data = attachment.data ?? (await attachment.fetchData?.())
     if (data) {
+      // Re-check the actual byte count: Slack size metadata can be absent.
+      const byteLength = Buffer.isBuffer(data) ? data.length : data.size
+      if (byteLength > MAX_INLINE_ATTACHMENT_BYTES) {
+        serialized.fetchError = attachmentTooLargeError(byteLength)
+        return serialized
+      }
       serialized.dataBase64 = await bytesToBase64(data)
     }
   } catch (error) {
@@ -219,6 +233,10 @@ async function serializeAttachment(attachment: Attachment): Promise<SlackbotV2Ap
   }
 
   return serialized
+}
+
+function attachmentTooLargeError(bytes: number): string {
+  return `attachment too large to inline (${bytes} bytes > ${MAX_INLINE_ATTACHMENT_BYTES} byte limit)`
 }
 
 async function bytesToBase64(data: Buffer | Blob): Promise<string> {
