@@ -125,16 +125,18 @@ pub async fn register_role(
 }
 
 /// Upsert each secret in ``inputs`` and grant it to the role identified by
-/// ``role_oid``, returning the created grant OIDs in input order. Idempotent
-/// when the inputs carry stable ``foreign_id``s (re-running re-upserts and
-/// re-grants). This is the wire-driving half of [`register_role`], factored out
-/// so callers that build [`SecretInput`]s from a source other than an
-/// iron-proxy fragment (e.g. a tool's ``pyproject.toml``) can reuse it.
+/// ``role_oid``, returning the grant OIDs in input order. Idempotent when the
+/// inputs carry stable ``foreign_id``s: re-running re-upserts each secret and
+/// reuses the role's existing grant for it instead of posting a duplicate.
+/// This is the wire-driving half of [`register_role`], factored out so callers
+/// that build [`SecretInput`]s from a source other than an iron-proxy fragment
+/// (e.g. a tool's ``pyproject.toml``) can reuse it.
 pub async fn grant_inputs_to_role(
     client: &IronControlClient,
     role_oid: &str,
     inputs: Vec<SecretInput>,
 ) -> Result<Vec<String>, IronControlError> {
+    let existing = client.list_role_grants(role_oid).await?;
     let mut grant_ids = Vec::with_capacity(inputs.len());
     for input in inputs {
         let secret = match input {
@@ -157,6 +159,13 @@ pub async fn grant_inputs_to_role(
                 GrantSecret::AwsAuth(client.upsert_aws_auth_secret(&input).await?.id)
             }
         };
+        if let Some(grant) = existing
+            .iter()
+            .find(|grant| grant.secret_id() == Some(secret.oid()))
+        {
+            grant_ids.push(grant.id.clone());
+            continue;
+        }
         let grant = client
             .create_grant(&Grantee::Role(role_oid.to_owned()), &secret)
             .await?;

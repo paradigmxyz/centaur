@@ -503,6 +503,18 @@ pub enum GrantSecret {
 }
 
 impl GrantSecret {
+    /// The wrapped secret OID, whichever secret type it is.
+    pub fn oid(&self) -> &str {
+        match self {
+            Self::Static(id)
+            | Self::GcpAuth(id)
+            | Self::OAuthToken(id)
+            | Self::PgDsn(id)
+            | Self::Hmac(id)
+            | Self::AwsAuth(id) => id,
+        }
+    }
+
     /// Route an OID to its grant variant by prefix (see [`SECRET_TYPES`]).
     /// `None` when the OID matches no known secret type.
     pub fn from_oid(oid: &str) -> Option<Self> {
