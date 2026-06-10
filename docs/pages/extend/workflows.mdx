@@ -10,6 +10,11 @@ engine. They are useful when the task is longer than one agent turn: polling,
 branching, retries, waiting for external events, or coordinating multiple agent
 runs.
 
+Use a workflow when the system needs durable progress rather than a single
+request-response turn. Common examples include scheduled reports, ETL syncs,
+incident monitors, approval gates, webhook-driven triage, long-running research
+jobs, and multi-agent handoffs that need to survive deploys or sandbox restarts.
+
 Put organization workflows in an overlay repo under `workflows/`. See
 [Using an overlay](/extend/overlay) for packaging, mount paths, and chart
 configuration.
@@ -67,6 +72,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 The handler may re-execute after a restart. Put external side effects behind
 `ctx.step(...)` so completed work is not repeated.
 
+These primitives compose into larger automations:
+
+- **Scheduled operations**: run a daily digest, weekly cleanup, periodic sync,
+  or business-hours monitor without a human prompt.
+- **Polling loops**: sleep between checks for CI, blockchain confirmations,
+  billing state, deploy health, or vendor exports.
+- **Event-driven flows**: wait for a webhook, approval, upload, or callback and
+  continue from the last checkpoint.
+- **Fan-out/fan-in orchestration**: start child workflows for independent work
+  and wait for all of them before producing a final result.
+- **Agent orchestration**: use agents for judgment-heavy steps while the
+  workflow owns timing, retries, state, and final delivery.
+
 ## Run a workflow
 
 Create a run through the API:
@@ -88,6 +106,68 @@ Inspect it:
 curl -s "$CENTAUR_API_URL/workflows/runs/$RUN_ID" \
   -H "X-Api-Key: $CENTAUR_API_KEY" | jq
 ```
+
+## Schedule a workflow
+
+Workflows can run from schedule metadata declared beside the handler. Use this
+when a workflow should be started by the platform on a clock instead of by an
+API call or webhook.
+
+```python
+WORKFLOW_NAME = "daily_market_digest"
+
+SCHEDULE = {
+    "type": "cron",
+    "cron": "0 9 * * 1-5",
+    "timezone": "America/New_York",
+    "input": {
+        "channel": "markets",
+        "topic": "overnight market structure and portfolio-relevant news",
+    },
+}
+```
+
+Cron schedules use five fields:
+
+```text
+minute hour day-of-month month day-of-week
+```
+
+Examples:
+
+| Cron | Meaning |
+|------|---------|
+| `0 9 * * 1-5` | 9:00 AM every weekday. |
+| `*/15 * * * *` | Every 15 minutes. |
+| `30 6 * * *` | 6:30 AM every day. |
+| `0 0 1 * *` | Midnight on the first day of every month. |
+
+Always set `timezone` for human-facing schedules. Without an explicit timezone,
+cron expressions are easy to misread across daylight saving changes and
+deployments in different regions.
+
+Use `input` to keep the handler deterministic for scheduled runs: channel names,
+query scopes, tenant IDs, lookback windows, and delivery settings should be
+declared in the schedule instead of inferred from wall-clock state when
+possible.
+
+For workflows that may run longer than their schedule interval, make each tick
+idempotent. Put writes and external API calls in named `ctx.step(...)` blocks,
+derive stable keys from the scheduled window, and have the handler detect
+already-processed periods before starting expensive work.
+
+Interval schedules are useful when exact wall-clock alignment does not matter:
+
+```python
+SCHEDULE = {
+    "type": "interval",
+    "seconds": 300,
+    "input": {"target": "production"},
+}
+```
+
+Use cron for calendar semantics such as "weekday at 9 AM"; use intervals for
+continuous monitors such as "check every five minutes".
 
 ## Expose a workflow as a webhook
 
