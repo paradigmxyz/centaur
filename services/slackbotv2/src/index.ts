@@ -712,7 +712,6 @@ async function renderExecutionStream(
     await renderPlainTextExecutionStream(thread, stream, message, options, trace)
     return
   }
-  const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
@@ -721,12 +720,10 @@ async function renderExecutionStream(
   })
   try {
     const visibleStream = await streamAfterFirstChunk(
-      fallback.collectChatSdk(
-        slackSafeChatSdkStream(
-          codexAppServerToChatSdkStream(
-            fallback.collectSource(stream),
-            rendererOptions(thread, options)
-          )
+      slackSafeChatSdkStream(
+        codexAppServerToChatSdkStream(
+          stream,
+          rendererOptions(thread, options)
         )
       )
     )
@@ -739,7 +736,7 @@ async function renderExecutionStream(
     )
   } catch (error) {
     if (!isSlackMessageTooLongError(error)) throw error
-    await postSlackTooLongFallback(thread, fallback, options, trace)
+    suppressSlackTooLongRender(error, options, trace)
   } finally {
     await setAssistantStatus(thread, '')
   }
@@ -756,7 +753,6 @@ async function renderRecoveredExecutionStream(
     await renderPlainTextExecutionStream(thread, stream, message, options, trace)
     return
   }
-  const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
@@ -765,12 +761,10 @@ async function renderRecoveredExecutionStream(
   })
   try {
     const visibleStream = await streamAfterFirstChunk(
-      fallback.collectChatSdk(
-        slackSafeChatSdkStream(
-          codexAppServerToChatSdkStream(
-            fallback.collectSource(stream),
-            rendererOptions(thread, options)
-          )
+      slackSafeChatSdkStream(
+        codexAppServerToChatSdkStream(
+          stream,
+          rendererOptions(thread, options)
         )
       )
     )
@@ -786,7 +780,7 @@ async function renderRecoveredExecutionStream(
     )
   } catch (error) {
     if (!isSlackMessageTooLongError(error)) throw error
-    await postSlackTooLongFallback(thread, fallback, options, trace)
+    suppressSlackTooLongRender(error, options, trace)
   } finally {
     await setAssistantStatus(thread, '')
   }
@@ -878,21 +872,14 @@ class SlackRenderFallback {
   }
 }
 
-async function postSlackTooLongFallback(
-  thread: Thread,
-  fallback: SlackRenderFallback,
+function suppressSlackTooLongRender(
+  error: unknown,
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
-): Promise<void> {
-  const text = truncateSlackText(
-    fallback.text() || 'Execution completed, but Slack rejected the detailed render as too large.',
-    SLACK_FALLBACK_TEXT_MAX_CHARS,
-    'Slack final answer'
-  )
-  traceLog(options, 'slackbotv2_render_too_long_fallback', trace, {
-    fallback_chars: text.length
+): void {
+  traceLog(options, 'slackbotv2_render_too_long_suppressed', trace, {
+    error: errorMessage(error)
   })
-  await thread.post(text)
 }
 
 async function* slackSafeChatSdkStream(
@@ -975,16 +962,18 @@ function terminalResultText(event: unknown): string {
 }
 
 function isSlackMessageTooLongError(error: unknown): boolean {
-  if (error instanceof Error && error.message.includes('msg_too_long')) return true
+  if (error instanceof Error && isSlackTooLongCode(error.message)) return true
   if (!error || typeof error !== 'object') return false
   const fields = error as Record<string, unknown>
-  if (fields.error === 'msg_too_long') return true
+  if (typeof fields.error === 'string' && isSlackTooLongCode(fields.error)) return true
   const data = fields.data
-  return (
-    Boolean(data) &&
-    typeof data === 'object' &&
-    (data as Record<string, unknown>).error === 'msg_too_long'
-  )
+  if (!data || typeof data !== 'object') return false
+  const dataError = (data as Record<string, unknown>).error
+  return typeof dataError === 'string' && isSlackTooLongCode(dataError)
+}
+
+function isSlackTooLongCode(value: string): boolean {
+  return value.includes('msg_too_long') || value.includes('msg_blocks_too_long')
 }
 
 async function* streamSessionAfterHandoff(

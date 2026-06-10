@@ -640,7 +640,7 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
-  it('posts a visible final-answer fallback when Slack rejects the stream as too long', async () => {
+  it('does not post a duplicate final-answer fallback when Slack rejects the stream as too long', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
@@ -654,7 +654,7 @@ describe('slackbotv2', () => {
     const response = await bot.app.request(
       '/api/webhooks/slack',
       signedSlackEvent({
-        event_id: 'Ev-slackbotv2-msg-too-long-fallback',
+        event_id: 'Ev-slackbotv2-msg-too-long-suppressed',
         event: {
           type: 'app_mention',
           user: USER_ID,
@@ -688,14 +688,17 @@ describe('slackbotv2', () => {
       })
     )
     codexApi.emitSessionEvent(key, 'session.execution_completed', {
-      execution_id: 'exe-msg-too-long-fallback',
+      execution_id: 'exe-msg-too-long-suppressed',
       status: 'completed',
       result_text: 'TOO_LONG_FALLBACK_VISIBLE'
     })
 
     await Promise.all(waits)
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
-    expect(await threadText(parent.ts)).toContain('TOO_LONG_FALLBACK_VISIBLE')
+    const visibleFinalReplies = (await threadTexts(parent.ts)).filter(text =>
+      text.includes('TOO_LONG_FALLBACK_VISIBLE')
+    )
+    expect(visibleFinalReplies).toHaveLength(1)
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
       expect.objectContaining({
