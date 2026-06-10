@@ -226,7 +226,9 @@ def main() -> int:
     index_path = bin_dir / ".centaur-tools.json"
     index_path.write_text(json.dumps(list(scripts.values()), indent=2, sort_keys=True) + "\n")
     _write_catalog(bin_dir / "centaur-tools", index_path, pythonpath)
-    print(f"installed {len(scripts)} Centaur tool CLI shims into {bin_dir}")
+    # stdout is reserved for harness JSONL output (the session stdout pump streams
+    # it to clients); write bootstrap notices to stderr so they never pollute it.
+    print(f"installed {len(scripts)} Centaur tool CLI shims into {bin_dir}", file=sys.stderr)
     return 0
 
 

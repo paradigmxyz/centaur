@@ -570,7 +570,9 @@ function isTerminalCodexOutputLine(line: string): boolean {
   try {
     payload = JSON.parse(line)
   } catch {
-    return true
+    // Non-JSON stdout lines (e.g. sandbox bootstrap notices) are noise, not a
+    // signal that the turn finished; treating them as terminal drops the answer.
+    return false
   }
   if (!isJsonObject(payload)) return false
 

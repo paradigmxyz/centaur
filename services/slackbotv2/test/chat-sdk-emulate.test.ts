@@ -332,6 +332,42 @@ describe('slackbotv2', () => {
     })
   })
 
+  it('ignores non-JSON sandbox bootstrap output lines instead of ending the stream', async () => {
+    codexApi.autoRespond = false
+
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> answer after bootstrap noise`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-bootstrap-noise',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> answer after bootstrap noise`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+
+    const key = threadKey(mention.ts)
+    codexApi.emitOutputLine(key, 'installed 62 Centaur tool CLI shims into /home/agent/.local/bin')
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Answer despite bootstrap noise.'))
+
+    await Promise.all(waits)
+    expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
+    expect(await threadText(mention.ts)).toContain('Answer despite bootstrap noise.')
+    expect(await threadText(mention.ts)).not.toContain(
+      'Execution completed, but no final text was captured.'
+    )
+  })
+
   it('forwards subscribed messages to /messages without executing during a stream', async () => {
     codexApi.autoRespond = false
 
