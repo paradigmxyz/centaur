@@ -813,6 +813,123 @@ describe('slackbotv2', () => {
     expect(await threadText(parent.ts)).toContain('TASK_STREAM_CONTINUATION_OK')
   })
 
+  it('does not seal a Slack stream continuation while task cards are still open', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a task boundary page.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> run steps with one slow command`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-open-task-stream-continuation',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> run steps with one slow command`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    for (let index = 1; index <= 43; index += 1) {
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: `cmd-before-${index}`,
+            type: 'commandExecution',
+            command: `printf before-${index}`,
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        })
+      )
+    }
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.started',
+        item: {
+          id: 'cmd-open',
+          type: 'commandExecution',
+          command: 'sleep 1 && true',
+          status: 'inProgress'
+        }
+      })
+    )
+    for (let index = 1; index <= 8; index += 1) {
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: `cmd-during-${index}`,
+            type: 'commandExecution',
+            command: `printf during-${index}`,
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        })
+      )
+    }
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-open',
+          type: 'commandExecution',
+          command: 'sleep 1 && true',
+          status: 'completed',
+          aggregatedOutput: ''
+        }
+      })
+    )
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('OPEN_TASK_PAGE_OK'))
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-open-task-page',
+      status: 'completed',
+      result_text: 'OPEN_TASK_PAGE_OK'
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts.length).toBeGreaterThan(1)
+
+    const transcriptWithOpenTask = transcripts.find(transcript =>
+      transcript.chunks.some(chunk => chunk.type === 'task_update' && chunk.id === 'cmd-open')
+    )
+    expect(transcriptWithOpenTask).toBeDefined()
+    expect(transcriptWithOpenTask!.chunks).toContainEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        id: 'cmd-open',
+        status: 'in_progress'
+      })
+    )
+    expect(transcriptWithOpenTask!.chunks).toContainEqual(
+      expect.objectContaining({
+        type: 'task_update',
+        id: 'cmd-open',
+        status: 'complete'
+      })
+    )
+    expect(await threadText(parent.ts)).toContain('OPEN_TASK_PAGE_OK')
+  })
+
   it('does not create an empty Slack stream before the first visible renderer chunk', async () => {
     codexApi.autoRespond = false
 
