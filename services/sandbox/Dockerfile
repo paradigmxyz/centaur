@@ -212,13 +212,17 @@ COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 USER agent
 WORKDIR /home/agent
 
-COPY --link --chown=1001:1001 crates/harness-server/ /tmp/harness-server/
-RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
+# Build from a bind mount instead of COPY: COPY --link into /tmp rebuilds the
+# parent directory chain in its own layer, clobbering /tmp's root:root 1777
+# sticky metadata with agent:agent 0755, which broke /tmp writes for any
+# non-1001 user (e.g. the root-with-dropped-caps repo-cache). A bind mount
+# leaves no trace in the image and caches on source content just like COPY.
+RUN --mount=type=bind,source=crates/harness-server,target=/harness-server-src \
+    --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
     CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
-    cargo install --locked --path /tmp/harness-server --root /home/agent/.local \
-    && rm -rf /tmp/harness-server
+    cargo install --locked --path /harness-server-src --root /home/agent/.local
 
 # No RUN instructions after these — all repo-local content at the very end.
 COPY --link --chown=1001:1001 .agents/skills/ /home/agent/.agents/skills/
