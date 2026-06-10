@@ -488,6 +488,7 @@ fn build_agent_sandbox(
         "containers": [container],
         "restartPolicy": "Never",
         "automountServiceAccountToken": false,
+        "enableServiceLinks": false,
     });
     insert_optional(
         &mut pod_spec,
@@ -731,6 +732,10 @@ mod tests {
             1
         );
         let container = &sandbox.spec.pod_template.spec.containers[0];
+        assert_eq!(
+            sandbox.spec.pod_template.spec.enable_service_links,
+            Some(false)
+        );
         assert_eq!(container.image.as_deref(), Some("centaur-agent:latest"));
         assert_eq!(container.stdin, Some(true));
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);

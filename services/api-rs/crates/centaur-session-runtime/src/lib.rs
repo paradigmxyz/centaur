@@ -37,7 +37,7 @@ use tracing::{Instrument, Span, error, info, info_span, warn};
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
-const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
+const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -3121,7 +3121,7 @@ mod tests {
     fn stdout_pump_max_line_error_is_stable() {
         assert_eq!(
             stdout_pump_error_message(&LinesCodecError::MaxLineLengthExceeded),
-            "sandbox stdout line exceeded maximum length of 1048576 bytes"
+            "sandbox stdout line exceeded maximum length of 8388608 bytes"
         );
     }
 
