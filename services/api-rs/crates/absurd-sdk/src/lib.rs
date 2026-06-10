@@ -2002,9 +2002,11 @@ mod tests {
                 .fetch_optional(&pool)
                 .await?;
         if has_schema.is_none() {
-            sqlx::raw_sql(include_str!("../../../sql/absurd.sql"))
-                .execute(&pool)
-                .await?;
+            sqlx::raw_sql(include_str!(
+                "../../centaur-session-sqlx/migrations/0007_absurd_workflows.sql"
+            ))
+            .execute(&pool)
+            .await?;
         }
 
         Ok(Some(pool))

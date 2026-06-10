@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, env, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use absurd::{
-    Client, ClientOptions, CreateQueueOptions, SpawnOptions, StepHandle, TaskContext,
-    TaskRegistrationOptions, Worker, WorkerOptions,
+    Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy, SpawnOptions, StepHandle,
+    TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
 };
 use centaur_sandbox_core::SandboxSpec;
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
@@ -1194,7 +1194,13 @@ async fn spawn_schedule_tick(
                     schedule.schedule_id,
                     scheduled_at.to_rfc3339()
                 )),
-                max_attempts: Some(3),
+                max_attempts: Some(10),
+                retry_strategy: Some(RetryStrategy {
+                    kind: RetryKind::Fixed,
+                    base_seconds: Some(30.0),
+                    factor: None,
+                    max_seconds: None,
+                }),
                 ..SpawnOptions::default()
             },
         )
