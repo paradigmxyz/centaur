@@ -26,6 +26,15 @@ pub struct CreateExecutionResult {
     pub created: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct ClaimExecutionResult {
+    pub execution: SessionExecution,
+    /// True only when this call transitioned the execution from `queued` to
+    /// `running`. False means another request already claimed it (or it is
+    /// terminal), so the caller must not drive the execution.
+    pub claimed: bool,
+}
+
 #[derive(Clone)]
 pub struct PgSessionStore {
     pool: PgPool,
@@ -258,7 +267,7 @@ impl PgSessionStore {
     pub async fn mark_execution_running(
         &self,
         execution_id: &str,
-    ) -> Result<SessionExecution, SessionStoreError> {
+    ) -> Result<ClaimExecutionResult, SessionStoreError> {
         let maybe_row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
             update session_executions
@@ -274,6 +283,9 @@ impl PgSessionStore {
         .await?;
 
         let Some(row) = maybe_row else {
+            // The execution was not queued: a concurrent request already
+            // claimed it or it reached a terminal state. Report the current
+            // row without taking ownership.
             let row = sqlx::query_as::<_, SessionExecutionRow>(
                 r#"
                 select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
@@ -284,12 +296,18 @@ impl PgSessionStore {
             .bind(execution_id)
             .fetch_one(&self.pool)
             .await?;
-            return row.try_into();
+            return Ok(ClaimExecutionResult {
+                execution: row.try_into()?,
+                claimed: false,
+            });
         };
 
         self.set_session_status(&row.thread_key, SessionStatus::Executing)
             .await?;
-        row.try_into()
+        Ok(ClaimExecutionResult {
+            execution: row.try_into()?,
+            claimed: true,
+        })
     }
 
     pub async fn complete_execution(

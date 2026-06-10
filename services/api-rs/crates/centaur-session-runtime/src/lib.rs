@@ -425,20 +425,25 @@ impl SessionRuntime {
                 );
                 return Ok(execution.execution);
             }
-            let execution = self
+            let claim = self
                 .store
                 .mark_execution_running(&execution.execution.execution_id)
                 .await?;
+            let execution = claim.execution;
             span.record("centaur.execution_id", execution.execution_id.as_str());
             span.record("execution_id", execution.execution_id.as_str());
-            if execution.status != ExecutionStatus::Running {
+            if !claim.claimed {
+                // A concurrent request with the same idempotency key claimed
+                // the execution first (or it already reached a terminal
+                // state). Do not drive it again — return the current row so
+                // the caller can attach to the event stream.
                 info!(
                     component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_execute_not_running",
+                    event = "session_execute_not_claimed",
                     thread_key = %thread_key,
                     execution_id = %execution.execution_id,
                     status = %execution.status,
-                    "execution is not running after claim"
+                    "execution was already claimed or terminal"
                 );
                 return Ok(execution);
             }
