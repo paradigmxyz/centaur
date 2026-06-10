@@ -80,6 +80,34 @@ afterAll(async () => {
 })
 
 describe('slackbotv2', () => {
+  it('accepts Slack events on the legacy route', async () => {
+    const parent = await postUserMessage('Legacy route context.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> use the legacy route`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/slack/events',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-legacy-route',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> use the legacy route`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.executes[0]?.threadKey).toBe(threadKey(parent.ts))
+  })
+
   it('syncs thread context, forwards subscribed messages, and renders execute streams', async () => {
     const parent = await postUserMessage('The deploy context is above.')
     const firstMention = await postUserMessage(
