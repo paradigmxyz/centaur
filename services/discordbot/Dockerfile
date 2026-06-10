@@ -8,6 +8,7 @@ RUN bun install -g pnpm@10.28.1
 # Workspace manifests first so dependency install is a cached layer. discordbot depends on the
 # @centaur/* workspace packages, so they must be present for pnpm to link the `workspace:*` ranges.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
 COPY packages/ packages/
 COPY services/discordbot/package.json services/discordbot/package.json
 RUN pnpm install --filter discordbot --prod --frozen-lockfile

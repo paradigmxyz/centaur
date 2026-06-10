@@ -1,0 +1,93 @@
+dns:
+  listen: ":53"
+  proxy_ip: "127.0.0.1"
+
+proxy:
+  tunnel_listen: ":8080"
+
+management:
+  listen: ":9092"
+  api_key_env: "IRON_MANAGEMENT_API_KEY"
+
+tls:
+  mode: "mitm"
+  ca_cert: "/etc/iron-proxy/ca.crt"
+  ca_key: "/etc/iron-proxy/ca.key"
+
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "*"
+  - name: header_allowlist
+    config:
+      headers:
+        - "host"
+        - "content-type"
+        - "content-length"
+        - "accept"
+        - "accept-encoding"
+        - "accept-language"
+        - "authorization"
+        - "jwt"
+        - "anthropic-version"
+        - "anthropic-beta"
+        - "openai-organization"
+        - "openai-project"
+        - "chatgpt-account-id"
+        - "x-request-id"
+        - "x-stainless-arch"
+        - "x-stainless-os"
+        - "x-stainless-lang"
+        - "x-stainless-runtime"
+        - "x-stainless-runtime-version"
+        - "x-stainless-package-version"
+        - "x-stainless-retry-count"
+        - "connection"
+        - "transfer-encoding"
+        - "te"
+        - "upgrade"
+        - "sec-websocket-key"
+        - "sec-websocket-version"
+        - "sec-websocket-protocol"
+        - "sec-websocket-extensions"
+        - "cache-control"
+        - "pragma"
+        - "if-none-match"
+        - "if-modified-since"
+        - "range"
+        - "cookie"
+        - "notion-version"
+        - "api-version"
+        - "x-github-api-version"
+        - "api-key"
+        - "apikey"
+        - "accesskey"
+        - "api-access-key"
+        - "api-signature"
+        - "api-timestamp"
+        - "fx-access-key"
+        - "fx-access-sign"
+        - "fx-access-timestamp"
+        - "fx-access-passphrase"
+        - "x-cb-access-passphrase"
+        - "x-cb-access-signature"
+        - "x-cb-access-timestamp"
+        - "addepar-firm"
+        - "clientid"
+        - "x-as-user-email"
+        - "/^x-codex-.*$/"
+        - "/^x-openai-.*$/"
+        # AWS SigV4 request headers (x-amz-target, x-amz-date,
+        # x-amz-content-sha256, x-amz-security-token) for the aws_auth transform.
+        - "/^x-amz-.*$/"
+        # AWS SDK headers that the SDK signer folds into the SigV4 signed-headers
+        # set (amz-sdk-request, amz-sdk-invocation-id, and x-amzn-query-mode for
+        # CloudWatch's query-JSON protocol). aws_auth signs them, so they must
+        # survive egress filtering or AWS rejects with InvalidSignatureException.
+        - "/^amz-sdk-.*$/"
+        - "/^x-amzn-.*$/"
+        - "/^x-[a-z0-9-]*(api-key|apikey|secret|token|auth|key)$/"
+
+log:
+  level: "info"
