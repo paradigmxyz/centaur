@@ -965,6 +965,23 @@ def drain_until_turn_done() -> None:
             return
 
 
+def export_slack_thread_env(thread_key: str) -> None:
+    """Derive SLACK_CHANNEL/SLACK_THREAD_TS from a Slack thread key so tools
+    like slack-upload can target the current thread.
+
+    Supports both key shapes: ``slack:<channel>:<thread_ts>`` (api-rs) and
+    ``slack:<team>:<channel>:<thread_ts>`` (legacy api). Runs before the app
+    server first starts, so tool subprocesses inherit the variables.
+    """
+    parts = thread_key.split(":")
+    if parts[0] != "slack" or len(parts) not in (3, 4):
+        return
+    channel, thread_ts = parts[-2], parts[-1]
+    if channel and thread_ts:
+        os.environ["SLACK_CHANNEL"] = channel
+        os.environ["SLACK_THREAD_TS"] = thread_ts
+
+
 def handle_input(turn_input: dict[str, Any]) -> None:
     global ACTIVE_TURN_ID, CURRENT_LLM_INPUT_TEXT, CURRENT_LLM_OUTPUT_TEXT
     global CURRENT_TRACE_METADATA
@@ -978,6 +995,7 @@ def handle_input(turn_input: dict[str, Any]) -> None:
     thread_key = str(turn_input.get("thread_key") or "").strip()
     if thread_key:
         os.environ["CENTAUR_THREAD_KEY"] = thread_key
+        export_slack_thread_env(thread_key)
     configure_trace_context_for_startup(turn_input.get("trace_id"))
     configure_traceparent(turn_input.get("traceparent"))
     configure_codex_otel_for_startup(
