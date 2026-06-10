@@ -1967,7 +1967,7 @@ fn run_time_now_tool() -> ToolResult {
         output: json!({
             "utc": now.to_rfc3339(),
             "unix_ms": now.timestamp_millis(),
-            "source": "centaur-workflows-absurd-poc",
+            "source": "centaur-workflows-poc",
         }),
     }
 }

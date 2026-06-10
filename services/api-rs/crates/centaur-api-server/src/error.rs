@@ -6,7 +6,7 @@ use axum::{
 use centaur_session_core::ThreadKeyError;
 use centaur_session_runtime::SessionRuntimeError;
 use centaur_session_sqlx::SessionStoreError;
-use centaur_workflows_absurd::WorkflowRuntimeError;
+use centaur_workflows::WorkflowRuntimeError;
 use serde_json::json;
 use thiserror::Error;
 

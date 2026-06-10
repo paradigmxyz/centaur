@@ -26,7 +26,7 @@ use centaur_telemetry::{
     PrometheusHandle, http_status_class, prometheus_handle, record_http_request_finished,
     record_http_request_started,
 };
-use centaur_workflows_absurd::{
+use centaur_workflows::{
     CreateWorkflowRunRequest, WorkflowRuntime, WorkflowWebhookAuth, WorkflowWebhookSpec,
     WorkflowWebhookTriggerKey,
 };

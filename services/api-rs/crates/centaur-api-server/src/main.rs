@@ -5,7 +5,7 @@ use centaur_api_server::build_router_with_session_and_workflow_runtime;
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{TelemetryConfig, init_telemetry};
-use centaur_workflows_absurd::WorkflowRuntime;
+use centaur_workflows::WorkflowRuntime;
 use clap::Parser;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -78,7 +78,7 @@ pub(crate) enum ServerError {
     #[error(transparent)]
     Store(#[from] centaur_session_sqlx::SessionStoreError),
     #[error(transparent)]
-    Workflows(#[from] centaur_workflows_absurd::WorkflowRuntimeError),
+    Workflows(#[from] centaur_workflows::WorkflowRuntimeError),
     #[error(transparent)]
     KubeConfig(#[from] kube::config::KubeconfigError),
     #[error(transparent)]

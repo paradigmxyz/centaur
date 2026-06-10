@@ -22,7 +22,7 @@ use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::WarmPoolConfig;
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::SandboxWorkloadMode;
-use centaur_workflows_absurd::WorkflowHostSandboxRuntime;
+use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::info;
 

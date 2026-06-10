@@ -103,7 +103,7 @@ Absurd queue: centaur_workflows
 
 ### Rust Runtime
 
-`centaur-workflows-absurd` owns:
+`centaur-workflows` owns:
 
 - workflow run creation
 - Absurd queue setup

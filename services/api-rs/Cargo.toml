@@ -15,7 +15,7 @@ members = [
     "crates/centaur-session-runtime",
     "crates/centaur-session-sqlx",
     "crates/centaur-telemetry",
-    "crates/centaur-workflows-absurd",
+    "crates/centaur-workflows",
 ]
 resolver = "3"
 
@@ -41,7 +41,7 @@ centaur-session-core = { path = "crates/centaur-session-core" }
 centaur-session-runtime = { path = "crates/centaur-session-runtime" }
 centaur-session-sqlx = { path = "crates/centaur-session-sqlx" }
 centaur-telemetry = { path = "crates/centaur-telemetry" }
-centaur-workflows-absurd = { path = "crates/centaur-workflows-absurd" }
+centaur-workflows = { path = "crates/centaur-workflows" }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10.4"

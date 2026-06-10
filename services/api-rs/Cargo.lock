@@ -296,7 +296,7 @@ dependencies = [
  "centaur-session-runtime",
  "centaur-session-sqlx",
  "centaur-telemetry",
- "centaur-workflows-absurd",
+ "centaur-workflows",
  "clap",
  "eventsource-stream",
  "futures-util",
@@ -498,7 +498,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "centaur-workflows-absurd"
+name = "centaur-workflows"
 version = "0.1.0"
 dependencies = [
  "absurd-sdk",
