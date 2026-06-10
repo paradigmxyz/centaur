@@ -562,31 +562,42 @@ async function recoverRenderObligations(
   })
 
   for (const threadId of threadIds) {
-    const thread = chat.thread(threadId)
-    const threadState = await thread.state
-    const obligation = threadState?.renderObligation
-    if (!obligation) continue
+    try {
+      const thread = chat.thread(threadId)
+      const threadState = await thread.state
+      const obligation = threadState?.renderObligation
+      if (!obligation) continue
 
-    const leaseToken = randomUUID()
-    const leaseAcquired = await state.setIfNotExists(
-      renderRecoveryLeaseKey(threadId),
-      leaseToken,
-      RENDER_RECOVERY_LEASE_TTL_MS
-    )
-    if (!leaseAcquired) {
-      traceLog(options, 'slackbotv2_render_recovery_lease_skipped', undefined, {
+      const leaseToken = randomUUID()
+      const leaseAcquired = await state.setIfNotExists(
+        renderRecoveryLeaseKey(threadId),
+        leaseToken,
+        RENDER_RECOVERY_LEASE_TTL_MS
+      )
+      if (!leaseAcquired) {
+        traceLog(options, 'slackbotv2_render_recovery_lease_skipped', undefined, {
+          thread_id: threadId
+        })
+        continue
+      }
+
+      try {
+        if (await recoverRenderObligation(chat, state, options, threadId, obligation)) {
+          deferredCount += 1
+        }
+      } finally {
+        const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
+        if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
+      }
+    } catch (error) {
+      // One thread's corrupt state or failed render must not abort the scan:
+      // log it, count it as deferred so a later pass retries it, and keep
+      // recovering the remaining threads.
+      deferredCount += 1
+      traceLog(options, 'slackbotv2_render_recovery_thread_failed', undefined, {
+        error: errorMessage(error),
         thread_id: threadId
       })
-      continue
-    }
-
-    try {
-      if (await recoverRenderObligation(chat, state, options, threadId, obligation)) {
-        deferredCount += 1
-      }
-    } finally {
-      const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
-      if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
     }
   }
   return deferredCount
