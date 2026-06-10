@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { CodexAppServerRendererEventMapper, codexAppServerToChatSdkStream } from './codex-app-server'
+import {
+  CodexAppServerRendererEventMapper,
+  codexAppServerToChatSdkStream,
+  codexAppServerToRendererEvents
+} from './codex-app-server'
 import type { RendererTaskBlock } from './types'
 
 describe('CodexAppServerRendererEventMapper', () => {
@@ -497,3 +501,25 @@ async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
 async function* toAsyncIterable<T>(source: Iterable<T>): AsyncIterable<T> {
   for (const item of source) yield item
 }
+
+describe('codexAppServerToRendererEvents', () => {
+  it('flushes buffered answer text and emits renderer.done when the source ends without a terminal event', () => {
+    const events = codexAppServerToRendererEvents([
+      {
+        type: 'item.started',
+        item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer' }
+      },
+      {
+        type: 'item.agentMessage.delta',
+        itemId: 'msg-1',
+        delta: 'Final answer text.'
+      }
+    ])
+
+    const done = events.find(event => event.type === 'renderer.done')
+    expect(done).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'Final answer text.'
+    })
+  })
+})

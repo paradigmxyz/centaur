@@ -567,7 +567,11 @@ export function codexAppServerToRendererEvents(
   sources: Array<ServerNotification | RustSessionStreamEvent | unknown>
 ): RendererEvent[] {
   const mapper = new CodexAppServerRendererEventMapper()
-  return sources.flatMap(source => mapper.process(source))
+  const events = sources.flatMap(source => mapper.process(source))
+  // Flush buffered answer text and emit renderer.done for sources that end
+  // without a terminal event. No-op when a terminal event already completed
+  // the stream.
+  return events.concat(mapper.flush())
 }
 
 export async function* codexAppServerToChatSdkStream(
