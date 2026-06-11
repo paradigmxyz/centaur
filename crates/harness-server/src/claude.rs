@@ -11,8 +11,6 @@ use crate::{
     command_from_override, user_input_to_anthropic_content,
 };
 
-const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
-
 /// Defers agent text until the owning message's fate is known, so agentMessage
 /// items can be emitted with an authoritative stop reason. Claude's per-block
 /// `assistant` events leave `stop_reason` null, and downstream renderers treat
@@ -204,8 +202,13 @@ impl HarnessServer for ClaudeCodeHarness {
         "claude-code"
     }
 
+    /// Empty when no explicit override exists: the model is owned by the
+    /// in-image harness config (harness/claude/settings.json), mirroring how
+    /// codex reads harness/codex/config.toml. An empty model means
+    /// `command_for_turn` omits `--model` so the CLI falls through to
+    /// settings.json.
     fn default_model(&self) -> String {
-        env::var("CLAUDE_MODEL").unwrap_or_else(|_| DEFAULT_CLAUDE_MODEL.to_string())
+        env::var("CLAUDE_MODEL").unwrap_or_default()
     }
 
     fn default_model_provider(&self) -> &'static str {
@@ -230,9 +233,10 @@ impl HarnessServer for ClaudeCodeHarness {
             "--dangerously-skip-permissions",
             "--permission-mode",
             "bypassPermissions",
-            "--model",
-            &state.model,
         ]);
+        if !state.model.is_empty() {
+            command.args(["--model", &state.model]);
+        }
         if PathBuf::from("AGENTS.md").is_file() {
             command.args(["--append-system-prompt-file", "AGENTS.md"]);
         }
