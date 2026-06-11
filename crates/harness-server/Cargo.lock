@@ -1539,6 +1539,7 @@ name = "harness-server"
 version = "0.1.0"
 dependencies = [
  "allocative",
+ "base64",
  "clap",
  "codex-app-server-protocol",
  "codex-protocol",

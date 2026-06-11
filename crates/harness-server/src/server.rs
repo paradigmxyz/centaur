@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_app_server_protocol::{
     ApprovalsReviewer, AskForApproval, ClientResponse, InitializeResponse, JSONRPCError,
     JSONRPCErrorError, JSONRPCMessage, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxPolicy,
@@ -74,6 +77,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     let mut state = initial_blocks_thread_state(harness)?;
+    let mut blocks_state = BlocksState::default();
     let (_request_tx, request_rx) = mpsc::channel();
 
     for raw in stdin.lock().lines() {
@@ -83,7 +87,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
             continue;
         }
 
-        match parse_blocks_line(trimmed) {
+        match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
             Ok(BlocksCommand::User {
                 input,
                 client_user_message_id,
@@ -107,6 +111,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
             Ok(BlocksCommand::Interrupt) => {
                 eprintln!("blocks interrupt ignored: no active stdin reader while a turn runs");
             }
+            Ok(BlocksCommand::AttachmentChunk) => {}
             Err(error) => {
                 eprintln!("invalid blocks input: {error:#}");
                 write_blocks_error(&mut stdout, &state.id, "input", error.to_string())?;
@@ -193,6 +198,20 @@ pub(crate) enum BlocksCommand {
         model: Option<String>,
     },
     Interrupt,
+    AttachmentChunk,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BlocksState {
+    uploads: HashMap<String, StagedAttachment>,
+    staged: HashMap<String, StagedAttachment>,
+}
+
+#[derive(Debug, Clone)]
+struct StagedAttachment {
+    path: PathBuf,
+    mime_type: Option<String>,
+    attachment_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +228,18 @@ struct BlocksLine {
     client_user_message_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(rename = "attachmentId", default)]
+    attachment_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(rename = "mimeType", default)]
+    mime_type: Option<String>,
+    #[serde(rename = "attachmentType", default)]
+    attachment_type: Option<String>,
+    #[serde(rename = "final", default)]
+    final_chunk: bool,
+    #[serde(rename = "dataBase64", default)]
+    data_base64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,11 +253,50 @@ struct BlocksMessage {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum BlocksContent {
-    Inputs(Vec<UserInput>),
+    Inputs(Vec<BlocksInput>),
     Text(String),
 }
 
-pub(crate) fn parse_blocks_line(line: &str) -> Result<BlocksCommand> {
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BlocksInput {
+    UserInput(UserInput),
+    Attachment(AttachmentBlock),
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentBlock {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(rename = "mimeType", default)]
+    mime_type: Option<String>,
+    #[serde(rename = "attachment_type", default)]
+    attachment_type: Option<String>,
+    #[serde(rename = "stagedAttachmentId", default)]
+    staged_attachment_id: Option<String>,
+    #[serde(rename = "dataBase64", default)]
+    data_base64: Option<String>,
+    #[serde(rename = "localPath", default)]
+    local_path: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(rename = "fetchError", default)]
+    fetch_error: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[cfg(test)]
+fn parse_blocks_line(line: &str) -> Result<BlocksCommand> {
+    parse_blocks_line_with_state(line, &mut BlocksState::default())
+}
+
+pub(crate) fn parse_blocks_line_with_state(
+    line: &str,
+    state: &mut BlocksState,
+) -> Result<BlocksCommand> {
     let parsed: BlocksLine =
         serde_json::from_str(line).map_err(|source| HarnessServerError::InvalidBlocksInput {
             message: source.to_string(),
@@ -240,7 +310,7 @@ pub(crate) fn parse_blocks_line(line: &str) -> Result<BlocksCommand> {
                 .and_then(|message| message.content.as_ref())
                 .or(parsed.content.as_ref());
             let mut input = match content {
-                Some(content) => blocks_content_to_user_input(content),
+                Some(content) => blocks_content_to_user_input(content, state)?,
                 None => parsed
                     .text
                     .map(|text| {
@@ -268,6 +338,10 @@ pub(crate) fn parse_blocks_line(line: &str) -> Result<BlocksCommand> {
                     .filter(|model| !model.is_empty()),
             })
         }
+        "attachment.chunk" => {
+            handle_attachment_chunk(parsed, state)?;
+            Ok(BlocksCommand::AttachmentChunk)
+        }
         "interrupt" => Ok(BlocksCommand::Interrupt),
         kind => Err(HarnessServerError::InvalidBlocksInput {
             message: format!("unsupported blocks input type `{kind}`"),
@@ -275,14 +349,260 @@ pub(crate) fn parse_blocks_line(line: &str) -> Result<BlocksCommand> {
     }
 }
 
-fn blocks_content_to_user_input(content: &BlocksContent) -> Vec<UserInput> {
+fn blocks_content_to_user_input(
+    content: &BlocksContent,
+    state: &mut BlocksState,
+) -> Result<Vec<UserInput>> {
     match content {
-        BlocksContent::Inputs(input) => input.clone(),
-        BlocksContent::Text(text) => vec![UserInput::Text {
+        BlocksContent::Inputs(input) => input
+            .iter()
+            .map(|item| blocks_input_to_user_input(item, state))
+            .collect::<Result<Vec<_>>>()
+            .map(|items| items.into_iter().flatten().collect()),
+        BlocksContent::Text(text) => Ok(vec![UserInput::Text {
             text: text.clone(),
             text_elements: Vec::new(),
-        }],
+        }]),
     }
+}
+
+fn blocks_input_to_user_input(
+    input: &BlocksInput,
+    state: &mut BlocksState,
+) -> Result<Vec<UserInput>> {
+    match input {
+        BlocksInput::UserInput(input) => Ok(vec![input.clone()]),
+        BlocksInput::Attachment(block) if block.kind == "attachment" => {
+            attachment_block_to_user_input(block, state)
+        }
+        BlocksInput::Attachment(block) => Ok(vec![UserInput::Text {
+            text: format!("[Unsupported attachment block type: {}]", block.kind),
+            text_elements: Vec::new(),
+        }]),
+    }
+}
+
+fn attachment_block_to_user_input(
+    block: &AttachmentBlock,
+    state: &mut BlocksState,
+) -> Result<Vec<UserInput>> {
+    let name = non_empty(block.name.as_deref()).unwrap_or("attachment");
+    let mime_type = non_empty(block.mime_type.as_deref());
+    let attachment_type = non_empty(block.attachment_type.as_deref());
+
+    if let Some(local_path) =
+        non_empty(block.local_path.as_deref()).or(non_empty(block.path.as_deref()))
+    {
+        let path = PathBuf::from(local_path);
+        if path.exists() {
+            return Ok(local_file_inputs(
+                &path,
+                mime_type,
+                is_image_attachment(attachment_type, mime_type),
+            ));
+        }
+    }
+
+    if let Some(staged_attachment_id) = non_empty(block.staged_attachment_id.as_deref()) {
+        if let Some(staged) = state.staged.get(staged_attachment_id) {
+            if staged.path.exists() {
+                return Ok(local_file_inputs(
+                    &staged.path,
+                    staged.mime_type.as_deref().or(mime_type),
+                    is_image_attachment(
+                        staged.attachment_type.as_deref(),
+                        staged.mime_type.as_deref().or(mime_type),
+                    ),
+                ));
+            }
+        }
+        return Ok(vec![UserInput::Text {
+            text: format!("[Attachment was not staged successfully: {name}]"),
+            text_elements: Vec::new(),
+        }]);
+    }
+
+    if let Some(data_base64) = non_empty(block.data_base64.as_deref()) {
+        let path = write_base64_upload(data_base64, name, mime_type)?;
+        return Ok(local_file_inputs(
+            &path,
+            mime_type,
+            is_image_attachment(attachment_type, mime_type),
+        ));
+    }
+
+    let mut fields = vec![format!("name={name}")];
+    if let Some(mime_type) = mime_type {
+        fields.push(format!("mime={mime_type}"));
+    }
+    if let Some(url) = non_empty(block.url.as_deref()) {
+        fields.push(format!("url={url}"));
+    }
+    if let Some(fetch_error) = non_empty(block.fetch_error.as_deref()) {
+        fields.push(format!("fetch_error={fetch_error}"));
+    }
+    Ok(vec![UserInput::Text {
+        text: format!("[Slack attachment: {}]", fields.join(" ")),
+        text_elements: Vec::new(),
+    }])
+}
+
+fn handle_attachment_chunk(parsed: BlocksLine, state: &mut BlocksState) -> Result<()> {
+    let attachment_id = non_empty(parsed.attachment_id.as_deref()).ok_or_else(|| {
+        HarnessServerError::InvalidBlocksInput {
+            message: "attachment chunk missing attachmentId".to_string(),
+        }
+    })?;
+    let name = non_empty(parsed.name.as_deref()).unwrap_or("attachment");
+    let mime_type = non_empty(parsed.mime_type.as_deref());
+
+    if !state.uploads.contains_key(attachment_id) {
+        let path = unique_upload_path(name, mime_type)?;
+        state.uploads.insert(
+            attachment_id.to_string(),
+            StagedAttachment {
+                path,
+                mime_type: mime_type.map(ToOwned::to_owned),
+                attachment_type: non_empty(parsed.attachment_type.as_deref())
+                    .map(ToOwned::to_owned),
+            },
+        );
+    }
+
+    if let Some(data_base64) = non_empty(parsed.data_base64.as_deref()) {
+        let bytes = BASE64_STANDARD.decode(data_base64).map_err(|source| {
+            HarnessServerError::InvalidBlocksInput {
+                message: format!("invalid attachment chunk for {attachment_id}: {source}"),
+            }
+        })?;
+        let upload = state.uploads.get(attachment_id).expect("upload exists");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&upload.path)?;
+        file.write_all(&bytes)?;
+    }
+
+    if parsed.final_chunk {
+        if let Some(upload) = state.uploads.remove(attachment_id) {
+            state.staged.insert(attachment_id.to_string(), upload);
+        }
+    }
+
+    Ok(())
+}
+
+fn local_file_inputs(path: &Path, mime_type: Option<&str>, is_image: bool) -> Vec<UserInput> {
+    let display_path = path.display();
+    if is_image || mime_type.is_some_and(|value| value.starts_with("image/")) {
+        return vec![
+            UserInput::Text {
+                text: format!("[Attached image saved to {display_path}]"),
+                text_elements: Vec::new(),
+            },
+            UserInput::LocalImage {
+                path: path.to_path_buf(),
+                detail: None,
+            },
+        ];
+    }
+    vec![UserInput::Text {
+        text: format!("[Attached file saved to {display_path}]"),
+        text_elements: Vec::new(),
+    }]
+}
+
+fn write_base64_upload(data_base64: &str, name: &str, mime_type: Option<&str>) -> Result<PathBuf> {
+    let bytes = BASE64_STANDARD.decode(data_base64).map_err(|source| {
+        HarnessServerError::InvalidBlocksInput {
+            message: format!("invalid attachment dataBase64: {source}"),
+        }
+    })?;
+    let path = unique_upload_path(name, mime_type)?;
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+fn unique_upload_path(name: &str, mime_type: Option<&str>) -> Result<PathBuf> {
+    let uploads_dir = uploads_dir();
+    std::fs::create_dir_all(&uploads_dir)?;
+    let mut base = sanitize_upload_name(name);
+    if Path::new(&base).extension().is_none()
+        && let Some(extension) = extension_for_mime_type(mime_type)
+    {
+        base.push_str(extension);
+    }
+    let path = uploads_dir.join(&base);
+    if !path.exists() {
+        return Ok(path);
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment");
+    let suffix = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let suffix = if suffix.is_empty() {
+        String::new()
+    } else {
+        format!(".{suffix}")
+    };
+    Ok(uploads_dir.join(format!("{stem}-{}{suffix}", Uuid::new_v4().simple())))
+}
+
+fn uploads_dir() -> PathBuf {
+    env::var_os("CENTAUR_UPLOADS_DIR")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join("uploads")))
+        .unwrap_or_else(|| PathBuf::from("/tmp/uploads"))
+}
+
+fn sanitize_upload_name(name: &str) -> String {
+    let leaf = Path::new(name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment")
+        .trim();
+    let clean = leaf
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['.', '_'])
+        .to_string();
+    if clean.is_empty() {
+        "attachment".to_string()
+    } else {
+        clean
+    }
+}
+
+fn extension_for_mime_type(mime_type: Option<&str>) -> Option<&'static str> {
+    match mime_type? {
+        "image/jpeg" => Some(".jpg"),
+        "image/png" => Some(".png"),
+        "image/gif" => Some(".gif"),
+        "image/webp" => Some(".webp"),
+        "video/mp4" => Some(".mp4"),
+        "application/pdf" => Some(".pdf"),
+        "text/plain" => Some(".txt"),
+        _ => None,
+    }
+}
+
+fn is_image_attachment(attachment_type: Option<&str>, mime_type: Option<&str>) -> bool {
+    attachment_type == Some("image") || mime_type.is_some_and(|value| value.starts_with("image/"))
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn handle_request<H: HarnessServer, W: Write>(
@@ -816,6 +1136,15 @@ pub(crate) fn write_blocks_error<W: Write>(
 mod tests {
     use super::*;
 
+    fn temp_upload_dir() -> PathBuf {
+        let path = env::temp_dir().join(format!("harness-server-test-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&path).expect("create temp upload dir");
+        unsafe {
+            env::set_var("CENTAUR_UPLOADS_DIR", &path);
+        }
+        path
+    }
+
     #[test]
     fn parses_blocks_user_line_with_model_override() {
         let line = r#"{"type":"user","thread_key":"web:t1","model":"claude-sonnet-4-6","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
@@ -834,5 +1163,72 @@ mod tests {
             panic!("expected user command");
         };
         assert_eq!(model, None);
+    }
+
+    #[test]
+    fn parses_attachment_chunk_without_starting_turn() {
+        let _upload_dir = temp_upload_dir();
+        let mut state = BlocksState::default();
+        let line = r#"{"type":"attachment.chunk","attachmentId":"att-1","name":"large-upload.mp4","mimeType":"video/mp4","attachmentType":"video","chunkIndex":0,"final":true,"dataBase64":"aGVsbG8="}"#;
+
+        assert!(matches!(
+            parse_blocks_line_with_state(line, &mut state).expect("parses"),
+            BlocksCommand::AttachmentChunk
+        ));
+
+        let staged = state.staged.get("att-1").expect("staged attachment");
+        assert_eq!(staged.mime_type.as_deref(), Some("video/mp4"));
+        assert_eq!(
+            std::fs::read(&staged.path).expect("read staged bytes"),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn staged_attachment_block_becomes_local_file_text_input() {
+        let _upload_dir = temp_upload_dir();
+        let mut state = BlocksState::default();
+        let chunk = r#"{"type":"attachment.chunk","attachmentId":"att-1","name":"clip.mp4","mimeType":"video/mp4","attachmentType":"video","chunkIndex":0,"final":true,"dataBase64":"aGVsbG8="}"#;
+        parse_blocks_line_with_state(chunk, &mut state).expect("chunk parses");
+
+        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"analyze this"},{"type":"attachment","attachment_type":"video","stagedAttachmentId":"att-1","name":"clip.mp4","mimeType":"video/mp4","size":5}]}}"#;
+        let BlocksCommand::User { input, .. } =
+            parse_blocks_line_with_state(user, &mut state).expect("user parses")
+        else {
+            panic!("expected user command");
+        };
+
+        assert_eq!(input.len(), 2);
+        assert_eq!(
+            input[0],
+            UserInput::Text {
+                text: "analyze this".to_string(),
+                text_elements: Vec::new()
+            }
+        );
+        let UserInput::Text { text, .. } = &input[1] else {
+            panic!("expected staged attachment to become text");
+        };
+        assert!(text.starts_with("[Attached file saved to "));
+        assert!(text.ends_with("clip.mp4]"));
+    }
+
+    #[test]
+    fn inline_attachment_block_becomes_local_file_text_input() {
+        let _upload_dir = temp_upload_dir();
+        let mut state = BlocksState::default();
+        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"attachment","attachment_type":"document","dataBase64":"aGVsbG8=","name":"notes.txt","mimeType":"text/plain","size":5}]}}"#;
+        let BlocksCommand::User { input, .. } =
+            parse_blocks_line_with_state(user, &mut state).expect("user parses")
+        else {
+            panic!("expected user command");
+        };
+
+        assert_eq!(input.len(), 1);
+        let UserInput::Text { text, .. } = &input[0] else {
+            panic!("expected inline attachment to become text");
+        };
+        assert!(text.starts_with("[Attached file saved to "));
+        assert!(text.ends_with("notes.txt]"));
     }
 }

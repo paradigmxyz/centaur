@@ -7,7 +7,7 @@ use std::thread;
 use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
 
-use crate::server::{BlocksCommand, parse_blocks_line, write_blocks_error};
+use crate::server::{BlocksCommand, BlocksState, parse_blocks_line_with_state, write_blocks_error};
 use crate::util::write_value;
 use crate::{AppServerRuntime, HarnessServerError, Result};
 
@@ -70,6 +70,7 @@ pub(crate) fn run_codex_blocks_server() -> Result<()> {
     let mut stdout = io::stdout().lock();
     let mut request_id = 1_i64;
     let mut thread_id: Option<String> = None;
+    let mut blocks_state = BlocksState::default();
 
     let initialize_id = next_request_id(&mut request_id);
     codex.send_request(
@@ -94,7 +95,7 @@ pub(crate) fn run_codex_blocks_server() -> Result<()> {
             continue;
         }
 
-        match parse_blocks_line(trimmed) {
+        match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
             Ok(BlocksCommand::User {
                 input,
                 client_user_message_id,
@@ -119,6 +120,7 @@ pub(crate) fn run_codex_blocks_server() -> Result<()> {
                     "Codex blocks interrupt ignored: no active stdin reader while a turn runs"
                 );
             }
+            Ok(BlocksCommand::AttachmentChunk) => {}
             Err(error) => {
                 eprintln!("invalid Codex blocks input: {error:#}");
                 write_blocks_error(
