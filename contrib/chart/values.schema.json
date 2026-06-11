@@ -44,7 +44,8 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "port": { "type": "integer" }
+        "port": { "type": "integer" },
+        "extraRepos": { "type": "array", "items": { "type": "string" } }
       }
     },
     "ironControl": {

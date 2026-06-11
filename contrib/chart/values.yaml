@@ -47,6 +47,13 @@ toolServer:
   ref: ""
   # Subdirectory in the repo holding the tools tree (mounted at /app/tools).
   subdir: tools
+  # Additional owner/name repos layering org tools/ + workflows/ trees onto the
+  # base set (the post-overlay-image org-overlay mechanism). Each repo is added
+  # to the repo-cache automatically (pin a branch via repoCache.repositoryRefs;
+  # default = the repo's default branch) and its tools/ and workflows/ dirs are
+  # appended to TOOL_DIRS / WORKFLOW_DIRS using the sandbox-side repos mount
+  # path, which api-rs also mounts.
+  extraRepos: []
   # Git-capable image the clone init container runs in; empty fields fall back to
   # sandbox.image (which carries git).
   runnerImage:

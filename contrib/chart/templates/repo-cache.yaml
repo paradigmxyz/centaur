@@ -6,6 +6,11 @@
 {{- if and .Values.toolServer.enabled .Values.toolServer.repo }}
 {{- $repoCacheRepositories = append $repoCacheRepositories .Values.toolServer.repo -}}
 {{- end }}
+{{- if .Values.toolServer.enabled }}
+{{- range .Values.toolServer.extraRepos }}
+{{- $repoCacheRepositories = append $repoCacheRepositories . -}}
+{{- end }}
+{{- end }}
 {{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
 {{- if $repoCacheRepositories }}
 {{- $repoCacheHasGithubToken := or .Values.repoCache.githubToken.existingSecretName .Values.repoCache.githubToken.token -}}

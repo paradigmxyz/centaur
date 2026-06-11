@@ -5,9 +5,20 @@
 {{- $reposPath = .Values.repoCache.hostPath -}}
 {{- end -}}
 {{- $toolsUseRepoCache := and .Values.repoCache.enabled .Values.toolServer.enabled .Values.toolServer.repo -}}
+{{- /* Sandboxes see the repo cache bind-mounted at this path (args.rs
+SANDBOX_REPOS_MOUNT_PATH). The api-rs pod mounts the cache at the same path
+(below) so a single colon-separated WORKFLOW_DIRS/TOOL_DIRS value resolves
+identically in the control plane, the workflow host, and agent sandboxes —
+that is what lets SESSION_SANDBOX_PASSTHROUGH_ENV forward them verbatim. */ -}}
+{{- $sandboxReposMount := "/home/agent/github" -}}
 {{- $workflowDirs := "/app/workflows" -}}
+{{- $toolDirs := "/app/tools" -}}
 {{- if $toolsUseRepoCache -}}
-{{- $workflowDirs = printf "%s/%s/workflows" .Values.repoCache.hostPath .Values.toolServer.repo -}}
+{{- $workflowDirs = printf "%s/%s/workflows" $sandboxReposMount .Values.toolServer.repo -}}
+{{- range .Values.toolServer.extraRepos -}}
+{{- $workflowDirs = printf "%s:%s/%s/workflows" $workflowDirs $sandboxReposMount . -}}
+{{- $toolDirs = printf "%s:%s/%s/tools" $toolDirs $sandboxReposMount . -}}
+{{- end -}}
 {{- end -}}
 {{- $apiRsMetricsAnnotations := dict -}}
 {{- if .Values.apiRs.metrics.scrapeAnnotations -}}
@@ -119,7 +130,7 @@ spec:
             - name: RUST_LOG
               value: info
             - name: TOOL_DIRS
-              value: /app/tools
+              value: {{ $toolDirs | quote }}
             - name: WORKFLOW_DIRS
               value: {{ $workflowDirs | quote }}
 {{- if .Values.overlay.systemPrompt }}
@@ -279,6 +290,12 @@ spec:
           volumeMounts:
             - name: repo-cache
               mountPath: {{ .Values.repoCache.hostPath | quote }}
+              readOnly: true
+            # Second mount at the sandbox-side repos path so the
+            # WORKFLOW_DIRS/TOOL_DIRS values above (which use sandbox-style
+            # paths) also resolve inside this pod for workflow/tool discovery.
+            - name: repo-cache
+              mountPath: {{ $sandboxReposMount | quote }}
               readOnly: true
 {{- end }}
 {{- if $toolsUseRepoCache }}
