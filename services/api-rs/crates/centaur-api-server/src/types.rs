@@ -41,6 +41,24 @@ pub struct ExecuteSessionResponse {
     pub status: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateFeedbackRequest {
+    pub source: Option<String>,
+    pub message: String,
+    pub user_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub thread_ts: Option<String>,
+    pub execution_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateFeedbackResponse {
+    pub ok: bool,
+    pub feedback_id: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct EventsQuery {
     pub after_event_id: Option<i64>,
