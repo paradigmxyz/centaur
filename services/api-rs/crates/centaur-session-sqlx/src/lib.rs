@@ -505,6 +505,38 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    /// Move an existing session onto a different harness. Clears the sandbox
+    /// and harness thread state (they belong to the old harness) and resets
+    /// the session to idle; messages and events are preserved.
+    pub async fn switch_session_harness(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+    ) -> Result<Session, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionRow>(
+            r#"
+            update sessions
+            set harness_type = $2,
+                harness_thread_id = null,
+                sandbox_id = null,
+                status = $3,
+                updated_at = now()
+            where thread_key = $1
+            returning thread_key, sandbox_id, harness_type, harness_thread_id, persona_id, status, iron_control_principal, created_at, updated_at
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(harness_type.as_ref())
+        .bind(SessionStatus::Idle.as_ref())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::NotFound {
+            thread_key: thread_key.as_str().to_owned(),
+        })?;
+
+        row.try_into()
+    }
+
     pub async fn set_iron_control_principal(
         &self,
         thread_key: &ThreadKey,

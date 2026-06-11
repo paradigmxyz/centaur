@@ -44,7 +44,7 @@ const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 
-type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync>;
+type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 
@@ -64,6 +64,9 @@ pub struct SandboxRuntime {
     spec_factory: SandboxSpecFactory,
     warm_spec_factory: Option<WarmSandboxSpecFactory>,
     workload_key: Option<String>,
+    /// The harness warm sandboxes boot with. A warm claim is only valid for a
+    /// session on the same harness; other sessions get a cold sandbox.
+    warm_harness: Option<HarnessType>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +78,30 @@ pub enum SandboxWorkloadMode {
         image: String,
         env: Vec<(String, String)>,
         mounts: Vec<Mount>,
+        /// The harness used for warm sandboxes and as the workload default.
+        /// Per-session sandboxes run the session's own harness.
+        harness: HarnessType,
     },
+}
+
+/// What to do when a session already exists with a different harness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HarnessConflictPolicy {
+    /// Fail with [`SessionStoreError::HarnessConflict`] (the default).
+    Reject,
+    /// Restart the thread on the requested harness: stop the old sandbox,
+    /// clear the harness thread state, and switch the session row over. The
+    /// new harness starts with no conversational memory.
+    Restart,
+}
+
+/// Result of [`SessionRuntime::create_or_get_session`].
+#[derive(Clone, Debug)]
+pub struct CreateOrGetSessionOutcome {
+    pub session: Session,
+    /// True when the session was restarted onto a different harness because
+    /// the request asked for [`HarnessConflictPolicy::Restart`].
+    pub harness_switched: bool,
 }
 
 /// Outcome of [`SessionRuntime::drain`]: the sandboxes that were stopped and
@@ -201,7 +227,8 @@ impl SessionRuntime {
         harness_type: &HarnessType,
         persona_id: Option<&str>,
         metadata: Option<Value>,
-    ) -> Result<Session, SessionRuntimeError> {
+        on_harness_conflict: HarnessConflictPolicy,
+    ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
         let span = info_span!(
             "centaur.api_rs.session.create_or_get",
             component = COMPONENT_SESSION_RUNTIME,
@@ -228,7 +255,8 @@ impl SessionRuntime {
                 .and_then(|metadata| metadata.get("slack_user_id"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            let session = self
+            let mut harness_switched = false;
+            let session = match self
                 .store
                 .create_or_get_session(
                     thread_key,
@@ -236,7 +264,20 @@ impl SessionRuntime {
                     persona_id,
                     default_metadata(metadata),
                 )
-                .await?;
+                .await
+            {
+                Ok(session) => session,
+                Err(SessionStoreError::HarnessConflict { existing, .. })
+                    if on_harness_conflict == HarnessConflictPolicy::Restart =>
+                {
+                    let session = self
+                        .restart_session_on_harness(thread_key, harness_type, &existing)
+                        .await?;
+                    harness_switched = true;
+                    session
+                }
+                Err(error) => return Err(error.into()),
+            };
             if let Some(registrar) = &self.iron_control {
                 // iron-control is the source of truth for the session's egress
                 // proxy: without a registered principal the proxy has no identity
@@ -258,9 +299,13 @@ impl SessionRuntime {
                     harness_type = %harness_type,
                     status = %session.status,
                     iron_control_principal_persisted = true,
+                    harness_switched,
                     "session ready"
                 );
-                return Ok(session);
+                return Ok(CreateOrGetSessionOutcome {
+                    session,
+                    harness_switched,
+                });
             }
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
@@ -269,9 +314,13 @@ impl SessionRuntime {
                 harness_type = %harness_type,
                 status = %session.status,
                 iron_control_principal_persisted = session.iron_control_principal.is_some(),
+                harness_switched,
                 "session ready"
             );
-            Ok(session)
+            Ok(CreateOrGetSessionOutcome {
+                session,
+                harness_switched,
+            })
         }
         .instrument(span)
         .await;
@@ -287,6 +336,60 @@ impl SessionRuntime {
             );
         }
         result
+    }
+
+    /// Restart an existing session on a different harness: stop its sandbox
+    /// (killing any in-flight execution), clear the harness thread state, and
+    /// flip the session row to the requested harness. Stored messages and
+    /// events are preserved for the record, but the new harness boots with no
+    /// conversational memory — callers that want continuity must re-send
+    /// context with the next turn.
+    async fn restart_session_on_harness(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        previous_harness: &str,
+    ) -> Result<Session, SessionRuntimeError> {
+        let previous = self.store.get_session(thread_key).await?;
+        if let Some(sandbox_id) = previous.sandbox_id.as_deref() {
+            self.sandbox_pipes.lock().await.remove(sandbox_id);
+            match self
+                .sandbox_runtime
+                .manager
+                .stop(&SandboxId::new(sandbox_id))
+                .await
+            {
+                Ok(()) | Err(SandboxError::NotFound(_)) => {}
+                Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+            }
+        }
+        let session = self
+            .store
+            .switch_session_harness(thread_key, harness_type)
+            .await?;
+        self.store
+            .append_event(
+                thread_key,
+                None,
+                "session.harness_switched",
+                json!({
+                    "thread_key": thread_key.as_str(),
+                    "from_harness": previous_harness,
+                    "to_harness": harness_type.as_ref(),
+                    "stopped_sandbox_id": previous.sandbox_id,
+                }),
+            )
+            .await?;
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_harness_switched",
+            thread_key = %thread_key,
+            from_harness = previous_harness,
+            to_harness = %harness_type,
+            stopped_sandbox_id = previous.sandbox_id.as_deref().unwrap_or(""),
+            "restarted session on a new harness"
+        );
+        Ok(session)
     }
 
     pub async fn append_messages(
@@ -511,6 +614,7 @@ impl SessionRuntime {
             let sandbox_id = match self
                 .ensure_session_sandbox(
                     thread_key,
+                    &session.harness_type,
                     session.sandbox_id.as_deref(),
                     session.iron_control_principal.as_deref(),
                     &execution.execution_id,
@@ -816,6 +920,7 @@ impl SessionRuntime {
     async fn ensure_session_sandbox(
         &self,
         thread_key: &ThreadKey,
+        harness_type: &HarnessType,
         existing_sandbox_id: Option<&str>,
         iron_control_principal: Option<&str>,
         execution_id: &str,
@@ -931,7 +1036,17 @@ impl SessionRuntime {
                 }
             }
 
-            if let Some(warm_pool) = &self.warm_pool {
+            // Warm sandboxes are pre-booted with the workload's default
+            // harness; a session on any other harness needs a cold sandbox.
+            let warm_harness_matches = self
+                .sandbox_runtime
+                .warm_harness
+                .as_ref()
+                .is_none_or(|warm| warm == harness_type);
+            if !warm_harness_matches && self.warm_pool.is_some() {
+                record_sandbox_warm_pool_claim("harness_mismatch");
+            }
+            if let Some(warm_pool) = self.warm_pool.as_ref().filter(|_| warm_harness_matches) {
                 match warm_pool
                     .claim(thread_key.as_str(), iron_control_principal)
                     .await
@@ -974,7 +1089,8 @@ impl SessionRuntime {
                 }
             }
 
-            let mut spec = (self.sandbox_runtime.spec_factory)(thread_key, execution_id);
+            let mut spec =
+                (self.sandbox_runtime.spec_factory)(thread_key, execution_id, harness_type);
             if let Some(principal) = iron_control_principal {
                 spec.iron_control_principal = Some(principal.to_owned());
             }
@@ -1389,7 +1505,10 @@ impl SandboxRuntime {
 
     pub fn backend(backend: Arc<dyn SandboxBackend>, spec: SandboxSpec) -> Self {
         let warm_spec = spec.clone();
-        let spec_factory = move |_thread_key: &ThreadKey, _execution_id: &str| spec.clone();
+        let spec_factory =
+            move |_thread_key: &ThreadKey, _execution_id: &str, _harness: &HarnessType| {
+                spec.clone()
+            };
         let warm_spec_factory = move || warm_spec.clone();
         Self::backend_with_warm_spec_factory(backend, spec_factory, warm_spec_factory)
     }
@@ -1398,23 +1517,27 @@ impl SandboxRuntime {
         backend: Arc<dyn SandboxBackend>,
         workload: SandboxWorkloadMode,
     ) -> Self {
+        let warm_harness = workload.default_harness();
         let warm_workload = workload.clone();
-        Self::backend_with_warm_spec_factory(
+        let mut runtime = Self::backend_with_warm_spec_factory(
             backend,
-            move |thread_key, _execution_id| workload.spec(thread_key),
+            move |thread_key, _execution_id, harness| workload.spec(thread_key, harness),
             move || warm_workload.warm_spec(),
-        )
+        );
+        runtime.warm_harness = warm_harness;
+        runtime
     }
 
     pub fn backend_with_spec_factory<F>(backend: Arc<dyn SandboxBackend>, spec_factory: F) -> Self
     where
-        F: Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync + 'static,
+        F: Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync + 'static,
     {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
             warm_spec_factory: None,
             workload_key: None,
+            warm_harness: None,
         }
     }
 
@@ -1424,7 +1547,7 @@ impl SandboxRuntime {
         warm_spec_factory: W,
     ) -> Self
     where
-        F: Fn(&ThreadKey, &str) -> SandboxSpec + Send + Sync + 'static,
+        F: Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync + 'static,
         W: Fn() -> SandboxSpec + Send + Sync + 'static,
     {
         let warm_spec_factory: WarmSandboxSpecFactory = Arc::new(warm_spec_factory);
@@ -1434,6 +1557,7 @@ impl SandboxRuntime {
             spec_factory: Arc::new(spec_factory),
             warm_spec_factory: Some(warm_spec_factory),
             workload_key: Some(workload_key),
+            warm_harness: None,
         }
     }
 }
@@ -1448,11 +1572,13 @@ impl SandboxWorkloadMode {
     pub fn codex_app_server(
         image: impl Into<String>,
         env: impl IntoIterator<Item = (String, String)>,
+        harness: HarnessType,
     ) -> Self {
         Self::CodexAppServer {
             image: image.into(),
             env: env.into_iter().collect(),
             mounts: Vec::new(),
+            harness,
         }
     }
 
@@ -1464,21 +1590,37 @@ impl SandboxWorkloadMode {
         self
     }
 
-    fn spec(&self, thread_key: &ThreadKey) -> SandboxSpec {
-        self.spec_with_thread_key(Some(thread_key))
+    fn default_harness(&self) -> Option<HarnessType> {
+        match self {
+            Self::MockAppServer { .. } => None,
+            Self::CodexAppServer { harness, .. } => Some(harness.clone()),
+        }
+    }
+
+    fn spec(&self, thread_key: &ThreadKey, harness: &HarnessType) -> SandboxSpec {
+        self.spec_for(Some(thread_key), harness)
     }
 
     fn warm_spec(&self) -> SandboxSpec {
-        self.spec_with_thread_key(None)
+        match self {
+            Self::MockAppServer { .. } => self.spec_for(None, &HarnessType::Codex),
+            Self::CodexAppServer { harness, .. } => self.spec_for(None, harness),
+        }
     }
 
-    fn spec_with_thread_key(&self, thread_key: Option<&ThreadKey>) -> SandboxSpec {
+    fn spec_for(&self, thread_key: Option<&ThreadKey>, harness: &HarnessType) -> SandboxSpec {
         match self {
             Self::MockAppServer { image } => SandboxSpec::new(image)
                 .command(["/bin/sh", "-lc"])
                 .args([mock_app_server_script()]),
-            Self::CodexAppServer { image, env, mounts } => {
-                let mut spec = SandboxSpec::new(image);
+            Self::CodexAppServer {
+                image, env, mounts, ..
+            } => {
+                // Pin the harness via container args (the image entrypoint is
+                // kept) so the sandbox runs the session's harness rather than
+                // whatever the image CMD defaults to.
+                let mut spec = SandboxSpec::new(image)
+                    .args(["harness-server", harness_server_subcommand(harness)]);
                 if let Some(thread_key) = thread_key {
                     spec = spec.env("CENTAUR_THREAD_KEY", thread_key.as_str());
                 }
@@ -1491,6 +1633,16 @@ impl SandboxWorkloadMode {
                 spec
             }
         }
+    }
+}
+
+/// The harness-server CLI subcommand for a harness type
+/// (see crates/harness-server/src/main.rs).
+fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
+    match harness {
+        HarnessType::Codex => "codex",
+        HarnessType::ClaudeCode => "claude-code",
+        HarnessType::Amp => "amp",
     }
 }
 
@@ -4028,6 +4180,7 @@ mod tests {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
             [("CENTAUR_API_URL".to_owned(), "http://api:8000".to_owned())],
+            HarnessType::Codex,
         )
         .mount(
             Mount::new(
@@ -4040,7 +4193,7 @@ mod tests {
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let spec = workload.spec(&thread_key);
+        let spec = workload.spec(&thread_key, &HarnessType::Codex);
 
         assert_eq!(spec.mounts.len(), 1);
         assert_eq!(spec.mounts[0].target_path, "/home/agent/github");
@@ -4055,10 +4208,14 @@ mod tests {
 
     #[test]
     fn codex_workload_does_not_inject_stale_continue_thread_id() {
-        let workload = SandboxWorkloadMode::codex_app_server("centaur-agent:latest", Vec::new());
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let spec = workload.spec(&thread_key);
+        let spec = workload.spec(&thread_key, &HarnessType::Codex);
 
         assert_eq!(
             spec.env
@@ -4081,10 +4238,11 @@ mod tests {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
             [("CENTAUR_API_URL".to_owned(), "http://api:8000".to_owned())],
+            HarnessType::Codex,
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let claimed_spec = workload.spec(&thread_key);
+        let claimed_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode);
         let warm_spec = workload.warm_spec();
 
         assert_eq!(
@@ -4099,17 +4257,60 @@ mod tests {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
             [("CENTAUR_API_URL".to_owned(), "http://api:8000".to_owned())],
+            HarnessType::Codex,
         );
         let first_thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
         let second_thread_key = ThreadKey::parse("chat:C456:1780000000.000001").unwrap();
 
         assert_ne!(
-            sandbox_spec_key(&workload.spec(&first_thread_key)),
-            sandbox_spec_key(&workload.spec(&second_thread_key))
+            sandbox_spec_key(&workload.spec(&first_thread_key, &HarnessType::ClaudeCode)),
+            sandbox_spec_key(&workload.spec(&second_thread_key, &HarnessType::ClaudeCode))
         );
         assert_eq!(
             sandbox_spec_key(&workload.warm_spec()),
             sandbox_spec_key(&workload.warm_spec())
+        );
+    }
+
+    #[test]
+    fn codex_workload_pins_harness_via_container_args() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+
+        let codex_spec = workload.spec(&thread_key, &HarnessType::Codex);
+        let claude_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode);
+        let amp_spec = workload.spec(&thread_key, &HarnessType::Amp);
+
+        assert_eq!(codex_spec.args, vec!["harness-server", "codex"]);
+        assert_eq!(claude_spec.args, vec!["harness-server", "claude-code"]);
+        assert_eq!(amp_spec.args, vec!["harness-server", "amp"]);
+        // The image entrypoint must be preserved: only CMD is overridden.
+        assert_eq!(codex_spec.command, None);
+    }
+
+    #[test]
+    fn warm_spec_uses_workload_default_harness() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+
+        assert_eq!(
+            workload.warm_spec().args,
+            vec!["harness-server", "codex"],
+            "warm sandboxes boot the configured default harness"
+        );
+        // A session on a different harness produces a different spec, so a
+        // warm claim for it would hand over the wrong harness.
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        assert_eq!(
+            workload.spec(&thread_key, &HarnessType::ClaudeCode).args,
+            vec!["harness-server", "claude-code"]
         );
     }
 

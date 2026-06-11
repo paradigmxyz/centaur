@@ -169,6 +169,10 @@ spec:
               value: {{ .Values.apiRs.sandboxBackend | quote }}
             - name: SESSION_SANDBOX_WORKLOAD
               value: {{ .Values.apiRs.sandboxWorkload | quote }}
+            # Default harness for warm sandboxes. Per-session sandboxes run
+            # their session's harness regardless (pinned via container args).
+            - name: SESSION_SANDBOX_HARNESS
+              value: {{ .Values.sandbox.harnessEngine | quote }}
             - name: SESSION_SANDBOX_READY_TIMEOUT_SECS
               value: {{ .Values.apiRs.sandboxReadyTimeoutSecs | quote }}
             - name: SESSION_SANDBOX_WARM_POOL_SIZE

@@ -193,9 +193,13 @@ sandbox:
   #                  subscription token (proxy injects the brokered credential).
   codexAuthMode: api_key
   claudeCodeAuthMode: api_key
-  # Which harness the sandbox runs: codex | amp | claudecode. Selects the
-  # iron-proxy auth fragment api-rs registers and must agree with the sandbox
-  # image's default CMD (services/sandbox/Dockerfile).
+  # The deployment's default harness: codex | amp | claudecode. Decides what
+  # warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
+  # fragment is required at startup (the other harnesses' fragments are
+  # registered too when available, so per-session --claude/--amp/--codex
+  # overrides keep working credentials). Per-session sandboxes always run
+  # their session's harness via container args; the sandbox image CMD only
+  # matters for containers started outside api-rs.
   harnessEngine: codex
   extraEnv: {}
   stateVolume:

@@ -462,6 +462,16 @@ struct SandboxArgs {
         default_value = "mock"
     )]
     workload: SandboxWorkloadKind,
+    /// The default harness for warm sandboxes. Per-session sandboxes always
+    /// run their session's harness (pinned via container args); this only
+    /// decides what the warm pool boots ahead of time. Defaults to codex
+    /// to match the sandbox image's CMD.
+    #[arg(
+        long = "session-sandbox-harness",
+        env = "SESSION_SANDBOX_HARNESS",
+        default_value = "codex"
+    )]
+    default_harness: HarnessType,
     #[arg(
         long = "session-sandbox-k8s-namespace",
         alias = "kubernetes-namespace",
@@ -845,6 +855,7 @@ impl SandboxArgs {
                 let mut workload = SandboxWorkloadMode::codex_app_server(
                     image,
                     self.codex_app_server_env_template()?,
+                    self.default_harness.clone(),
                 );
                 if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
                     workload = workload.mount(
@@ -1416,12 +1427,12 @@ impl IronProxyArgs {
         let (ca_cert_secret_name, ca_key_secret_name) =
             ca.ok_or(ServerError::MissingIronProxyCaSecret)?;
 
-        let harness_fragment = self.harness.fragment()?;
+        let harness_fragments = self.harness.fragments()?;
         let mut config =
             IronProxyConfig::new(self.image.clone(), ca_cert_secret_name, ca_key_secret_name);
         config.image_pull_policy = self.image_pull_policy.clone();
         self.source.apply_to_config(&mut config);
-        config.fragments = vec![harness_fragment];
+        config.fragments = harness_fragments;
         config.env_from_secret_names = self.env_from_secret_names();
         if let Some(labels) = self
             .api_pod_label_selector
@@ -1451,12 +1462,14 @@ impl IronProxyArgs {
         Ok(vec![(RoleSpec::infra(), infra)])
     }
 
-    /// The full infra fragment: the shared infra secrets plus the harness auth
-    /// (also infra), selected by auth mode. Discovered tool secrets are folded
-    /// into the same infra role at registration time.
+    /// The full infra fragment: the shared infra secrets plus every available
+    /// harness auth fragment (also infra), selected by auth mode. Discovered
+    /// tool secrets are folded into the same infra role at registration time.
     fn infra_fragment(&self) -> Result<ProxyFragment, ServerError> {
         let mut infra = infra_fragment()?;
-        merge_fragment(&mut infra, self.harness.fragment()?);
+        for fragment in self.harness.fragments()? {
+            merge_fragment(&mut infra, fragment);
+        }
         Ok(infra)
     }
 
@@ -1617,6 +1630,27 @@ impl IronProxyHarnessArgs {
                 "no harness auth fragment for engine {engine} auth-mode {auth_mode}"
             ))
         })
+    }
+
+    /// Every harness auth fragment to register. The configured engine's
+    /// fragment is required (startup fails without it, as before); the other
+    /// engines' fragments are added when their engine/auth-mode pair has one,
+    /// so sessions restarted onto another harness still get working
+    /// credentials through the proxy.
+    fn fragments(&self) -> Result<Vec<ProxyFragment>, ServerError> {
+        let mut fragments = vec![self.fragment()?];
+        for engine in [HarnessType::Codex, HarnessType::ClaudeCode, HarnessType::Amp] {
+            if engine == self.engine {
+                continue;
+            }
+            let auth_mode = harness_auth_mode_env(&engine).unwrap_or_else(|| "api_key".to_owned());
+            if let Some(fragment) =
+                harness_auth_fragment(harness_fragment_engine_name(&engine), &auth_mode)?
+            {
+                fragments.push(fragment);
+            }
+        }
+        Ok(fragments)
     }
 }
 
@@ -2389,10 +2423,14 @@ mod tests {
         .unwrap();
 
         let workload = args.sandbox.container_workload_mode().unwrap();
-        let SandboxWorkloadMode::CodexAppServer { mounts, .. } = workload else {
+        let SandboxWorkloadMode::CodexAppServer {
+            harness, mounts, ..
+        } = workload
+        else {
             panic!("expected codex app server workload");
         };
 
+        assert_eq!(harness, HarnessType::Codex);
         assert!(mounts.iter().any(|mount| {
             mount.target_path == SANDBOX_REPOS_MOUNT_PATH
                 && mount.read_only

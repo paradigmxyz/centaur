@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
                 metadata: Some(json!({
                     "source": "centaur-session-cli",
                 })),
+                on_harness_conflict: None,
             },
         )
         .await

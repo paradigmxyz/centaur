@@ -2,11 +2,14 @@
  * Inline message directives, restored from the v1 slackbot:
  *   --claude | --claude-code | --amp | --codex   pick the harness for the thread
  *   --model <name> (or --model=<name>)           pick the model within that harness
- *   --opus | --sonnet | --haiku                  model shortcuts (imply claude-code)
+ *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
- * applies at session creation (the API pins a thread to one harness); the model
- * applies per turn via the blocks-protocol `model` field.
+ * applies at session creation — an explicit harness flag on a thread pinned to
+ * another harness restarts the thread on the requested one. The model applies
+ * per turn via the blocks-protocol `model` field; `--model` accepts either a
+ * full model id (claude-sonnet-4-6, gpt-5.2, …), an amp mode (deep/fast), or a
+ * Claude alias (fable/opus/sonnet/haiku) which expands to the full id.
  */
 
 export type MessageOverrides = {
@@ -24,11 +27,22 @@ const HARNESS_FLAGS: Record<string, string> = {
   codex: 'codex'
 }
 
-const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> = {
-  haiku: { harnessType: 'claudecode', model: 'claude-haiku-4-5' },
-  opus: { harnessType: 'claudecode', model: 'claude-opus-4-8' },
-  sonnet: { harnessType: 'claudecode', model: 'claude-sonnet-4-6' }
+// Claude model aliases, usable both as bare flags (--opus) and as --model
+// values (--model opus). Bare-flag form also implies the claude-code harness.
+const CLAUDE_MODEL_ALIASES: Record<string, string> = {
+  fable: 'claude-fable-5',
+  haiku: 'claude-haiku-4-5',
+  opus: 'claude-opus-4-8',
+  sonnet: 'claude-sonnet-4-6'
 }
+
+const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
+  Object.fromEntries(
+    Object.entries(CLAUDE_MODEL_ALIASES).map(([alias, model]) => [
+      alias,
+      { harnessType: 'claudecode', model }
+    ])
+  )
 
 const MODEL_FLAG_PATTERN = /(?:^|\s)--model[=\s]+([A-Za-z0-9._/-]+)(?=\s|$)/i
 
@@ -39,7 +53,8 @@ export function extractMessageOverrides(text: string): MessageOverrides {
 
   const modelMatch = MODEL_FLAG_PATTERN.exec(cleaned)
   if (modelMatch) {
-    model = modelMatch[1]
+    const value = modelMatch[1]!
+    model = CLAUDE_MODEL_ALIASES[value.toLowerCase()] ?? value
     cleaned = stripMatch(cleaned, modelMatch)
   }
 

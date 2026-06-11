@@ -30,6 +30,7 @@ const options: SlackbotV2Options = {
   assistantStatus: optionalEnv('SLACKBOTV2_ASSISTANT_STATUS'),
   botToken,
   botUserId: optionalEnv('SLACK_BOT_USER_ID'),
+  defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   postgresUrl:
