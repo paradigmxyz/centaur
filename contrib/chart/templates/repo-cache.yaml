@@ -84,6 +84,12 @@ spec:
               git config --global --add safe.directory '*'
               git config --global init.defaultBranch main
               umask 022
+              ready_file=/cache/.repo-cache-ready
+              ready_tmp="${ready_file}.tmp"
+
+              repository_fingerprint() {
+                printf 'repositories=%s\nrepository_refs=%s\n' "$REPOSITORIES" "$REPOSITORY_REFS"
+              }
 
               repo_ref() {
                 local repo="$1"
@@ -157,11 +163,22 @@ spec:
               }
 
               while true; do
+                sync_ok=1
                 for repo in $REPOSITORIES; do
                   if ! sync_repo "$repo"; then
                     echo "Failed to sync $repo" >&2
+                    sync_ok=0
                   fi
                 done
+                if [ "$sync_ok" = "1" ]; then
+                  {
+                    repository_fingerprint
+                    printf 'synced_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  } > "$ready_tmp"
+                  mv "$ready_tmp" "$ready_file"
+                else
+                  rm -f "$ready_tmp" "$ready_file"
+                fi
                 sleep "$SYNC_INTERVAL_SECONDS"
               done
           env:
@@ -179,11 +196,17 @@ spec:
                 - /bin/bash
                 - -ec
                 - |
+                  ready_file=/cache/.repo-cache-ready
+                  expected="$(printf 'repositories=%s\nrepository_refs=%s\n' "$REPOSITORIES" "$REPOSITORY_REFS")"
+                  actual="$(sed -n '1,2p' "$ready_file" 2>/dev/null || true)"
+                  [ "$actual" = "$expected" ] || exit 1
                   for repo in $REPOSITORIES; do
-                    git -C "/cache/$repo" rev-parse --git-dir >/dev/null 2>&1 || exit 1
+                    [ -d "/cache/$repo/.git" ] || exit 1
                   done
-            initialDelaySeconds: 10
-            periodSeconds: 30
+            initialDelaySeconds: {{ .Values.repoCache.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.repoCache.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.repoCache.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.repoCache.readinessProbe.failureThreshold }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
