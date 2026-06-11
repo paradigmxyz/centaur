@@ -12,12 +12,10 @@ goals = true
 fast_mode = true
 memories = true
 hooks = true
+multi_agent = false
+multi_agent_v2 = false
 enable_fanout = false
 runtime_metrics = true
-
-[features.multi_agent_v2]
-enabled = true
-max_concurrent_threads_per_session = 6
 
 [agents]
 max_depth = 2
