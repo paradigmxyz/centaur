@@ -25,4 +25,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "DEBANK_API_KEY", match_headers = ["AccessKey"], hosts = ["pro-openapi.debank.com"]}]
+secrets = [{type = "http", name = "DEBANK_API_KEY", mode = "inject", inject_header = "AccessKey", hosts = ["pro-openapi.debank.com"]}]

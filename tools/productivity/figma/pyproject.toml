@@ -26,5 +26,5 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "FIGMA_ACCESS_TOKEN", match_headers = ["X-Figma-Token"], hosts = ["api.figma.com"]},
+    {type = "http", name = "FIGMA_ACCESS_TOKEN", mode = "inject", inject_header = "X-Figma-Token", hosts = ["api.figma.com"]},
 ]

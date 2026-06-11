@@ -27,6 +27,6 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "POSTHOG_API_KEY", match_headers = ["Authorization"], hosts = ["us.posthog.com"]},
+    {type = "http", name = "POSTHOG_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["us.posthog.com"]},
     {type = "http", name = "POSTHOG_PROJECT_ID", match_path = true, hosts = ["us.posthog.com"]},
 ]

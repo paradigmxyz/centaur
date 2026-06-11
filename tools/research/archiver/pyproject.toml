@@ -29,6 +29,6 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "REDUCTO_API_KEY", match_headers = ["Authorization"], hosts = ["platform.reducto.ai"]},
+    {type = "http", name = "REDUCTO_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["platform.reducto.ai"]},
     {type = "http", name = "BROWSER_USE_API_KEY", match_query = true, hosts = ["connect.browser-use.com"]},
 ]

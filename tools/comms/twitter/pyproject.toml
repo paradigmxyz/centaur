@@ -28,4 +28,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "SYNOPTIC_API_KEY", match_headers = ["x-api-key"], hosts = ["api.synoptic.com"]}]
+secrets = [{type = "http", name = "SYNOPTIC_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.synoptic.com"]}]

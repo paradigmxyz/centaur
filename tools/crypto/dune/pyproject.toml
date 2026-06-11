@@ -26,4 +26,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "DUNE_API_KEY", match_headers = ["X-Dune-API-Key"], hosts = ["api.dune.com"]}]
+secrets = [{type = "http", name = "DUNE_API_KEY", mode = "inject", inject_header = "X-Dune-API-Key", hosts = ["api.dune.com"]}]

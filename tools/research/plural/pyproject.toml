@@ -26,4 +26,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "PLURAL_API_KEY", match_headers = ["X-API-KEY"], hosts = ["v3.openstates.org"]}]
+secrets = [{type = "http", name = "PLURAL_API_KEY", mode = "inject", inject_header = "X-API-KEY", hosts = ["v3.openstates.org"]}]

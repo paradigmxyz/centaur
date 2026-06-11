@@ -17,5 +17,5 @@ packages = ["."]
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "COMPOSIO_API_KEY", match_headers = ["x-api-key"], hosts = ["backend.composio.dev"]},
+    {type = "http", name = "COMPOSIO_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["backend.composio.dev"]},
 ]

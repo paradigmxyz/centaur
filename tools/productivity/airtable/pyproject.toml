@@ -26,5 +26,5 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "AIRTABLE_API_KEY", match_headers = ["Authorization"], hosts = ["api.airtable.com"]},
+    {type = "http", name = "AIRTABLE_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.airtable.com"]},
 ]
