@@ -98,6 +98,7 @@ pub(crate) fn run_codex_blocks_server() -> Result<()> {
             Ok(BlocksCommand::User {
                 input,
                 client_user_message_id,
+                model,
             }) => {
                 if let Err(error) = run_codex_user_turn(
                     &mut codex,
@@ -106,6 +107,7 @@ pub(crate) fn run_codex_blocks_server() -> Result<()> {
                     &mut thread_id,
                     input,
                     client_user_message_id,
+                    model,
                 ) {
                     let fallback_thread_id = thread_id.as_deref().unwrap_or("codex");
                     eprintln!("Codex blocks turn failed: {error:#}");
@@ -139,6 +141,7 @@ fn run_codex_user_turn<W: Write>(
     thread_id: &mut Option<String>,
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
+    model: Option<String>,
 ) -> Result<()> {
     if thread_id.is_none() {
         *thread_id = Some(start_or_resume_thread(codex, stdout, request_id)?);
@@ -154,6 +157,9 @@ fn run_codex_user_turn<W: Write>(
     });
     if let Some(client_user_message_id) = client_user_message_id {
         params["clientUserMessageId"] = Value::String(client_user_message_id);
+    }
+    if let Some(model) = model {
+        params["model"] = Value::String(model);
     }
 
     let turn_request_id = next_request_id(request_id);

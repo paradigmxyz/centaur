@@ -137,7 +137,11 @@ export type ForwardSessionInput = {
   afterEventId: number
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
+  /** Harness override parsed from message flags (--claude/--amp/--codex). */
+  harnessType?: string
   messages: SlackbotV2ApiMessage[]
+  /** Per-turn model override parsed from message flags (--model/--opus/...). */
+  model?: string
   onEventId(eventId: number): void
   openStream: boolean
   threadId: string
