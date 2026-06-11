@@ -28,6 +28,8 @@ const BOT_USER_ID = 'U000000001'
 const USER_ID = 'USLACKBOTV2USER'
 const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
+/** How real Slack renders a streamed message whose stream broke or was never stopped. */
+const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
 
 let emulator: Emulator
 let slackApi: PatchedSlackApi
@@ -704,12 +706,14 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
-  it('does not post a duplicate final-answer fallback when Slack rejects the stream as too long', async () => {
+  it('reposts the durable final answer exactly once when Slack rejects the stream stop as too long', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
     codexApi.autoRespond = false
-    slackApi.failStreamStopsLongerThan(120)
+    // Every stop fails: the streamed message never finalizes, so its content
+    // breaks in real Slack. The bot must repost the durable answer once.
+    slackApi.failStreamStopsLongerThan(10)
 
     const parent = await postUserMessage('Context before an oversized Slack render.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> generate noisy progress`, parent.ts)
@@ -718,7 +722,7 @@ describe('slackbotv2', () => {
     const response = await bot.app.request(
       '/api/webhooks/slack',
       signedSlackEvent({
-        event_id: 'Ev-slackbotv2-msg-too-long-suppressed',
+        event_id: 'Ev-slackbotv2-msg-too-long-fallback',
         event: {
           type: 'app_mention',
           user: USER_ID,
@@ -752,19 +756,317 @@ describe('slackbotv2', () => {
       })
     )
     codexApi.emitSessionEvent(key, 'session.execution_completed', {
-      execution_id: 'exe-msg-too-long-suppressed',
+      execution_id: 'exe-msg-too-long-fallback',
       status: 'completed',
       result_text: 'TOO_LONG_FALLBACK_VISIBLE'
     })
 
     await Promise.all(waits)
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
-    const visibleFinalReplies = (await threadTexts(parent.ts)).filter(text =>
+    const texts = await threadTexts(parent.ts)
+    // The streamed message broke ("Something went wrong"), so the durable
+    // final answer must be reposted - exactly once, never duplicated.
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(true)
+    const visibleFinalReplies = texts.filter(text =>
       text.includes('TOO_LONG_FALLBACK_VISIBLE')
     )
     expect(visibleFinalReplies).toHaveLength(1)
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
+      expect.objectContaining({
+        activeExecution: false,
+        renderObligation: null
+      })
+    )
+  })
+
+  it('reposts the durable final answer when the Slack stream expires mid-render', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+    // The first append succeeds, then Slack expires the streaming message
+    // (production: ~300s after chat.startStream) and every further append
+    // fails. The final answer has not reached Slack at that point.
+    slackApi.failStreamAppendsAfter(1, 'message_not_in_streaming_state')
+
+    const parent = await postUserMessage('Context before a stream expiry.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> run something long`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-stream-expired-fallback',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> run something long`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-long',
+          type: 'commandExecution',
+          command: 'sleep 600',
+          status: 'completed',
+          aggregatedOutput: 'done'
+        }
+      })
+    )
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-stream-expired',
+      status: 'completed',
+      result_text: 'EXPIRED_STREAM_FALLBACK_VISIBLE'
+    })
+
+    await Promise.all(waits)
+    const texts = await threadTexts(parent.ts)
+    const visibleFinalReplies = texts.filter(text =>
+      text.includes('EXPIRED_STREAM_FALLBACK_VISIBLE')
+    )
+    expect(visibleFinalReplies).toHaveLength(1)
+    const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(threadState).toEqual(
+      expect.objectContaining({
+        activeExecution: false,
+        renderObligation: null
+      })
+    )
+  })
+
+  it('rotates Slack stream segments before they reach the streaming age limit', async () => {
+    process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS = '120'
+    try {
+      codexApi.autoRespond = false
+
+      const parent = await postUserMessage('Context before a slow render.')
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> work slowly`, parent.ts)
+      const key = threadKey(parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-age-rotation',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> work slowly`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1)
+      await waitFor(() => codexApi.eventRequests.length === 1)
+      await waitFor(() => codexApi.streamCount === 1)
+
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'cmd-slow-1',
+            type: 'commandExecution',
+            // Large enough to flush the Slack SDK's client-side stream buffer
+            // so the first segment demonstrably carries content.
+            command: `sleep 1 # ${'x'.repeat(300)}`,
+            status: 'completed',
+            aggregatedOutput: 'first'
+          }
+        })
+      )
+      // Wait for the first segment to age past the rotation threshold, then
+      // keep streaming: the adapter must continue in a fresh stream message.
+      await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+      await new Promise(resolve => setTimeout(resolve, 250))
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'cmd-slow-2',
+            type: 'commandExecution',
+            command: 'sleep 2',
+            status: 'completed',
+            aggregatedOutput: 'second'
+          }
+        })
+      )
+      codexApi.emitSessionEvent(key, 'session.execution_completed', {
+        execution_id: 'exe-age-rotation',
+        status: 'completed',
+        result_text: 'AGE_ROTATION_ANSWER_VISIBLE'
+      })
+
+      await Promise.all(waits)
+      const starts = slackApi.calls.filter(call => call.method === 'chat.startStream')
+      expect(starts.length).toBeGreaterThanOrEqual(2)
+      const startTs = new Set(
+        starts.map(call => call.streamTs).filter((ts): ts is string => Boolean(ts))
+      )
+      const stopTs = new Set(
+        slackApi.calls
+          .filter(call => call.method === 'chat.stopStream')
+          .map(call => stringField(call.body.ts))
+      )
+      for (const ts of startTs) {
+        expect(stopTs.has(ts)).toBe(true)
+      }
+      const texts = await threadTexts(parent.ts)
+      expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+      const visibleFinalReplies = texts.filter(text =>
+        text.includes('AGE_ROTATION_ANSWER_VISIBLE')
+      )
+      expect(visibleFinalReplies).toHaveLength(1)
+    } finally {
+      delete process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS
+    }
+  })
+
+  it('rotates structured plan segments before they exceed the task char budget', async () => {
+    process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET = '400'
+    try {
+      codexApi.autoRespond = false
+
+      const parent = await postUserMessage('Context before a card-heavy render.')
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> run many steps`, parent.ts)
+      const key = threadKey(parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-budget-rotation',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> run many steps`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1)
+      await waitFor(() => codexApi.eventRequests.length === 1)
+      await waitFor(() => codexApi.streamCount === 1)
+
+      for (let index = 1; index <= 3; index++) {
+        codexApi.emitOutputLine(
+          key,
+          JSON.stringify({
+            type: 'item.completed',
+            item: {
+              id: `cmd-budget-${index}`,
+              type: 'commandExecution',
+              command: `step-${index} ${'x'.repeat(200)}`,
+              status: 'completed',
+              aggregatedOutput: 'ok'
+            }
+          })
+        )
+        // Let the renderer flush each card before emitting the next so the
+        // budget accounting sees them as separate appends. The first flush of
+        // a segment arrives as chat.startStream, later ones as appendStream.
+        await waitFor(
+          () =>
+            slackApi.calls.filter(
+              call => call.method === 'chat.appendStream' || call.method === 'chat.startStream'
+            ).length >= index
+        )
+      }
+      codexApi.emitSessionEvent(key, 'session.execution_completed', {
+        execution_id: 'exe-budget-rotation',
+        status: 'completed',
+        result_text: 'BUDGET_ROTATION_ANSWER_VISIBLE'
+      })
+
+      await Promise.all(waits)
+      const starts = slackApi.calls.filter(call => call.method === 'chat.startStream')
+      expect(starts.length).toBeGreaterThanOrEqual(2)
+      const texts = await threadTexts(parent.ts)
+      expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+      const visibleFinalReplies = texts.filter(text =>
+        text.includes('BUDGET_ROTATION_ANSWER_VISIBLE')
+      )
+      expect(visibleFinalReplies).toHaveLength(1)
+    } finally {
+      delete process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET
+    }
+  })
+
+  it('recovers the final answer when thread state already advanced past the terminal event', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+
+    const parent = await postUserMessage('Context before restart recovery past terminal.')
+    const mentionText = `<@${BOT_USER_ID}> recover a consumed run`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = apiMessageFromSlackEvent({
+      isMention: true,
+      text: mentionText,
+      threadId: key,
+      ts: mention.ts
+    })
+    // The crashed render consumed the whole stream (lastEventId advanced past
+    // the terminal event) but the answer never reached Slack. Recovery must
+    // replay from the obligation's starting position, not lastEventId.
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [mention.ts],
+      forwardedMessageIds: [mention.ts],
+      historyForwarded: true,
+      lastEventId: 999999,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-recovery-consumed',
+        message
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered consumed answer.'))
+
+    bot = createTestBot({ state: sharedState })
+
+    await waitFor(() => codexApi.eventRequests.length === 1, 2000)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.stopStream'), 2000)
+
+    expect(codexApi.eventRequests).toEqual([
+      { afterEventId: 0, executionId: 'exe-recovery-consumed', threadKey: key }
+    ])
+    expect(await threadText(parent.ts)).toContain('Recovered consumed answer.')
+    const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${key}`
+    )
+    expect(recoveredThreadState).toEqual(
       expect.objectContaining({
         activeExecution: false,
         renderObligation: null
@@ -2570,6 +2872,7 @@ type PatchedSlackApi = {
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
+  failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
   reset(): void
   url: string
@@ -2606,10 +2909,12 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const calls: StreamCall[] = []
   const threadNotFoundReplies = new Set<string>()
   let maxStreamStopChars: number | null = null
+  const appendFailure: { error: string; remaining: number } = { error: '', remaining: -1 }
   const streams = new Map<string, StreamRecord>()
   const port = await availablePort(4053)
   const server = createServer((req, res) => {
     void handlePatchedSlackRequest(req, res, {
+      appendFailure,
       calls,
       maxStreamStopChars,
       port,
@@ -2628,12 +2933,18 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
     },
+    failStreamAppendsAfter(count: number, error: string) {
+      appendFailure.remaining = count
+      appendFailure.error = error
+    },
     failStreamStopsLongerThan(maxChars: number) {
       maxStreamStopChars = maxChars
     },
     reset() {
       calls.length = 0
       maxStreamStopChars = null
+      appendFailure.remaining = -1
+      appendFailure.error = ''
       threadNotFoundReplies.clear()
       streams.clear()
     },
@@ -2645,6 +2956,7 @@ async function handlePatchedSlackRequest(
   req: IncomingMessage,
   res: ServerResponse,
   input: {
+    appendFailure: { error: string; remaining: number }
     calls: StreamCall[]
     maxStreamStopChars: number | null
     port: number
@@ -2689,7 +3001,7 @@ async function handlePatchedSlackRequest(
   if (path === '/api/chat.appendStream') {
     await sendWebResponse(
       res,
-      await appendStream(input.upstreamUrl, request, input.streams, input.calls)
+      await appendStream(input.upstreamUrl, request, input.streams, input.calls, input.appendFailure)
     )
     return
   }
@@ -2816,12 +3128,24 @@ async function appendStream(
   emulatorUrl: string,
   request: Request,
   streams: Map<string, StreamRecord>,
-  calls: StreamCall[]
+  calls: StreamCall[],
+  appendFailure: { error: string; remaining: number }
 ): Promise<Response> {
   const body = await requestBody(request)
   const channel = stringField(body.channel)
   const ts = stringField(body.ts)
   calls.push({ method: 'chat.appendStream', body, streamTs: ts })
+  if (appendFailure.remaining === 0) {
+    // The stream broke server-side: real Slack renders the message as
+    // "Something went wrong" and drops the streamed content.
+    await postSlack(emulatorUrl, request, '/api/chat.update', {
+      channel,
+      ts,
+      text: BROKEN_STREAM_TEXT
+    })
+    return Response.json({ ok: false, error: appendFailure.error })
+  }
+  if (appendFailure.remaining > 0) appendFailure.remaining -= 1
   const record = streams.get(streamKey(channel, ts)) ?? { channel, ts, text: '' }
   record.text += streamBodyText(body)
   streams.set(streamKey(channel, ts), record)
@@ -2848,6 +3172,13 @@ async function stopStream(
   const record = streams.get(key) ?? { channel, ts, text: '' }
   const text = [record.text, streamBodyText(body)].filter(part => part.trim()).join('\n')
   if (maxStreamStopChars !== null && text.length > maxStreamStopChars) {
+    // A stream that is never stopped breaks in real Slack: the message shows
+    // "Something went wrong" instead of the streamed content.
+    await postSlack(emulatorUrl, request, '/api/chat.update', {
+      channel,
+      ts,
+      text: BROKEN_STREAM_TEXT
+    })
     return Response.json({ ok: false, error: 'msg_too_long' })
   }
   await postSlack(emulatorUrl, request, '/api/chat.update', {
