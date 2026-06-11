@@ -16,6 +16,7 @@
 //!   from the repo-cache DaemonSet's node-level cache when configured, otherwise
 //!   it git-clones the tools repo at a pinned ref into an emptyDir mounted at
 //!   `/app/tools`;
+//!
 //! `TOOL_DIRS` is set explicitly on the agent env to `/app/tools`, pointing at
 //! the path the init container populates in this pod. The copied tools tree keeps
 //! source metadata in a hidden file so `centaur-tools refresh` can either re-copy

@@ -717,18 +717,18 @@ impl SandboxArgs {
                 spec = spec.env(name, value);
             }
         }
-        if matches!(self.backend, SandboxBackendKind::AgentK8s) {
-            if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
-                spec = spec.mount(
-                    Mount::new(
-                        MountKind::Bind {
-                            source_path: repos_path,
-                        },
-                        SANDBOX_REPOS_MOUNT_PATH,
-                    )
-                    .read_only(),
-                );
-            }
+        if matches!(self.backend, SandboxBackendKind::AgentK8s)
+            && let Some(repos_path) = clean_optional_value(self.repos_path.as_deref())
+        {
+            spec = spec.mount(
+                Mount::new(
+                    MountKind::Bind {
+                        source_path: repos_path,
+                    },
+                    SANDBOX_REPOS_MOUNT_PATH,
+                )
+                .read_only(),
+            );
         }
         for (name, value) in self.workflow_host_env_template()? {
             upsert_spec_env(&mut spec, name, value);
