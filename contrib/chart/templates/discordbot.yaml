@@ -87,12 +87,18 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
 {{- end }}
-          envFrom:
-            - secretRef:
-                name: {{ include "centaur.secretEnvName" . }}
           ports:
             - containerPort: 3001
               name: http
+          # /health reflects the Gateway connection. A slow or rate-limited Discord login can take
+          # well over a minute; give startup a generous ~2min window so the liveness probe doesn't
+          # kill the pod mid-login (each restart burns the 1000/24h IDENTIFY budget).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 5
+            failureThreshold: 24
           readinessProbe:
             httpGet:
               path: /health
@@ -101,11 +107,14 @@ spec:
             httpGet:
               path: /health
               port: 3001
-            # /health reflects the Gateway connection; give the listener time to connect on boot.
-            initialDelaySeconds: 20
             periodSeconds: 15
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            # The oven/bun runtime image ships the `bun` user (uid/gid 1000); the Dockerfile drops
+            # to it, so enforce non-root here too.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
           resources:
 {{ toYaml .Values.discordbot.resources | nindent 12 }}
 ---

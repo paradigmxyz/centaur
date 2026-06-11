@@ -1,9 +1,9 @@
 # discordbot
 
 Discord chat ingress for the Centaur agent. Mirrors `slackbotv2` (streamed, session-backed
-replies to `@`-mentions) using Vercel's Chat SDK Discord adapter. Shares the platform-agnostic
-session logic with Slack via `@centaur/chat-session-bridge`; the Rust `api-rs` control plane is
-unchanged (`discord:…` thread keys flow through identically).
+replies to `@`-mentions) using Vercel's Chat SDK Discord adapter. The session logic is a
+deliberate clone of `services/slackbotv2` kept in sync manually (there is no shared package);
+the Rust `api-rs` control plane is unchanged (`discord:…` thread keys flow through identically).
 
 ## Behavior
 
@@ -42,14 +42,21 @@ ingress** — only a `GET /health` endpoint that reflects the Gateway connection
 | `DISCORDBOT_GUILD_ALLOWLIST` | ✅ to do anything | Comma/space-separated guild IDs. **Fail-closed: empty ⇒ the bot ignores all messages.** |
 | `DISCORDBOT_API_KEY` | – | Bearer to api-rs (falls back to `CENTAUR_API_KEY`). Use a dedicated key, not the Slack one. |
 | `CENTAUR_API_URL` | – | api-rs base URL (default `http://127.0.0.1:8080`). |
-| `DISCORDBOT_DATABASE_URL` / `DATABASE_URL` / `POSTGRES_URL` | – | Thread-state store. |
+| `DISCORDBOT_DATABASE_URL` / `DATABASE_URL` / `POSTGRES_URL` | ✅ | Thread-state store. The bot refuses to boot without one (no silent localhost fallback). |
+| `DISCORDBOT_TRIGGER_BOT_ALLOWLIST` | – | Comma/space-separated bot/webhook author IDs whose messages may enter sessions (e.g. a Sentry webhook). Empty (default) ⇒ all bot messages are ignored. Use the ID the message is authored as: the bot's user id, or the webhook id for webhook integrations. |
+| `DISCORDBOT_MAX_CONCURRENT_EXECUTIONS_PER_GUILD` | – | In-flight execution cap per guild (default 3). Over the cap, the triggering message gets a 🚦 reaction and is kept as context only. |
+| `DISCORDBOT_ACTIVE_EXECUTION_TTL_MS` | – | Staleness TTL for the per-thread active-execution flag (default 30 min) — unwedges threads after a crash mid-handoff. |
+| `DISCORDBOT_ANSWER_EDIT_INTERVAL_MS` | – | Edit cadence for the streamed answer message (default 1500 ms, clamped to ≥1500 to respect Discord rate limits). |
 | `DISCORD_MENTION_ROLE_IDS` | – | Role mentions that also trigger the bot. |
 | `DISCORDBOT_NAME_THREADS` | – | Set `false` to keep the adapter's generic thread names. |
+| `DISCORDBOT_USER_NAME` | – | Bot display name used for mention parsing/thread naming (default `centaur`; the chart sets it from `discordbot.userName`). |
+| `DISCORDBOT_STATE_KEY_PREFIX` | – | Prefix for rows in the Postgres thread-state store (default `centaur-discordbot`). |
 | `DISCORD_API_URL` | – | Override Discord API base. |
 | `PORT` | – | Health server port (default 3001). |
 | `SESSION_IDLE_TIMEOUT_MS` / `SESSION_MAX_DURATION_MS` | – | Forwarded to api-rs execute. |
 
-DMs are denied unconditionally (DM intents are not requested).
+DMs are denied by the guild allowlist: the adapter does request the DirectMessages intent, but a
+DM has no guild, so the fail-closed allowlist check rejects it.
 
 ## Discord application setup
 
@@ -88,8 +95,10 @@ bun run dev           # run the server locally (needs env above)
 - Concurrency is `'drop'`: the per-thread lock serializes handling so two near-simultaneous mentions
   can't double-execute. The tradeoff is that a follow-up sent *while a stream is still running* is
   dropped rather than appended mid-stream; send it again once the reply finishes.
-- Thread renaming is best-effort and applies on the first execution; a first mention inside a
-  user-created thread will rename that thread (set `DISCORDBOT_NAME_THREADS=false` to disable).
+- Thread renaming is best-effort, applies on the first execution, and only touches threads the
+  bot created from a channel mention (`isThreadCreatedForMessage`); a mention inside a
+  user-created thread never renames it (set `DISCORDBOT_NAME_THREADS=false` to disable renaming
+  entirely).
 - A Gateway RESUME that replays a channel mention before state commits could, in rare cases, let
   the adapter create a second thread (the dedup guards execution, but thread creation happens
   inside the adapter). See the plan's invariant #2.
