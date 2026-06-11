@@ -40,24 +40,78 @@ def _git_env() -> tuple[dict[str, str], tempfile.TemporaryDirectory[str] | None]
     return env, temp_dir
 
 
-def _publish_tools(tool_dir: Path, published: Path) -> None:
-    if not published.is_dir():
-        raise RuntimeError(f"refreshed tools subdir does not exist: {published}")
-
+def _clear_published_tools(tool_dir: Path) -> None:
     for child in tool_dir.iterdir():
-        if child.name in {".centaur-source", ".centaur-tools-source.json"}:
+        if child.name in {".centaur-source", ".centaur-tools-source.json"} or child.name.startswith(
+            ".centaur-source-"
+        ):
             continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
         else:
             child.unlink()
 
+
+def _copy_published_tools(tool_dir: Path, published: Path) -> None:
+    if not published.is_dir():
+        raise RuntimeError(f"refreshed tools subdir does not exist: {published}")
+
     for child in published.iterdir():
         target = tool_dir / child.name
+        if target.exists() or target.is_symlink():
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
         if child.is_dir() and not child.is_symlink():
             shutil.copytree(child, target, symlinks=True)
         else:
             shutil.copy2(child, target, follow_symlinks=False)
+
+
+def _publish_tools(tool_dir: Path, published: Path) -> None:
+    _clear_published_tools(tool_dir)
+    _copy_published_tools(tool_dir, published)
+
+
+def _refresh_source(tool_dir: Path, source_metadata: dict[str, object]) -> None:
+    subdir = str(source_metadata.get("source_subdir") or "tools")
+    if source_metadata.get("source") == "repo_cache":
+        repo_cache_repo_path = source_metadata.get("repo_cache_repo_path")
+        if not repo_cache_repo_path:
+            raise RuntimeError("repo-cache tools metadata is missing repo_cache_repo_path")
+        _copy_published_tools(tool_dir, Path(str(repo_cache_repo_path)) / subdir)
+        return
+
+    source_path = Path(str(source_metadata.get("source_path") or tool_dir / ".centaur-source"))
+    if not source_path.is_dir():
+        raise RuntimeError(f"git tools source does not exist: {source_path}")
+
+    git_ref = source_metadata.get("git_ref")
+    env, temp_dir = _git_env()
+    try:
+        if git_ref:
+            subprocess.run(
+                ["git", "-C", str(source_path), "-c", "gc.auto=0", "fetch", "--quiet", "origin", str(git_ref)],
+                check=True,
+                env=env,
+            )
+            subprocess.run(
+                ["git", "-C", str(source_path), "checkout", "--quiet", "--detach", "FETCH_HEAD"],
+                check=True,
+                env=env,
+            )
+        else:
+            subprocess.run(
+                ["git", "-C", str(source_path), "pull", "--ff-only", "--quiet"],
+                check=True,
+                env=env,
+            )
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
+    _copy_published_tools(tool_dir, source_path / subdir)
 
 
 def _refresh_tool_dir(tool_dir: Path) -> bool:
@@ -67,6 +121,15 @@ def _refresh_tool_dir(tool_dir: Path) -> bool:
         return False
 
     metadata = json.loads(metadata_path.read_text())
+    sources = metadata.get("sources")
+    if isinstance(sources, list) and sources:
+        _clear_published_tools(tool_dir)
+        for source_metadata in sources:
+            if not isinstance(source_metadata, dict):
+                raise RuntimeError(f"invalid tools source metadata in {metadata_path}: {source_metadata!r}")
+            _refresh_source(tool_dir, source_metadata)
+        return True
+
     subdir = metadata.get("source_subdir") or "tools"
     if metadata.get("source") == "repo_cache":
         repo_cache_repo_path = metadata.get("repo_cache_repo_path")

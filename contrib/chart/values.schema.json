@@ -44,7 +44,22 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "port": { "type": "integer" }
+        "port": { "type": "integer" },
+        "repo": { "type": "string" },
+        "ref": { "type": "string" },
+        "subdir": { "type": "string" },
+        "extraSources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string" },
+              "ref": { "type": "string" },
+              "subdir": { "type": "string" }
+            },
+            "required": ["repo"]
+          }
+        }
       }
     },
     "ironControl": {

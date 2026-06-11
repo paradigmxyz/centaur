@@ -20,7 +20,7 @@ use centaur_iron_proxy::{
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    ToolsConfig,
+    ToolSource, ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -92,7 +92,7 @@ pub(crate) struct IronControlToolReconciler {
     source_policy: SourcePolicy,
     base_infra_fragment: ProxyFragment,
     tool_dirs: Vec<PathBuf>,
-    tool_git_source: Option<ToolGitSource>,
+    tool_git_sources: Vec<ToolGitSource>,
     interval: Duration,
 }
 
@@ -160,28 +160,50 @@ impl IronControlToolReconciler {
     }
 
     fn tool_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
-        if let Some(source) = &self.tool_git_source {
-            source.sync()?;
-            let tools_dir = source.tools_dir();
-            if source.repo_cache_path.is_some() && !tools_dir.is_dir() {
-                return Ok(Vec::new());
+        if !self.tool_git_sources.is_empty() {
+            let mut dirs = Vec::with_capacity(self.tool_git_sources.len());
+            for source in &self.tool_git_sources {
+                source.sync()?;
+                let tools_dir = source.tools_dir();
+                if source.repo_cache_path.is_some() && !tools_dir.is_dir() {
+                    continue;
+                }
+                dirs.push(tools_dir);
             }
-            return Ok(vec![tools_dir]);
+            return Ok(dirs);
         }
         Ok(self.tool_dirs.clone())
     }
 }
 
 impl ToolGitSource {
-    fn from_config(tools: &ToolsConfig) -> Self {
+    fn from_config(tools: &ToolsConfig) -> Vec<Self> {
+        let mut sources = vec![Self::from_source(
+            &ToolSource {
+                repo: tools.repo.clone(),
+                git_ref: tools.git_ref.clone(),
+                source_subdir: tools.source_subdir.clone(),
+            },
+            tools.repo_cache_path.clone(),
+        )];
+        sources.extend(
+            tools
+                .extra_sources
+                .iter()
+                .map(|source| Self::from_source(source, tools.repo_cache_path.clone())),
+        );
+        sources
+    }
+
+    fn from_source(source: &ToolSource, repo_cache_path: Option<String>) -> Self {
         Self {
-            repo: tools.repo.clone(),
-            git_ref: tools.git_ref.clone(),
-            source_subdir: tools.source_subdir.clone(),
+            repo: source.repo.clone(),
+            git_ref: source.git_ref.clone(),
+            source_subdir: source.source_subdir.clone(),
             cache_dir: env::temp_dir()
                 .join("centaur-api-rs-tools")
-                .join(slug_path_component(&tools.repo)),
-            repo_cache_path: tools.repo_cache_path.clone(),
+                .join(slug_path_component(&source.repo)),
+            repo_cache_path,
         }
     }
 
@@ -577,11 +599,12 @@ impl SandboxArgs {
             source_policy: self.iron_proxy.source_policy(),
             base_infra_fragment: self.iron_proxy.infra_fragment()?,
             tool_dirs: self.tools.resolve_tool_dirs()?,
-            tool_git_source: self
+            tool_git_sources: self
                 .tools_source
                 .to_config()
                 .as_ref()
-                .map(ToolGitSource::from_config),
+                .map(ToolGitSource::from_config)
+                .unwrap_or_default(),
             interval: Duration::from_secs(self.tool_proxy_reconcile_interval_secs),
         }))
     }
@@ -914,9 +937,17 @@ impl SandboxArgs {
 
     fn tool_proxy_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
         if let Some(tools) = self.tools_source.to_config() {
-            let source = ToolGitSource::from_config(&tools);
-            source.sync()?;
-            return Ok(vec![source.tools_dir()]);
+            let sources = ToolGitSource::from_config(&tools);
+            let mut dirs = Vec::with_capacity(sources.len());
+            for source in sources {
+                source.sync()?;
+                let tools_dir = source.tools_dir();
+                if source.repo_cache_path.is_some() && !tools_dir.is_dir() {
+                    continue;
+                }
+                dirs.push(tools_dir);
+            }
+            return Ok(dirs);
         }
         self.tools.resolve_tool_dirs()
     }
@@ -1059,6 +1090,12 @@ struct ToolsArgs {
         env = "KUBERNETES_TOOLS_REPO_CACHE_PATH"
     )]
     repo_cache_path: Option<String>,
+    #[arg(
+        id = "tools_extra_sources",
+        long = "kubernetes-tools-extra-sources",
+        env = "KUBERNETES_TOOLS_EXTRA_SOURCES"
+    )]
+    extra_sources: Option<String>,
 }
 
 impl ToolsArgs {
@@ -1080,7 +1117,46 @@ impl ToolsArgs {
             });
         }
         config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
+        if let Some(value) = clean_optional_value(self.extra_sources.as_deref()) {
+            match serde_json::from_str::<Vec<ToolSourceArg>>(&value) {
+                Ok(sources) => {
+                    config.extra_sources = sources
+                        .into_iter()
+                        .filter_map(ToolSourceArg::into_source)
+                        .collect();
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "invalid KUBERNETES_TOOLS_EXTRA_SOURCES; ignoring extra tool sources");
+                }
+            }
+        }
         Some(config)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ToolSourceArg {
+    repo: String,
+    #[serde(default, rename = "ref")]
+    git_ref: Option<String>,
+    #[serde(default)]
+    subdir: Option<String>,
+}
+
+impl ToolSourceArg {
+    fn into_source(self) -> Option<ToolSource> {
+        Some(ToolSource {
+            repo: clean_optional_value(Some(self.repo.as_str()))?,
+            git_ref: self
+                .git_ref
+                .as_deref()
+                .and_then(|value| clean_optional_value(Some(value))),
+            source_subdir: self
+                .subdir
+                .as_deref()
+                .and_then(|value| clean_optional_value(Some(value)))
+                .unwrap_or_else(|| "tools".to_owned()),
+        })
     }
 }
 

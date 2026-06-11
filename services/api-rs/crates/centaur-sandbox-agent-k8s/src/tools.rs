@@ -61,6 +61,17 @@ pub struct ToolsConfig {
     /// tools-bootstrap copies from `<repo_cache_path>/<repo>/<source_subdir>` and
     /// `centaur-tools refresh` re-copies from the same cache instead of fetching.
     pub repo_cache_path: Option<String>,
+    /// Additional tool sources copied after the base tree. Later sources shadow
+    /// earlier ones when they contain the same tool directory name.
+    pub extra_sources: Vec<ToolSource>,
+}
+
+/// One repo/subdir tools source copied into `/app/tools`.
+#[derive(Clone, Debug)]
+pub struct ToolSource {
+    pub repo: String,
+    pub git_ref: Option<String>,
+    pub source_subdir: String,
 }
 
 /// A Kubernetes Secret key holding a GitHub token, fed to `git` via `GIT_ASKPASS`.
@@ -80,7 +91,18 @@ impl ToolsConfig {
             image_pull_policy: None,
             github_token: None,
             repo_cache_path: None,
+            extra_sources: Vec::new(),
         }
+    }
+
+    fn sources(&self) -> Vec<ToolSource> {
+        let mut sources = vec![ToolSource {
+            repo: self.repo.clone(),
+            git_ref: self.git_ref.clone(),
+            source_subdir: self.source_subdir.clone(),
+        }];
+        sources.extend(self.extra_sources.clone());
+        sources
     }
 }
 
@@ -145,22 +167,7 @@ pub(crate) fn tools_init_container_json(
     tools: &ToolsConfig,
     clone_proxy: Option<&CloneProxy>,
 ) -> Value {
-    let repo_url = format!("https://github.com/{}.git", tools.repo);
-    let subdir = &tools.source_subdir;
-    let repo_cache_repo_path = tools.repo_cache_path.as_ref().map(|path| {
-        format!(
-            "{}/{}",
-            path.trim_end_matches('/'),
-            tools.repo.trim_start_matches('/')
-        )
-    });
-    let metadata = json!({
-        "source_subdir": subdir,
-        "git_ref": tools.git_ref.as_deref(),
-        "source": if repo_cache_repo_path.is_some() { "repo_cache" } else { "git" },
-        "repo_cache_repo_path": repo_cache_repo_path.as_deref(),
-    })
-    .to_string();
+    let sources = tools.sources();
 
     let proxy_exports = match clone_proxy {
         Some(proxy) => format!(
@@ -187,61 +194,99 @@ pub(crate) fn tools_init_container_json(
         String::new()
     };
 
-    // `--filter=blob:none --no-checkout` + sparse-checkout fetches only the tools
-    // subtree's blobs. With a ref we fetch it explicitly (branch/tag/sha);
-    // without one we check out the cloned default branch.
-    let checkout = match &tools.git_ref {
-        Some(git_ref) => format!(
-            "git -C \"$source\" -c gc.auto=0 fetch --quiet origin \"{git_ref}\" && \
-             git -C \"$source\" checkout --quiet --detach FETCH_HEAD"
-        ),
-        None => "git -C \"$source\" checkout --quiet".to_owned(),
-    };
-
     // The per-sandbox proxy is created in the same reconcile as the Sandbox and
     // may not be accepting connections when this init container first runs — and
     // an init failure is terminal for the Sandbox (no kubelet retry), so the
     // clone must retry through the connection-refused window rather than die.
     // repo/ref/subdir are operator config, but quote them anyway so a stray
     // space or metacharacter breaks loudly in git instead of in the shell.
-    let publish_script = if let Some(repo_cache_repo_path) = &repo_cache_repo_path {
-        format!(
-            "attempt=0\n\
-             cache_repo=\"{repo_cache_repo_path}\"\n\
-             until [ -d \"$cache_repo/.git\" ] && [ -d \"$cache_repo/{subdir}\" ]; do\n\
-             attempt=$((attempt + 1))\n\
-             if [ \"$attempt\" -ge 30 ]; then echo \"tools repo-cache entry unavailable after $attempt attempts: $cache_repo/{subdir}\" >&2; exit 1; fi\n\
-             sleep 2\n\
-             done\n\
-             find \"$target\" -mindepth 1 -maxdepth 1 ! -name '.centaur-tools-source.json' -exec rm -rf {{}} +\n\
-             cp -R \"$cache_repo/{subdir}/.\" \"$target\"/"
-        )
-    } else {
-        format!(
-            "source=\"$target/.centaur-source\"\n\
-             rm -rf \"$source\"\n\
-             until git clone --quiet --filter=blob:none --no-checkout \"{repo_url}\" \"$source\" && \
-             git -C \"$source\" sparse-checkout set \"{subdir}\" && \
-             {checkout}; do\n\
-             attempt=$((attempt + 1))\n\
-             if [ \"$attempt\" -ge 30 ]; then echo \"tools clone failed after $attempt attempts\" >&2; exit 1; fi\n\
-             rm -rf \"$source\"\n\
-             sleep 2\n\
-             done\n\
-             find \"$target\" -mindepth 1 -maxdepth 1 ! -name '.centaur-source' ! -name '.centaur-tools-source.json' -exec rm -rf {{}} +\n\
-             cp -R \"$source/{subdir}/.\" \"$target\"/"
-        )
-    };
+    let mut publish_steps = String::from(
+        "find \"$target\" -mindepth 1 -maxdepth 1 ! -name '.centaur-source*' ! -name '.centaur-tools-source.json' -exec rm -rf {} +\n",
+    );
+    let mut metadata_sources = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let subdir = &source.source_subdir;
+        if let Some(repo_cache_path) = &tools.repo_cache_path {
+            let repo_cache_repo_path = format!(
+                "{}/{}",
+                repo_cache_path.trim_end_matches('/'),
+                source.repo.trim_start_matches('/')
+            );
+            publish_steps.push_str(&format!(
+                "attempt=0\n\
+                 cache_repo=\"{repo_cache_repo_path}\"\n\
+                 until [ -d \"$cache_repo/.git\" ] && [ -d \"$cache_repo/{subdir}\" ]; do\n\
+                 attempt=$((attempt + 1))\n\
+                 if [ \"$attempt\" -ge 30 ]; then echo \"tools repo-cache entry unavailable after $attempt attempts: $cache_repo/{subdir}\" >&2; exit 1; fi\n\
+                 sleep 2\n\
+                 done\n\
+                 cp -R \"$cache_repo/{subdir}/.\" \"$target\"/\n"
+            ));
+            metadata_sources.push(json!({
+                "repo": source.repo,
+                "source_subdir": subdir,
+                "git_ref": source.git_ref.as_deref(),
+                "source": "repo_cache",
+                "repo_cache_repo_path": repo_cache_repo_path,
+            }));
+        } else {
+            let repo_url = format!("https://github.com/{}.git", source.repo);
+            let source_path = if index == 0 {
+                "$target/.centaur-source".to_owned()
+            } else {
+                format!("$target/.centaur-source-{index}")
+            };
+            let checkout = match &source.git_ref {
+                Some(git_ref) => format!(
+                    "git -C \"$source\" -c gc.auto=0 fetch --quiet origin \"{git_ref}\" && \
+                     git -C \"$source\" checkout --quiet --detach FETCH_HEAD"
+                ),
+                None => "git -C \"$source\" checkout --quiet".to_owned(),
+            };
+            publish_steps.push_str(&format!(
+                "source=\"{source_path}\"\n\
+                 rm -rf \"$source\"\n\
+                 attempt=0\n\
+                 until git clone --quiet --filter=blob:none --no-checkout \"{repo_url}\" \"$source\" && \
+                 git -C \"$source\" sparse-checkout set \"{subdir}\" && \
+                 {checkout}; do\n\
+                 attempt=$((attempt + 1))\n\
+                 if [ \"$attempt\" -ge 30 ]; then echo \"tools clone failed after $attempt attempts\" >&2; exit 1; fi\n\
+                 rm -rf \"$source\"\n\
+                 sleep 2\n\
+                 done\n\
+                 cp -R \"$source/{subdir}/.\" \"$target\"/\n"
+            ));
+            metadata_sources.push(json!({
+                "repo": source.repo,
+                "source_subdir": subdir,
+                "git_ref": source.git_ref.as_deref(),
+                "source": "git",
+                "source_path": source_path.replace("$target", TOOLS_BOOTSTRAP_DIR),
+            }));
+        }
+    }
+    let first_metadata = metadata_sources
+        .first()
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let metadata = json!({
+        "source_subdir": first_metadata.get("source_subdir").and_then(Value::as_str),
+        "git_ref": first_metadata.get("git_ref").and_then(Value::as_str),
+        "source": first_metadata.get("source").and_then(Value::as_str),
+        "repo_cache_repo_path": first_metadata.get("repo_cache_repo_path").and_then(Value::as_str),
+        "sources": metadata_sources,
+    })
+    .to_string();
     let script = format!(
         "set -e\n\
          {proxy_exports}\
          {askpass}\
          export GIT_TERMINAL_PROMPT=0\n\
          git config --global --add safe.directory '*'\n\
-         attempt=0\n\
          target=\"{TOOLS_BOOTSTRAP_DIR}\"\n\
          mkdir -p \"$target\"\n\
-         {publish_script}\n\
+         {publish_steps}\n\
          cat > \"$target/.centaur-tools-source.json\" <<'CENTAUR_TOOLS_METADATA'\n\
 {metadata}\n\
 CENTAUR_TOOLS_METADATA"

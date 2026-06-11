@@ -5,9 +5,17 @@
 {{- $reposPath = .Values.repoCache.hostPath -}}
 {{- end -}}
 {{- $toolsUseRepoCache := and .Values.repoCache.enabled .Values.toolServer.enabled .Values.toolServer.repo -}}
+{{- $toolDirs := list "/app/tools" -}}
 {{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}
-{{- $workflowDirs = printf "%s/%s/workflows" .Values.repoCache.hostPath .Values.toolServer.repo -}}
+{{- $toolDirs = list (printf "%s/%s/%s" .Values.repoCache.hostPath .Values.toolServer.repo .Values.toolServer.subdir) -}}
+{{- $workflowDirList := list (printf "%s/%s/workflows" .Values.repoCache.hostPath .Values.toolServer.repo) -}}
+{{- range .Values.toolServer.extraSources }}
+{{- $sourceSubdir := default "tools" .subdir -}}
+{{- $toolDirs = append $toolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath .repo $sourceSubdir) -}}
+{{- $workflowDirList = append $workflowDirList (printf "%s/%s/workflows" $.Values.repoCache.hostPath .repo) -}}
+{{- end -}}
+{{- $workflowDirs = join ":" $workflowDirList -}}
 {{- end -}}
 {{- $apiRsMetricsAnnotations := dict -}}
 {{- if .Values.apiRs.metrics.scrapeAnnotations -}}
@@ -119,7 +127,7 @@ spec:
             - name: RUST_LOG
               value: info
             - name: TOOL_DIRS
-              value: /app/tools
+              value: {{ join ":" $toolDirs | quote }}
             - name: WORKFLOW_DIRS
               value: {{ $workflowDirs | quote }}
 {{- if .Values.overlay.systemPrompt }}
@@ -221,6 +229,10 @@ spec:
 {{- end }}
             - name: KUBERNETES_TOOLS_SUBDIR
               value: {{ .Values.toolServer.subdir | quote }}
+{{- with .Values.toolServer.extraSources }}
+            - name: KUBERNETES_TOOLS_EXTRA_SOURCES
+              value: {{ toJson . | quote }}
+{{- end }}
 {{- if $toolsUseRepoCache }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PATH
               value: {{ .Values.repoCache.hostPath | quote }}

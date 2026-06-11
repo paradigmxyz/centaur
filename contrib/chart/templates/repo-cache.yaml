@@ -5,6 +5,9 @@
 {{- end }}
 {{- if and .Values.toolServer.enabled .Values.toolServer.repo }}
 {{- $repoCacheRepositories = append $repoCacheRepositories .Values.toolServer.repo -}}
+{{- range .Values.toolServer.extraSources }}
+{{- $repoCacheRepositories = append $repoCacheRepositories .repo -}}
+{{- end }}
 {{- end }}
 {{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
 {{- if $repoCacheRepositories }}
@@ -18,6 +21,11 @@
 {{- end }}
 {{- if and .Values.toolServer.enabled .Values.toolServer.repo .Values.toolServer.ref (not (hasKey .Values.repoCache.repositoryRefs .Values.toolServer.repo)) }}
 {{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" .Values.toolServer.repo .Values.toolServer.ref) -}}
+{{- end }}
+{{- range .Values.toolServer.extraSources }}
+{{- if and .ref (not (hasKey $.Values.repoCache.repositoryRefs .repo)) }}
+{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" .repo .ref) -}}
+{{- end }}
 {{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
