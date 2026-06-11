@@ -60,10 +60,23 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        let body = Json(json!({
+        let mut body = json!({
             "ok": false,
             "error": self.to_string(),
-        }));
-        (status, body).into_response()
+        });
+        // Structured conflict details let clients (e.g. the slackbot) recover by
+        // retrying with the session's existing harness instead of parsing the
+        // human-readable message.
+        if let Self::Runtime(SessionRuntimeError::Store(SessionStoreError::HarnessConflict {
+            existing,
+            requested,
+            ..
+        })) = &self
+        {
+            body["code"] = json!("harness_conflict");
+            body["existing_harness"] = json!(existing);
+            body["requested_harness"] = json!(requested);
+        }
+        (status, Json(body)).into_response()
     }
 }

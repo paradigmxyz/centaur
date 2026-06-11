@@ -87,7 +87,11 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
             Ok(BlocksCommand::User {
                 input,
                 client_user_message_id,
+                model,
             }) => {
+                if let Some(model) = model {
+                    state.model = model;
+                }
                 if let Err(error) = run_blocks_turn(
                     harness,
                     &mut state,
@@ -186,6 +190,7 @@ pub(crate) enum BlocksCommand {
     User {
         input: Vec<UserInput>,
         client_user_message_id: Option<String>,
+        model: Option<String>,
     },
     Interrupt,
 }
@@ -202,6 +207,8 @@ struct BlocksLine {
     text: Option<String>,
     #[serde(default)]
     client_user_message_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,6 +262,10 @@ pub(crate) fn parse_blocks_line(line: &str) -> Result<BlocksCommand> {
                 client_user_message_id: parsed
                     .client_user_message_id
                     .or_else(|| parsed.message.and_then(|message| message.id)),
+                model: parsed
+                    .model
+                    .map(|model| model.trim().to_owned())
+                    .filter(|model| !model.is_empty()),
             })
         }
         "interrupt" => Ok(BlocksCommand::Interrupt),
@@ -799,4 +810,29 @@ pub(crate) fn write_blocks_error<W: Write>(
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_blocks_user_line_with_model_override() {
+        let line = r#"{"type":"user","thread_key":"web:t1","model":"claude-sonnet-4-6","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let BlocksCommand::User { model, input, .. } = parse_blocks_line(line).expect("parses")
+        else {
+            panic!("expected user command");
+        };
+        assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(input.len(), 1);
+    }
+
+    #[test]
+    fn ignores_blank_model_on_blocks_user_line() {
+        let line = r#"{"type":"user","model":"  ","text":"hi"}"#;
+        let BlocksCommand::User { model, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(model, None);
+    }
 }
