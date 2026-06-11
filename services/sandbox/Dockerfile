@@ -58,9 +58,12 @@ ARG CODEX_VERSION=0.139.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
-# Matches the packageManager pin in 0xSplits/splits — baked into the image so
-# agents don't need a corepack download through the egress proxy at runtime.
-ARG PNPM_VERSION=10.9.0
+# Bootstrap pnpm for agents working in JS monorepos. The exact baked version
+# doesn't constrain repos: when a repo's `packageManager` field declares a
+# different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
+# default; `manage-package-manager-versions` in v10) over the same registry
+# egress a dependency install already needs.
+ARG PNPM_VERSION=11.5.3
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
