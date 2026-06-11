@@ -56,6 +56,8 @@ LLM_INPUTS_BY_TURN_ID: dict[str, str] = {}
 LLM_OUTPUTS_BY_TURN_ID: dict[str, str] = {}
 CURRENT_TRACE_METADATA: dict[str, Any] = {}
 TRACE_METADATA_BY_TURN_ID: dict[str, dict[str, Any]] = {}
+ATTACHMENT_UPLOADS: dict[str, dict[str, Any]] = {}
+STAGED_ATTACHMENTS: dict[str, dict[str, Any]] = {}
 
 LAMINAR_METADATA_PREFIX = "lmnr.association.properties.metadata."
 DATA_URL_PREFIX = "data:"
@@ -227,6 +229,35 @@ def input_items_from_image_block(block: dict[str, Any]) -> list[dict[str, Any]]:
 def input_items_from_attachment_block(block: dict[str, Any]) -> list[dict[str, Any]]:
     name = str(block.get("name") or "attachment")
     mime_type = optional_string(block.get("mimeType"))
+    local_path = optional_string(block.get("localPath")) or optional_string(block.get("path"))
+    if local_path:
+        path = Path(local_path)
+        if path.exists():
+            return local_file_items(
+                path,
+                mime_type,
+                is_image=optional_string(block.get("attachment_type")) == "image",
+            )
+
+    staged_attachment_id = optional_string(block.get("stagedAttachmentId"))
+    if staged_attachment_id:
+        staged = STAGED_ATTACHMENTS.get(staged_attachment_id)
+        if staged:
+            path = Path(str(staged.get("path") or ""))
+            if path.exists():
+                return local_file_items(
+                    path,
+                    optional_string(staged.get("mimeType")) or mime_type,
+                    is_image=optional_string(staged.get("attachmentType"))
+                    == "image",
+                )
+        return [
+            {
+                "type": "text",
+                "text": f"[Attachment was not staged successfully: {name}]",
+            }
+        ]
+
     data_base64 = optional_string(block.get("dataBase64"))
     if data_base64:
         path = materialize_base64(data_base64, name, mime_type)
@@ -298,6 +329,46 @@ def write_upload_bytes(data: bytes, name: str, mime_type: str | None) -> Path:
     path = unique_upload_path(name, mime_type)
     path.write_bytes(data)
     return path
+
+
+def handle_attachment_chunk(chunk_input: dict[str, Any]) -> None:
+    attachment_id = optional_string(chunk_input.get("attachmentId"))
+    if not attachment_id:
+        emit({"type": "error", "message": "attachment chunk missing attachmentId"})
+        return
+    name = str(chunk_input.get("name") or "attachment")
+    mime_type = optional_string(chunk_input.get("mimeType"))
+    upload = ATTACHMENT_UPLOADS.get(attachment_id)
+    if upload is None:
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        path = unique_upload_path(name, mime_type)
+        upload = {
+            "path": path,
+            "name": name,
+            "mimeType": mime_type,
+            "attachmentType": optional_string(chunk_input.get("attachmentType")),
+        }
+        ATTACHMENT_UPLOADS[attachment_id] = upload
+
+    data_base64 = optional_string(chunk_input.get("dataBase64"))
+    if data_base64:
+        try:
+            data = base64.b64decode(data_base64, validate=True)
+        except (binascii.Error, ValueError):
+            ATTACHMENT_UPLOADS.pop(attachment_id, None)
+            emit(
+                {
+                    "type": "error",
+                    "message": f"invalid attachment chunk for {attachment_id}",
+                }
+            )
+            return
+        with Path(upload["path"]).open("ab") as file:
+            file.write(data)
+
+    if bool(chunk_input.get("final")):
+        STAGED_ATTACHMENTS[attachment_id] = upload
+        ATTACHMENT_UPLOADS.pop(attachment_id, None)
 
 
 def unique_upload_path(name: str, mime_type: str | None) -> Path:
@@ -988,6 +1059,9 @@ def handle_input(turn_input: dict[str, Any]) -> None:
     input_type = turn_input.get("type")
     if input_type == "interrupt":
         interrupt_active_turn()
+        return
+    if input_type == "attachment.chunk":
+        handle_attachment_chunk(turn_input)
         return
     if input_type not in {"user", "turn.start"}:
         return

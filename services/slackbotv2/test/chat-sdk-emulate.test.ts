@@ -395,6 +395,70 @@ describe('slackbotv2', () => {
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
+  it('stages large Slack file attachments without exceeding session input line limits', async () => {
+    const parent = await postUserMessage('Context before the video upload.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this mp4`, parent.ts)
+    const fileUrl = `${slackApi.url}/files/large-upload.mp4`
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-large-mp4',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> inspect this mp4`,
+          files: [
+            {
+              id: 'F-large-mp4',
+              mimetype: 'video/mp4',
+              name: 'large-upload.mp4',
+              size: 2 * 1024 * 1024,
+              url_private: fileUrl
+            }
+          ]
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const appendedAttachment = codexApi.appends[0]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        attachment_type: 'video',
+        dataBase64Omitted: expect.stringContaining('base64 chars omitted'),
+        mimeType: 'video/mp4',
+        name: 'large-upload.mp4'
+      })
+    )
+    expect(appendedAttachment).not.toHaveProperty('dataBase64')
+
+    const inputLines = codexApi.executes[0]!.body.input_lines
+    expect(inputLines.length).toBeGreaterThan(1)
+    for (const line of inputLines) {
+      expect(line.length).toBeLessThanOrEqual(1048576)
+    }
+
+    const chunkInputs = inputLines.slice(0, -1).map(line => JSON.parse(line))
+    expect(chunkInputs.every(input => input.type === 'attachment.chunk')).toBe(true)
+    expect(chunkInputs.at(-1)).toEqual(expect.objectContaining({ final: true }))
+
+    const turnInput = JSON.parse(inputLines.at(-1)!) as Record<string, unknown>
+    const serializedTurn = JSON.stringify(turnInput)
+    expect(serializedTurn).toContain('"stagedAttachmentId"')
+    expect(serializedTurn).not.toContain('dataBase64')
+  })
+
   it('executes a root app mention when Slack has no thread history yet', async () => {
     const mention = await postUserMessage(`<@${BOT_USER_ID}> answer from a new root message`)
     slackApi.failRepliesWithThreadNotFound(CHANNEL_ID, mention.ts)
@@ -3130,6 +3194,19 @@ async function handlePatchedSlackRequest(
       res,
       new Response('captured-image', {
         headers: { 'content-type': 'image/png' }
+      })
+    )
+    return
+  }
+
+  if (
+    url.pathname.endsWith('/files/large-upload.mp4')
+    || url.pathname.endsWith('/large-upload.mp4')
+  ) {
+    await sendWebResponse(
+      res,
+      new Response(new Uint8Array(2 * 1024 * 1024), {
+        headers: { 'content-type': 'video/mp4' }
       })
     )
     return

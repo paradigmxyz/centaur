@@ -17,6 +17,7 @@ export type SlackbotV2ApiAuthor = {
 
 export type SlackbotV2ApiAttachment = {
   dataBase64?: string
+  dataBase64Omitted?: string
   fetchError?: string
   fetchMetadata?: Record<string, string>
   height?: number

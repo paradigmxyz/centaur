@@ -199,6 +199,8 @@ export function sessionStreamError(error: unknown): RustSessionStreamEvent {
 
 /** Largest attachment we are willing to buffer in memory and inline as base64. */
 export const MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024
+const MAX_CODEX_INPUT_LINE_CHARS = 900 * 1024
+const STAGED_ATTACHMENT_CHUNK_CHARS = 700 * 1024
 
 async function serializeAttachment(attachment: Attachment): Promise<SlackbotV2ApiAttachment> {
   const serialized: SlackbotV2ApiAttachment = {
@@ -342,7 +344,7 @@ async function executeSession(
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
     metadata: sessionMetadata(message, { action: 'execute' }),
-    input_lines: [toCodexInputLine(message, threadId, model)],
+    input_lines: toCodexInputLines(message, threadId, model),
     ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
@@ -435,9 +437,21 @@ function sessionMessageParts(message: SlackbotV2ApiMessage): JsonValue[] {
     parts.push({ type: 'text', text: message.text })
   }
   for (const attachment of message.attachments) {
-    parts.push({ ...attachment, attachment_type: attachment.type, type: 'attachment' })
+    parts.push(sessionAttachmentPart(attachment))
   }
   return parts.length > 0 ? parts : [{ type: 'text', text: '' }]
+}
+
+function sessionAttachmentPart(attachment: SlackbotV2ApiAttachment): JsonObject {
+  const part: JsonObject = { ...attachment, attachment_type: attachment.type, type: 'attachment' }
+  if (
+    typeof attachment.dataBase64 === 'string'
+    && attachment.dataBase64.length > MAX_CODEX_INPUT_LINE_CHARS
+  ) {
+    delete part.dataBase64
+    part.dataBase64Omitted = `${attachment.dataBase64.length} base64 chars omitted from stored session message`
+  }
+  return part
 }
 
 function sessionMetadata(
@@ -457,7 +471,36 @@ function sessionMetadata(
   }
 }
 
-function toCodexInputLine(message: SlackbotV2ApiMessage, threadId: string, model?: string): string {
+function toCodexInputLines(
+  message: SlackbotV2ApiMessage,
+  threadId: string,
+  model?: string
+): string[] {
+  const staged = new Map<SlackbotV2ApiAttachment, string>()
+  const lines: string[] = []
+  for (const attachment of message.attachments) {
+    if (!attachment.dataBase64) continue
+    const inlineLine = toCodexInputLineWithStaged(message, threadId, staged, model)
+    if (
+      inlineLine.length <= MAX_CODEX_INPUT_LINE_CHARS
+      && attachment.dataBase64.length <= MAX_CODEX_INPUT_LINE_CHARS
+    ) {
+      continue
+    }
+    const stagedAttachmentId = `att-${message.id}-${staged.size + 1}`
+    staged.set(attachment, stagedAttachmentId)
+    lines.push(...stagedAttachmentInputLines(attachment, stagedAttachmentId))
+  }
+  lines.push(toCodexInputLineWithStaged(message, threadId, staged, model))
+  return lines
+}
+
+function toCodexInputLineWithStaged(
+  message: SlackbotV2ApiMessage,
+  threadId: string,
+  staged: Map<SlackbotV2ApiAttachment, string>,
+  model?: string
+): string {
   return JSON.stringify({
     type: 'user',
     thread_key: threadId,
@@ -465,23 +508,63 @@ function toCodexInputLine(message: SlackbotV2ApiMessage, threadId: string, model
     ...(model ? { model } : {}),
     message: {
       role: 'user',
-      content: codexInputContent(message)
+      content: codexInputContent(message, staged)
     }
   })
 }
 
-function codexInputContent(message: SlackbotV2ApiMessage): JsonValue[] {
+function stagedAttachmentInputLines(
+  attachment: SlackbotV2ApiAttachment,
+  stagedAttachmentId: string
+): string[] {
+  const dataBase64 = attachment.dataBase64
+  if (!dataBase64) return []
+  const lines: string[] = []
+  const chunkSize = STAGED_ATTACHMENT_CHUNK_CHARS - (STAGED_ATTACHMENT_CHUNK_CHARS % 4)
+  for (let offset = 0, index = 0; offset < dataBase64.length; offset += chunkSize, index += 1) {
+    const chunk = dataBase64.slice(offset, offset + chunkSize)
+    lines.push(JSON.stringify({
+      type: 'attachment.chunk',
+      attachmentId: stagedAttachmentId,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      attachmentType: attachment.type,
+      chunkIndex: index,
+      final: offset + chunkSize >= dataBase64.length,
+      dataBase64: chunk
+    }))
+  }
+  return lines
+}
+
+function codexInputContent(
+  message: SlackbotV2ApiMessage,
+  staged: Map<SlackbotV2ApiAttachment, string> = new Map()
+): JsonValue[] {
   const content: JsonValue[] = []
   if (message.text.trim()) {
     content.push({ type: 'text', text: message.text })
   }
   for (const attachment of message.attachments) {
-    content.push(codexAttachmentInput(attachment))
+    content.push(codexAttachmentInput(attachment, staged.get(attachment)))
   }
   return content.length > 0 ? content : [{ type: 'text', text: 'continue' }]
 }
 
-function codexAttachmentInput(attachment: SlackbotV2ApiAttachment): JsonValue {
+function codexAttachmentInput(
+  attachment: SlackbotV2ApiAttachment,
+  stagedAttachmentId?: string
+): JsonValue {
+  if (stagedAttachmentId) {
+    return {
+      type: 'attachment',
+      attachment_type: attachment.type,
+      stagedAttachmentId,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      size: attachment.size
+    }
+  }
   const dataUrl =
     attachment.dataBase64 && attachment.mimeType
       ? `data:${attachment.mimeType};base64,${attachment.dataBase64}`
@@ -492,6 +575,16 @@ function codexAttachmentInput(attachment: SlackbotV2ApiAttachment): JsonValue {
       url: dataUrl ?? attachment.url,
       detail: 'auto',
       name: attachment.name
+    }
+  }
+  if (attachment.dataBase64) {
+    return {
+      type: 'attachment',
+      attachment_type: attachment.type,
+      dataBase64: attachment.dataBase64,
+      mimeType: attachment.mimeType,
+      name: attachment.name,
+      size: attachment.size
     }
   }
   return {
@@ -506,8 +599,7 @@ function attachmentDescription(attachment: SlackbotV2ApiAttachment): string {
     `type=${attachment.type}`,
     attachment.mimeType ? `mime=${attachment.mimeType}` : undefined,
     attachment.url ? `url=${attachment.url}` : undefined,
-    // TODO: Upload files through POST /session/{thread_key}/attachments and pass refs here.
-    attachment.dataBase64 ? `base64=${attachment.dataBase64}` : undefined,
+    attachment.dataBase64Omitted ? `content=${attachment.dataBase64Omitted}` : undefined,
     attachment.fetchError ? `fetch_error=${attachment.fetchError}` : undefined
   ].filter(Boolean)
   return `[Slack attachment: ${fields.join(' ')}]`
