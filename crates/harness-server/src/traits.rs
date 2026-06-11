@@ -93,6 +93,12 @@ pub enum NormalizedEvent {
     SessionStarted {
         session_id: Option<String>,
     },
+    /// Announces an agent message before its text deltas so the item starts with
+    /// the phase implied by `stop_reason` (deltas carry no phase of their own).
+    AgentMessageStarted {
+        item_id: String,
+        stop_reason: Option<String>,
+    },
     AssistantMessage {
         partial: bool,
         stop_reason: Option<String>,

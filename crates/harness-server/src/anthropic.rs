@@ -45,6 +45,22 @@ impl AnthropicStreamEvent {
     pub fn parse_json_line(line: &str) -> Result<Self> {
         Ok(serde_json::from_str(line)?)
     }
+
+    /// The authoritative end-of-message stop reason, carried by the raw
+    /// `message_delta` stream event (`tool_use`, `end_turn`, ...). The per-block
+    /// `assistant` events leave `stop_reason` null, so this is the only in-stream
+    /// signal of whether a message is interim commentary or the final answer.
+    pub fn message_stop_reason(&self) -> Option<&str> {
+        match self {
+            Self::StreamEvent {
+                event:
+                    AnthropicRawStreamEvent::MessageDelta {
+                        delta: Some(delta), ..
+                    },
+            } => delta.stop_reason.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -65,9 +81,18 @@ pub enum AnthropicRawStreamEvent {
         index: usize,
     },
     MessageStop,
-    MessageDelta,
+    MessageDelta {
+        #[serde(default)]
+        delta: Option<AnthropicMessageDeltaBody>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnthropicMessageDeltaBody {
+    #[serde(default)]
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,7 +183,7 @@ impl AnthropicEventNormalizer {
                 self.content_blocks.clear();
                 NormalizedEvent::Ignored
             }
-            AnthropicRawStreamEvent::MessageDelta | AnthropicRawStreamEvent::Unknown => {
+            AnthropicRawStreamEvent::MessageDelta { .. } | AnthropicRawStreamEvent::Unknown => {
                 NormalizedEvent::Ignored
             }
         }

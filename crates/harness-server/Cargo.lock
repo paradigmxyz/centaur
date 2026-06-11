@@ -1541,6 +1541,7 @@ dependencies = [
  "allocative",
  "clap",
  "codex-app-server-protocol",
+ "codex-protocol",
  "codex-utils-absolute-path",
  "serde",
  "serde_json",
