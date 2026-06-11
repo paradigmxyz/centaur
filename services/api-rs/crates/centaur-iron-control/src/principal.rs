@@ -13,6 +13,8 @@
 //! [`derive_principal`] is pure so the mapping is unit-tested directly; callers
 //! upsert the returned [`PrincipalRef`] at session start.
 
+use std::collections::BTreeMap;
+
 use crate::models::IdentityInput;
 use crate::util::{managed_labels, slugify};
 
@@ -21,17 +23,20 @@ use crate::util::{managed_labels, slugify};
 pub struct PrincipalRef {
     pub foreign_id: String,
     pub name: String,
+    pub labels: BTreeMap<String, String>,
 }
 
 impl PrincipalRef {
     /// Build the upsert body for this principal in ``namespace``, tagging it as
     /// Centaur-managed.
     pub fn to_identity_input(&self, namespace: &str) -> IdentityInput {
+        let mut labels = managed_labels();
+        labels.extend(self.labels.clone());
         IdentityInput {
             namespace: namespace.to_owned(),
             foreign_id: self.foreign_id.clone(),
             name: self.name.clone(),
-            labels: managed_labels(),
+            labels,
         }
     }
 }
@@ -58,6 +63,7 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
         return PrincipalRef {
             foreign_id: format!("slack-user-{scope}{}", slugify(user)),
             name: format!("Slack user {user}{team_suffix}"),
+            labels: slack_labels(team_id, conversation_id, Some(user)),
         };
     }
 
@@ -65,13 +71,39 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
         return PrincipalRef {
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
             name: format!("Slack channel {conversation_id}{team_suffix}"),
+            labels: slack_labels(team_id, Some(conversation_id), None),
         };
     }
 
     PrincipalRef {
         foreign_id: format!("thread-{}", slugify(thread_key)),
         name: thread_key.to_owned(),
+        labels: BTreeMap::new(),
     }
+}
+
+fn slack_labels(
+    team_id: Option<&str>,
+    conversation_id: Option<&str>,
+    user_id: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    if let Some(team_id) = team_id {
+        labels.insert("slack_team_id".to_owned(), team_id.to_owned());
+    }
+    if let Some(conversation_id) = conversation_id {
+        labels.insert(
+            "slack_conversation_id".to_owned(),
+            conversation_id.to_owned(),
+        );
+        if !is_direct_message(Some(conversation_id)) {
+            labels.insert("slack_channel_id".to_owned(), conversation_id.to_owned());
+        }
+    }
+    if let Some(user_id) = user_id {
+        labels.insert("slack_user_id".to_owned(), user_id.to_owned());
+    }
+    labels
 }
 
 /// Identify the team and conversation segments by their Slack prefix, ignoring
@@ -122,6 +154,10 @@ mod tests {
         let principal = derive_principal("chat:C123:1780000000.000000", Some("U07ABC"));
         assert_eq!(principal.foreign_id, "slack-channel-c123");
         assert_eq!(principal.name, "Slack channel C123");
+        assert_eq!(
+            principal.labels.get("slack_channel_id").map(String::as_str),
+            Some("C123")
+        );
     }
 
     #[test]
@@ -135,6 +171,14 @@ mod tests {
         let principal = derive_principal("slack:T123:C456:1780000000.0001", Some("U1"));
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
         assert_eq!(principal.name, "Slack channel C456 (team T123)");
+        assert_eq!(
+            principal.labels.get("slack_team_id").map(String::as_str),
+            Some("T123")
+        );
+        assert_eq!(
+            principal.labels.get("slack_channel_id").map(String::as_str),
+            Some("C456")
+        );
     }
 
     #[test]
@@ -159,6 +203,10 @@ mod tests {
         assert_eq!(
             input.labels.get("managed-by").map(String::as_str),
             Some("centaur")
+        );
+        assert_eq!(
+            input.labels.get("slack_channel_id").map(String::as_str),
+            Some("C1")
         );
     }
 }

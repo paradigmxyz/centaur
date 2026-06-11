@@ -15,8 +15,16 @@ pub struct PostgresListener {
     pub client: Option<PostgresClient>,
     #[serde(default, skip_serializing)]
     pub sandbox_env: Option<SandboxEnv>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<PostgresSetting>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PostgresSetting {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

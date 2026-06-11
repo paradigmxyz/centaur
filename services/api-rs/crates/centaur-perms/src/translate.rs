@@ -207,6 +207,7 @@ fn pg_dsn_input(namespace: &str, pg: &PgDsnSecret, policy: &SourcePolicy) -> PgD
         database: pg.database.clone(),
         description: None,
         role: None,
+        settings: Vec::new(),
         labels: managed_labels(),
         dsn: source_from_placeholder(policy, &pg.secret_ref, None),
     }

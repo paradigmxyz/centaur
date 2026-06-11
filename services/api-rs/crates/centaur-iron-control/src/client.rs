@@ -640,6 +640,34 @@ mod tests {
     }
 
     #[test]
+    fn pg_dsn_input_serializes_settings() {
+        let input = PgDsnSecretInput {
+            namespace: "default".to_owned(),
+            foreign_id: "pg-slack-etl".to_owned(),
+            name: "Slack ETL".to_owned(),
+            database: "centaur".to_owned(),
+            description: None,
+            role: Some("centaur_slack_reader".to_owned()),
+            settings: vec![crate::PgDsnSettingInput {
+                name: "centaur.slack_channel_id".to_owned(),
+                value: "{{ .Principal.Labels.slack_channel_id }}".to_owned(),
+            }],
+            labels: std::collections::BTreeMap::new(),
+            dsn: SecretSource::env("SLACK_ETL_DATABASE_URL"),
+        };
+        let body = serde_json::to_value(&input).unwrap();
+        assert_eq!(body["role"], json!("centaur_slack_reader"));
+        assert_eq!(
+            body["settings"],
+            json!([{ "name": "centaur.slack_channel_id", "value": "{{ .Principal.Labels.slack_channel_id }}" }])
+        );
+        assert_eq!(
+            body["dsn"],
+            json!({ "source_type": "env", "config": { "var": "SLACK_ETL_DATABASE_URL" } })
+        );
+    }
+
+    #[test]
     fn upsert_path_encodes_foreign_id() {
         assert_eq!(
             upsert_path("static_secrets", "github/token"),

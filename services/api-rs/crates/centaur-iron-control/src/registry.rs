@@ -535,6 +535,14 @@ fn pg_dsn_from_listener(
         database,
         description: None,
         role: role_to_set,
+        settings: listener
+            .settings
+            .iter()
+            .map(|setting| crate::PgDsnSettingInput {
+                name: setting.name.clone(),
+                value: setting.value.clone(),
+            })
+            .collect(),
         labels: managed_labels(),
         dsn,
     })
@@ -991,6 +999,11 @@ postgres:
     sandbox_env:
       database: analytics_db
     role: readonly
+    settings:
+      - name: application_name
+        value: centaur
+      - name: centaur.slack_channel_id
+        value: "{{ .Principal.Labels.slack_channel_id }}"
 "#,
         )
         .unwrap();
@@ -1004,6 +1017,19 @@ postgres:
         assert_eq!(input.name, "analytics");
         assert_eq!(input.database, "analytics_db");
         assert_eq!(input.role.as_deref(), Some("readonly"));
+        assert_eq!(
+            input.settings,
+            vec![
+                crate::PgDsnSettingInput {
+                    name: "application_name".to_owned(),
+                    value: "centaur".to_owned(),
+                },
+                crate::PgDsnSettingInput {
+                    name: "centaur.slack_channel_id".to_owned(),
+                    value: "{{ .Principal.Labels.slack_channel_id }}".to_owned(),
+                }
+            ]
+        );
         assert_eq!(input.dsn.source_type, "env");
         assert_eq!(input.dsn.config, json!({ "var": "PG_ANALYTICS_DSN" }));
     }

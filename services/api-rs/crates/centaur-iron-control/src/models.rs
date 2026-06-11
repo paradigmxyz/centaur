@@ -261,7 +261,10 @@ pub struct AwsAuthSecretInput {
 /// ``database`` is the database name to connect to on both the proxied and the
 /// upstream connection (the ``dsn`` source is opaque, so it can't be parsed out
 /// of the connection string); ``role`` is an optional Postgres role the proxy
-/// issues ``SET ROLE`` for.
+/// issues ``SET ROLE`` for. ``settings`` are optional Postgres GUCs the proxy
+/// sets after connecting, after rendering each value against the managed
+/// proxy/principal context. They allow RLS policies to key off dynamic
+/// application identity without creating one Postgres role per principal.
 // Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PgDsnSecretInput {
@@ -273,9 +276,17 @@ pub struct PgDsnSecretInput {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<PgDsnSettingInput>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     pub dsn: SecretSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PgDsnSettingInput {
+    pub name: String,
+    pub value: String,
 }
 
 // ---------------------------------------------------------------------------

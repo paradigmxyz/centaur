@@ -152,6 +152,38 @@ Configured channel. #incident-response has channel grants for org-wide Slack
 search and prod Postgres read. Anyone in the channel gets that scope when the
 agent runs, regardless of their individual perms.
 
+Dynamic channel-scoped Postgres. Slack ETL is a special case where the desired
+scope is naturally the current Slack channel. Instead of creating one Postgres
+role per Slack channel, Centaur can create one iron-control principal per
+channel and stamp channel metadata onto that principal:
+
+```text
+foreign_id = slack-channel-t123-c456
+labels.slack_team_id = T123
+labels.slack_channel_id = C456
+```
+
+The Postgres grant can then use one shared reader role plus a session setting
+rendered from the principal:
+
+```yaml
+postgres:
+  - name: slack-etl
+    upstream:
+      dsn: { placeholder: SLACK_ETL_DATABASE_URL }
+    sandbox_env:
+      name: SLACK_ETL_DSN
+      database: centaur
+    role: centaur_slack_reader
+    settings:
+      - name: centaur.slack_channel_id
+        value: "{{ .Principal.Labels.slack_channel_id }}"
+```
+
+Postgres RLS checks `channel_id =
+current_setting('centaur.slack_channel_id', true)`, while an explicitly granted
+admin role keeps the broad `USING (true)` policy.
+
 Unconfigured channel. Channel exists but no grants registered -> fall back to
 the requesting user's grants.
 
