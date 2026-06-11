@@ -597,9 +597,13 @@ enum WorkflowQueueClass {
 
 fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
-        "slack_sync" | "slack_backfill" | "company_context_documents" | "chief_of_staff_daily" => {
-            WorkflowQueueClass::Etl
-        }
+        "slack_sync"
+        | "slack_backfill"
+        | "google_calendar_sync"
+        | "google_drive_sync"
+        | "linear_sync"
+        | "company_context_documents"
+        | "chief_of_staff_daily" => WorkflowQueueClass::Etl,
         _ => WorkflowQueueClass::Standard,
     }
 }
@@ -2509,6 +2513,25 @@ mod tests {
                 .with_ymd_and_hms(2026, 6, 8, 7, 45, 0)
                 .unwrap()
                 .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn scheduled_etls_use_etl_queue() {
+        for workflow_name in [
+            "slack_sync",
+            "slack_backfill",
+            "google_calendar_sync",
+            "google_drive_sync",
+            "linear_sync",
+            "company_context_documents",
+            "chief_of_staff_daily",
+        ] {
+            assert_eq!(workflow_queue_class(workflow_name), WorkflowQueueClass::Etl);
+        }
+        assert_eq!(
+            workflow_queue_class("github_issue_triage"),
+            WorkflowQueueClass::Standard
         );
     }
 

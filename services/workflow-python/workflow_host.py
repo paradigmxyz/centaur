@@ -20,6 +20,7 @@ import sys
 import traceback
 import types
 import typing
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -195,11 +196,363 @@ class RegisteredWorkflow:
 
 
 def install_api_compat_module() -> None:
-    api_mod = sys.modules.setdefault("api", types.ModuleType("api"))
+    api_mod = sys.modules.get("api")
+    if api_mod is None:
+        try:
+            import api as imported_api  # type: ignore
+
+            api_mod = imported_api
+        except ImportError:
+            api_mod = types.ModuleType("api")
+            api_mod.__path__ = []  # Mark as package so compat submodules can import.
+            sys.modules["api"] = api_mod
+
     workflow_engine = types.ModuleType("api.workflow_engine")
     workflow_engine.WorkflowContext = WorkflowContext
-    sys.modules.setdefault("api.workflow_engine", workflow_engine)
+    sys.modules["api.workflow_engine"] = workflow_engine
     setattr(api_mod, "workflow_engine", workflow_engine)
+
+    runtime_control = types.ModuleType("api.runtime_control")
+    runtime_control.canonical_json = canonical_json
+    runtime_control.decode_jsonb = decode_jsonb
+    sys.modules.setdefault("api.runtime_control", runtime_control)
+    setattr(api_mod, "runtime_control", runtime_control)
+
+    install_vm_metrics_compat_module(api_mod)
+
+    install_centaur_sdk_compat_module()
+    if not real_integrations_available():
+        install_integration_compat_modules(api_mod)
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def decode_jsonb(value: Any, fallback: Any) -> Any:
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return value
+
+
+def install_centaur_sdk_compat_module() -> None:
+    if "centaur_sdk" in sys.modules:
+        return
+    try:
+        __import__("centaur_sdk")
+        return
+    except ImportError:
+        pass
+    centaur_sdk = types.ModuleType("centaur_sdk")
+
+    def secret(name: str, default: str | None = None) -> str:
+        return os.getenv(name, default or "")
+
+    centaur_sdk.secret = secret
+    sys.modules["centaur_sdk"] = centaur_sdk
+
+
+_METRIC_COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+_METRIC_GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+_METRIC_HISTOGRAMS: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]] = {}
+_COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS = [
+    100,
+    500,
+    1_000,
+    5_000,
+    10_000,
+    25_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+]
+
+
+def install_vm_metrics_compat_module(api_mod: types.ModuleType) -> None:
+    if "api.vm_metrics" in sys.modules:
+        setattr(api_mod, "vm_metrics", sys.modules["api.vm_metrics"])
+        return
+    try:
+        import api.vm_metrics as vm_metrics  # type: ignore
+
+        setattr(api_mod, "vm_metrics", vm_metrics)
+        return
+    except ImportError:
+        pass
+
+    vm_metrics = types.ModuleType("api.vm_metrics")
+    vm_metrics.record_etl_items_deleted = record_etl_items_deleted
+    vm_metrics.record_etl_items_enqueued = record_etl_items_enqueued
+    vm_metrics.record_etl_items_failed = record_etl_items_failed
+    vm_metrics.record_etl_items_seen = record_etl_items_seen
+    vm_metrics.record_etl_items_upserted = record_etl_items_upserted
+    vm_metrics.record_company_context_documents_changed = (
+        record_company_context_documents_changed
+    )
+    vm_metrics.observe_company_context_document_size = (
+        observe_company_context_document_size
+    )
+    vm_metrics.set_company_context_projection_lag = (
+        set_company_context_projection_lag
+    )
+    sys.modules["api.vm_metrics"] = vm_metrics
+    setattr(api_mod, "vm_metrics", vm_metrics)
+
+
+def record_etl_items_seen(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
+    increment_metric(
+        "etl_items_seen_total",
+        count,
+        source=source,
+        source_type=source_type,
+        item_type=item_type,
+    )
+
+
+def record_etl_items_enqueued(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
+    increment_metric(
+        "etl_items_enqueued_total",
+        count,
+        source=source,
+        source_type=source_type,
+        item_type=item_type,
+    )
+
+
+def record_etl_items_upserted(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
+    increment_metric(
+        "etl_items_upserted_total",
+        count,
+        source=source,
+        source_type=source_type,
+        item_type=item_type,
+    )
+
+
+def record_etl_items_deleted(
+    source: str, source_type: str, item_type: str, count: int
+) -> None:
+    increment_metric(
+        "etl_items_deleted_total",
+        count,
+        source=source,
+        source_type=source_type,
+        item_type=item_type,
+    )
+
+
+def record_etl_items_failed(
+    source: str,
+    source_type: str,
+    item_type: str,
+    reason: str,
+    count: int = 1,
+) -> None:
+    increment_metric(
+        "etl_items_failed_total",
+        count,
+        source=source,
+        source_type=source_type,
+        item_type=item_type,
+        reason=reason,
+    )
+
+
+def record_company_context_documents_changed(
+    source: str,
+    source_type: str,
+    action: str,
+    count: int = 1,
+) -> None:
+    increment_metric(
+        "company_context_documents_changed_total",
+        count,
+        source=source,
+        source_type=source_type,
+        action=action,
+    )
+
+
+def observe_company_context_document_size(
+    source: str, source_type: str, chars: int
+) -> None:
+    observe_histogram(
+        "company_context_document_size_chars",
+        max(chars, 0),
+        _COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS,
+        source=source,
+        source_type=source_type,
+    )
+
+
+def set_company_context_projection_lag(source: str, projection_lag_s: float) -> None:
+    set_gauge(
+        "company_context_projection_lag_seconds",
+        max(projection_lag_s, 0.0),
+        source=source,
+    )
+
+
+def increment_metric(metric: str, count: int, **labels: str) -> None:
+    if count <= 0:
+        return
+    key = metric_key(metric, labels)
+    _METRIC_COUNTERS[key] = _METRIC_COUNTERS.get(key, 0.0) + float(count)
+    push_metric_lines([format_metric_line(metric, labels, _METRIC_COUNTERS[key])])
+
+
+def set_gauge(metric: str, value: float, **labels: str) -> None:
+    key = metric_key(metric, labels)
+    _METRIC_GAUGES[key] = float(value)
+    push_metric_lines([format_metric_line(metric, labels, _METRIC_GAUGES[key])])
+
+
+def observe_histogram(
+    metric: str,
+    value: int | float,
+    buckets: list[int],
+    **labels: str,
+) -> None:
+    key = metric_key(metric, labels)
+    histogram = _METRIC_HISTOGRAMS.setdefault(
+        key,
+        {
+            "buckets": {bucket: 0 for bucket in buckets},
+            "count": 0,
+            "sum": 0.0,
+        },
+    )
+    numeric = float(value)
+    histogram["count"] += 1
+    histogram["sum"] += numeric
+    for bucket in buckets:
+        if numeric <= bucket:
+            histogram["buckets"][bucket] += 1
+
+    lines = []
+    for bucket in buckets:
+        lines.append(
+            format_metric_line(
+                f"{metric}_bucket",
+                {**labels, "le": str(float(bucket))},
+                histogram["buckets"][bucket],
+            )
+        )
+    lines.append(
+        format_metric_line(
+            f"{metric}_bucket",
+            {**labels, "le": "+Inf"},
+            histogram["count"],
+        )
+    )
+    lines.append(format_metric_line(f"{metric}_count", labels, histogram["count"]))
+    lines.append(format_metric_line(f"{metric}_sum", labels, histogram["sum"]))
+    push_metric_lines(lines)
+
+
+def metric_key(
+    metric: str, labels: dict[str, str]
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    return (metric, tuple(sorted((key, str(value)) for key, value in labels.items())))
+
+
+def format_metric_line(metric: str, labels: dict[str, str], value: float) -> str:
+    if labels:
+        label_text = ",".join(
+            f'{key}="{escape_label_value(str(label_value))}"'
+            for key, label_value in sorted(labels.items())
+        )
+        return f"{metric}{{{label_text}}} {value}"
+    return f"{metric} {value}"
+
+
+def escape_label_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def push_metric_lines(lines: list[str]) -> None:
+    if not victoria_metrics_push_enabled():
+        return
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    request = urllib.request.Request(
+        f"{victoria_metrics_url().rstrip('/')}/api/v1/import/prometheus",
+        data=payload,
+        headers={"Content-Type": "text/plain"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(request, timeout=2).close()
+    except Exception as exc:
+        print(f"workflow_metric_push_error error={exc}", file=sys.stderr)
+
+
+def victoria_metrics_url() -> str:
+    return os.environ.get("VICTORIAMETRICS_URL", "http://victoriametrics:8428")
+
+
+def victoria_metrics_push_enabled() -> bool:
+    return os.environ.get("VICTORIAMETRICS_PUSH_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+class MissingWorkflowIntegration:
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError(
+            "workflow integration client is unavailable in this lightweight "
+            "workflow discovery host; run the workflow in a full workflow-host environment"
+        )
+
+
+def real_integrations_available() -> bool:
+    try:
+        __import__("api.integrations.gsuite.calendar")
+        __import__("api.integrations.gsuite.drive")
+        __import__("api.integrations.linear")
+        return True
+    except ImportError:
+        return False
+
+
+def install_integration_compat_modules(api_mod: types.ModuleType) -> None:
+    integrations = types.ModuleType("api.integrations")
+    integrations.__path__ = []
+    gsuite = types.ModuleType("api.integrations.gsuite")
+    gsuite.__path__ = []
+    calendar = types.ModuleType("api.integrations.gsuite.calendar")
+    drive = types.ModuleType("api.integrations.gsuite.drive")
+    linear = types.ModuleType("api.integrations.linear")
+
+    calendar.GoogleCalendarReadonlyClient = MissingWorkflowIntegration
+    drive.GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
+    drive.GoogleDriveReadonlyClient = MissingWorkflowIntegration
+    linear.LinearReadonlyClient = MissingWorkflowIntegration
+
+    sys.modules.setdefault("api.integrations", integrations)
+    sys.modules.setdefault("api.integrations.gsuite", gsuite)
+    sys.modules.setdefault("api.integrations.gsuite.calendar", calendar)
+    sys.modules.setdefault("api.integrations.gsuite.drive", drive)
+    sys.modules.setdefault("api.integrations.linear", linear)
+    setattr(api_mod, "integrations", integrations)
+    setattr(integrations, "gsuite", gsuite)
+    setattr(integrations, "linear", linear)
+    setattr(gsuite, "calendar", calendar)
+    setattr(gsuite, "drive", drive)
 
 
 def workflow_dirs() -> list[Path]:
@@ -212,6 +565,16 @@ def workflow_dirs() -> list[Path]:
             if path.is_dir():
                 dirs.append(path)
     return dirs
+
+
+def configure_workflow_import_paths(dirs: list[Path]) -> None:
+    for directory in dirs:
+        candidate_paths = [directory.parent, directory]
+        if directory.name == "workflows":
+            candidate_paths.append(directory.parent / "services" / "api")
+        for path in candidate_paths:
+            if path.is_dir() and str(path) not in sys.path:
+                sys.path.insert(0, str(path))
 
 
 def module_name_for(path: Path) -> str:
@@ -241,12 +604,11 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
 
 
 def discover_workflows() -> dict[str, RegisteredWorkflow]:
+    dirs = workflow_dirs()
+    configure_workflow_import_paths(dirs)
     install_api_compat_module()
     discovered: dict[str, RegisteredWorkflow] = {}
-    for directory in workflow_dirs():
-        if str(directory) not in sys.path:
-            sys.path.insert(0, str(directory.parent))
-            sys.path.insert(0, str(directory))
+    for directory in dirs:
         for path in sorted(directory.glob("*.py")):
             if path.name.startswith("_"):
                 continue
