@@ -20,6 +20,24 @@ pub trait SandboxBackend: Send + Sync {
     /// Open owned stdin/stdout/stderr handles for a running sandbox.
     async fn open_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo>;
 
+    /// Read the sandbox workload's recorded stdout history since `since`.
+    ///
+    /// Live io streams only deliver output from attach time forward; output
+    /// emitted while no reader was attached (for example across a control
+    /// plane restart) is otherwise lost. Backends whose runtime records the
+    /// workload's stdout (such as Kubernetes pod logs) can replay it here so
+    /// orphaned executions can be adopted instead of failed.
+    async fn read_output_since(
+        &self,
+        _id: &SandboxId,
+        _since: Option<std::time::SystemTime>,
+    ) -> SandboxResult<Vec<String>> {
+        Err(crate::SandboxError::Unsupported {
+            backend: self.name(),
+            operation: "read_output_since",
+        })
+    }
+
     /// Return the portable, cheap lifecycle status for a sandbox.
     async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus>;
 

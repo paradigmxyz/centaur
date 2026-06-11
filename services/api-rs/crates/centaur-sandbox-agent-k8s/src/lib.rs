@@ -16,7 +16,9 @@ use centaur_sandbox_core::{
     SandboxResult, SandboxSpec, SandboxStatus,
 };
 use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
-use kube::api::{AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{
+    AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams,
+};
 use kube::{Api, Client, Error};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -313,6 +315,32 @@ impl SandboxBackend for AgentSandboxBackend {
 
     async fn open_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
         self.attach_io(id).await
+    }
+
+    /// Replays the workload container's stdout from the kubelet's log files.
+    /// Unlike an attach stream, this includes output emitted while no reader
+    /// was attached, which is what makes orphaned-execution adoption possible.
+    async fn read_output_since(
+        &self,
+        id: &SandboxId,
+        since: Option<std::time::SystemTime>,
+    ) -> SandboxResult<Vec<String>> {
+        let mut params = LogParams {
+            container: Some(self.config.container_name.clone()),
+            ..LogParams::default()
+        };
+        if let Some(since) = since {
+            params.since_time = Some(
+                jiff::Timestamp::try_from(since)
+                    .map_err(|error| SandboxError::io_source("invalid log since time", error))?,
+            );
+        }
+        let text = self
+            .pods()
+            .logs(id.as_str(), &params)
+            .await
+            .map_err(|err| map_kube_error("read sandbox pod logs", err))?;
+        Ok(text.lines().map(str::to_owned).collect())
     }
 
     async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus> {

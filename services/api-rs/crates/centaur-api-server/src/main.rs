@@ -54,6 +54,14 @@ async fn main() -> Result<(), ServerError> {
         .await?,
     );
 
+    // Adopt executions orphaned by the previous process (deploy/crash):
+    // recover finished turns from recorded sandbox output, re-attach still
+    // running sandboxes, and fail the rest so their threads unwedge.
+    let adoption_runtime = runtime.clone();
+    tokio::spawn(async move {
+        adoption_runtime.adopt_orphaned_executions().await;
+    });
+
     let listener = TcpListener::bind(args.server.bind_addr).await?;
     info!(bind_addr = %args.server.bind_addr, "starting centaur api-rs server");
 
