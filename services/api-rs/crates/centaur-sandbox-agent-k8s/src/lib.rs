@@ -465,7 +465,8 @@ fn build_agent_sandbox(
     );
     // Agent container env: spec env + tools wiring (deduped). `TOOL_DIRS`
     // is set deterministically here (not via passthrough) so it always matches
-    // the path the bootstrap init container actually populates in this pod.
+    // the path the bootstrap init container actually populates in this pod,
+    // plus org extra repos' tools trees under the read-only repos mount.
     let mut agent_env: Vec<(String, String)> = spec
         .env
         .iter()

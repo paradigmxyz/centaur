@@ -1122,6 +1122,11 @@ impl ToolsArgs {
         if let Some(subdir) = clean_optional_value(Some(self.source_subdir.as_str())) {
             config.source_subdir = subdir;
         }
+        config.extra_repos = self
+            .extra_repos
+            .iter()
+            .filter_map(|repo| clean_optional_value(Some(repo.as_str())))
+            .collect();
         if let Some(secret_name) = clean_optional_value(self.github_token_secret.as_deref()) {
             config.github_token = Some(GitHubTokenRef {
                 secret_name,

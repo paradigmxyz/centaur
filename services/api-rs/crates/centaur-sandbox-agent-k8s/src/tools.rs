@@ -61,6 +61,10 @@ pub struct ToolsConfig {
     /// tools-bootstrap copies from `<repo_cache_path>/<repo>/<source_subdir>` and
     /// `centaur-tools refresh` re-copies from the same cache instead of fetching.
     pub repo_cache_path: Option<String>,
+    /// Additional `owner/name` repos layering org tools onto the base set.
+    /// Their `<source_subdir>` trees under the read-only repos mount join the
+    /// agent's `TOOL_DIRS`; they are not part of the tools-bootstrap copy.
+    pub extra_repos: Vec<String>,
 }
 
 /// A Kubernetes Secret key holding a GitHub token, fed to `git` via `GIT_ASKPASS`.
@@ -80,6 +84,7 @@ impl ToolsConfig {
             image_pull_policy: None,
             github_token: None,
             repo_cache_path: None,
+            extra_repos: Vec::new(),
         }
     }
 }
@@ -102,14 +107,30 @@ pub(crate) fn pod_security_context_json() -> Value {
     })
 }
 
-/// `TOOL_DIRS` for the agent. Matches the path tools-bootstrap populates.
-pub(crate) fn agent_tool_dirs() -> String {
-    BASE_TOOL_DIR.to_owned()
+/// Read-only repos mount inside sandboxes (matches the server's
+/// `SANDBOX_REPOS_MOUNT_PATH`), where org extra-repo tools trees live.
+const REPOS_MOUNT_PATH: &str = "/home/agent/github";
+
+/// `TOOL_DIRS` for the agent: the path tools-bootstrap populates, plus each
+/// org extra repo's tools tree under the read-only repos mount. The shim
+/// installer skips dirs that do not exist (e.g. the repos mount is absent or
+/// the repo-cache has not cloned a repo yet).
+pub(crate) fn agent_tool_dirs(tools: Option<&ToolsConfig>) -> String {
+    let mut dirs = vec![BASE_TOOL_DIR.to_owned()];
+    if let Some(tools) = tools {
+        dirs.extend(
+            tools
+                .extra_repos
+                .iter()
+                .map(|repo| format!("{REPOS_MOUNT_PATH}/{repo}/{}", tools.source_subdir)),
+        );
+    }
+    dirs.join(":")
 }
 
 /// Agent env added for tools wiring.
 pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
-    let mut env = vec![("TOOL_DIRS".to_owned(), agent_tool_dirs())];
+    let mut env = vec![("TOOL_DIRS".to_owned(), agent_tool_dirs(tools))];
     if tools
         .and_then(|tools| tools.github_token.as_ref())
         .is_some()
@@ -338,7 +359,19 @@ mod tests {
 
     #[test]
     fn tool_dirs_point_at_bootstrapped_tools() {
-        assert_eq!(agent_tool_dirs(), "/app/tools");
+        assert_eq!(agent_tool_dirs(None), "/app/tools");
+        let tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        assert_eq!(agent_tool_dirs(Some(&tools)), "/app/tools");
+    }
+
+    #[test]
+    fn tool_dirs_append_extra_repos_under_repos_mount() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.extra_repos = vec!["acme/centaur-acme".to_owned()];
+        assert_eq!(
+            agent_tool_dirs(Some(&tools)),
+            "/app/tools:/home/agent/github/acme/centaur-acme/tools"
+        );
     }
 
     #[test]

@@ -15,8 +15,14 @@ hooks = true
 enable_fanout = false
 runtime_metrics = true
 
+# Disabled on codex >= 0.139: multi_agent_v2 marks spawn_agent/send_message/
+# followup_task params "encrypted", and api-key models reject the schema with
+# 400 "declares encrypted parameters but is not configured for encrypted tool
+# use" before the model sees the prompt (openai/codex#26753, #27205). The
+# legacy/stable subagent flow still covers spawn/wait. Re-enable once the
+# model/account supports encrypted tool use.
 [features.multi_agent_v2]
-enabled = true
+enabled = false
 max_concurrent_threads_per_session = 6
 
 [agents]
