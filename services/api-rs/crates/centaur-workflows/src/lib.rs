@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, env, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env,
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use absurd::{
     Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy, SpawnOptions, StepHandle,
@@ -38,6 +45,8 @@ const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
 const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
+const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
 
 struct WorkflowTaskHeartbeatGuard {
     task: JoinHandle<()>,
@@ -60,8 +69,8 @@ struct WorkflowRuntimeInner {
     _worker: Worker,
     _etl_worker: Worker,
     _schedule_worker: Worker,
-    webhook_registry: BTreeMap<String, RegisteredWorkflowWebhook>,
-    schedule_registry: Arc<BTreeMap<String, RegisteredWorkflowSchedule>>,
+    webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
+    schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 }
 
 #[derive(Clone)]
@@ -285,7 +294,8 @@ impl WorkflowRuntime {
                 warn!(%error, "python workflow discovery failed");
                 PythonWorkflowMetadata::default()
             });
-        let schedule_registry = Arc::new(build_schedule_registry(&discovery)?);
+        let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(&discovery)?));
+        let webhook_registry = Arc::new(RwLock::new(build_webhook_registry(&discovery)?));
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
@@ -325,7 +335,11 @@ impl WorkflowRuntime {
                 }
             },
         )?;
-        reconcile_schedules(&schedule_client, &schedule_registry).await?;
+        let startup_schedules = schedule_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        reconcile_schedules(&schedule_client, &startup_schedules).await?;
 
         let worker = client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-worker".to_owned()),
@@ -367,6 +381,15 @@ impl WorkflowRuntime {
             "started absurd workflow schedule worker"
         );
 
+        if let Some(interval) = workflow_reconcile_interval() {
+            spawn_workflow_metadata_reconciler(
+                schedule_client.clone(),
+                webhook_registry.clone(),
+                schedule_registry.clone(),
+                interval,
+            );
+        }
+
         Ok(Self {
             inner: Arc::new(WorkflowRuntimeInner {
                 client,
@@ -374,7 +397,7 @@ impl WorkflowRuntime {
                 _worker: worker,
                 _etl_worker: etl_worker,
                 _schedule_worker: schedule_worker,
-                webhook_registry: build_webhook_registry(&discovery)?,
+                webhook_registry,
                 schedule_registry,
             }),
         })
@@ -530,15 +553,32 @@ impl WorkflowRuntime {
     }
 
     pub fn get_webhook(&self, slug: &str) -> Option<RegisteredWorkflowWebhook> {
-        self.inner.webhook_registry.get(slug).cloned()
+        self.inner
+            .webhook_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(slug)
+            .cloned()
     }
 
     pub fn list_webhooks(&self) -> Vec<RegisteredWorkflowWebhook> {
-        self.inner.webhook_registry.values().cloned().collect()
+        self.inner
+            .webhook_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn list_schedules(&self) -> Vec<RegisteredWorkflowSchedule> {
-        self.inner.schedule_registry.values().cloned().collect()
+        self.inner
+            .schedule_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     fn client_for_workflow(&self, workflow_name: &str) -> &Client {
@@ -1113,21 +1153,109 @@ async fn reconcile_schedules(
     Ok(())
 }
 
+fn workflow_reconcile_interval() -> Option<Duration> {
+    let seconds = env::var(WORKFLOW_RECONCILE_INTERVAL_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS);
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+fn spawn_workflow_metadata_reconciler(
+    schedule_client: Client,
+    webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
+    schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    interval: Duration,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // Startup discovery already ran; wait one full period before refreshing.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Err(error) = reconcile_workflow_metadata_once(
+                &schedule_client,
+                &webhook_registry,
+                &schedule_registry,
+            )
+            .await
+            {
+                warn!(%error, "failed to reconcile workflow metadata");
+            }
+        }
+    });
+}
+
+async fn reconcile_workflow_metadata_once(
+    schedule_client: &Client,
+    webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
+    schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+) -> Result<(), WorkflowRuntimeError> {
+    let discovery = discover_python_workflow_metadata().await?;
+    let next_webhooks = build_webhook_registry(&discovery)?;
+    let next_schedules = build_schedule_registry(&discovery)?;
+    {
+        let mut webhooks = webhook_registry
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *webhooks = next_webhooks;
+    }
+    {
+        let mut schedules = schedule_registry
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *schedules = next_schedules.clone();
+    }
+    reconcile_schedules(schedule_client, &next_schedules).await?;
+    info!(
+        webhook_count = discovery.webhooks.len(),
+        schedule_count = discovery.schedules.len(),
+        "reconciled workflow metadata"
+    );
+    Ok(())
+}
+
 async fn run_schedule_tick(
     input: ScheduleTickInput,
     ctx: TaskContext,
     schedule_client: Client,
     workflow_client: Client,
     etl_client: Client,
-    schedules: Arc<BTreeMap<String, RegisteredWorkflowSchedule>>,
+    schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 ) -> Result<Value, absurd::Error> {
-    let schedule = schedules.get(&input.schedule_id).ok_or_else(|| {
-        absurd::Error::InvalidOptions(format!(
-            "unknown workflow schedule_id {:?}",
-            input.schedule_id
-        ))
-    })?;
     ctx.sleep_until("schedule_tick", input.scheduled_at).await?;
+    let schedule = match schedules
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&input.schedule_id)
+        .cloned()
+    {
+        Some(schedule) if schedule.enabled => schedule,
+        Some(schedule) => {
+            info!(
+                schedule_id = %schedule.schedule_id,
+                "skipping disabled workflow schedule tick"
+            );
+            return Ok(json!({
+                "schedule_id": schedule.schedule_id,
+                "scheduled_at": input.scheduled_at.to_rfc3339(),
+                "skipped": true,
+                "reason": "disabled",
+            }));
+        }
+        None => {
+            info!(
+                schedule_id = %input.schedule_id,
+                "skipping removed workflow schedule tick"
+            );
+            return Ok(json!({
+                "schedule_id": input.schedule_id,
+                "scheduled_at": input.scheduled_at.to_rfc3339(),
+                "skipped": true,
+                "reason": "removed",
+            }));
+        }
+    };
     let fire_key = format!(
         "schedule:{}:{}",
         schedule.schedule_id,
@@ -1151,8 +1279,8 @@ async fn run_schedule_tick(
             },
         )
         .await?;
-    let next_run_at = next_schedule_time(schedule, Utc::now()).map_err(absurd_error)?;
-    spawn_schedule_tick(&schedule_client, schedule, next_run_at)
+    let next_run_at = next_schedule_time(&schedule, Utc::now()).map_err(absurd_error)?;
+    spawn_schedule_tick(&schedule_client, &schedule, next_run_at)
         .await
         .map_err(absurd_error)?;
     Ok(json!({

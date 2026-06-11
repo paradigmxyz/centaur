@@ -1,13 +1,23 @@
 {{- if .Values.repoCache.enabled }}
-{{- if not .Values.repoCache.repositories }}
-{{- fail "repoCache.repositories must contain at least one owner/repo entry when repoCache.enabled=true" }}
+{{- $repoCacheRepositories := list -}}
+{{- range .Values.repoCache.repositories }}
+{{- $repoCacheRepositories = append $repoCacheRepositories . -}}
 {{- end }}
+{{- if and .Values.toolServer.enabled .Values.toolServer.repo }}
+{{- $repoCacheRepositories = append $repoCacheRepositories .Values.toolServer.repo -}}
+{{- end }}
+{{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
+{{- if $repoCacheRepositories }}
+{{- $repoCacheHasGithubToken := or .Values.repoCache.githubToken.existingSecretName .Values.repoCache.githubToken.token -}}
 {{- $repoCacheImageRepository := default .Values.sandbox.image.repository .Values.repoCache.image.repository -}}
 {{- $repoCacheImageTag := default .Values.sandbox.image.tag .Values.repoCache.image.tag -}}
 {{- $repoCacheImagePullPolicy := default .Values.sandbox.image.pullPolicy .Values.repoCache.image.pullPolicy -}}
 {{- $repoCacheRepositoryRefs := list -}}
 {{- range $repo, $ref := .Values.repoCache.repositoryRefs }}
 {{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
+{{- end }}
+{{- if and .Values.toolServer.enabled .Values.toolServer.repo .Values.toolServer.ref (not (hasKey .Values.repoCache.repositoryRefs .Values.toolServer.repo)) }}
+{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" .Values.toolServer.repo .Values.toolServer.ref) -}}
 {{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -51,11 +61,7 @@ spec:
             - |
               set -o pipefail
               token_file=/github-token/token
-              if [ ! -s "$token_file" ]; then
-                echo "GitHub token file is missing or empty: $token_file" >&2
-                exit 1
-              fi
-
+              if [ -s "$token_file" ]; then
               cat > /tmp/git-askpass <<'EOF'
               #!/bin/sh
               case "$1" in
@@ -66,6 +72,7 @@ spec:
               EOF
               chmod 0700 /tmp/git-askpass
               export GIT_ASKPASS=/tmp/git-askpass
+              fi
               git config --global --add safe.directory '*'
               git config --global init.defaultBranch main
               umask 022
@@ -151,7 +158,7 @@ spec:
               done
           env:
             - name: REPOSITORIES
-              value: {{ join " " .Values.repoCache.repositories | quote }}
+              value: {{ join " " $repoCacheRepositories | quote }}
             - name: REPOSITORY_REFS
               value: {{ join " " $repoCacheRepositoryRefs | quote }}
             - name: SYNC_INTERVAL_SECONDS
@@ -183,14 +190,17 @@ spec:
           volumeMounts:
             - name: repo-cache
               mountPath: /cache
+{{- if $repoCacheHasGithubToken }}
             - name: github-token
               mountPath: /github-token
               readOnly: true
+{{- end }}
       volumes:
         - name: repo-cache
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- if $repoCacheHasGithubToken }}
         - name: github-token
           secret:
             secretName: {{ include "centaur.repoCacheGithubTokenSecretName" . }}
@@ -198,4 +208,6 @@ spec:
             items:
               - key: {{ .Values.repoCache.githubToken.secretKey | quote }}
                 path: token
+{{- end }}
+{{- end }}
 {{- end }}

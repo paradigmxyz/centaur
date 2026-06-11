@@ -1,4 +1,4 @@
-//! Tool sources + gerard overlay wiring for agent sandboxes.
+//! Tool sources for agent sandboxes.
 //!
 //! api-rs serves no `/tools` HTTP registry and the agent's `call <tool>` HTTP
 //! registry is deprecated upstream (control-plane-only). Instead the agent
@@ -12,29 +12,23 @@
 //! trees api-rs's own `tool_discovery` scans, so the creds api-rs grants match
 //! the tools the agent installs:
 //!
-//! * a `tools-bootstrap` init container git-clones the tools repo at a pinned
-//!   ref and copies its `source_subdir` into an emptyDir mounted at `/app/tools`
-//!   — the same repo-cache architecture (clone a repo into a pre-provisioned
-//!   directory, no Dockerfile rebuild to add a tool) without sharing the
-//!   repo-cache DaemonSet's node-level cache;
-//! * the org overlay rides the shared spec-level [`OverlayImage`] plumbing
-//!   (`overlay_json` in `lib.rs`, the same mechanism and `/opt/centaur/overlay`
-//!   mount workflow-host sandboxes use), which also stages the overlay's
-//!   `SYSTEM_PROMPT.md` as `$HOME/AGENTS_OVERLAY.md` for the sandbox entrypoint
-//!   to append to the base prompt.
-//!
-//! `TOOL_DIRS` is set explicitly on the agent env to `/app/tools` (or
-//! `/app/tools:<mount_path>/tools` when the overlay is configured), pointing at
-//! the paths the init containers populate in this pod.
+//! * a `tools-bootstrap` init container copies the tools repo's `source_subdir`
+//!   from the repo-cache DaemonSet's node-level cache when configured, otherwise
+//!   it git-clones the tools repo at a pinned ref into an emptyDir mounted at
+//!   `/app/tools`;
+//! `TOOL_DIRS` is set explicitly on the agent env to `/app/tools`, pointing at
+//! the path the init container populates in this pod. The copied tools tree keeps
+//! source metadata in a hidden file so `centaur-tools refresh` can either re-copy
+//! from repo-cache or fetch the configured ref, then reinstall shims without
+//! restarting the pod.
 
-use centaur_sandbox_core::OverlayImage;
 use serde_json::{Value, json};
 
 const AGENT_UID: i64 = 1001;
 
 /// Base tools path inside both the api-rs pod and the agent sandbox.
 pub(crate) const BASE_TOOL_DIR: &str = "/app/tools";
-/// emptyDir the `tools-bootstrap` init container clones the tools tree into.
+/// emptyDir the `tools-bootstrap` init container publishes the tools tree into.
 const TOOLS_VOLUME: &str = "tools-root";
 /// Staging path where `tools-bootstrap` mounts the tools emptyDir. The agent
 /// container mounts the same volume read-only at `BASE_TOOL_DIR`.
@@ -43,6 +37,8 @@ const TOOLS_BOOTSTRAP_DIR: &str = "/tools-bootstrap";
 const GITHUB_TOKEN_VOLUME: &str = "tools-github-token";
 const GITHUB_TOKEN_DIR: &str = "/tools-github-token";
 const GITHUB_TOKEN_FILE: &str = "token";
+const GITHUB_TOKEN_FILE_PATH: &str = "/tools-github-token/token";
+const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
 
 /// Git source for the base tools tree. When set, every sandbox gets a
 /// `tools-bootstrap` init container that clones `repo` at `git_ref` and copies
@@ -61,6 +57,10 @@ pub struct ToolsConfig {
     pub image_pull_policy: Option<String>,
     /// GitHub token secret for private-repo clones. `None` => unauthenticated clone.
     pub github_token: Option<GitHubTokenRef>,
+    /// Optional repo-cache root path mounted from the host. When set,
+    /// tools-bootstrap copies from `<repo_cache_path>/<repo>/<source_subdir>` and
+    /// `centaur-tools refresh` re-copies from the same cache instead of fetching.
+    pub repo_cache_path: Option<String>,
 }
 
 /// A Kubernetes Secret key holding a GitHub token, fed to `git` via `GIT_ASKPASS`.
@@ -79,6 +79,7 @@ impl ToolsConfig {
             image: image.into(),
             image_pull_policy: None,
             github_token: None,
+            repo_cache_path: None,
         }
     }
 }
@@ -101,21 +102,22 @@ pub(crate) fn pod_security_context_json() -> Value {
     })
 }
 
-/// `TOOL_DIRS` for the agent: base tools plus the overlay's tools when present.
-/// Matches the value the api-rs Deployment computes for its own `TOOL_DIRS`.
-pub(crate) fn agent_tool_dirs(overlay: Option<&OverlayImage>) -> String {
-    match overlay {
-        Some(overlay) => format!("{BASE_TOOL_DIR}:{}/tools", overlay.mount_path),
-        None => BASE_TOOL_DIR.to_owned(),
-    }
+/// `TOOL_DIRS` for the agent. Matches the path tools-bootstrap populates.
+pub(crate) fn agent_tool_dirs() -> String {
+    BASE_TOOL_DIR.to_owned()
 }
 
-/// Agent env added for tools/overlay wiring: `TOOL_DIRS` (always) and
-/// `CENTAUR_OVERLAY_DIR` (when the overlay is configured).
-pub(crate) fn agent_env(overlay: Option<&OverlayImage>) -> Vec<(String, String)> {
-    let mut env = vec![("TOOL_DIRS".to_owned(), agent_tool_dirs(overlay))];
-    if let Some(overlay) = overlay {
-        env.push(("CENTAUR_OVERLAY_DIR".to_owned(), overlay.mount_path.clone()));
+/// Agent env added for tools wiring.
+pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
+    let mut env = vec![("TOOL_DIRS".to_owned(), agent_tool_dirs())];
+    if tools
+        .and_then(|tools| tools.github_token.as_ref())
+        .is_some()
+    {
+        env.push((
+            "CENTAUR_TOOLS_GITHUB_TOKEN_FILE".to_owned(),
+            GITHUB_TOKEN_FILE_PATH.to_owned(),
+        ));
     }
     env
 }
@@ -134,9 +136,10 @@ pub(crate) struct CloneProxy {
     pub ca_volume_mount: Value,
 }
 
-/// The `tools-bootstrap` init container: clones `repo` at `git_ref` (sparse, on
+/// The `tools-bootstrap` init container: copies `repo`'s `source_subdir` from
+/// repo-cache when configured, otherwise clones `repo` at `git_ref` (sparse, on
 /// `source_subdir`) and copies that subtree into the shared `tools-root` emptyDir
-/// the agent mounts read-only at `/app/tools`. With a `CloneProxy`, the clone
+/// the agent mounts at `/app/tools`. With a `CloneProxy`, the clone fallback
 /// rides the per-sandbox iron-proxy like all other sandbox egress.
 pub(crate) fn tools_init_container_json(
     tools: &ToolsConfig,
@@ -144,6 +147,20 @@ pub(crate) fn tools_init_container_json(
 ) -> Value {
     let repo_url = format!("https://github.com/{}.git", tools.repo);
     let subdir = &tools.source_subdir;
+    let repo_cache_repo_path = tools.repo_cache_path.as_ref().map(|path| {
+        format!(
+            "{}/{}",
+            path.trim_end_matches('/'),
+            tools.repo.trim_start_matches('/')
+        )
+    });
+    let metadata = json!({
+        "source_subdir": subdir,
+        "git_ref": tools.git_ref.as_deref(),
+        "source": if repo_cache_repo_path.is_some() { "repo_cache" } else { "git" },
+        "repo_cache_repo_path": repo_cache_repo_path.as_deref(),
+    })
+    .to_string();
 
     let proxy_exports = match clone_proxy {
         Some(proxy) => format!(
@@ -175,10 +192,10 @@ pub(crate) fn tools_init_container_json(
     // without one we check out the cloned default branch.
     let checkout = match &tools.git_ref {
         Some(git_ref) => format!(
-            "git -C \"$src\" -c gc.auto=0 fetch --quiet origin \"{git_ref}\" && \
-             git -C \"$src\" checkout --quiet --detach FETCH_HEAD"
+            "git -C \"$source\" -c gc.auto=0 fetch --quiet origin \"{git_ref}\" && \
+             git -C \"$source\" checkout --quiet --detach FETCH_HEAD"
         ),
-        None => "git -C \"$src\" checkout --quiet".to_owned(),
+        None => "git -C \"$source\" checkout --quiet".to_owned(),
     };
 
     // The per-sandbox proxy is created in the same reconcile as the Sandbox and
@@ -187,6 +204,34 @@ pub(crate) fn tools_init_container_json(
     // clone must retry through the connection-refused window rather than die.
     // repo/ref/subdir are operator config, but quote them anyway so a stray
     // space or metacharacter breaks loudly in git instead of in the shell.
+    let publish_script = if let Some(repo_cache_repo_path) = &repo_cache_repo_path {
+        format!(
+            "attempt=0\n\
+             cache_repo=\"{repo_cache_repo_path}\"\n\
+             until [ -d \"$cache_repo/.git\" ] && [ -d \"$cache_repo/{subdir}\" ]; do\n\
+             attempt=$((attempt + 1))\n\
+             if [ \"$attempt\" -ge 30 ]; then echo \"tools repo-cache entry unavailable after $attempt attempts: $cache_repo/{subdir}\" >&2; exit 1; fi\n\
+             sleep 2\n\
+             done\n\
+             find \"$target\" -mindepth 1 -maxdepth 1 ! -name '.centaur-tools-source.json' -exec rm -rf {{}} +\n\
+             cp -R \"$cache_repo/{subdir}/.\" \"$target\"/"
+        )
+    } else {
+        format!(
+            "source=\"$target/.centaur-source\"\n\
+             rm -rf \"$source\"\n\
+             until git clone --quiet --filter=blob:none --no-checkout \"{repo_url}\" \"$source\" && \
+             git -C \"$source\" sparse-checkout set \"{subdir}\" && \
+             {checkout}; do\n\
+             attempt=$((attempt + 1))\n\
+             if [ \"$attempt\" -ge 30 ]; then echo \"tools clone failed after $attempt attempts\" >&2; exit 1; fi\n\
+             rm -rf \"$source\"\n\
+             sleep 2\n\
+             done\n\
+             find \"$target\" -mindepth 1 -maxdepth 1 ! -name '.centaur-source' ! -name '.centaur-tools-source.json' -exec rm -rf {{}} +\n\
+             cp -R \"$source/{subdir}/.\" \"$target\"/"
+        )
+    };
     let script = format!(
         "set -e\n\
          {proxy_exports}\
@@ -194,18 +239,12 @@ pub(crate) fn tools_init_container_json(
          export GIT_TERMINAL_PROMPT=0\n\
          git config --global --add safe.directory '*'\n\
          attempt=0\n\
-         until src=\"$(mktemp -d)\" && \
-         git clone --quiet --filter=blob:none --no-checkout \"{repo_url}\" \"$src\" && \
-         git -C \"$src\" sparse-checkout set \"{subdir}\" && \
-         {checkout}; do\n\
-         attempt=$((attempt + 1))\n\
-         if [ \"$attempt\" -ge 30 ]; then echo \"tools clone failed after $attempt attempts\" >&2; exit 1; fi\n\
-         rm -rf \"$src\"\n\
-         sleep 2\n\
-         done\n\
          target=\"{TOOLS_BOOTSTRAP_DIR}\"\n\
          mkdir -p \"$target\"\n\
-         cp -R \"$src/{subdir}/.\" \"$target\"/"
+         {publish_script}\n\
+         cat > \"$target/.centaur-tools-source.json\" <<'CENTAUR_TOOLS_METADATA'\n\
+{metadata}\n\
+CENTAUR_TOOLS_METADATA"
     );
 
     let mut volume_mounts = vec![json!({"name": TOOLS_VOLUME, "mountPath": TOOLS_BOOTSTRAP_DIR})];
@@ -218,6 +257,13 @@ pub(crate) fn tools_init_container_json(
     }
     if let Some(proxy) = clone_proxy {
         volume_mounts.push(proxy.ca_volume_mount.clone());
+    }
+    if let Some(repo_cache_path) = &tools.repo_cache_path {
+        volume_mounts.push(json!({
+            "name": REPO_CACHE_VOLUME,
+            "mountPath": repo_cache_path,
+            "readOnly": true,
+        }));
     }
 
     let mut container = json!({
@@ -248,18 +294,42 @@ pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
                 },
             }));
         }
+        if let Some(repo_cache_path) = &tools.repo_cache_path {
+            volumes.push(json!({
+                "name": REPO_CACHE_VOLUME,
+                "hostPath": {
+                    "path": repo_cache_path,
+                    "type": "DirectoryOrCreate",
+                },
+            }));
+        }
     }
     volumes
 }
 
-/// Volume mounts added to the AGENT container: the base tools tree at
-/// `/app/tools`. (Overlay mounts ride the shared spec-level overlay plumbing.)
-pub(crate) fn agent_volume_mounts_json(tools: bool) -> Vec<Value> {
-    if tools {
-        vec![json!({"name": TOOLS_VOLUME, "mountPath": BASE_TOOL_DIR, "readOnly": true})]
-    } else {
-        Vec::new()
+/// Volume mounts added to the AGENT container: the tools tree at `/app/tools`.
+/// It is writable so `centaur-tools refresh` can publish a freshly fetched tree
+/// into the same emptyDir and reinstall shims without restarting the pod.
+pub(crate) fn agent_volume_mounts_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
+    let Some(tools) = tools else {
+        return Vec::new();
+    };
+    let mut mounts = vec![json!({"name": TOOLS_VOLUME, "mountPath": BASE_TOOL_DIR})];
+    if tools.github_token.is_some() {
+        mounts.push(json!({
+            "name": GITHUB_TOKEN_VOLUME,
+            "mountPath": GITHUB_TOKEN_DIR,
+            "readOnly": true,
+        }));
     }
+    if let Some(repo_cache_path) = &tools.repo_cache_path {
+        mounts.push(json!({
+            "name": REPO_CACHE_VOLUME,
+            "mountPath": repo_cache_path,
+            "readOnly": true,
+        }));
+    }
+    mounts
 }
 
 #[cfg(test)]
@@ -267,30 +337,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_dirs_include_overlay_tools_at_its_mount_path() {
-        assert_eq!(agent_tool_dirs(None), "/app/tools");
-        let overlay = OverlayImage::new("centaur-overlay:test", "/overlay", "/opt/centaur/overlay");
-        assert_eq!(
-            agent_tool_dirs(Some(&overlay)),
-            "/app/tools:/opt/centaur/overlay/tools"
-        );
+    fn tool_dirs_point_at_bootstrapped_tools() {
+        assert_eq!(agent_tool_dirs(), "/app/tools");
     }
 
     #[test]
-    fn agent_env_sets_tool_dirs_and_overlay_dir() {
+    fn agent_env_sets_tool_dirs() {
         let env = agent_env(None);
         assert_eq!(env, vec![("TOOL_DIRS".to_owned(), "/app/tools".to_owned())]);
-
-        let overlay = OverlayImage::new("centaur-overlay:test", "/overlay", "/opt/centaur/overlay");
-        let env = agent_env(Some(&overlay));
-        assert!(env.contains(&(
-            "TOOL_DIRS".to_owned(),
-            "/app/tools:/opt/centaur/overlay/tools".to_owned()
-        )));
-        assert!(env.contains(&(
-            "CENTAUR_OVERLAY_DIR".to_owned(),
-            "/opt/centaur/overlay".to_owned()
-        )));
     }
 
     #[test]
@@ -306,7 +360,9 @@ mod tests {
         ));
         assert!(script.contains("sparse-checkout set \"tools\""));
         assert!(script.contains("fetch --quiet origin \"main\""));
-        assert!(script.contains("cp -R \"$src/tools/.\" \"$target\"/"));
+        assert!(script.contains("source=\"$target/.centaur-source\""));
+        assert!(script.contains("cp -R \"$source/tools/.\" \"$target\"/"));
+        assert!(script.contains(".centaur-tools-source.json"));
         // No token configured => no askpass, single (tools) volume mount.
         assert!(!script.contains("GIT_ASKPASS"));
         assert_eq!(c["volumeMounts"].as_array().unwrap().len(), 1);
@@ -325,7 +381,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        assert!(script.contains("until src=\"$(mktemp -d)\""));
+        assert!(script.contains("until git clone"));
         assert!(script.contains("checkout --quiet --detach FETCH_HEAD; do"));
         assert!(script.contains("if [ \"$attempt\" -ge 30 ]"));
         assert!(script.contains("sleep 2"));
@@ -369,8 +425,39 @@ mod tests {
             .unwrap()
             .to_owned();
         // Default branch: plain checkout, no explicit ref fetch.
-        assert!(script.contains("git -C \"$src\" checkout --quiet; do"));
+        assert!(script.contains("git -C \"$source\" checkout --quiet; do"));
         assert!(!script.contains("fetch --quiet origin"));
+    }
+
+    #[test]
+    fn tools_init_can_copy_from_repo_cache() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+
+        let c = tools_init_container_json(&tools, None);
+        let script = c["command"][2].as_str().unwrap();
+        assert!(script.contains("cache_repo=\"/var/lib/centaur/repos/paradigmxyz/centaur\""));
+        assert!(script.contains("cp -R \"$cache_repo/tools/.\" \"$target\"/"));
+        assert!(script.contains("\"source\":\"repo_cache\""));
+        assert!(!script.contains("git clone"));
+        assert!(c["volumeMounts"].as_array().unwrap().iter().any(|mount| {
+            mount["name"] == REPO_CACHE_VOLUME
+                && mount["mountPath"] == "/var/lib/centaur/repos"
+                && mount["readOnly"] == true
+        }));
+
+        let volumes = volumes_json(Some(&tools));
+        assert!(volumes.iter().any(|volume| {
+            volume["name"] == REPO_CACHE_VOLUME
+                && volume["hostPath"]["path"] == "/var/lib/centaur/repos"
+                && volume["hostPath"]["type"] == "DirectoryOrCreate"
+        }));
+        let mounts = agent_volume_mounts_json(Some(&tools));
+        assert!(mounts.iter().any(|mount| {
+            mount["name"] == REPO_CACHE_VOLUME
+                && mount["mountPath"] == "/var/lib/centaur/repos"
+                && mount["readOnly"] == true
+        }));
     }
 
     #[test]
@@ -415,12 +502,33 @@ mod tests {
     }
 
     #[test]
-    fn agent_mounts_tools_read_only() {
-        let mounts = agent_volume_mounts_json(true);
+    fn agent_mounts_tools_writable_for_refresh() {
+        let tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        let mounts = agent_volume_mounts_json(Some(&tools));
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0]["mountPath"], "/app/tools");
-        assert_eq!(mounts[0]["readOnly"], true);
+        assert!(mounts[0].get("readOnly").is_none());
 
-        assert!(agent_volume_mounts_json(false).is_empty());
+        assert!(agent_volume_mounts_json(None).is_empty());
+    }
+
+    #[test]
+    fn agent_mounts_token_for_private_repo_refresh() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.github_token = Some(GitHubTokenRef {
+            secret_name: "centaur-repo-cache-github-token".to_owned(),
+            secret_key: "token".to_owned(),
+        });
+
+        let env = agent_env(Some(&tools));
+        assert!(env.contains(&(
+            "CENTAUR_TOOLS_GITHUB_TOKEN_FILE".to_owned(),
+            "/tools-github-token/token".to_owned()
+        )));
+        let mounts = agent_volume_mounts_json(Some(&tools));
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts.iter().any(|mount| {
+            mount["mountPath"] == "/tools-github-token" && mount["readOnly"] == true
+        }));
     }
 }

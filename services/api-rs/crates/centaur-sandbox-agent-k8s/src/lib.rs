@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use centaur_iron_control::IronControlClient;
 use centaur_sandbox_core::{
-    MountKind, ObservedSandbox, OverlayImage, SandboxBackend, SandboxError, SandboxHandle,
-    SandboxId, SandboxIo, SandboxResult, SandboxSpec, SandboxStatus,
+    MountKind, ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
+    SandboxResult, SandboxSpec, SandboxStatus,
 };
 use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
 use kube::api::{AttachParams, DeleteParams, ListParams, Patch, PatchParams, PostParams};
@@ -59,11 +59,6 @@ pub struct AgentSandboxConfig {
     /// git-clones the tools repo into the agent's `/app/tools`, and `TOOL_DIRS`
     /// is set so the agent's shim installer finds them.
     pub tools: Option<ToolsConfig>,
-    /// When set, the org overlay tree (tools, workflows, skills, system-prompt
-    /// overlay) is mounted into every sandbox this backend creates, via the same
-    /// spec-level [`OverlayImage`] plumbing workflow-host sandboxes use. A
-    /// spec-level overlay takes precedence over this default.
-    pub overlay: Option<OverlayImage>,
     pub ready_timeout: Duration,
 }
 
@@ -95,7 +90,6 @@ impl AgentSandboxConfig {
             iron_proxy: None,
             iron_control: None,
             tools: None,
-            overlay: None,
             ready_timeout: Duration::from_secs(60),
         }
     }
@@ -117,11 +111,6 @@ impl AgentSandboxConfig {
 
     pub fn tools(mut self, tools: ToolsConfig) -> Self {
         self.tools = Some(tools);
-        self
-    }
-
-    pub fn overlay(mut self, overlay: OverlayImage) -> Self {
-        self.overlay = Some(overlay);
         self
     }
 }
@@ -474,21 +463,16 @@ fn build_agent_sandbox(
         "args",
         (!spec.args.is_empty()).then(|| spec.args.clone()),
     );
-    // One overlay per sandbox: a spec-level overlay (workflow hosts) wins over
-    // the backend-wide default, so the two never stack into duplicate
-    // `overlay-bootstrap`/`overlay-root` names.
-    let overlay = spec.overlay.as_ref().or(config.overlay.as_ref());
-
-    // Agent container env: spec env + tools/overlay wiring (deduped). `TOOL_DIRS`
+    // Agent container env: spec env + tools wiring (deduped). `TOOL_DIRS`
     // is set deterministically here (not via passthrough) so it always matches
-    // the paths the bootstrap init containers actually populate in this pod.
+    // the path the bootstrap init container actually populates in this pod.
     let mut agent_env: Vec<(String, String)> = spec
         .env
         .iter()
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
-    if config.tools.is_some() || overlay.is_some() {
-        for (name, value) in tools::agent_env(overlay) {
+    if config.tools.is_some() {
+        for (name, value) in tools::agent_env(config.tools.as_ref()) {
             upsert_env(&mut agent_env, &name, value);
         }
     }
@@ -506,7 +490,7 @@ fn build_agent_sandbox(
     insert_optional(&mut container, "resources", resources_json(spec));
 
     let (mut volumes, mut volume_mounts) = mount_json(spec);
-    let mut init_containers = overlay_json(overlay, &mut volumes, &mut volume_mounts);
+    let mut init_containers = Vec::new();
     if let Some(state_volume) = &config.state_volume {
         volume_mounts.push(json!({
             "name": "state",
@@ -518,9 +502,10 @@ fn build_agent_sandbox(
         volumes.push(iron_proxy::sandbox_ca_volume_json(iron_proxy));
     }
     // Tool sources are bootstrapped into an emptyDir by an init container and
-    // mounted read-only into the agent at the same path `TOOL_DIRS` points at.
+    // mounted into the agent at the same path `TOOL_DIRS` points at. The mount is
+    // writable so `centaur-tools refresh` can fetch and republish the tree.
     if config.tools.is_some() {
-        volume_mounts.extend(tools::agent_volume_mounts_json(config.tools.is_some()));
+        volume_mounts.extend(tools::agent_volume_mounts_json(config.tools.as_ref()));
         volumes.extend(tools::volumes_json(config.tools.as_ref()));
     }
     insert_optional(
@@ -529,8 +514,7 @@ fn build_agent_sandbox(
         (!volume_mounts.is_empty()).then_some(volume_mounts),
     );
 
-    // tools-bootstrap git-clones the tools repo into /app/tools (the overlay's
-    // own overlay-bootstrap init container came from `overlay_json` above).
+    // tools-bootstrap publishes the tools repo into /app/tools.
     if let Some(tools) = &config.tools {
         // The sandbox NetworkPolicy only allows egress to the per-sandbox proxy
         // (plus api-rs and DNS), so when iron-proxy is on the clone must ride it.
@@ -558,7 +542,7 @@ fn build_agent_sandbox(
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
     });
-    if config.tools.is_some() || overlay.is_some() {
+    if config.tools.is_some() {
         pod_spec["securityContext"] = tools::pod_security_context_json();
     }
     insert_optional(
@@ -615,86 +599,6 @@ fn build_agent_sandbox(
     sandbox.metadata.labels = Some(labels);
     sandbox.metadata.annotations = Some(annotations);
     Ok(sandbox)
-}
-
-// The overlay's `SYSTEM_PROMPT.md` is staged by the init container into a tiny
-// shared volume and surfaced to the agent at `$HOME/AGENTS_OVERLAY.md`, which
-// the sandbox entrypoint appends to the base prompt.
-const OVERLAY_PROMPT_VOLUME: &str = "overlay-prompt";
-const OVERLAY_PROMPT_DIR: &str = "/overlay-prompt";
-const OVERLAY_PROMPT_FILE: &str = "AGENTS_OVERLAY.md";
-const AGENT_OVERLAY_PROMPT_PATH: &str = "/home/agent/AGENTS_OVERLAY.md";
-const OVERLAY_SYSTEM_PROMPT_REL: &str = "services/sandbox/SYSTEM_PROMPT.md";
-
-/// The shared overlay plumbing: an `overlay-bootstrap` init container copies the
-/// overlay image's tree into the `overlay-root` emptyDir mounted read-only into
-/// the main container at `mount_path`, and stages the overlay's
-/// `SYSTEM_PROMPT.md` as `$HOME/AGENTS_OVERLAY.md`.
-fn overlay_json(
-    overlay: Option<&OverlayImage>,
-    volumes: &mut Vec<Value>,
-    volume_mounts: &mut Vec<Value>,
-) -> Vec<Value> {
-    let Some(overlay) = overlay else {
-        return Vec::new();
-    };
-
-    let volume_name = "overlay-root";
-    let init_mount_path = "/centaur-overlay-target";
-    volumes.push(json!({
-        "name": volume_name,
-        "emptyDir": {},
-    }));
-    volumes.push(json!({
-        "name": OVERLAY_PROMPT_VOLUME,
-        "emptyDir": {},
-    }));
-    volume_mounts.push(json!({
-        "name": volume_name,
-        "mountPath": overlay.mount_path,
-        "readOnly": true,
-    }));
-    volume_mounts.push(json!({
-        "name": OVERLAY_PROMPT_VOLUME,
-        "mountPath": AGENT_OVERLAY_PROMPT_PATH,
-        "subPath": OVERLAY_PROMPT_FILE,
-        "readOnly": true,
-    }));
-
-    let mut init_container = json!({
-        "name": "overlay-bootstrap",
-        "image": overlay.image,
-        "command": ["/bin/sh", "-ec"],
-        "args": [format!(
-            "src={}; target={}; mkdir -p \"$target\"; cp -R \"$src\"/. \"$target\"/; \
-             if [ -f \"$target/{OVERLAY_SYSTEM_PROMPT_REL}\" ]; then \
-             cp \"$target/{OVERLAY_SYSTEM_PROMPT_REL}\" '{OVERLAY_PROMPT_DIR}/{OVERLAY_PROMPT_FILE}'; \
-             else : > '{OVERLAY_PROMPT_DIR}/{OVERLAY_PROMPT_FILE}'; fi",
-            shell_quote(&overlay.source_path),
-            shell_quote(init_mount_path),
-        )],
-        "volumeMounts": [
-            {
-                "name": volume_name,
-                "mountPath": init_mount_path,
-            },
-            {
-                "name": OVERLAY_PROMPT_VOLUME,
-                "mountPath": OVERLAY_PROMPT_DIR,
-            },
-        ],
-        "securityContext": tools::security_context_json(),
-    });
-    insert_optional(
-        &mut init_container,
-        "imagePullPolicy",
-        overlay.image_pull_policy.clone(),
-    );
-    vec![init_container]
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
 fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
@@ -810,7 +714,7 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{OverlayImage, ResourceLimits, SandboxSpec};
+    use centaur_sandbox_core::{ResourceLimits, SandboxSpec};
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
 
     use super::*;
@@ -854,141 +758,6 @@ mod tests {
         assert_eq!(container.stdin, Some(true));
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);
         assert!(container.resources.as_ref().unwrap().limits.is_some());
-    }
-
-    #[test]
-    fn builds_agent_sandbox_spec_with_overlay_image() {
-        let spec = SandboxSpec::new("centaur-agent:latest").overlay_image(
-            OverlayImage::new(
-                "ghcr.io/example/centaur-overlay:test",
-                "/overlay",
-                "/opt/centaur/overlay",
-            )
-            .image_pull_policy("Always"),
-        );
-        let mut config = AgentSandboxConfig::new("centaur");
-        config.image_pull_secrets = vec!["github-access-token-read-packages".to_owned()];
-
-        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
-
-        let pod_spec = &sandbox.spec.pod_template.spec;
-        let init = &pod_spec.init_containers.as_ref().unwrap()[0];
-        assert_eq!(init.name, "overlay-bootstrap");
-        assert_eq!(
-            init.image.as_deref(),
-            Some("ghcr.io/example/centaur-overlay:test")
-        );
-        assert_eq!(init.image_pull_policy.as_deref(), Some("Always"));
-        assert!(
-            init.args
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|arg| arg.contains("src='/overlay'"))
-        );
-        assert!(
-            pod_spec
-                .volumes
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|volume| volume.name == "overlay-root")
-        );
-        assert_eq!(
-            pod_spec.image_pull_secrets.as_ref().unwrap()[0]
-                .name
-                .as_deref(),
-            Some("github-access-token-read-packages")
-        );
-        let container = &pod_spec.containers[0];
-        let overlay_mount = container
-            .volume_mounts
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|mount| mount.name == "overlay-root")
-            .expect("main container overlay mount");
-        assert_eq!(overlay_mount.mount_path, "/opt/centaur/overlay");
-        assert_eq!(overlay_mount.read_only, Some(true));
-    }
-
-    #[test]
-    fn builds_agent_sandbox_spec_with_overlay_without_tools() {
-        let spec = SandboxSpec::new("centaur-agent:latest");
-        let config = AgentSandboxConfig::new("centaur").overlay(OverlayImage::new(
-            "overlay:test",
-            "/overlay",
-            "/opt/centaur/overlay",
-        ));
-
-        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
-        let pod_spec = &sandbox.spec.pod_template.spec;
-        let container = &pod_spec.containers[0];
-
-        let env = container.env.as_ref().unwrap();
-        assert!(env.iter().any(|env| {
-            env.name == "TOOL_DIRS"
-                && env.value.as_deref() == Some("/app/tools:/opt/centaur/overlay/tools")
-        }));
-        assert!(env.iter().any(|env| {
-            env.name == "CENTAUR_OVERLAY_DIR"
-                && env.value.as_deref() == Some("/opt/centaur/overlay")
-        }));
-
-        let volumes = pod_spec.volumes.as_ref().unwrap();
-        assert!(
-            volumes
-                .iter()
-                .any(|volume| { volume.name == "overlay-root" && volume.empty_dir.is_some() })
-        );
-        assert!(
-            volumes
-                .iter()
-                .any(|volume| { volume.name == "overlay-prompt" && volume.empty_dir.is_some() })
-        );
-        assert!(!volumes.iter().any(|volume| volume.name == "tools-root"));
-
-        let mounts = container.volume_mounts.as_ref().unwrap();
-        assert!(mounts.iter().any(|mount| mount.name == "overlay-root"));
-        assert!(mounts.iter().any(|mount| mount.name == "overlay-prompt"));
-
-        let init_containers = pod_spec.init_containers.as_ref().unwrap();
-        assert_eq!(init_containers.len(), 1);
-        assert_eq!(init_containers[0].name, "overlay-bootstrap");
-    }
-
-    #[test]
-    fn spec_level_overlay_wins_over_backend_default() {
-        // A workflow-host spec carries its own overlay while the backend has a
-        // default — the two must collapse into ONE overlay-bootstrap/overlay-root
-        // pair (duplicate names are an invalid pod), with the spec's winning.
-        let spec = SandboxSpec::new("centaur-agent:latest").overlay_image(OverlayImage::new(
-            "overlay:spec",
-            "/overlay",
-            "/opt/centaur/overlay",
-        ));
-        let config = AgentSandboxConfig::new("centaur").overlay(OverlayImage::new(
-            "overlay:config",
-            "/overlay",
-            "/opt/centaur/overlay",
-        ));
-
-        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
-        let pod_spec = &sandbox.spec.pod_template.spec;
-
-        let init_containers = pod_spec.init_containers.as_ref().unwrap();
-        assert_eq!(init_containers.len(), 1);
-        assert_eq!(init_containers[0].name, "overlay-bootstrap");
-        assert_eq!(init_containers[0].image.as_deref(), Some("overlay:spec"));
-
-        let overlay_volumes = pod_spec
-            .volumes
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter(|volume| volume.name == "overlay-root")
-            .count();
-        assert_eq!(overlay_volumes, 1);
     }
 
     #[test]
