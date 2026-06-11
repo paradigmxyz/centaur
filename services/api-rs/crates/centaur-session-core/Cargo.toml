@@ -11,3 +11,6 @@ serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 time.workspace = true
+
+[lints]
+workspace = true

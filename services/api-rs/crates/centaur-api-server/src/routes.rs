@@ -271,12 +271,22 @@ async fn stream_events(
             query.execution_id.as_deref(),
         )
         .await?;
-    let stream = events.map(|result| {
+    let stream = events.map(move |result| {
+        // Stream failures are server-side faults: log the details, send the
+        // client an opaque stream-error event.
+        let opaque = |error: &dyn std::error::Error| {
+            tracing::error!(
+                thread_key = %thread_key,
+                error = %crate::error::error_chain(error),
+                "session event stream failed"
+            );
+            stream_error_sse("event stream failed")
+        };
         let sse = match result {
             Ok(event) => SessionSseEvent::try_from(event)
                 .map(Event::from)
-                .unwrap_or_else(|error| stream_error_sse(error.to_string())),
-            Err(error) => stream_error_sse(error.to_string()),
+                .unwrap_or_else(|error| opaque(&error)),
+            Err(error) => opaque(&error),
         };
         Ok(sse)
     });
@@ -444,10 +454,10 @@ fn parse_webhook_body(headers: &HeaderMap, raw_body: &[u8]) -> Result<Value, Api
             .map_err(|_| ApiError::BadRequest("invalid JSON webhook body".to_owned())),
         "application/x-www-form-urlencoded" => {
             let form = parse_form(std::str::from_utf8(raw_body).unwrap_or_default());
-            if let Some(Value::String(payload)) = form.get("payload") {
-                if let Ok(value) = serde_json::from_str(payload) {
-                    return Ok(value);
-                }
+            if let Some(Value::String(payload)) = form.get("payload")
+                && let Ok(value) = serde_json::from_str(payload)
+            {
+                return Ok(value);
             }
             Ok(Value::Object(form.into_iter().collect()))
         }
@@ -541,7 +551,9 @@ fn verify_webhook_auth(
         WorkflowWebhookAuth::None => Ok(()),
         WorkflowWebhookAuth::Bearer { secret_ref } => {
             let expected = env::var(secret_ref).map_err(|_| {
-                ApiError::BadRequest("webhook auth secret is not configured".to_owned())
+                ApiError::Internal(format!(
+                    "webhook auth secret {secret_ref} is not configured"
+                ))
             })?;
             let Some(actual) = header_value(headers, "Authorization") else {
                 return Err(ApiError::Unauthorized("missing bearer token".to_owned()));
@@ -551,7 +563,7 @@ fn verify_webhook_auth(
                 .or_else(|| actual.strip_prefix("bearer "))
                 .unwrap_or(actual.as_str())
                 .trim();
-            if actual == expected.trim() {
+            if constant_time_eq(actual.as_bytes(), expected.trim().as_bytes()) {
                 Ok(())
             } else {
                 Err(ApiError::Unauthorized("invalid bearer token".to_owned()))
@@ -595,25 +607,38 @@ fn verify_hmac_signature(
             "missing webhook signature".to_owned(),
         ));
     };
-    let secret = env::var(secret_ref)
-        .map_err(|_| ApiError::BadRequest("webhook auth secret is not configured".to_owned()))?;
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let invalid = || ApiError::Unauthorized("invalid webhook signature".to_owned());
+    let presented = signature
+        .trim()
+        .strip_prefix(signature_prefix)
+        .ok_or_else(invalid)?;
+    let presented = match encoding {
+        "base64" => general_purpose::STANDARD
+            .decode(presented)
+            .map_err(|_| invalid())?,
+        _ => hex::decode(presented).map_err(|_| invalid())?,
+    };
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| {
-        ApiError::BadRequest("webhook auth secret is not valid HMAC key material".to_owned())
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not valid HMAC key material"
+        ))
     })?;
     mac.update(raw_body);
-    let digest = mac.finalize().into_bytes();
-    let encoded = match encoding {
-        "base64" => general_purpose::STANDARD.encode(digest),
-        _ => hex::encode(digest),
-    };
-    let expected = format!("{signature_prefix}{encoded}");
-    if signature.trim() == expected {
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized(
-            "invalid webhook signature".to_owned(),
-        ))
-    }
+    // `verify_slice` is a constant-time comparison.
+    mac.verify_slice(&presented).map_err(|_| invalid())
+}
+
+/// Compare two byte strings in constant time (modulo length, which is not
+/// secret here).
+fn constant_time_eq(actual: &[u8], expected: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+
+    actual.ct_eq(expected).into()
 }
 
 fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
@@ -715,5 +740,99 @@ mod webhook_tests {
             raw_body,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn verifies_uppercase_hex_hmac_signature() {
+        let raw_body = br#"{"hello":"signed"}"#;
+        let secret_ref = "CENTRAUR_TEST_WEBHOOK_SECRET_UPPER";
+        unsafe {
+            env::set_var(secret_ref, "test-webhook-secret");
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-webhook-secret").unwrap();
+        mac.update(raw_body);
+        let signature = format!(
+            "sha256={}",
+            hex::encode(mac.finalize().into_bytes()).to_uppercase()
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-signature", signature.parse().unwrap());
+        verify_hmac_signature(
+            "X-Test-Signature",
+            "sha256=",
+            "hex",
+            secret_ref,
+            &headers,
+            raw_body,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn verifies_base64_hmac_signature() {
+        let raw_body = br#"{"hello":"signed"}"#;
+        let secret_ref = "CENTRAUR_TEST_WEBHOOK_SECRET_B64";
+        unsafe {
+            env::set_var(secret_ref, "test-webhook-secret");
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-webhook-secret").unwrap();
+        mac.update(raw_body);
+        let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-signature", signature.parse().unwrap());
+        verify_hmac_signature(
+            "X-Test-Signature",
+            "",
+            "base64",
+            secret_ref,
+            &headers,
+            raw_body,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_hmac_signature() {
+        let secret_ref = "CENTRAUR_TEST_WEBHOOK_SECRET_REJECT";
+        unsafe {
+            env::set_var(secret_ref, "test-webhook-secret");
+        }
+        let mut headers = HeaderMap::new();
+        for bad_signature in [
+            // Valid hex, wrong digest.
+            format!("sha256={}", hex::encode([0_u8; 32])),
+            // Missing prefix.
+            hex::encode([0_u8; 32]),
+            // Not decodable.
+            "sha256=not-hex".to_owned(),
+        ] {
+            headers.insert("x-test-signature", bad_signature.parse().unwrap());
+            let error = verify_hmac_signature(
+                "X-Test-Signature",
+                "sha256=",
+                "hex",
+                secret_ref,
+                &headers,
+                br#"{"hello":"signed"}"#,
+            )
+            .unwrap_err();
+            assert!(matches!(error, ApiError::Unauthorized(_)));
+        }
+    }
+
+    #[test]
+    fn missing_webhook_secret_is_internal_error() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-signature", "sha256=00".parse().unwrap());
+        let error = verify_hmac_signature(
+            "X-Test-Signature",
+            "sha256=",
+            "hex",
+            "CENTRAUR_TEST_WEBHOOK_SECRET_UNSET",
+            &headers,
+            b"{}",
+        )
+        .unwrap_err();
+        assert!(matches!(error, ApiError::Internal(_)));
     }
 }

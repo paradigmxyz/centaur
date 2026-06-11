@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, env, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env,
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use absurd::{
     Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy, SpawnOptions, StepHandle,
@@ -38,6 +45,8 @@ const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
 const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
+const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
 
 struct WorkflowTaskHeartbeatGuard {
     task: JoinHandle<()>,
@@ -60,8 +69,8 @@ struct WorkflowRuntimeInner {
     _worker: Worker,
     _etl_worker: Worker,
     _schedule_worker: Worker,
-    webhook_registry: BTreeMap<String, RegisteredWorkflowWebhook>,
-    schedule_registry: Arc<BTreeMap<String, RegisteredWorkflowSchedule>>,
+    webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
+    schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 }
 
 #[derive(Clone)]
@@ -138,7 +147,9 @@ pub struct WorkflowWebhookSpec {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WorkflowWebhookAuth {
+    #[default]
     None,
     Hmac {
         secret_ref: String,
@@ -157,12 +168,6 @@ pub enum WorkflowWebhookAuth {
     Bearer {
         secret_ref: String,
     },
-}
-
-impl Default for WorkflowWebhookAuth {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -289,7 +294,8 @@ impl WorkflowRuntime {
                 warn!(%error, "python workflow discovery failed");
                 PythonWorkflowMetadata::default()
             });
-        let schedule_registry = Arc::new(build_schedule_registry(&discovery)?);
+        let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(&discovery)?));
+        let webhook_registry = Arc::new(RwLock::new(build_webhook_registry(&discovery)?));
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
@@ -329,7 +335,11 @@ impl WorkflowRuntime {
                 }
             },
         )?;
-        reconcile_schedules(&schedule_client, &schedule_registry).await?;
+        let startup_schedules = schedule_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        reconcile_schedules(&schedule_client, &startup_schedules).await?;
 
         let worker = client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-worker".to_owned()),
@@ -371,6 +381,15 @@ impl WorkflowRuntime {
             "started absurd workflow schedule worker"
         );
 
+        if let Some(interval) = workflow_reconcile_interval() {
+            spawn_workflow_metadata_reconciler(
+                schedule_client.clone(),
+                webhook_registry.clone(),
+                schedule_registry.clone(),
+                interval,
+            );
+        }
+
         Ok(Self {
             inner: Arc::new(WorkflowRuntimeInner {
                 client,
@@ -378,7 +397,7 @@ impl WorkflowRuntime {
                 _worker: worker,
                 _etl_worker: etl_worker,
                 _schedule_worker: schedule_worker,
-                webhook_registry: build_webhook_registry(&discovery)?,
+                webhook_registry,
                 schedule_registry,
             }),
         })
@@ -422,16 +441,8 @@ impl WorkflowRuntime {
     pub async fn list_runs(&self, limit: i64) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
         let limit = limit.clamp(1, 200);
         let mut runs = Vec::new();
-        runs.extend(
-            self.list_runs_for_queue(WORKFLOW_QUEUE, limit)
-                .await?
-                .into_iter(),
-        );
-        runs.extend(
-            self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit)
-                .await?
-                .into_iter(),
-        );
+        runs.extend(self.list_runs_for_queue(WORKFLOW_QUEUE, limit).await?);
+        runs.extend(self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit).await?);
         runs.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
@@ -542,15 +553,32 @@ impl WorkflowRuntime {
     }
 
     pub fn get_webhook(&self, slug: &str) -> Option<RegisteredWorkflowWebhook> {
-        self.inner.webhook_registry.get(slug).cloned()
+        self.inner
+            .webhook_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(slug)
+            .cloned()
     }
 
     pub fn list_webhooks(&self) -> Vec<RegisteredWorkflowWebhook> {
-        self.inner.webhook_registry.values().cloned().collect()
+        self.inner
+            .webhook_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn list_schedules(&self) -> Vec<RegisteredWorkflowSchedule> {
-        self.inner.schedule_registry.values().cloned().collect()
+        self.inner
+            .schedule_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     fn client_for_workflow(&self, workflow_name: &str) -> &Client {
@@ -589,7 +617,7 @@ fn absurd_queue_tables(
             "absurd.t_centaur_workflow_schedules",
             "absurd.r_centaur_workflow_schedules",
         )),
-        other => Err(WorkflowRuntimeError::BadRequest(format!(
+        other => Err(WorkflowRuntimeError::Internal(format!(
             "unknown workflow queue {other:?}"
         ))),
     }
@@ -862,21 +890,21 @@ fn workflow_schedule_input(
         metadata.insert("workflow_name".to_owned(), json!(workflow_name));
         metadata.insert("no_delivery".to_owned(), json!(no_delivery));
     }
-    if let Some(thread_key) = object.get("thread_key").and_then(Value::as_str) {
-        if !thread_key.trim().is_empty() {
-            input.insert("thread_key".to_owned(), json!(thread_key.trim()));
-            if !input.contains_key("delivery") {
-                if let Some((channel, thread_ts)) = split_slack_thread_key(thread_key.trim()) {
-                    input.insert(
-                        "delivery".to_owned(),
-                        json!({
-                            "platform": "slack",
-                            "channel": channel,
-                            "thread_ts": thread_ts,
-                        }),
-                    );
-                }
-            }
+    if let Some(thread_key) = object.get("thread_key").and_then(Value::as_str)
+        && !thread_key.trim().is_empty()
+    {
+        input.insert("thread_key".to_owned(), json!(thread_key.trim()));
+        if !input.contains_key("delivery")
+            && let Some((channel, thread_ts)) = split_slack_thread_key(thread_key.trim())
+        {
+            input.insert(
+                "delivery".to_owned(),
+                json!({
+                    "platform": "slack",
+                    "channel": channel,
+                    "thread_ts": thread_ts,
+                }),
+            );
         }
     }
     if let Some(slack_channel) = object.get("slack_channel").and_then(Value::as_str) {
@@ -1025,20 +1053,23 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
     }
 
     let mut child = command.spawn().map_err(|error| {
-        WorkflowRuntimeError::BadRequest(format!(
+        WorkflowRuntimeError::Internal(format!(
             "failed to spawn Python workflow host {}: {error}",
             host_path.display()
         ))
     })?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdin missing".to_owned())
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdout missing".to_owned())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stderr missing".to_owned())
-    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdin missing".to_owned()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdout missing".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stderr missing".to_owned()))?;
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         let mut collected = Vec::new();
@@ -1080,7 +1111,7 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
             }
             Some("host.error") | Some("workflow.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "Python workflow discovery error: {}{}{}",
                     message
                         .get("message")
@@ -1091,7 +1122,7 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
                 )));
             }
             other => {
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "unexpected Python workflow discovery message type {other:?}: {message}"
                 )));
             }
@@ -1100,7 +1131,7 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
 
     let status = child.wait().await?;
     let stderr = stderr_task.await.unwrap_or_default();
-    Err(WorkflowRuntimeError::BadRequest(format!(
+    Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.discovery: status={status}, stderr={stderr}"
     )))
 }
@@ -1122,21 +1153,109 @@ async fn reconcile_schedules(
     Ok(())
 }
 
+fn workflow_reconcile_interval() -> Option<Duration> {
+    let seconds = env::var(WORKFLOW_RECONCILE_INTERVAL_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS);
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+fn spawn_workflow_metadata_reconciler(
+    schedule_client: Client,
+    webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
+    schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    interval: Duration,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // Startup discovery already ran; wait one full period before refreshing.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Err(error) = reconcile_workflow_metadata_once(
+                &schedule_client,
+                &webhook_registry,
+                &schedule_registry,
+            )
+            .await
+            {
+                warn!(%error, "failed to reconcile workflow metadata");
+            }
+        }
+    });
+}
+
+async fn reconcile_workflow_metadata_once(
+    schedule_client: &Client,
+    webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
+    schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+) -> Result<(), WorkflowRuntimeError> {
+    let discovery = discover_python_workflow_metadata().await?;
+    let next_webhooks = build_webhook_registry(&discovery)?;
+    let next_schedules = build_schedule_registry(&discovery)?;
+    {
+        let mut webhooks = webhook_registry
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *webhooks = next_webhooks;
+    }
+    {
+        let mut schedules = schedule_registry
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *schedules = next_schedules.clone();
+    }
+    reconcile_schedules(schedule_client, &next_schedules).await?;
+    info!(
+        webhook_count = discovery.webhooks.len(),
+        schedule_count = discovery.schedules.len(),
+        "reconciled workflow metadata"
+    );
+    Ok(())
+}
+
 async fn run_schedule_tick(
     input: ScheduleTickInput,
     ctx: TaskContext,
     schedule_client: Client,
     workflow_client: Client,
     etl_client: Client,
-    schedules: Arc<BTreeMap<String, RegisteredWorkflowSchedule>>,
+    schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 ) -> Result<Value, absurd::Error> {
-    let schedule = schedules.get(&input.schedule_id).ok_or_else(|| {
-        absurd::Error::InvalidOptions(format!(
-            "unknown workflow schedule_id {:?}",
-            input.schedule_id
-        ))
-    })?;
     ctx.sleep_until("schedule_tick", input.scheduled_at).await?;
+    let schedule = match schedules
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&input.schedule_id)
+        .cloned()
+    {
+        Some(schedule) if schedule.enabled => schedule,
+        Some(schedule) => {
+            info!(
+                schedule_id = %schedule.schedule_id,
+                "skipping disabled workflow schedule tick"
+            );
+            return Ok(json!({
+                "schedule_id": schedule.schedule_id,
+                "scheduled_at": input.scheduled_at.to_rfc3339(),
+                "skipped": true,
+                "reason": "disabled",
+            }));
+        }
+        None => {
+            info!(
+                schedule_id = %input.schedule_id,
+                "skipping removed workflow schedule tick"
+            );
+            return Ok(json!({
+                "schedule_id": input.schedule_id,
+                "scheduled_at": input.scheduled_at.to_rfc3339(),
+                "skipped": true,
+                "reason": "removed",
+            }));
+        }
+    };
     let fire_key = format!(
         "schedule:{}:{}",
         schedule.schedule_id,
@@ -1160,8 +1279,8 @@ async fn run_schedule_tick(
             },
         )
         .await?;
-    let next_run_at = next_schedule_time(schedule, Utc::now()).map_err(absurd_error)?;
-    spawn_schedule_tick(&schedule_client, schedule, next_run_at)
+    let next_run_at = next_schedule_time(&schedule, Utc::now()).map_err(absurd_error)?;
+    spawn_schedule_tick(&schedule_client, &schedule, next_run_at)
         .await
         .map_err(absurd_error)?;
     Ok(json!({
@@ -1341,17 +1460,21 @@ async fn run_centaur_workflow(
                         });
                         run_agent_session_turn(
                             session_runtime,
-                            thread_key,
-                            harness_type,
-                            None,
-                            vec![json!({"type": "text", "text": prompt})],
-                            client_message_id.clone(),
-                            metadata.clone(),
-                            metadata.clone(),
-                            metadata,
-                            format!("absurd-workflow-agent-turn:{client_message_id}"),
-                            idle_timeout_ms,
-                            max_duration_ms,
+                            AgentTurnRequest {
+                                thread_key,
+                                harness_type,
+                                persona_id: None,
+                                parts: vec![json!({"type": "text", "text": prompt})],
+                                client_message_id: client_message_id.clone(),
+                                session_metadata: metadata.clone(),
+                                message_metadata: metadata.clone(),
+                                execution_metadata: metadata,
+                                execution_idempotency_key: format!(
+                                    "absurd-workflow-agent-turn:{client_message_id}"
+                                ),
+                                idle_timeout_ms,
+                                max_duration_ms,
+                            },
                         )
                         .await
                         .map_err(absurd_error)
@@ -1473,20 +1596,23 @@ async fn run_python_workflow_host_local(
     }
 
     let mut child = command.spawn().map_err(|error| {
-        WorkflowRuntimeError::BadRequest(format!(
+        WorkflowRuntimeError::Internal(format!(
             "failed to spawn Python workflow host {}: {error}",
             host_path.display()
         ))
     })?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdin missing".to_owned())
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdout missing".to_owned())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stderr missing".to_owned())
-    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdin missing".to_owned()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdout missing".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stderr missing".to_owned()))?;
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         let mut collected = Vec::new();
@@ -1522,7 +1648,7 @@ async fn run_python_workflow_host_local(
             }
             Some("workflow.error") | Some("host.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "Python workflow host error: {}{}{}",
                     message
                         .get("message")
@@ -1551,7 +1677,7 @@ async fn run_python_workflow_host_local(
                 write_host_message(&mut stdin, &response).await?;
             }
             other => {
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "unexpected Python workflow host message type {other:?}: {message}"
                 )));
             }
@@ -1560,7 +1686,7 @@ async fn run_python_workflow_host_local(
 
     let status = child.wait().await?;
     let stderr = stderr_task.await.unwrap_or_default();
-    Err(WorkflowRuntimeError::BadRequest(format!(
+    Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.result: status={status}, stderr={stderr}"
     )))
 }
@@ -1651,7 +1777,7 @@ where
             }
             Some("workflow.error") | Some("host.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "Python workflow host error: {}{}{}",
                     message
                         .get("message")
@@ -1680,7 +1806,7 @@ where
                 write_host_message(stdin, &response).await?;
             }
             other => {
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "unexpected Python workflow host message type {other:?}: {message}"
                 )));
             }
@@ -1688,7 +1814,7 @@ where
     }
 
     let stderr = stderr_task.await.unwrap_or_default();
-    Err(WorkflowRuntimeError::BadRequest(format!(
+    Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.result: stderr={stderr}"
     )))
 }
@@ -1874,17 +2000,19 @@ async fn run_python_agent_turn(
         .unwrap_or_else(|| format!("absurd-workflow-agent-turn:{client_message_id}"));
     let result = run_agent_session_turn(
         session_runtime,
-        thread_key,
-        harness_type,
-        persona_id,
-        parts,
-        client_message_id,
-        session_metadata,
-        message_metadata,
-        execution_metadata,
-        execution_idempotency_key,
-        idle_timeout_ms,
-        max_duration_ms,
+        AgentTurnRequest {
+            thread_key,
+            harness_type,
+            persona_id,
+            parts,
+            client_message_id,
+            session_metadata,
+            message_metadata,
+            execution_metadata,
+            execution_idempotency_key,
+            idle_timeout_ms,
+            max_duration_ms,
+        },
     )
     .await?;
     serde_json::to_value(result).map_err(WorkflowRuntimeError::from)
@@ -2117,7 +2245,7 @@ async fn send_slack_message(token: &str, payload: Value) -> Result<Value, Workfl
         .json()
         .await?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(WorkflowRuntimeError::BadRequest(format!(
+        return Err(WorkflowRuntimeError::Upstream(format!(
             "Slack chat.postMessage failed: {}",
             response
                 .get("error")
@@ -2143,8 +2271,7 @@ fn slack_post_result_from_response(channel: &str, response: Value) -> SlackPostR
     }
 }
 
-async fn run_agent_session_turn(
-    session_runtime: SessionRuntime,
+struct AgentTurnRequest {
     thread_key: String,
     harness_type: HarnessType,
     persona_id: Option<String>,
@@ -2156,7 +2283,25 @@ async fn run_agent_session_turn(
     execution_idempotency_key: String,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
+}
+
+async fn run_agent_session_turn(
+    session_runtime: SessionRuntime,
+    turn: AgentTurnRequest,
 ) -> Result<AgentTurnResult, WorkflowRuntimeError> {
+    let AgentTurnRequest {
+        thread_key,
+        harness_type,
+        persona_id,
+        parts,
+        client_message_id,
+        session_metadata,
+        message_metadata,
+        execution_metadata,
+        execution_idempotency_key,
+        idle_timeout_ms,
+        max_duration_ms,
+    } = turn;
     let thread_key = ThreadKey::parse(thread_key)?;
     session_runtime
         .create_or_get_session(
@@ -2227,7 +2372,7 @@ async fn run_agent_session_turn(
                     result_text: result_text_from_output_lines(&output_lines),
                     output_lines,
                 };
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Upstream(format!(
                     "agent turn {} for thread {} ended with {}",
                     result.execution_id, result.thread_key, result.status
                 )));
@@ -2236,7 +2381,7 @@ async fn run_agent_session_turn(
         }
     }
 
-    Err(WorkflowRuntimeError::BadRequest(
+    Err(WorkflowRuntimeError::Upstream(
         "session event stream ended before terminal execution event".to_owned(),
     ))
 }
@@ -2279,15 +2424,25 @@ fn workflow_run_from_row(row: sqlx::postgres::PgRow) -> Result<WorkflowRun, Work
 }
 
 fn absurd_error(error: WorkflowRuntimeError) -> absurd::Error {
-    absurd::Error::InvalidOptions(error.to_string())
+    absurd::Error::TaskFailed(Box::new(error))
 }
 
 #[derive(Debug, Error)]
 pub enum WorkflowRuntimeError {
+    /// The caller supplied an invalid request or workflow configuration.
+    /// Maps to HTTP 400.
     #[error("{0}")]
     BadRequest(String),
     #[error("workflow run not found: {0}")]
     NotFound(String),
+    /// Server-side failure (workflow host spawn/protocol, internal dispatch).
+    /// Maps to HTTP 500.
+    #[error("{0}")]
+    Internal(String),
+    /// An upstream dependency (Slack, agent session) failed. Maps to
+    /// HTTP 502.
+    #[error("{0}")]
+    Upstream(String),
     #[error(transparent)]
     Absurd(#[from] absurd::Error),
     #[error(transparent)]

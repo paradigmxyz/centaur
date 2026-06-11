@@ -817,6 +817,97 @@ describe('slackbotv2', () => {
     expect(await threadText(parent.ts)).toContain('STREAM_CONTINUATION_END')
   })
 
+  it('conflates rapid task updates instead of one Slack call per event', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a chatty command.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> run the chatty command`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-conflated-render',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> run the chatty command`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.started',
+        item: {
+          id: 'cmd-chatty',
+          type: 'commandExecution',
+          command: 'stream-much-output',
+          status: 'inProgress'
+        }
+      })
+    )
+    const updateCount = 400
+    for (let index = 1; index <= updateCount; index += 1) {
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.commandExecution.outputDelta',
+          itemId: 'cmd-chatty',
+          delta: `line-${index}\n`
+        })
+      )
+    }
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-chatty',
+          type: 'commandExecution',
+          command: 'stream-much-output',
+          status: 'completed',
+          aggregatedOutput: ''
+        }
+      })
+    )
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-conflated-render',
+      status: 'completed',
+      result_text: 'CONFLATED_RENDER_OK'
+    })
+
+    await Promise.all(waits)
+    const chattyChunkSends = slackApi.calls.reduce((total, call) => {
+      return (
+        total +
+        streamChunks(call.body.chunks).filter(chunk => chunk.id === 'cmd-chatty').length
+      )
+    }, 0)
+    // Without conflation every output delta becomes its own Slack append
+    // (~400 chunk sends for this card). Conflation folds updates that arrive
+    // while a Slack call is in flight, so the card is sent far fewer times.
+    expect(chattyChunkSends).toBeGreaterThan(0)
+    expect(chattyChunkSends).toBeLessThan(100)
+    const renderedText = slackStreamTranscripts(slackApi.calls)
+      .flatMap(transcript => transcript.chunks.map(chunkText))
+      .filter(Boolean)
+      .join('\n')
+    expect(renderedText).toContain('CONFLATED_RENDER_OK')
+  })
+
   it('continues large task streams across Slack stream replies', async () => {
     codexApi.autoRespond = false
 
@@ -952,6 +1043,16 @@ describe('slackbotv2', () => {
           status: 'inProgress'
         }
       })
+    )
+    // Conflation collapses unsent intermediate states, so wait until the open
+    // task has actually reached Slack before completing it - this test is
+    // about segments staying open while a card is in progress.
+    await waitFor(() =>
+      slackApi.calls.some(call =>
+        streamChunks(call.body.chunks).some(
+          chunk => chunk.id === 'cmd-open' && chunk.status === 'in_progress'
+        )
+      )
     )
     for (let index = 1; index <= 3; index += 1) {
       codexApi.emitOutputLine(
@@ -2762,30 +2863,15 @@ function expectSlackPlanStreamShape(
     expect(progressChunks).toContainEqual(
       expect.objectContaining({ type: 'plan_update', title: 'Implementation plan' })
     )
+    // Conflation may merge intermediate states into the final card update
+    // when the consumer is behind, so only assert the terminal status per
+    // card here; content presence is asserted on the aggregate text below.
     expect(progressChunks).toContainEqual(
       expect.objectContaining({
         type: 'task_update',
         id: 'thinking-commentary-1',
         title: 'Thinking',
-        status: 'in_progress',
-      })
-    )
-    expect(progressChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        id: 'thinking-commentary-1',
-        title: 'Thinking',
-        status: 'complete',
-        details: expect.stringContaining('Checking the command output')
-      })
-    )
-    expect(progressChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        id: 'reasoning-1',
-        title: 'Thinking',
-        status: 'in_progress',
-        details: expect.stringContaining('Inspecting the event stream')
+        status: 'complete'
       })
     )
     expect(progressChunks).toContainEqual(

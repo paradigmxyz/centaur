@@ -14,3 +14,6 @@ tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
 [dev-dependencies]
 centaur-sandbox-manager = { path = "../centaur-sandbox-manager" }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
+
+[lints]
+workspace = true

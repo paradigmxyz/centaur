@@ -1,11 +1,15 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
+    env, fs,
     net::SocketAddr,
     path::PathBuf,
+    process::Command,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use centaur_api_server::SandboxRuntime;
 use centaur_iron_control::{
@@ -18,14 +22,14 @@ use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
     ToolsConfig,
 };
-use centaur_sandbox_core::{Mount, MountKind, OverlayImage, SandboxSpec};
+use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::WarmPoolConfig;
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::SandboxWorkloadMode;
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     ServerError,
@@ -56,6 +60,12 @@ impl Args {
         self.sandbox.iron_control_runtime().await
     }
 
+    pub(crate) fn iron_control_tool_reconciler(
+        &self,
+    ) -> Result<Option<IronControlToolReconciler>, ServerError> {
+        self.sandbox.iron_control_tool_reconciler()
+    }
+
     pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
         self.sandbox.warm_pool_config()
     }
@@ -74,6 +84,273 @@ pub(crate) struct IronControlRuntime {
     pub(crate) registrar: SessionRegistrar,
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
+}
+
+pub(crate) struct IronControlToolReconciler {
+    client: IronControlClient,
+    namespace: String,
+    source_policy: SourcePolicy,
+    base_infra_fragment: ProxyFragment,
+    tool_dirs: Vec<PathBuf>,
+    tool_git_source: Option<ToolGitSource>,
+    interval: Duration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToolGitSource {
+    repo: String,
+    git_ref: Option<String>,
+    source_subdir: String,
+    cache_dir: PathBuf,
+    repo_cache_path: Option<String>,
+}
+
+impl IronControlToolReconciler {
+    pub(crate) async fn run(self) {
+        let mut interval = tokio::time::interval(self.interval);
+        // The startup path already registered once; wait a full period so this
+        // task only handles post-start git/volume updates.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = self.reconcile_once().await {
+                error!(%error, "failed to reconcile iron-control tool secrets");
+            }
+        }
+    }
+
+    async fn reconcile_once(&self) -> Result<(), ServerError> {
+        let tool_dirs = self.tool_dirs()?;
+        let tool_fragment = self.discover_tool_proxy_fragment()?;
+        let mut infra = self.base_infra_fragment.clone();
+        if let Some(tool_fragment) = &tool_fragment {
+            merge_fragment(&mut infra, tool_fragment.fragment.clone());
+        }
+        let role_id = register_role(
+            &self.client,
+            &self.namespace,
+            &RoleSpec::infra(),
+            &infra,
+            &self.source_policy,
+        )
+        .await?;
+        info!(
+            role_id,
+            tool_dirs = ?tool_dirs,
+            tool_count = tool_fragment
+                .as_ref()
+                .map_or(0, |fragment| fragment.tool_count),
+            secret_count = tool_fragment
+                .as_ref()
+                .map_or(0, |fragment| fragment.secret_count),
+            "reconciled iron-control tool secrets"
+        );
+        Ok(())
+    }
+
+    fn discover_tool_proxy_fragment(
+        &self,
+    ) -> Result<Option<DiscoveredToolProxyFragment>, ServerError> {
+        let tool_dirs = self.tool_dirs()?;
+        let discovered = discover_tool_proxy_fragment(&tool_dirs)?;
+        if discovered.secret_count == 0 {
+            return Ok(None);
+        }
+        Ok(Some(discovered))
+    }
+
+    fn tool_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
+        if let Some(source) = &self.tool_git_source {
+            source.sync()?;
+            let tools_dir = source.tools_dir();
+            if source.repo_cache_path.is_some() && !tools_dir.is_dir() {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![tools_dir]);
+        }
+        Ok(self.tool_dirs.clone())
+    }
+}
+
+impl ToolGitSource {
+    fn from_config(tools: &ToolsConfig) -> Self {
+        Self {
+            repo: tools.repo.clone(),
+            git_ref: tools.git_ref.clone(),
+            source_subdir: tools.source_subdir.clone(),
+            cache_dir: env::temp_dir()
+                .join("centaur-api-rs-tools")
+                .join(slug_path_component(&tools.repo)),
+            repo_cache_path: tools.repo_cache_path.clone(),
+        }
+    }
+
+    fn tools_dir(&self) -> PathBuf {
+        if let Some(repo_cache_path) = &self.repo_cache_path {
+            return PathBuf::from(repo_cache_path)
+                .join(&self.repo)
+                .join(&self.source_subdir);
+        }
+        self.cache_dir.join(&self.source_subdir)
+    }
+
+    fn sync(&self) -> Result<(), ServerError> {
+        if self.repo_cache_path.is_some() {
+            return Ok(());
+        }
+        static TOOL_PROXY_GIT_SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = TOOL_PROXY_GIT_SYNC
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.sync_locked()
+    }
+
+    fn sync_locked(&self) -> Result<(), ServerError> {
+        let repo_url = format!("https://github.com/{}.git", self.repo);
+        if !self.cache_dir.join(".git").is_dir() {
+            if self.cache_dir.exists() {
+                fs::remove_dir_all(&self.cache_dir)?;
+            }
+            if let Some(parent) = self.cache_dir.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            run_git(
+                Command::new("git")
+                    .arg("clone")
+                    .arg("--quiet")
+                    .arg("--filter=blob:none")
+                    .arg("--no-checkout")
+                    .arg(&repo_url)
+                    .arg(&self.cache_dir),
+                "clone api-rs tools repo",
+            )?;
+            run_git(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&self.cache_dir)
+                    .arg("sparse-checkout")
+                    .arg("set")
+                    .arg(&self.source_subdir),
+                "configure api-rs tools sparse checkout",
+            )?;
+        }
+
+        match &self.git_ref {
+            Some(git_ref) => {
+                run_git(
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(&self.cache_dir)
+                        .arg("-c")
+                        .arg("gc.auto=0")
+                        .arg("fetch")
+                        .arg("--quiet")
+                        .arg("origin")
+                        .arg(git_ref),
+                    "fetch api-rs tools ref",
+                )?;
+                run_git(
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(&self.cache_dir)
+                        .arg("checkout")
+                        .arg("--quiet")
+                        .arg("--detach")
+                        .arg("FETCH_HEAD"),
+                    "checkout api-rs tools ref",
+                )?;
+            }
+            None => {
+                run_git(
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(&self.cache_dir)
+                        .arg("checkout")
+                        .arg("--quiet"),
+                    "checkout api-rs tools default branch",
+                )?;
+                run_git(
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(&self.cache_dir)
+                        .arg("pull")
+                        .arg("--ff-only")
+                        .arg("--quiet"),
+                    "pull api-rs tools default branch",
+                )?;
+            }
+        }
+
+        if !self.tools_dir().is_dir() {
+            return Err(ServerError::ToolSource(format!(
+                "configured tools subdir does not exist after sync: {}",
+                self.tools_dir().display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn run_git(command: &mut Command, operation: &str) -> Result<(), ServerError> {
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    let askpass = configure_git_askpass(command)?;
+    let output = command.output()?;
+    if let Some(path) = askpass {
+        let _ = fs::remove_file(path);
+    }
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(ServerError::ToolSource(format!(
+        "{operation} failed with status {}: {}",
+        output.status,
+        stderr.trim()
+    )))
+}
+
+fn configure_git_askpass(command: &mut Command) -> Result<Option<PathBuf>, ServerError> {
+    let token = env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let token_file = env::var("CENTAUR_TOOLS_GITHUB_TOKEN_FILE")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let Some(password_command) = token
+        .map(|token| format!("echo {}", shell_quote(&token)))
+        .or_else(|| token_file.map(|path| format!("cat {}", shell_quote(&path))))
+    else {
+        return Ok(None);
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "centaur-api-rs-git-askpass-{}-{nonce}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  *Username*) echo x-access-token;;\n  *Password*) {password_command};;\n  *) echo;;\nesac\n"
+        ),
+    )?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    command.env("GIT_ASKPASS", &path);
+    Ok(Some(path))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
+}
+
+fn slug_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
 }
 
 #[derive(Debug, ClapArgs)]
@@ -226,6 +503,12 @@ struct SandboxArgs {
     workflow_host_command: Option<String>,
     #[command(flatten)]
     tools_source: ToolsArgs,
+    #[arg(
+        long = "tool-proxy-reconcile-interval-secs",
+        env = "TOOL_PROXY_RECONCILE_INTERVAL_SECS",
+        default_value_t = 60
+    )]
+    tool_proxy_reconcile_interval_secs: u64,
 }
 
 impl SandboxArgs {
@@ -272,6 +555,34 @@ impl SandboxArgs {
             registrar: SessionRegistrar::new(client, namespace, role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
+        }))
+    }
+
+    /// Background registration for git/volume-backed tool updates. The startup
+    /// registrar grants every principal the stable infra role; re-upserting that
+    /// role here adds newly discovered tool secrets to existing and future
+    /// principals without restarting api-rs or sandboxes.
+    fn iron_control_tool_reconciler(
+        &self,
+    ) -> Result<Option<IronControlToolReconciler>, ServerError> {
+        let Some(client) = self.iron_control.client() else {
+            return Ok(None);
+        };
+        if self.tool_proxy_reconcile_interval_secs == 0 {
+            return Ok(None);
+        }
+        Ok(Some(IronControlToolReconciler {
+            client,
+            namespace: self.iron_control.namespace.clone(),
+            source_policy: self.iron_proxy.source_policy(),
+            base_infra_fragment: self.iron_proxy.infra_fragment()?,
+            tool_dirs: self.tools.resolve_tool_dirs()?,
+            tool_git_source: self
+                .tools_source
+                .to_config()
+                .as_ref()
+                .map(ToolGitSource::from_config),
+            interval: Duration::from_secs(self.tool_proxy_reconcile_interval_secs),
         }))
     }
 
@@ -388,9 +699,6 @@ impl SandboxArgs {
                     .read_only(),
                 );
             }
-            if let Some(overlay) = overlay_image_from_env() {
-                spec = spec.overlay_image(overlay);
-            }
         }
         for (name, value) in self.workflow_host_env_template()? {
             upsert_spec_env(&mut spec, name, value);
@@ -402,13 +710,10 @@ impl SandboxArgs {
     }
 
     fn agent_k8s_workflow_dirs(&self) -> String {
-        if matches!(self.backend, SandboxBackendKind::AgentK8s)
-            && env::var_os("CENTAUR_OVERLAY_IMAGE").is_some()
-        {
-            "/opt/centaur/workflows:/opt/centaur/overlay/workflows".to_owned()
-        } else {
-            "/opt/centaur/workflows".to_owned()
+        if let Some(repo) = clean_optional_value(self.tools_source.repo.as_deref()) {
+            return format!("{SANDBOX_REPOS_MOUNT_PATH}/{repo}/workflows");
         }
+        "/opt/centaur/workflows".to_owned()
     }
 
     fn default_workflow_host_path(&self) -> String {
@@ -594,7 +899,7 @@ impl SandboxArgs {
     fn discover_tool_proxy_fragment(
         &self,
     ) -> Result<Option<DiscoveredToolProxyFragment>, ServerError> {
-        let tool_dirs = self.tools.resolve_tool_dirs()?;
+        let tool_dirs = self.tool_proxy_dirs()?;
         let discovered = discover_tool_proxy_fragment(&tool_dirs)?;
         if discovered.secret_count == 0 {
             return Ok(None);
@@ -605,6 +910,15 @@ impl SandboxArgs {
             "api-rs tool proxy fragment enabled"
         );
         Ok(Some(discovered))
+    }
+
+    fn tool_proxy_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
+        if let Some(tools) = self.tools_source.to_config() {
+            let source = ToolGitSource::from_config(&tools);
+            source.sync()?;
+            return Ok(vec![source.tools_dir()]);
+        }
+        self.tools.resolve_tool_dirs()
     }
 
     fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
@@ -672,10 +986,6 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         }
         config.iron_control = args.iron_control.settings();
         config.tools = args.tools_source.to_config();
-        // The same org overlay (and the same CENTAUR_OVERLAY_* env the chart
-        // already sets) serves every sandbox; workflow hosts set it spec-level
-        // via `workflow_host_spec`, which then takes precedence in the backend.
-        config.overlay = overlay_image_from_env();
         // iron-control is the only proxy mode: a per-sandbox proxy syncs its
         // secrets from the control plane, so configuring iron-proxy without
         // iron-control would produce a non-functional proxy. Fail fast.
@@ -741,6 +1051,14 @@ struct ToolsArgs {
         default_value = "token"
     )]
     github_token_secret_key: String,
+    // Optional mounted repo-cache root. When present, sandboxes and api-rs copy
+    // tools from `<path>/<repo>/<subdir>` instead of fetching GitHub directly.
+    #[arg(
+        id = "tools_repo_cache_path",
+        long = "kubernetes-tools-repo-cache-path",
+        env = "KUBERNETES_TOOLS_REPO_CACHE_PATH"
+    )]
+    repo_cache_path: Option<String>,
 }
 
 impl ToolsArgs {
@@ -761,6 +1079,7 @@ impl ToolsArgs {
                     .unwrap_or_else(|| "token".to_owned()),
             });
         }
+        config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
         Some(config)
     }
 }
@@ -1070,20 +1389,6 @@ fn default_workflow_host_path() -> String {
         .to_string()
 }
 
-/// The org overlay image, from the `CENTAUR_OVERLAY_*` env the chart sets.
-/// Shared by workflow-host specs and the agent-sandbox backend default — every
-/// sandbox mounts the same overlay tree at the same path.
-fn overlay_image_from_env() -> Option<OverlayImage> {
-    let image = env::var("CENTAUR_OVERLAY_IMAGE").ok()?;
-    let source_path =
-        env::var("CENTAUR_OVERLAY_IMAGE_SOURCE_PATH").unwrap_or_else(|_| "/overlay".to_owned());
-    let mut overlay = OverlayImage::new(image, source_path, "/opt/centaur/overlay");
-    if let Ok(image_pull_policy) = env::var("CENTAUR_OVERLAY_IMAGE_PULL_POLICY") {
-        overlay = overlay.image_pull_policy(image_pull_policy);
-    }
-    Some(overlay)
-}
-
 fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
     match engine {
         HarnessType::Codex => "codex",
@@ -1149,42 +1454,6 @@ fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Process env is global: tests that set CENTAUR_OVERLAY_* via EnvGuard must
-    // not interleave, or one test observes another's values.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    struct EnvGuard {
-        name: &'static str,
-        old_value: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let old_value = env::var(name).ok();
-            unsafe {
-                env::set_var(name, value);
-            }
-            Self { name, old_value }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.old_value {
-                    Some(value) => env::set_var(self.name, value),
-                    None => env::remove_var(self.name),
-                }
-            }
-        }
-    }
 
     #[test]
     fn parses_session_sandbox_flags() {
@@ -1268,11 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_overlay_config_read_from_flags() {
-        // The overlay rides the same CENTAUR_OVERLAY_* env the workflow host
-        // reads — one overlay convention for every sandbox.
-        let _env_lock = env_lock();
-        let _overlay_image = EnvGuard::set("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test");
+    fn tools_config_read_from_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -1287,6 +1552,8 @@ mod tests {
             "main",
             "--kubernetes-tools-runner-image",
             "centaur-agent:test",
+            "--kubernetes-tools-repo-cache-path",
+            "/var/lib/centaur/repos",
             "--kubernetes-tools-github-token-secret",
             "centaur-repo-cache-github-token",
         ])
@@ -1297,47 +1564,13 @@ mod tests {
         assert_eq!(tools.git_ref.as_deref(), Some("main"));
         assert_eq!(tools.source_subdir, "tools");
         assert_eq!(tools.image, "centaur-agent:test");
+        assert_eq!(
+            tools.repo_cache_path.as_deref(),
+            Some("/var/lib/centaur/repos")
+        );
         let token = tools.github_token.expect("token should be Some");
         assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
         assert_eq!(token.secret_key, "token");
-        let overlay = config.overlay.expect("overlay should be Some");
-        assert_eq!(overlay.image, "centaur-overlay:test");
-        assert_eq!(overlay.mount_path, "/opt/centaur/overlay");
-    }
-
-    #[test]
-    fn agent_k8s_workflow_host_mounts_overlay_workflows() {
-        let _env_lock = env_lock();
-        let _overlay_image = EnvGuard::set("CENTAUR_OVERLAY_IMAGE", "ghcr.io/example/overlay:test");
-        let _overlay_pull_policy = EnvGuard::set("CENTAUR_OVERLAY_IMAGE_PULL_POLICY", "Always");
-        let _overlay_source_path = EnvGuard::set("CENTAUR_OVERLAY_IMAGE_SOURCE_PATH", "/overlay");
-        let _workflow_dirs =
-            EnvGuard::set("WORKFLOW_DIRS", "/app/workflows:/app/overlay/workflows");
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-sandbox-backend",
-            "agent-k8s",
-            "--kubernetes-sandbox-iron-proxy-mode",
-            "disabled",
-        ])
-        .unwrap();
-
-        let spec = args.sandbox.workflow_host_spec(None).unwrap();
-
-        assert_eq!(
-            spec.env
-                .iter()
-                .find(|env| env.name == "WORKFLOW_DIRS")
-                .map(|env| env.value.as_str()),
-            Some("/opt/centaur/workflows:/opt/centaur/overlay/workflows")
-        );
-        let overlay = spec.overlay.as_ref().expect("overlay image configured");
-        assert_eq!(overlay.image, "ghcr.io/example/overlay:test");
-        assert_eq!(overlay.source_path, "/overlay");
-        assert_eq!(overlay.mount_path, "/opt/centaur/overlay");
-        assert_eq!(overlay.image_pull_policy.as_deref(), Some("Always"));
     }
 
     #[test]

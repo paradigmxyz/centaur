@@ -11,9 +11,9 @@ mod lifecycle;
 mod spec;
 
 pub use backend::SandboxBackend;
-pub use error::{SandboxError, SandboxResult};
+pub use error::{BoxedError, SandboxError, SandboxResult};
 pub use io::{SandboxIo, SandboxIoGuard, SandboxIoParts, SandboxRead, SandboxWrite};
 pub use lifecycle::{
     DesiredSandboxState, ObservedSandbox, SandboxHandle, SandboxId, SandboxStatus,
 };
-pub use spec::{EnvVar, Mount, MountKind, OverlayImage, ResourceLimits, SandboxSpec};
+pub use spec::{EnvVar, Mount, MountKind, ResourceLimits, SandboxSpec};

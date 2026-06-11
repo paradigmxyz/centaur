@@ -19,6 +19,7 @@ import {
   type ChatSDKStreamChunk,
   type RendererEvent
 } from '@centaur/rendering'
+import { conflateChatSdkStream } from './conflate'
 import {
   collectInitialContext,
   forwardToSessionApi,
@@ -733,10 +734,12 @@ async function renderExecutionStream(
   })
   try {
     const visibleStream = await streamAfterFirstChunk(
-      slackSafeChatSdkStream(
-        codexAppServerToChatSdkStream(
-          stream,
-          rendererOptions(thread, options)
+      conflateChatSdkStream(
+        slackSafeChatSdkStream(
+          codexAppServerToChatSdkStream(
+            stream,
+            rendererOptions(thread, options)
+          )
         )
       )
     )
@@ -774,10 +777,12 @@ async function renderRecoveredExecutionStream(
   })
   try {
     const visibleStream = await streamAfterFirstChunk(
-      slackSafeChatSdkStream(
-        codexAppServerToChatSdkStream(
-          stream,
-          rendererOptions(thread, options)
+      conflateChatSdkStream(
+        slackSafeChatSdkStream(
+          codexAppServerToChatSdkStream(
+            stream,
+            rendererOptions(thread, options)
+          )
         )
       )
     )

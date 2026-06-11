@@ -13,3 +13,6 @@ sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true
+
+[lints]
+workspace = true

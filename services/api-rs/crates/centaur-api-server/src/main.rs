@@ -34,6 +34,10 @@ async fn main() -> Result<(), ServerError> {
         workflow_host_principal = Some(iron_control.workflow_host_principal);
         runtime = runtime.with_iron_control(iron_control.registrar);
     }
+    if let Some(reconciler) = args.iron_control_tool_reconciler()? {
+        info!("iron-control tool secret reconciliation enabled");
+        tokio::spawn(reconciler.run());
+    }
     if let Some(mut config) = args.warm_pool_config() {
         config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
         runtime = runtime.with_warm_pool(config);
@@ -95,6 +99,8 @@ pub(crate) enum ServerError {
     Telemetry(#[from] centaur_telemetry::TelemetryError),
     #[error(transparent)]
     ToolDiscovery(#[from] tool_discovery::ToolDiscoveryError),
+    #[error("tool source error: {0}")]
+    ToolSource(String),
     #[error("iron-proxy requires both firewall CA cert and key Secret names")]
     MissingIronProxyCaSecret,
     #[error("{0}")]

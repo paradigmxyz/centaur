@@ -105,6 +105,16 @@ struct SessionPipe {
     stdin: Arc<Mutex<SessionInputSink>>,
 }
 
+/// Shared handles threaded through background session tasks (stdout pump,
+/// terminal-output recording, max-duration failure, idle pause).
+#[derive(Clone)]
+struct RuntimeContext {
+    store: PgSessionStore,
+    manager: Arc<SandboxManager>,
+    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    execution_spans: ExecutionSpanRegistry,
+}
+
 struct EventStreamState {
     store: PgSessionStore,
     thread_key: ThreadKey,
@@ -127,6 +137,15 @@ impl SessionRuntime {
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: None,
             warm_pool: None,
+        }
+    }
+
+    fn context(&self) -> RuntimeContext {
+        RuntimeContext {
+            store: self.store.clone(),
+            manager: self.sandbox_runtime.manager.clone(),
+            sandbox_pipes: self.sandbox_pipes.clone(),
+            execution_spans: self.execution_spans.clone(),
         }
     }
 
@@ -525,10 +544,7 @@ impl SessionRuntime {
 
             if let Some(max_duration) = max_duration {
                 spawn_max_duration_failure(
-                    self.store.clone(),
-                    self.sandbox_runtime.manager.clone(),
-                    self.sandbox_pipes.clone(),
-                    self.execution_spans.clone(),
+                    self.context(),
                     thread_key.clone(),
                     execution.execution_id.clone(),
                     max_duration,
@@ -1035,13 +1051,10 @@ impl SessionRuntime {
                 .lock()
                 .await
                 .insert(sandbox_id.to_owned(), pipe.clone());
-            let store = self.store.clone();
-            let manager = self.sandbox_runtime.manager.clone();
-            let execution_spans = self.execution_spans.clone();
+            let ctx = self.context();
             let thread_key = thread_key.clone();
             let pump_thread_key = thread_key.clone();
             let pump_key = sandbox_id.to_owned();
-            let sandbox_pipes = self.sandbox_pipes.clone();
             let stdout = io.stdout;
             let stderr = io.stderr;
             let guard = io.guard;
@@ -1049,10 +1062,7 @@ impl SessionRuntime {
 
             tokio::spawn(async move {
                 let result = run_stdout_pump(
-                    store.clone(),
-                    manager,
-                    sandbox_pipes.clone(),
-                    execution_spans.clone(),
+                    ctx.clone(),
                     pump_thread_key.clone(),
                     &pump_key,
                     stdout,
@@ -1068,7 +1078,8 @@ impl SessionRuntime {
                         %error,
                         "session stdout pump failed"
                     );
-                    let _ = store
+                    let _ = ctx
+                        .store
                         .append_event(
                             &pump_thread_key,
                             None,
@@ -1080,7 +1091,7 @@ impl SessionRuntime {
                         )
                         .await;
                 }
-                sandbox_pipes.lock().await.remove(&pump_key);
+                ctx.sandbox_pipes.lock().await.remove(&pump_key);
             });
 
             tokio::spawn(async move {
@@ -1362,10 +1373,7 @@ fn session_event_stream(
 }
 
 async fn run_stdout_pump(
-    store: PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
-    execution_spans: ExecutionSpanRegistry,
+    ctx: RuntimeContext,
     thread_key: ThreadKey,
     sandbox_id: &str,
     stdout: SandboxRead,
@@ -1399,10 +1407,7 @@ async fn run_stdout_pump(
                 Ok(line) => line,
                 Err(error) => {
                     record_stdout_pump_failure(
-                        &store,
-                        manager.clone(),
-                        sandbox_pipes.clone(),
-                        execution_spans.clone(),
+                        &ctx,
                         &thread_key,
                         sandbox_id,
                         stdout_pump_error_message(&error),
@@ -1414,13 +1419,14 @@ async fn run_stdout_pump(
             line_count += 1;
             let output_value = serde_json::from_str::<Value>(&line).ok();
             if let Some(harness_thread_id) = harness_thread_id_from_output_line(&line)
-                && let Err(error) = store
+                && let Err(error) = ctx
+                    .store
                     .update_harness_thread_id(&thread_key, Some(&harness_thread_id))
                     .await
             {
                 warn!(%thread_key, %harness_thread_id, %error, "failed to persist harness thread id");
             }
-            let active_execution = store.active_execution_for_thread(&thread_key).await?;
+            let active_execution = ctx.store.active_execution_for_thread(&thread_key).await?;
             let execution_id = active_execution
                 .as_ref()
                 .map(|execution| execution.execution_id.as_str());
@@ -1428,7 +1434,8 @@ async fn run_stdout_pump(
             else {
                 continue;
             };
-            let execution_span = execution_spans
+            let execution_span = ctx
+                .execution_spans
                 .lock()
                 .await
                 .get(&output_execution_id)
@@ -1439,7 +1446,7 @@ async fn run_stdout_pump(
                 sandbox_id,
                 &output_execution_id,
             );
-            append_output_line(&store, &thread_key, Some(&output_execution_id), &line)
+            append_output_line(&ctx.store, &thread_key, Some(&output_execution_id), &line)
                 .instrument(output_span.clone())
                 .await?;
             if let Some(value) = output_value.as_ref() {
@@ -1456,10 +1463,7 @@ async fn run_stdout_pump(
                 && let Some(terminal) = output_state.observe(&output_execution_id, &line)
             {
                 record_terminal_output(
-                    &store,
-                    manager.clone(),
-                    sandbox_pipes.clone(),
-                    execution_spans.clone(),
+                    &ctx,
                     &thread_key,
                     sandbox_id,
                     &output_execution_id,
@@ -1467,12 +1471,13 @@ async fn run_stdout_pump(
                 )
                 .instrument(output_span)
                 .await?;
-                execution_spans.lock().await.remove(&output_execution_id);
+                ctx.execution_spans.lock().await.remove(&output_execution_id);
                 output_state.forget(&output_execution_id);
             }
         }
-        if let Some(execution) = store.active_execution_for_thread(&thread_key).await? {
-            let execution_span = execution_spans
+        if let Some(execution) = ctx.store.active_execution_for_thread(&thread_key).await? {
+            let execution_span = ctx
+                .execution_spans
                 .lock()
                 .await
                 .get(&execution.execution_id)
@@ -1484,10 +1489,7 @@ async fn run_stdout_pump(
                 &execution.execution_id,
             );
             record_terminal_output(
-                &store,
-                manager,
-                sandbox_pipes,
-                execution_spans.clone(),
+                &ctx,
                 &thread_key,
                 sandbox_id,
                 &execution.execution_id,
@@ -1497,10 +1499,10 @@ async fn run_stdout_pump(
             )
             .instrument(output_span)
             .await?;
-            execution_spans.lock().await.remove(&execution.execution_id);
+            ctx.execution_spans.lock().await.remove(&execution.execution_id);
             output_state.forget(&execution.execution_id);
         }
-        store
+        ctx.store
             .append_event(
                 &thread_key,
                 None,
@@ -1525,19 +1527,16 @@ async fn run_stdout_pump(
 }
 
 async fn record_stdout_pump_failure(
-    store: &PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
-    execution_spans: ExecutionSpanRegistry,
+    ctx: &RuntimeContext,
     thread_key: &ThreadKey,
     sandbox_id: &str,
     error: String,
 ) -> Result<(), SessionRuntimeError> {
-    let active_execution = store.active_execution_for_thread(thread_key).await?;
+    let active_execution = ctx.store.active_execution_for_thread(thread_key).await?;
     let execution_id = active_execution
         .as_ref()
         .map(|execution| execution.execution_id.as_str());
-    store
+    ctx.store
         .append_event(
             thread_key,
             execution_id,
@@ -1552,10 +1551,7 @@ async fn record_stdout_pump_failure(
         .await?;
     if let Some(execution) = active_execution {
         record_terminal_output(
-            store,
-            manager,
-            sandbox_pipes,
-            execution_spans,
+            ctx,
             thread_key,
             sandbox_id,
             &execution.execution_id,
@@ -1635,9 +1631,8 @@ impl StdoutPumpState {
         let tool_ids_to_forget = self
             .item_execution_by_id
             .iter()
-            .filter_map(|(item_id, mapped_execution_id)| {
-                (mapped_execution_id == execution_id).then(|| item_id.clone())
-            })
+            .filter(|&(_item_id, mapped_execution_id)| mapped_execution_id == execution_id)
+            .map(|(item_id, _mapped_execution_id)| item_id.clone())
             .collect::<Vec<_>>();
         self.turn_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
@@ -2153,10 +2148,7 @@ enum TerminalOutput {
 }
 
 async fn record_terminal_output(
-    store: &PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
-    execution_spans: ExecutionSpanRegistry,
+    ctx: &RuntimeContext,
     thread_key: &ThreadKey,
     sandbox_id: &str,
     execution_id: &str,
@@ -2167,7 +2159,8 @@ async fn record_terminal_output(
             reason,
             result_text,
         } => {
-            let Some(execution) = store.complete_execution_if_active(execution_id).await? else {
+            let Some(execution) = ctx.store.complete_execution_if_active(execution_id).await?
+            else {
                 return Ok(());
             };
             let mut payload = json!({
@@ -2180,7 +2173,7 @@ async fn record_terminal_output(
             {
                 object.insert("result_text".to_owned(), json!(result_text));
             }
-            store
+            ctx.store
                 .append_event(
                     thread_key,
                     Some(execution_id),
@@ -2191,11 +2184,14 @@ async fn record_terminal_output(
             (execution, "completed")
         }
         TerminalOutput::Failed { error } => {
-            let Some(execution) = store.fail_execution_if_active(execution_id, &error).await?
+            let Some(execution) = ctx
+                .store
+                .fail_execution_if_active(execution_id, &error)
+                .await?
             else {
                 return Ok(());
             };
-            store
+            ctx.store
                 .append_event(
                     thread_key,
                     Some(execution_id),
@@ -2210,13 +2206,12 @@ async fn record_terminal_output(
             (execution, "failed")
         }
     };
-    execution_spans.lock().await.remove(execution_id);
-    record_finished_execution_metric(store, thread_key, &terminal_execution, terminal_status).await;
+    ctx.execution_spans.lock().await.remove(execution_id);
+    record_finished_execution_metric(&ctx.store, thread_key, &terminal_execution, terminal_status)
+        .await;
     if let Some(idle_timeout) = idle_timeout_from_execution(&terminal_execution) {
         spawn_idle_pause(
-            store.clone(),
-            manager,
-            sandbox_pipes,
+            ctx.clone(),
             thread_key.clone(),
             terminal_execution.execution_id,
             sandbox_id.to_owned(),
@@ -2227,10 +2222,7 @@ async fn record_terminal_output(
 }
 
 fn spawn_max_duration_failure(
-    store: PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
-    execution_spans: ExecutionSpanRegistry,
+    ctx: RuntimeContext,
     thread_key: ThreadKey,
     execution_id: String,
     max_duration: Duration,
@@ -2239,10 +2231,7 @@ fn spawn_max_duration_failure(
     tokio::spawn(async move {
         sleep(max_duration).await;
         if let Err(error) = record_max_duration_failure(
-            &store,
-            manager,
-            sandbox_pipes,
-            execution_spans,
+            &ctx,
             &thread_key,
             &execution_id,
             max_duration,
@@ -2256,10 +2245,7 @@ fn spawn_max_duration_failure(
 }
 
 async fn record_max_duration_failure(
-    store: &PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
-    execution_spans: ExecutionSpanRegistry,
+    ctx: &RuntimeContext,
     thread_key: &ThreadKey,
     execution_id: &str,
     max_duration: Duration,
@@ -2267,11 +2253,15 @@ async fn record_max_duration_failure(
 ) -> Result<(), SessionRuntimeError> {
     let max_duration_ms = duration_millis_u64(max_duration);
     let error = format!("execution exceeded max_duration_ms={max_duration_ms}");
-    let Some(execution) = store.fail_execution_if_active(execution_id, &error).await? else {
+    let Some(execution) = ctx
+        .store
+        .fail_execution_if_active(execution_id, &error)
+        .await?
+    else {
         return Ok(());
     };
-    execution_spans.lock().await.remove(execution_id);
-    store
+    ctx.execution_spans.lock().await.remove(execution_id);
+    ctx.store
         .append_event(
             thread_key,
             Some(execution_id),
@@ -2285,14 +2275,12 @@ async fn record_max_duration_failure(
             }),
         )
         .await?;
-    record_finished_execution_metric(store, thread_key, &execution, "failed").await;
+    record_finished_execution_metric(&ctx.store, thread_key, &execution, "failed").await;
     if let Some(idle_timeout) = idle_timeout.or_else(|| idle_timeout_from_execution(&execution))
-        && let Some(sandbox_id) = store.get_session(thread_key).await?.sandbox_id
+        && let Some(sandbox_id) = ctx.store.get_session(thread_key).await?.sandbox_id
     {
         spawn_idle_pause(
-            store.clone(),
-            manager,
-            sandbox_pipes,
+            ctx.clone(),
             thread_key.clone(),
             execution_id.to_owned(),
             sandbox_id,
@@ -2303,9 +2291,7 @@ async fn record_max_duration_failure(
 }
 
 fn spawn_idle_pause(
-    store: PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    ctx: RuntimeContext,
     thread_key: ThreadKey,
     execution_id: String,
     sandbox_id: String,
@@ -2313,16 +2299,8 @@ fn spawn_idle_pause(
 ) {
     tokio::spawn(async move {
         sleep(idle_timeout).await;
-        if let Err(error) = record_idle_pause(
-            &store,
-            manager,
-            sandbox_pipes,
-            &thread_key,
-            &execution_id,
-            &sandbox_id,
-            idle_timeout,
-        )
-        .await
+        if let Err(error) =
+            record_idle_pause(&ctx, &thread_key, &execution_id, &sandbox_id, idle_timeout).await
         {
             warn!(%thread_key, %execution_id, %sandbox_id, %error, "idle pause task failed");
         }
@@ -2330,16 +2308,14 @@ fn spawn_idle_pause(
 }
 
 async fn record_idle_pause(
-    store: &PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    ctx: &RuntimeContext,
     thread_key: &ThreadKey,
     execution_id: &str,
     sandbox_id: &str,
     idle_timeout: Duration,
 ) -> Result<(), SessionRuntimeError> {
-    let latest_execution = store.latest_execution_for_thread(thread_key).await?;
-    let session = store.get_session(thread_key).await?;
+    let latest_execution = ctx.store.latest_execution_for_thread(thread_key).await?;
+    let session = ctx.store.get_session(thread_key).await?;
     if !should_pause_idle_sandbox(
         &session,
         latest_execution.as_ref(),
@@ -2350,7 +2326,7 @@ async fn record_idle_pause(
     }
 
     let id = SandboxId::new(sandbox_id);
-    match manager.status(&id).await {
+    match ctx.manager.status(&id).await {
         Ok(SandboxStatus::Suspended | SandboxStatus::Stopped | SandboxStatus::Gone) => {
             return Ok(());
         }
@@ -2359,7 +2335,7 @@ async fn record_idle_pause(
         Err(SandboxError::NotFound(_)) => return Ok(()),
         Err(error) => {
             record_idle_pause_failure(
-                store,
+                &ctx.store,
                 thread_key,
                 execution_id,
                 sandbox_id,
@@ -2371,10 +2347,10 @@ async fn record_idle_pause(
         }
     }
 
-    sandbox_pipes.lock().await.remove(sandbox_id);
-    match manager.pause(&id).await {
+    ctx.sandbox_pipes.lock().await.remove(sandbox_id);
+    match ctx.manager.pause(&id).await {
         Ok(()) => {
-            store
+            ctx.store
                 .append_event(
                     thread_key,
                     Some(execution_id),
@@ -2391,7 +2367,7 @@ async fn record_idle_pause(
         }
         Err(error) => {
             record_idle_pause_failure(
-                store,
+                &ctx.store,
                 thread_key,
                 execution_id,
                 sandbox_id,
@@ -2743,7 +2719,7 @@ async fn drain_stderr(mut stderr: SandboxRead) -> Result<(), SessionRuntimeError
     io::copy(&mut stderr, &mut io::sink())
         .await
         .map_err(|err| {
-            SessionRuntimeError::Sandbox(SandboxError::Io(format!("drain stderr: {err}")))
+            SessionRuntimeError::Sandbox(SandboxError::io_source("drain stderr", err))
         })?;
     Ok(())
 }
@@ -3045,7 +3021,11 @@ fn stdout_pump_error_message(error: &LinesCodecError) -> String {
 }
 
 fn codec_error_to_runtime(error: LinesCodecError) -> SessionRuntimeError {
-    SessionRuntimeError::Sandbox(SandboxError::Io(error.to_string()))
+    let context = error.to_string();
+    SessionRuntimeError::Sandbox(SandboxError::Io {
+        context,
+        source: Some(Box::new(error)),
+    })
 }
 
 fn duration_options(
@@ -3615,8 +3595,7 @@ mod tests {
     fn event_stream_tolerates_not_ready_attach_race() {
         let not_ready =
             SessionRuntimeError::Sandbox(SandboxError::NotReady("sandbox paused".to_owned()));
-        let backend_error =
-            SessionRuntimeError::Sandbox(SandboxError::Backend("api failed".to_owned()));
+        let backend_error = SessionRuntimeError::Sandbox(SandboxError::backend("api failed"));
 
         assert!(is_event_stream_attach_race(&not_ready));
         assert!(!is_event_stream_attach_race(&backend_error));
@@ -3627,7 +3606,7 @@ mod tests {
         let not_ready =
             SessionRuntimeError::Sandbox(SandboxError::NotReady("sandbox starting".to_owned()));
         let not_found = SessionRuntimeError::Sandbox(SandboxError::NotFound("asbx-1".to_owned()));
-        let io = SessionRuntimeError::Sandbox(SandboxError::Io("stdin closed".to_owned()));
+        let io = SessionRuntimeError::Sandbox(SandboxError::io("stdin closed"));
         let store = SessionRuntimeError::Store(SessionStoreError::NotFound {
             thread_key: "cli:test".to_owned(),
         });

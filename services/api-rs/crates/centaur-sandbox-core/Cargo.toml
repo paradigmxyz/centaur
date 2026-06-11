@@ -10,3 +10,6 @@ async-trait.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
+
+[lints]
+workspace = true

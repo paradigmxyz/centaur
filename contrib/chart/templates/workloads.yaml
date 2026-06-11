@@ -132,25 +132,6 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
-{{- if .Values.overlay.image.repository }}
-      initContainers:
-        - name: overlay-bootstrap
-          image: {{ printf "%s:%s" .Values.overlay.image.repository .Values.overlay.image.tag | quote }}
-          imagePullPolicy: {{ .Values.overlay.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              src={{ .Values.overlay.image.sourcePath | quote }}
-              target={{ .Values.overlay.mountPath | quote }}
-              mkdir -p "$target"
-              cp -R "$src"/. "$target"/
-          volumeMounts:
-            - name: overlay-root
-              mountPath: {{ dir .Values.overlay.mountPath | quote }}
-          securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-{{- end }}
       containers:
         - name: api
           image: {{ printf "%s:%s" .Values.api.image.repository .Values.api.image.tag | quote }}
@@ -191,28 +172,12 @@ spec:
             - name: CENTAUR_DEFAULT_HARNESS
               value: {{ .Values.api.defaultHarness | quote }}
             - name: TOOL_DIRS
-{{- if .Values.overlay.image.repository }}
-              value: {{ printf "/app/tools:%s/tools" .Values.overlay.mountPath | quote }}
-{{- else }}
               value: /app/tools
-{{- end }}
             - name: WORKFLOW_DIRS
-{{- if .Values.overlay.image.repository }}
-              value: {{ printf "/app/workflows:%s/workflows" .Values.overlay.mountPath | quote }}
-{{- else }}
               value: /app/workflows
-{{- end }}
-{{- if or .Values.overlay.systemPrompt .Values.overlay.image.repository }}
+{{- if .Values.overlay.systemPrompt }}
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}
-{{- end }}
-{{- if .Values.overlay.image.repository }}
-            - name: CENTAUR_OVERLAY_IMAGE
-              value: {{ printf "%s:%s" .Values.overlay.image.repository .Values.overlay.image.tag | quote }}
-            - name: CENTAUR_OVERLAY_IMAGE_PULL_POLICY
-              value: {{ .Values.overlay.image.pullPolicy | quote }}
-            - name: CENTAUR_OVERLAY_IMAGE_SOURCE_PATH
-              value: {{ .Values.overlay.image.sourcePath | quote }}
 {{- end }}
             - name: AGENT_API_URL
               value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
@@ -438,11 +403,7 @@ spec:
             - name: firewall-ca
               mountPath: /firewall-certs
               readOnly: true
-{{- if .Values.overlay.image.repository }}
-            - name: overlay-root
-              mountPath: {{ dir .Values.overlay.mountPath | quote }}
-              readOnly: true
-{{- else if .Values.overlay.systemPrompt }}
+{{- if .Values.overlay.systemPrompt }}
             - name: overlay
               mountPath: {{ .Values.overlay.mountPath | quote }}
               readOnly: true
@@ -455,10 +416,7 @@ spec:
         - name: firewall-ca
           secret:
             secretName: {{ include "centaur.trustedCaSecretName" . }}
-{{- if .Values.overlay.image.repository }}
-        - name: overlay-root
-          emptyDir: {}
-{{- else if .Values.overlay.systemPrompt }}
+{{- if .Values.overlay.systemPrompt }}
         - name: overlay
           configMap:
             name: {{ include "centaur.componentName" (dict "root" . "component" "overlay") }}

@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-ARG CODEX_VERSION=0.130.0
+ARG CODEX_VERSION=0.139.0
 
 # Minimal runtime for codex-app-server reliability tests. This intentionally
 # omits TeX, Manim, Foundry, browser deps, Amp, and Claude Code.

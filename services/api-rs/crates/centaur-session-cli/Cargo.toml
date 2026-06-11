@@ -16,3 +16,6 @@ ratatui.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 uuid.workspace = true
+
+[lints]
+workspace = true

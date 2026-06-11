@@ -4,6 +4,11 @@
 {{- if and .Values.repoCache.enabled (not $reposPath) -}}
 {{- $reposPath = .Values.repoCache.hostPath -}}
 {{- end -}}
+{{- $toolsUseRepoCache := and .Values.repoCache.enabled .Values.toolServer.enabled .Values.toolServer.repo -}}
+{{- $workflowDirs := "/app/workflows" -}}
+{{- if $toolsUseRepoCache -}}
+{{- $workflowDirs = printf "%s/%s/workflows" .Values.repoCache.hostPath .Values.toolServer.repo -}}
+{{- end -}}
 {{- $apiRsMetricsAnnotations := dict -}}
 {{- if .Values.apiRs.metrics.scrapeAnnotations -}}
 {{- $apiRsMetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.apiRs.metrics.path "prometheus.io/port" (printf "%v" .Values.apiRs.port) -}}
@@ -97,25 +102,6 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
-{{- if .Values.overlay.image.repository }}
-      initContainers:
-        - name: overlay-bootstrap
-          image: {{ printf "%s:%s" .Values.overlay.image.repository .Values.overlay.image.tag | quote }}
-          imagePullPolicy: {{ .Values.overlay.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              src={{ .Values.overlay.image.sourcePath | quote }}
-              target={{ .Values.overlay.mountPath | quote }}
-              mkdir -p "$target"
-              cp -R "$src"/. "$target"/
-          volumeMounts:
-            - name: overlay-root
-              mountPath: {{ dir .Values.overlay.mountPath | quote }}
-          securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-{{- end }}
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
@@ -133,28 +119,12 @@ spec:
             - name: RUST_LOG
               value: info
             - name: TOOL_DIRS
-{{- if .Values.overlay.image.repository }}
-              value: {{ printf "/app/tools:%s/tools" .Values.overlay.mountPath | quote }}
-{{- else }}
               value: /app/tools
-{{- end }}
             - name: WORKFLOW_DIRS
-{{- if .Values.overlay.image.repository }}
-              value: {{ printf "/app/workflows:%s/workflows" .Values.overlay.mountPath | quote }}
-{{- else }}
-              value: /app/workflows
-{{- end }}
-{{- if or .Values.overlay.systemPrompt .Values.overlay.image.repository }}
+              value: {{ $workflowDirs | quote }}
+{{- if .Values.overlay.systemPrompt }}
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}
-{{- end }}
-{{- if .Values.overlay.image.repository }}
-            - name: CENTAUR_OVERLAY_IMAGE
-              value: {{ printf "%s:%s" .Values.overlay.image.repository .Values.overlay.image.tag | quote }}
-            - name: CENTAUR_OVERLAY_IMAGE_PULL_POLICY
-              value: {{ .Values.overlay.image.pullPolicy | quote }}
-            - name: CENTAUR_OVERLAY_IMAGE_SOURCE_PATH
-              value: {{ .Values.overlay.image.sourcePath | quote }}
 {{- end }}
             - name: SESSION_SANDBOX_BACKEND
               value: {{ .Values.apiRs.sandboxBackend | quote }}
@@ -239,12 +209,10 @@ spec:
 {{- if not .Values.toolServer.repo }}
 {{- fail "toolServer.repo (owner/name) must be set when toolServer.enabled=true" }}
 {{- end }}
-            # Base tools are git-cloned into each sandbox at boot by a
-            # tools-bootstrap init container (the repo-cache architecture, without
-            # the shared node cache), so adding a tool is a push to the repo, not
-            # an api-rs image rebuild. api-rs still discovers its own /app/tools to
-            # grant proxy creds, so pin toolServer.ref to the tool set that image
-            # carries to avoid drift between granted creds and installed tools.
+            # Base tools are copied from repo-cache into each sandbox at boot by
+            # a tools-bootstrap init container, so adding a tool is a push to the
+            # repo, not an api-rs image rebuild. api-rs reads the same repo-cache
+            # mount for tool-secret discovery and refreshes grants in-process.
             - name: KUBERNETES_TOOLS_REPO
               value: {{ .Values.toolServer.repo | quote }}
 {{- if .Values.toolServer.ref }}
@@ -253,11 +221,15 @@ spec:
 {{- end }}
             - name: KUBERNETES_TOOLS_SUBDIR
               value: {{ .Values.toolServer.subdir | quote }}
+{{- if $toolsUseRepoCache }}
+            - name: KUBERNETES_TOOLS_REPO_CACHE_PATH
+              value: {{ .Values.repoCache.hostPath | quote }}
+{{- end }}
             - name: KUBERNETES_TOOLS_RUNNER_IMAGE
               value: {{ printf "%s:%s" (default .Values.sandbox.image.repository .Values.toolServer.runnerImage.repository) (default .Values.sandbox.image.tag .Values.toolServer.runnerImage.tag) | quote }}
             - name: KUBERNETES_TOOLS_RUNNER_IMAGE_PULL_POLICY
               value: {{ default .Values.sandbox.image.pullPolicy .Values.toolServer.runnerImage.pullPolicy | quote }}
-{{- if .Values.toolServer.githubToken.existingSecretName }}
+{{- if and .Values.toolServer.githubToken.existingSecretName (not $toolsUseRepoCache) }}
             - name: KUBERNETES_TOOLS_GITHUB_TOKEN_SECRET
               value: {{ .Values.toolServer.githubToken.existingSecretName | quote }}
             - name: KUBERNETES_TOOLS_GITHUB_TOKEN_SECRET_KEY
@@ -303,15 +275,18 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if .Values.overlay.image.repository }}
+{{- if $toolsUseRepoCache }}
           volumeMounts:
-            - name: overlay-root
-              mountPath: {{ dir .Values.overlay.mountPath | quote }}
+            - name: repo-cache
+              mountPath: {{ .Values.repoCache.hostPath | quote }}
+              readOnly: true
 {{- end }}
-{{- if .Values.overlay.image.repository }}
+{{- if $toolsUseRepoCache }}
       volumes:
-        - name: overlay-root
-          emptyDir: {}
+        - name: repo-cache
+          hostPath:
+            path: {{ .Values.repoCache.hostPath | quote }}
+            type: DirectoryOrCreate
 {{- end }}
 ---
 apiVersion: v1

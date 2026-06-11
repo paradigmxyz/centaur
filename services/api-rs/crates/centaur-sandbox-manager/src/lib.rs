@@ -106,7 +106,7 @@ mod tests {
 
         let err = manager.pause(&"sandbox-1".into()).await.unwrap_err();
 
-        assert!(matches!(err, SandboxError::Backend(_)));
+        assert!(matches!(err, SandboxError::Backend { .. }));
         assert!(matches!(
             manager.desired_state(&"sandbox-1".into()),
             Some(DesiredSandboxState::Running(_))
@@ -226,7 +226,7 @@ mod tests {
                 .expect("fail operation lock poisoned")
                 .contains(&operation)
             {
-                return Err(SandboxError::Backend(format!(
+                return Err(SandboxError::backend(format!(
                     "injected {operation} failure"
                 )));
             }

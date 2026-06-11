@@ -1,4 +1,4 @@
-{{- if and .Values.overlay.systemPrompt (not .Values.overlay.image.repository) }}
+{{- if .Values.overlay.systemPrompt }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

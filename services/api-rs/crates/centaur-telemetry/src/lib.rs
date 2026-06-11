@@ -134,10 +134,10 @@ impl TraceExporter {
 
 impl TelemetryGuard {
     pub fn shutdown(mut self) {
-        if let Some(provider) = self.tracer_provider.take() {
-            if let Err(error) = provider.shutdown() {
-                tracing::warn!(%error, "failed to shut down OpenTelemetry tracer provider");
-            }
+        if let Some(provider) = self.tracer_provider.take()
+            && let Err(error) = provider.shutdown()
+        {
+            tracing::warn!(%error, "failed to shut down OpenTelemetry tracer provider");
         }
     }
 }
