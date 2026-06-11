@@ -9,10 +9,14 @@ APIs for thread goals, and emits Codex-shaped NDJSON events for Centaur.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import mimetypes
 import os
 from pathlib import Path
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -23,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote
+from urllib.parse import unquote, unquote_to_bytes
 
 from opentelemetry.proto.common.v1.common_pb2 import KeyValue
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
@@ -54,6 +58,9 @@ CURRENT_TRACE_METADATA: dict[str, Any] = {}
 TRACE_METADATA_BY_TURN_ID: dict[str, dict[str, Any]] = {}
 
 LAMINAR_METADATA_PREFIX = "lmnr.association.properties.metadata."
+DATA_URL_PREFIX = "data:"
+UPLOADS_DIR = Path(os.environ.get("CENTAUR_UPLOADS_DIR", str(Path.home() / "uploads")))
+SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -176,27 +183,179 @@ def api_stdin_reader() -> None:
     INPUTS.put(None)
 
 
-def text_from_blocks(blocks: list[dict[str, Any]]) -> str:
-    parts: list[str] = []
-    for block in blocks:
-        btype = block.get("type")
-        if btype == "text":
-            parts.append(str(block.get("text") or ""))
-        elif btype == "image":
-            parts.append(
-                "[User sent an image attachment; if needed, ask them to upload it as a file reference.]"
-            )
-        else:
-            parts.append(json.dumps(block, ensure_ascii=False))
-    return "\n".join(p for p in parts if p).strip()
-
-
 def input_items(turn_input: dict[str, Any]) -> list[dict[str, Any]]:
     blocks = turn_input.get("message", {}).get("content") or []
     if not isinstance(blocks, list):
         blocks = []
-    text = text_from_blocks(blocks)
-    return [{"type": "text", "text": text or "continue"}]
+    items: list[dict[str, Any]] = []
+    for block in blocks:
+        if isinstance(block, dict):
+            items.extend(input_items_from_block(block))
+    return coalesce_text_items(items) or [{"type": "text", "text": "continue"}]
+
+
+def input_items_from_block(block: dict[str, Any]) -> list[dict[str, Any]]:
+    btype = block.get("type")
+    if btype == "text":
+        text = str(block.get("text") or "").strip()
+        return [{"type": "text", "text": text}] if text else []
+    if btype == "image":
+        return input_items_from_image_block(block)
+    if btype == "attachment":
+        return input_items_from_attachment_block(block)
+    return [{"type": "text", "text": json.dumps(block, ensure_ascii=False)}]
+
+
+def input_items_from_image_block(block: dict[str, Any]) -> list[dict[str, Any]]:
+    name = str(block.get("name") or "image")
+    detail = image_detail(block.get("detail"))
+    url = str(block.get("url") or "")
+    if url.startswith(DATA_URL_PREFIX):
+        materialized = materialize_data_url(url, name)
+        if materialized:
+            path, mime_type = materialized
+            return local_file_items(path, mime_type, detail=detail, is_image=True)
+        return [{"type": "text", "text": f"[Attached image could not be decoded: {name}]"}]
+    if url:
+        return [
+            {"type": "text", "text": f"[Attached image: {name}]"},
+            {"type": "image", "url": url, "detail": detail},
+        ]
+    return [{"type": "text", "text": f"[Attached image metadata without data: {name}]"}]
+
+
+def input_items_from_attachment_block(block: dict[str, Any]) -> list[dict[str, Any]]:
+    name = str(block.get("name") or "attachment")
+    mime_type = optional_string(block.get("mimeType"))
+    data_base64 = optional_string(block.get("dataBase64"))
+    if data_base64:
+        path = materialize_base64(data_base64, name, mime_type)
+        if path:
+            return local_file_items(
+                path,
+                mime_type,
+                is_image=optional_string(block.get("attachment_type")) == "image",
+            )
+        return [{"type": "text", "text": f"[Attachment could not be decoded: {name}]"}]
+
+    fetch_error = optional_string(block.get("fetchError"))
+    url = optional_string(block.get("url"))
+    fields = [f"name={name}"]
+    if mime_type:
+        fields.append(f"mime={mime_type}")
+    if url:
+        fields.append(f"url={url}")
+    if fetch_error:
+        fields.append(f"fetch_error={fetch_error}")
+    return [{"type": "text", "text": f"[Slack attachment: {' '.join(fields)}]"}]
+
+
+def local_file_items(
+    path: Path,
+    mime_type: str | None,
+    *,
+    detail: str = "auto",
+    is_image: bool = False,
+) -> list[dict[str, Any]]:
+    text = f"[Attached file saved to {path}]"
+    if is_image or (mime_type and mime_type.startswith("image/")):
+        return [
+            {"type": "text", "text": f"[Attached image saved to {path}]"},
+            {"type": "localImage", "path": str(path), "detail": detail},
+        ]
+    return [{"type": "text", "text": text}]
+
+
+def materialize_data_url(url: str, name: str) -> tuple[Path, str | None] | None:
+    try:
+        header, encoded = url.split(",", 1)
+    except ValueError:
+        return None
+    metadata = header[len(DATA_URL_PREFIX) :]
+    mime_type = metadata.split(";", 1)[0] or None
+    try:
+        if ";base64" in metadata:
+            data = base64.b64decode(encoded, validate=True)
+        else:
+            data = unquote_to_bytes(encoded)
+    except (binascii.Error, ValueError):
+        return None
+    return write_upload_bytes(data, name, mime_type), mime_type
+
+
+def materialize_base64(
+    data_base64: str, name: str, mime_type: str | None
+) -> Path | None:
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return write_upload_bytes(data, name, mime_type)
+
+
+def write_upload_bytes(data: bytes, name: str, mime_type: str | None) -> Path:
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    path = unique_upload_path(name, mime_type)
+    path.write_bytes(data)
+    return path
+
+
+def unique_upload_path(name: str, mime_type: str | None) -> Path:
+    base = sanitize_upload_name(name)
+    suffix = Path(base).suffix
+    if not suffix:
+        suffix = extension_for_mime_type(mime_type)
+        if suffix:
+            base = f"{base}{suffix}"
+    path = UPLOADS_DIR / base
+    if not path.exists():
+        return path
+    stem = path.stem or "attachment"
+    suffix = path.suffix
+    return UPLOADS_DIR / f"{stem}-{uuid.uuid4().hex[:8]}{suffix}"
+
+
+def sanitize_upload_name(name: str) -> str:
+    leaf = Path(name).name.strip()
+    leaf = SAFE_FILENAME_RE.sub("_", leaf)
+    leaf = leaf.strip("._")
+    return leaf or "attachment"
+
+
+def extension_for_mime_type(mime_type: str | None) -> str:
+    if not mime_type:
+        return ""
+    if mime_type == "image/jpeg":
+        return ".jpg"
+    return mimetypes.guess_extension(mime_type) or ""
+
+
+def image_detail(value: Any) -> str:
+    detail = str(value or "auto")
+    return detail if detail in {"auto", "low", "high"} else "auto"
+
+
+def optional_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def coalesce_text_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("type") == "text" and merged and merged[-1].get("type") == "text":
+            text = "\n".join(
+                part
+                for part in [
+                    str(merged[-1].get("text") or "").strip(),
+                    str(item.get("text") or "").strip(),
+                ]
+                if part
+            )
+            if text:
+                merged[-1]["text"] = text
+            continue
+        merged.append(item)
+    return merged
 
 
 def trace_metadata_from_input(turn_input: dict[str, Any]) -> dict[str, Any]:

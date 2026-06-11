@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 from pathlib import Path
 import tomllib
@@ -128,6 +129,65 @@ def test_request_attaches_traceparent(monkeypatch) -> None:
             },
         }
     ]
+
+
+def test_input_items_materializes_data_url_image(monkeypatch, tmp_path) -> None:
+    wrapper = _load_wrapper()
+    monkeypatch.setattr(wrapper, "UPLOADS_DIR", tmp_path)
+
+    items = wrapper.input_items(
+        {
+            "message": {
+                "content": [
+                    {"type": "text", "text": "please invert this"},
+                    {
+                        "type": "image",
+                        "name": "image.png",
+                        "url": "data:image/png;base64,"
+                        + base64.b64encode(b"png-bytes").decode(),
+                    },
+                ]
+            }
+        }
+    )
+
+    assert items == [
+        {
+            "type": "text",
+            "text": "please invert this\n"
+            + f"[Attached image saved to {tmp_path / 'image.png'}]",
+        },
+        {"type": "localImage", "path": str(tmp_path / "image.png"), "detail": "auto"},
+    ]
+    assert (tmp_path / "image.png").read_bytes() == b"png-bytes"
+
+
+def test_input_items_materializes_slack_attachment_part(monkeypatch, tmp_path) -> None:
+    wrapper = _load_wrapper()
+    monkeypatch.setattr(wrapper, "UPLOADS_DIR", tmp_path)
+
+    items = wrapper.input_items(
+        {
+            "message": {
+                "content": [
+                    {
+                        "type": "attachment",
+                        "attachment_type": "image",
+                        "mimeType": "image/png",
+                        "name": "meme.png",
+                        "dataBase64": base64.b64encode(b"meme-bytes").decode(),
+                    }
+                ]
+            }
+        }
+    )
+
+    assert items == [
+        {"type": "text", "text": f"[Attached image saved to {tmp_path / 'meme.png'}]"},
+        {"type": "localImage", "path": str(tmp_path / "meme.png"), "detail": "auto"},
+    ]
+    assert (tmp_path / "meme.png").read_bytes() == b"meme-bytes"
+    assert "dataBase64" not in str(items)
 
 
 def test_configure_codex_otel_writes_startup_config(monkeypatch, tmp_path) -> None:
