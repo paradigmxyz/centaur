@@ -374,6 +374,16 @@ networkPolicy:
   # the egress rule must allow it. Defaults to 6443 (k3s, kubeadm). Set to 443
   # on clusters whose API server endpoint already listens on 443.
   apiServerPort: 6443
+  # Egress to an in-cluster OTLP trace collector (e.g. Laminar) in another
+  # namespace. api-rs needs this to export its own spans; sandboxes get their
+  # equivalent per-sandbox rule from api-rs, derived from the OTLP endpoint in
+  # sandbox.extraEnv. The collector's own namespace must also admit ingress
+  # from this namespace's pods.
+  otlpEgress:
+    enabled: false
+    # kubernetes.io/metadata.name of the collector's namespace, e.g. "laminar".
+    namespace: ""
+    port: 8000
 
 podSecurityContext:
   fsGroupChangePolicy: OnRootMismatch

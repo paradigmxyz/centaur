@@ -201,6 +201,19 @@ spec:
               value: {{ .Values.sandbox.codexAuthMode | quote }}
             - name: CLAUDE_CODE_AUTH_MODE
               value: {{ .Values.sandbox.claudeCodeAuthMode | quote }}
+{{- $sandboxEnvList := list }}
+{{- range $k, $v := .Values.sandbox.extraEnv }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}
+{{- end }}
+{{- if and $sandboxEnvList (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_EXTRA_ENV")) }}
+            # Operator sandbox env (sandbox.extraEnv), applied to every codex
+            # sandbox api-rs creates. Carries the harness OTLP trace wiring
+            # (endpoint, service name, NO_PROXY extras) that codex needs to
+            # export usage/cost spans. Same contract as the Python control
+            # plane's KUBERNETES_SANDBOX_EXTRA_ENV.
+            - name: SESSION_SANDBOX_EXTRA_ENV
+              value: {{ $sandboxEnvList | toJson | quote }}
+{{- end }}
 {{- if .Values.ironControl.enabled }}
             # iron-control control plane: principals/roles/grants + per-sandbox
             # proxy sync. When unset, the api-rs falls back to the rendered

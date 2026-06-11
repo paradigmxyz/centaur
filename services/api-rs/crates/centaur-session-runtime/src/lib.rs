@@ -527,7 +527,8 @@ impl SessionRuntime {
                 }
             };
 
-            let input_lines = input_lines_with_thread_key(thread_key, &input_lines);
+            let trace = SessionTraceContext::new(thread_key, Some(&execution_trace_span));
+            let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
             if let Err(error) = write_input_lines(
                 &pipe,
                 &input_lines,
@@ -630,6 +631,17 @@ impl SessionRuntime {
         }) else {
             return;
         };
+
+        // Steering joins the active execution's trace so harness spans for the
+        // steered turn stay in the same tree.
+        let execution_span = self
+            .execution_spans
+            .lock()
+            .await
+            .get(&execution.execution_id)
+            .cloned();
+        let trace = SessionTraceContext::new(thread_key, execution_span.as_ref());
+        let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
 
         let pipe = match self
             .wait_for_active_steering_pipe(thread_key, &execution.execution_id)
@@ -2764,14 +2776,56 @@ async fn write_input_lines(
     .await
 }
 
-fn input_lines_with_thread_key(thread_key: &ThreadKey, input_lines: &[String]) -> Vec<String> {
+/// Trace identity injected into sandbox stdin lines so the harness wrapper
+/// (codex-app-wrapper) can configure its OTLP export. Without a `trace_id` or
+/// `traceparent` on the first turn the wrapper never writes codex's `[otel]`
+/// config, codex exports no `session_task.turn` spans, and Laminar has no
+/// token usage to price into cost.
+#[derive(Clone, Debug)]
+struct SessionTraceContext {
+    /// Stable per-thread trace id, derived from the thread key (UUIDv5) so it
+    /// needs no persisted state and survives API restarts.
+    trace_id: String,
+    /// W3C traceparent of the current execution span, when the OpenTelemetry
+    /// layer is active. Lets harness spans join the execution's trace.
+    traceparent: Option<String>,
+}
+
+impl SessionTraceContext {
+    fn new(thread_key: &ThreadKey, execution_span: Option<&Span>) -> Self {
+        Self {
+            trace_id: thread_trace_id(thread_key),
+            traceparent: execution_span.and_then(centaur_telemetry::traceparent_for_span),
+        }
+    }
+}
+
+/// Deterministic per-thread trace id: one trace identity per thread without a
+/// `thread_traces` table (derive, don't store).
+fn thread_trace_id(thread_key: &ThreadKey) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("centaur:thread:{}", thread_key.as_str()).as_bytes(),
+    )
+    .to_string()
+}
+
+fn input_lines_with_session_context(
+    thread_key: &ThreadKey,
+    trace: &SessionTraceContext,
+    input_lines: &[String],
+) -> Vec<String> {
     input_lines
         .iter()
-        .map(|line| input_line_with_thread_key(thread_key, line))
+        .map(|line| input_line_with_session_context(thread_key, trace, line))
         .collect()
 }
 
-fn input_line_with_thread_key(thread_key: &ThreadKey, line: &str) -> String {
+fn input_line_with_session_context(
+    thread_key: &ThreadKey,
+    trace: &SessionTraceContext,
+    line: &str,
+) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(line) else {
         return line.to_owned();
     };
@@ -2780,6 +2834,12 @@ fn input_line_with_thread_key(thread_key: &ThreadKey, line: &str) -> String {
     };
     map.entry("thread_key")
         .or_insert_with(|| Value::String(thread_key.as_str().to_owned()));
+    map.entry("trace_id")
+        .or_insert_with(|| Value::String(trace.trace_id.clone()));
+    if let Some(traceparent) = &trace.traceparent {
+        map.entry("traceparent")
+            .or_insert_with(|| Value::String(traceparent.clone()));
+    }
     serde_json::to_string(&value).unwrap_or_else(|_| line.to_owned())
 }
 
@@ -3796,28 +3856,56 @@ mod tests {
     }
 
     #[test]
-    fn input_line_with_thread_key_enriches_json_objects() {
+    fn input_line_with_session_context_enriches_json_objects() {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        let trace = SessionTraceContext::new(&thread_key, None);
 
-        let line = input_line_with_thread_key(&thread_key, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["type"], "user");
         assert_eq!(value["thread_key"], thread_key.as_str());
+        assert_eq!(value["trace_id"], trace.trace_id);
+        // Without an OpenTelemetry layer there is no traceparent to forward.
+        assert!(value.get("traceparent").is_none());
     }
 
     #[test]
-    fn input_line_with_thread_key_preserves_existing_thread_key_and_non_json() {
+    fn input_line_with_session_context_preserves_existing_fields_and_non_json() {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        let trace = SessionTraceContext {
+            trace_id: thread_trace_id(&thread_key),
+            traceparent: Some("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_owned()),
+        };
 
-        let line = input_line_with_thread_key(
+        let line = input_line_with_session_context(
             &thread_key,
-            r#"{"type":"user","thread_key":"chat:existing"}"#,
+            &trace,
+            r#"{"type":"user","thread_key":"chat:existing","trace_id":"caller-trace"}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["thread_key"], "chat:existing");
-        assert_eq!(input_line_with_thread_key(&thread_key, "raw"), "raw");
+        assert_eq!(value["trace_id"], "caller-trace");
+        assert_eq!(
+            value["traceparent"],
+            "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+        );
+        assert_eq!(
+            input_line_with_session_context(&thread_key, &trace, "raw"),
+            "raw"
+        );
+    }
+
+    #[test]
+    fn thread_trace_id_is_deterministic_per_thread() {
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        let other = ThreadKey::parse("chat:C456:1780000000.000000").unwrap();
+
+        assert_eq!(thread_trace_id(&thread_key), thread_trace_id(&thread_key));
+        assert_ne!(thread_trace_id(&thread_key), thread_trace_id(&other));
+        // The wrapper parses this with uuid.UUID(...): must stay a canonical UUID.
+        assert!(uuid::Uuid::parse_str(&thread_trace_id(&thread_key)).is_ok());
     }
 
     fn session_with_sandbox(sandbox_id: &str) -> Session {

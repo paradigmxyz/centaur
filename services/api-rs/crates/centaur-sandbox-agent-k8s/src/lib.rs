@@ -59,7 +59,21 @@ pub struct AgentSandboxConfig {
     /// git-clones the tools repo into the agent's `/app/tools`, and `TOOL_DIRS`
     /// is set so the agent's shim installer finds them.
     pub tools: Option<ToolsConfig>,
+    /// In-cluster OTLP collector (e.g. Laminar) the sandbox exports harness
+    /// traces to directly. The per-sandbox egress NetworkPolicy denies all
+    /// destinations except the proxy/control plane, so without this rule the
+    /// harness's usage/cost spans never leave the pod.
+    pub otlp_egress: Option<OtlpEgressTarget>,
     pub ready_timeout: Duration,
+}
+
+/// Destination of the sandbox's direct OTLP export, expressed as the target
+/// namespace (matched by `kubernetes.io/metadata.name`) and port of the
+/// collector service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OtlpEgressTarget {
+    pub namespace: String,
+    pub port: u16,
 }
 
 /// iron-control coordinates for sync-mode egress proxies. When set, a sandbox
@@ -90,6 +104,7 @@ impl AgentSandboxConfig {
             iron_proxy: None,
             iron_control: None,
             tools: None,
+            otlp_egress: None,
             ready_timeout: Duration::from_secs(60),
         }
     }
