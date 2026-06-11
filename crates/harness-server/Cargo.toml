@@ -1,0 +1,24 @@
+[package]
+name = "harness-server"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[[bin]]
+name = "harness-server"
+path = "src/main.rs"
+
+[dependencies]
+allocative = "=0.3.4"
+clap = { version = "4.5", features = ["derive"] }
+codex-app-server-protocol = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-app-server-protocol" }
+# Already a transitive dep of codex-app-server-protocol; made direct because
+# `MessagePhase` (the type of `ThreadItem::AgentMessage.phase`) is defined in
+# codex_protocol::models and not re-exported by codex-app-server-protocol.
+# Keep the rev in lockstep with the other codex crates.
+codex-protocol = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-protocol" }
+codex-utils-absolute-path = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-utils-absolute-path" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.19", features = ["v4"] }

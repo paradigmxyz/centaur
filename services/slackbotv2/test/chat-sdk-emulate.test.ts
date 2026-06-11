@@ -2383,7 +2383,22 @@ function sampleCodexNotifications(answer: string): ServerNotification[] {
 function sampleCodexOutputLines(answer: string): string[] {
   return [
     ...sampleCodexNotifications(answer).map(notification => JSON.stringify(notification)),
-    JSON.stringify({ type: 'turn.completed', turn: { id: 'turn-1', items: [] } })
+    JSON.stringify({
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-1',
+        turn: {
+          id: 'turn-1',
+          items: [],
+          itemsView: 'full',
+          status: 'completed',
+          error: null,
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1
+        }
+      }
+    })
   ]
 }
 

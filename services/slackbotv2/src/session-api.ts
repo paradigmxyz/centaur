@@ -138,7 +138,7 @@ export async function forwardToSessionApi(
   callbacks: ForwardSessionApiCallbacks = {}
 ): Promise<AsyncIterable<SlackbotV2RendererSource> | null> {
   const createStartedAtMs = nowMs()
-  await createSession(options, input.threadId)
+  await createSession(options, input.threadId, input.harnessType)
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
     phase_ms: elapsedMs(createStartedAtMs)
   })
@@ -158,7 +158,7 @@ export async function forwardToSessionApi(
   if (!input.executeMessage) return null
 
   const executeStartedAtMs = nowMs()
-  const execution = await executeSession(options, input.threadId, input.executeMessage)
+  const execution = await executeSession(options, input.threadId, input.executeMessage, input.model)
   traceLog(options, 'slackbotv2_session_execute_complete', input.trace, {
     execution_id: execution.execution_id,
     phase_ms: elapsedMs(executeStartedAtMs)
@@ -245,22 +245,74 @@ async function bytesToBase64(data: Buffer | Blob): Promise<string> {
   return Buffer.from(bytes).toString('base64')
 }
 
-async function createSession(options: SlackbotV2Options, threadId: string): Promise<void> {
+const DEFAULT_HARNESS_TYPE = 'codex'
+
+async function createSession(
+  options: SlackbotV2Options,
+  threadId: string,
+  harnessType?: string
+): Promise<void> {
+  const requested = harnessType ?? DEFAULT_HARNESS_TYPE
+  const response = await postCreateSession(options, threadId, requested)
+  if (response.ok) return
+
+  let body = ''
+  try {
+    body = await response.text()
+  } catch {
+    body = ''
+  }
+  // A thread is pinned to the harness it was created with; the API rejects a
+  // differing harness_type with 409. A mid-thread --claude/--amp/--codex (or a
+  // plain message on a thread created with a non-default harness) lands here:
+  // keep the thread alive on its existing harness instead of failing the message.
+  const existing = response.status === 409 ? existingHarnessFromConflict(body) : undefined
+  if (existing && existing !== requested) {
+    const retry = await postCreateSession(options, threadId, existing)
+    await ensureApiOk(retry, 'create session')
+    return
+  }
+  throw new SessionApiError({
+    action: 'create session',
+    body,
+    retryable: isRetryableApiStatus(response.status),
+    status: response.status,
+    statusText: response.statusText
+  })
+}
+
+async function postCreateSession(
+  options: SlackbotV2Options,
+  threadId: string,
+  harnessType: string
+): Promise<Response> {
   const fetchFn = options.fetch ?? fetch
   const body: SlackbotV2CreateSessionRequest = {
-    harness_type: 'codex',
+    harness_type: harnessType,
     metadata: {
       source: 'slackbotv2',
       platform: 'slack',
       thread_id: threadId
     }
   }
-  const response = await fetchFn(apiSessionUrl(options.apiUrl, threadId), {
+  return fetchFn(apiSessionUrl(options.apiUrl, threadId), {
     method: 'POST',
     headers: apiHeaders(options),
     body: JSON.stringify(body)
   })
-  await ensureApiOk(response, 'create session')
+}
+
+function existingHarnessFromConflict(body: string): string | undefined {
+  try {
+    const payload = JSON.parse(body)
+    if (isJsonObject(payload)) {
+      const existing = stringValue(payload.existing_harness)
+      if (existing) return existing
+    }
+  } catch {
+    // fall through to message parsing
+  }
+  return /already exists with harness_type ([A-Za-z0-9_-]+)/.exec(body)?.[1]
 }
 
 async function appendSessionMessages(
@@ -283,13 +335,14 @@ async function appendSessionMessages(
 async function executeSession(
   options: SlackbotV2Options,
   threadId: string,
-  message: SlackbotV2ApiMessage
+  message: SlackbotV2ApiMessage,
+  model?: string
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
     metadata: sessionMetadata(message, { action: 'execute' }),
-    input_lines: [toCodexInputLine(message, threadId)],
+    input_lines: [toCodexInputLine(message, threadId, model)],
     ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
@@ -404,11 +457,12 @@ function sessionMetadata(
   }
 }
 
-function toCodexInputLine(message: SlackbotV2ApiMessage, threadId: string): string {
+function toCodexInputLine(message: SlackbotV2ApiMessage, threadId: string, model?: string): string {
   return JSON.stringify({
     type: 'user',
     thread_key: threadId,
     trace_metadata: sessionMetadata(message, { action: 'execute' }),
+    ...(model ? { model } : {}),
     message: {
       role: 'user',
       content: codexInputContent(message)

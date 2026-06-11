@@ -204,10 +204,6 @@ COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/cl
 COPY --link --chmod=755 services/sandbox/call.sh /usr/local/bin/call
 COPY --link --chmod=755 services/sandbox/slack-upload.sh /usr/local/bin/slack-upload
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
-COPY --link --chmod=755 services/sandbox/amp-wrapper.py /usr/local/bin/amp-wrapper
-COPY --link --chmod=755 services/sandbox/codex-app-wrapper.py /usr/local/bin/codex-app-wrapper
-COPY --link --chmod=755 services/sandbox/claude-app-wrapper.py /usr/local/bin/claude-app-wrapper
-COPY --link --chmod=755 services/sandbox/harness_adapter.py /usr/local/bin/harness-adapter
 COPY --link --chmod=755 services/workflow-python/workflow_host.py /usr/local/bin/workflow-host
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
@@ -216,6 +212,18 @@ COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 USER agent
 WORKDIR /home/agent
 
+# Build from a bind mount instead of COPY: COPY --link into /tmp rebuilds the
+# parent directory chain in its own layer, clobbering /tmp's root:root 1777
+# sticky metadata with agent:agent 0755, which broke /tmp writes for any
+# non-1001 user (e.g. the root-with-dropped-caps repo-cache). A bind mount
+# leaves no trace in the image and caches on source content just like COPY.
+RUN --mount=type=bind,source=crates/harness-server,target=/harness-server-src \
+    --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
+    CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
+    cargo install --locked --path /harness-server-src --root /home/agent/.local
+
 # No RUN instructions after these — all repo-local content at the very end.
 COPY --link --chown=1001:1001 .agents/skills/ /home/agent/.agents/skills/
 COPY --link --chown=1001:1001 harness/ /home/agent/harness/
@@ -223,5 +231,7 @@ COPY --link --chown=1001:1001 workflows/ /opt/centaur/workflows/
 COPY --link --chown=1001:1001 services/sandbox/SYSTEM_PROMPT.md /home/agent/AGENTS.md
 
 ENTRYPOINT ["/entrypoint.sh"]
-# Default CMD uses Codex app-server through Centaur's NDJSON bridge.
-CMD ["codex-app-wrapper"]
+# Default CMD uses Rust blocks mode; pass --mode=jsonrpc for raw App Server JSON-RPC.
+# NOTE: claude-code is a preview-463 dogfood default — flip back to codex
+# (together with sandbox.harnessEngine in contrib/chart) before merging.
+CMD ["harness-server", "claude-code"]

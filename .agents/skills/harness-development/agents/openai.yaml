@@ -1,0 +1,4 @@
+interface:
+  display_name: "Harness Development"
+  short_description: "Add and compare harness server backends"
+  default_prompt: "Use $harness-development to add or debug a harness-server backend with real differential tests."

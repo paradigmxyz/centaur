@@ -28,6 +28,7 @@ import {
   serializeMessage,
   sessionStreamError
 } from './session-api'
+import { extractMessageOverrides } from './overrides'
 import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
 import type {
   ForwardSessionInput,
@@ -271,6 +272,14 @@ async function syncThreadMessageToSession(
 
   const serializeStartedAtMs = nowMs()
   const serializedMessage = await serializeMessage(message)
+  const overrides = extractMessageOverrides(serializedMessage.text)
+  serializedMessage.text = overrides.cleanedText
+  if (overrides.harnessType || overrides.model) {
+    traceLog(input.options, 'slackbotv2_forward_overrides_parsed', trace, {
+      harness_type: overrides.harnessType,
+      model: overrides.model
+    })
+  }
   traceLog(input.options, 'slackbotv2_forward_message_serialized', trace, {
     attachment_count: serializedMessage.attachments.length,
     phase_ms: elapsedMs(serializeStartedAtMs)
@@ -280,6 +289,11 @@ async function syncThreadMessageToSession(
   if (shouldIncludeContext && !state.historyForwarded) {
     const contextStartedAtMs = nowMs()
     context = await collectInitialContext(thread, message)
+    // collectInitialContext re-serializes the current message; mirror the
+    // flag-stripped text on that copy too.
+    for (const item of context) {
+      if (item.id === serializedMessage.id) item.text = serializedMessage.text
+    }
     traceLog(input.options, 'slackbotv2_forward_context_collected', trace, {
       message_count: context.length,
       phase_ms: elapsedMs(contextStartedAtMs)
@@ -297,7 +311,9 @@ async function syncThreadMessageToSession(
   const forwardInput: ForwardSessionInput = {
     afterEventId: lastEventId,
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
+    harnessType: overrides.harnessType,
     messages: messagesToAppend,
+    model: overrides.model,
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)
     },
