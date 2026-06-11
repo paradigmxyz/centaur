@@ -253,7 +253,7 @@ def _agent_session_title(
 _DEFAULT_CLAUDE_MODEL = "claude-fable-5"
 
 _CLAUDE_MODEL_ALIASES: dict[str, str] = {
-    "fable": _DEFAULT_CLAUDE_MODEL,
+    "fable": "claude-fable-5",
     "opus": "claude-opus-4-8",
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5",

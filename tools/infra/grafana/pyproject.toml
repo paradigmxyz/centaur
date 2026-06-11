@@ -27,10 +27,11 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 # Egress allowlist + the host(s) the GRAFANA_API_KEY Bearer token is scoped to.
-# MUST be non-empty: an empty list renders the iron-proxy `secrets` transform
-# with no host rules, so the token is never injected AND egress to Grafana is
-# denied (every call 405s/401s through the CONNECT-only proxy).
-hosts = ["splits.grafana.net"]
+# MUST be overridden per deployment (e.g. via a tool overlay) with your Grafana
+# hostname: an empty list renders the iron-proxy `secrets` transform with no
+# host rules, so the token is never injected AND egress to Grafana is denied
+# (every call 405s/401s through the CONNECT-only proxy).
+hosts = []
 secrets = [
     # NOTE: GRAFANA_URL is NOT a secret — it's the base URL the client reads
     # in-process (os.getenv) to pick its connection target, so it can never be
