@@ -160,6 +160,18 @@ spec:
         - protocol: TCP
           port: {{ .Values.ironControl.service.httpPort }}
 {{- end }}
+{{- if .Values.networkPolicy.otlpEgress.enabled }}
+    # OTLP trace export (e.g. Laminar). The collector lives in another
+    # namespace; without this rule api-rs's own spans die with
+    # BatchSpanProcessor "network error" export failures.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "networkPolicy.otlpEgress.namespace is required when networkPolicy.otlpEgress.enabled" .Values.networkPolicy.otlpEgress.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.otlpEgress.port }}
+{{- end }}
     - ports:
         - protocol: TCP
           port: 443

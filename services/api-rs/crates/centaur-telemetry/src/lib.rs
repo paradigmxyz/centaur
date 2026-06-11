@@ -260,6 +260,23 @@ pub fn http_status_class(status: u16) -> &'static str {
     }
 }
 
+/// W3C `traceparent` for a tracing span, when the OpenTelemetry layer is
+/// installed and the span carries a valid trace context. The sampled flag is
+/// always `01`: downstream harness exporters (codex OTLP) must keep emitting
+/// usage/cost spans regardless of any upstream sampling decision.
+pub fn traceparent_for_span(span: &tracing::Span) -> Option<String> {
+    let context = span.context();
+    let span_context = context.span().span_context().clone();
+    if !span_context.is_valid() {
+        return None;
+    }
+    Some(format!(
+        "00-{}-{}-01",
+        span_context.trace_id(),
+        span_context.span_id()
+    ))
+}
+
 pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     let _metrics = prometheus_handle()?;
     let filter = EnvFilter::try_new(&config.rust_log).unwrap_or_else(|_| EnvFilter::new("info"));

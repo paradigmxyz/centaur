@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
 use crate::{
-    AgentSandboxBackend, MANAGED_BY_LABEL, MANAGED_BY_VALUE, SANDBOX_ID_LABEL, is_not_found,
-    map_kube_error,
+    AgentSandboxBackend, MANAGED_BY_LABEL, MANAGED_BY_VALUE, OtlpEgressTarget, SANDBOX_ID_LABEL,
+    is_not_found, map_kube_error,
 };
 
 const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
@@ -298,7 +298,13 @@ impl AgentSandboxBackend {
             .await
             .map_err(|err| map_kube_error("create iron-proxy service", err))?;
         let control_port = url_port(&sync.control_url).unwrap_or(443);
-        for policy in build_iron_proxy_network_policies(id, resolved, iron_proxy, control_port) {
+        for policy in build_iron_proxy_network_policies(
+            id,
+            resolved,
+            iron_proxy,
+            control_port,
+            self.config.otlp_egress.as_ref(),
+        ) {
             self.network_policies()
                 .create(&PostParams::default(), &policy)
                 .await
@@ -518,7 +524,11 @@ impl AgentSandboxBackend {
 }
 
 pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronProxy) {
-    let no_proxy_extra = current_env_values(spec, ["NO_PROXY", "no_proxy"]);
+    let mut no_proxy_extra = current_env_values(spec, ["NO_PROXY", "no_proxy"]);
+    // The harness exports OTLP traces (usage/cost spans) straight to the
+    // collector; routing them through iron-proxy fails (plain-HTTP forwards
+    // are rejected), so the endpoint host always bypasses the proxy.
+    no_proxy_extra.extend(otlp_endpoint_hosts(spec));
     let api_host = env_value(spec, "CENTAUR_API_URL").and_then(host_from_url);
     for (name, value) in proxy_env(
         &resolved.proxy_host,
@@ -743,8 +753,29 @@ fn build_iron_proxy_network_policies(
     resolved: &ResolvedIronProxy,
     iron_proxy: &IronProxyConfig,
     control_port: u16,
+    otlp_egress: Option<&OtlpEgressTarget>,
 ) -> Vec<NetworkPolicy> {
     let sandbox_to_proxy_ports = sandbox_to_proxy_ports(resolved);
+    let mut sandbox_egress = vec![
+        egress_to(
+            vec![pod_peer(iron_proxy_labels(id))],
+            sandbox_to_proxy_ports.clone(),
+        ),
+        egress_to(
+            vec![pod_peer(iron_proxy.api_pod_labels.clone())],
+            vec![network_port(8000), network_port(8080)],
+        ),
+        dns_egress_rule(),
+    ];
+    if let Some(target) = otlp_egress {
+        // Direct harness OTLP export (codex usage/cost spans). The collector
+        // lives outside this namespace, so the sandbox bypasses iron-proxy for
+        // this one destination (the endpoint host also rides NO_PROXY).
+        sandbox_egress.push(egress_to(
+            vec![namespace_peer(&target.namespace)],
+            vec![network_port(target.port)],
+        ));
+    }
     vec![
         NetworkPolicy {
             metadata: object_meta(
@@ -754,17 +785,7 @@ fn build_iron_proxy_network_policies(
             spec: Some(NetworkPolicySpec {
                 pod_selector: Some(label_selector(sandbox_labels(id))),
                 policy_types: Some(vec!["Egress".to_owned()]),
-                egress: Some(vec![
-                    egress_to(
-                        vec![pod_peer(iron_proxy_labels(id))],
-                        sandbox_to_proxy_ports.clone(),
-                    ),
-                    egress_to(
-                        vec![pod_peer(iron_proxy.api_pod_labels.clone())],
-                        vec![network_port(8000), network_port(8080)],
-                    ),
-                    dns_egress_rule(),
-                ]),
+                egress: Some(sandbox_egress),
                 ..Default::default()
             }),
         },
@@ -827,15 +848,19 @@ fn proxy_egress_rules(
 
 fn dns_egress_rule() -> NetworkPolicyEgressRule {
     egress_to(
-        vec![NetworkPolicyPeer {
-            namespace_selector: Some(label_selector(BTreeMap::from([(
-                "kubernetes.io/metadata.name".to_owned(),
-                "kube-system".to_owned(),
-            )]))),
-            ..Default::default()
-        }],
+        vec![namespace_peer("kube-system")],
         vec![udp_port(53), network_port(53)],
     )
+}
+
+fn namespace_peer(namespace: &str) -> NetworkPolicyPeer {
+    NetworkPolicyPeer {
+        namespace_selector: Some(label_selector(BTreeMap::from([(
+            "kubernetes.io/metadata.name".to_owned(),
+            namespace.to_owned(),
+        )]))),
+        ..Default::default()
+    }
 }
 
 fn proxy_env(
@@ -927,6 +952,19 @@ fn current_env_values<const N: usize>(spec: &SandboxSpec, names: [&str; N]) -> V
         .into_iter()
         .filter_map(|name| env_value(spec, name))
         .collect()
+}
+
+/// Hosts of the spec's OTLP exporter endpoints, mirrored into NO_PROXY (same
+/// contract as the Python control plane's `_sandbox_otel_endpoint_hosts`).
+fn otlp_endpoint_hosts(spec: &SandboxSpec) -> Vec<String> {
+    [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ]
+    .into_iter()
+    .filter_map(|name| env_value(spec, name))
+    .filter_map(host_from_url)
+    .collect()
 }
 
 /// The authority (`[user@]host[:port]`) of a URL or bare `host:port`, with any
@@ -1141,4 +1179,109 @@ fn unique_suffix() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("{millis}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved() -> ResolvedIronProxy {
+        ResolvedIronProxy {
+            proxy_host: "asbx-test-iron-proxy".to_owned(),
+            proxy_pod_name: "asbx-test-iron-proxy-1".to_owned(),
+            proxy_port: 8080,
+            principal_id: "principal".to_owned(),
+            pg: None,
+            replace_placeholders: BTreeMap::new(),
+        }
+    }
+
+    fn rule_allows_namespace_port(
+        rule: &NetworkPolicyEgressRule,
+        namespace: &str,
+        port: u16,
+    ) -> bool {
+        rule.to.as_ref().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer.namespace_selector.as_ref().is_some_and(|selector| {
+                    selector.match_labels.as_ref().is_some_and(|labels| {
+                        labels
+                            .get("kubernetes.io/metadata.name")
+                            .map(String::as_str)
+                            == Some(namespace)
+                    })
+                })
+            })
+        }) && rule.ports.as_ref().is_some_and(|ports| {
+            ports
+                .iter()
+                .any(|policy_port| policy_port.port == Some(IntOrString::Int(i32::from(port))))
+        })
+    }
+
+    #[test]
+    fn sandbox_egress_policy_allows_otlp_collector_when_configured() {
+        let id = SandboxId::new("asbx-test");
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        let target = OtlpEgressTarget {
+            namespace: "laminar".to_owned(),
+            port: 8000,
+        };
+
+        let policies =
+            build_iron_proxy_network_policies(&id, &resolved(), &iron_proxy, 3000, Some(&target));
+        let sandbox_egress = policies[0]
+            .spec
+            .as_ref()
+            .unwrap()
+            .egress
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(
+            sandbox_egress
+                .iter()
+                .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
+        );
+
+        let policies = build_iron_proxy_network_policies(&id, &resolved(), &iron_proxy, 3000, None);
+        let sandbox_egress = policies[0]
+            .spec
+            .as_ref()
+            .unwrap()
+            .egress
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(
+            !sandbox_egress
+                .iter()
+                .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
+        );
+    }
+
+    #[test]
+    fn apply_proxy_env_adds_otlp_endpoint_host_to_no_proxy() {
+        let mut spec = SandboxSpec::new("centaur-agent:latest").env(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "http://laminar-app-server.laminar.svc.cluster.local:8000/v1/traces",
+        );
+
+        apply_proxy_env(&mut spec, &resolved());
+
+        for name in ["NO_PROXY", "no_proxy"] {
+            let value = spec
+                .env
+                .iter()
+                .find(|env| env.name == name)
+                .map(|env| env.value.clone())
+                .unwrap();
+            assert!(
+                value
+                    .split(',')
+                    .any(|host| host == "laminar-app-server.laminar.svc.cluster.local"),
+                "{name} should contain the OTLP endpoint host: {value}"
+            );
+        }
+    }
 }

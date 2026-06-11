@@ -19,6 +19,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
