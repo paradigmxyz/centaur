@@ -1492,6 +1492,125 @@ describe('slackbotv2', () => {
     expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)
   })
 
+  it('does not let one hung recovery block the obligations queued behind it', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+
+    // Thread A's execution has no events at all (a zombie: its SSE opens and
+    // never yields a chunk), so its recovery hangs until the per-thread
+    // deadline. Thread B is fully renderable and indexed behind A.
+    const hungKey = threadKey('1781100000.000001')
+    const hungMessage = apiMessageFromSlackEvent({
+      isMention: true,
+      text: `<@${BOT_USER_ID}> hung recovery`,
+      threadId: hungKey,
+      ts: '1781100000.000002'
+    })
+    await sharedState.set(`thread-state:${hungKey}`, {
+      activeExecution: true,
+      executedMessageIds: [hungMessage.id],
+      forwardedMessageIds: [hungMessage.id],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-hung-recovery',
+        message: hungMessage
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', hungKey)
+
+    const parent = await postUserMessage('Context before queued recovery.')
+    const mentionText = `<@${BOT_USER_ID}> recover behind a zombie`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = apiMessageFromSlackEvent({
+      isMention: true,
+      text: mentionText,
+      threadId: key,
+      ts: mention.ts
+    })
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [mention.ts],
+      forwardedMessageIds: [mention.ts],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-behind-zombie',
+        message
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered behind the zombie.'))
+
+    bot = createTestBot({ state: sharedState, renderRecoveryThreadTimeoutMs: 200 })
+
+    await waitFor(async () => {
+      const recovered = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return recovered?.renderObligation === null
+    }, 5000)
+    expect(await threadText(parent.ts)).toContain('Recovered behind the zombie.')
+    const recoveredState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(recoveredState).toEqual(
+      expect.objectContaining({ activeExecution: false, renderObligation: null })
+    )
+    // The hung thread stays pending (deferred), not failed or cleared.
+    const hungState = await sharedState.get<Record<string, unknown>>(`thread-state:${hungKey}`)
+    expect(hungState).toEqual(
+      expect.objectContaining({
+        renderObligation: expect.objectContaining({ executionId: 'exe-hung-recovery' })
+      })
+    )
+  })
+
+  it('abandons an obligation after repeated non-retryable recovery failures', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+
+    // A corrupt thread id without a thread ts: the Slack adapter rejects it
+    // on every recovery attempt, mirroring the production obligation that
+    // poisoned the scan forever.
+    const corruptKey = `slack:${CHANNEL_ID}:`
+    const corruptMessage = apiMessageFromSlackEvent({
+      isMention: true,
+      text: `<@${BOT_USER_ID}> recover the corrupt thread`,
+      threadId: corruptKey,
+      ts: '1781100001.000001'
+    })
+    await sharedState.set(`thread-state:${corruptKey}`, {
+      activeExecution: true,
+      executedMessageIds: [corruptMessage.id],
+      forwardedMessageIds: [corruptMessage.id],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-corrupt-thread',
+        message: corruptMessage
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', corruptKey)
+    codexApi.emitOutputLines(corruptKey, sampleCodexOutputLines('Unreachable answer.'))
+
+    bot = createTestBot({ state: sharedState })
+
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(
+        `thread-state:${corruptKey}`
+      )
+      return threadState?.renderObligation === null
+    }, 10_000)
+    const abandonedState = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${corruptKey}`
+    )
+    expect(abandonedState).toEqual(
+      expect.objectContaining({ activeExecution: false, renderObligation: null })
+    )
+    // Five failing passes with backoff take several seconds.
+  }, 15_000)
+
   it('retries retryable event stream open failures after execute', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -3000,10 +3119,13 @@ function parseMaybeJson(value: string): unknown {
   }
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 1000
+): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (predicate()) return
+    if (await predicate()) return
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error('Timed out waiting for condition')
