@@ -138,7 +138,9 @@ pub struct WorkflowWebhookSpec {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WorkflowWebhookAuth {
+    #[default]
     None,
     Hmac {
         secret_ref: String,
@@ -157,12 +159,6 @@ pub enum WorkflowWebhookAuth {
     Bearer {
         secret_ref: String,
     },
-}
-
-impl Default for WorkflowWebhookAuth {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -422,16 +418,8 @@ impl WorkflowRuntime {
     pub async fn list_runs(&self, limit: i64) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
         let limit = limit.clamp(1, 200);
         let mut runs = Vec::new();
-        runs.extend(
-            self.list_runs_for_queue(WORKFLOW_QUEUE, limit)
-                .await?
-                .into_iter(),
-        );
-        runs.extend(
-            self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit)
-                .await?
-                .into_iter(),
-        );
+        runs.extend(self.list_runs_for_queue(WORKFLOW_QUEUE, limit).await?);
+        runs.extend(self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit).await?);
         runs.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
@@ -589,7 +577,7 @@ fn absurd_queue_tables(
             "absurd.t_centaur_workflow_schedules",
             "absurd.r_centaur_workflow_schedules",
         )),
-        other => Err(WorkflowRuntimeError::BadRequest(format!(
+        other => Err(WorkflowRuntimeError::Internal(format!(
             "unknown workflow queue {other:?}"
         ))),
     }
@@ -862,21 +850,21 @@ fn workflow_schedule_input(
         metadata.insert("workflow_name".to_owned(), json!(workflow_name));
         metadata.insert("no_delivery".to_owned(), json!(no_delivery));
     }
-    if let Some(thread_key) = object.get("thread_key").and_then(Value::as_str) {
-        if !thread_key.trim().is_empty() {
-            input.insert("thread_key".to_owned(), json!(thread_key.trim()));
-            if !input.contains_key("delivery") {
-                if let Some((channel, thread_ts)) = split_slack_thread_key(thread_key.trim()) {
-                    input.insert(
-                        "delivery".to_owned(),
-                        json!({
-                            "platform": "slack",
-                            "channel": channel,
-                            "thread_ts": thread_ts,
-                        }),
-                    );
-                }
-            }
+    if let Some(thread_key) = object.get("thread_key").and_then(Value::as_str)
+        && !thread_key.trim().is_empty()
+    {
+        input.insert("thread_key".to_owned(), json!(thread_key.trim()));
+        if !input.contains_key("delivery")
+            && let Some((channel, thread_ts)) = split_slack_thread_key(thread_key.trim())
+        {
+            input.insert(
+                "delivery".to_owned(),
+                json!({
+                    "platform": "slack",
+                    "channel": channel,
+                    "thread_ts": thread_ts,
+                }),
+            );
         }
     }
     if let Some(slack_channel) = object.get("slack_channel").and_then(Value::as_str) {
@@ -1025,20 +1013,23 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
     }
 
     let mut child = command.spawn().map_err(|error| {
-        WorkflowRuntimeError::BadRequest(format!(
+        WorkflowRuntimeError::Internal(format!(
             "failed to spawn Python workflow host {}: {error}",
             host_path.display()
         ))
     })?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdin missing".to_owned())
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdout missing".to_owned())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stderr missing".to_owned())
-    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdin missing".to_owned()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdout missing".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stderr missing".to_owned()))?;
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         let mut collected = Vec::new();
@@ -1080,7 +1071,7 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
             }
             Some("host.error") | Some("workflow.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "Python workflow discovery error: {}{}{}",
                     message
                         .get("message")
@@ -1091,7 +1082,7 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
                 )));
             }
             other => {
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "unexpected Python workflow discovery message type {other:?}: {message}"
                 )));
             }
@@ -1100,7 +1091,7 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
 
     let status = child.wait().await?;
     let stderr = stderr_task.await.unwrap_or_default();
-    Err(WorkflowRuntimeError::BadRequest(format!(
+    Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.discovery: status={status}, stderr={stderr}"
     )))
 }
@@ -1341,17 +1332,21 @@ async fn run_centaur_workflow(
                         });
                         run_agent_session_turn(
                             session_runtime,
-                            thread_key,
-                            harness_type,
-                            None,
-                            vec![json!({"type": "text", "text": prompt})],
-                            client_message_id.clone(),
-                            metadata.clone(),
-                            metadata.clone(),
-                            metadata,
-                            format!("absurd-workflow-agent-turn:{client_message_id}"),
-                            idle_timeout_ms,
-                            max_duration_ms,
+                            AgentTurnRequest {
+                                thread_key,
+                                harness_type,
+                                persona_id: None,
+                                parts: vec![json!({"type": "text", "text": prompt})],
+                                client_message_id: client_message_id.clone(),
+                                session_metadata: metadata.clone(),
+                                message_metadata: metadata.clone(),
+                                execution_metadata: metadata,
+                                execution_idempotency_key: format!(
+                                    "absurd-workflow-agent-turn:{client_message_id}"
+                                ),
+                                idle_timeout_ms,
+                                max_duration_ms,
+                            },
                         )
                         .await
                         .map_err(absurd_error)
@@ -1473,20 +1468,23 @@ async fn run_python_workflow_host_local(
     }
 
     let mut child = command.spawn().map_err(|error| {
-        WorkflowRuntimeError::BadRequest(format!(
+        WorkflowRuntimeError::Internal(format!(
             "failed to spawn Python workflow host {}: {error}",
             host_path.display()
         ))
     })?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdin missing".to_owned())
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stdout missing".to_owned())
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        WorkflowRuntimeError::BadRequest("workflow host stderr missing".to_owned())
-    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdin missing".to_owned()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdout missing".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stderr missing".to_owned()))?;
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         let mut collected = Vec::new();
@@ -1522,7 +1520,7 @@ async fn run_python_workflow_host_local(
             }
             Some("workflow.error") | Some("host.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "Python workflow host error: {}{}{}",
                     message
                         .get("message")
@@ -1551,7 +1549,7 @@ async fn run_python_workflow_host_local(
                 write_host_message(&mut stdin, &response).await?;
             }
             other => {
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "unexpected Python workflow host message type {other:?}: {message}"
                 )));
             }
@@ -1560,7 +1558,7 @@ async fn run_python_workflow_host_local(
 
     let status = child.wait().await?;
     let stderr = stderr_task.await.unwrap_or_default();
-    Err(WorkflowRuntimeError::BadRequest(format!(
+    Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.result: status={status}, stderr={stderr}"
     )))
 }
@@ -1651,7 +1649,7 @@ where
             }
             Some("workflow.error") | Some("host.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "Python workflow host error: {}{}{}",
                     message
                         .get("message")
@@ -1680,7 +1678,7 @@ where
                 write_host_message(stdin, &response).await?;
             }
             other => {
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Internal(format!(
                     "unexpected Python workflow host message type {other:?}: {message}"
                 )));
             }
@@ -1688,7 +1686,7 @@ where
     }
 
     let stderr = stderr_task.await.unwrap_or_default();
-    Err(WorkflowRuntimeError::BadRequest(format!(
+    Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.result: stderr={stderr}"
     )))
 }
@@ -1874,17 +1872,19 @@ async fn run_python_agent_turn(
         .unwrap_or_else(|| format!("absurd-workflow-agent-turn:{client_message_id}"));
     let result = run_agent_session_turn(
         session_runtime,
-        thread_key,
-        harness_type,
-        persona_id,
-        parts,
-        client_message_id,
-        session_metadata,
-        message_metadata,
-        execution_metadata,
-        execution_idempotency_key,
-        idle_timeout_ms,
-        max_duration_ms,
+        AgentTurnRequest {
+            thread_key,
+            harness_type,
+            persona_id,
+            parts,
+            client_message_id,
+            session_metadata,
+            message_metadata,
+            execution_metadata,
+            execution_idempotency_key,
+            idle_timeout_ms,
+            max_duration_ms,
+        },
     )
     .await?;
     serde_json::to_value(result).map_err(WorkflowRuntimeError::from)
@@ -2117,7 +2117,7 @@ async fn send_slack_message(token: &str, payload: Value) -> Result<Value, Workfl
         .json()
         .await?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(WorkflowRuntimeError::BadRequest(format!(
+        return Err(WorkflowRuntimeError::Upstream(format!(
             "Slack chat.postMessage failed: {}",
             response
                 .get("error")
@@ -2143,8 +2143,7 @@ fn slack_post_result_from_response(channel: &str, response: Value) -> SlackPostR
     }
 }
 
-async fn run_agent_session_turn(
-    session_runtime: SessionRuntime,
+struct AgentTurnRequest {
     thread_key: String,
     harness_type: HarnessType,
     persona_id: Option<String>,
@@ -2156,7 +2155,25 @@ async fn run_agent_session_turn(
     execution_idempotency_key: String,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
+}
+
+async fn run_agent_session_turn(
+    session_runtime: SessionRuntime,
+    turn: AgentTurnRequest,
 ) -> Result<AgentTurnResult, WorkflowRuntimeError> {
+    let AgentTurnRequest {
+        thread_key,
+        harness_type,
+        persona_id,
+        parts,
+        client_message_id,
+        session_metadata,
+        message_metadata,
+        execution_metadata,
+        execution_idempotency_key,
+        idle_timeout_ms,
+        max_duration_ms,
+    } = turn;
     let thread_key = ThreadKey::parse(thread_key)?;
     session_runtime
         .create_or_get_session(
@@ -2227,7 +2244,7 @@ async fn run_agent_session_turn(
                     result_text: result_text_from_output_lines(&output_lines),
                     output_lines,
                 };
-                return Err(WorkflowRuntimeError::BadRequest(format!(
+                return Err(WorkflowRuntimeError::Upstream(format!(
                     "agent turn {} for thread {} ended with {}",
                     result.execution_id, result.thread_key, result.status
                 )));
@@ -2236,7 +2253,7 @@ async fn run_agent_session_turn(
         }
     }
 
-    Err(WorkflowRuntimeError::BadRequest(
+    Err(WorkflowRuntimeError::Upstream(
         "session event stream ended before terminal execution event".to_owned(),
     ))
 }
@@ -2279,15 +2296,25 @@ fn workflow_run_from_row(row: sqlx::postgres::PgRow) -> Result<WorkflowRun, Work
 }
 
 fn absurd_error(error: WorkflowRuntimeError) -> absurd::Error {
-    absurd::Error::InvalidOptions(error.to_string())
+    absurd::Error::TaskFailed(Box::new(error))
 }
 
 #[derive(Debug, Error)]
 pub enum WorkflowRuntimeError {
+    /// The caller supplied an invalid request or workflow configuration.
+    /// Maps to HTTP 400.
     #[error("{0}")]
     BadRequest(String),
     #[error("workflow run not found: {0}")]
     NotFound(String),
+    /// Server-side failure (workflow host spawn/protocol, internal dispatch).
+    /// Maps to HTTP 500.
+    #[error("{0}")]
+    Internal(String),
+    /// An upstream dependency (Slack, agent session) failed. Maps to
+    /// HTTP 502.
+    #[error("{0}")]
+    Upstream(String),
     #[error(transparent)]
     Absurd(#[from] absurd::Error),
     #[error(transparent)]

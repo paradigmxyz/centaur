@@ -22,6 +22,10 @@ pub enum ApiError {
     MethodNotAllowed(String),
     #[error("{0}")]
     PayloadTooLarge(String),
+    /// Server-side misconfiguration or invariant failure. The message is
+    /// logged but never returned to the client.
+    #[error("{0}")]
+    Internal(String),
     #[error(transparent)]
     Runtime(#[from] SessionRuntimeError),
     #[error(transparent)]
@@ -56,14 +60,43 @@ impl IntoResponse for ApiError {
             })) => StatusCode::CONFLICT,
             Self::Workflow(WorkflowRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             Self::Workflow(WorkflowRuntimeError::NotFound(_)) => StatusCode::NOT_FOUND,
-            Self::Runtime(_) | Self::Workflow(_) | Self::Serialize(_) => {
+            Self::Workflow(WorkflowRuntimeError::Upstream(_)) => StatusCode::BAD_GATEWAY,
+            Self::Internal(_) | Self::Runtime(_) | Self::Workflow(_) | Self::Serialize(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
+        // 5xx error details are server-side faults: log them for operators but
+        // never echo internals (SQL text, hostnames, config refs) to clients.
+        let message = if status.is_server_error() {
+            tracing::error!(
+                status = status.as_u16(),
+                error = %error_chain(&self),
+                "API request failed"
+            );
+            "internal server error".to_owned()
+        } else {
+            self.to_string()
+        };
         let body = Json(json!({
             "ok": false,
-            "error": self.to_string(),
+            "error": message,
         }));
         (status, body).into_response()
     }
+}
+
+/// Render an error and its full `source()` chain as a single string. Causes
+/// already rendered into an ancestor's message are skipped.
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let rendered = cause.to_string();
+        if !message.contains(&rendered) {
+            message.push_str(": ");
+            message.push_str(&rendered);
+        }
+        source = cause.source();
+    }
+    message
 }

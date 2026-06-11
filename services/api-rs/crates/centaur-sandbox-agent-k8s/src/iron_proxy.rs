@@ -202,9 +202,7 @@ impl AgentSandboxBackend {
             .client
             .effective_config(&iron_control.namespace, principal)
             .await
-            .map_err(|err| {
-                SandboxError::Backend(format!("iron-control effective_config: {err}"))
-            })?;
+            .map_err(|err| SandboxError::backend_source("iron-control effective_config", err))?;
 
         Ok(effective
             .secrets
@@ -325,16 +323,16 @@ impl AgentSandboxBackend {
         resolved: &ResolvedIronProxy,
     ) -> SandboxResult<ProxySyncEnv> {
         let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
-            SandboxError::Backend("iron-proxy requires iron-control to be configured".to_owned())
+            SandboxError::backend("iron-proxy requires iron-control to be configured")
         })?;
         let proxy = iron_control
             .client
             .create_proxy(id.as_str(), &resolved.principal_id)
             .await
-            .map_err(|err| SandboxError::Backend(format!("iron-control create proxy: {err}")))?;
-        let token = proxy.token.ok_or_else(|| {
-            SandboxError::Backend("iron-control create proxy returned no token".to_owned())
-        })?;
+            .map_err(|err| SandboxError::backend_source("iron-control create proxy", err))?;
+        let token = proxy
+            .token
+            .ok_or_else(|| SandboxError::backend("iron-control create proxy returned no token"))?;
         self.proxy_ids
             .lock()
             .await
@@ -379,16 +377,16 @@ impl AgentSandboxBackend {
         id: &SandboxId,
         principal_id: &str,
     ) -> SandboxResult<()> {
-        let iron_control =
-            self.config
-                .iron_control
-                .as_ref()
-                .ok_or_else(|| SandboxError::Unsupported {
-                    backend: crate::BACKEND_NAME,
-                    operation: "assign_iron_control_proxy_principal",
-                })?;
+        let iron_control = self
+            .config
+            .iron_control
+            .as_ref()
+            .ok_or(SandboxError::Unsupported {
+                backend: crate::BACKEND_NAME,
+                operation: "assign_iron_control_proxy_principal",
+            })?;
         let proxy_id = self.proxy_id_for_sandbox(id).await?.ok_or_else(|| {
-            SandboxError::Backend(format!(
+            SandboxError::backend(format!(
                 "iron-control proxy id for sandbox {} was not found",
                 id.as_str()
             ))
@@ -397,7 +395,7 @@ impl AgentSandboxBackend {
             .client
             .assign_proxy_principal(&proxy_id, principal_id)
             .await
-            .map_err(|err| SandboxError::Backend(format!("iron-control assign proxy: {err}")))?;
+            .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
         self.proxy_ids
             .lock()
             .await

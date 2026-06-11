@@ -1241,7 +1241,7 @@ secrets = [
 "#,
         );
 
-        let discovered = discover_tool_proxy_fragment(&[base.clone()]).unwrap();
+        let discovered = discover_tool_proxy_fragment(std::slice::from_ref(&base)).unwrap();
 
         // The tool is kept (not dropped) and contributes exactly one aws_auth
         // transform in the shape iron-control's translator consumes.
@@ -1276,7 +1276,8 @@ secrets = [
         assert_eq!(config["rules"].as_sequence().unwrap().len(), 2);
 
         // The sandbox AWS SDK gets seeded placeholder credentials to sign with.
-        let placeholders = centaur_iron_proxy::placeholder_env(&[discovered.fragment.clone()]);
+        let placeholders =
+            centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
         assert_eq!(
             placeholders.get("AWS_ACCESS_KEY_ID").map(String::as_str),
             Some("AWS_ACCESS_KEY_ID")

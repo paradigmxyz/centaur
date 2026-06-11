@@ -310,6 +310,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "sqlx",
+ "subtle",
  "thiserror",
  "tokio",
  "toml",

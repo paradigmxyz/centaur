@@ -84,9 +84,9 @@ impl SandboxBackend for LocalSandboxBackend {
             command.env(&env.name, &env.value);
         }
 
-        let mut child = command.spawn().map_err(|err| {
-            SandboxError::Backend(format!("failed to spawn local sandbox: {err}"))
-        })?;
+        let mut child = command
+            .spawn()
+            .map_err(|err| SandboxError::backend_source("failed to spawn local sandbox", err))?;
 
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
@@ -123,15 +123,15 @@ impl SandboxBackend for LocalSandboxBackend {
         let stdin = sandbox
             .stdin
             .take()
-            .ok_or_else(|| SandboxError::Io("stdin is already open or closed".to_owned()))?;
+            .ok_or_else(|| SandboxError::io("stdin is already open or closed"))?;
         let stdout = sandbox
             .stdout
             .take()
-            .ok_or_else(|| SandboxError::Io("stdout is already open or closed".to_owned()))?;
+            .ok_or_else(|| SandboxError::io("stdout is already open or closed"))?;
         let stderr = sandbox
             .stderr
             .take()
-            .ok_or_else(|| SandboxError::Io("stderr is already open or closed".to_owned()))?;
+            .ok_or_else(|| SandboxError::io("stderr is already open or closed"))?;
         Ok(SandboxIo::new(
             Box::pin(stdin) as SandboxWrite,
             Box::pin(stdout) as SandboxRead,
@@ -219,7 +219,7 @@ async fn refresh_status(sandbox: &mut LocalSandbox) -> SandboxResult<SandboxStat
     match sandbox
         .child
         .try_wait()
-        .map_err(|err| SandboxError::Backend(format!("failed to poll local sandbox: {err}")))?
+        .map_err(|err| SandboxError::backend_source("failed to poll local sandbox", err))?
     {
         Some(_) => {
             sandbox.status = SandboxStatus::Stopped;
@@ -248,12 +248,12 @@ async fn send_signal(child: &Child, signal: &str) -> SandboxResult<()> {
         .arg(pid.to_string())
         .status()
         .await
-        .map_err(|err| SandboxError::Backend(format!("failed to send SIG{signal}: {err}")))?;
+        .map_err(|err| SandboxError::backend_source(format!("failed to send SIG{signal}"), err))?;
 
     if status.success() {
         Ok(())
     } else {
-        Err(SandboxError::Backend(format!(
+        Err(SandboxError::backend(format!(
             "kill -{signal} {pid} exited with {status}"
         )))
     }

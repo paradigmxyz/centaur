@@ -16,3 +16,6 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json", "registry"] }
+
+[lints]
+workspace = true

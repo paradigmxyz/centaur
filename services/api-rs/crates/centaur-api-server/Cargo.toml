@@ -31,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
@@ -42,3 +43,6 @@ urlencoding.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 tower.workspace = true
+
+[lints]
+workspace = true

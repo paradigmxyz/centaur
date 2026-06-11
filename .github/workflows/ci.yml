@@ -53,6 +53,35 @@ jobs:
             tests/test_agent_control_plane.py::test_worker_stops_session_when_cancel_requested_mid_stream \
             tests/test_agent_control_plane.py::test_worker_maps_amp_user_cancelled_error_to_cancelled
 
+  rust-api:
+    name: Rust API fmt, clippy, and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: services/api-rs
+
+      - name: Format
+        working-directory: services/api-rs
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: services/api-rs
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: services/api-rs
+        run: cargo test --workspace
+
   slackbot-targeted-tests:
     name: Slackbot interface and delivery tests
     runs-on: ubuntu-latest

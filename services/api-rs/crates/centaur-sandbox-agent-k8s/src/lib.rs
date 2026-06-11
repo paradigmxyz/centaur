@@ -169,7 +169,7 @@ impl AgentSandboxBackend {
     pub async fn try_default(namespace: impl Into<String>) -> SandboxResult<Self> {
         let client = Client::try_default()
             .await
-            .map_err(|err| SandboxError::Backend(format!("create kube client: {err}")))?;
+            .map_err(|err| SandboxError::backend_source("create kube client", err))?;
         Ok(Self::new(client, AgentSandboxConfig::new(namespace)))
     }
 
@@ -277,11 +277,9 @@ impl AgentSandboxBackend {
         let stderr = attached
             .stderr()
             .map(|stream| Box::pin(stream) as Pin<Box<dyn AsyncRead + Send>>);
-        let stdin = stdin.ok_or_else(|| SandboxError::Io("stdin was not attached".to_owned()))?;
-        let stdout =
-            stdout.ok_or_else(|| SandboxError::Io("stdout was not attached".to_owned()))?;
-        let stderr =
-            stderr.ok_or_else(|| SandboxError::Io("stderr was not attached".to_owned()))?;
+        let stdin = stdin.ok_or_else(|| SandboxError::io("stdin was not attached"))?;
+        let stdout = stdout.ok_or_else(|| SandboxError::io("stdout was not attached"))?;
+        let stderr = stderr.ok_or_else(|| SandboxError::io("stderr was not attached"))?;
         // Keep kube's attach process alive as long as the returned streams are in use.
         Ok(SandboxIo::with_guard(stdin, stdout, stderr, attached))
     }
@@ -806,7 +804,7 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
     if is_not_found(&err) {
         SandboxError::NotFound(operation.to_owned())
     } else {
-        SandboxError::Backend(format!("{operation}: {err}"))
+        SandboxError::backend_source(operation, err)
     }
 }
 

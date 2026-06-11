@@ -39,6 +39,11 @@ const UNKNOWN_TASK_DEFER_JITTER_SECONDS: u64 = 15;
 pub enum Error {
     #[error("{0}")]
     InvalidOptions(String),
+    /// A task handler failed with an application-level error. The boxed
+    /// error keeps the full `source()` chain intact instead of flattening
+    /// it to a string.
+    #[error(transparent)]
+    TaskFailed(Box<dyn std::error::Error + Send + Sync>),
     #[error("queue name must be provided")]
     MissingQueueName,
     #[error("queue name {name:?} is too long (max {max} bytes)")]
@@ -1929,6 +1934,18 @@ fn map_task_state_error(err: sqlx::Error) -> Error {
 }
 
 fn serialize_error(err: &Error) -> Value {
+    // Persist the full source chain: the failure payload is often the only
+    // forensic artifact of a failed run.
+    let mut message = err.to_string();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        let rendered = cause.to_string();
+        if !message.contains(&rendered) {
+            message.push_str(": ");
+            message.push_str(&rendered);
+        }
+        source = cause.source();
+    }
     json!({
         "name": match err {
             Error::Timeout(_) => "TimeoutError",
@@ -1937,7 +1954,7 @@ fn serialize_error(err: &Error) -> Value {
             Error::Suspend => "SuspendTask",
             _ => "Error",
         },
-        "message": err.to_string(),
+        "message": message,
     })
 }
 

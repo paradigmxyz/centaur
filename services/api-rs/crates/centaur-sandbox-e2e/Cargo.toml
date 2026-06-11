@@ -14,3 +14,6 @@ clap.workspace = true
 kube.workspace = true
 test-case.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
