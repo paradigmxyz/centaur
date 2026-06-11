@@ -17,7 +17,8 @@ use centaur_session_core::{
     SessionMessageInput, ThreadKey,
 };
 use centaur_session_sqlx::{
-    PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
+    CreateFeedbackInput, PgSessionStore, SessionEventListener, SessionStoreError, UserFeedback,
+    default_metadata,
 };
 use centaur_telemetry::{
     record_sandbox_warm_pool_claim, record_session_execution_finished,
@@ -377,6 +378,13 @@ impl SessionRuntime {
             }
         }
         Ok(report)
+    }
+
+    pub async fn create_feedback(
+        &self,
+        input: CreateFeedbackInput,
+    ) -> Result<UserFeedback, SessionRuntimeError> {
+        Ok(self.store.create_feedback(input).await?)
     }
 
     pub async fn execute_session(

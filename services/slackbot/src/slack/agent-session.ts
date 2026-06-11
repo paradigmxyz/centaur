@@ -721,6 +721,7 @@ function hasVisibleStreamChunks(chunks: SlackStreamChunk[]): boolean {
     if (chunk.type === 'markdown_text') return Boolean(chunk.text?.trim())
     if (chunk.type === 'task_update') return Boolean(chunk.title?.trim())
     if (chunk.type === 'plan_update') return Boolean(chunk.title?.trim())
+    if (chunk.type === 'blocks') return Boolean(chunk.blocks.length)
     return false
   })
 }
