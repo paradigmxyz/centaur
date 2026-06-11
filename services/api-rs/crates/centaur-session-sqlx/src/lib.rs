@@ -245,6 +245,25 @@ impl PgSessionStore {
         row.map(TryInto::try_into).transpose()
     }
 
+    /// Lists every execution still marked queued or running. Used at startup
+    /// to adopt executions orphaned by a previous control plane process.
+    pub async fn list_active_executions(&self) -> Result<Vec<SessionExecution>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            from session_executions
+            where status in ($1, $2)
+            order by created_at, execution_id
+            "#,
+        )
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     pub async fn latest_execution_for_thread(
         &self,
         thread_key: &ThreadKey,

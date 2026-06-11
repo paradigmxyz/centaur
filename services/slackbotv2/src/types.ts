@@ -88,6 +88,8 @@ export type SlackbotV2Options = {
   maxDurationMs?: number
   postgresUrl?: string
   recoverRenderObligationsOnStart?: boolean
+  /** Per-thread deadline for one recovery attempt during the startup scan. */
+  renderRecoveryThreadTimeoutMs?: number
   signingSecret: string
   slackApiUrl?: string
   state?: StateAdapter

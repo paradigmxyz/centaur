@@ -82,6 +82,8 @@ const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
+const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
+const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const SLACK_TASK_DETAILS_MAX_CHARS = 500
@@ -525,10 +527,11 @@ async function recoverRenderObligationsWithRetry(
   // Wait for Postgres before scanning for obligations. This is also what warms the
   // shared pool at startup, so transient connect failures don't wedge the bot.
   await ensureStateConnected(state, options)
+  const failureCounts = new Map<string, number>()
   let attempt = 0
   while (true) {
     try {
-      const deferredCount = await recoverRenderObligations(chat, state, options)
+      const deferredCount = await recoverRenderObligations(chat, state, options, failureCounts)
       if (deferredCount === 0) return
       const delayMs = renderRetryDelayMs(attempt)
       attempt += 1
@@ -550,12 +553,14 @@ async function recoverRenderObligationsWithRetry(
 async function recoverRenderObligations(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
-  options: SlackbotV2Options
+  options: SlackbotV2Options,
+  failureCounts: Map<string, number>
 ): Promise<number> {
   const startedAtMs = nowMs()
   await chat.initialize()
   const indexedThreadIds = await state.getList<string>(RENDER_OBLIGATION_INDEX_KEY)
   const threadIds = Array.from(new Set(indexedThreadIds))
+  const timeoutMs = options.renderRecoveryThreadTimeoutMs ?? RENDER_RECOVERY_THREAD_TIMEOUT_MS
   let deferredCount = 0
   traceLog(options, 'slackbotv2_render_recovery_scan', undefined, {
     obligation_count: threadIds.length,
@@ -569,6 +574,22 @@ async function recoverRenderObligations(
       const obligation = threadState?.renderObligation
       if (!obligation) continue
 
+      // An obligation that keeps failing non-retryably (for example corrupt
+      // state that can never address a Slack thread) must not poison the
+      // retry loop forever: give up on it and unwedge the thread.
+      if ((failureCounts.get(threadId) ?? 0) >= RENDER_RECOVERY_MAX_THREAD_FAILURES) {
+        traceLog(options, 'slackbotv2_render_recovery_abandoned', undefined, {
+          failure_count: failureCounts.get(threadId),
+          thread_id: threadId
+        })
+        await thread.setState({
+          activeExecution: false,
+          lastEventId: threadState?.lastEventId ?? 0,
+          renderObligation: null
+        })
+        continue
+      }
+
       const leaseToken = randomUUID()
       const leaseAcquired = await state.setIfNotExists(
         renderRecoveryLeaseKey(threadId),
@@ -576,27 +597,56 @@ async function recoverRenderObligations(
         RENDER_RECOVERY_LEASE_TTL_MS
       )
       if (!leaseAcquired) {
+        // Another holder (or a lease from a crashed pass, pending TTL expiry)
+        // owns this thread. Count it as deferred so the retry loop keeps
+        // running until the obligation is actually resolved.
+        deferredCount += 1
         traceLog(options, 'slackbotv2_render_recovery_lease_skipped', undefined, {
           thread_id: threadId
         })
         continue
       }
-
-      try {
-        if (await recoverRenderObligation(chat, state, options, threadId, obligation)) {
-          deferredCount += 1
-        }
-      } finally {
+      const releaseLease = async (): Promise<void> => {
         const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
         if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
       }
+
+      // A single hung recovery (for example an event stream that never
+      // produces a chunk) must not block every obligation queued behind it.
+      // Race a deadline; on timeout move on and leave the attempt running
+      // detached - it may still finish and clear the obligation, which is why
+      // the lease is kept so a later pass does not start a duplicate render.
+      const recovery = recoverRenderObligation(chat, state, options, threadId, obligation)
+      let outcome: { timedOut: true } | { timedOut: false; deferred: boolean }
+      try {
+        outcome = await Promise.race([
+          recovery.then(deferred => ({ timedOut: false as const, deferred })),
+          sleep(timeoutMs).then(() => ({ timedOut: true as const }))
+        ])
+      } catch (error) {
+        await releaseLease()
+        throw error
+      }
+      if (outcome.timedOut) {
+        void recovery.catch(() => undefined)
+        deferredCount += 1
+        traceLog(options, 'slackbotv2_render_recovery_thread_timeout', undefined, {
+          thread_id: threadId,
+          timeout_ms: timeoutMs
+        })
+        continue
+      }
+      await releaseLease()
+      if (outcome.deferred) deferredCount += 1
     } catch (error) {
       // One thread's corrupt state or failed render must not abort the scan:
-      // log it, count it as deferred so a later pass retries it, and keep
-      // recovering the remaining threads.
+      // log it, count it as deferred so a later pass retries it (up to the
+      // failure budget above), and keep recovering the remaining threads.
+      failureCounts.set(threadId, (failureCounts.get(threadId) ?? 0) + 1)
       deferredCount += 1
       traceLog(options, 'slackbotv2_render_recovery_thread_failed', undefined, {
         error: errorMessage(error),
+        failure_count: failureCounts.get(threadId),
         thread_id: threadId
       })
     }

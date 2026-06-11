@@ -143,6 +143,16 @@ where
         self.backend.status(id).await
     }
 
+    /// Read the sandbox workload's recorded stdout history since `since`.
+    /// Backends without recorded output return `SandboxError::Unsupported`.
+    pub async fn read_output_since(
+        &self,
+        id: &SandboxId,
+        since: Option<std::time::SystemTime>,
+    ) -> SandboxResult<Vec<String>> {
+        self.backend.read_output_since(id, since).await
+    }
+
     pub async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
         self.backend.observe(id).await
     }

@@ -47,13 +47,13 @@ toolServer:
   ref: ""
   # Subdirectory in the repo holding the tools tree (mounted at /app/tools).
   subdir: tools
-  # Additional owner/name repos layering org tools/ + workflows/ trees onto the
-  # base set (the post-overlay-image org-overlay mechanism). Each repo is added
-  # to the repo-cache automatically (pin a branch via repoCache.repositoryRefs;
-  # default = the repo's default branch) and its tools/ and workflows/ dirs are
-  # appended to TOOL_DIRS / WORKFLOW_DIRS using the sandbox-side repos mount
-  # path, which api-rs also mounts.
-  extraRepos: []
+  # Additional repo/subdir sources copied after the base tools source. Later
+  # sources shadow earlier ones when tool directory names collide. These repos
+  # are cached automatically when repoCache.enabled=true.
+  extraSources: []
+  # - repo: tempoxyz/centaur-tempo
+  #   ref: ""
+  #   subdir: tools
   # Git-capable image the clone init container runs in; empty fields fall back to
   # sandbox.image (which carries git).
   runnerImage:
@@ -316,25 +316,6 @@ slackbotv2:
   assistantStatus: ""
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
-  extraEnv: {}
-  resources: {}
-
-# Discord chat ingress — mirrors slackbotv2, forwards to the api-rs control plane (:8080) over a
-# persistent Discord Gateway connection. Off by default; needs a Discord app + Message Content
-# Intent + a guild allowlist. Always exactly one replica (singleton Gateway session).
-discordbot:
-  enabled: false
-  image:
-    repository: centaur-discordbot
-    tag: latest
-    pullPolicy: Always
-  userName: centaur
-  # Comma/space-separated Discord guild IDs. The bot is INERT (ignores all messages) until set.
-  guildAllowlist: ""
-  # Comma/space-separated role IDs whose mentions also trigger the bot.
-  mentionRoleIds: ""
-  # Rename auto-created threads to the triggering message; set false to keep generic names.
-  nameThreads: true
   extraEnv: {}
   resources: {}
 

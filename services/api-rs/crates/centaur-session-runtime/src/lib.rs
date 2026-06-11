@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use centaur_iron_control::SessionRegistrar;
@@ -1129,6 +1129,223 @@ impl SessionRuntime {
             );
         }
         result
+    }
+
+    /// Reconciles executions left `queued`/`running` by a previous control
+    /// plane process. Execution rows never time out on their own: the only
+    /// writer of a terminal status is the process that was watching the
+    /// sandbox, so a kill mid-turn leaves the row active forever, wedging the
+    /// thread (the one-active-execution index blocks new executes) and any
+    /// event-stream consumer waiting for a terminal event.
+    ///
+    /// Adoption order of preference:
+    /// 1. The sandbox already finished the turn while nobody was attached:
+    ///    recover the terminal outcome from the backend's recorded output.
+    /// 2. The sandbox is still running the turn: re-attach the stdout pump
+    ///    and re-arm the remaining max-duration deadline.
+    /// 3. The sandbox is gone: record the failure honestly.
+    pub async fn adopt_orphaned_executions(&self) {
+        let executions = match self.store.list_active_executions().await {
+            Ok(executions) => executions,
+            Err(error) => {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_scan_failed",
+                    %error,
+                    "failed to list orphaned executions"
+                );
+                return;
+            }
+        };
+        if executions.is_empty() {
+            return;
+        }
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "execution_adoption_scan",
+            orphan_count = executions.len(),
+            "adopting executions orphaned by a previous control plane process"
+        );
+        for execution in executions {
+            if let Err(error) = self.adopt_orphaned_execution(&execution).await {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_failed",
+                    thread_key = %execution.thread_key,
+                    execution_id = %execution.execution_id,
+                    %error,
+                    "failed to adopt orphaned execution; will retry on next startup"
+                );
+            }
+        }
+    }
+
+    async fn adopt_orphaned_execution(
+        &self,
+        execution: &SessionExecution,
+    ) -> Result<(), SessionRuntimeError> {
+        let thread_key = &execution.thread_key;
+        let execution_id = execution.execution_id.as_str();
+        if execution.status == ExecutionStatus::Queued {
+            // Input is only written after an execution is marked running, so
+            // a queued orphan never reached the harness: nothing can come.
+            self.fail_orphaned_execution(
+                thread_key,
+                execution_id,
+                "",
+                "orphaned before input was sent",
+            )
+            .await;
+            return Ok(());
+        }
+        let session = self.store.get_session(thread_key).await?;
+        let Some(sandbox_id) = session.sandbox_id.as_deref() else {
+            self.fail_orphaned_execution(
+                thread_key,
+                execution_id,
+                "",
+                "orphaned with no sandbox assigned",
+            )
+            .await;
+            return Ok(());
+        };
+        let id = SandboxId::new(sandbox_id);
+        let status = match self.sandbox_runtime.manager.status(&id).await {
+            Ok(status) => status,
+            Err(SandboxError::NotFound(_)) => SandboxStatus::Gone,
+            // Transient status failures must not fail a possibly live
+            // execution; surface the error and retry on the next startup.
+            Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+        };
+        if !status.can_open_io() {
+            self.fail_orphaned_execution(
+                thread_key,
+                execution_id,
+                sandbox_id,
+                &format!("sandbox no longer accepts io (status {status:?})"),
+            )
+            .await;
+            return Ok(());
+        }
+
+        // The turn may have finished while no control plane was attached. An
+        // attach stream cannot replay that output, but the backend's recorded
+        // history (pod logs) can.
+        let since = execution.started_at.unwrap_or(execution.created_at);
+        let lines = match self
+            .sandbox_runtime
+            .manager
+            .read_output_since(&id, Some(SystemTime::from(since)))
+            .await
+        {
+            Ok(lines) => lines,
+            Err(SandboxError::Unsupported { .. }) => Vec::new(),
+            Err(error) => {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_log_read_failed",
+                    thread_key = %thread_key,
+                    execution_id,
+                    sandbox_id,
+                    %error,
+                    "failed to read recorded sandbox output; adopting live"
+                );
+                Vec::new()
+            }
+        };
+        if let Some(terminal) = terminal_output_from_lines(&lines) {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_adopted",
+                thread_key = %thread_key,
+                execution_id,
+                sandbox_id,
+                mode = "recorded_output",
+                "adopted orphaned execution from recorded sandbox output"
+            );
+            let _ = self
+                .store
+                .append_event(
+                    thread_key,
+                    Some(execution_id),
+                    "session.execution_adopted",
+                    json!({ "sandbox_id": sandbox_id, "mode": "recorded_output" }),
+                )
+                .await;
+            record_terminal_output(
+                &self.context(),
+                thread_key,
+                sandbox_id,
+                execution_id,
+                terminal,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // No terminal in the recorded output: treat the turn as still in
+        // flight. Re-attach the stdout pump and re-arm the remaining
+        // max-duration budget so an adopted-but-silent turn stays bounded.
+        self.ensure_session_pipe(thread_key, sandbox_id).await?;
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "execution_adopted",
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id,
+            mode = "live_attach",
+            "adopted orphaned execution with a live sandbox attach"
+        );
+        let _ = self
+            .store
+            .append_event(
+                thread_key,
+                Some(execution_id),
+                "session.execution_adopted",
+                json!({ "sandbox_id": sandbox_id, "mode": "live_attach" }),
+            )
+            .await;
+        if let Some(max_duration) = max_duration_from_execution(execution) {
+            let elapsed = SystemTime::now()
+                .duration_since(SystemTime::from(since))
+                .unwrap_or_default();
+            spawn_max_duration_failure(
+                self.context(),
+                thread_key.clone(),
+                execution.execution_id.clone(),
+                max_duration.saturating_sub(elapsed),
+                idle_timeout_from_execution(execution),
+            );
+        }
+        Ok(())
+    }
+
+    async fn fail_orphaned_execution(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        sandbox_id: &str,
+        detail: &str,
+    ) {
+        let error = format!("execution orphaned by control plane restart; {detail}");
+        if let Err(record_error) = record_terminal_output(
+            &self.context(),
+            thread_key,
+            sandbox_id,
+            execution_id,
+            TerminalOutput::Failed { error },
+        )
+        .await
+        {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_adoption_fail_record_failed",
+                thread_key = %thread_key,
+                execution_id,
+                error = %record_error,
+                "failed to record orphaned execution failure"
+            );
+        }
     }
 }
 
@@ -3080,6 +3297,36 @@ fn idle_timeout_from_execution(execution: &SessionExecution) -> Option<Duration>
         .and_then(|value| nonzero_duration_millis(value).ok())
 }
 
+fn max_duration_from_execution(execution: &SessionExecution) -> Option<Duration> {
+    execution
+        .metadata
+        .get("max_duration_ms")
+        .and_then(Value::as_u64)
+        .and_then(|value| nonzero_duration_millis(value).ok())
+}
+
+/// Folds recorded sandbox output the same way the live stdout pump does,
+/// returning the first terminal outcome (with its accumulated final answer)
+/// if the recorded history already contains the end of the turn.
+fn terminal_output_from_lines(lines: &[String]) -> Option<TerminalOutput> {
+    let mut final_answer_text = String::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(update) = output_line_final_answer_text(&value) {
+            match update {
+                FinalAnswerTextUpdate::Append(delta) => final_answer_text.push_str(&delta),
+                FinalAnswerTextUpdate::Replace(canonical) => final_answer_text = canonical,
+            }
+        }
+        if let Some(terminal) = terminal_output(&value, &final_answer_text) {
+            return Some(terminal);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Error)]
 pub enum SessionRuntimeError {
     #[error("{0}")]
@@ -3862,5 +4109,324 @@ mod tests {
             .iter()
             .find(|env| env.name == name)
             .map(|env| env.value.as_str())
+    }
+}
+
+/// Integration tests for orphaned-execution adoption. They need a real
+/// Postgres; set `SESSION_RUNTIME_TEST_DATABASE_URL` to run them (they skip
+/// silently otherwise, mirroring `ABSURD_TEST_DATABASE_URL` in absurd-sdk).
+#[cfg(test)]
+mod adoption_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use centaur_sandbox_core::{ObservedSandbox, SandboxHandle, SandboxIo, SandboxResult};
+    use tokio::io::{AsyncWriteExt, DuplexStream};
+
+    use super::*;
+
+    /// The adoption scan is database-wide, so concurrently running tests
+    /// would adopt each other's executions. Serialize the module; every test
+    /// fully terminalizes its own executions before releasing the lock.
+    static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+    struct MockBackend {
+        ios: Mutex<VecDeque<SandboxIo>>,
+        recorded_output: Vec<String>,
+        open_count: AtomicUsize,
+        status: std::sync::Mutex<SandboxStatus>,
+    }
+
+    impl MockBackend {
+        fn new(status: SandboxStatus, recorded_output: Vec<String>) -> Self {
+            Self {
+                ios: Mutex::new(VecDeque::new()),
+                recorded_output,
+                open_count: AtomicUsize::new(0),
+                status: std::sync::Mutex::new(status),
+            }
+        }
+
+        async fn push_io(&self, io: SandboxIo) {
+            self.ios.lock().await.push_back(io);
+        }
+
+        fn opens(&self) -> usize {
+            self.open_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SandboxBackend for MockBackend {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn create(&self, _spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
+            Ok(SandboxHandle::new(SandboxId::new("mock-sbx"), "mock"))
+        }
+
+        async fn open_io(&self, _id: &SandboxId) -> SandboxResult<SandboxIo> {
+            self.open_count.fetch_add(1, Ordering::SeqCst);
+            self.ios
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| SandboxError::io("mock backend has no more ios"))
+        }
+
+        async fn read_output_since(
+            &self,
+            _id: &SandboxId,
+            _since: Option<SystemTime>,
+        ) -> SandboxResult<Vec<String>> {
+            Ok(self.recorded_output.clone())
+        }
+
+        async fn status(&self, _id: &SandboxId) -> SandboxResult<SandboxStatus> {
+            Ok(self.status.lock().unwrap().clone())
+        }
+
+        async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
+            let status = self.status(id).await?;
+            Ok(ObservedSandbox::new(id.clone(), "mock", status))
+        }
+
+        async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
+            Ok(Vec::new())
+        }
+
+        async fn stop(&self, _id: &SandboxId) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &SandboxId) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _id: &SandboxId) -> SandboxResult<()> {
+            Ok(())
+        }
+    }
+
+    fn mock_io() -> (SandboxIo, DuplexStream, DuplexStream) {
+        let (stdin_near, stdin_far) = tokio::io::duplex(64 * 1024);
+        let (stdout_near, stdout_far) = tokio::io::duplex(64 * 1024);
+        let (stderr_near, _stderr_far) = tokio::io::duplex(1024);
+        let io = SandboxIo::new(
+            Box::pin(stdin_near),
+            Box::pin(stdout_near),
+            Box::pin(stderr_near),
+        );
+        (io, stdout_far, stdin_far)
+    }
+
+    async fn test_store() -> Option<PgSessionStore> {
+        let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
+            eprintln!("skipping: SESSION_RUNTIME_TEST_DATABASE_URL not set");
+            return None;
+        };
+        let store = PgSessionStore::connect(&url)
+            .await
+            .expect("connect test db");
+        store.run_migrations().await.expect("run migrations");
+        Some(store)
+    }
+
+    async fn orphaned_execution(
+        store: &PgSessionStore,
+        thread_key: &ThreadKey,
+        sandbox_id: Option<&str>,
+        running: bool,
+    ) -> String {
+        store
+            .create_or_get_session(thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+        if sandbox_id.is_some() {
+            store
+                .update_sandbox_id(thread_key, sandbox_id)
+                .await
+                .expect("set sandbox id");
+        }
+        let created = store
+            .create_execution(thread_key, None, json!({}))
+            .await
+            .expect("create execution");
+        let execution_id = created.execution.execution_id;
+        if running {
+            store
+                .mark_execution_running(&execution_id)
+                .await
+                .expect("mark running");
+        }
+        execution_id
+    }
+
+    async fn wait_for_event(store: &PgSessionStore, thread_key: &ThreadKey, event_type: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let events = store
+                .list_events_after(thread_key, 0, None, 1000)
+                .await
+                .expect("list events");
+            if events.iter().any(|event| event.event_type == event_type) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {event_type}"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn events(store: &PgSessionStore, thread_key: &ThreadKey) -> Vec<SessionEvent> {
+        store
+            .list_events_after(thread_key, 0, None, 1000)
+            .await
+            .expect("list events")
+    }
+
+    fn runtime_with(store: &PgSessionStore, backend: Arc<MockBackend>) -> SessionRuntime {
+        SessionRuntime::new(
+            store.clone(),
+            SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopts_finished_turn_from_recorded_sandbox_output() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-logs-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+
+        let backend = Arc::new(MockBackend::new(
+            SandboxStatus::Running,
+            vec![
+                json!({"type": "item.completed", "item": {"id": "msg-1", "type": "agentMessage", "text": "Done: pushed commit abc123.", "phase": "final_answer"}}).to_string(),
+                json!({"type": "turn.completed", "turn": {"id": "turn-1", "status": "completed"}}).to_string(),
+            ],
+        ));
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .any(|event| event.event_type == "session.execution_adopted"),
+            "expected an adoption event"
+        );
+        let completed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_completed")
+            .expect("completed event");
+        assert_eq!(
+            completed.payload["result_text"].as_str(),
+            Some("Done: pushed commit abc123.")
+        );
+        // The terminal came from recorded output; no live attach was needed.
+        assert_eq!(backend.opens(), 0);
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_ne!(session.status.as_ref(), "failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopts_live_when_recorded_output_has_no_terminal() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-live-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+        assert_eq!(backend.opens(), 1);
+
+        stdout
+            .write_all(
+                b"{\"type\":\"turn.completed\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}\n",
+            )
+            .await
+            .unwrap();
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter().any(|event| {
+                event.event_type == "session.execution_adopted"
+                    && event.payload["mode"] == json!("live_attach")
+            }),
+            "expected a live adoption event"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fails_orphans_whose_sandbox_is_gone() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-gone-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Gone, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let all = events(&store, &thread_key).await;
+        let failed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_failed")
+            .expect("failed event");
+        let error = failed.payload["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("execution orphaned by control plane restart"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("sandbox no longer accepts io"),
+            "expected status detail: {error}"
+        );
+        assert_eq!(backend.opens(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fails_queued_orphans_that_never_received_input() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-queued-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let all = events(&store, &thread_key).await;
+        let failed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_failed")
+            .expect("failed event");
+        let error = failed.payload["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("orphaned before input was sent"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(backend.opens(), 0);
     }
 }

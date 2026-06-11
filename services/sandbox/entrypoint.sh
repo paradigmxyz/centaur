@@ -139,6 +139,36 @@ fi
 HARNESS_CONFIG_DIR="${CENTAUR_HARNESS_CONFIG_DIR:-$HOME_DIR/harness}"
 if [ -f "$HARNESS_CONFIG_DIR/codex/config.toml" ]; then
     cp "$HARNESS_CONFIG_DIR/codex/config.toml" "$HOME_DIR/.codex/config.toml"
+    CODEX_CONFIG_PATH="$HOME_DIR/.codex/config.toml" python3 - <<'PYEOF'
+from pathlib import Path
+import os
+
+path = Path(os.environ["CODEX_CONFIG_PATH"])
+lines = path.read_text().splitlines()
+features_start = next((i for i, line in enumerate(lines) if line.strip() == "[features]"), None)
+if features_start is None:
+    lines.extend(["", "[features]", "multi_agent = false", "multi_agent_v2 = false"])
+else:
+    features_end = next(
+        (i for i in range(features_start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    feature_names = {"multi_agent", "multi_agent_v2"}
+    seen = set()
+    rewritten = []
+    for line in lines[features_start + 1 : features_end]:
+        stripped = line.strip()
+        name = stripped.split("=", 1)[0].strip() if "=" in stripped else None
+        if name in feature_names:
+            rewritten.append(f"{name} = false")
+            seen.add(name)
+        else:
+            rewritten.append(line)
+    for name in sorted(feature_names - seen):
+        rewritten.append(f"{name} = false")
+    lines = lines[: features_start + 1] + rewritten + lines[features_end:]
+path.write_text("\n".join(lines).rstrip() + "\n")
+PYEOF
 else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
     exit 1
