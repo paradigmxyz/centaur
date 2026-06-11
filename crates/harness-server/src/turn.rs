@@ -8,6 +8,7 @@ use codex_app_server_protocol::{
     Turn, TurnCompletedNotification, TurnError, TurnItemsView, TurnStartedNotification, TurnStatus,
     UserInput,
 };
+use codex_protocol::models::MessagePhase;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
@@ -150,13 +151,23 @@ impl CodexTurnNormalizer {
 
         match event {
             NormalizedEvent::SessionStarted { .. } => {}
-            NormalizedEvent::AssistantMessage {
-                partial, content, ..
+            NormalizedEvent::AgentMessageStarted {
+                item_id,
+                stop_reason,
             } => {
+                let phase = phase_from_stop_reason(stop_reason.as_deref());
+                self.start_agent_message_item(item_id, phase, &mut out);
+            }
+            NormalizedEvent::AssistantMessage {
+                partial,
+                stop_reason,
+                content,
+            } => {
+                let phase = phase_from_stop_reason(stop_reason.as_deref());
                 for item in content {
                     match item {
                         NormalizedContent::AgentText { item_id, text } => {
-                            self.emit_agent_text(item_id, text, *partial, &mut out);
+                            self.emit_agent_text(item_id, text, *partial, phase.clone(), &mut out);
                         }
                         NormalizedContent::ReasoningText { item_id, text } => {
                             self.emit_reasoning_text(item_id, text, *partial, &mut out);
@@ -312,23 +323,34 @@ impl CodexTurnNormalizer {
         })
     }
 
+    fn start_agent_message_item(
+        &mut self,
+        item_id: &str,
+        phase: Option<MessagePhase>,
+        out: &mut Vec<ServerNotification>,
+    ) {
+        if self.started_items.contains_key(item_id) {
+            return;
+        }
+        let item = ThreadItem::AgentMessage {
+            id: item_id.to_string(),
+            text: String::new(),
+            phase,
+            memory_citation: None,
+        };
+        self.started_items.insert(item_id.to_string(), item.clone());
+        out.push(self.item_started(item));
+    }
+
     fn emit_agent_text(
         &mut self,
         item_id: &str,
         text: &str,
         partial: bool,
+        phase: Option<MessagePhase>,
         out: &mut Vec<ServerNotification>,
     ) {
-        if !self.started_items.contains_key(item_id) {
-            let item = ThreadItem::AgentMessage {
-                id: item_id.to_string(),
-                text: String::new(),
-                phase: None,
-                memory_citation: None,
-            };
-            self.started_items.insert(item_id.to_string(), item.clone());
-            out.push(self.item_started(item));
-        }
+        self.start_agent_message_item(item_id, phase.clone(), out);
 
         let previous = self
             .text_by_item_id
@@ -355,7 +377,7 @@ impl CodexTurnNormalizer {
             let item = ThreadItem::AgentMessage {
                 id: item_id.to_string(),
                 text: final_text,
-                phase: None,
+                phase,
                 memory_citation: None,
             };
             self.completed_items.push(item.clone());
@@ -372,16 +394,7 @@ impl CodexTurnNormalizer {
         if delta.is_empty() {
             return;
         }
-        if !self.started_items.contains_key(item_id) {
-            let item = ThreadItem::AgentMessage {
-                id: item_id.to_string(),
-                text: String::new(),
-                phase: None,
-                memory_citation: None,
-            };
-            self.started_items.insert(item_id.to_string(), item.clone());
-            out.push(self.item_started(item));
-        }
+        self.start_agent_message_item(item_id, None, out);
         out.push(ServerNotification::AgentMessageDelta(
             AgentMessageDeltaNotification {
                 thread_id: self.thread_id.clone(),
@@ -672,6 +685,18 @@ impl CodexTurnNormalizer {
     }
 }
 
+/// Classifies an assistant message by its stop reason: `tool_use` means more
+/// work follows in the same turn (commentary), while `end_turn`/`stop_sequence`
+/// terminate the turn (final answer). Unknown reasons stay unphased so
+/// downstream keeps its compatibility behavior.
+fn phase_from_stop_reason(stop_reason: Option<&str>) -> Option<MessagePhase> {
+    match stop_reason {
+        Some("tool_use") => Some(MessagePhase::Commentary),
+        Some("end_turn" | "stop_sequence") => Some(MessagePhase::FinalAnswer),
+        _ => None,
+    }
+}
+
 fn tool_projection(tool: &str, arguments: &Value) -> ToolProjection {
     if matches!(tool, "Bash" | "shell_command")
         && let Some(command) = arguments.get("command").and_then(Value::as_str)
@@ -846,6 +871,50 @@ mod tests {
         assert_eq!(params["threadId"], "claude-session-1");
         assert_eq!(params["item"]["type"], "agentMessage");
         assert_eq!(params["item"]["text"], "final answer");
+    }
+
+    #[test]
+    fn stop_reason_projects_agent_message_phase() {
+        let mut normalizer = normalizer();
+        let events = process_anthropic(
+            &mut normalizer,
+            json!({
+                "type": "assistant",
+                "is_partial": false,
+                "message": {
+                    "id": "msg_1",
+                    "stop_reason": "tool_use",
+                    "content": [{"type": "text", "text": "Let me check."}]
+                }
+            }),
+        );
+        let started = notification_to_jsonrpc(&events[2]).unwrap().params.unwrap();
+        assert_eq!(started["item"]["type"], "agentMessage");
+        assert_eq!(started["item"]["phase"], "commentary");
+        let completed = notification_to_jsonrpc(&events[4]).unwrap().params.unwrap();
+        assert_eq!(completed["item"]["phase"], "commentary");
+
+        let events = process_anthropic(
+            &mut normalizer,
+            json!({
+                "type": "assistant",
+                "is_partial": false,
+                "message": {
+                    "id": "msg_2",
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "DONE"}]
+                }
+            }),
+        );
+        let completed = events
+            .iter()
+            .find_map(|event| {
+                let rpc = notification_to_jsonrpc(event).unwrap();
+                (rpc.method == "item/completed").then(|| rpc.params.unwrap())
+            })
+            .expect("final text should complete an item");
+        assert_eq!(completed["item"]["phase"], "final_answer");
+        assert_eq!(completed["item"]["text"], "DONE");
     }
 
     #[test]
