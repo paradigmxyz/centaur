@@ -658,10 +658,23 @@ impl PgSessionStore {
         .bind(input.user_id)
         .bind(input.channel_id)
         .bind(input.thread_ts)
-        .bind(input.execution_id)
+        .bind(&input.execution_id)
         .bind(input.metadata)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .and_then(|db_error| db_error.constraint())
+                == Some("user_feedback_execution_id_fkey")
+            {
+                SessionStoreError::ExecutionNotFound {
+                    execution_id: input.execution_id.unwrap_or_default(),
+                }
+            } else {
+                SessionStoreError::from(error)
+            }
+        })?;
 
         Ok(row.into())
     }
@@ -720,6 +733,8 @@ pub struct SessionEventNotification {
 pub enum SessionStoreError {
     #[error("session not found for thread_key {thread_key}")]
     NotFound { thread_key: String },
+    #[error("execution not found: {execution_id}")]
+    ExecutionNotFound { execution_id: String },
     #[error(
         "session {thread_key} already exists with harness_type {existing}, requested {requested}"
     )]

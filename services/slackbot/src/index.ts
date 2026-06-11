@@ -140,6 +140,10 @@ const slackHandler = async (c: Context<{ Variables: Variables }>) => {
   const envelope = parseSlackBody(c.get('slackRawBody'), c.req.header('content-type'))
   if (!envelope) return c.json({ ok: false, error: 'invalid_slack_payload' }, 400)
   if (envelope.type === 'url_verification') return c.json({ challenge: envelope.challenge })
+  // Slack app manifests typically point interactivity at the same request URL
+  // as events, so interactive payloads can arrive on any registered path.
+  // Dispatch them before the event dedup logic, which assumes event envelopes.
+  if (envelope.type && isSlackInteractiveType(envelope.type)) return slackActionHandler(c)
 
   const event = envelope.event
   const key = slackDedupKey({
@@ -680,6 +684,7 @@ type SlackActionPayload = {
   callback_id?: string
   actions?: Array<{ action_id?: string; value?: string }>
   view?: {
+    callback_id?: string
     private_metadata?: string
     state?: {
       values?: Record<string, Record<string, { type?: string; value?: string }>>
@@ -687,10 +692,24 @@ type SlackActionPayload = {
   }
 }
 
+// Block-button action_id and message-shortcut callback_id that open the
+// feedback modal, and the modal callback_id handled on submission.
+const FEEDBACK_OPEN_ID = 'centaur_feedback_open'
+const FEEDBACK_SUBMIT_CALLBACK_ID = 'centaur_feedback_submit'
+
+// Slack interactive payload max_length for plain_text_input is capped at 3000
+// by the Block Kit API; views.open rejects anything larger.
+const FEEDBACK_MESSAGE_MAX_LENGTH = 3000
+
+function isSlackInteractiveType(type: string): boolean {
+  return type === 'block_actions' || type === 'message_action' || type === 'view_submission'
+}
+
 async function slackActionHandler(c: Context<{ Variables: Variables }>) {
-  const payload = parseSlackBody(c.get('slackRawBody'), c.req.header('content-type')) as
-    | SlackActionPayload
-    | null
+  const payload = parseSlackBody(
+    c.get('slackRawBody'),
+    c.req.header('content-type')
+  ) as SlackActionPayload | null
   if (!payload?.type) return c.json({ ok: false, error: 'invalid_slack_action' }, 400)
   if (payload.type === 'block_actions') return openFeedbackModal(c, payload)
   if (payload.type === 'message_action') return openFeedbackModal(c, payload)
@@ -699,49 +718,58 @@ async function slackActionHandler(c: Context<{ Variables: Variables }>) {
 }
 
 async function openFeedbackModal(c: Context, payload: SlackActionPayload) {
-  const action = payload.actions?.find(action => action.action_id === 'centaur_feedback_open')
+  const action = payload.actions?.find(action => action.action_id === FEEDBACK_OPEN_ID)
   if (payload.type === 'block_actions' && !action) return c.json({ ok: true })
+  if (payload.type === 'message_action' && payload.callback_id !== FEEDBACK_OPEN_ID) {
+    return c.json({ ok: true })
+  }
   if (!payload.trigger_id) return c.json({ ok: true })
   const metadata = {
     ...messageActionMetadata(payload),
     ...parseFeedbackMetadata(action?.value)
   }
   const { client } = await resolver.resolve({})
-  await client.views.open({
-    trigger_id: payload.trigger_id,
-    view: {
-      type: 'modal',
-      callback_id: 'centaur_feedback_submit',
-      title: { type: 'plain_text', text: 'Feedback' },
-      submit: { type: 'plain_text', text: 'Send' },
-      close: { type: 'plain_text', text: 'Cancel' },
-      private_metadata: JSON.stringify({
-        ...metadata,
-        user_id: payload.user?.id,
-        team_id: payload.team?.id,
-        channel_id: metadata.channel ?? payload.channel?.id,
-        thread_ts: metadata.thread_ts ?? payload.message?.thread_ts ?? payload.message?.ts
-      }),
-      blocks: [
-        {
-          type: 'input',
-          block_id: 'feedback',
-          element: {
-            type: 'plain_text_input',
-            action_id: 'message',
-            multiline: true,
-            max_length: 20000,
-            placeholder: { type: 'plain_text', text: 'What should we improve?' }
-          },
-          label: { type: 'plain_text', text: 'Feedback' }
-        }
-      ]
-    }
-  })
+  try {
+    await client.views.open({
+      trigger_id: payload.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: FEEDBACK_SUBMIT_CALLBACK_ID,
+        title: { type: 'plain_text', text: 'Feedback' },
+        submit: { type: 'plain_text', text: 'Send' },
+        close: { type: 'plain_text', text: 'Cancel' },
+        private_metadata: JSON.stringify({
+          ...metadata,
+          user_id: payload.user?.id,
+          team_id: payload.team?.id,
+          channel_id: metadata.channel ?? payload.channel?.id,
+          thread_ts: metadata.thread_ts ?? payload.message?.thread_ts ?? payload.message?.ts
+        }),
+        blocks: [
+          {
+            type: 'input',
+            block_id: 'feedback',
+            element: {
+              type: 'plain_text_input',
+              action_id: 'message',
+              multiline: true,
+              max_length: FEEDBACK_MESSAGE_MAX_LENGTH,
+              placeholder: { type: 'plain_text', text: 'What should we improve?' }
+            },
+            label: { type: 'plain_text', text: 'Feedback' }
+          }
+        ]
+      }
+    })
+  } catch (error) {
+    logError('slack_feedback_modal_open_failed', error)
+    return c.json({ ok: false, error: 'feedback_modal_open_failed' }, 502)
+  }
   return c.json({ ok: true })
 }
 
 async function submitFeedbackModal(c: Context, payload: SlackActionPayload) {
+  if (payload.view?.callback_id !== FEEDBACK_SUBMIT_CALLBACK_ID) return c.json({ ok: true })
   const message = payload.view?.state?.values?.feedback?.message?.value?.trim() ?? ''
   if (!message) {
     return c.json({
@@ -824,7 +852,9 @@ async function postFeedbackToCentaur(body: {
       'Content-Type': 'application/json',
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    // Slack expects the view_submission ack within 3 seconds.
+    signal: AbortSignal.timeout(2500)
   })
   if (!response.ok) throw new Error(`Centaur feedback API returned ${response.status}`)
 }

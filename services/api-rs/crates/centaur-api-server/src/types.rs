@@ -1,5 +1,7 @@
 use axum::response::sse::Event;
-use centaur_session_core::{HarnessType, SessionEvent, SessionMessageInput, ThreadKey};
+use centaur_session_core::{
+    HarnessType, SessionEvent, SessionMessageInput, ThreadKey, empty_object,
+};
 use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,7 +51,7 @@ pub struct CreateFeedbackRequest {
     pub channel_id: Option<String>,
     pub thread_ts: Option<String>,
     pub execution_id: Option<String>,
-    #[serde(default)]
+    #[serde(default = "empty_object")]
     pub metadata: Value,
 }
 
