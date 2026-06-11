@@ -571,3 +571,30 @@ def test_start_or_resume_thread_resumes_existing_thread(monkeypatch) -> None:
     assert wrapper.start_or_resume_thread() == "existing-thread-id"
     assert requests == ["thread/resume"]
     assert {"type": "thread.started", "thread_id": "existing-thread-id"} in emitted
+
+
+def test_export_slack_thread_env_handles_both_key_shapes(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    monkeypatch.delenv("SLACK_CHANNEL", raising=False)
+    monkeypatch.delenv("SLACK_THREAD_TS", raising=False)
+
+    wrapper.export_slack_thread_env("slack:C0A87C21805:1781122990.363779")
+    assert wrapper.os.environ["SLACK_CHANNEL"] == "C0A87C21805"
+    assert wrapper.os.environ["SLACK_THREAD_TS"] == "1781122990.363779"
+
+    wrapper.export_slack_thread_env("slack:T092R71U6QY:C0B2ZRAMV9C:1781123220.343859")
+    assert wrapper.os.environ["SLACK_CHANNEL"] == "C0B2ZRAMV9C"
+    assert wrapper.os.environ["SLACK_THREAD_TS"] == "1781123220.343859"
+
+
+def test_export_slack_thread_env_ignores_non_slack_keys(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    monkeypatch.delenv("SLACK_CHANNEL", raising=False)
+    monkeypatch.delenv("SLACK_THREAD_TS", raising=False)
+
+    wrapper.export_slack_thread_env("cli:test-thread")
+    wrapper.export_slack_thread_env("slack:onlyonepart")
+    wrapper.export_slack_thread_env("slack:a:b:c:d:e")
+
+    assert "SLACK_CHANNEL" not in wrapper.os.environ
+    assert "SLACK_THREAD_TS" not in wrapper.os.environ
