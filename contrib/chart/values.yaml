@@ -222,6 +222,11 @@ repoCache:
     token: ""
   egressPorts:
     - 443
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
   nodeSelector: {}
   tolerations: []
   affinity: {}
