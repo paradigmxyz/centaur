@@ -93,6 +93,9 @@ pub(crate) struct IronControlToolReconciler {
     base_infra_fragment: ProxyFragment,
     tool_dirs: Vec<PathBuf>,
     tool_git_source: Option<ToolGitSource>,
+    // Org overlay repos' tools dirs (unfiltered candidates — the repo-cache
+    // may not have cloned them yet, so existence is checked per cycle).
+    extra_tool_dirs: Vec<PathBuf>,
     interval: Duration,
 }
 
@@ -163,10 +166,17 @@ impl IronControlToolReconciler {
         if let Some(source) = &self.tool_git_source {
             source.sync()?;
             let tools_dir = source.tools_dir();
-            if source.repo_cache_path.is_some() && !tools_dir.is_dir() {
-                return Ok(Vec::new());
+            let mut dirs = Vec::new();
+            if !(source.repo_cache_path.is_some() && !tools_dir.is_dir()) {
+                dirs.push(tools_dir);
             }
-            return Ok(vec![tools_dir]);
+            dirs.extend(
+                self.extra_tool_dirs
+                    .iter()
+                    .filter(|dir| dir.is_dir())
+                    .cloned(),
+            );
+            return Ok(dirs);
         }
         Ok(self.tool_dirs.clone())
     }
@@ -582,6 +592,7 @@ impl SandboxArgs {
                 .to_config()
                 .as_ref()
                 .map(ToolGitSource::from_config),
+            extra_tool_dirs: self.tools_source.extra_tool_dir_candidates(),
             interval: Duration::from_secs(self.tool_proxy_reconcile_interval_secs),
         }))
     }
@@ -916,7 +927,14 @@ impl SandboxArgs {
         if let Some(tools) = self.tools_source.to_config() {
             let source = ToolGitSource::from_config(&tools);
             source.sync()?;
-            return Ok(vec![source.tools_dir()]);
+            let mut dirs = vec![source.tools_dir()];
+            dirs.extend(
+                self.tools_source
+                    .extra_tool_dir_candidates()
+                    .into_iter()
+                    .filter(|dir| dir.is_dir()),
+            );
+            return Ok(dirs);
         }
         self.tools.resolve_tool_dirs()
     }
@@ -1059,9 +1077,41 @@ struct ToolsArgs {
         env = "KUBERNETES_TOOLS_REPO_CACHE_PATH"
     )]
     repo_cache_path: Option<String>,
+    // Additional owner/name repos layering org tools onto the base set (the
+    // chart's toolServer.extraRepos). Their `<repo-cache>/<repo>/<subdir>` dirs
+    // join proxy-secret discovery; repo-cache mode only — each repo must be in
+    // the cache's REPOSITORIES. Sandboxes reach the same trees through the
+    // read-only repos mount plus a TOOL_DIRS passthrough, so no per-sandbox
+    // bootstrap is involved.
+    #[arg(
+        id = "tools_extra_repos",
+        long = "kubernetes-tools-extra-repos",
+        env = "KUBERNETES_TOOLS_EXTRA_REPOS",
+        value_delimiter = ','
+    )]
+    extra_repos: Vec<String>,
 }
 
 impl ToolsArgs {
+    /// Candidate org-overlay tools dirs under the repo-cache for `extra_repos`.
+    /// Unfiltered: the cache may not have cloned a repo yet, so callers check
+    /// `is_dir()` at use time. Empty without a repo-cache mount — there is
+    /// nothing to scan in direct-clone mode.
+    fn extra_tool_dir_candidates(&self) -> Vec<PathBuf> {
+        let Some(repo_cache_path) = clean_optional_value(self.repo_cache_path.as_deref()) else {
+            return Vec::new();
+        };
+        self.extra_repos
+            .iter()
+            .filter_map(|repo| clean_optional_value(Some(repo.as_str())))
+            .map(|repo| {
+                PathBuf::from(&repo_cache_path)
+                    .join(repo)
+                    .join(&self.source_subdir)
+            })
+            .collect()
+    }
+
     /// `None` when no repo or runner image is configured (tools disabled).
     fn to_config(&self) -> Option<ToolsConfig> {
         let repo = clean_optional_value(self.repo.as_deref())?;
@@ -1571,6 +1621,54 @@ mod tests {
         let token = tools.github_token.expect("token should be Some");
         assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
         assert_eq!(token.secret_key, "token");
+    }
+
+    #[test]
+    fn tools_extra_repos_yield_repo_cache_tool_dir_candidates() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-repo-cache-path",
+            "/var/lib/centaur/repos",
+            "--kubernetes-tools-extra-repos",
+            "acme/centaur-acme,acme/centaur-tools",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.sandbox.tools_source.extra_tool_dir_candidates(),
+            vec![
+                PathBuf::from("/var/lib/centaur/repos/acme/centaur-acme/tools"),
+                PathBuf::from("/var/lib/centaur/repos/acme/centaur-tools/tools"),
+            ]
+        );
+
+        // Without a repo-cache mount there is nothing to scan.
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-extra-repos",
+            "acme/centaur-acme",
+        ])
+        .unwrap();
+        assert!(args.sandbox.tools_source.extra_tool_dir_candidates().is_empty());
     }
 
     #[test]

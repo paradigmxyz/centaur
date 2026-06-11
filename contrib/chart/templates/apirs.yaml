@@ -235,6 +235,12 @@ spec:
 {{- if $toolsUseRepoCache }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PATH
               value: {{ .Values.repoCache.hostPath | quote }}
+{{- if .Values.toolServer.extraRepos }}
+            # Org overlay repos: their <repo>/tools dirs join api-rs proxy-secret
+            # discovery alongside the base repo (see toolServer.extraRepos).
+            - name: KUBERNETES_TOOLS_EXTRA_REPOS
+              value: {{ join "," .Values.toolServer.extraRepos | quote }}
+{{- end }}
 {{- end }}
             - name: KUBERNETES_TOOLS_RUNNER_IMAGE
               value: {{ printf "%s:%s" (default .Values.sandbox.image.repository .Values.toolServer.runnerImage.repository) (default .Values.sandbox.image.tag .Values.toolServer.runnerImage.tag) | quote }}
