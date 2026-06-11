@@ -1,6 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { Chat, Logger } from "chat";
-import { createGatewayController } from "../src/gateway";
+import {
+  createGatewayController,
+  isGatewayConnectionFresh,
+  setGatewayConnected,
+} from "../src/gateway";
 import type { GatewayCapableAdapter } from "../src/types";
 
 const silentLogger: Logger = {
@@ -76,5 +80,58 @@ describe("createGatewayController", () => {
     await Bun.sleep(5);
     expect(fatal).toBe(true);
     expect(controller.isActive()).toBe(false);
+  });
+});
+
+describe("gateway connection staleness", () => {
+  afterEach(() => {
+    // The disconnect timestamp is module-level; reset it between tests.
+    setGatewayConnected(true);
+  });
+
+  it("stays fresh while connected", () => {
+    setGatewayConnected(true);
+    expect(isGatewayConnectionFresh()).toBe(true);
+  });
+
+  it("stays fresh within 60s of a disconnect", () => {
+    const t0 = 1_000_000;
+    setGatewayConnected(false, t0);
+    expect(isGatewayConnectionFresh(t0 + 60_000)).toBe(true);
+  });
+
+  it("goes stale after the gateway has been down for more than 60s", () => {
+    const t0 = 1_000_000;
+    setGatewayConnected(false, t0);
+    expect(isGatewayConnectionFresh(t0 + 60_001)).toBe(false);
+  });
+
+  it("keeps the FIRST disconnect timestamp across repeated disconnect signals", () => {
+    const t0 = 1_000_000;
+    setGatewayConnected(false, t0);
+    setGatewayConnected(false, t0 + 59_000);
+    expect(isGatewayConnectionFresh(t0 + 60_001)).toBe(false);
+  });
+
+  it("a reconnect flips it back to fresh", () => {
+    const t0 = 1_000_000;
+    setGatewayConnected(false, t0);
+    expect(isGatewayConnectionFresh(t0 + 120_000)).toBe(false);
+    setGatewayConnected(true);
+    expect(isGatewayConnectionFresh(t0 + 120_000)).toBe(true);
+  });
+
+  it("makes the controller report inactive while stale", async () => {
+    const { adapter } = fakeAdapter();
+    const controller = createGatewayController({
+      logger: silentLogger,
+      onFatalEnd: () => undefined,
+    });
+    await controller.start(fakeChat, adapter);
+    expect(controller.isActive()).toBe(true);
+    setGatewayConnected(false, Date.now() - 120_000);
+    expect(controller.isActive()).toBe(false);
+    setGatewayConnected(true);
+    expect(controller.isActive()).toBe(true);
   });
 });

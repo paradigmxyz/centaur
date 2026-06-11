@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { Logger, Message } from "chat";
 import {
   isAllowedDiscordMessage,
+  isAllowedTriggerBotMessage,
   isGuildAllowlistEmpty,
   parseDiscordThreadKey,
 } from "../src/discord-allowlist";
@@ -127,6 +128,82 @@ describe("isAllowedDiscordMessage", () => {
         silentLogger,
       ),
     ).toBe(false);
+  });
+
+  it("allows an allowlisted trigger bot through the bot gate", () => {
+    expect(
+      isAllowedDiscordMessage(
+        message({ threadId: "discord:G1:C1:T1", isBot: true }),
+        options({ triggerBotAllowlist: ["u1"] }),
+        silentLogger,
+      ),
+    ).toBe(true);
+  });
+
+  it("still denies a bot not on the trigger allowlist", () => {
+    expect(
+      isAllowedDiscordMessage(
+        message({ threadId: "discord:G1:C1:T1", isBot: true }),
+        options({ triggerBotAllowlist: ["someone-else"] }),
+        silentLogger,
+      ),
+    ).toBe(false);
+  });
+
+  it("still denies the bot’s own messages even when allowlisted", () => {
+    expect(
+      isAllowedDiscordMessage(
+        message({ threadId: "discord:G1:C1:T1", isBot: true, isMe: true }),
+        options({ triggerBotAllowlist: ["u1"] }),
+        silentLogger,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("isAllowedTriggerBotMessage", () => {
+  const botMessage = (raw?: unknown) =>
+    ({
+      author: {
+        fullName: "Sentry",
+        isBot: true,
+        isMe: false,
+        userId: "bot-1",
+        userName: "sentry",
+      },
+      raw,
+    }) as Parameters<typeof isAllowedTriggerBotMessage>[0];
+
+  it("is fail-closed with no allowlist", () => {
+    expect(isAllowedTriggerBotMessage(botMessage(), undefined)).toBe(false);
+    expect(isAllowedTriggerBotMessage(botMessage(), [])).toBe(false);
+  });
+
+  it("matches the author user id", () => {
+    expect(isAllowedTriggerBotMessage(botMessage(), ["bot-1"])).toBe(true);
+    expect(isAllowedTriggerBotMessage(botMessage(), ["bot-2"])).toBe(false);
+  });
+
+  it("matches the raw application_id and webhook_id", () => {
+    expect(
+      isAllowedTriggerBotMessage(botMessage({ application_id: "app-9" }), [
+        "app-9",
+      ]),
+    ).toBe(true);
+    expect(
+      isAllowedTriggerBotMessage(botMessage({ webhook_id: "hook-7" }), [
+        "hook-7",
+      ]),
+    ).toBe(true);
+    expect(
+      isAllowedTriggerBotMessage(botMessage({ application_id: "app-9" }), [
+        "other",
+      ]),
+    ).toBe(false);
+  });
+
+  it("tolerates entries and ids with surrounding whitespace", () => {
+    expect(isAllowedTriggerBotMessage(botMessage(), [" bot-1 "])).toBe(true);
   });
 });
 
