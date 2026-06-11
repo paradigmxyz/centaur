@@ -87,10 +87,12 @@ spec:
             httpGet:
               path: /health
               port: 3001
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 3001
+            timeoutSeconds: 5
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:

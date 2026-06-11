@@ -420,7 +420,15 @@ async function syncThreadMessageToSession(
         throw error
       }
     }
-    await renderExecutionStream(thread, streamError(error), serializedMessage, input.options, trace)
+    try {
+      await renderExecutionStream(thread, streamError(error), serializedMessage, input.options, trace)
+    } catch (renderError) {
+      // The error notice is best-effort; a Slack render failure here must not
+      // mask the original forward failure.
+      traceLog(input.options, 'slackbotv2_forward_error_notice_render_failed', trace, {
+        error: errorMessage(renderError)
+      })
+    }
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       latest_active_execution: latest.activeExecution === true,
       last_event_id: lastEventId
@@ -470,6 +478,7 @@ async function renderExecutionAttempt(
 ): Promise<'complete' | 'retry'> {
   let rendered = false
   let retry = false
+  let fallbackLastEventId = 0
   try {
     await renderExecutionStream(
       thread,
@@ -482,7 +491,12 @@ async function renderExecutionAttempt(
     traceLog(options, 'slackbotv2_render_complete', trace)
     return 'complete'
   } catch (error) {
-    if (isRetryableSessionApiError(error)) {
+    // Check the Slack adapter's delivery annotation before retryability:
+    // Slack network failures can surface as TypeError/AbortError, which would
+    // otherwise be misclassified as retryable session API errors and re-render
+    // the whole stream instead of posting the durable final answer.
+    const answerLost = slackAnswerLost(error)
+    if (answerLost === undefined && isRetryableSessionApiError(error)) {
       retry = true
       traceLog(options, 'slackbotv2_render_deferred', trace, {
         error: errorMessage(error),
@@ -490,15 +504,41 @@ async function renderExecutionAttempt(
       })
       return 'retry'
     }
+    if (answerLost === false) {
+      // The Slack stream broke only after the final answer became visible
+      // (for example a progress-card stop failed). Reposting would duplicate
+      // the answer, so record the failure and finish.
+      rendered = true
+      traceLog(options, 'slackbotv2_render_failed_answer_visible', trace, {
+        error: errorMessage(error)
+      })
+      return 'complete'
+    }
     traceLog(options, 'slackbotv2_render_failed', trace, {
-      error: errorMessage(error)
+      error: errorMessage(error),
+      slack_answer_lost: answerLost ?? 'unknown'
     })
+    const fallback = await renderFallbackFinalAnswer(
+      thread,
+      options,
+      {
+        afterEventId: input.afterEventId,
+        executionId: input.executionId,
+        threadId: input.threadId
+      },
+      trace
+    )
+    if (fallback) {
+      rendered = true
+      fallbackLastEventId = fallback.lastEventId
+      return 'complete'
+    }
     throw error
   } finally {
     const latest = (await thread.state) ?? {}
     await thread.setState({
       activeExecution: retry,
-      lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId()),
+      lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
       ...(rendered ? { renderObligation: null } : {})
     })
     traceLog(options, 'slackbotv2_render_finalized', trace, {
@@ -506,6 +546,96 @@ async function renderExecutionAttempt(
       retry_scheduled: retry,
       last_event_id: getLastEventId()
     })
+  }
+}
+
+/**
+ * Reads the delivery annotation the Slack chat adapter attaches to streaming
+ * errors. `false` means the stream's final answer was confirmed visible before
+ * the failure; `true` means it was definitely not; `undefined` means the error
+ * did not come through the adapter's streaming path.
+ */
+function slackAnswerLost(error: unknown): boolean | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const value = (error as { slackAnswerLost?: unknown }).slackAnswerLost
+  return typeof value === 'boolean' ? value : undefined
+}
+
+const FALLBACK_OPEN_MAX_ATTEMPTS = 4
+
+/**
+ * Delivers the durable final answer as a plain thread post after the live
+ * Slack streaming render failed. Replays the session event stream from the
+ * execution's starting position (the control plane keeps the events durably,
+ * so the terminal result is replayable even when the failed render already
+ * consumed it), drains it without making Slack calls, and posts the terminal
+ * result text once. Slack streaming is best-effort; this is the delivery
+ * guarantee. Returns null when nothing could be delivered.
+ */
+async function renderFallbackFinalAnswer(
+  thread: Thread,
+  options: SlackbotV2Options,
+  source: { afterEventId: number; executionId?: string; threadId: string },
+  trace?: SlackbotV2Trace
+): Promise<{ lastEventId: number } | null> {
+  const startedAtMs = nowMs()
+  let lastEventId = source.afterEventId
+  try {
+    let stream: AsyncIterable<SlackbotV2RendererSource> | undefined
+    for (let attempt = 0; ; attempt++) {
+      try {
+        stream = await openSessionEventStream(options, {
+          afterEventId: source.afterEventId,
+          executionId: source.executionId,
+          onEventId: eventId => {
+            lastEventId = Math.max(lastEventId, eventId)
+          },
+          threadId: source.threadId,
+          trace
+        })
+        break
+      } catch (error) {
+        if (!isRetryableSessionApiError(error) || attempt + 1 >= FALLBACK_OPEN_MAX_ATTEMPTS) {
+          throw error
+        }
+        await sleep(renderRetryDelayMs(attempt))
+      }
+    }
+    const fallback = new SlackRenderFallback()
+    const chatStream = fallback.collectChatSdk(
+      slackSafeChatSdkStream(
+        codexAppServerToChatSdkStream(
+          fallback.collectSource(stream),
+          fallbackRendererOptions(options)
+        )
+      )
+    )
+    for await (const _chunk of chatStream) {
+      void _chunk
+    }
+    const text = fallback.text()
+    if (!text) {
+      traceLog(options, 'slackbotv2_render_fallback_empty', trace, {
+        last_event_id: lastEventId,
+        phase_ms: elapsedMs(startedAtMs)
+      })
+      return null
+    }
+    await thread.post(
+      truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
+    )
+    traceLog(options, 'slackbotv2_render_fallback_complete', trace, {
+      chars: text.length,
+      last_event_id: lastEventId,
+      phase_ms: elapsedMs(startedAtMs)
+    })
+    return { lastEventId }
+  } catch (error) {
+    traceLog(options, 'slackbotv2_render_fallback_failed', trace, {
+      error: errorMessage(error),
+      phase_ms: elapsedMs(startedAtMs)
+    })
+    return null
   }
 }
 
@@ -670,10 +800,13 @@ async function recoverRenderObligation(
     threadId
   }
   const thread = chat.thread(threadId)
-  const threadState = (await thread.state) ?? {}
-  let lastEventId = Math.max(threadState.lastEventId ?? 0, obligation.afterEventId)
+  // Replay from the obligation's starting position, not the thread's
+  // lastEventId: the failed render may have consumed events (including the
+  // terminal result) past which a resumed stream would never see the final
+  // answer again. Session events are durable, so a full replay is safe.
+  let lastEventId = obligation.afterEventId
   const input: ForwardSessionInput = {
-    afterEventId: lastEventId,
+    afterEventId: obligation.afterEventId,
     executionId: obligation.executionId,
     messages: [],
     onEventId: eventId => {
@@ -720,10 +853,33 @@ async function recoverRenderObligation(
     rendered = true
     traceLog(options, 'slackbotv2_render_recovery_complete', trace)
   } catch (error) {
-    traceLog(options, 'slackbotv2_render_recovery_render_failed', trace, {
-      error: errorMessage(error)
-    })
-    throw error
+    const answerLost = slackAnswerLost(error)
+    if (answerLost === false) {
+      // The recovered stream broke only after the final answer became
+      // visible; reposting would duplicate it.
+      rendered = true
+      traceLog(options, 'slackbotv2_render_recovery_failed_answer_visible', trace, {
+        error: errorMessage(error)
+      })
+    } else {
+      traceLog(options, 'slackbotv2_render_recovery_render_failed', trace, {
+        error: errorMessage(error),
+        slack_answer_lost: answerLost ?? 'unknown'
+      })
+      const fallback = await renderFallbackFinalAnswer(
+        thread,
+        options,
+        {
+          afterEventId: obligation.afterEventId,
+          executionId: obligation.executionId,
+          threadId
+        },
+        trace
+      )
+      if (!fallback) throw error
+      rendered = true
+      lastEventId = Math.max(lastEventId, fallback.lastEventId)
+    }
   } finally {
     const latest = (await thread.state) ?? {}
     await thread.setState({
@@ -800,9 +956,6 @@ async function renderExecutionStream(
         { groupTasks: options.streamTaskDisplayMode ?? 'plan' }
       )
     )
-  } catch (error) {
-    if (!isSlackMessageTooLongError(error)) throw error
-    suppressSlackTooLongRender(error, options, trace)
   } finally {
     await setAssistantStatus(thread, '')
   }
@@ -846,9 +999,6 @@ async function renderRecoveredExecutionStream(
         taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
       }
     )
-  } catch (error) {
-    if (!isSlackMessageTooLongError(error)) throw error
-    suppressSlackTooLongRender(error, options, trace)
   } finally {
     await setAssistantStatus(thread, '')
   }
@@ -940,16 +1090,6 @@ class SlackRenderFallback {
   }
 }
 
-function suppressSlackTooLongRender(
-  error: unknown,
-  options: SlackbotV2Options,
-  trace?: SlackbotV2Trace
-): void {
-  traceLog(options, 'slackbotv2_render_too_long_suppressed', trace, {
-    error: errorMessage(error)
-  })
-}
-
 async function* slackSafeChatSdkStream(
   stream: AsyncIterable<ChatSDKStreamChunk>
 ): AsyncIterable<ChatSDKStreamChunk> {
@@ -1029,21 +1169,6 @@ function terminalResultText(event: unknown): string {
   return ''
 }
 
-function isSlackMessageTooLongError(error: unknown): boolean {
-  if (error instanceof Error && isSlackTooLongCode(error.message)) return true
-  if (!error || typeof error !== 'object') return false
-  const fields = error as Record<string, unknown>
-  if (typeof fields.error === 'string' && isSlackTooLongCode(fields.error)) return true
-  const data = fields.data
-  if (!data || typeof data !== 'object') return false
-  const dataError = (data as Record<string, unknown>).error
-  return typeof dataError === 'string' && isSlackTooLongCode(dataError)
-}
-
-function isSlackTooLongCode(value: string): boolean {
-  return value.includes('msg_too_long') || value.includes('msg_blocks_too_long')
-}
-
 async function* streamSessionAfterHandoff(
   options: SlackbotV2Options,
   input: ForwardSessionInput
@@ -1094,6 +1219,25 @@ function rendererOptions(thread: Thread, options: SlackbotV2Options): CodexAppSe
       await mapper?.onRendererEvent?.(event)
       if (event.type === 'renderer.title.update') {
         await setAssistantTitle(thread, event.title)
+      }
+    }
+  }
+}
+
+/**
+ * Renderer options for the final-answer fallback drain: no Slack side effects
+ * (no assistant title updates) and renderer hooks must not be able to fail
+ * the delivery.
+ */
+function fallbackRendererOptions(options: SlackbotV2Options): CodexAppServerToChatStreamOptions {
+  const mapper = options.mapper
+  return {
+    ...mapper,
+    async onRendererEvent(event: RendererEvent) {
+      try {
+        await mapper?.onRendererEvent?.(event)
+      } catch {
+        // Fallback delivery must not depend on renderer side-effect hooks.
       }
     }
   }
