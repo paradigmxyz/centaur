@@ -3,7 +3,7 @@ import type { Logger, Thread } from "chat";
 import { parseDiscordThreadKey } from "./discord-allowlist";
 import { DEFAULT_DISCORD_API_URL } from "./discord-threading";
 import type { DiscordbotApiMessage, DiscordbotOptions } from "./types";
-import { errorMessage, nowMs } from "./utils";
+import { errorMessage, nowMs, sliceSurrogateSafe } from "./utils";
 
 export type DiscordNarratorChunk = Exclude<
   ChatSDKStreamChunk,
@@ -211,33 +211,81 @@ export class DiscordNarrator {
   private enqueueReaction(method: "PUT" | "DELETE", emoji: string): void {
     const channelId = this.reactionChannelId;
     if (!channelId) return;
-    this.chain = this.chain.then(async () => {
-      try {
-        const fetchFn = this.botOptions.fetch ?? fetch;
-        const apiBase = (
-          this.botOptions.discordApiUrl ?? DEFAULT_DISCORD_API_URL
-        ).replace(/\/$/, "");
-        const response = await fetchFn(
-          `${apiBase}/channels/${channelId}/messages/${this.reactionMessageId}/reactions/${encodeURIComponent(emoji)}/@me`,
-          {
-            method,
-            headers: { authorization: `Bot ${this.botOptions.botToken}` },
-          },
-        );
-        if (!response.ok) {
-          this.logger.warn("discordbot_narrator_reaction_failed", {
-            emoji,
-            method,
-            status: response.status,
-          });
-        }
-      } catch (error) {
-        this.logger.warn("discordbot_narrator_reaction_error", {
-          emoji,
-          method,
-          error: errorMessage(error),
-        });
-      }
+    this.chain = this.chain.then(() =>
+      discordReactionRequest(
+        this.botOptions,
+        channelId,
+        { emoji, messageId: this.reactionMessageId, method },
+        this.logger,
+      ),
+    );
+  }
+}
+
+/**
+ * Discord delta (no slackbotv2 analog, shared by the narrator and the ingress
+ * guards): best-effort reaction via the raw Discord REST API, parent-channel
+ * aware — a thread-starter message (id == thread segment) lives in the parent
+ * channel, while the adapter always routes reactions to the thread.
+ */
+export async function reactToDiscordMessage(
+  botOptions: DiscordbotOptions,
+  input: {
+    emoji: string;
+    messageId: string;
+    method?: "PUT" | "DELETE";
+    threadKey: string;
+  },
+  logger: Logger,
+): Promise<void> {
+  const { channelId, threadId } = parseDiscordThreadKey(input.threadKey);
+  const targetChannelId =
+    input.messageId === threadId ? channelId : (threadId ?? channelId);
+  if (!targetChannelId) return;
+  await discordReactionRequest(
+    botOptions,
+    targetChannelId,
+    {
+      emoji: input.emoji,
+      messageId: input.messageId,
+      method: input.method ?? "PUT",
+    },
+    logger,
+  );
+}
+
+/** Raw REST reaction request; never throws (reactions are cosmetic). */
+async function discordReactionRequest(
+  botOptions: DiscordbotOptions,
+  channelId: string,
+  input: { emoji: string; messageId: string; method: "PUT" | "DELETE" },
+  logger: Logger,
+): Promise<void> {
+  const { emoji, messageId, method } = input;
+  try {
+    const fetchFn = botOptions.fetch ?? fetch;
+    const apiBase = (
+      botOptions.discordApiUrl ?? DEFAULT_DISCORD_API_URL
+    ).replace(/\/$/, "");
+    const response = await fetchFn(
+      `${apiBase}/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`,
+      {
+        method,
+        headers: { authorization: `Bot ${botOptions.botToken}` },
+      },
+    );
+    if (!response.ok) {
+      logger.warn("discordbot_narrator_reaction_failed", {
+        emoji,
+        method,
+        status: response.status,
+      });
+    }
+  } catch (error) {
+    logger.warn("discordbot_narrator_reaction_error", {
+      emoji,
+      method,
+      error: errorMessage(error),
     });
   }
 }
@@ -251,12 +299,14 @@ function subtext(text: string): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
+// Discord delta: surrogate-safe cuts — slicing raw UTF-16 units can halve an
+// emoji's surrogate pair, which Discord rejects with a 400.
 function truncateBlurb(text: string): string {
   if (text.length <= NARRATOR_BLURB_MAX_CHARS) return text;
-  return `${text.slice(0, NARRATOR_BLURB_MAX_CHARS - 1).trimEnd()}…`;
+  return `${sliceSurrogateSafe(text, NARRATOR_BLURB_MAX_CHARS - 1).trimEnd()}…`;
 }
 
 function clipMessage(content: string): string {
   if (content.length <= NARRATOR_MESSAGE_MAX_CHARS) return content;
-  return content.slice(0, NARRATOR_MESSAGE_MAX_CHARS);
+  return sliceSurrogateSafe(content, NARRATOR_MESSAGE_MAX_CHARS);
 }

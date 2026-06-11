@@ -28,8 +28,26 @@ export function isAllowedDiscordMessage(
   options: DiscordbotOptions,
   logger: Logger,
 ): boolean {
-  if (message.author.isBot === true || message.author.isMe === true) {
+  if (message.author.isMe === true) {
     return false;
+  }
+  // Discord delta (mirrors slackbotv2's trigger-bot allowlist semantics):
+  // bot-authored messages are rejected unless the bot is explicitly
+  // allowlisted. The gateway only forwards bot messages that pass the
+  // adapter's `shouldForwardBotMessage` hook (wired at the adapter
+  // construction site); this gate re-checks with the full payload, where
+  // application_id/webhook_id matching is possible.
+  if (message.author.isBot === true) {
+    if (
+      !isAllowedTriggerBotMessage(message, resolveTriggerBotAllowlist(options))
+    ) {
+      logger.warn("discordbot_message_ignored_bot_not_allowlisted", {
+        message_id: message.id,
+        thread_id: message.threadId,
+        user_id: message.author.userId,
+      });
+      return false;
+    }
   }
 
   const { guildId } = parseDiscordThreadKey(message.threadId);
@@ -60,6 +78,61 @@ export function isAllowedDiscordMessage(
   }
 
   return true;
+}
+
+/**
+ * Discord delta (mirrors slackbotv2's `isAllowedTriggerBotMessage`): whether a
+ * bot-authored message may trigger the agent. The allowlist carries bot user
+ * ids; the message's author id plus the raw payload's `application_id` and
+ * `webhook_id` are all accepted as matches (webhook-style integrations post
+ * under those identities).
+ */
+export function isAllowedTriggerBotMessage(
+  message: Pick<Message, "author" | "raw">,
+  allowlist: readonly string[] | undefined,
+): boolean {
+  if (!allowlist?.length) return false;
+  const raw =
+    message.raw && typeof message.raw === "object"
+      ? (message.raw as { application_id?: unknown; webhook_id?: unknown })
+      : {};
+  const identifiers = new Set(
+    [
+      message.author.userId,
+      typeof raw.application_id === "string" ? raw.application_id : undefined,
+      typeof raw.webhook_id === "string" ? raw.webhook_id : undefined,
+    ]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value)),
+  );
+  return allowlist.some((entry) => identifiers.has(entry.trim()));
+}
+
+/**
+ * Guild-level slice of the allowlist check, usable from adapter hooks that run
+ * before a full `Message` exists (e.g. `shouldHandleMention`, which gates
+ * thread creation). Fail-closed like `isAllowedDiscordMessage`: DMs
+ * (`guildId` unset or `@me`) and an empty allowlist are denied.
+ */
+export function isAllowedDiscordGuild(
+  guildId: string | undefined,
+  options: DiscordbotOptions,
+): boolean {
+  if (!guildId || guildId === "@me") return false;
+  const allowlist =
+    options.guildAllowlist ??
+    splitEnvList(process.env.DISCORDBOT_GUILD_ALLOWLIST);
+  return allowlist.length > 0 && new Set(allowlist).has(guildId);
+}
+
+/** Resolved trigger-bot allowlist (options first, env fallback). */
+export function resolveTriggerBotAllowlist(
+  options: DiscordbotOptions,
+): string[] {
+  return [
+    ...(options.triggerBotAllowlist ??
+      splitEnvList(process.env.DISCORDBOT_TRIGGER_BOT_ALLOWLIST)),
+  ];
 }
 
 /** True when the bot has no guild allowlist configured and will ignore every message. */

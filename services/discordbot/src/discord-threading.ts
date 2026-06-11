@@ -1,6 +1,7 @@
 import type { Logger } from "chat";
 import { parseDiscordThreadKey } from "./discord-allowlist";
 import type { DiscordbotOptions } from "./types";
+import { sliceSurrogateSafe } from "./utils";
 
 const DISCORD_THREAD_NAME_LIMIT = 100;
 export const DEFAULT_DISCORD_API_URL = "https://discord.com/api/v10";
@@ -84,7 +85,9 @@ export async function renameThreadFromMessage(
 function clipOneLine(value: string, max: number): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
   if (oneLine.length <= max) return oneLine;
-  return `${oneLine.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+  // Discord delta: surrogate-safe cut — halving an emoji's surrogate pair
+  // makes Discord reject the rename with a 400.
+  return `${sliceSurrogateSafe(oneLine, Math.max(0, max - 1)).trimEnd()}…`;
 }
 
 function escapeRegExp(value: string): string {

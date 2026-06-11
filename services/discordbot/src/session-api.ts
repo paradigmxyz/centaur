@@ -99,13 +99,55 @@ export async function collectInitialContext(
 // Discord analog of slackbotv2's isSlackThreadNotFoundError: the Discord
 // adapter throws a NetworkError carrying the raw Discord API body, e.g.
 // `Discord API error: 404 {"message": "Unknown Channel", "code": 10003}`.
+// The JSON portion is parsed for the error code (serializer spacing varies);
+// the substring checks remain as a fallback.
 function isDiscordThreadNotFoundError(error: unknown): boolean {
+  const code = discordApiErrorCode(error);
+  if (code === 10003 || code === 10008) return true;
   if (!(error instanceof Error)) return false;
   return (
     error.message.includes("Unknown Channel") ||
     error.message.includes("Unknown Message") ||
     error.message.includes('"code": 10003')
   );
+}
+
+// Discord delta (no slackbotv2 analog): a 403 while reading channel history
+// (50001 Missing Access / 50013 Missing Permissions) is NOT a thread-not-found
+// and previously propagated with total user silence; callers surface it.
+export function isDiscordPermissionError(error: unknown): boolean {
+  const code = discordApiErrorCode(error);
+  if (code === 50001 || code === 50013) return true;
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message.includes("Missing Access") ||
+    error.message.includes("Missing Permissions")
+  );
+}
+
+/** Best-effort extraction of the Discord error `code` from an adapter error message. */
+function discordApiErrorCode(error: unknown): number | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const jsonStart = error.message.indexOf("{");
+  if (jsonStart === -1) return undefined;
+  try {
+    const payload: unknown = JSON.parse(error.message.slice(jsonStart));
+    if (isJsonObject(payload) && typeof payload.code === "number") {
+      return payload.code;
+    }
+  } catch {
+    // Not a JSON body; fall back to substring checks.
+  }
+  return undefined;
+}
+
+// Discord delta (no slackbotv2 analog): sticker-only/forwarded/poll/system
+// mentions serialize to empty text with no attachments; executing them would
+// fabricate a synthetic "continue" turn. Callers skip execution and react ❓.
+export function isContentlessApiMessage(
+  message: DiscordbotApiMessage,
+): boolean {
+  return message.text.trim() === "" && message.attachments.length === 0;
 }
 
 export async function serializeMessage(
@@ -136,6 +178,10 @@ export async function serializeMessage(
   };
 }
 
+// Note: on Discord the execute/openStream tail below is dead code — the live
+// path always calls with `executeMessage: undefined` and runs the execute via
+// `executeSessionTurn` inside the render stream (after the 👀 reaction lands).
+// The tail is kept verbatim so 3-way syncs against slackbotv2 diff cleanly.
 export async function forwardToSessionApi(
   options: DiscordbotOptions,
   input: ForwardSessionInput,
@@ -254,6 +300,9 @@ export function sessionStreamError(error: unknown): RustSessionStreamEvent {
   };
 }
 
+/** Largest attachment we are willing to buffer in memory and inline as base64. */
+export const MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
 async function serializeAttachment(
   attachment: Attachment,
 ): Promise<DiscordbotApiAttachment> {
@@ -268,9 +317,23 @@ async function serializeAttachment(
     width: attachment.width,
   };
 
+  if (
+    typeof attachment.size === "number" &&
+    attachment.size > MAX_INLINE_ATTACHMENT_BYTES
+  ) {
+    serialized.fetchError = attachmentTooLargeError(attachment.size);
+    return serialized;
+  }
+
   try {
     const data = attachment.data ?? (await attachment.fetchData?.());
     if (data) {
+      // Re-check the actual byte count: Discord size metadata can be absent.
+      const byteLength = Buffer.isBuffer(data) ? data.length : data.size;
+      if (byteLength > MAX_INLINE_ATTACHMENT_BYTES) {
+        serialized.fetchError = attachmentTooLargeError(byteLength);
+        return serialized;
+      }
       serialized.dataBase64 = await bytesToBase64(data);
     }
   } catch (error) {
@@ -279,6 +342,10 @@ async function serializeAttachment(
   }
 
   return serialized;
+}
+
+function attachmentTooLargeError(bytes: number): string {
+  return `attachment too large to inline (${bytes} bytes > ${MAX_INLINE_ATTACHMENT_BYTES} byte limit)`;
 }
 
 async function bytesToBase64(data: Buffer | Blob): Promise<string> {
@@ -602,32 +669,41 @@ async function* parseSseEvents(
   let eventId: number | undefined;
   let data: string[] = [];
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
+  // Discord delta (no slackbotv2 analog): the consumer returns early on
+  // terminal events, abandoning this generator at a yield point. Without the
+  // finally, the reader lock is never released and the HTTP response body is
+  // never cancelled, leaking the SSE connection on every completed run.
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
 
-    for (const line of lines) {
-      const emitted = parseSseLine(line, { data, eventId, eventName });
+      for (const line of lines) {
+        const emitted = parseSseLine(line, { data, eventId, eventName });
+        data = emitted.state.data;
+        eventId = emitted.state.eventId;
+        eventName = emitted.state.eventName;
+        if (emitted.event) yield emitted.event;
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer) {
+      const emitted = parseSseLine(buffer, { data, eventId, eventName });
       data = emitted.state.data;
       eventId = emitted.state.eventId;
       eventName = emitted.state.eventName;
       if (emitted.event) yield emitted.event;
     }
-  }
-
-  buffer += decoder.decode();
-  if (buffer) {
-    const emitted = parseSseLine(buffer, { data, eventId, eventName });
-    data = emitted.state.data;
-    eventId = emitted.state.eventId;
-    eventName = emitted.state.eventName;
-    if (emitted.event) yield emitted.event;
-  }
-  if (data.length > 0) {
-    yield { data: data.join("\n"), event: eventName, id: eventId };
+    if (data.length > 0) {
+      yield { data: data.join("\n"), event: eventName, id: eventId };
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }
 
@@ -678,7 +754,9 @@ function isTerminalCodexOutputLine(line: string): boolean {
   try {
     payload = JSON.parse(line);
   } catch {
-    return true;
+    // Non-JSON stdout lines (e.g. sandbox bootstrap notices) are noise, not a
+    // signal that the turn finished; treating them as terminal drops the answer.
+    return false;
   }
   if (!isJsonObject(payload)) return false;
 

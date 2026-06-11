@@ -17,7 +17,22 @@ const consoleLogger = {
 
 const gateway = createGatewayController({ logger: consoleLogger });
 
+// Discord delta: slackbotv2 leaves the postgres URL optional, in which case
+// pg.Pool silently falls back to localhost and every handler fails at runtime.
+// Fail fast at boot instead — the chart always provides DISCORDBOT_DATABASE_URL.
+const postgresUrl =
+  optionalEnv("DISCORDBOT_DATABASE_URL") ??
+  optionalEnv("DATABASE_URL") ??
+  optionalEnv("POSTGRES_URL");
+if (!postgresUrl) {
+  throw new Error(
+    "DISCORDBOT_DATABASE_URL (or DATABASE_URL / POSTGRES_URL) is required",
+  );
+}
+
 const options: DiscordbotOptions = {
+  activeExecutionTtlMs: optionalNumberEnv("DISCORDBOT_ACTIVE_EXECUTION_TTL_MS"),
+  answerEditIntervalMs: optionalNumberEnv("DISCORDBOT_ANSWER_EDIT_INTERVAL_MS"),
   apiUrl,
   apiKey: optionalEnv("DISCORDBOT_API_KEY") ?? optionalEnv("CENTAUR_API_KEY"),
   applicationId,
@@ -27,14 +42,15 @@ const options: DiscordbotOptions = {
   guildAllowlist: optionalList("DISCORDBOT_GUILD_ALLOWLIST"),
   idleTimeoutMs: optionalNumberEnv("SESSION_IDLE_TIMEOUT_MS"),
   isGatewayActive: () => gateway.isActive(),
+  maxConcurrentExecutionsPerGuild: optionalNumberEnv(
+    "DISCORDBOT_MAX_CONCURRENT_EXECUTIONS_PER_GUILD",
+  ),
   maxDurationMs: optionalNumberEnv("SESSION_MAX_DURATION_MS"),
   mentionRoleIds: optionalList("DISCORD_MENTION_ROLE_IDS"),
   nameThreads: optionalEnv("DISCORDBOT_NAME_THREADS") !== "false",
-  postgresUrl:
-    optionalEnv("DISCORDBOT_DATABASE_URL") ??
-    optionalEnv("DATABASE_URL") ??
-    optionalEnv("POSTGRES_URL"),
+  postgresUrl,
   stateKeyPrefix: optionalEnv("DISCORDBOT_STATE_KEY_PREFIX"),
+  triggerBotAllowlist: optionalList("DISCORDBOT_TRIGGER_BOT_ALLOWLIST"),
   userName: stringEnv("DISCORDBOT_USER_NAME", "centaur"),
   logger: consoleLogger,
 };

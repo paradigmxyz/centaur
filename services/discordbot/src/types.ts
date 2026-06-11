@@ -82,6 +82,14 @@ export type DiscordbotFetch = (
 ) => Promise<Response>;
 
 export type DiscordbotOptions = {
+  /**
+   * Discord delta: TTL after which a persisted `activeExecution` flag is
+   * treated as stale (a crash between marking and clearing would otherwise
+   * wedge the thread forever — Gateway ingress has no redelivery to kick it).
+   */
+  activeExecutionTtlMs?: number;
+  /** Discord delta: edit cadence for the in-progress answer message. */
+  answerEditIntervalMs?: number;
   apiKey?: string;
   apiUrl: string;
   applicationId: string;
@@ -94,6 +102,8 @@ export type DiscordbotOptions = {
   isGatewayActive?: () => boolean;
   logger?: Logger;
   mapper?: CodexAppServerToChatStreamOptions;
+  /** Discord delta: per-guild cap on concurrently executing runs. Default 3. */
+  maxConcurrentExecutionsPerGuild?: number;
   maxDurationMs?: number;
   mentionRoleIds?: string[];
   /** Rename auto-created threads to the message-derived title. Defaults to true. */
@@ -103,6 +113,11 @@ export type DiscordbotOptions = {
   recoverRenderObligationsOnStart?: boolean;
   state?: StateAdapter;
   stateKeyPrefix?: string;
+  /**
+   * Discord delta (mirrors slackbotv2's `triggerBotAllowlist`): bot user ids
+   * whose messages may trigger/append despite being bot-authored.
+   */
+  triggerBotAllowlist?: readonly string[];
   userName?: string;
 };
 
@@ -114,6 +129,12 @@ export type Discordbot = {
 
 export type DiscordbotThreadState = {
   activeExecution?: boolean;
+  /**
+   * Discord delta: epoch ms when `activeExecution` was last (re)confirmed;
+   * the flag is ignored once this is older than the active-execution TTL.
+   * Cleared (null) together with the flag.
+   */
+  activeExecutionStartedAt?: number | null;
   executedMessageIds?: string[];
   forwardedMessageIds?: string[];
   historyForwarded?: boolean;
