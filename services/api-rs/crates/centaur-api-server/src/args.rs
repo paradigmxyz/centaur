@@ -40,6 +40,17 @@ use crate::{
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 
+/// OTLP env always forwarded from the api-rs process into codex sandboxes,
+/// mirroring the Python control plane's `_SANDBOX_PASSTHROUGH_ENV_KEYS`. The
+/// wrapper inside the sandbox reads these to configure codex's trace export
+/// (endpoint, Laminar ingest auth header, resource attributes).
+const SANDBOX_OTLP_PASSTHROUGH_ENV_KEYS: [&str; 4] = [
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
+];
+
 #[derive(Debug, Parser)]
 #[command(about = "Run the Centaur API Rust session control plane")]
 pub(crate) struct Args {
@@ -851,6 +862,21 @@ impl SandboxArgs {
                 .any(|(existing, _)| existing == "OPENAI_API_KEY")
         {
             envs.push(("OPENAI_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()));
+        }
+
+        // OTLP trace wiring rides from this process into every sandbox (the
+        // same hardcoded set the Python control plane forwarded). The harness
+        // wrapper needs the endpoint + auth header to configure codex's OTLP
+        // export — codex's `session_task.turn` spans carry the token usage
+        // Laminar prices into cost. The headers value is a secret (Laminar
+        // ingest key, ideally ingest-only): it reaches the api-rs process via
+        // the chart's secret envFrom, never via values.
+        for name in SANDBOX_OTLP_PASSTHROUGH_ENV_KEYS {
+            if let Some(value) = clean_optional_value(env::var(name).ok().as_deref())
+                && !envs.iter().any(|(existing, _)| existing == name)
+            {
+                envs.push((name.to_owned(), value));
+            }
         }
 
         for name in &self.passthrough_env {
@@ -1949,23 +1975,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_otlp_egress_target_absent_without_endpoint_or_for_mock_workload() {
-        let without_endpoint = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-sandbox-workload",
-            "codex-app-server",
-        ])
-        .unwrap();
-        assert_eq!(
-            without_endpoint
-                .sandbox
-                .sandbox_otlp_egress_target()
-                .unwrap(),
-            None
-        );
-
+    fn sandbox_otlp_egress_target_absent_for_mock_workload() {
         let mock = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -1975,6 +1985,67 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(mock.sandbox.sandbox_otlp_egress_target().unwrap(), None);
+    }
+
+    /// The only test that mutates the process-level OTLP env keys: keeps all
+    /// assertions that depend on their presence or absence sequential so
+    /// parallel tests never race on them.
+    #[test]
+    fn codex_app_server_env_template_forwards_process_otlp_env() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-workload",
+            "codex-app-server",
+        ])
+        .unwrap();
+
+        unsafe {
+            for key in SANDBOX_OTLP_PASSTHROUGH_ENV_KEYS {
+                env::remove_var(key);
+            }
+        }
+        let envs = args.sandbox.codex_app_server_env_template().unwrap();
+        assert!(!envs.iter().any(|(name, _)| name.starts_with("OTEL_")));
+        assert_eq!(args.sandbox.sandbox_otlp_egress_target().unwrap(), None);
+
+        unsafe {
+            env::set_var(
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "http://laminar-app-server.laminar.svc.cluster.local:8000/v1/traces",
+            );
+            env::set_var("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer test");
+        }
+        let envs = args.sandbox.codex_app_server_env_template().unwrap();
+        let value = |key: &str| {
+            envs.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        // The harness wrapper reads these to configure codex's OTLP export
+        // (endpoint + Laminar ingest auth header).
+        assert_eq!(
+            value("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+            Some("http://laminar-app-server.laminar.svc.cluster.local:8000/v1/traces")
+        );
+        assert_eq!(
+            value("OTEL_EXPORTER_OTLP_HEADERS"),
+            Some("authorization=Bearer test")
+        );
+        // The egress target derives from the same forwarded endpoint.
+        assert_eq!(
+            args.sandbox.sandbox_otlp_egress_target().unwrap(),
+            Some(OtlpEgressTarget {
+                namespace: "laminar".to_owned(),
+                port: 8000,
+            })
+        );
+        unsafe {
+            for key in SANDBOX_OTLP_PASSTHROUGH_ENV_KEYS {
+                env::remove_var(key);
+            }
+        }
     }
 
     #[test]

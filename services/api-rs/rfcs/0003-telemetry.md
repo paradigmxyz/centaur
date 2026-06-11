@@ -46,12 +46,17 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
   key — no `thread_traces` table), and the execution span's `traceparent`, so
   codex-app-wrapper can configure codex's OTLP export and the harness's
   `session_task.turn` spans (token usage that Laminar prices into cost) join
-  the execution trace. Operator sandbox env (`SESSION_SANDBOX_EXTRA_ENV`,
-  rendered from the chart's `sandbox.extraEnv`) carries the OTLP endpoint into
-  each sandbox; the endpoint host is auto-merged into the sandbox `NO_PROXY`,
-  and the per-sandbox egress NetworkPolicy gets a namespace-scoped rule for
-  in-cluster collector endpoints. The chart's `networkPolicy.otlpEgress`
-  values open the matching api-rs egress for its own OTLP export.
+  the execution trace. The api-rs process's own OTLP env
+  (`OTEL_EXPORTER_OTLP_{ENDPOINT,TRACES_ENDPOINT,HEADERS}` and
+  `OTEL_RESOURCE_ATTRIBUTES`) is always forwarded into codex sandboxes —
+  the same hardcoded passthrough set the Python control plane used — so the
+  Laminar ingest key flows secret → api-rs env → sandbox without touching
+  values. Operator sandbox env (`SESSION_SANDBOX_EXTRA_ENV`, rendered from the
+  chart's `sandbox.extraEnv`) layers on top; the endpoint host is auto-merged
+  into the sandbox `NO_PROXY`, and the per-sandbox egress NetworkPolicy gets a
+  namespace-scoped rule for in-cluster collector endpoints. The chart's
+  `networkPolicy.otlpEgress` values open the matching api-rs egress for its
+  own OTLP export on installs without a broader CNI policy.
 
 ## Goals
 
