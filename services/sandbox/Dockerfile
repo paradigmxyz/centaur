@@ -58,6 +58,9 @@ ARG CODEX_VERSION=0.139.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
+# Matches the packageManager pin in 0xSplits/splits — baked into the image so
+# agents don't need a corepack download through the egress proxy at runtime.
+ARG PNPM_VERSION=10.9.0
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -94,10 +97,12 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
       "@mariozechner/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
+      "pnpm@${PNPM_VERSION}" \
       agent-browser@0.26.0 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
-    && codex --version | grep -F "${CODEX_VERSION}"
+    && codex --version | grep -F "${CODEX_VERSION}" \
+    && pnpm --version | grep -F "${PNPM_VERSION}"
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
 # Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium
