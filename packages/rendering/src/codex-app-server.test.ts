@@ -140,38 +140,69 @@ describe('CodexAppServerRendererEventMapper', () => {
       plain(secondUpdate?.type === 'renderer.task.update' ? secondUpdate.task.details : undefined)
     ).toContain('Inspecting the event stream')
 
-    // Sealing keeps the task in_progress: Slack uses the latest task chunk
-    // as the plan header, so completing here would pin "Thinking completed"
-    // while the agent is still working.
+    // Sealing completes the Thinking task; the still-running command keeps
+    // the plan in an in-progress state so the Slack header tracks it.
     const sealed = mapper.process({
       type: 'item.completed',
       item: { id: 'reasoning-1', type: 'reasoning', content: ['Inspecting the event stream'] }
     })
     const sealedUpdate = sealed.find(event => event.type === 'renderer.task.update')
     expect(sealedUpdate).toMatchObject({
-      task: { id: 'reasoning-1', title: 'Thinking', status: 'in_progress' }
+      task: { id: 'reasoning-1', title: 'Thinking', status: 'complete' }
+    })
+  })
+
+  it('holds the last finished task in_progress so the Slack header never claims completion mid-turn', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+
+    mapper.process({
+      type: 'item.started',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test' }
     })
 
-    // The next activity flips the sealed Thinking task to complete in the
-    // same batch, ordered before the new task's update.
+    // The command finishes, leaving nothing else running. Slack would show
+    // "Thinking completed" for an all-complete plan, so the completion is
+    // held back and the task stays presented as in_progress.
+    const completed = mapper.process({
+      type: 'item.completed',
+      item: {
+        id: 'cmd-1',
+        type: 'commandExecution',
+        command: 'pnpm test',
+        aggregatedOutput: 'tests passed',
+        status: 'completed'
+      }
+    })
+    const heldUpdate = completed.find(event => event.type === 'renderer.task.update')
+    expect(heldUpdate).toMatchObject({
+      task: { id: 'cmd-1', status: 'in_progress' }
+    })
+
+    // The next command releases the held completion in the same batch,
+    // ordered before the new task's in_progress update.
     const next = mapper.process({
       type: 'item.started',
       item: { id: 'cmd-2', type: 'commandExecution', command: 'pnpm build' }
     })
     const updates = next.filter(event => event.type === 'renderer.task.update')
-    const thinkingIndex = updates.findIndex(
-      update => update.type === 'renderer.task.update' && update.task.id === 'reasoning-1'
+    const firstIndex = updates.findIndex(
+      update => update.type === 'renderer.task.update' && update.task.id === 'cmd-1'
     )
-    const commandIndex = updates.findIndex(
+    const secondIndex = updates.findIndex(
       update => update.type === 'renderer.task.update' && update.task.id === 'cmd-2'
     )
-    expect(updates[thinkingIndex]).toMatchObject({
-      task: { id: 'reasoning-1', title: 'Thinking', status: 'complete' }
-    })
-    expect(updates[commandIndex]).toMatchObject({
-      task: { id: 'cmd-2', status: 'in_progress' }
-    })
-    expect(thinkingIndex).toBeLessThan(commandIndex)
+    expect(updates[firstIndex]).toMatchObject({ task: { id: 'cmd-1', status: 'complete' } })
+    expect(updates[secondIndex]).toMatchObject({ task: { id: 'cmd-2', status: 'in_progress' } })
+    expect(firstIndex).toBeLessThan(secondIndex)
+
+    // The final flush reports true statuses for everything.
+    const done = mapper.flush()
+    const finalStatuses = done
+      .filter(event => event.type === 'renderer.task.update')
+      .map(event => (event.type === 'renderer.task.update' ? event.task : null))
+    expect(finalStatuses).toContainEqual(
+      expect.objectContaining({ id: 'cmd-2', status: 'complete' })
+    )
   })
 
   it('separates Codex reasoning summary sections within one Thinking task', () => {
