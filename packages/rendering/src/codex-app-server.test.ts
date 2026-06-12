@@ -78,17 +78,27 @@ describe('CodexAppServerRendererEventMapper', () => {
 
     expect(events.some(event => event.type === 'renderer.message.delta')).toBe(false)
     const task = events.find(event => event.type === 'renderer.task.update')
+    // Sealed commentary stays in_progress until the next activity starts so
+    // "Thinking completed" never headlines the Slack plan card mid-turn.
     expect(task).toMatchObject({
       type: 'renderer.task.update',
       task: {
         id: 'thinking-thinking-1',
         title: 'Thinking',
-        status: 'complete'
+        status: 'in_progress'
       }
     })
     expect(plain(task?.type === 'renderer.task.update' ? task.task.details : undefined)).toContain(
       'Checking the runtime.'
     )
+
+    const next = mapper.process({
+      type: 'item.started',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test' }
+    })
+    expect(next.find(event => event.type === 'renderer.task.update')).toMatchObject({
+      task: { id: 'thinking-thinking-1', title: 'Thinking', status: 'complete' }
+    })
   })
 
   it('keeps one Thinking task in_progress across reasoning deltas until the item seals', () => {
@@ -142,7 +152,7 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
-  it('fills gaps between activities with a Thinking task so the Slack header never claims completion mid-turn', () => {
+  it('holds the last finished task in_progress so the Slack header never claims completion mid-turn', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
     mapper.process({
@@ -151,8 +161,8 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
 
     // The command finishes, leaving nothing else running. Slack would show
-    // "Thinking completed" for an all-complete plan, so a synthetic
-    // "Thinking" task spins through the gap instead.
+    // "Thinking completed" for an all-complete plan, so the completion is
+    // held back and the task stays presented as in_progress.
     const completed = mapper.process({
       type: 'item.completed',
       item: {
@@ -163,48 +173,36 @@ describe('CodexAppServerRendererEventMapper', () => {
         status: 'completed'
       }
     })
-    const completedUpdates = completed.filter(event => event.type === 'renderer.task.update')
-    expect(completedUpdates).toContainEqual(
-      expect.objectContaining({ task: expect.objectContaining({ id: 'cmd-1', status: 'complete' }) })
-    )
-    const gapUpdate = completedUpdates.find(
-      update => update.type === 'renderer.task.update' && update.task.id.startsWith('thinking-gap-')
-    )
-    expect(gapUpdate).toMatchObject({
-      task: { title: 'Thinking', status: 'in_progress' }
+    const heldUpdate = completed.find(event => event.type === 'renderer.task.update')
+    expect(heldUpdate).toMatchObject({
+      task: { id: 'cmd-1', status: 'in_progress' }
     })
-    const gapId = gapUpdate?.type === 'renderer.task.update' ? gapUpdate.task.id : ''
 
-    // The next command completes the gap Thinking task in the same batch,
+    // The next command releases the held completion in the same batch,
     // ordered before the new task's in_progress update.
     const next = mapper.process({
       type: 'item.started',
       item: { id: 'cmd-2', type: 'commandExecution', command: 'pnpm build' }
     })
     const updates = next.filter(event => event.type === 'renderer.task.update')
-    const gapIndex = updates.findIndex(
-      update => update.type === 'renderer.task.update' && update.task.id === gapId
+    const firstIndex = updates.findIndex(
+      update => update.type === 'renderer.task.update' && update.task.id === 'cmd-1'
     )
-    const commandIndex = updates.findIndex(
+    const secondIndex = updates.findIndex(
       update => update.type === 'renderer.task.update' && update.task.id === 'cmd-2'
     )
-    expect(updates[gapIndex]).toMatchObject({
-      task: { id: gapId, title: 'Thinking', status: 'complete' }
-    })
-    expect(updates[commandIndex]).toMatchObject({ task: { id: 'cmd-2', status: 'in_progress' } })
-    expect(gapIndex).toBeLessThan(commandIndex)
+    expect(updates[firstIndex]).toMatchObject({ task: { id: 'cmd-1', status: 'complete' } })
+    expect(updates[secondIndex]).toMatchObject({ task: { id: 'cmd-2', status: 'in_progress' } })
+    expect(firstIndex).toBeLessThan(secondIndex)
 
-    // The final flush completes everything without opening a new gap.
+    // The final flush reports true statuses for everything.
     const done = mapper.flush()
-    const finalTasks = done
+    const finalStatuses = done
       .filter(event => event.type === 'renderer.task.update')
       .map(event => (event.type === 'renderer.task.update' ? event.task : null))
-    expect(finalTasks).toContainEqual(
+    expect(finalStatuses).toContainEqual(
       expect.objectContaining({ id: 'cmd-2', status: 'complete' })
     )
-    expect(
-      finalTasks.filter(task => task?.id.startsWith('thinking-gap-') && task.status !== 'complete')
-    ).toHaveLength(0)
   })
 
   it('separates Codex reasoning summary sections within one Thinking task', () => {

@@ -417,7 +417,6 @@ export class CodexAppServerRendererEventMapper
   }
 
   private emitActivitySummary(out: RendererEvent[], opts: { final?: boolean } = {}): void {
-    if (!opts.final) maintainGapThinkingTask(this.state)
     const tasks = Array.from(this.state.taskByUseId.values())
     if (!tasks.length) return
     for (const update of changedActivityTaskUpdates(this.state, tasks, opts)) {
@@ -1153,7 +1152,15 @@ function changedActivityTaskUpdates(
     details?: RendererTaskBlock[]
     output?: RendererTaskBlock[]
   }> = []
-  for (const task of tasks) {
+  // Slack derives the plan card header from task statuses: it shows the
+  // current in_progress task, and falls back to "Thinking completed" when
+  // nothing is in progress — even mid-turn (e.g. while the model thinks
+  // between commands without emitting reasoning events). Mid-turn, present
+  // the most recent finished task as still in progress so the header never
+  // claims completion; its true status is emitted with the next batch or at
+  // the final flush.
+  const report = opts.final ? tasks : holdLastFinishedTask(tasks)
+  for (const task of report) {
     let details: RendererTaskBlock[] | undefined
     let output: RendererTaskBlock[] | undefined
     if (task.details.length) {
@@ -1191,37 +1198,17 @@ function changedActivityTaskUpdates(
   return updates
 }
 
-// Slack derives the plan card header from task statuses: it shows the
-// current in_progress task, and falls back to "Thinking completed" when
-// nothing is in progress — even mid-turn (e.g. while the model thinks
-// between commands without emitting reasoning events). Fill those gaps with
-// a synthetic "Thinking" task so the header says "Thinking" instead of
-// claiming completion, and complete it as soon as real activity resumes.
-function maintainGapThinkingTask(state: CodexMapperState): void {
-  const tasks = Array.from(state.taskByUseId.values())
-  if (!tasks.length) return
-  const running = tasks.filter(task => task.status === 'in_progress')
-  const gapRunning = running.filter(task => isGapThinkingTask(task.id))
-  if (running.length > gapRunning.length) {
-    for (const task of gapRunning) {
-      state.taskByUseId.set(task.id, { ...task, status: 'complete' })
-    }
-    return
+function holdLastFinishedTask(tasks: HarnessTask[]): HarnessTask[] {
+  if (!tasks.length) return tasks
+  if (tasks.some(task => task.status === 'in_progress')) return tasks
+  for (let index = tasks.length - 1; index >= 0; index -= 1) {
+    const task = tasks[index]
+    if (task.status !== 'complete' && task.status !== 'error') continue
+    const held = [...tasks]
+    held[index] = { ...task, status: 'in_progress' }
+    return held
   }
-  if (!running.length) {
-    const id = `thinking-gap-${++state.stepCounter}`
-    state.taskByUseId.set(id, {
-      id,
-      title: 'Thinking',
-      status: 'in_progress',
-      details: [],
-      output: []
-    })
-  }
-}
-
-function isGapThinkingTask(id: string): boolean {
-  return id.startsWith('thinking-gap-')
+  return tasks
 }
 
 function activityRunBlock(task: HarnessTask): RendererTaskBlock[] {
