@@ -408,12 +408,14 @@ def set_company_context_projection_lag(source: str, projection_lag_s: float) -> 
 def increment_metric(metric: str, count: int, **labels: str) -> None:
     if count <= 0:
         return
+    labels = metric_runtime_labels(labels)
     key = metric_key(metric, labels)
     _METRIC_COUNTERS[key] = _METRIC_COUNTERS.get(key, 0.0) + float(count)
     push_metric_lines([format_metric_line(metric, labels, _METRIC_COUNTERS[key])])
 
 
 def set_gauge(metric: str, value: float, **labels: str) -> None:
+    labels = metric_runtime_labels(labels)
     key = metric_key(metric, labels)
     _METRIC_GAUGES[key] = float(value)
     push_metric_lines([format_metric_line(metric, labels, _METRIC_GAUGES[key])])
@@ -425,6 +427,7 @@ def observe_histogram(
     buckets: list[int],
     **labels: str,
 ) -> None:
+    labels = metric_runtime_labels(labels)
     key = metric_key(metric, labels)
     histogram = _METRIC_HISTOGRAMS.setdefault(
         key,
@@ -466,6 +469,75 @@ def metric_key(
     metric: str, labels: dict[str, str]
 ) -> tuple[str, tuple[tuple[str, str], ...]]:
     return (metric, tuple(sorted((key, str(value)) for key, value in labels.items())))
+
+
+def metric_runtime_labels(labels: dict[str, str]) -> dict[str, str]:
+    runtime_labels = dict(labels)
+    for key, value in default_metric_runtime_labels().items():
+        runtime_labels.setdefault(key, value)
+    return runtime_labels
+
+
+def default_metric_runtime_labels() -> dict[str, str]:
+    labels: dict[str, str] = {}
+    namespace = runtime_namespace()
+    if namespace:
+        labels["namespace"] = namespace
+    environment = runtime_environment()
+    if environment:
+        labels["environment"] = environment
+    return labels
+
+
+def runtime_namespace() -> str | None:
+    for name in (
+        "METRICS_NAMESPACE",
+        "KUBERNETES_NAMESPACE",
+        "POD_NAMESPACE",
+        "SESSION_SANDBOX_K8S_NAMESPACE",
+    ):
+        value = clean_metric_label_value(os.environ.get(name))
+        if value:
+            return value
+
+    try:
+        namespace = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        if namespace.exists():
+            return clean_metric_label_value(namespace.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    return None
+
+
+def runtime_environment() -> str | None:
+    for name in ("METRICS_ENVIRONMENT", "ENVIRONMENT", "DEPLOYMENT_ENVIRONMENT"):
+        value = clean_metric_label_value(os.environ.get(name))
+        if value:
+            return value
+
+    for attr in os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").split(","):
+        key, separator, value = attr.partition("=")
+        if separator and key.strip() in {
+            "deployment.environment",
+            "deployment.environment.name",
+        }:
+            cleaned = clean_metric_label_value(value)
+            if cleaned:
+                return cleaned
+
+    namespace = runtime_namespace()
+    if namespace == "centaur-system":
+        return "production"
+    if namespace and namespace.startswith("stg-"):
+        return "staging"
+    return None
+
+
+def clean_metric_label_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 def format_metric_line(metric: str, labels: dict[str, str], value: float) -> str:
