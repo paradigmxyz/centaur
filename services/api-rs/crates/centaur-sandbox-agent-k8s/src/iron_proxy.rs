@@ -51,9 +51,22 @@ const PG_LISTEN_ENV: &str = "IRON_PROXY_PG_LISTEN";
 const PG_CLIENT_USER_ENV: &str = "IRON_PROXY_PG_CLIENT_USER";
 const PG_CLIENT_PASSWORD_ENV: &str = "IRON_PROXY_PG_CLIENT_PASSWORD";
 // Managed iron-proxy instances pick up principal/config changes on their next
-// /proxy/sync poll. Claiming a warm sandbox must not return before the proxy
-// has had a chance to stop serving the bootstrap principal's empty config.
-const PROXY_REASSIGN_SYNC_DELAY: Duration = Duration::from_secs(6);
+// /proxy/sync poll (5s cadence upstream). Claiming a warm sandbox must not
+// return before the proxy has applied the session principal's config: the
+// harness fires its first LLM call within milliseconds of stdin, and an
+// un-applied config sends the placeholder credential upstream (observed as
+// Anthropic 401s when the first call beat the poll by ~350ms).
+//
+// The claim barrier asks the proxy directly: POST /v1/sync (immediate
+// out-of-band sync), then poll GET /v1/status until the applied principal
+// matches. Proxy images without the managed-mode management API never answer
+// on the management port; after PROXY_ACK_PROBE_WINDOW of failed probes the
+// barrier falls back to the blind delay that covers a full poll interval plus
+// apply latency (the pre-barrier behavior).
+const PROXY_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+const PROXY_ACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PROXY_ACK_PROBE_WINDOW: Duration = Duration::from_secs(2);
+const PROXY_REASSIGN_FALLBACK_DELAY: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Debug)]
 pub struct IronProxyConfig {
@@ -112,6 +125,10 @@ pub(crate) struct ResolvedIronProxy {
     // (`proxy_value` -> same), set as sandbox env so tools send the value the
     // proxy swaps. Infra placeholders are set separately from the known set.
     replace_placeholders: BTreeMap<String, String>,
+    // Bearer key for the proxy's management API (/v1/status, /v1/sync),
+    // random per proxy pod. The claim barrier reads it back off the live pod
+    // env, so it survives api-rs restarts and respects env overrides.
+    management_api_key: String,
 }
 
 /// The single Postgres listener the proxy multiplexes every upstream through.
@@ -183,6 +200,7 @@ impl AgentSandboxBackend {
             principal_id,
             pg,
             replace_placeholders,
+            management_api_key: new_proxy_management_api_key(),
         }))
     }
 
@@ -277,6 +295,7 @@ impl AgentSandboxBackend {
             principal_id,
             pg,
             replace_placeholders,
+            management_api_key: new_proxy_management_api_key(),
         }))
     }
 
@@ -408,8 +427,114 @@ impl AgentSandboxBackend {
             .insert(id.as_str().to_owned(), proxy.id);
         self.patch_iron_control_principal_annotation(id, principal_id)
             .await?;
-        sleep(PROXY_REASSIGN_SYNC_DELAY).await;
+        self.wait_for_proxy_principal_applied(id, principal_id)
+            .await;
         Ok(())
+    }
+
+    /// Barrier between reassigning the proxy principal in iron-control and
+    /// returning the claimed sandbox: the caller writes stdin (and the harness
+    /// fires its first credentialed call) immediately after, so the proxy must
+    /// be serving the claimed principal's config by then, not the warm
+    /// bootstrap principal's empty one. Pokes the proxy to sync now and waits
+    /// until it reports the principal applied; proxy images without the
+    /// managed-mode management API fall back to a fixed delay. Never fails the
+    /// claim: managed proxies fail closed until synced, so the worst case is a
+    /// brief 503 window rather than a failed execution.
+    async fn wait_for_proxy_principal_applied(&self, id: &SandboxId, principal_id: &str) {
+        let started = Instant::now();
+        let endpoint = match self.proxy_management_endpoint(id).await {
+            Ok(Some(endpoint)) => endpoint,
+            Ok(None) => {
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    "no running iron-proxy pod found for the claim barrier; \
+                     using the fixed reassign delay"
+                );
+                sleep(PROXY_REASSIGN_FALLBACK_DELAY).await;
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    %error,
+                    "failed to look up the iron-proxy management endpoint; \
+                     using the fixed reassign delay"
+                );
+                sleep(PROXY_REASSIGN_FALLBACK_DELAY).await;
+                return;
+            }
+        };
+        let Ok(client) = reqwest::Client::builder()
+            // Pod-IP call inside the cluster: never route via env-configured
+            // HTTP proxies.
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .build()
+        else {
+            sleep(PROXY_REASSIGN_FALLBACK_DELAY).await;
+            return;
+        };
+        match wait_for_proxy_ack(
+            &client,
+            &endpoint,
+            principal_id,
+            PROXY_ACK_TIMEOUT,
+            PROXY_ACK_PROBE_WINDOW,
+            PROXY_ACK_POLL_INTERVAL,
+        )
+        .await
+        {
+            ProxyAck::Applied => {
+                tracing::info!(
+                    sandbox_id = id.as_str(),
+                    principal_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "iron-proxy acknowledged the claimed principal's config"
+                );
+            }
+            ProxyAck::ManagementUnavailable => {
+                tracing::info!(
+                    sandbox_id = id.as_str(),
+                    "iron-proxy management API is unavailable (image without \
+                     managed status support?); using the fixed reassign delay"
+                );
+                sleep(PROXY_REASSIGN_FALLBACK_DELAY.saturating_sub(started.elapsed())).await;
+            }
+            ProxyAck::TimedOut => {
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    principal_id,
+                    "iron-proxy did not acknowledge the claimed principal's \
+                     config before the deadline; proceeding (managed proxies \
+                     fail closed until synced)"
+                );
+            }
+        }
+    }
+
+    /// Locate the management API of the sandbox's running proxy pod. The
+    /// address (pod IP + IRON_MANAGEMENT_LISTEN port) and bearer key are read
+    /// back off the pod itself so the barrier always speaks to what the pod
+    /// was actually given.
+    async fn proxy_management_endpoint(
+        &self,
+        id: &SandboxId,
+    ) -> SandboxResult<Option<ProxyManagementEndpoint>> {
+        let params = ListParams::default().labels(&format!(
+            "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+            id.as_str()
+        ));
+        let pods = self
+            .pods()
+            .list(&params)
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
+        Ok(pods
+            .items
+            .iter()
+            .find_map(proxy_management_endpoint_from_pod))
     }
 
     async fn proxy_id_for_sandbox(&self, id: &SandboxId) -> SandboxResult<Option<String>> {
@@ -521,6 +646,136 @@ impl AgentSandboxBackend {
             }
         }
     }
+}
+
+/// Address + bearer key of a managed proxy's management API.
+struct ProxyManagementEndpoint {
+    base_url: String,
+    api_key: String,
+}
+
+/// Applied control-plane state served by the proxy's `GET /v1/status`.
+#[derive(serde::Deserialize)]
+struct ProxyManagedStatus {
+    #[serde(default)]
+    principal_id: String,
+    #[serde(default)]
+    synced_once: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ProxyAck {
+    /// The proxy reports the expected principal's config as applied.
+    Applied,
+    /// The management API never answered within the probe window (proxy image
+    /// without managed-mode management support, or listener disabled).
+    ManagementUnavailable,
+    /// The management API answered but the expected principal's config was
+    /// not applied before the deadline.
+    TimedOut,
+}
+
+/// Poll the proxy's management API until it reports `principal_id`'s config
+/// applied. `probe_window` bounds how long an entirely-unresponsive
+/// management API is probed before concluding the image predates managed
+/// status support; any successful response within the window commits to
+/// waiting out the full `ack_timeout`.
+async fn wait_for_proxy_ack(
+    client: &reqwest::Client,
+    endpoint: &ProxyManagementEndpoint,
+    principal_id: &str,
+    ack_timeout: Duration,
+    probe_window: Duration,
+    poll_interval: Duration,
+) -> ProxyAck {
+    let started = Instant::now();
+    let mut poked = false;
+    let mut management_confirmed = false;
+    loop {
+        // Poke an immediate out-of-band sync so the barrier does not ride the
+        // proxy's 5s poll cadence; retried until it lands (the status poll
+        // below still converges without it, just slower).
+        if !poked {
+            poked = matches!(
+                client
+                    .post(format!("{}/v1/sync", endpoint.base_url))
+                    .bearer_auth(&endpoint.api_key)
+                    .send()
+                    .await,
+                Ok(response) if response.status().is_success()
+            );
+        }
+        let status = client
+            .get(format!("{}/v1/status", endpoint.base_url))
+            .bearer_auth(&endpoint.api_key)
+            .send()
+            .await;
+        if let Ok(response) = status
+            && response.status().is_success()
+        {
+            management_confirmed = true;
+            if let Ok(status) = response.json::<ProxyManagedStatus>().await
+                && status.synced_once
+                && status.principal_id == principal_id
+            {
+                return ProxyAck::Applied;
+            }
+        }
+        let elapsed = started.elapsed();
+        if !management_confirmed && elapsed >= probe_window {
+            return ProxyAck::ManagementUnavailable;
+        }
+        if elapsed >= ack_timeout {
+            return ProxyAck::TimedOut;
+        }
+        sleep(poll_interval).await;
+    }
+}
+
+/// The management endpoint advertised by a running proxy pod: pod IP plus the
+/// IRON_MANAGEMENT_LISTEN port and IRON_MANAGEMENT_API_KEY from the pod's
+/// env (so env overrides are respected). `None` for pods that are not
+/// running or predate the management env wiring.
+fn proxy_management_endpoint_from_pod(pod: &Pod) -> Option<ProxyManagementEndpoint> {
+    if !pod_running(pod) {
+        return None;
+    }
+    let pod_ip = pod.status.as_ref()?.pod_ip.as_deref()?;
+    let env = pod
+        .spec
+        .as_ref()?
+        .containers
+        .iter()
+        .find(|container| container.name == "iron-proxy")?
+        .env
+        .as_ref()?;
+    let env_value = |name: &str| {
+        env.iter()
+            .find(|env| env.name == name)
+            .and_then(|env| env.value.as_deref())
+    };
+    let api_key = env_value("IRON_MANAGEMENT_API_KEY")?.to_owned();
+    let port = env_value("IRON_MANAGEMENT_LISTEN")
+        .and_then(listen_port)
+        .unwrap_or(PROXY_MANAGEMENT_PORT);
+    let host = if pod_ip.contains(':') {
+        format!("[{pod_ip}]")
+    } else {
+        pod_ip.to_owned()
+    };
+    Some(ProxyManagementEndpoint {
+        base_url: format!("http://{host}:{port}"),
+        api_key,
+    })
+}
+
+/// Port of a `[host]:port` listen address (`":9092"`, `"0.0.0.0:9092"`).
+fn listen_port(listen: &str) -> Option<u16> {
+    listen.rsplit_once(':')?.1.parse().ok()
+}
+
+fn new_proxy_management_api_key() -> String {
+    format!("mgmt-{}", uuid::Uuid::new_v4().simple())
 }
 
 pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronProxy) {
@@ -654,7 +909,18 @@ fn iron_proxy_env_vars(
     let mut env = BTreeMap::new();
     env.insert(
         "IRON_MANAGEMENT_API_KEY".to_owned(),
-        env_var("IRON_MANAGEMENT_API_KEY", "unused-local-sidecar-key"),
+        env_var("IRON_MANAGEMENT_API_KEY", &resolved.management_api_key),
+    );
+    // Start the managed-mode management API (/v1/status, /v1/sync) so the
+    // claim-time principal barrier can verify the applied config. Older proxy
+    // images ignore this env and simply never listen; the barrier falls back
+    // to a fixed delay.
+    env.insert(
+        "IRON_MANAGEMENT_LISTEN".to_owned(),
+        env_var(
+            "IRON_MANAGEMENT_LISTEN",
+            &format!(":{PROXY_MANAGEMENT_PORT}"),
+        ),
     );
     // iron-proxy pulls its effective config (allowlist, secrets, management)
     // from iron-control using this token; no local config file is rendered.
@@ -794,10 +1060,18 @@ fn build_iron_proxy_network_policies(
             spec: Some(NetworkPolicySpec {
                 pod_selector: Some(label_selector(iron_proxy_labels(id))),
                 policy_types: Some(vec!["Ingress".to_owned(), "Egress".to_owned()]),
-                ingress: Some(vec![NetworkPolicyIngressRule {
-                    from: Some(vec![pod_peer(sandbox_labels(id))]),
-                    ports: Some(sandbox_to_proxy_ports),
-                }]),
+                ingress: Some(vec![
+                    NetworkPolicyIngressRule {
+                        from: Some(vec![pod_peer(sandbox_labels(id))]),
+                        ports: Some(sandbox_to_proxy_ports),
+                    },
+                    // api-rs -> proxy management API, for the claim-time
+                    // principal barrier (POST /v1/sync + GET /v1/status).
+                    NetworkPolicyIngressRule {
+                        from: Some(vec![pod_peer(iron_proxy.api_pod_labels.clone())]),
+                        ports: Some(vec![network_port(PROXY_MANAGEMENT_PORT)]),
+                    },
+                ]),
                 egress: Some(proxy_egress_rules(iron_proxy, control_port)),
             }),
         },
@@ -1193,6 +1467,7 @@ mod tests {
             principal_id: "principal".to_owned(),
             pg: None,
             replace_placeholders: BTreeMap::new(),
+            management_api_key: "test-management-key".to_owned(),
         }
     }
 
@@ -1258,6 +1533,266 @@ mod tests {
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
+    }
+
+    #[test]
+    fn proxy_policy_allows_api_pods_to_management_port() {
+        let id = SandboxId::new("asbx-test");
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+
+        let policies = build_iron_proxy_network_policies(&id, &resolved(), &iron_proxy, 3000, None);
+        let ingress = policies[1]
+            .spec
+            .as_ref()
+            .unwrap()
+            .ingress
+            .as_ref()
+            .unwrap()
+            .clone();
+
+        assert!(ingress.iter().any(|rule| {
+            rule.from.as_ref().is_some_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer.pod_selector.as_ref().is_some_and(|selector| {
+                        selector.match_labels.as_ref() == Some(&iron_proxy.api_pod_labels)
+                    })
+                })
+            }) && rule.ports.as_ref().is_some_and(|ports| {
+                ports.iter().any(|port| {
+                    port.port == Some(IntOrString::Int(i32::from(PROXY_MANAGEMENT_PORT)))
+                })
+            })
+        }));
+        // The sandbox-facing rule must not gain the management port.
+        assert!(!ingress.iter().any(|rule| {
+            rule.from.as_ref().is_some_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer.pod_selector.as_ref().is_some_and(|selector| {
+                        selector.match_labels.as_ref().is_some_and(|labels| {
+                            labels.contains_key(SANDBOX_ID_LABEL)
+                                && !labels.contains_key(IRON_PROXY_LABEL)
+                        })
+                    })
+                })
+            }) && rule.ports.as_ref().is_some_and(|ports| {
+                ports.iter().any(|port| {
+                    port.port == Some(IntOrString::Int(i32::from(PROXY_MANAGEMENT_PORT)))
+                })
+            })
+        }));
+    }
+
+    fn running_proxy_pod(pod_ip: &str, env: Vec<K8sEnvVar>) -> Pod {
+        use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
+        Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "iron-proxy".to_owned(),
+                    env: Some(env),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_owned()),
+                pod_ip: Some(pod_ip.to_owned()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_owned(),
+                    status: "True".to_owned(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn proxy_management_endpoint_read_back_off_pod_env() {
+        let pod = running_proxy_pod(
+            "10.1.2.3",
+            vec![
+                env_var("IRON_MANAGEMENT_API_KEY", "key-123"),
+                env_var("IRON_MANAGEMENT_LISTEN", ":9092"),
+            ],
+        );
+        let endpoint = proxy_management_endpoint_from_pod(&pod).unwrap();
+        assert_eq!(endpoint.base_url, "http://10.1.2.3:9092");
+        assert_eq!(endpoint.api_key, "key-123");
+
+        // Overridden listen port is respected.
+        let pod = running_proxy_pod(
+            "10.1.2.3",
+            vec![
+                env_var("IRON_MANAGEMENT_API_KEY", "key-123"),
+                env_var("IRON_MANAGEMENT_LISTEN", "0.0.0.0:19092"),
+            ],
+        );
+        let endpoint = proxy_management_endpoint_from_pod(&pod).unwrap();
+        assert_eq!(endpoint.base_url, "http://10.1.2.3:19092");
+
+        // A pod without the key (pre-barrier pod) yields no endpoint.
+        let pod = running_proxy_pod("10.1.2.3", vec![]);
+        assert!(proxy_management_endpoint_from_pod(&pod).is_none());
+
+        // A pod that is not running yields no endpoint.
+        let mut pod = running_proxy_pod(
+            "10.1.2.3",
+            vec![env_var("IRON_MANAGEMENT_API_KEY", "key-123")],
+        );
+        pod.status.as_mut().unwrap().phase = Some("Pending".to_owned());
+        assert!(proxy_management_endpoint_from_pod(&pod).is_none());
+    }
+
+    /// Stub of the proxy management API from iron-proxy's managed mode:
+    /// `POST /v1/sync` -> 202, `GET /v1/status` -> the bootstrap principal for
+    /// the first `mismatches` calls, then the claimed principal.
+    async fn spawn_management_stub(
+        api_key: &str,
+        mismatches: usize,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let sync_calls = Arc::new(AtomicUsize::new(0));
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let auth = format!("authorization: bearer {}", api_key.to_lowercase());
+        let handle = tokio::spawn({
+            let sync_calls = sync_calls.clone();
+            async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => request.extend_from_slice(&buf[..read]),
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request).to_lowercase();
+                    let (status_line, body) = if !request.contains(&auth) {
+                        ("401 Unauthorized", r#"{"error":"unauthorized"}"#.to_owned())
+                    } else if request.starts_with("post /v1/sync") {
+                        sync_calls.fetch_add(1, Ordering::SeqCst);
+                        ("202 Accepted", r#"{"status":"sync requested"}"#.to_owned())
+                    } else if request.starts_with("get /v1/status") {
+                        let calls = status_calls.fetch_add(1, Ordering::SeqCst);
+                        let principal = if calls < mismatches {
+                            "prin_bootstrap"
+                        } else {
+                            "prin_claimed"
+                        };
+                        (
+                            "200 OK",
+                            format!(
+                                r#"{{"config_hash":"h","principal_id":"{principal}","principal_status":"active","synced_once":true,"last_sync_at":"2026-06-12T00:00:00Z"}}"#
+                            ),
+                        )
+                    } else {
+                        ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                }
+            }
+        });
+        (base_url, sync_calls, handle)
+    }
+
+    fn barrier_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn proxy_ack_waits_until_claimed_principal_is_applied() {
+        let (base_url, sync_calls, server) = spawn_management_stub("test-key", 2).await;
+        let endpoint = ProxyManagementEndpoint {
+            base_url,
+            api_key: "test-key".to_owned(),
+        };
+
+        let ack = wait_for_proxy_ack(
+            &barrier_client(),
+            &endpoint,
+            "prin_claimed",
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(ack, ProxyAck::Applied);
+        assert!(
+            sync_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the barrier should poke an immediate out-of-band sync"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_ack_times_out_when_principal_never_applies() {
+        let (base_url, _sync_calls, server) = spawn_management_stub("test-key", usize::MAX).await;
+        let endpoint = ProxyManagementEndpoint {
+            base_url,
+            api_key: "test-key".to_owned(),
+        };
+
+        let ack = wait_for_proxy_ack(
+            &barrier_client(),
+            &endpoint,
+            "prin_claimed",
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+            Duration::from_millis(25),
+        )
+        .await;
+
+        assert_eq!(ack, ProxyAck::TimedOut);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_ack_reports_unavailable_management_api() {
+        // Bind to grab a free port, then drop the listener so connections are
+        // refused — the shape of a proxy image without the management API.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let endpoint = ProxyManagementEndpoint {
+            base_url,
+            api_key: "test-key".to_owned(),
+        };
+
+        let ack = wait_for_proxy_ack(
+            &barrier_client(),
+            &endpoint,
+            "prin_claimed",
+            Duration::from_secs(2),
+            Duration::from_millis(300),
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert_eq!(ack, ProxyAck::ManagementUnavailable);
     }
 
     #[test]

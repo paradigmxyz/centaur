@@ -369,9 +369,11 @@ dependencies = [
  "jiff",
  "k8s-openapi",
  "kube",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
