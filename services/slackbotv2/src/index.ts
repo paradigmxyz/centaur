@@ -12,6 +12,7 @@ import {
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
 import { createPostgresState } from '@chat-adapter/state-pg'
+import { WebClient } from '@slack/web-api'
 import pg from 'pg'
 import {
   codexAppServerToChatSdkStream,
@@ -251,7 +252,9 @@ async function syncThreadMessageToSession(
   const executedMessageIds = new Set(state.executedMessageIds ?? [])
   const shouldStartExecution =
     input.mode === 'execute' && state.activeExecution !== true && !executedMessageIds.has(message.id)
-  const shouldIncludeContext = shouldStartExecution && state.historyForwarded !== true
+  const shouldRefreshThreadContext = shouldStartExecution && isSlackThreadReply(message)
+  const shouldIncludeContext =
+    shouldStartExecution && (state.historyForwarded !== true || shouldRefreshThreadContext)
   const isDuplicateIncrementalMessage =
     messageIds.has(message.id) && !shouldStartExecution && !shouldIncludeContext
   const trace: SlackbotV2Trace = {
@@ -287,9 +290,11 @@ async function syncThreadMessageToSession(
   })
   let context: SlackbotV2ApiMessage[] | undefined
 
-  if (shouldIncludeContext && !state.historyForwarded) {
+  if (shouldIncludeContext) {
     const contextStartedAtMs = nowMs()
-    context = await collectInitialContext(thread, message)
+    context = shouldRefreshThreadContext
+      ? await collectSlackThreadContext(input.options, message)
+      : await collectInitialContext(thread, message)
     // collectInitialContext re-serializes the current message; mirror the
     // flag-stripped text on that copy too.
     for (const item of context) {
@@ -1286,6 +1291,150 @@ function shouldAwaitSlackHandoff(rawBody: string): boolean {
   } catch {
     return false
   }
+}
+
+function isSlackThreadReply(message: ChatMessage): boolean {
+  const raw = message.raw
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const item = raw as Record<string, unknown>
+  const threadTs = typeof item.thread_ts === 'string' ? item.thread_ts : ''
+  const ts = typeof item.ts === 'string' ? item.ts : message.id
+  return Boolean(threadTs && ts && threadTs !== ts)
+}
+
+async function collectSlackThreadContext(
+  options: SlackbotV2Options,
+  currentMessage: ChatMessage
+): Promise<SlackbotV2ApiMessage[]> {
+  const raw = slackRawRecord(currentMessage)
+  const channel = stringField(raw.channel)
+  const threadTs = stringField(raw.thread_ts)
+  const currentTs = stringField(raw.ts) || currentMessage.id
+  if (!channel || !threadTs) return [await serializeMessage(currentMessage)]
+
+  const client = new WebClient(options.botToken, { slackApiUrl: options.slackApiUrl })
+  const messages: SlackbotV2ApiMessage[] = []
+  let cursor: string | undefined
+  do {
+    const response = await client.conversations.replies({
+      channel,
+      ts: threadTs,
+      limit: 200,
+      cursor
+    })
+    const slackMessages = Array.isArray(response.messages) ? response.messages : []
+    for (const rawMessage of slackMessages) {
+      const message = rawMessage as Record<string, unknown>
+      const messageTs = stringField(message.ts)
+      if (!messageTs || compareSlackTs(messageTs, currentTs) > 0) continue
+      if (isSelfSlackBotMessage(options, message)) continue
+      messages.push(slackApiMessageFromSlack(message, currentMessage))
+    }
+    const nextCursor = response.response_metadata?.next_cursor
+    cursor = typeof nextCursor === 'string' && nextCursor.trim() ? nextCursor : undefined
+  } while (cursor)
+
+  const currentIndex = messages.findIndex(message => message.id === currentMessage.id)
+  const serializedCurrent = await serializeMessage(currentMessage)
+  if (currentIndex >= 0) {
+    messages[currentIndex] = serializedCurrent
+  } else {
+    messages.push(serializedCurrent)
+  }
+  return messages
+}
+
+function slackApiMessageFromSlack(
+  message: Record<string, unknown>,
+  currentMessage: ChatMessage
+): SlackbotV2ApiMessage {
+  const rawCurrent = slackRawRecord(currentMessage)
+  const id = stringField(message.ts) || randomUUID()
+  const actorId = slackActorId(message)
+  const isBot = Boolean(message.bot_id || message.bot_profile)
+  return {
+    attachments: [],
+    author: {
+      fullName: actorId,
+      isBot,
+      isMe: Boolean(actorId && actorId === currentMessage.author.userId),
+      userId: actorId,
+      userName: actorId
+    },
+    id,
+    isMention: id === currentMessage.id ? currentMessage.isMention === true : false,
+    raw: message,
+    teamId:
+      stringField(message.team)
+      || stringField(message.team_id)
+      || stringField(rawCurrent.team)
+      || stringField(rawCurrent.team_id),
+    text: normalizeSlackText(stringField(message.text)),
+    threadId: currentMessage.threadId,
+    timestamp: slackTimestampToIso(id)
+  }
+}
+
+function slackRawRecord(message: ChatMessage): Record<string, unknown> {
+  return message.raw && typeof message.raw === 'object' && !Array.isArray(message.raw)
+    ? (message.raw as Record<string, unknown>)
+    : {}
+}
+
+function slackActorId(message: Record<string, unknown>): string {
+  const profile = message.bot_profile
+  if (profile && typeof profile === 'object' && !Array.isArray(profile)) {
+    const userId = stringField((profile as Record<string, unknown>).user_id)
+    if (userId) return userId
+  }
+  return stringField(message.user) || stringField(message.bot_id)
+}
+
+function isSelfSlackBotMessage(
+  options: SlackbotV2Options,
+  message: Record<string, unknown>
+): boolean {
+  const botUserId = options.botUserId
+  if (!botUserId) return false
+  if (stringField(message.user) === botUserId) return true
+  const profile = message.bot_profile
+  if (profile && typeof profile === 'object' && !Array.isArray(profile)) {
+    return stringField((profile as Record<string, unknown>).user_id) === botUserId
+  }
+  return false
+}
+
+function stringField(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function compareSlackTs(a: string, b: string): number {
+  const left = Number(a)
+  const right = Number(b)
+  if (Number.isFinite(left) && Number.isFinite(right)) return left - right
+  return a.localeCompare(b)
+}
+
+function slackTimestampToIso(ts: string): string {
+  const seconds = Number(ts)
+  return Number.isFinite(seconds)
+    ? new Date(seconds * 1000).toISOString()
+    : new Date().toISOString()
+}
+
+function normalizeSlackText(input: string): string {
+  return input
+    .replace(/<([a-z]+:\/\/[^>|]+)\|([^>]+)>/gi, '$2 ($1)')
+    .replace(/<([a-z]+:\/\/[^>]+)>/gi, '$1')
+    .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, '#$2')
+    .replace(/<#([A-Z0-9]+)>/g, '#$1')
+    .replace(/<@([A-Z0-9]+)>/g, '@$1')
+    .replace(/<!subteam\^([A-Z0-9]+)\|([^>]+)>/g, '@$2')
+    .replace(/<!(channel|here|everyone)>/g, '@$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim()
 }
 
 function rendererOptions(thread: Thread, options: SlackbotV2Options): CodexAppServerToChatStreamOptions {

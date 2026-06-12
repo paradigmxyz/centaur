@@ -295,6 +295,113 @@ describe('slackbotv2', () => {
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
+  it('includes all preceding Slack thread messages for a first mid-thread mention', async () => {
+    const parent = await postUserMessage('Root context for the thread.')
+    const firstReply = await postUserMessage('First preceding reply.', parent.ts)
+    const secondReply = await postUserMessage('Second preceding reply.', parent.ts)
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> summarize the thread so far`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-mid-thread-history',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> summarize the thread so far`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.appends[0]!.body.messages.map(message => message.client_message_id)).toEqual([
+      parent.ts,
+      firstReply.ts,
+      secondReply.ts,
+      mention.ts
+    ])
+    expect(sessionMessageTexts(codexApi.appends[0]!.body.messages)).toEqual([
+      'Root context for the thread.',
+      'First preceding reply.',
+      'Second preceding reply.',
+      `@${BOT_USER_ID} summarize the thread so far`
+    ])
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.executes[0]!.body.idempotency_key).toBe(mention.ts)
+  })
+
+  it('refreshes Slack thread context for a reply mention after a root mention', async () => {
+    const rootMention = await postUserMessage(`<@${BOT_USER_ID}> start from this root mention`)
+    const rootWaits: Promise<unknown>[] = []
+    const rootResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-before-reply-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: rootMention.ts,
+          text: `<@${BOT_USER_ID}> start from this root mention`
+        }
+      }),
+      {},
+      waitUntilContext(rootWaits)
+    )
+    expect(rootResponse.status).toBe(200)
+    await Promise.all(rootWaits)
+
+    await postUserMessage('Important reply between mentions.', rootMention.ts)
+    const replyMention = await postUserMessage(
+      `<@${BOT_USER_ID}> now use the full thread`,
+      rootMention.ts
+    )
+    const replyWaits: Promise<unknown>[] = []
+    const replyResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-reply-mention-after-root',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: replyMention.ts,
+          thread_ts: rootMention.ts,
+          text: `<@${BOT_USER_ID}> now use the full thread`
+        }
+      }),
+      {},
+      waitUntilContext(replyWaits)
+    )
+
+    expect(replyResponse.status).toBe(200)
+    await Promise.all(replyWaits)
+
+    expect(codexApi.appends).toHaveLength(2)
+    expect(sessionMessageTexts(codexApi.appends[0]!.body.messages)).toEqual([
+      `@${BOT_USER_ID} start from this root mention`
+    ])
+    expect(sessionMessageTexts(codexApi.appends[1]!.body.messages)).toEqual([
+      'Important reply between mentions.',
+      `@${BOT_USER_ID} now use the full thread`
+    ])
+    expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([
+      rootMention.ts,
+      replyMention.ts
+    ])
+  })
+
   it('stages large Slack file attachments without exceeding session input line limits', async () => {
     const parent = await postUserMessage('Context before the video upload.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this mp4`, parent.ts)
@@ -359,7 +466,9 @@ describe('slackbotv2', () => {
     expect(serializedTurn).not.toContain('dataBase64')
   })
 
-  it('executes a root app mention when Slack has no thread history yet', async () => {
+  it('executes a root app mention without channel history', async () => {
+    await postUserMessage('Prior channel message A.')
+    await postUserMessage('Prior channel message B.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> answer from a new root message`)
     slackApi.failRepliesWithThreadNotFound(CHANNEL_ID, mention.ts)
     const waits: Promise<unknown>[] = []
