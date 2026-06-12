@@ -91,6 +91,81 @@ describe('CodexAppServerRendererEventMapper', () => {
     )
   })
 
+  it('keeps one Thinking task in_progress across reasoning deltas until the item seals', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+
+    const first = mapper.process({
+      type: 'item.reasoning.textDelta',
+      itemId: 'reasoning-1',
+      delta: 'Inspecting the '
+    })
+    expect(first).toContainEqual({
+      type: 'renderer.task.update',
+      task: {
+        id: 'reasoning-1',
+        title: 'Thinking',
+        status: 'in_progress',
+        details: [{ type: 'text', text: 'Inspecting the' }],
+        output: undefined
+      },
+      flush: true
+    })
+
+    // A command starting mid-thought must not flip the Thinking task to complete.
+    mapper.process({
+      type: 'item.started',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test' }
+    })
+
+    const second = mapper.process({
+      type: 'item.reasoning.textDelta',
+      itemId: 'reasoning-1',
+      delta: 'event stream'
+    })
+    const secondUpdate = second.find(event => event.type === 'renderer.task.update')
+    expect(secondUpdate).toMatchObject({
+      task: { id: 'reasoning-1', title: 'Thinking', status: 'in_progress' }
+    })
+    expect(
+      plain(secondUpdate?.type === 'renderer.task.update' ? secondUpdate.task.details : undefined)
+    ).toContain('Inspecting the event stream')
+
+    const sealed = mapper.process({
+      type: 'item.completed',
+      item: { id: 'reasoning-1', type: 'reasoning', content: ['Inspecting the event stream'] }
+    })
+    const sealedUpdate = sealed.find(event => event.type === 'renderer.task.update')
+    expect(sealedUpdate).toMatchObject({
+      task: { id: 'reasoning-1', title: 'Thinking', status: 'complete' }
+    })
+  })
+
+  it('separates Codex reasoning summary sections within one Thinking task', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+
+    mapper.process({
+      type: 'item.reasoning.summaryTextDelta',
+      itemId: 'reasoning-1',
+      summaryIndex: 0,
+      delta: 'First section.'
+    })
+    const events = mapper.process({
+      type: 'item.reasoning.summaryTextDelta',
+      itemId: 'reasoning-1',
+      summaryIndex: 1,
+      delta: 'Second section.'
+    })
+    const update = events.find(event => event.type === 'renderer.task.update')
+    expect(update).toMatchObject({
+      task: {
+        id: 'reasoning-1',
+        title: 'Thinking',
+        status: 'in_progress',
+        details: [{ type: 'text', text: 'First section.\n\nSecond section.' }]
+      }
+    })
+  })
+
   it('parses Rust session output lines before mapping app-server notifications', () => {
     const mapper = new CodexAppServerRendererEventMapper()
     mapper.process({
