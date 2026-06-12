@@ -24,7 +24,18 @@ pub struct PostgresListener {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PostgresSetting {
     pub name: String,
-    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<PostgresSettingValueFrom>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PostgresSettingValueFrom {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_field: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

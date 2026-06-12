@@ -650,7 +650,11 @@ mod tests {
             role: Some("centaur_slack_reader".to_owned()),
             settings: vec![crate::PgDsnSettingInput {
                 name: "centaur.slack_channel_id".to_owned(),
-                value: "{{ .Principal.Labels.slack_channel_id }}".to_owned(),
+                value: None,
+                value_from: Some(crate::PgDsnSettingValueFromInput {
+                    principal_label: Some("slack_channel_id".to_owned()),
+                    principal_field: None,
+                }),
             }],
             labels: std::collections::BTreeMap::new(),
             dsn: SecretSource::env("SLACK_ETL_DATABASE_URL"),
@@ -659,7 +663,10 @@ mod tests {
         assert_eq!(body["role"], json!("centaur_slack_reader"));
         assert_eq!(
             body["settings"],
-            json!([{ "name": "centaur.slack_channel_id", "value": "{{ .Principal.Labels.slack_channel_id }}" }])
+            json!([{
+                "name": "centaur.slack_channel_id",
+                "value_from": { "principal_label": "slack_channel_id" }
+            }])
         );
         assert_eq!(
             body["dsn"],

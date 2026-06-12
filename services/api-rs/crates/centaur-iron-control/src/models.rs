@@ -262,9 +262,11 @@ pub struct AwsAuthSecretInput {
 /// upstream connection (the ``dsn`` source is opaque, so it can't be parsed out
 /// of the connection string); ``role`` is an optional Postgres role the proxy
 /// issues ``SET ROLE`` for. ``settings`` are optional Postgres GUCs the proxy
-/// sets after connecting, after rendering each value against the managed
-/// proxy/principal context. They allow RLS policies to key off dynamic
-/// application identity without creating one Postgres role per principal.
+/// sets after connecting. A setting can carry either a literal ``value`` or a
+/// structured ``value_from`` reference that iron-control resolves against the
+/// proxy's assigned principal at sync time. They allow RLS policies to key off
+/// dynamic application identity without creating one Postgres role per
+/// principal.
 // Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PgDsnSecretInput {
@@ -286,7 +288,18 @@ pub struct PgDsnSecretInput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PgDsnSettingInput {
     pub name: String,
-    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<PgDsnSettingValueFromInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PgDsnSettingValueFromInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal_field: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -541,6 +541,12 @@ fn pg_dsn_from_listener(
             .map(|setting| crate::PgDsnSettingInput {
                 name: setting.name.clone(),
                 value: setting.value.clone(),
+                value_from: setting.value_from.as_ref().map(|value_from| {
+                    crate::PgDsnSettingValueFromInput {
+                        principal_label: value_from.principal_label.clone(),
+                        principal_field: value_from.principal_field.clone(),
+                    }
+                }),
             })
             .collect(),
         labels: managed_labels(),
@@ -1003,7 +1009,8 @@ postgres:
       - name: application_name
         value: centaur
       - name: centaur.slack_channel_id
-        value: "{{ .Principal.Labels.slack_channel_id }}"
+        value_from:
+          principal_label: slack_channel_id
 "#,
         )
         .unwrap();
@@ -1022,11 +1029,16 @@ postgres:
             vec![
                 crate::PgDsnSettingInput {
                     name: "application_name".to_owned(),
-                    value: "centaur".to_owned(),
+                    value: Some("centaur".to_owned()),
+                    value_from: None,
                 },
                 crate::PgDsnSettingInput {
                     name: "centaur.slack_channel_id".to_owned(),
-                    value: "{{ .Principal.Labels.slack_channel_id }}".to_owned(),
+                    value: None,
+                    value_from: Some(crate::PgDsnSettingValueFromInput {
+                        principal_label: Some("slack_channel_id".to_owned()),
+                        principal_field: None,
+                    }),
                 }
             ]
         );

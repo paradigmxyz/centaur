@@ -177,7 +177,8 @@ postgres:
     role: centaur_slack_reader
     settings:
       - name: centaur.slack_channel_id
-        value: "{{ .Principal.Labels.slack_channel_id }}"
+        value_from:
+          principal_label: slack_channel_id
 ```
 
 Postgres RLS checks `channel_id =
