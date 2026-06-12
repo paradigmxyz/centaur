@@ -238,6 +238,11 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 0
   sandboxWarmPoolReplenishIntervalSecs: 5
+  # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
+  # the max lifetime. 0 disables that sweep. Interval must be >= 1.
+  sandboxIdleStopTtlSecs: 3600
+  sandboxMaxLifetimeSecs: 86400
+  sandboxReapIntervalSecs: 300
   ironProxy:
     mode: enabled
   metrics:

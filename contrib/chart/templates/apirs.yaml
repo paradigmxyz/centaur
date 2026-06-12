@@ -144,6 +144,12 @@ spec:
               value: {{ .Values.apiRs.sandboxWarmPoolSize | quote }}
             - name: SESSION_SANDBOX_WARM_POOL_REPLENISH_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
+            - name: SESSION_SANDBOX_IDLE_STOP_TTL_SECS
+              value: {{ .Values.apiRs.sandboxIdleStopTtlSecs | quote }}
+            - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
+              value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
+            - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
+              value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: SESSION_SANDBOX_IMAGE
