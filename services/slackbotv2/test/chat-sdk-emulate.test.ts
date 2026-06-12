@@ -1845,6 +1845,12 @@ describe('slackbotv2', () => {
       parentTs: parent.ts
     })
     expect(await threadText(parent.ts)).toContain('Recovered request.')
+    // The thread state is cleared shortly after the Slack stream stops, so
+    // wait for the obligation to clear instead of racing the state write.
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )
