@@ -11,8 +11,8 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
+import { fetchSlackThreadReplies } from '@chat-adapter/slack/api'
 import { createPostgresState } from '@chat-adapter/state-pg'
-import { WebClient } from '@slack/web-api'
 import pg from 'pg'
 import {
   codexAppServerToChatSdkStream,
@@ -1312,15 +1312,16 @@ async function collectSlackThreadContext(
   const currentTs = stringField(raw.ts) || currentMessage.id
   if (!channel || !threadTs) return [await serializeMessage(currentMessage)]
 
-  const client = new WebClient(options.botToken, { slackApiUrl: options.slackApiUrl })
   const messages: SlackbotV2ApiMessage[] = []
   let cursor: string | undefined
   do {
-    const response = await client.conversations.replies({
+    const response = await fetchSlackThreadReplies({
+      apiUrl: options.slackApiUrl,
       channel,
-      ts: threadTs,
+      cursor,
       limit: 200,
-      cursor
+      token: options.botToken,
+      ts: threadTs
     })
     const slackMessages = Array.isArray(response.messages) ? response.messages : []
     for (const rawMessage of slackMessages) {
@@ -1330,8 +1331,7 @@ async function collectSlackThreadContext(
       if (isSelfSlackBotMessage(options, message)) continue
       messages.push(slackApiMessageFromSlack(message, currentMessage))
     }
-    const nextCursor = response.response_metadata?.next_cursor
-    cursor = typeof nextCursor === 'string' && nextCursor.trim() ? nextCursor : undefined
+    cursor = response.nextCursor
   } while (cursor)
 
   const currentIndex = messages.findIndex(message => message.id === currentMessage.id)
