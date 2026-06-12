@@ -1639,7 +1639,11 @@ impl IronProxyHarnessArgs {
     /// credentials through the proxy.
     fn fragments(&self) -> Result<Vec<ProxyFragment>, ServerError> {
         let mut fragments = vec![self.fragment()?];
-        for engine in [HarnessType::Codex, HarnessType::ClaudeCode, HarnessType::Amp] {
+        for engine in [
+            HarnessType::Codex,
+            HarnessType::ClaudeCode,
+            HarnessType::Amp,
+        ] {
             if engine == self.engine {
                 continue;
             }
