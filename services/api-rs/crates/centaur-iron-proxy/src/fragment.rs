@@ -99,8 +99,13 @@ fn normalize_auth_mode(value: &str) -> String {
     value.replace('-', "_")
 }
 
+/// The `PLACEHOLDER=PLACEHOLDER` env for replace-mode secrets whose consumers
+/// read credentials straight from the environment (codex's `OPENAI_API_KEY`,
+/// git's `GITHUB_TOKEN`, …) rather than through the tool SDK, whose
+/// `StubBackend` already hands back the key name. Only the infra/harness
+/// fragments have such consumers; tool fragments are excluded at the call site.
 pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = fragments
+    fragments
         .iter()
         .flat_map(|fragment| &fragment.transforms)
         .filter(|transform| transform.is_secrets())
@@ -108,42 +113,7 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
         .filter_map(|secret| secret.proxy_value())
         .filter(|value| !value.is_empty() && !value.contains('='))
         .map(|value| (value.to_owned(), value.to_owned()))
-        .collect();
-    // The `aws_auth` transform re-signs at the proxy, but the in-sandbox AWS SDK
-    // still needs credentials in its environment to produce the inbound SigV4
-    // signature. Seed each declared placeholder ref (var name == value, the same
-    // convention the secrets transform uses) so the SDK signs with throwaway
-    // values the proxy strips and replaces with the real keys.
-    for transform in fragments
-        .iter()
-        .flat_map(|fragment| &fragment.transforms)
-        .filter(|transform| transform.name == "aws_auth")
-    {
-        for field in ["access_key_id", "secret_access_key", "session_token"] {
-            if let Some(name) = transform
-                .config
-                .extra
-                .get(field)
-                .and_then(placeholder_ref)
-                .filter(|value| !value.is_empty() && !value.contains('='))
-            {
-                env.entry(name.clone()).or_insert(name);
-            }
-        }
-    }
-    env
-}
-
-/// Extract a `{placeholder: NAME}` ref (or a bare `NAME` string) from an
-/// `aws_auth` credential field, matching how iron-control's translator reads it.
-fn placeholder_ref(value: &serde_yaml::Value) -> Option<String> {
-    value
-        .as_mapping()
-        .and_then(|mapping| mapping.get(serde_yaml::Value::from("placeholder")))
-        .and_then(serde_yaml::Value::as_str)
-        .or_else(|| value.as_str())
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// The static catalog of sandbox Postgres DSN env vars declared across

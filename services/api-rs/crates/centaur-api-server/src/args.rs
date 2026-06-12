@@ -819,7 +819,6 @@ impl SandboxArgs {
     }
 
     fn codex_app_server_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let tool_fragment = self.discover_tool_proxy_fragment()?;
         let mut envs = vec![(
             "CENTAUR_API_URL".to_owned(),
             self.centaur_api_url_override
@@ -843,15 +842,12 @@ impl SandboxArgs {
             envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
         }
 
-        // Inject the proxy fragments' placeholder credentials so env-based
+        // Inject the infra/harness placeholder credentials so env-based
         // consumers send the proxy_value iron-proxy replaces with the real
         // secret: codex's OPENAI_API_KEY (api_key mode → codex logs in and
         // hits api.openai.com instead of falling back to the ChatGPT
-        // auth.json), git's GITHUB_TOKEN, and the rest of the infra/tool set.
-        for (name, value) in self
-            .iron_proxy
-            .sandbox_placeholder_env(tool_fragment.as_ref())?
-        {
+        // auth.json), git's GITHUB_TOKEN, and the rest of the infra set.
+        for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             if !envs.iter().any(|(existing, _)| existing == &name) {
                 envs.push((name, value));
             }
@@ -999,13 +995,9 @@ impl SandboxArgs {
     }
 
     fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let tool_fragment = self.discover_tool_proxy_fragment()?;
         let mut envs = Vec::new();
 
-        for (name, value) in self
-            .iron_proxy
-            .sandbox_placeholder_env(tool_fragment.as_ref())?
-        {
+        for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             envs.push((name, value));
         }
 
@@ -1392,20 +1384,16 @@ impl IronProxyArgs {
         Ok(infra)
     }
 
-    /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for every secret the proxy
-    /// fragments declare — infra, harness, and tools — so env-based consumers
-    /// in the sandbox send the proxy_value iron-proxy replaces with the real
-    /// credential (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …). Mirrors
-    /// the full fragment set registered as iron-control roles.
-    fn sandbox_placeholder_env(
-        &self,
-        tool_fragment: Option<&DiscoveredToolProxyFragment>,
-    ) -> Result<BTreeMap<String, String>, ServerError> {
-        let mut fragments = vec![self.infra_fragment()?];
-        if let Some(tool_fragment) = tool_fragment {
-            fragments.push(tool_fragment.fragment.clone());
-        }
-        Ok(centaur_iron_proxy::placeholder_env(&fragments))
+    /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for the infra/harness
+    /// secrets, whose consumers read credentials straight from the environment
+    /// (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …). Discovered tool
+    /// secrets contribute nothing here: tools read credentials through the SDK,
+    /// whose `StubBackend` already returns the key name iron-proxy matches on,
+    /// and the cloudwatch tool embeds its own throwaway SigV4 credentials.
+    fn sandbox_placeholder_env(&self) -> Result<BTreeMap<String, String>, ServerError> {
+        Ok(centaur_iron_proxy::placeholder_env(&[
+            self.infra_fragment()?
+        ]))
     }
 
     fn env_from_secret_names(&self) -> Vec<String> {
