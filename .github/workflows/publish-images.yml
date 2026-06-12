@@ -42,17 +42,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - service: api
-            image: centaur-api
-            dockerfile: services/api/Dockerfile
-            target: ""
           - service: api-rs
             image: centaur-api-rs
             dockerfile: services/api-rs/Dockerfile
-            target: ""
-          - service: slackbot
-            image: centaur-slackbot
-            dockerfile: services/slackbot/Dockerfile
             target: ""
           - service: slackbotv2
             image: centaur-slackbotv2

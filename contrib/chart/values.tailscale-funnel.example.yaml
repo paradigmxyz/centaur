@@ -1,4 +1,4 @@
-# Example overlay: expose the Centaur Slackbot publicly via the Tailscale
+# Example overlay: expose Centaur Slackbot v2 publicly via the Tailscale
 # Kubernetes operator + Funnel, so Slack can POST events to /api/webhooks/slack.
 #
 # Layer it on top of the normal values (it keeps the shared values.dev.yaml clean):
@@ -21,12 +21,11 @@ ingress:
     tailscale.com/funnel: "true"    # public Funnel exposure; omit for tailnet-only
   tls:
     - hosts:
-        - centaur-slackbot          # -> https://centaur-slackbot.<your-tailnet>.ts.net
+        - centaur-slackbotv2        # -> https://centaur-slackbotv2.<your-tailnet>.ts.net
 
 networkPolicy:
   # Allow the operator's proxy pods (in the `tailscale` namespace) to reach the
-  # Slackbot on :3001. Appended to the chart default of [kube-system]; the
-  # Slackbot NetworkPolicy otherwise admits only the API and workflow-run pods.
+  # Slackbot v2 on :3001. Appended to the chart default of [kube-system].
   ingressControllerNamespaces:
     - kube-system
     - tailscale

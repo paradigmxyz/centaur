@@ -16,7 +16,7 @@ spec:
   {{- if .Values.ingress.defaultBackend }}
   defaultBackend:
     service:
-      name: {{ include "centaur.componentName" (dict "root" . "component" "slackbot") }}
+      name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
       port:
         number: 3001
   {{- else }}

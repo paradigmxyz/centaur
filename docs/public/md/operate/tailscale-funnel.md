@@ -63,7 +63,7 @@ ingress:
     tailscale.com/funnel: "true"  # public Funnel exposure; omit for tailnet-only
   tls:
     - hosts:
-        - centaur-slackbot        # -> https://centaur-slackbot.<your-tailnet>.ts.net
+        - centaur-slackbotv2      # -> https://centaur-slackbotv2.<your-tailnet>.ts.net
 
 networkPolicy:
   ingressControllerNamespaces:

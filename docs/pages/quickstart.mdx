@@ -39,8 +39,8 @@ kubectl config current-context
 kubectl get nodes
 ```
 
-The `Justfile` builds local images named `centaur-api:latest`,
-`centaur-iron-proxy:latest`, `centaur-slackbot:latest`, and
+The `Justfile` builds local images named `centaur-api-rs:latest`,
+`centaur-iron-proxy:latest`, `centaur-slackbotv2:latest`, and
 `centaur-agent:latest`, then deploys `contrib/chart` with
 `contrib/chart/values.dev.yaml`.
 
@@ -106,8 +106,8 @@ The API exposes localhost inside its own deployment. Localhost bypasses external
 API-key auth, which is why the health check runs through `kubectl exec`:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
+  curl -fsS http://localhost:8080/healthz
 ```
 
 Expected shape:

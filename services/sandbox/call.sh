@@ -4,7 +4,7 @@
 #   call <tool> <method> [json_body]   → POST /tools/<tool>/<method>
 #   call tools                          → GET /tools (list all)
 #   call discover <tool>               → GET /tools/<tool>
-U="${CENTAUR_API_URL:-http://api:8000}"
+U="${CENTAUR_API_URL:-http://api-rs:8080}"
 # Tools are served by an in-pod sidecar when CENTAUR_TOOLS_URL is set; otherwise
 # fall back to the API server. Agent and workflow calls always go to the API.
 TU="${CENTAUR_TOOLS_URL:-$U}"
@@ -23,7 +23,7 @@ _append_no_proxy() {
 
 _api_host="$(_host_from_url "$U")"
 _tools_host="$(_host_from_url "$TU")"
-_append_no_proxy "localhost,127.0.0.1,api,centaur-api,centaur-centaur-api,centaur-api-proxy,victoriametrics,victorialogs,.centaur.svc.cluster.local,${_api_host},${_tools_host}"
+_append_no_proxy "localhost,127.0.0.1,api-rs,centaur-api-rs,centaur-centaur-api-rs,victoriametrics,victorialogs,.centaur.svc.cluster.local,${_api_host},${_tools_host}"
 # Prefer refreshed token (written on warm-pool claim) over original env var
 _KEY="${CENTAUR_API_KEY:-}"
 if [ -f /home/agent/.api_key ]; then

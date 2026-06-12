@@ -6,7 +6,7 @@
 # secret storage. The chart owns the Deployment shape (image, port, env,
 # security context) so operators tune it via `helm upgrade`. It runs against a
 # dedicated `iron_control_production` database on the bundled Postgres (a separate logical
-# DB so its Rails schema_migrations table never collides with the API's dbmate
+# DB so its Rails schema_migrations table never collides with the API's migration
 # table); the create-db init container provisions that DB idempotently. All
 # secret material — the primary DB URL, the bootstrap user/API-key, the three
 # ActiveRecord encryption keys, and SECRET_KEY_BASE — comes from the shared
@@ -199,16 +199,13 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # The API and api-rs are the control-plane callers (api-rs registers
-    # principals/roles/grants on startup and per session); per-sandbox
+    # api-rs is the control-plane caller (it registers principals/roles/grants
+    # on startup and per session); per-sandbox
     # iron-proxy pods sync their effective config from the control plane over
     # /proxy/sync in managed mode. Widen this when another concrete client
     # integrates. (kubectl port-forward works regardless — it arrives via the
     # kubelet, not pod-to-pod.)
     - from:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
 {{- if .Values.apiRs.enabled }}
         - podSelector:
             matchLabels:

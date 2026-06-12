@@ -34,8 +34,8 @@ local images:
 ```bash
 just build
 kind load docker-image \
-  centaur-api:latest \
-  centaur-slackbot:latest \
+  centaur-api-rs:latest \
+  centaur-slackbotv2:latest \
   centaur-iron-proxy:latest \
   centaur-agent:latest \
   --name centaur
@@ -120,8 +120,8 @@ just status
 Verify the API:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
+  curl -fsS http://localhost:8080/healthz
 ```
 
 Expected shape:
@@ -142,7 +142,7 @@ Cloudflare Tunnel, forward Slackbot to localhost and expose it with a temporary
 HTTPS URL:
 
 ```bash
-kubectl port-forward -n centaur svc/centaur-centaur-slackbot 3001:3001
+kubectl port-forward -n centaur svc/centaur-centaur-slackbotv2 3001:3001
 ```
 
 In another terminal:

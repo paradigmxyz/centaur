@@ -97,29 +97,6 @@
         "bootstrapSecretName": { "type": "string" }
       }
     },
-    "api": {
-      "type": "object",
-      "properties": {
-        "egressDiscovery": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "namespace": { "type": "string" },
-            "clusterDomain": { "type": "string" },
-            "tailnetFqdnAnnotation": { "type": "string" }
-          }
-        },
-        "slackEtlEnabled": { "type": "boolean" },
-        "slackSyncIntervalSeconds": { "type": "integer" },
-        "slackSyncLookbackDays": { "type": "integer" },
-        "slackSyncThreadLookbackDays": { "type": "integer" },
-        "googleDriveEtlEnabled": { "type": "boolean" },
-        "googleDriveSyncIntervalSeconds": { "type": "integer" },
-        "googleCalendarEtlEnabled": { "type": "boolean" },
-        "googleCalendarSyncIntervalSeconds": { "type": "integer" },
-        "companyContextDocumentsIntervalSeconds": { "type": "integer" }
-      }
-    },
     "overlay": {
       "type": "object",
       "properties": {
@@ -231,12 +208,6 @@
         }
       }
     },
-    "slackbot": {
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
-    },
     "postgres": {
       "type": "object",
       "properties": {
@@ -245,15 +216,6 @@
           "properties": {
             "subPath": { "type": "string" }
           }
-        }
-      }
-    },
-    "runnerAccess": {
-      "type": "object",
-      "properties": {
-        "allowedCidrs": {
-          "type": "array",
-          "items": { "type": "string" }
         }
       }
     },

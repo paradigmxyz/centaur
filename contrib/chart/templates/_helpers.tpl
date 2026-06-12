@@ -51,10 +51,6 @@ app.kubernetes.io/component: {{ .component }}
 {{- required "firewall.existingCaKeySecretName is required" .Values.firewall.existingCaKeySecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "centaur.apiServiceAccountName" -}}
-{{- printf "%s-api" (include "centaur.fullname" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
 {{- define "centaur.repoCacheGithubTokenSecretName" -}}
 {{- if .Values.repoCache.githubToken.existingSecretName -}}
 {{- .Values.repoCache.githubToken.existingSecretName | trunc 63 | trimSuffix "-" -}}
@@ -83,22 +79,6 @@ app.kubernetes.io/component: {{ .component }}
 {{- $caKeyName := include "centaur.trustedCaKeySecretName" . -}}
 {{- $payload := dict "env" (include "centaur.secretResourceVersion" (dict "root" . "name" $envName)) "ca" (include "centaur.secretResourceVersion" (dict "root" . "name" $caName)) "caKey" (include "centaur.secretResourceVersion" (dict "root" . "name" $caKeyName)) -}}
 {{- toJson $payload | sha256sum -}}
-{{- end -}}
-
-{{- define "centaur.firewallProxyHost" -}}
-centaur-api-proxy
-{{- end -}}
-
-{{- define "centaur.firewallProxyPort" -}}
-{{- .Values.ironProxy.service.proxyPort -}}
-{{- end -}}
-
-{{- define "centaur.firewallProxyUrl" -}}
-{{- printf "http://%s:%v" (include "centaur.firewallProxyHost" .) (include "centaur.firewallProxyPort" .) -}}
-{{- end -}}
-
-{{- define "centaur.firewallNoProxyHosts" -}}
-{{- include "centaur.firewallProxyHost" . -}}
 {{- end -}}
 
 {{- /*

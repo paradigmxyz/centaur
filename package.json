@@ -1,8 +1,5 @@
 {
   "name": "centaur",
   "private": true,
-  "packageManager": "pnpm@10.28.1",
-  "scripts": {
-    "slackbot:delivery-regression": "pnpm --filter slackbot test"
-  }
+  "packageManager": "pnpm@10.28.1"
 }

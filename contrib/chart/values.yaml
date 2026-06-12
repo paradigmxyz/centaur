@@ -69,7 +69,7 @@ toolServer:
 # iron-control — Rails control plane for authenticated API access + encrypted
 # secret storage. Off by default; enable per-environment. Uses a dedicated
 # `iron_control_production` database on the bundled Postgres (its own logical DB so its
-# Rails schema_migrations table never collides with the API's dbmate table); an
+# Rails schema_migrations table never collides with the API's migration table); an
 # init container creates the DB idempotently. DATABASE_URL, bootstrap
 # user/API-key, and the three ActiveRecord encryption keys are injected from the
 # shared infra Secret. Point IRON_CONTROL_DATABASE_URL elsewhere to use an
@@ -117,58 +117,6 @@ onepasswordConnect:
 
 secrets:
   bootstrapSecretName: ""
-
-# Legacy Python control plane. Superseded by apiRs (the Rust control plane);
-# disabled by default. It still owns subsystems not yet ported (workflows, warm
-# pool, Slack ETL, plugin watcher, egress discovery), so re-enable it if you need
-# those alongside api-rs.
-api:
-  enabled: false
-  replicaCount: 1
-  image:
-    repository: centaur-api
-    tag: latest
-    pullPolicy: Always
-  executionWorkerEnabled: false
-  defaultHarness: codex
-  # The API's worker claims workflow_runs and spawns a per-run sandbox to
-  # execute each handler. Disable only if you're running your own claimer.
-  workflowWorkerEnabled: true
-  warmPoolEnabled: false
-  pluginWatcherEnabled: false
-  slackEtlEnabled: false
-  slackSyncIntervalSeconds: 3600
-  slackBackfillIntervalSeconds: 3600
-  slackBackfillChannelBatchLimit: 20
-  slackSyncBackfillLookbackDays: 30
-  slackSyncThreadLookbackDays: 3
-  googleDriveEtlEnabled: false
-  googleDriveSyncIntervalSeconds: 14400
-  googleCalendarEtlEnabled: false
-  googleCalendarSyncIntervalSeconds: 14400
-  companyContextDocumentsIntervalSeconds: 14400
-  slackEtlExcludedChannelPatterns: ""
-  victoriaMetricsPushEnabled: false
-  startupProbe:
-    failureThreshold: 30
-    periodSeconds: 10
-    timeoutSeconds: 5
-  livenessProbe:
-    failureThreshold: 6
-    periodSeconds: 10
-    timeoutSeconds: 5
-  readinessProbe:
-    failureThreshold: 6
-    periodSeconds: 10
-    timeoutSeconds: 5
-  egressDiscovery:
-    enabled: true
-    namespace: centaur-egress
-    clusterDomain: cluster.local
-    tailnetFqdnAnnotation: tailscale.com/tailnet-fqdn
-  terminationGracePeriodSeconds: 35
-  extraEnv: {}
-  resources: {}
 
 overlay:
   mountPath: /app/overlay/org
@@ -254,8 +202,7 @@ agentSandbox:
 
 # Rust session control plane (services/api-rs). Owns sessions, agent-k8s
 # sandboxes (via the agents.x-k8s.io Sandbox CRD), and the per-sandbox
-# iron-proxy/firewall. Coexists with the Python `api`; reuses the same Postgres
-# and infra secret. Disable to fall back to the Python-only stack.
+# iron-proxy/firewall.
 apiRs:
   enabled: true
   replicaCount: 1
@@ -299,23 +246,8 @@ apiRs:
   extraEnv: {}
   resources: {}
 
-# Legacy Slackbot that talks to the Python `api` on :8000. Superseded by
-# slackbotv2 (which talks to api-rs); disabled by default so the two bots don't
-# both answer the same Slack events. Re-enable only for a separate Slack app.
-slackbot:
-  enabled: false
-  replicaCount: 1
-  image:
-    repository: centaur-slackbot
-    tag: latest
-    pullPolicy: Always
-  runtimeErrorAlertChannel: ""
-  extraEnv: {}
-  resources: {}
-
-# Chat SDK Slackbot v2 — successor to `slackbot`. Forwards Slack events to the
-# api-rs control plane (:8080) and streams responses back. Listens on :3001 so
-# chart ingress/networkpolicy swap cleanly from slackbot.
+# Chat SDK Slackbot v2. Forwards Slack events to the api-rs control plane
+# (:8080) and streams responses back. Listens on :3001.
 slackbotv2:
   enabled: true
   replicaCount: 1
@@ -365,16 +297,6 @@ ingress:
   tls: []
 
 httpRoutes: []
-
-runnerAccess:
-  enabled: false
-  allowedCidrs: []
-  apiService:
-    type: LoadBalancer
-    loadBalancerSourceRanges: []
-  proxyService:
-    type: LoadBalancer
-    loadBalancerSourceRanges: []
 
 networkPolicy:
   enabled: true
