@@ -26,5 +26,5 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 hosts = ["api.legistorm.com"]
-secrets = [{type = "http", name = "LEGISTORM_API_KEY", match_headers = ["X-Api-Key"], hosts = ["api.legistorm.com"]}]
+secrets = [{type = "http", name = "LEGISTORM_API_KEY", mode = "inject", inject_header = "X-Api-Key", hosts = ["api.legistorm.com"]}]
 optional_secrets = ["LEGISTORM_ISSUES_ENDPOINT"]
