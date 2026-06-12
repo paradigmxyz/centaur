@@ -10,7 +10,8 @@ use centaur_sandbox_core::{
     SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
-    SandboxManager, WarmPoolConfig, WarmPoolError, WarmPoolManager, WarmSandboxSpecFactory,
+    SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
+    WarmPoolManager, WarmSandboxSpecFactory,
 };
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, Session, SessionEvent, SessionExecution,
@@ -181,6 +182,16 @@ impl SessionRuntime {
         ));
         pool.clone().spawn_replenisher();
         self.warm_pool = Some(pool);
+        self
+    }
+
+    /// Spawn the background reaper that stops sandboxes whose idle pause or
+    /// total lifetime expired. No-op when both TTLs are disabled.
+    pub fn with_sandbox_reaper(self, config: SandboxReaperConfig) -> Self {
+        if !config.is_enabled() {
+            return self;
+        }
+        SandboxReaper::new(self.sandbox_runtime.manager.clone(), config).spawn();
         self
     }
 

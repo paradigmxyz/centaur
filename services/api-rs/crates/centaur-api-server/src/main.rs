@@ -42,6 +42,7 @@ async fn main() -> Result<(), ServerError> {
         config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
         runtime = runtime.with_warm_pool(config);
     }
+    runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
         .await?;

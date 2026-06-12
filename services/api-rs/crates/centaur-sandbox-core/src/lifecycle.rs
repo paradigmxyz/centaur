@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
 
 use crate::SandboxSpec;
@@ -98,6 +100,11 @@ pub struct ObservedSandbox {
     pub status: SandboxStatus,
     /// Backend-owned diagnostic reason for the observed status.
     pub reason: Option<String>,
+    /// When the backend created the sandbox, if the backend records it.
+    pub created_at: Option<SystemTime>,
+    /// When the sandbox was suspended, if it is currently suspended and the
+    /// backend records it.
+    pub suspended_since: Option<SystemTime>,
 }
 
 impl ObservedSandbox {
@@ -111,7 +118,19 @@ impl ObservedSandbox {
             backend: backend.into(),
             status,
             reason: None,
+            created_at: None,
+            suspended_since: None,
         }
+    }
+
+    pub fn with_created_at(mut self, created_at: Option<SystemTime>) -> Self {
+        self.created_at = created_at;
+        self
+    }
+
+    pub fn with_suspended_since(mut self, suspended_since: Option<SystemTime>) -> Self {
+        self.suspended_since = suspended_since;
+        self
     }
 }
 

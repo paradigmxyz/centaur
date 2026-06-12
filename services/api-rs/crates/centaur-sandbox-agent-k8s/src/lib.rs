@@ -42,6 +42,11 @@ const MANAGED_BY_VALUE: &str = "api-rs";
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
 const IRON_CONTROL_PRINCIPAL_ANNOTATION: &str = "centaur.ai/iron-control-principal";
+// RFC 3339 instant stamped when the sandbox is paused for idleness and
+// cleared on resume. The reaper uses it to stop sandboxes whose pause
+// outlived the idle TTL, surviving api-rs restarts (the pause timer is
+// otherwise in-memory only).
+const PAUSED_AT_ANNOTATION: &str = "centaur.ai/paused-at";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -207,14 +212,26 @@ impl AgentSandboxBackend {
         }
     }
 
-    async fn patch_replicas(&self, id: &SandboxId, replicas: i32) -> SandboxResult<()> {
+    async fn observed_from_sandbox(
+        &self,
+        id: &SandboxId,
+        sandbox: &crd::Sandbox,
+    ) -> SandboxResult<ObservedSandbox> {
+        let replicas = sandbox.spec.replicas.unwrap_or(1);
+        let pod = self.get_pod(id).await?;
+        let status = sandbox_status_from_pod(replicas, pod.as_ref());
+        Ok(ObservedSandbox::new(id.clone(), BACKEND_NAME, status)
+            .with_created_at(sandbox_creation_time(sandbox))
+            .with_suspended_since(sandbox_paused_at(sandbox)))
+    }
+
+    async fn patch_sandbox_merge(&self, id: &SandboxId, patch: Value) -> SandboxResult<()> {
         let params = PatchParams::apply(&self.config.field_manager);
-        let patch = Patch::Merge(json!({ "spec": { "replicas": replicas } }));
         self.sandboxes()
-            .patch(id.as_str(), &params, &patch)
+            .patch(id.as_str(), &params, &Patch::Merge(patch))
             .await
             .map(|_| ())
-            .map_err(|err| map_kube_error("patch sandbox replicas", err))
+            .map_err(|err| map_kube_error("patch sandbox", err))
     }
 
     async fn delete_state_pvc(&self, id: &SandboxId) -> SandboxResult<()> {
@@ -312,14 +329,26 @@ impl SandboxBackend for AgentSandboxBackend {
             return Err(err);
         }
         let sandbox = build_agent_sandbox(&id, &spec, &self.config)?;
-        let create_result = self
+        let created = match self
             .sandboxes()
             .create(&PostParams::default(), &sandbox)
             .await
-            .map_err(|err| map_kube_error("create sandbox", err));
-        if let Err(err) = create_result {
-            let _ = self.delete_iron_proxy_resources(&id).await;
-            return Err(err);
+        {
+            Ok(created) => created,
+            Err(err) => {
+                let _ = self.delete_iron_proxy_resources(&id).await;
+                return Err(map_kube_error("create sandbox", err));
+            }
+        };
+        // The proxy resources are created before the Sandbox CR (the egress
+        // policies must exist before the pod starts), so bind them to it here
+        // for cascade deletion. Failure leaves them cleanable by stop() only.
+        if let Err(error) = self.adopt_iron_proxy_resources(&id, &created).await {
+            tracing::warn!(
+                sandbox_id = id.as_str(),
+                %error,
+                "failed to set ownerReferences on iron-proxy resources"
+            );
         }
         if let Err(err) = self.wait_until_running(&id).await {
             let _ = self.stop(&id).await;
@@ -368,8 +397,14 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
-        let status = self.status(id).await?;
-        Ok(ObservedSandbox::new(id.clone(), BACKEND_NAME, status))
+        let Some(sandbox) = self.get_sandbox(id).await? else {
+            return Ok(ObservedSandbox::new(
+                id.clone(),
+                BACKEND_NAME,
+                SandboxStatus::Gone,
+            ));
+        };
+        self.observed_from_sandbox(id, &sandbox).await
     }
 
     async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
@@ -382,11 +417,11 @@ impl SandboxBackend for AgentSandboxBackend {
             .map_err(|err| map_kube_error("list sandboxes", err))?;
         let mut observed = Vec::with_capacity(sandboxes.items.len());
         for sandbox in sandboxes.items {
-            let Some(name) = sandbox.metadata.name else {
+            let Some(name) = sandbox.metadata.name.clone() else {
                 continue;
             };
             let id = SandboxId::new(name);
-            observed.push(self.observe(&id).await?);
+            observed.push(self.observed_from_sandbox(&id, &sandbox).await?);
         }
         Ok(observed)
     }
@@ -419,7 +454,8 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
-        self.patch_replicas(id, 0).await
+        self.patch_sandbox_merge(id, sandbox_pause_patch(jiff::Timestamp::now()))
+            .await
     }
 
     async fn resume(&self, id: &SandboxId) -> SandboxResult<()> {
@@ -428,9 +464,53 @@ impl SandboxBackend for AgentSandboxBackend {
         let resolved_iron_proxy = self.resolve_iron_proxy_for_resume(id).await?;
         self.create_iron_proxy_resources(id, resolved_iron_proxy.as_ref())
             .await?;
-        self.patch_replicas(id, 1).await?;
+        // The proxy resources were recreated, so re-bind them to the sandbox
+        // for cascade deletion.
+        if let Some(sandbox) = self.get_sandbox(id).await?
+            && let Err(error) = self.adopt_iron_proxy_resources(id, &sandbox).await
+        {
+            tracing::warn!(
+                sandbox_id = id.as_str(),
+                %error,
+                "failed to set ownerReferences on resumed iron-proxy resources"
+            );
+        }
+        self.patch_sandbox_merge(id, sandbox_resume_patch()).await?;
         self.wait_until_running(id).await
     }
+}
+
+fn sandbox_pause_patch(paused_at: jiff::Timestamp) -> Value {
+    json!({
+        "spec": { "replicas": 0 },
+        "metadata": { "annotations": { PAUSED_AT_ANNOTATION: paused_at.to_string() } },
+    })
+}
+
+fn sandbox_resume_patch() -> Value {
+    // A JSON merge patch null removes the annotation.
+    json!({
+        "spec": { "replicas": 1 },
+        "metadata": { "annotations": { PAUSED_AT_ANNOTATION: null } },
+    })
+}
+
+fn sandbox_creation_time(sandbox: &crd::Sandbox) -> Option<SystemTime> {
+    sandbox
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|time| SystemTime::from(time.0))
+}
+
+fn sandbox_paused_at(sandbox: &crd::Sandbox) -> Option<SystemTime> {
+    let raw = sandbox
+        .metadata
+        .annotations
+        .as_ref()?
+        .get(PAUSED_AT_ANNOTATION)?;
+    let timestamp = raw.parse::<jiff::Timestamp>().ok()?;
+    Some(SystemTime::from(timestamp))
 }
 
 fn sandbox_status_from_pod(replicas: i32, pod: Option<&Pod>) -> SandboxStatus {

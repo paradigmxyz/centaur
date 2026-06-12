@@ -14,8 +14,8 @@ use k8s_openapi::api::networking::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::Api;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::{Api, Resource};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
@@ -369,10 +369,69 @@ impl AgentSandboxBackend {
         })
     }
 
-    pub(crate) async fn delete_iron_proxy_resources(&self, id: &SandboxId) -> SandboxResult<()> {
-        if self.config.iron_proxy.is_none() {
+    /// Bind the per-sandbox proxy resources (pods, service, network policies)
+    /// to the Sandbox CR with ownerReferences so Kubernetes garbage-collects
+    /// them when the sandbox is deleted out-of-band (operator cleanup, a
+    /// future shutdownPolicy). They are created before the Sandbox CR exists
+    /// (the egress policies must precede the pod), so this runs as a separate
+    /// patch once the CR is available.
+    pub(crate) async fn adopt_iron_proxy_resources(
+        &self,
+        id: &SandboxId,
+        sandbox: &crate::crd::Sandbox,
+    ) -> SandboxResult<()> {
+        let Some(owner_reference) = sandbox_owner_reference(sandbox) else {
             return Ok(());
+        };
+        let params = PatchParams::default();
+        let patch = Patch::Merge(json!({
+            "metadata": { "ownerReferences": [owner_reference] },
+        }));
+        let pods = self
+            .pods()
+            .list(&ListParams::default().labels(&format!(
+                "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+                id.as_str()
+            )))
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods for adoption", err))?;
+        for pod in pods.items {
+            let Some(name) = pod.metadata.name else {
+                continue;
+            };
+            match self.pods().patch(&name, &params, &patch).await {
+                Ok(_) => {}
+                Err(err) if is_not_found(&err) => {}
+                Err(err) => return Err(map_kube_error("adopt iron-proxy pod", err)),
+            }
         }
+        match self
+            .services()
+            .patch(&iron_proxy_service_name(id), &params, &patch)
+            .await
+        {
+            Ok(_) => {}
+            Err(err) if is_not_found(&err) => {}
+            Err(err) => return Err(map_kube_error("adopt iron-proxy service", err)),
+        }
+        for name in [
+            iron_proxy_sandbox_egress_policy_name(id),
+            iron_proxy_policy_name(id),
+        ] {
+            match self.network_policies().patch(&name, &params, &patch).await {
+                Ok(_) => {}
+                Err(err) if is_not_found(&err) => {}
+                Err(err) => return Err(map_kube_error("adopt iron-proxy network policy", err)),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn delete_iron_proxy_resources(&self, id: &SandboxId) -> SandboxResult<()> {
+        // Deliberately not gated on iron_proxy being configured: the resources
+        // may exist from a previous configuration, and deleting absent ones is
+        // a no-op.
+        //
         // Deregister the iron-control proxy first (best-effort): once the pod is
         // gone the token is useless, and a stale proxy row just fails to sync.
         if let Some(iron_control) = self.config.iron_control.as_ref()
@@ -1291,6 +1350,17 @@ fn pod_stopped(pod: &Pod) -> bool {
         .is_some_and(|phase| {
             phase.eq_ignore_ascii_case("succeeded") || phase.eq_ignore_ascii_case("failed")
         })
+}
+
+fn sandbox_owner_reference(sandbox: &crate::crd::Sandbox) -> Option<Value> {
+    let name = sandbox.metadata.name.as_ref()?;
+    let uid = sandbox.metadata.uid.as_ref()?;
+    Some(json!({
+        "apiVersion": crate::crd::Sandbox::api_version(&()),
+        "kind": crate::crd::Sandbox::kind(&()),
+        "name": name,
+        "uid": uid,
+    }))
 }
 
 fn object_meta(name: impl Into<String>, labels: BTreeMap<String, String>) -> ObjectMeta {
