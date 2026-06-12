@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     path::PathBuf,
     str::FromStr,
@@ -47,6 +47,11 @@ const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
+/// How many consecutive reconcile passes a workflow must be missing from
+/// discovery before its active tasks are cancelled. 0 disables reaping.
+const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
+const DEFAULT_WORKFLOW_REAP_REMOVED_AFTER_TICKS: u32 = 3;
+const ABSURD_TERMINAL_TASK_STATES: &str = "('completed', 'failed', 'cancelled')";
 
 struct WorkflowTaskHeartbeatGuard {
     task: JoinHandle<()>,
@@ -384,6 +389,8 @@ impl WorkflowRuntime {
         if let Some(interval) = workflow_reconcile_interval() {
             spawn_workflow_metadata_reconciler(
                 schedule_client.clone(),
+                client.clone(),
+                etl_client.clone(),
                 webhook_registry.clone(),
                 schedule_registry.clone(),
                 interval,
@@ -1039,6 +1046,31 @@ struct PythonWorkflowDiscoveryPayload {
 struct PythonWorkflowMetadata {
     webhooks: Vec<RegisteredWorkflowWebhook>,
     schedules: Vec<Value>,
+    workflow_names: BTreeSet<String>,
+}
+
+fn metadata_from_discovery_payload(
+    payload: PythonWorkflowDiscoveryPayload,
+) -> PythonWorkflowMetadata {
+    let mut metadata = PythonWorkflowMetadata::default();
+    for workflow in payload.workflows {
+        metadata
+            .workflow_names
+            .insert(workflow.workflow_name.clone());
+        metadata.webhooks.extend(workflow.webhooks);
+        if let Some(mut schedule) = workflow.schedule {
+            if let Some(object) = schedule.as_object_mut() {
+                object
+                    .entry("workflow_name".to_owned())
+                    .or_insert_with(|| json!(workflow.workflow_name));
+                object
+                    .entry("source_path".to_owned())
+                    .or_insert_with(|| json!(workflow.source_path));
+            }
+            metadata.schedules.push(schedule);
+        }
+    }
+    metadata
 }
 
 async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, WorkflowRuntimeError>
@@ -1096,22 +1128,7 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
             Some("workflow.discovery") => {
                 let _ = child.wait().await;
                 let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(message)?;
-                let mut metadata = PythonWorkflowMetadata::default();
-                for workflow in payload.workflows {
-                    metadata.webhooks.extend(workflow.webhooks);
-                    if let Some(mut schedule) = workflow.schedule {
-                        if let Some(object) = schedule.as_object_mut() {
-                            object
-                                .entry("workflow_name".to_owned())
-                                .or_insert_with(|| json!(workflow.workflow_name));
-                            object
-                                .entry("source_path".to_owned())
-                                .or_insert_with(|| json!(workflow.source_path));
-                        }
-                        metadata.schedules.push(schedule);
-                    }
-                }
-                return Ok(metadata);
+                return Ok(metadata_from_discovery_payload(payload));
             }
             Some("host.error") | Some("workflow.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
@@ -1167,24 +1184,41 @@ fn workflow_reconcile_interval() -> Option<Duration> {
 
 fn spawn_workflow_metadata_reconciler(
     schedule_client: Client,
+    workflow_client: Client,
+    etl_client: Client,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     interval: Duration,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
+        let mut reaper = RemovedWorkflowReaper::from_env();
         // Startup discovery already ran; wait one full period before refreshing.
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if let Err(error) = reconcile_workflow_metadata_once(
+            match reconcile_workflow_metadata_once(
                 &schedule_client,
                 &webhook_registry,
                 &schedule_registry,
             )
             .await
             {
-                warn!(%error, "failed to reconcile workflow metadata");
+                Ok((metadata, schedules)) => {
+                    if let Err(error) = reaper
+                        .reap(
+                            &workflow_client,
+                            &etl_client,
+                            &schedule_client,
+                            &metadata,
+                            &schedules,
+                        )
+                        .await
+                    {
+                        warn!(%error, "failed to reap removed workflow tasks");
+                    }
+                }
+                Err(error) => warn!(%error, "failed to reconcile workflow metadata"),
             }
         }
     });
@@ -1194,7 +1228,13 @@ async fn reconcile_workflow_metadata_once(
     schedule_client: &Client,
     webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
-) -> Result<(), WorkflowRuntimeError> {
+) -> Result<
+    (
+        PythonWorkflowMetadata,
+        BTreeMap<String, RegisteredWorkflowSchedule>,
+    ),
+    WorkflowRuntimeError,
+> {
     let discovery = discover_python_workflow_metadata().await?;
     let next_webhooks = build_webhook_registry(&discovery)?;
     let next_schedules = build_schedule_registry(&discovery)?;
@@ -1216,7 +1256,190 @@ async fn reconcile_workflow_metadata_once(
         schedule_count = discovery.schedules.len(),
         "reconciled workflow metadata"
     );
-    Ok(())
+    Ok((discovery, next_schedules))
+}
+
+/// Cancels queued/running runs and pending schedule ticks that reference a
+/// workflow which is no longer discoverable on disk. Without this, runs of a
+/// deleted workflow keep retrying (each attempt spawning a sandbox that fails
+/// with `unknown workflow_name`) and an interrupted run can sit in `running`
+/// forever once its claim lapses.
+struct RemovedWorkflowReaper {
+    threshold: u32,
+    workflow_miss_counts: BTreeMap<String, u32>,
+    schedule_miss_counts: BTreeMap<String, u32>,
+}
+
+impl RemovedWorkflowReaper {
+    fn from_env() -> Self {
+        let threshold = env::var(WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .unwrap_or(DEFAULT_WORKFLOW_REAP_REMOVED_AFTER_TICKS);
+        Self {
+            threshold,
+            workflow_miss_counts: BTreeMap::new(),
+            schedule_miss_counts: BTreeMap::new(),
+        }
+    }
+
+    async fn reap(
+        &mut self,
+        workflow_client: &Client,
+        etl_client: &Client,
+        schedule_client: &Client,
+        metadata: &PythonWorkflowMetadata,
+        schedules: &BTreeMap<String, RegisteredWorkflowSchedule>,
+    ) -> Result<(), WorkflowRuntimeError> {
+        if self.threshold == 0 {
+            return Ok(());
+        }
+        // An empty discovery result almost certainly means WORKFLOW_DIRS is
+        // missing or broken; never treat that as "every workflow was deleted".
+        if metadata.workflow_names.is_empty() {
+            warn!("workflow discovery returned no workflows; skipping removed-workflow reaping");
+            return Ok(());
+        }
+
+        let mut active_runs = Vec::new();
+        for (queue_name, client) in [
+            (WORKFLOW_QUEUE, workflow_client),
+            (WORKFLOW_ETL_QUEUE, etl_client),
+        ] {
+            for (task_id, name) in
+                fetch_active_named_tasks(client, queue_name, WORKFLOW_TASK, "workflow_name").await?
+            {
+                active_runs.push((queue_name, task_id, name));
+            }
+        }
+        let run_keyed = active_runs
+            .iter()
+            .map(|(queue, task_id, name)| (format!("{queue}:{task_id}"), name.clone()))
+            .collect::<Vec<_>>();
+        let stale_runs = select_stale_cancellations(
+            &run_keyed,
+            &metadata.workflow_names,
+            &mut self.workflow_miss_counts,
+            self.threshold,
+        );
+        for key in &stale_runs {
+            let Some((queue_name, task_id)) = key.split_once(':') else {
+                continue;
+            };
+            let client = if queue_name == WORKFLOW_ETL_QUEUE {
+                etl_client
+            } else {
+                workflow_client
+            };
+            if let Err(error) = client.cancel_task(task_id, Some(queue_name)).await {
+                warn!(%error, queue_name, task_id, "failed to cancel run of removed workflow");
+            } else {
+                info!(queue_name, task_id, "cancelled run of removed workflow");
+            }
+        }
+
+        let known_schedule_ids = schedules.keys().cloned().collect::<BTreeSet<_>>();
+        let active_ticks = fetch_active_named_tasks(
+            schedule_client,
+            WORKFLOW_SCHEDULE_QUEUE,
+            WORKFLOW_SCHEDULE_TASK,
+            "schedule_id",
+        )
+        .await?;
+        let stale_ticks = select_stale_cancellations(
+            &active_ticks,
+            &known_schedule_ids,
+            &mut self.schedule_miss_counts,
+            self.threshold,
+        );
+        for task_id in &stale_ticks {
+            if let Err(error) = schedule_client
+                .cancel_task(task_id, Some(WORKFLOW_SCHEDULE_QUEUE))
+                .await
+            {
+                warn!(%error, task_id, "failed to cancel schedule tick of removed workflow");
+            } else {
+                info!(task_id, "cancelled schedule tick of removed workflow");
+            }
+        }
+
+        if !stale_runs.is_empty() || !stale_ticks.is_empty() {
+            info!(
+                cancelled_runs = stale_runs.len(),
+                cancelled_schedule_ticks = stale_ticks.len(),
+                "reaped tasks referencing removed workflows"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Returns `(task_id, name)` for every non-terminal task in the queue, where
+/// `name` is extracted from the task params (`workflow_name` for runs,
+/// `schedule_id` for schedule ticks). Tasks without the field are skipped.
+async fn fetch_active_named_tasks(
+    client: &Client,
+    queue_name: &str,
+    task_name: &str,
+    params_name_field: &str,
+) -> Result<Vec<(String, String)>, WorkflowRuntimeError> {
+    let (task_table, _) = absurd_queue_tables(queue_name)?;
+    let rows = sqlx::query(&format!(
+        r#"
+        select t.task_id::text as task_id, t.params->>'{params_name_field}' as name
+        from {task_table} t
+        where t.task_name = $1
+          and t.state not in {ABSURD_TERMINAL_TASK_STATES}
+        "#,
+    ))
+    .bind(task_name)
+    .fetch_all(client.pool())
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let task_id: String = row.try_get("task_id").ok()?;
+            let name: Option<String> = row.try_get("name").ok()?;
+            Some((task_id, name?))
+        })
+        .collect())
+}
+
+/// Counts consecutive reconcile passes in which each referenced name was
+/// absent from `known_names`, and returns the task ids whose name has been
+/// missing for at least `threshold` passes. Counters for names that are known
+/// again, or no longer referenced by any active task, are dropped.
+fn select_stale_cancellations(
+    active_tasks: &[(String, String)],
+    known_names: &BTreeSet<String>,
+    miss_counts: &mut BTreeMap<String, u32>,
+    threshold: u32,
+) -> Vec<String> {
+    let mut active_by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (task_id, name) in active_tasks {
+        active_by_name
+            .entry(name.as_str())
+            .or_default()
+            .push(task_id.as_str());
+    }
+    let mut cancellations = Vec::new();
+    let mut next_counts = BTreeMap::new();
+    for (name, task_ids) in active_by_name {
+        if known_names.contains(name) {
+            continue;
+        }
+        let count = miss_counts
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if count >= threshold {
+            cancellations.extend(task_ids.iter().map(|id| (*id).to_owned()));
+        }
+        next_counts.insert(name.to_owned(), count);
+    }
+    *miss_counts = next_counts;
+    cancellations
 }
 
 async fn run_schedule_tick(
@@ -2569,5 +2792,96 @@ mod tests {
         let value = serde_json::to_value(run).unwrap();
         assert_eq!(value["created_at"], json!("2026-06-09T13:35:05.044019Z"));
         assert_eq!(value["updated_at"], json!("2026-06-09T13:35:05.044019Z"));
+    }
+
+    #[test]
+    fn discovery_metadata_collects_all_workflow_names() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [
+                {
+                    "workflow_name": "scheduled_workflow",
+                    "source_path": "workflows/scheduled_workflow.py",
+                    "schedule": {"schedule_id": "scheduled_workflow", "cron": "*/5 * * * *"},
+                },
+                {
+                    "workflow_name": "manual_workflow",
+                    "source_path": "workflows/manual_workflow.py",
+                },
+            ],
+        }))
+        .unwrap();
+        let metadata = metadata_from_discovery_payload(payload);
+        assert_eq!(
+            metadata.workflow_names,
+            BTreeSet::from([
+                "scheduled_workflow".to_owned(),
+                "manual_workflow".to_owned()
+            ])
+        );
+        assert_eq!(metadata.schedules.len(), 1);
+        assert_eq!(
+            metadata.schedules[0].get("workflow_name"),
+            Some(&json!("scheduled_workflow"))
+        );
+    }
+
+    #[test]
+    fn stale_cancellations_wait_for_threshold_consecutive_misses() {
+        let known = BTreeSet::from(["alive".to_owned()]);
+        let active = vec![
+            ("task-1".to_owned(), "removed".to_owned()),
+            ("task-2".to_owned(), "removed".to_owned()),
+            ("task-3".to_owned(), "alive".to_owned()),
+        ];
+        let mut counts = BTreeMap::new();
+
+        assert!(select_stale_cancellations(&active, &known, &mut counts, 3).is_empty());
+        assert!(select_stale_cancellations(&active, &known, &mut counts, 3).is_empty());
+        assert_eq!(
+            select_stale_cancellations(&active, &known, &mut counts, 3),
+            vec!["task-1".to_owned(), "task-2".to_owned()]
+        );
+        assert!(!counts.contains_key("alive"));
+    }
+
+    #[test]
+    fn stale_cancellation_counter_resets_when_workflow_reappears() {
+        let active = vec![("task-1".to_owned(), "flaky".to_owned())];
+        let mut counts = BTreeMap::new();
+
+        assert!(select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 2).is_empty());
+        // Workflow discovered again: counter must drop so a later removal
+        // starts counting from scratch.
+        let known = BTreeSet::from(["flaky".to_owned()]);
+        assert!(select_stale_cancellations(&active, &known, &mut counts, 2).is_empty());
+        assert!(counts.is_empty());
+        assert!(select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 2).is_empty());
+        assert_eq!(
+            select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 2),
+            vec!["task-1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn stale_cancellation_counter_drops_idle_names() {
+        let active = vec![("task-1".to_owned(), "removed".to_owned())];
+        let mut counts = BTreeMap::new();
+        assert!(select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 2).is_empty());
+        // No active tasks reference the name anymore (e.g. all cancelled).
+        assert!(select_stale_cancellations(&[], &BTreeSet::new(), &mut counts, 2).is_empty());
+        assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn zero_threshold_disables_reaping_selection() {
+        // threshold 0 is handled by RemovedWorkflowReaper::reap returning
+        // early; the selection helper itself treats it as "cancel instantly",
+        // so guard the contract here to catch accidental misuse.
+        let active = vec![("task-1".to_owned(), "removed".to_owned())];
+        let mut counts = BTreeMap::new();
+        assert_eq!(
+            select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 1),
+            vec!["task-1".to_owned()]
+        );
     }
 }
