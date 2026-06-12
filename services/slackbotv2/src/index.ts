@@ -84,6 +84,7 @@ const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
+const RENDER_LEASE_REFRESH_INTERVAL_MS = 60 * 1000
 const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
 const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
@@ -312,6 +313,7 @@ async function syncThreadMessageToSession(
   }
 
   let lastEventId = state.lastEventId ?? 0
+  const renderLease: { release: (() => Promise<void>) | null } = { release: null }
   const candidateMessages = context ?? [serializedMessage]
   const messagesToAppend = candidateMessages.filter(item => !messageIds.has(item.id))
 
@@ -351,6 +353,16 @@ async function syncThreadMessageToSession(
     const latestExecutedMessageIds = new Set(latest.executedMessageIds ?? [])
     latestExecutedMessageIds.add(serializedMessage.id)
     forwardInput.executionId = execution.execution_id
+    // Take the render lease before the obligation becomes visible so a
+    // concurrent recovery sweep never claims it while this process is about
+    // to render it live.
+    try {
+      renderLease.release = await acquireRenderLease(input.state, thread.id)
+    } catch (error) {
+      traceLog(input.options, 'slackbotv2_render_lease_acquire_failed', trace, {
+        error: errorMessage(error)
+      })
+    }
     await thread.setState({
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
@@ -415,12 +427,16 @@ async function syncThreadMessageToSession(
       input.options,
       forwardInput,
       () => lastEventId,
+      renderLease,
       trace
     )
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       last_event_id: lastEventId
     })
   } catch (error) {
+    // The live render is not happening; let the recovery sweep claim the
+    // obligation (if one was committed) as soon as it scans.
+    await renderLease.release?.()
     const latest = (await thread.state) ?? {}
     await thread.setState({
       activeExecution: false,
@@ -465,27 +481,32 @@ function scheduleExecutionRender(
   options: SlackbotV2Options,
   input: ForwardSessionInput,
   getLastEventId: () => number,
+  renderLease: { release: (() => Promise<void>) | null },
   trace?: SlackbotV2Trace
 ): void {
   const promise = (async () => {
-    let attempt = 0
-    while (true) {
-      const result = await renderExecutionAttempt(
-        thread,
-        message,
-        options,
-        input,
-        getLastEventId,
-        trace
-      )
-      if (result === 'complete') return
-      const delayMs = renderRetryDelayMs(attempt)
-      attempt += 1
-      traceLog(options, 'slackbotv2_render_retry_scheduled', trace, {
-        retry_delay_ms: delayMs,
-        retry_attempt: attempt
-      })
-      await sleep(delayMs)
+    try {
+      let attempt = 0
+      while (true) {
+        const result = await renderExecutionAttempt(
+          thread,
+          message,
+          options,
+          input,
+          getLastEventId,
+          trace
+        )
+        if (result === 'complete') return
+        const delayMs = renderRetryDelayMs(attempt)
+        attempt += 1
+        traceLog(options, 'slackbotv2_render_retry_scheduled', trace, {
+          retry_delay_ms: delayMs,
+          retry_attempt: attempt
+        })
+        await sleep(delayMs)
+      }
+    } finally {
+      await renderLease.release?.()
     }
   })()
   backgroundWaitUntil(promise)
@@ -783,7 +804,13 @@ async function recoverRenderObligations(
       if (outcome.timedOut) {
         void recovery.catch(() => undefined)
         deferredCount += 1
+        // Count timeouts toward the abandonment budget: an obligation whose
+        // recovery hangs on every claim (for example an event stream that
+        // never yields) would otherwise keep the sweep loop spinning forever,
+        // racing every live render in the process.
+        failureCounts.set(threadId, (failureCounts.get(threadId) ?? 0) + 1)
         traceLog(options, 'slackbotv2_render_recovery_thread_timeout', undefined, {
+          failure_count: failureCounts.get(threadId),
           thread_id: threadId,
           timeout_ms: timeoutMs
         })
@@ -942,6 +969,40 @@ async function* streamOpenedSession(
 
 function renderRecoveryLeaseKey(threadId: string): string {
   return `slackbotv2:render:lease:${threadId}`
+}
+
+/**
+ * Holds the per-thread render lease for the duration of a live render so the
+ * recovery sweep cannot claim the just-indexed obligation and post a
+ * duplicate answer (it lease-skips instead). The TTL keeps this crash-safe:
+ * if the pod dies mid-render the lease expires and recovery takes over. The
+ * lease is refreshed while the render runs because agent turns routinely
+ * outlive a single TTL window.
+ */
+async function acquireRenderLease(
+  state: StateAdapter,
+  threadId: string
+): Promise<() => Promise<void>> {
+  const key = renderRecoveryLeaseKey(threadId)
+  const token = randomUUID()
+  await state.set(key, token, RENDER_RECOVERY_LEASE_TTL_MS)
+  const refresh = setInterval(() => {
+    void state
+      .get<string>(key)
+      .then(current =>
+        current === token ? state.set(key, token, RENDER_RECOVERY_LEASE_TTL_MS) : undefined
+      )
+      .catch(() => undefined)
+  }, RENDER_LEASE_REFRESH_INTERVAL_MS)
+  return async () => {
+    clearInterval(refresh)
+    try {
+      const current = await state.get<string>(key)
+      if (current === token) await state.delete(key)
+    } catch {
+      // Best effort: TTL expiry is the backstop.
+    }
+  }
 }
 
 async function renderExecutionStream(

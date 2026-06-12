@@ -2034,6 +2034,87 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('does not duplicate the live render while the recovery sweep is cycling', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+
+    // A zombie obligation (its event stream never yields) keeps the recovery
+    // sweep loop cycling with short claim timeouts, so sweep passes land
+    // while the live render below is still streaming. Without the live
+    // render holding the per-thread lease, a pass claims the just-indexed
+    // obligation and posts the same answer twice.
+    const zombieKey = threadKey('1781200000.000001')
+    const zombieMessage = apiMessageFromSlackEvent({
+      isMention: true,
+      text: `<@${BOT_USER_ID}> zombie`,
+      threadId: zombieKey,
+      ts: '1781200000.000002'
+    })
+    await sharedState.set(`thread-state:${zombieKey}`, {
+      activeExecution: true,
+      executedMessageIds: [zombieMessage.id],
+      forwardedMessageIds: [zombieMessage.id],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-sweep-zombie',
+        message: zombieMessage
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', zombieKey)
+
+    codexApi.autoRespond = false
+    bot = createTestBot({ state: sharedState, renderRecoveryThreadTimeoutMs: 100 })
+
+    const parent = await postUserMessage('Context before sweep race.')
+    const mentionText = `<@${BOT_USER_ID}> race the sweep`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-sweep-race',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: mentionText
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+
+    const key = threadKey(parent.ts)
+    await waitFor(() => codexApi.executes.length === 1, 2000)
+    const outputLines = sampleCodexOutputLines('Single answer despite the sweep.')
+    // Everything except turn/completed: the live render stays in-flight...
+    codexApi.emitOutputLines(key, outputLines.slice(0, -1))
+    // ...long enough for several sweep passes to scan the live obligation.
+    await sleep(1200)
+    codexApi.emitOutputLines(key, outputLines.slice(-1))
+    await Promise.all(waits)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.stopStream'), 3000)
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 3000)
+
+    // Exactly one renderer consumed the execution and exactly one Slack
+    // stream was started for the live thread.
+    expect(codexApi.eventRequests.filter(request => request.threadKey === key)).toHaveLength(1)
+    const startsForThread = slackApi.calls.filter(
+      call => call.method === 'chat.startStream' && call.body.thread_ts === parent.ts
+    )
+    expect(startsForThread).toHaveLength(1)
+    expect(await threadText(parent.ts)).toContain('Single answer despite the sweep.')
+  })
+
   it('abandons an obligation after repeated non-retryable recovery failures', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
