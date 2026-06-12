@@ -39,15 +39,15 @@ jobs:
   # Build each image natively per platform (amd64 on x64 runners, arm64 on
   # arm runners — no QEMU emulation), push by digest, and hand the digests
   # to the merge job below which assembles the multi-arch manifest.
-  # arm64 is only built for release publishes (main pushes, tags, manual
-  # dispatch) — PR builds stay amd64-only to keep iteration fast.
+  # arm64 is only built on pushes to main and release tags — PR and manual
+  # dispatch builds stay amd64-only to keep iteration fast.
   build:
     runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         service: [api-rs, slackbotv2, agent, iron-proxy]
-        platform: ${{ github.event_name == 'pull_request' && fromJSON('["linux/amd64"]') || fromJSON('["linux/amd64", "linux/arm64"]') }}
+        platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
             image: centaur-api-rs
