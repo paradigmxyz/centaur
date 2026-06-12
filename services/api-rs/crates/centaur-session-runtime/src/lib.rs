@@ -1,3 +1,7 @@
+mod janitor;
+
+pub use janitor::SandboxJanitorConfig;
+
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -109,11 +113,11 @@ struct SessionPipe {
 /// Shared handles threaded through background session tasks (stdout pump,
 /// terminal-output recording, max-duration failure, idle pause).
 #[derive(Clone)]
-struct RuntimeContext {
-    store: PgSessionStore,
-    manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
-    execution_spans: ExecutionSpanRegistry,
+pub(crate) struct RuntimeContext {
+    pub(crate) store: PgSessionStore,
+    pub(crate) manager: Arc<SandboxManager>,
+    pub(crate) sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    pub(crate) execution_spans: ExecutionSpanRegistry,
 }
 
 struct EventStreamState {
@@ -141,7 +145,7 @@ impl SessionRuntime {
         }
     }
 
-    fn context(&self) -> RuntimeContext {
+    pub(crate) fn context(&self) -> RuntimeContext {
         RuntimeContext {
             store: self.store.clone(),
             manager: self.sandbox_runtime.manager.clone(),
@@ -2544,7 +2548,7 @@ fn spawn_idle_pause(
     });
 }
 
-async fn record_idle_pause(
+pub(crate) async fn record_idle_pause(
     ctx: &RuntimeContext,
     thread_key: &ThreadKey,
     execution_id: &str,

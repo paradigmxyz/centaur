@@ -42,6 +42,14 @@ async fn main() -> Result<(), ServerError> {
         config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
         runtime = runtime.with_warm_pool(config);
     }
+    if let Some(config) = args.sandbox_janitor_config() {
+        info!(
+            interval_secs = config.interval.as_secs(),
+            idle_backstop_secs = config.idle_backstop.map(|d| d.as_secs()),
+            "sandbox janitor enabled"
+        );
+        tokio::spawn(runtime.clone().run_sandbox_janitor(config));
+    }
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
         .await?;

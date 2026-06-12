@@ -26,7 +26,7 @@ use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::WarmPoolConfig;
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::SandboxWorkloadMode;
+use centaur_session_runtime::{SandboxJanitorConfig, SandboxWorkloadMode};
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{error, info, warn};
@@ -79,6 +79,10 @@ impl Args {
 
     pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
         self.sandbox.warm_pool_config()
+    }
+
+    pub(crate) fn sandbox_janitor_config(&self) -> Option<SandboxJanitorConfig> {
+        self.sandbox.sandbox_janitor_config()
     }
 
     pub(crate) async fn workflow_host_sandbox_runtime(
@@ -497,6 +501,23 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
+    /// Seconds between sandbox janitor passes; 0 disables the janitor. The
+    /// interval doubles as the orphan grace period.
+    #[arg(
+        long = "session-sandbox-janitor-interval-secs",
+        env = "SESSION_SANDBOX_JANITOR_INTERVAL_SECS",
+        default_value_t = 300
+    )]
+    sandbox_janitor_interval_secs: u64,
+    /// Idle-pause backstop in seconds for sessions whose per-execution idle
+    /// timer was lost (e.g. across a control-plane restart); 0 disables the
+    /// idle arm while keeping the orphan sweep.
+    #[arg(
+        long = "session-sandbox-janitor-idle-backstop-secs",
+        env = "SESSION_SANDBOX_JANITOR_IDLE_BACKSTOP_SECS",
+        default_value_t = 21_600
+    )]
+    sandbox_janitor_idle_backstop_secs: u64,
     #[arg(
         long = "session-sandbox-k8s-context",
         alias = "kubernetes-context",
@@ -1089,6 +1110,14 @@ impl SandboxArgs {
             target_size: self.warm_pool_size,
             replenish_interval: Duration::from_secs(self.warm_pool_replenish_interval_secs),
             bootstrap_iron_control_principal: None,
+        })
+    }
+
+    fn sandbox_janitor_config(&self) -> Option<SandboxJanitorConfig> {
+        (self.sandbox_janitor_interval_secs > 0).then(|| SandboxJanitorConfig {
+            interval: Duration::from_secs(self.sandbox_janitor_interval_secs),
+            idle_backstop: (self.sandbox_janitor_idle_backstop_secs > 0)
+                .then(|| Duration::from_secs(self.sandbox_janitor_idle_backstop_secs)),
         })
     }
 }

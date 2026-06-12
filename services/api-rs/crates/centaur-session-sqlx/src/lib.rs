@@ -637,6 +637,66 @@ impl PgSessionStore {
         Ok(())
     }
 
+    /// Sandbox ids the control plane still references: any session's current
+    /// sandbox plus ready/claimed warm-pool entries. Sandboxes the backend
+    /// reports that are absent from this set are orphans (insert races,
+    /// crashed processes, historical teardown failures) and have nothing left
+    /// to reap them except the janitor.
+    pub async fn list_referenced_sandbox_ids(&self) -> Result<Vec<String>, SessionStoreError> {
+        let ids = sqlx::query_scalar::<_, String>(
+            r#"
+            select sandbox_id from sessions where sandbox_id is not null
+            union
+            select sandbox_id from session_warm_sandboxes where status in ('ready', 'claimed')
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ids)
+    }
+
+    /// Sessions whose sandbox should be idle-paused by the janitor backstop:
+    /// the latest execution is terminal and finished before the cutoff, and no
+    /// active execution exists. This catches sandboxes whose in-process idle
+    /// timer died with a control-plane restart.
+    pub async fn list_idle_sandbox_sessions(
+        &self,
+        idle: std::time::Duration,
+    ) -> Result<Vec<IdleSandboxSession>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            select s.thread_key, s.sandbox_id, e.execution_id
+            from sessions s
+            join lateral (
+                select execution_id, status, coalesce(completed_at, updated_at) as finished_at
+                from session_executions
+                where thread_key = s.thread_key
+                order by created_at desc, execution_id desc
+                limit 1
+            ) e on true
+            where s.sandbox_id is not null
+              and e.status in ($1, $2, $3)
+              and e.finished_at < now() - make_interval(secs => $4::double precision)
+            "#,
+        )
+        .bind(ExecutionStatus::Completed.as_ref())
+        .bind(ExecutionStatus::Failed.as_ref())
+        .bind(ExecutionStatus::Cancelled.as_ref())
+        .bind(idle.as_secs_f64())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(thread_key, sandbox_id, execution_id)| IdleSandboxSession {
+                    thread_key,
+                    sandbox_id,
+                    execution_id,
+                },
+            )
+            .collect())
+    }
+
     pub async fn update_harness_thread_id(
         &self,
         thread_key: &ThreadKey,
@@ -987,6 +1047,14 @@ fn prefixed_id(prefix: &str) -> String {
 
 pub fn default_metadata(metadata: Option<Value>) -> Value {
     metadata.unwrap_or_else(empty_object)
+}
+
+/// A session eligible for the janitor's idle-pause backstop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdleSandboxSession {
+    pub thread_key: String,
+    pub sandbox_id: String,
+    pub execution_id: String,
 }
 
 #[cfg(test)]
