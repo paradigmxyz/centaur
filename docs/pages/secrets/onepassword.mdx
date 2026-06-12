@@ -26,7 +26,7 @@ There are two source modes:
 ```yaml
 ironProxy:
   secretSource: onepassword-connect
-  secretTtl: 10m
+  secretTtl: 1h
 
 onepasswordConnect:
   connect:
@@ -48,12 +48,16 @@ OP_CONNECT_TOKEN
 OP_VAULT
 ```
 
+Centaur's chart defaults `ironProxy.secretTtl` to `1h` so live proxies refresh
+their cached secret material less often. If you shorten it, expect more
+background 1Password traffic.
+
 ## Configure the chart (service account)
 
 ```yaml
 ironProxy:
   secretSource: onepassword
-  secretTtl: 10m
+  secretTtl: 1h
 
 secretManager:
   existingSecretName: centaur-infra-env
@@ -66,6 +70,10 @@ The infra Secret must include:
 OP_SERVICE_ACCOUNT_TOKEN
 OP_VAULT
 ```
+
+1Password's service-account rate limit is account-wide, not per service
+account. A second service account helps separate operator and cluster identity
+or audit trails, but it does **not** buy a second read budget.
 
 It must also include infrastructure secrets such as:
 
@@ -134,4 +142,6 @@ kubectl get secret -n centaur-system centaur-infra-env -o jsonpath='{.data.OP_CO
 
 Then run a tool or harness call that reaches an allowed host. If injection
 fails, check the secret entry's `hosts` and `match_*` fields, the 1Password
-item name, `OP_VAULT`, and whether the item has a `credential` field.
+item name, `OP_VAULT`, and whether the item has a `credential` field. If the
+proxy logs `secret_unavailable` with `rate limit exceeded`, see
+[Recover from 1Password quota exhaustion](/operate/onepassword-quota).

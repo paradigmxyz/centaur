@@ -29,7 +29,10 @@ ironProxy:
     # one port so callers can reach it.
     pgPort: 5432
   secretSource: onepassword
-  secretTtl: 10m
+  # Deployment default. The binary fallback remains 10m, but a longer chart
+  # value keeps steady-state 1Password reads proportional to live proxies
+  # instead of every proxy refreshing on a short fixed cadence.
+  secretTtl: 1h
 
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`
 # fresh on each node and a tools-bootstrap init container copies `subdir` into

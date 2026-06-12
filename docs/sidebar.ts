@@ -14,6 +14,7 @@ export const sidebar = [
   {
     text: 'Operate',
     items: [
+      { text: 'Recover from 1Password quota exhaustion', link: '/operate/onepassword-quota' },
       { text: 'Slack ETL', link: '/operate/slack-etl' },
       { text: 'Expose Slackbot with Tailscale Funnel', link: '/operate/tailscale-funnel' },
     ],

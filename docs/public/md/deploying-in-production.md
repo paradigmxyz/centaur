@@ -231,7 +231,7 @@ api:
 
 ironProxy:
   secretSource: onepassword-connect
-  secretTtl: 10m
+  secretTtl: 1h
 
 onepasswordConnect:
   connect:
@@ -249,6 +249,11 @@ sandbox:
 
 The Kubernetes sandbox backend is the active runtime backend; there is no chart
 switch named `api.sandboxBackend`.
+
+`1h` is the chart's steady-state default because shorter TTLs make every live
+proxy re-read secrets more often. If you run the `onepassword` service-account
+path, treat that budget as shared across all service accounts on the 1Password
+account.
 
 Install or upgrade:
 
