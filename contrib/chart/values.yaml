@@ -92,24 +92,29 @@ ironControl:
     name: iron_control_production
   service:
     httpPort: 3000
-  # Optional tailnet-only ingress via the Tailscale Kubernetes operator
-  # (installed separately; see docs/operate/tailscale-funnel for operator
-  # setup). Renders an Ingress with className "tailscale" and a single
-  # defaultBackend, which the operator turns into a Tailscale device serving
-  # iron-control at `hostname`. Tailnet-only by default; add the
-  # `tailscale.com/funnel: "true"` annotation to expose via Funnel.
-  tailscaleIngress:
+  # Optional Ingress for iron-control. Bring your own controller — Tailscale
+  # operator, Cloudflare, ingress-nginx, etc. — via className + annotations +
+  # tls. Mirrors the top-level `ingress` block (which is wired to the
+  # Slackbot). Add the controller's namespace to
+  # networkPolicy.ingressControllerNamespaces so its pods can reach
+  # iron-control; the iron-control NetworkPolicy admits those namespaces when
+  # this is enabled.
+  #
+  # Tailscale operator example (serves https://iron-control.<tailnet>.ts.net):
+  #   className: tailscale
+  #   defaultBackend: true
+  #   tls: [{hosts: [iron-control]}]
+  ingress:
     enabled: false
-    # Single DNS label the operator names the Tailscale device after, placed in
-    # the Ingress tls.hosts — e.g. "iron-control" serves
-    # https://iron-control.<tailnet>.ts.net. REQUIRED when enabled. MagicDNS +
-    # HTTPS certificates must be enabled on the tailnet.
-    hostname: ""
-    # Namespace the Tailscale operator runs its proxy pods in. The iron-control
-    # NetworkPolicy admits ingress from this namespace so tailnet traffic can
-    # reach the pod.
-    operatorNamespace: tailscale
+    className: ""
     annotations: {}
+    # When true, render a single spec.defaultBackend instead of host/path
+    # rules. Required by the Tailscale operator; harmless otherwise.
+    defaultBackend: false
+    # Host for the path rule when not using defaultBackend; empty matches any
+    # host.
+    host: ""
+    tls: []
   resources: {}
   # Solid Queue worker (`bin/jobs`) that runs iron-control's background jobs —
   # most importantly the broker-credential OAuth refresh loop that mints and
