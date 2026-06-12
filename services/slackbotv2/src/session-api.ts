@@ -132,19 +132,24 @@ function slackTeamId(raw: unknown): string | undefined {
   return undefined
 }
 
+function rawSlackString(raw: unknown, key: string): string | undefined {
+  if (!isJsonObject(raw)) return undefined
+  return stringValue(raw[key])
+}
+
 export async function forwardToSessionApi(
   options: SlackbotV2Options,
   input: ForwardSessionInput,
   callbacks: ForwardSessionApiCallbacks = {}
 ): Promise<AsyncIterable<SlackbotV2RendererSource> | null> {
   const createStartedAtMs = nowMs()
-  await createSession(options, input.threadId, input.harnessType)
+  await createSession(options, input.threadId, input.harnessType, sessionRequesterMessage(input))
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
     phase_ms: elapsedMs(createStartedAtMs)
   })
   if (input.messages.length > 0) {
     const appendStartedAtMs = nowMs()
-    await appendSessionMessages(options, input.threadId, input.messages)
+    await appendSessionMessages(options, input.threadId, input.messages, !input.executeMessage)
     traceLog(options, 'slackbotv2_session_append_complete', input.trace, {
       message_count: input.messages.length,
       phase_ms: elapsedMs(appendStartedAtMs)
@@ -255,13 +260,37 @@ async function bytesToBase64(data: Buffer | Blob): Promise<string> {
 
 const DEFAULT_HARNESS_TYPE = 'codex'
 
+type RequesterIdentity = {
+  githubHandle?: string
+  githubHandleSource?: string
+  githubUnavailableReason?: string
+  slackDisplayName?: string
+  slackMention?: string
+  slackUserId?: string
+  slackUserName?: string
+}
+
+type RequesterIdentityCacheEntry = {
+  expiresAtMs: number
+  identity: RequesterIdentity
+}
+
+const REQUESTER_IDENTITY_CACHE_SUCCESS_TTL_MS = 6 * 60 * 60 * 1000
+const REQUESTER_IDENTITY_CACHE_MISS_TTL_MS = 10 * 60 * 1000
+const requesterIdentityCache = new Map<string, RequesterIdentityCacheEntry>()
+
+export function clearRequesterIdentityCacheForTests(): void {
+  requesterIdentityCache.clear()
+}
+
 async function createSession(
   options: SlackbotV2Options,
   threadId: string,
-  harnessType?: string
+  harnessType?: string,
+  message?: SlackbotV2ApiMessage
 ): Promise<void> {
   const requested = harnessType ?? DEFAULT_HARNESS_TYPE
-  const response = await postCreateSession(options, threadId, requested)
+  const response = await postCreateSession(options, threadId, requested, message)
   if (response.ok) return
 
   let body = ''
@@ -276,7 +305,7 @@ async function createSession(
   // keep the thread alive on its existing harness instead of failing the message.
   const existing = response.status === 409 ? existingHarnessFromConflict(body) : undefined
   if (existing && existing !== requested) {
-    const retry = await postCreateSession(options, threadId, existing)
+    const retry = await postCreateSession(options, threadId, existing, message)
     await ensureApiOk(retry, 'create session')
     return
   }
@@ -292,7 +321,8 @@ async function createSession(
 async function postCreateSession(
   options: SlackbotV2Options,
   threadId: string,
-  harnessType: string
+  harnessType: string,
+  message?: SlackbotV2ApiMessage
 ): Promise<Response> {
   const fetchFn = options.fetch ?? fetch
   const body: SlackbotV2CreateSessionRequest = {
@@ -300,7 +330,8 @@ async function postCreateSession(
     metadata: {
       source: 'slackbotv2',
       platform: 'slack',
-      thread_id: threadId
+      thread_id: threadId,
+      ...sessionRequesterMetadata(message)
     }
   }
   return fetchFn(apiSessionUrl(options.apiUrl, threadId), {
@@ -323,14 +354,258 @@ function existingHarnessFromConflict(body: string): string | undefined {
   return /already exists with harness_type ([A-Za-z0-9_-]+)/.exec(body)?.[1]
 }
 
+function sessionRequesterMessage(input: ForwardSessionInput): SlackbotV2ApiMessage | undefined {
+  return input.executeMessage ?? input.messages.find(message => message.author.isMe !== true)
+}
+
+function sessionRequesterMetadata(
+  message?: SlackbotV2ApiMessage,
+  identity?: RequesterIdentity
+): JsonObject {
+  const slackUserId = identity?.slackUserId ?? messageRequesterUserId(message)
+  const slackUserName = identity?.slackUserName ?? message?.author.userName
+  const slackDisplayName = identity?.slackDisplayName ?? message?.author.fullName
+  return {
+    ...(slackUserId ? { slack_user_id: slackUserId } : {}),
+    ...(slackUserName ? { slack_user_name: slackUserName } : {}),
+    ...(slackDisplayName ? { slack_display_name: slackDisplayName } : {}),
+    ...(identity?.githubHandle ? { github_handle: identity.githubHandle } : {})
+  }
+}
+
+function messageRequesterUserId(message: SlackbotV2ApiMessage | undefined): string | undefined {
+  if (!message) return undefined
+  const rawUserId = rawSlackUserId(message.raw)
+  const authorUserId = stringValue(message.author.userId)
+  return authorUserId ?? rawUserId
+}
+
+function rawSlackUserId(raw: unknown): string | undefined {
+  if (!isJsonObject(raw)) return undefined
+  const directUser = stringValue(raw.user)
+  if (directUser) return directUser
+  const user = raw.user
+  if (isJsonObject(user)) {
+    return stringValue(user.id) ?? stringValue(user.user_id)
+  }
+  const botProfile = raw.bot_profile
+  if (isJsonObject(botProfile)) return stringValue(botProfile.user_id)
+  return undefined
+}
+
+async function resolveRequesterIdentity(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage
+): Promise<RequesterIdentity> {
+  const slackUserId = messageRequesterUserId(message)
+  const identity: RequesterIdentity = {
+    slackDisplayName: stringValue(message.author.fullName),
+    slackMention: slackUserId ? `<@${slackUserId}>` : undefined,
+    slackUserId,
+    slackUserName: stringValue(message.author.userName)
+  }
+  if (!identity.slackUserId) return identity
+
+  const cacheKey = requesterIdentityCacheKey(message, identity.slackUserId)
+  const cached = cacheKey ? cachedRequesterIdentity(cacheKey) : undefined
+  if (cached) return mergeRequesterIdentity(identity, cached)
+
+  const profile = await fetchSlackUserProfile(options, identity.slackUserId)
+  if (!profile) {
+    identity.githubUnavailableReason = 'Slack profile could not be fetched'
+    cacheRequesterIdentity(cacheKey, identity)
+    return identity
+  }
+
+  identity.slackDisplayName =
+    stringValue(profile.display_name)
+    ?? stringValue(profile.real_name)
+    ?? stringValue(profile.name)
+    ?? identity.slackDisplayName
+  identity.slackUserName = stringValue(profile.name) ?? identity.slackUserName
+
+  const github = extractGithubHandleFromSlackProfile(profile)
+  if (github.handle) {
+    identity.githubHandle = github.handle
+    identity.githubHandleSource = github.source ?? 'Slack profile custom field'
+  } else {
+    identity.githubUnavailableReason = github.reason
+  }
+  cacheRequesterIdentity(cacheKey, identity)
+  return identity
+}
+
+function requesterIdentityCacheKey(
+  message: SlackbotV2ApiMessage,
+  slackUserId: string
+): string | undefined {
+  const teamId = message.teamId || slackTeamId(message.raw) || rawSlackString(message.raw, 'team_id')
+  return teamId ? `slack:${teamId}:${slackUserId}` : `slack:${slackUserId}`
+}
+
+function cachedRequesterIdentity(cacheKey: string): RequesterIdentity | undefined {
+  const cached = requesterIdentityCache.get(cacheKey)
+  if (!cached) return undefined
+  if (cached.expiresAtMs <= Date.now()) {
+    requesterIdentityCache.delete(cacheKey)
+    return undefined
+  }
+  return cached.identity
+}
+
+function cacheRequesterIdentity(cacheKey: string | undefined, identity: RequesterIdentity): void {
+  if (!cacheKey) return
+  const ttlMs = identity.githubHandle
+    ? REQUESTER_IDENTITY_CACHE_SUCCESS_TTL_MS
+    : REQUESTER_IDENTITY_CACHE_MISS_TTL_MS
+  requesterIdentityCache.set(cacheKey, {
+    expiresAtMs: Date.now() + ttlMs,
+    identity: { ...identity }
+  })
+}
+
+function mergeRequesterIdentity(
+  fallback: RequesterIdentity,
+  cached: RequesterIdentity
+): RequesterIdentity {
+  return {
+    ...fallback,
+    ...cached,
+    slackDisplayName: cached.slackDisplayName ?? fallback.slackDisplayName,
+    slackMention: fallback.slackMention ?? cached.slackMention,
+    slackUserId: fallback.slackUserId ?? cached.slackUserId,
+    slackUserName: cached.slackUserName ?? fallback.slackUserName
+  }
+}
+
+async function fetchSlackUserProfile(
+  options: SlackbotV2Options,
+  userId: string
+): Promise<JsonObject | null> {
+  const token = options.botToken
+  if (!token) return null
+  if (options.fetch && !options.slackApiUrl) return null
+  try {
+    const [userPayload, profilePayload] = await Promise.all([
+      slackApiGet(options, 'users.info', { user: userId }),
+      slackApiGet(options, 'users.profile.get', { include_labels: 'true', user: userId })
+    ])
+    const user = isJsonObject(userPayload?.user) ? userPayload.user : undefined
+    const userProfile = isJsonObject(user?.profile) ? user.profile : undefined
+    const profile = isJsonObject(profilePayload?.profile) ? profilePayload.profile : userProfile
+    if (!user && !profile) return null
+    return {
+      ...(user ?? {}),
+      ...(profile ?? {}),
+      ...(profile?.fields ? { fields: profile.fields } : {}),
+      ...(profile?.custom_fields ? { custom_fields: profile.custom_fields } : {})
+    }
+  } catch {
+    return null
+  }
+}
+
+async function slackApiGet(
+  options: SlackbotV2Options,
+  method: string,
+  params: Record<string, string>
+): Promise<JsonObject | null> {
+  const url = slackApiMethodUrl(options.slackApiUrl, method)
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${options.botToken}` }
+  })
+  const payload = await response.json()
+  if (!response.ok || !isJsonObject(payload) || payload.ok === false) return null
+  return payload
+}
+
+function slackApiMethodUrl(slackApiUrl: string | undefined, method: string): URL {
+  return new URL(method, slackApiUrl ?? 'https://slack.com/api/')
+}
+
+const GITHUB_LABEL_RE = /\bgithub\b/i
+const GITHUB_URL_RE = /github\.com\/([A-Za-z0-9-]{1,39})(?:[/?#]|$)/i
+const GITHUB_PREFIX_RE = /\bgithub\s*[:=]\s*@?([A-Za-z0-9-]{1,39})\b/i
+const GITHUB_HANDLE_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
+
+function extractGithubHandleFromSlackProfile(
+  profile: JsonObject
+): { handle?: string; source?: string; reason: string } {
+  const fields = slackProfileCustomFields(profile)
+  if (fields.length === 0) return { reason: 'no GitHub custom field found on Slack profile' }
+
+  let sawGithubField = false
+  for (const field of fields) {
+    const labelMentionsGithub = GITHUB_LABEL_RE.test(field.label)
+    const valueMentionsGithub = GITHUB_LABEL_RE.test(field.value)
+    if (!labelMentionsGithub && !valueMentionsGithub) continue
+    sawGithubField = true
+
+    const source = field.label
+      ? `Slack profile custom field "${field.label}"`
+      : 'Slack profile custom field'
+    const urlMatch = GITHUB_URL_RE.exec(field.value)
+    const prefixedMatch = GITHUB_PREFIX_RE.exec(field.value)
+    const handle =
+      validGithubHandle(urlMatch?.[1] ?? '')
+      ?? validGithubHandle(prefixedMatch?.[1] ?? '')
+      ?? (labelMentionsGithub ? validGithubHandle(field.value) : undefined)
+    if (handle) return { handle: `@${handle}`, source, reason: '' }
+  }
+
+  return {
+    reason: sawGithubField
+      ? 'GitHub profile field did not contain a valid GitHub handle'
+      : 'no GitHub custom field found on Slack profile'
+  }
+}
+
+function slackProfileCustomFields(profile: JsonObject): Array<{ label: string; value: string }> {
+  const fields: Array<{ label: string; value: string }> = []
+  collectSlackCustomFields(fields, profile.custom_fields)
+  collectSlackCustomFields(fields, profile.fields)
+  return fields
+}
+
+function collectSlackCustomFields(
+  fields: Array<{ label: string; value: string }>,
+  rawFields: unknown
+): void {
+  if (!isJsonObject(rawFields)) return
+  for (const [key, rawValue] of Object.entries(rawFields)) {
+    if (isJsonObject(rawValue)) {
+      const value = stringValue(rawValue.value)
+      if (value) {
+        fields.push({
+          label: stringValue(rawValue.label) ?? stringValue(rawValue.alt) ?? key,
+          value
+        })
+      }
+    } else {
+      const value = stringValue(rawValue)
+      if (value) fields.push({ label: key, value })
+    }
+  }
+}
+
+function validGithubHandle(value: string): string | undefined {
+  const candidate = value.trim().replace(/^@/, '').replace(/\/+$/, '').split('/', 1)[0] ?? ''
+  return GITHUB_HANDLE_RE.test(candidate) ? candidate : undefined
+}
+
 async function appendSessionMessages(
   options: SlackbotV2Options,
   threadId: string,
-  messages: SlackbotV2ApiMessage[]
+  messages: SlackbotV2ApiMessage[],
+  includeRequesterContext = false
 ): Promise<void> {
   const fetchFn = options.fetch ?? fetch
   const body: SlackbotV2AppendMessagesRequest = {
-    messages: messages.map(toSessionMessage)
+    messages: await Promise.all(
+      messages.map(message => toSessionMessage(options, message, includeRequesterContext))
+    )
   }
   const response = await fetchFn(apiSessionUrl(options.apiUrl, threadId, 'messages'), {
     method: 'POST',
@@ -348,10 +623,11 @@ async function executeSession(
   contextMessages?: SlackbotV2ApiMessage[]
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
+  const requesterIdentity = await resolveRequesterIdentity(options, message)
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
-    metadata: sessionMetadata(message, { action: 'execute' }),
-    input_lines: toCodexInputLines(message, threadId, model, contextMessages),
+    metadata: sessionMetadata(message, { action: 'execute' }, requesterIdentity),
+    input_lines: toCodexInputLines(message, threadId, model, requesterIdentity, contextMessages),
     ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
@@ -429,17 +705,32 @@ function apiHeaders(options: SlackbotV2Options, jsonBody = true): HeadersInit {
   }
 }
 
-function toSessionMessage(message: SlackbotV2ApiMessage): SlackbotV2SessionMessage {
+async function toSessionMessage(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage,
+  includeRequesterContext: boolean
+): Promise<SlackbotV2SessionMessage> {
+  const requesterIdentity =
+    includeRequesterContext && message.isMention && !message.author.isMe
+      ? await resolveRequesterIdentity(options, message)
+      : undefined
   return {
     client_message_id: message.id,
     role: message.author.isMe ? 'assistant' : 'user',
-    parts: sessionMessageParts(message),
-    metadata: sessionMetadata(message)
+    parts: sessionMessageParts(message, requesterIdentity),
+    metadata: sessionMetadata(message, {}, requesterIdentity)
   }
 }
 
-function sessionMessageParts(message: SlackbotV2ApiMessage): JsonValue[] {
+function sessionMessageParts(
+  message: SlackbotV2ApiMessage,
+  requesterIdentity?: RequesterIdentity
+): JsonValue[] {
   const parts: JsonValue[] = []
+  const requesterContext = requesterIdentityContext(requesterIdentity)
+  if (requesterContext) {
+    parts.push({ type: 'text', text: requesterContext })
+  }
   if (message.text.trim()) {
     parts.push({ type: 'text', text: message.text })
   }
@@ -463,7 +754,8 @@ function sessionAttachmentPart(attachment: SlackbotV2ApiAttachment): JsonObject 
 
 function sessionMetadata(
   message: SlackbotV2ApiMessage,
-  extra: JsonObject = {}
+  extra: JsonObject = {},
+  requesterIdentity?: RequesterIdentity
 ): JsonObject {
   return {
     source: 'slackbotv2',
@@ -474,6 +766,7 @@ function sessionMetadata(
     timestamp: message.timestamp,
     user_id: message.author.userId,
     user_name: message.author.userName,
+    ...sessionRequesterMetadata(message, requesterIdentity),
     ...extra
   }
 }
@@ -482,6 +775,7 @@ function toCodexInputLines(
   message: SlackbotV2ApiMessage,
   threadId: string,
   model?: string,
+  requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[]
 ): string[] {
   const staged = new Map<SlackbotV2ApiAttachment, string>()
@@ -493,6 +787,7 @@ function toCodexInputLines(
       threadId,
       staged,
       model,
+      requesterIdentity,
       contextMessages
     )
     if (
@@ -505,7 +800,16 @@ function toCodexInputLines(
     staged.set(attachment, stagedAttachmentId)
     lines.push(...stagedAttachmentInputLines(attachment, stagedAttachmentId))
   }
-  lines.push(toCodexInputLineWithStaged(message, threadId, staged, model, contextMessages))
+  lines.push(
+    toCodexInputLineWithStaged(
+      message,
+      threadId,
+      staged,
+      model,
+      requesterIdentity,
+      contextMessages
+    )
+  )
   return lines
 }
 
@@ -514,16 +818,17 @@ function toCodexInputLineWithStaged(
   threadId: string,
   staged: Map<SlackbotV2ApiAttachment, string>,
   model?: string,
+  requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[]
 ): string {
   return JSON.stringify({
     type: 'user',
     thread_key: threadId,
-    trace_metadata: sessionMetadata(message, { action: 'execute' }),
+    trace_metadata: sessionMetadata(message, { action: 'execute' }, requesterIdentity),
     ...(model ? { model } : {}),
     message: {
       role: 'user',
-      content: codexInputContent(message, staged, contextMessages)
+      content: codexInputContent(message, staged, requesterIdentity, contextMessages)
     }
   })
 }
@@ -552,12 +857,63 @@ function stagedAttachmentInputLines(
   return lines
 }
 
+function requesterIdentityContext(identity: RequesterIdentity | undefined): string | undefined {
+  if (!identity?.slackUserId && !identity?.slackUserName && !identity?.githubHandle) return undefined
+
+  const lines = [
+    '# Requester Context',
+    '',
+    'The Slack user who prompted this turn is:',
+    ...(identity.slackUserId ? [`- Slack user ID: ${identity.slackUserId}`] : []),
+    ...(identity.slackMention ? [`- Slack mention: ${identity.slackMention}`] : []),
+    ...(identity.slackUserName ? [`- Slack username: ${identity.slackUserName}`] : []),
+    ...(identity.slackDisplayName ? [`- Slack display name: ${identity.slackDisplayName}`] : [])
+  ]
+
+  if (identity.githubHandle) {
+    const githubLogin = identity.githubHandle.replace(/^@/, '')
+    lines.push(
+      `- GitHub handle from Slack profile: ${identity.githubHandle}`,
+      `- GitHub handle source: ${identity.githubHandleSource ?? 'Slack profile custom field'}`,
+      '- GitHub handle verified: yes',
+      '',
+      '## GitHub PR Attribution',
+      '',
+      '- If you create a GitHub PR for this Slack request, '
+        + `the PR body MUST contain this standalone line: \`Prompted by: ${identity.githubHandle}\``,
+      '- The credited prompter is the requester in this section, not the Slack thread OP/root author.',
+      '- This is a GitHub PR body requirement, not a Slack response mention rule.',
+      `- Assign the PR to the requester when possible: \`${githubLogin}\``
+    )
+  } else {
+    lines.push(
+      '- GitHub handle from Slack profile: unavailable',
+      `- GitHub handle unavailable reason: ${identity.githubUnavailableReason ?? 'not resolved'}`,
+      '- GitHub handle verified: no',
+      '',
+      '## GitHub PR Attribution',
+      '',
+      '- If you create a GitHub PR for this Slack request, do not infer a GitHub '
+        + 'username from Slack display name, real name, or email.',
+      '- Omit the `Prompted by` line unless a verified GitHub handle is present.'
+    )
+  }
+
+  lines.push('', 'The user message follows in the next content block.', '---')
+  return lines.join('\n')
+}
+
 function codexInputContent(
   message: SlackbotV2ApiMessage,
   staged: Map<SlackbotV2ApiAttachment, string> = new Map(),
+  requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[]
 ): JsonValue[] {
   const content: JsonValue[] = []
+  const requesterContext = requesterIdentityContext(requesterIdentity)
+  if (requesterContext) {
+    content.push({ type: 'text', text: requesterContext })
+  }
   const threadContext = slackThreadContext(message, contextMessages)
   if (threadContext) {
     content.push({ type: 'text', text: threadContext })

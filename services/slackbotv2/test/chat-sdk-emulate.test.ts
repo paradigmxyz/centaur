@@ -20,12 +20,15 @@ import {
   type SlackbotV2ExecuteSessionRequest,
   type SlackbotV2SessionMessage
 } from '../src/index'
+import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
 const USER_TOKEN = 'xoxp-slackbotv2-user'
+const USER_B_TOKEN = 'xoxp-slackbotv2-user-b'
 const SIGNING_SECRET = 'slackbotv2-signing-secret'
 const BOT_USER_ID = 'U000000001'
 const USER_ID = 'USLACKBOTV2USER'
+const USER_B_ID = 'USLACKBOTV2USERB'
 const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
@@ -35,6 +38,7 @@ let emulator: Emulator
 let slackApi: PatchedSlackApi
 let codexApi: MockSessionApi
 let slack: WebClient
+let slackB: WebClient
 let slackApiUrl: string
 let bot: SlackbotV2
 
@@ -51,11 +55,18 @@ beforeAll(async () => {
         [USER_TOKEN]: {
           login: USER_ID,
           scopes: ['chat:write', 'channels:read', 'users:read']
+        },
+        [USER_B_TOKEN]: {
+          login: USER_B_ID,
+          scopes: ['chat:write', 'channels:read', 'users:read']
         }
       },
       slack: {
         team: { name: 'Slackbot V2', domain: 'slackbot-v2' },
-        users: [{ name: 'tester', real_name: 'Test User', email: 'tester@example.com' }],
+        users: [
+          { name: 'tester', real_name: 'Test User', email: 'tester@example.com' },
+          { name: 'builder', real_name: 'Build User', email: 'builder@example.com' }
+        ],
         channels: [{ name: 'slackbot-v2' }],
         bots: [{ name: 'centaur' }],
         signing_secret: SIGNING_SECRET
@@ -66,9 +77,11 @@ beforeAll(async () => {
   codexApi = await startMockCodexApi()
   slackApiUrl = `${slackApi.url}/api/`
   slack = new WebClient(USER_TOKEN, { slackApiUrl })
+  slackB = new WebClient(USER_B_TOKEN, { slackApiUrl })
 })
 
 beforeEach(() => {
+  clearRequesterIdentityCacheForTests()
   emulator.reset()
   slackApi.reset()
   codexApi.reset()
@@ -342,6 +355,285 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('First preceding reply.')
     expect(executeInput).toContain('Second preceding reply.')
     expect(executeInput).toContain('summarize the thread so far')
+  })
+
+  it('injects Slack requester identity and verified GitHub handle into Codex input', async () => {
+    slackApi.setUserProfile(USER_ID, {
+      name: 'akshaan',
+      real_name: 'Akshaan Kakar',
+      fields: {
+        X_GITHUB: {
+          label: 'GitHub',
+          value: 'https://github.com/decofe'
+        }
+      }
+    })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> what is my name?`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-requester-identity',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> what is my name?`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    expect(codexApi.creates[0]!.body.metadata).toEqual(
+      expect.objectContaining({
+        slack_user_id: USER_ID
+      })
+    )
+    const executeMetadata = codexApi.executes[0]!.body.metadata
+    expect(executeMetadata).toEqual(
+      expect.objectContaining({
+        github_handle: '@decofe',
+        slack_display_name: 'Akshaan Kakar',
+        slack_user_id: USER_ID,
+        slack_user_name: 'akshaan'
+      })
+    )
+    const input = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
+      message: { content: Array<{ text?: string; type: string }> }
+    }
+    expect(input.message.content[0]?.text).toContain('# Requester Context')
+    expect(input.message.content[0]?.text).toContain(`Slack user ID: ${USER_ID}`)
+    expect(input.message.content[0]?.text).toContain('Slack username: akshaan')
+    expect(input.message.content[0]?.text).toContain('GitHub handle from Slack profile: @decofe')
+    expect(input.message.content[0]?.text).toContain('Prompted by: @decofe')
+    expect(input.message.content[1]?.text).toBe(`@${BOT_USER_ID} what is my name?`)
+  })
+
+  it('caches Slack requester identity across mentions from the same user', async () => {
+    slackApi.setUserProfile(USER_ID, {
+      name: 'akshaan',
+      real_name: 'Akshaan Kakar',
+      fields: {
+        X_GITHUB: {
+          label: 'GitHub',
+          value: 'https://github.com/decofe'
+        }
+      }
+    })
+
+    for (const index of [1, 2]) {
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> identity cache ${index}`)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-slackbotv2-requester-identity-cache-${index}`,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            text: `<@${BOT_USER_ID}> identity cache ${index}`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(slackApi.userProfileMethodRequestCount(USER_ID, '/api/users.profile.get')).toBe(1)
+    for (const execute of codexApi.executes) {
+      const input = JSON.parse(execute.body.input_lines.at(-1)!) as {
+        message: { content: Array<{ text?: string; type: string }> }
+      }
+      expect(input.message.content[0]?.text).toContain('GitHub handle from Slack profile: @decofe')
+    }
+  })
+
+  it('uses the reply mention requester identity instead of the root requester', async () => {
+    slackApi.setUserProfile(USER_ID, {
+      name: 'alice',
+      real_name: 'Alice Requester',
+      fields: {
+        X_GITHUB: {
+          label: 'GitHub',
+          value: 'alice-gh'
+        }
+      }
+    })
+    slackApi.setUserProfile(USER_B_ID, {
+      name: 'bob',
+      real_name: 'Bob Builder',
+      fields: {
+        X_GITHUB: {
+          label: 'GitHub',
+          value: 'https://github.com/bob-gh'
+        }
+      }
+    })
+
+    const rootMention = await postUserMessage(`<@${BOT_USER_ID}> start this PR thread`)
+    const rootWaits: Promise<unknown>[] = []
+    const rootResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-requester-a',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: rootMention.ts,
+          text: `<@${BOT_USER_ID}> start this PR thread`
+        }
+      }),
+      {},
+      waitUntilContext(rootWaits)
+    )
+    expect(rootResponse.status).toBe(200)
+    await Promise.all(rootWaits)
+
+    const replyMention = await postUserMessage(
+      `<@${BOT_USER_ID}> now make the PR`,
+      rootMention.ts,
+      slackB
+    )
+    const replyWaits: Promise<unknown>[] = []
+    const replyResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-reply-requester-b',
+        event: {
+          type: 'app_mention',
+          user: USER_B_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: replyMention.ts,
+          thread_ts: rootMention.ts,
+          text: `<@${BOT_USER_ID}> now make the PR`
+        }
+      }),
+      {},
+      waitUntilContext(replyWaits)
+    )
+    expect(replyResponse.status).toBe(200)
+    await Promise.all(replyWaits)
+
+    expect(codexApi.executes).toHaveLength(2)
+    const rootInput = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
+      message: { content: Array<{ text?: string; type: string }> }
+    }
+    const replyInput = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!) as {
+      message: { content: Array<{ text?: string; type: string }> }
+    }
+    const rootContext = rootInput.message.content[0]?.text ?? ''
+    const replyContext = replyInput.message.content[0]?.text ?? ''
+
+    expect(rootContext).toContain(`Slack user ID: ${USER_ID}`)
+    expect(rootContext).toContain('GitHub handle from Slack profile: @alice-gh')
+    expect(replyContext).toContain(`Slack user ID: ${USER_B_ID}`)
+    expect(replyContext).toContain('Slack username: bob')
+    expect(replyContext).toContain('GitHub handle from Slack profile: @bob-gh')
+    expect(replyContext).toContain('Prompted by: @bob-gh')
+    expect(replyContext).not.toContain('@alice-gh')
+  })
+
+  it('includes reply mention requester identity when steering an active execution', async () => {
+    codexApi.autoRespond = false
+    slackApi.setUserProfile(USER_ID, {
+      name: 'alice',
+      real_name: 'Alice Requester',
+      fields: {
+        X_GITHUB: {
+          label: 'GitHub',
+          value: 'alice-gh'
+        }
+      }
+    })
+    slackApi.setUserProfile(USER_B_ID, {
+      name: 'bob',
+      real_name: 'Bob Builder',
+      fields: {
+        X_GITHUB: {
+          label: 'GitHub',
+          value: 'bob-gh'
+        }
+      }
+    })
+
+    const rootMention = await postUserMessage(`<@${BOT_USER_ID}> start a long PR run`)
+    const rootWaits: Promise<unknown>[] = []
+    const rootResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-active-root-requester-a',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: rootMention.ts,
+          text: `<@${BOT_USER_ID}> start a long PR run`
+        }
+      }),
+      {},
+      waitUntilContext(rootWaits)
+    )
+    expect(rootResponse.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const replyMention = await postUserMessage(
+      `<@${BOT_USER_ID}> actually attribute the PR to me`,
+      rootMention.ts,
+      slackB
+    )
+    const replyWaits: Promise<unknown>[] = []
+    const replyResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-active-reply-requester-b',
+        event: {
+          type: 'app_mention',
+          user: USER_B_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: replyMention.ts,
+          thread_ts: rootMention.ts,
+          text: `<@${BOT_USER_ID}> actually attribute the PR to me`
+        }
+      }),
+      {},
+      waitUntilContext(replyWaits)
+    )
+    expect(replyResponse.status).toBe(200)
+    await Promise.all(replyWaits)
+
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.appends).toHaveLength(2)
+    const steeredParts = codexApi.appends[1]!.body.messages[0]!.parts
+    const steeredText = steeredParts
+      .map(part => (isRecord(part) && typeof part.text === 'string' ? part.text : ''))
+      .join('\n')
+    expect(steeredText).toContain('# Requester Context')
+    expect(steeredText).toContain(`Slack user ID: ${USER_B_ID}`)
+    expect(steeredText).toContain('GitHub handle from Slack profile: @bob-gh')
+    expect(steeredText).toContain('Prompted by: @bob-gh')
+    expect(steeredText).not.toContain('@alice-gh')
+
+    codexApi.closeStreams()
+    await Promise.all(rootWaits)
   })
 
   it('refreshes Slack thread context for a reply mention after a root mention', async () => {
@@ -668,9 +960,9 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.appends.length === 2)
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.streamCount).toBe(1)
-    expect(sessionMessageTexts(codexApi.appends[1]!.body.messages)).toEqual([
-      `@${BOT_USER_ID} add this while still running`
-    ])
+    const secondAppendTexts = sessionMessageTexts(codexApi.appends[1]!.body.messages)
+    expect(secondAppendTexts[0]).toContain('# Requester Context')
+    expect(secondAppendTexts.at(-1)).toBe(`@${BOT_USER_ID} add this while still running`)
 
     codexApi.closeStreams()
     await Promise.all(firstWaits)
@@ -2721,8 +3013,12 @@ function apiMessageFromSlackEvent(input: {
   }
 }
 
-async function postUserMessage(text: string, threadTs?: string): Promise<{ ts: string }> {
-  const response = await slack.chat.postMessage({ channel: CHANNEL_ID, text, thread_ts: threadTs })
+async function postUserMessage(
+  text: string,
+  threadTs?: string,
+  client: WebClient = slack
+): Promise<{ ts: string }> {
+  const response = await client.chat.postMessage({ channel: CHANNEL_ID, text, thread_ts: threadTs })
   expect(response.ok).toBe(true)
   return { ts: String(response.ts) }
 }
@@ -3155,6 +3451,9 @@ type PatchedSlackApi = {
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
   reset(): void
+  setUserProfile(userId: string, profile: Record<string, unknown>): void
+  userProfileMethodRequestCount(userId: string, method: string): number
+  userProfileRequestCount(userId: string): number
   url: string
 }
 
@@ -3187,6 +3486,8 @@ type SlackStreamTranscript = {
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
+  const userProfiles = new Map<string, Record<string, unknown>>()
+  const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
   let maxStreamStopChars: number | null = null
   const appendFailure: { error: string; remaining: number } = { error: '', remaining: -1 }
@@ -3200,6 +3501,8 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       port,
       streams,
       threadNotFoundReplies,
+      userProfiles,
+      userProfileRequests,
       upstreamUrl
     }).catch(error => {
       res.writeHead(500, { 'content-type': 'application/json' })
@@ -3227,6 +3530,17 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure.error = ''
       threadNotFoundReplies.clear()
       streams.clear()
+      userProfiles.clear()
+      userProfileRequests.clear()
+    },
+    setUserProfile(userId: string, profile: Record<string, unknown>) {
+      userProfiles.set(userId, profile)
+    },
+    userProfileMethodRequestCount(userId: string, method: string) {
+      return userProfileRequests.get(`${method}:${userId}`) ?? 0
+    },
+    userProfileRequestCount(userId: string) {
+      return userProfileRequests.get(userId) ?? 0
     },
     close: () => closeServer(server)
   }
@@ -3242,6 +3556,8 @@ async function handlePatchedSlackRequest(
     port: number
     streams: Map<string, StreamRecord>
     threadNotFoundReplies: Set<string>
+    userProfiles: Map<string, Record<string, unknown>>
+    userProfileRequests: Map<string, number>
     upstreamUrl: string
   }
 ): Promise<void> {
@@ -3282,6 +3598,34 @@ async function handlePatchedSlackRequest(
     const body = await requestBody(request)
     input.calls.push({ method: 'assistant.threads.setTitle', body })
     await sendWebResponse(res, Response.json({ ok: true }))
+    return
+  }
+  if (path === '/api/users.info' || path === '/api/users.profile.get') {
+    const userId = url.searchParams.get('user') ?? stringField((await requestBody(request)).user)
+    input.userProfileRequests.set(userId, (input.userProfileRequests.get(userId) ?? 0) + 1)
+    input.userProfileRequests.set(path, (input.userProfileRequests.get(path) ?? 0) + 1)
+    input.userProfileRequests.set(`${path}:${userId}`, (input.userProfileRequests.get(`${path}:${userId}`) ?? 0) + 1)
+    const profile = input.userProfiles.get(userId) ?? {
+      name: 'tester',
+      real_name: 'Test User',
+      fields: {}
+    }
+    if (path === '/api/users.info') {
+      await sendWebResponse(
+        res,
+        Response.json({
+          ok: true,
+          user: {
+            id: userId,
+            name: profile.name,
+            real_name: profile.real_name,
+            profile
+          }
+        })
+      )
+      return
+    }
+    await sendWebResponse(res, Response.json({ ok: true, profile }))
     return
   }
   if (path === '/api/chat.startStream') {

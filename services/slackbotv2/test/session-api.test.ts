@@ -111,7 +111,8 @@ describe('forwardToSessionApi overrides', () => {
     expect(inputLines).toHaveLength(1)
     const line = JSON.parse(inputLines[0]!)
     expect(line.model).toBe('claude-sonnet-4-6')
-    expect(line.message.content).toEqual([{ type: 'text', text: 'review this' }])
+    expect(line.message.content[0].text).toContain('# Requester Context')
+    expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
   })
 
   test('omits model field when no override is set', async () => {
