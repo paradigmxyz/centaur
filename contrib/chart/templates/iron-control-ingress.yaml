@@ -1,0 +1,28 @@
+{{- if and .Values.ironControl.enabled .Values.ironControl.tailscaleIngress.enabled }}
+{{- $hostname := required "ironControl.tailscaleIngress.hostname is required when ironControl.tailscaleIngress.enabled (a single DNS label, e.g. iron-control)" .Values.ironControl.tailscaleIngress.hostname }}
+# Tailnet ingress for iron-control via the Tailscale Kubernetes operator
+# (installed separately). The operator only honors a single backend, so this
+# renders spec.defaultBackend rather than host/path rules; tls.hosts carries
+# the single label the operator names the device after (it serves at
+# <hostname>.<tailnet>.ts.net).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "centaur.ironControlName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+  {{- with .Values.ironControl.tailscaleIngress.annotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: {{ include "centaur.ironControlName" . }}
+      port:
+        number: {{ .Values.ironControl.service.httpPort }}
+  tls:
+    - hosts:
+        - {{ $hostname | quote }}
+{{- end }}
