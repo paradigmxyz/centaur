@@ -232,6 +232,4 @@ COPY --link --chown=1001:1001 services/sandbox/SYSTEM_PROMPT.md /home/agent/AGEN
 
 ENTRYPOINT ["/entrypoint.sh"]
 # Default CMD uses Rust blocks mode; pass --mode=jsonrpc for raw App Server JSON-RPC.
-# NOTE: claude-code is a preview-463 dogfood default — flip back to codex
-# (together with sandbox.harnessEngine in contrib/chart) before merging.
-CMD ["harness-server", "claude-code"]
+CMD ["harness-server", "codex"]

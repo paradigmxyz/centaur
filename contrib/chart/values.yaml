@@ -166,9 +166,7 @@ sandbox:
   # Which harness the sandbox runs: codex | amp | claudecode. Selects the
   # iron-proxy auth fragment api-rs registers and must agree with the sandbox
   # image's default CMD (services/sandbox/Dockerfile).
-  # NOTE: claudecode is a preview-463 dogfood default — flip back to codex
-  # (together with the Dockerfile CMD) before merging.
-  harnessEngine: claudecode
+  harnessEngine: codex
   extraEnv: {}
   stateVolume:
     enabled: false
