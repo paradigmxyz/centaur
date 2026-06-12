@@ -317,6 +317,8 @@ async function syncThreadMessageToSession(
 
   const forwardInput: ForwardSessionInput = {
     afterEventId: lastEventId,
+    executeContextMessages:
+      shouldStartExecution && shouldIncludeContext ? candidateMessages : undefined,
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
     harnessType: overrides.harnessType,
     messages: messagesToAppend,

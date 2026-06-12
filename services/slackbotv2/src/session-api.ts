@@ -158,7 +158,13 @@ export async function forwardToSessionApi(
   if (!input.executeMessage) return null
 
   const executeStartedAtMs = nowMs()
-  const execution = await executeSession(options, input.threadId, input.executeMessage, input.model)
+  const execution = await executeSession(
+    options,
+    input.threadId,
+    input.executeMessage,
+    input.model,
+    input.executeContextMessages
+  )
   traceLog(options, 'slackbotv2_session_execute_complete', input.trace, {
     execution_id: execution.execution_id,
     phase_ms: elapsedMs(executeStartedAtMs)
@@ -338,13 +344,14 @@ async function executeSession(
   options: SlackbotV2Options,
   threadId: string,
   message: SlackbotV2ApiMessage,
-  model?: string
+  model?: string,
+  contextMessages?: SlackbotV2ApiMessage[]
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
     metadata: sessionMetadata(message, { action: 'execute' }),
-    input_lines: toCodexInputLines(message, threadId, model),
+    input_lines: toCodexInputLines(message, threadId, model, contextMessages),
     ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
@@ -474,13 +481,20 @@ function sessionMetadata(
 function toCodexInputLines(
   message: SlackbotV2ApiMessage,
   threadId: string,
-  model?: string
+  model?: string,
+  contextMessages?: SlackbotV2ApiMessage[]
 ): string[] {
   const staged = new Map<SlackbotV2ApiAttachment, string>()
   const lines: string[] = []
   for (const attachment of message.attachments) {
     if (!attachment.dataBase64) continue
-    const inlineLine = toCodexInputLineWithStaged(message, threadId, staged, model)
+    const inlineLine = toCodexInputLineWithStaged(
+      message,
+      threadId,
+      staged,
+      model,
+      contextMessages
+    )
     if (
       inlineLine.length <= MAX_CODEX_INPUT_LINE_CHARS
       && attachment.dataBase64.length <= MAX_CODEX_INPUT_LINE_CHARS
@@ -491,7 +505,7 @@ function toCodexInputLines(
     staged.set(attachment, stagedAttachmentId)
     lines.push(...stagedAttachmentInputLines(attachment, stagedAttachmentId))
   }
-  lines.push(toCodexInputLineWithStaged(message, threadId, staged, model))
+  lines.push(toCodexInputLineWithStaged(message, threadId, staged, model, contextMessages))
   return lines
 }
 
@@ -499,7 +513,8 @@ function toCodexInputLineWithStaged(
   message: SlackbotV2ApiMessage,
   threadId: string,
   staged: Map<SlackbotV2ApiAttachment, string>,
-  model?: string
+  model?: string,
+  contextMessages?: SlackbotV2ApiMessage[]
 ): string {
   return JSON.stringify({
     type: 'user',
@@ -508,7 +523,7 @@ function toCodexInputLineWithStaged(
     ...(model ? { model } : {}),
     message: {
       role: 'user',
-      content: codexInputContent(message, staged)
+      content: codexInputContent(message, staged, contextMessages)
     }
   })
 }
@@ -539,9 +554,14 @@ function stagedAttachmentInputLines(
 
 function codexInputContent(
   message: SlackbotV2ApiMessage,
-  staged: Map<SlackbotV2ApiAttachment, string> = new Map()
+  staged: Map<SlackbotV2ApiAttachment, string> = new Map(),
+  contextMessages?: SlackbotV2ApiMessage[]
 ): JsonValue[] {
   const content: JsonValue[] = []
+  const threadContext = slackThreadContext(message, contextMessages)
+  if (threadContext) {
+    content.push({ type: 'text', text: threadContext })
+  }
   if (message.text.trim()) {
     content.push({ type: 'text', text: message.text })
   }
@@ -549,6 +569,51 @@ function codexInputContent(
     content.push(codexAttachmentInput(attachment, staged.get(attachment)))
   }
   return content.length > 0 ? content : [{ type: 'text', text: 'continue' }]
+}
+
+function slackThreadContext(
+  currentMessage: SlackbotV2ApiMessage,
+  contextMessages: SlackbotV2ApiMessage[] | undefined
+): string | undefined {
+  const priorMessages = (contextMessages ?? []).filter(message => message.id !== currentMessage.id)
+  if (priorMessages.length === 0) return undefined
+
+  const lines = [
+    '# Slack Thread Context',
+    '',
+    'Earlier messages in this Slack thread, in chronological order:'
+  ]
+  for (const [index, message] of priorMessages.entries()) {
+    const author = slackContextAuthor(message)
+    const text = slackContextMessageText(message)
+    lines.push('', `${index + 1}. ${author}:`, indentSlackContext(text || '[no text]'))
+  }
+  lines.push('', '# Current Request', '', 'The user message follows in the next content block.', '---')
+  return lines.join('\n')
+}
+
+function slackContextAuthor(message: SlackbotV2ApiMessage): string {
+  const displayName = message.author.fullName || message.author.userName || message.author.userId
+  const userId = message.author.userId && message.author.userId !== displayName
+    ? ` (${message.author.userId})`
+    : ''
+  const bot = message.author.isBot === true ? ' bot' : ''
+  return `${displayName || 'unknown'}${userId}${bot}`
+}
+
+function slackContextMessageText(message: SlackbotV2ApiMessage): string {
+  const fields = [message.text.trim()]
+  for (const attachment of message.attachments) {
+    fields.push(attachmentDescription(attachment))
+  }
+  return fields.filter(Boolean).join('\n')
+}
+
+function indentSlackContext(text: string): string {
+  return text
+    .split('\n')
+    .map(line => `   ${line}`)
+    .join('\n')
 }
 
 function codexAttachmentInput(

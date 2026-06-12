@@ -337,6 +337,11 @@ describe('slackbotv2', () => {
     ])
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.executes[0]!.body.idempotency_key).toBe(mention.ts)
+    const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
+    expect(executeInput).toContain('Root context for the thread.')
+    expect(executeInput).toContain('First preceding reply.')
+    expect(executeInput).toContain('Second preceding reply.')
+    expect(executeInput).toContain('summarize the thread so far')
   })
 
   it('refreshes Slack thread context for a reply mention after a root mention', async () => {
@@ -400,6 +405,12 @@ describe('slackbotv2', () => {
       rootMention.ts,
       replyMention.ts
     ])
+    const replyExecuteInput = JSON.stringify(
+      JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!)
+    )
+    expect(replyExecuteInput).toContain('start from this root mention')
+    expect(replyExecuteInput).toContain('Important reply between mentions.')
+    expect(replyExecuteInput).toContain('now use the full thread')
   })
 
   it('stages large Slack file attachments without exceeding session input line limits', async () => {

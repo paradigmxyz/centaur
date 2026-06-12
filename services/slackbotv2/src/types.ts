@@ -136,6 +136,7 @@ export type SlackbotV2Trace = {
 
 export type ForwardSessionInput = {
   afterEventId: number
+  executeContextMessages?: SlackbotV2ApiMessage[]
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
   /** Harness override parsed from message flags (--claude/--amp/--codex). */
