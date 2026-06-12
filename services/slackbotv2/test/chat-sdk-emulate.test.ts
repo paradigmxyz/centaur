@@ -110,106 +110,6 @@ describe('slackbotv2', () => {
     expect(codexApi.executes[0]?.threadKey).toBe(threadKey(parent.ts))
   })
 
-  it('stores one-tap positive feedback from the native feedback buttons', async () => {
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackInteraction({
-        type: 'block_actions',
-        team: { id: TEAM_ID },
-        user: { id: USER_ID, username: 'tester', name: 'Test User' },
-        channel: { id: CHANNEL_ID },
-        message: { ts: '1700000001.000200', thread_ts: '1700000001.000100' },
-        trigger_id: 'trigger-positive',
-        actions: [{ action_id: 'centaur_feedback', type: 'feedback_buttons', value: 'positive' }]
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-    expect(slackApi.calls.filter(call => call.method === 'views.open')).toHaveLength(0)
-    expect(codexApi.feedbacks).toHaveLength(1)
-    expect(codexApi.feedbacks[0]).toMatchObject({
-      source: 'slackbotv2_feedback_button',
-      message: '+1',
-      user_id: USER_ID,
-      channel_id: CHANNEL_ID,
-      thread_ts: '1700000001.000100',
-      metadata: { sentiment: 'positive' }
-    })
-  })
-
-  it('opens the details modal on negative feedback and stores the submission', async () => {
-    const waits: Promise<unknown>[] = []
-    const actionResponse = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackInteraction({
-        type: 'block_actions',
-        team: { id: TEAM_ID },
-        user: { id: USER_ID, username: 'tester', name: 'Test User' },
-        channel: { id: CHANNEL_ID },
-        message: { ts: '1700000002.000200', thread_ts: '1700000002.000100' },
-        trigger_id: 'trigger-negative',
-        actions: [{ action_id: 'centaur_feedback', type: 'feedback_buttons', value: 'negative' }]
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-
-    expect(actionResponse.status).toBe(200)
-    await Promise.all(waits)
-    expect(codexApi.feedbacks).toHaveLength(0)
-    const opens = slackApi.calls.filter(call => call.method === 'views.open')
-    expect(opens).toHaveLength(1)
-    const view = opens[0]?.body.view as {
-      blocks?: Array<{ block_id?: string }>
-      callback_id?: string
-      private_metadata?: string
-    }
-    expect(view?.blocks?.[0]?.block_id).toBe('message')
-
-    const submitWaits: Promise<unknown>[] = []
-    const submitResponse = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackInteraction({
-        type: 'view_submission',
-        team: { id: TEAM_ID },
-        user: { id: USER_ID, username: 'tester', name: 'Test User' },
-        view: {
-          id: 'V0TESTVIEW',
-          callback_id: view?.callback_id,
-          private_metadata: view?.private_metadata,
-          state: {
-            values: {
-              message: {
-                message: {
-                  type: 'plain_text_input',
-                  value: '  The answer missed the point.  '
-                }
-              }
-            }
-          }
-        }
-      }),
-      {},
-      waitUntilContext(submitWaits)
-    )
-
-    expect(submitResponse.status).toBe(200)
-    await Promise.all(submitWaits)
-    expect(codexApi.feedbacks).toHaveLength(1)
-    expect(codexApi.feedbacks[0]).toMatchObject({
-      source: 'slackbotv2_feedback_modal',
-      message: 'The answer missed the point.',
-      user_id: USER_ID,
-      channel_id: CHANNEL_ID,
-      thread_ts: '1700000002.000100',
-      metadata: { sentiment: 'negative' }
-    })
-  })
-
   it('syncs thread context, forwards subscribed messages, and renders execute streams', async () => {
     const parent = await postUserMessage('The deploy context is above.')
     const firstMention = await postUserMessage(
@@ -528,9 +428,6 @@ describe('slackbotv2', () => {
 
     await Promise.all(waits)
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
-    const stops = slackApi.calls.filter(call => call.method === 'chat.stopStream')
-    const stopBlocks = stops.flatMap(call => (call.body.blocks as Array<{ type?: string }>) ?? [])
-    expect(stopBlocks.some(block => block.type === 'context_actions')).toBe(true)
     expect(await threadText(mention.ts)).toContain('Answer despite bootstrap noise.')
     expect(await threadText(mention.ts)).not.toContain(
       'Execution completed, but no final text was captured.'
@@ -2751,23 +2648,6 @@ function signedSlackEvent(input: {
   }
 }
 
-function signedSlackInteraction(payload: Record<string, unknown>): RequestInit {
-  const timestamp = Math.floor(Date.now() / 1000)
-  const body = `payload=${encodeURIComponent(JSON.stringify(payload))}`
-  const signature = createHmac('sha256', SIGNING_SECRET)
-    .update(`v0:${timestamp}:${body}`)
-    .digest('hex')
-  return {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded',
-      'x-slack-request-timestamp': String(timestamp),
-      'x-slack-signature': `v0=${signature}`
-    },
-    body
-  }
-}
-
 function waitUntilContext(waits: Promise<unknown>[]) {
   return {
     waitUntil(promise: Promise<unknown>) {
@@ -2797,15 +2677,6 @@ type MockSessionEvent = {
   threadKey: string
 }
 
-type MockFeedbackRequest = {
-  channel_id?: string
-  message: string
-  metadata?: { sentiment?: string; slack?: Record<string, string> }
-  source: string
-  thread_ts?: string
-  user_id?: string
-}
-
 type MockSessionApi = {
   appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
   autoRespond: boolean
@@ -2820,7 +2691,6 @@ type MockSessionApi = {
   failNextEvents: boolean
   failNextExecute: boolean
   failNextExecuteAfterAccept: boolean
-  feedbacks: MockFeedbackRequest[]
   holdNextExecute(): () => void
   reset(): void
   streamCount: number
@@ -2833,7 +2703,6 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const eventRequests: MockSessionEventRequest[] = []
   const events: MockSessionEvent[] = []
   const executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[] = []
-  const feedbacks: MockFeedbackRequest[] = []
   const idempotentExecutions = new Map<string, string>()
   const streams = new Set<ServerResponse>()
   let autoRespond = true
@@ -2855,7 +2724,6 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       events,
       eventRequests,
       executes,
-      feedbacks,
       get autoRespond() {
         return autoRespond
       },
@@ -2899,14 +2767,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     creates,
     eventRequests,
     executes,
-    feedbacks,
     reset() {
       appends.length = 0
       creates.length = 0
       eventRequests.length = 0
       events.length = 0
       executes.length = 0
-      feedbacks.length = 0
       idempotentExecutions.clear()
       executeHoldRelease?.()
       executeHold = null
@@ -3006,8 +2872,7 @@ async function handleMockCodexRequest(
     failNextExecuteAfterAccept: boolean
     failNextEvents: boolean
     failNextExecute: boolean
-    feedbacks: MockFeedbackRequest[]
-    idempotentExecutions: Map<string, string>
+      idempotentExecutions: Map<string, string>
     nextEventId(): number
     port: number
     setFailNextEvents(value: boolean): void
@@ -3017,12 +2882,6 @@ async function handleMockCodexRequest(
   }
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${input.port}`)
-  if (url.pathname === '/api/feedback') {
-    const request = await nodeRequestToWebRequest(req, url)
-    input.feedbacks.push((await request.json()) as MockFeedbackRequest)
-    await sendWebResponse(res, Response.json({ ok: true, feedback_id: 'fbk_test' }))
-    return
-  }
   const match = /^\/api\/session\/([^/]+)(?:\/(messages|execute|events))?$/.exec(url.pathname)
   if (!match?.[1]) {
     await sendWebResponse(res, new Response('not found', { status: 404 }))
@@ -3187,7 +3046,6 @@ type StreamCall = {
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
-    | 'views.open'
   streamTs?: string
 }
 
@@ -3294,12 +3152,6 @@ async function handlePatchedSlackRequest(
   }
 
   const path = normalizeApiPath(url.pathname)
-  if (path === '/api/views.open') {
-    const body = await requestBody(request)
-    input.calls.push({ method: 'views.open', body })
-    await sendWebResponse(res, Response.json({ ok: true, view: { id: 'V0TESTVIEW' } }))
-    return
-  }
   if (path === '/api/assistant.threads.setStatus') {
     const body = await requestBody(request)
     input.calls.push({ method: 'assistant.threads.setStatus', body })

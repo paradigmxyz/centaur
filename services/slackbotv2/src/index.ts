@@ -20,7 +20,6 @@ import {
   type RendererEvent
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
-import { feedbackEndBlocks, registerFeedbackHandlers } from './feedback'
 import {
   collectInitialContext,
   forwardToSessionApi,
@@ -111,12 +110,6 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     adapters: { slack },
     state,
     onLockConflict: 'force',
-    logger
-  })
-
-  registerFeedbackHandlers(chat, {
-    apiKey: options.apiKey,
-    apiUrl: options.apiUrl,
     logger
   })
 
@@ -1037,10 +1030,7 @@ async function renderExecutionStream(
     await thread.post(
       new StreamingPlan(
         visibleStream,
-        {
-          endWith: feedbackEndBlocks(),
-          groupTasks: options.streamTaskDisplayMode ?? 'plan'
-        }
+        { groupTasks: options.streamTaskDisplayMode ?? 'plan' }
       )
     )
   } finally {
@@ -1083,7 +1073,6 @@ async function renderRecoveredExecutionStream(
       {
         recipientTeamId: message.teamId,
         recipientUserId: message.author.userId,
-        stopBlocks: feedbackEndBlocks(),
         taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
       }
     )

@@ -36,30 +36,6 @@ pub struct ClaimExecutionResult {
     pub claimed: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct CreateFeedbackInput {
-    pub source: String,
-    pub message: String,
-    pub user_id: Option<String>,
-    pub channel_id: Option<String>,
-    pub thread_ts: Option<String>,
-    pub execution_id: Option<String>,
-    pub metadata: Value,
-}
-
-#[derive(Clone, Debug)]
-pub struct UserFeedback {
-    pub feedback_id: String,
-    pub source: String,
-    pub message: String,
-    pub user_id: Option<String>,
-    pub channel_id: Option<String>,
-    pub thread_ts: Option<String>,
-    pub execution_id: Option<String>,
-    pub metadata: Value,
-    pub created_at: OffsetDateTime,
-}
-
 #[derive(Clone)]
 pub struct PgSessionStore {
     pool: PgPool,
@@ -658,46 +634,6 @@ impl PgSessionStore {
         row.try_into()
     }
 
-    pub async fn create_feedback(
-        &self,
-        input: CreateFeedbackInput,
-    ) -> Result<UserFeedback, SessionStoreError> {
-        let feedback_id = prefixed_id("fbk");
-        let row = sqlx::query_as::<_, UserFeedbackRow>(
-            r#"
-            insert into user_feedback
-                (feedback_id, source, message, user_id, channel_id, thread_ts, execution_id, metadata)
-            values ($1, $2, $3, $4, $5, $6, $7, $8)
-            returning feedback_id, source, message, user_id, channel_id, thread_ts, execution_id, metadata, created_at
-            "#,
-        )
-        .bind(&feedback_id)
-        .bind(input.source)
-        .bind(input.message)
-        .bind(input.user_id)
-        .bind(input.channel_id)
-        .bind(input.thread_ts)
-        .bind(&input.execution_id)
-        .bind(input.metadata)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| {
-            if error
-                .as_database_error()
-                .and_then(|db_error| db_error.constraint())
-                == Some("user_feedback_execution_id_fkey")
-            {
-                SessionStoreError::ExecutionNotFound {
-                    execution_id: input.execution_id.unwrap_or_default(),
-                }
-            } else {
-                SessionStoreError::from(error)
-            }
-        })?;
-
-        Ok(row.into())
-    }
-
     async fn set_session_status(
         &self,
         thread_key: &str,
@@ -752,8 +688,6 @@ pub struct SessionEventNotification {
 pub enum SessionStoreError {
     #[error("session not found for thread_key {thread_key}")]
     NotFound { thread_key: String },
-    #[error("execution not found: {execution_id}")]
-    ExecutionNotFound { execution_id: String },
     #[error(
         "session {thread_key} already exists with harness_type {existing}, requested {requested}"
     )]
@@ -795,35 +729,6 @@ struct SessionRow {
     iron_control_principal: Option<String>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
-}
-
-#[derive(Debug, FromRow)]
-struct UserFeedbackRow {
-    feedback_id: String,
-    source: String,
-    message: String,
-    user_id: Option<String>,
-    channel_id: Option<String>,
-    thread_ts: Option<String>,
-    execution_id: Option<String>,
-    metadata: Value,
-    created_at: OffsetDateTime,
-}
-
-impl From<UserFeedbackRow> for UserFeedback {
-    fn from(row: UserFeedbackRow) -> Self {
-        Self {
-            feedback_id: row.feedback_id,
-            source: row.source,
-            message: row.message,
-            user_id: row.user_id,
-            channel_id: row.channel_id,
-            thread_ts: row.thread_ts,
-            execution_id: row.execution_id,
-            metadata: row.metadata,
-            created_at: row.created_at,
-        }
-    }
 }
 
 impl TryFrom<SessionRow> for Session {
