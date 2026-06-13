@@ -18,10 +18,8 @@ grant select on slack_sync_messages to centaur_slack_reader, centaur_slack_admin
 grant select on company_context_documents to centaur_slack_reader, centaur_slack_admin;
 
 alter table slack_sync_messages enable row level security;
-alter table slack_sync_messages force row level security;
 
 alter table company_context_documents enable row level security;
-alter table company_context_documents force row level security;
 
 drop policy if exists centaur_slack_messages_admin_select on slack_sync_messages;
 create policy centaur_slack_messages_admin_select
