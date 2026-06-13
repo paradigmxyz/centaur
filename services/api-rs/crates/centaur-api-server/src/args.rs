@@ -907,11 +907,7 @@ impl SandboxArgs {
             }
         }
 
-        for name in &self.passthrough_env {
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
-            }
+        for name in self.passthrough_env_names() {
             if let Ok(value) = env::var(name) {
                 if let Some((_, existing_value)) = envs
                     .iter_mut()
@@ -1059,11 +1055,7 @@ impl SandboxArgs {
             envs.push(("TOOLS_OVERLAY_PATH".to_owned(), value));
         }
 
-        for name in &self.passthrough_env {
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
-            }
+        for name in self.passthrough_env_names() {
             if let Ok(value) = env::var(name) {
                 if let Some((_, existing_value)) = envs
                     .iter_mut()
@@ -1077,6 +1069,14 @@ impl SandboxArgs {
         }
 
         Ok(envs)
+    }
+
+    fn passthrough_env_names(&self) -> impl Iterator<Item = &str> {
+        self.passthrough_env
+            .iter()
+            .flat_map(|entry| entry.split(','))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
     }
 
     fn discover_tool_proxy_fragment(
@@ -1729,6 +1729,46 @@ fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &'static str)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|(name, _)| (*name, env::var(name).ok()))
+                .collect();
+            for (name, value) in vars {
+                // SAFETY: tests that mutate process env hold ENV_LOCK for the
+                // duration of the guard, so concurrent tests in this module
+                // cannot observe partial mutations.
+                unsafe {
+                    env::set_var(name, value);
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                // SAFETY: see EnvGuard::set; the lock outlives the guard.
+                unsafe {
+                    if let Some(value) = value {
+                        env::set_var(name, value);
+                    } else {
+                        env::remove_var(name);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn parses_session_sandbox_flags() {
@@ -1892,6 +1932,46 @@ mod tests {
                 .find(|env| env.name == "TOOLS_OVERLAY_PATH")
                 .map(|env| env.value.as_str()),
             Some("/home/agent/github/tempoxyz/centaur-tempo/tools")
+        );
+    }
+
+    #[test]
+    fn workflow_host_env_template_splits_passthrough_env_from_environment() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            (
+                "SESSION_SANDBOX_PASSTHROUGH_ENV",
+                "SLACK_ETL_ENABLED,SLACK_BACKFILL_ENABLED",
+            ),
+            ("SLACK_ETL_ENABLED", "true"),
+            ("SLACK_BACKFILL_ENABLED", "true"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "SLACK_ETL_ENABLED")
+                .map(|env| env.value.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "SLACK_BACKFILL_ENABLED")
+                .map(|env| env.value.as_str()),
+            Some("true")
         );
     }
 
