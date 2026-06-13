@@ -360,6 +360,57 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_forwards_reasoning_as_turn_start_effort() {
+    let fake_codex = temp_path("fake-codex-effort.sh");
+    let fake_codex_log = temp_path("fake-codex-effort-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+    );
+    let turn = bridge.run_blocks_user_line(
+        json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "reasoning": "high",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "say codex blocks"}],
+            },
+        }),
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+    assert_completed_turn(&turn);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let turn_start = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake codex request JSON"))
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .expect("blocks mode did not send turn/start");
+    assert_eq!(
+        turn_start.pointer("/params/effort").and_then(Value::as_str),
+        Some("high"),
+        "reasoning should be forwarded as turn/start effort; turn_start={turn_start}"
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_amp_final_only_assistant_message_is_chunked_into_codex_deltas() {
     let expected = expected_long_text();
     let system = json!({
@@ -982,7 +1033,11 @@ impl BridgeProcess {
         if let Some(model) = model {
             input["model"] = Value::String(model.to_string());
         }
-        self.send(input);
+        self.run_blocks_user_line(input, timeout)
+    }
+
+    fn run_blocks_user_line(&mut self, user_line: Value, timeout: Duration) -> TurnCapture {
+        self.send(user_line);
 
         let deadline = Instant::now() + timeout;
         let mut capture = TurnCapture::default();

@@ -140,6 +140,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 input,
                 client_user_message_id,
                 model,
+                reasoning,
             }) => {
                 if let Err(error) = run_codex_user_turn(
                     &mut codex,
@@ -153,6 +154,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                         let model_provider = config.model_provider_for(model.as_deref());
                         (model, model_provider)
                     },
+                    reasoning,
                 ) {
                     let fallback_thread_id = thread_id.as_deref().unwrap_or("codex");
                     eprintln!("Codex blocks turn failed: {error:#}");
@@ -188,6 +190,7 @@ fn run_codex_user_turn<W: Write>(
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
     model_and_provider: (Option<String>, String),
+    reasoning: Option<String>,
 ) -> Result<()> {
     let (model, model_provider) = model_and_provider;
     if thread_id.is_none() {
@@ -212,6 +215,12 @@ fn run_codex_user_turn<W: Write>(
     }
     if let Some(model) = model {
         params["model"] = Value::String(model);
+    }
+    // Per-turn reasoning effort (codex `turn/start.effort`), parsed from the
+    // `-rsn` message flag. Values match codex's ReasoningEffort enum
+    // (none|minimal|low|medium|high|xhigh); validation happens upstream.
+    if let Some(reasoning) = reasoning {
+        params["effort"] = Value::String(reasoning);
     }
 
     let turn_request_id = next_request_id(request_id);

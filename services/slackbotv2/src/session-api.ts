@@ -185,7 +185,8 @@ export async function forwardToSessionApi(
     input.executeMessage,
     input.model,
     input.executeContextMessages,
-    input.contextPreamble
+    input.contextPreamble,
+    input.reasoning
   )
   traceLog(options, 'slackbotv2_session_execute_complete', input.trace, {
     execution_id: execution.execution_id,
@@ -789,7 +790,8 @@ async function executeSession(
   message: SlackbotV2ApiMessage,
   model?: string,
   contextMessages?: SlackbotV2ApiMessage[],
-  contextPreamble?: string
+  contextPreamble?: string,
+  reasoning?: string
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
@@ -802,7 +804,8 @@ async function executeSession(
       model,
       requesterIdentity,
       contextMessages,
-      contextPreamble
+      contextPreamble,
+      reasoning
     ),
     ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
@@ -953,7 +956,8 @@ function toCodexInputLines(
   model?: string,
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
-  contextPreamble?: string
+  contextPreamble?: string,
+  reasoning?: string
 ): string[] {
   const staged = new Map<SlackbotV2ApiAttachment, string>()
   const lines: string[] = []
@@ -966,7 +970,8 @@ function toCodexInputLines(
       model,
       requesterIdentity,
       contextMessages,
-      contextPreamble
+      contextPreamble,
+      reasoning
     )
     if (
       inlineLine.length <= MAX_CODEX_INPUT_LINE_CHARS
@@ -986,7 +991,8 @@ function toCodexInputLines(
       model,
       requesterIdentity,
       contextMessages,
-      contextPreamble
+      contextPreamble,
+      reasoning
     )
   )
   return lines
@@ -1012,13 +1018,15 @@ function toCodexInputLineWithStaged(
   model?: string,
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
-  contextPreamble?: string
+  contextPreamble?: string,
+  reasoning?: string
 ): string {
   return JSON.stringify({
     type: 'user',
     thread_key: threadId,
     trace_metadata: sessionMetadata(message, { action: 'execute' }, requesterIdentity),
     ...(model ? { model } : {}),
+    ...(reasoning ? { reasoning } : {}),
     message: {
       role: 'user',
       content: codexInputContent(
