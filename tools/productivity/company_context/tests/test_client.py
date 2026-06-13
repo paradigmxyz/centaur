@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 import client as company_context_client
+from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 from client import CompanyContextClient
 
 
@@ -48,6 +49,45 @@ def test_search_rejects_empty_query(query):
     result = CompanyContextClient("postgresql://example").search(query)
 
     assert result == {"status": "error", "error": "query cannot be empty"}
+
+
+def test_default_database_url_uses_company_context_dsn_env(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_DSN", "postgresql://scoped")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://raw-app-db")
+
+    client = CompanyContextClient()
+
+    assert client._require_database_url() == "postgresql://scoped"
+
+
+def test_default_database_url_uses_tool_context_secret(monkeypatch):
+    monkeypatch.delenv("COMPANY_CONTEXT_DSN", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://raw-app-db")
+    token = set_tool_context(
+        ToolContext(
+            name="company_context",
+            secrets={"COMPANY_CONTEXT_DSN": "postgresql://context-scoped"},
+        )
+    )
+    try:
+        client = CompanyContextClient()
+
+        assert client._require_database_url() == "postgresql://context-scoped"
+    finally:
+        reset_tool_context(token)
+
+
+def test_default_database_url_does_not_fall_back_to_raw_database_url(monkeypatch):
+    monkeypatch.delenv("COMPANY_CONTEXT_DSN", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://raw-app-db")
+    token = set_tool_context(ToolContext(name="company_context", secrets={}))
+    try:
+        client = CompanyContextClient()
+
+        with pytest.raises(RuntimeError, match="COMPANY_CONTEXT_DSN is required"):
+            client._require_database_url()
+    finally:
+        reset_tool_context(token)
 
 
 def test_search_queries_bm25_and_returns_compact_results(monkeypatch):

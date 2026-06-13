@@ -25,6 +25,7 @@ CHANNEL_DAY_SCORE_MULTIPLIER = 0.75
 DEFAULT_PREVIEW_CHARS = 280
 MAX_RELATED_CHILDREN = 25
 SLACK_LIVE_SOURCE_TYPE = "slack_live_message"
+COMPANY_CONTEXT_DSN_ENV = "COMPANY_CONTEXT_DSN"
 _SLACK_AFTER_RE = re.compile(r"\bafter:\d{4}-\d{2}-\d{2}\b", re.IGNORECASE)
 
 _SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
@@ -76,6 +77,16 @@ _STOP_WORDS = {
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
     """Clamp integer tool inputs to predictable output bounds."""
     return max(minimum, min(int(value), maximum))
+
+
+def _scoped_database_url() -> str:
+    value = os.getenv(COMPANY_CONTEXT_DSN_ENV)
+    if value is None:
+        value = secret(COMPANY_CONTEXT_DSN_ENV, default="")
+    value = value.strip()
+    if value == COMPANY_CONTEXT_DSN_ENV:
+        return ""
+    return value
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -298,15 +309,11 @@ class CompanyContextClient:
     """Query the shared company context document table."""
 
     def __init__(self, database_url: str | None = None) -> None:
-        # DATABASE_URL is owned by the API process, not an agent-facing secret.
-        env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
-        self._database_url = (
-            database_url or env_database_url or secret("DATABASE_URL", default="")
-        ).strip()
+        self._database_url = (database_url or _scoped_database_url()).strip()
 
     def _require_database_url(self) -> str:
         if not self._database_url:
-            raise RuntimeError("DATABASE_URL is required for company context search")
+            raise RuntimeError(f"{COMPANY_CONTEXT_DSN_ENV} is required for company context search")
         return self._database_url
 
     async def _connect(self) -> asyncpg.Connection:
