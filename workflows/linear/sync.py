@@ -8,7 +8,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from api.integrations.linear import LinearReadonlyClient
 from api.runtime_control import canonical_json
 from api.vm_metrics import (
     record_etl_items_failed,
@@ -16,7 +15,7 @@ from api.vm_metrics import (
     record_etl_items_upserted,
 )
 from api.workflow_engine import WorkflowContext
-from workflows.slack_sync_shared import env_flag_enabled, positive_int
+from workflows.slack.shared import env_flag_enabled, positive_int
 
 WORKFLOW_NAME = "linear_sync"
 DEFAULT_SYNC_INTERVAL_SECONDS = 4 * 60 * 60
@@ -82,6 +81,8 @@ class LinearSyncClient(Protocol):
 
 
 def _client() -> LinearSyncClient:
+    from workflows.linear import LinearReadonlyClient
+
     return LinearReadonlyClient()
 
 

@@ -9,6 +9,7 @@ context operations back to api-rs.
 from __future__ import annotations
 
 import asyncio
+import ast
 import dataclasses
 import importlib.util
 import inspect
@@ -221,8 +222,6 @@ def install_api_compat_module() -> None:
     install_vm_metrics_compat_module(api_mod)
 
     install_centaur_sdk_compat_module()
-    if not real_integrations_available():
-        install_integration_compat_modules(api_mod)
 
 
 def canonical_json(value: Any) -> str:
@@ -583,50 +582,6 @@ def victoria_metrics_push_enabled() -> bool:
     }
 
 
-class MissingWorkflowIntegration:
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        raise RuntimeError(
-            "workflow integration client is unavailable in this lightweight "
-            "workflow discovery host; run the workflow in a full workflow-host environment"
-        )
-
-
-def real_integrations_available() -> bool:
-    try:
-        __import__("api.integrations.gsuite.calendar")
-        __import__("api.integrations.gsuite.drive")
-        __import__("api.integrations.linear")
-        return True
-    except ImportError:
-        return False
-
-
-def install_integration_compat_modules(api_mod: types.ModuleType) -> None:
-    integrations = types.ModuleType("api.integrations")
-    integrations.__path__ = []
-    gsuite = types.ModuleType("api.integrations.gsuite")
-    gsuite.__path__ = []
-    calendar = types.ModuleType("api.integrations.gsuite.calendar")
-    drive = types.ModuleType("api.integrations.gsuite.drive")
-    linear = types.ModuleType("api.integrations.linear")
-
-    calendar.GoogleCalendarReadonlyClient = MissingWorkflowIntegration
-    drive.GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
-    drive.GoogleDriveReadonlyClient = MissingWorkflowIntegration
-    linear.LinearReadonlyClient = MissingWorkflowIntegration
-
-    sys.modules.setdefault("api.integrations", integrations)
-    sys.modules.setdefault("api.integrations.gsuite", gsuite)
-    sys.modules.setdefault("api.integrations.gsuite.calendar", calendar)
-    sys.modules.setdefault("api.integrations.gsuite.drive", drive)
-    sys.modules.setdefault("api.integrations.linear", linear)
-    setattr(api_mod, "integrations", integrations)
-    setattr(integrations, "gsuite", gsuite)
-    setattr(integrations, "linear", linear)
-    setattr(gsuite, "calendar", calendar)
-    setattr(gsuite, "drive", drive)
-
-
 def workflow_dirs() -> list[Path]:
     dirs = []
     raw = os.getenv("WORKFLOW_DIRS", "")
@@ -675,14 +630,33 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
     )
 
 
+def has_workflow_name_assignment(path: Path) -> bool:
+    try:
+        tree = ast.parse(path.read_text())
+    except Exception:
+        return False
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "WORKFLOW_NAME":
+                    return True
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id == "WORKFLOW_NAME":
+                return True
+    return False
+
+
 def discover_workflows() -> dict[str, RegisteredWorkflow]:
     dirs = workflow_dirs()
     configure_workflow_import_paths(dirs)
     install_api_compat_module()
     discovered: dict[str, RegisteredWorkflow] = {}
     for directory in dirs:
-        for path in sorted(directory.glob("*.py")):
-            if path.name.startswith("_"):
+        for path in sorted(directory.rglob("*.py")):
+            if path.name == "__init__.py" or path.name.startswith("_"):
+                continue
+            if not has_workflow_name_assignment(path):
                 continue
             try:
                 registered = load_workflow_file(path)

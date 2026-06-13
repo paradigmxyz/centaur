@@ -15,7 +15,7 @@ from api.vm_metrics import (
     record_etl_items_upserted,
 )
 from api.workflow_engine import WorkflowContext
-from workflows.slack_sync_shared import (
+from workflows.slack.shared import (
     BACKFILL_JOB_CHANNEL_BOOTSTRAP,
     BACKFILL_JOB_CHANNEL_CONTINUATION,
     BACKFILL_JOB_PAYLOAD_VERSION,

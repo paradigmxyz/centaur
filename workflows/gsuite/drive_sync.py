@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from api.integrations.gsuite.drive import GOOGLE_DOC_MIME_TYPE, GoogleDriveReadonlyClient
+from workflows.gsuite.drive import GOOGLE_DOC_MIME_TYPE
 from api.runtime_control import canonical_json
 from api.vm_metrics import (
     record_etl_items_failed,
@@ -16,7 +16,7 @@ from api.vm_metrics import (
     record_etl_items_upserted,
 )
 from api.workflow_engine import WorkflowContext
-from workflows.slack_sync_shared import env_flag_enabled, positive_int
+from workflows.slack.shared import env_flag_enabled, positive_int
 
 WORKFLOW_NAME = "google_drive_sync"
 DEFAULT_SYNC_INTERVAL_SECONDS = 4 * 60 * 60
@@ -60,6 +60,8 @@ class GoogleDriveSyncClient(Protocol):
 
 
 def _client() -> GoogleDriveSyncClient:
+    from workflows.gsuite.drive import GoogleDriveReadonlyClient
+
     return GoogleDriveReadonlyClient()
 
 
