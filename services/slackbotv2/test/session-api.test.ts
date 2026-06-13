@@ -128,6 +128,25 @@ describe('forwardToSessionApi overrides', () => {
     expect('model' in line).toBe(false)
   })
 
+  test('includes reasoning override on the execute input line', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('audit this'), { reasoning: 'high' })
+    )
+    const execute = requests.find(request => request.url.endsWith('/execute'))
+    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
+    expect(line.reasoning).toBe('high')
+  })
+
+  test('omits reasoning field when no override is set', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
+    const execute = requests.find(request => request.url.endsWith('/execute'))
+    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
+    expect('reasoning' in line).toBe(false)
+  })
+
   test('retries session creation with existing harness on 409 conflict', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [
