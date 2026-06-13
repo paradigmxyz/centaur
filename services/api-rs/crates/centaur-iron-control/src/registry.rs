@@ -15,7 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use centaur_iron_proxy::{
-    PostgresListener, ProxyFragment, Secret, SecretReplace, SourceKind, SourcePolicy, pg_foreign_id,
+    PgDsnSetting, PgDsnSettingValueFrom, PostgresListener, ProxyFragment, Secret, SecretReplace,
+    SourceKind, SourcePolicy, pg_foreign_id,
 };
 use serde_json::{Value as JsonValue, json};
 use serde_yaml::Value as YamlValue;
@@ -24,8 +25,8 @@ use crate::client::IronControlClient;
 use crate::error::IronControlError;
 use crate::models::{
     AwsAuthSecretInput, GcpAuthSecretInput, GrantSecret, Grantee, HmacSecretInput, IdentityInput,
-    InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput, ReplaceConfig, RequestRule,
-    SecretSource, StaticSecretInput,
+    InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput, PgDsnSettingInput,
+    PgDsnSettingValueFromInput, ReplaceConfig, RequestRule, SecretSource, StaticSecretInput,
 };
 use crate::util::{managed_labels, slugify};
 
@@ -536,8 +537,31 @@ fn pg_dsn_from_listener(
         description: None,
         role: role_to_set,
         labels: managed_labels(),
+        settings: listener
+            .settings
+            .iter()
+            .map(pg_setting_from_listener)
+            .collect(),
         dsn,
     })
+}
+
+fn pg_setting_from_listener(setting: &PgDsnSetting) -> PgDsnSettingInput {
+    PgDsnSettingInput {
+        name: setting.name.clone(),
+        value: setting.value.clone(),
+        value_from: setting.value_from.as_ref().map(
+            |PgDsnSettingValueFrom {
+                 principal_label,
+                 principal_field,
+             }| {
+                PgDsnSettingValueFromInput {
+                    principal_label: principal_label.clone(),
+                    principal_field: principal_field.clone(),
+                }
+            },
+        ),
+    }
 }
 
 /// Resolve a listener's ``upstream.dsn`` into an iron-control secret source.
@@ -991,6 +1015,10 @@ postgres:
     sandbox_env:
       database: analytics_db
     role: readonly
+    settings:
+      - name: centaur.slack_channel_id
+        value_from:
+          principal_label: slack_channel_id
 "#,
         )
         .unwrap();
@@ -1004,6 +1032,15 @@ postgres:
         assert_eq!(input.name, "analytics");
         assert_eq!(input.database, "analytics_db");
         assert_eq!(input.role.as_deref(), Some("readonly"));
+        assert_eq!(input.settings.len(), 1);
+        assert_eq!(input.settings[0].name, "centaur.slack_channel_id");
+        assert_eq!(
+            input.settings[0]
+                .value_from
+                .as_ref()
+                .and_then(|value_from| value_from.principal_label.as_deref()),
+            Some("slack_channel_id")
+        );
         assert_eq!(input.dsn.source_type, "env");
         assert_eq!(input.dsn.config, json!({ "var": "PG_ANALYTICS_DSN" }));
     }

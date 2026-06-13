@@ -5,8 +5,8 @@ use std::{
 };
 
 use centaur_iron_proxy::{
-    PostgresListener, PostgresUpstream, ProxyFragment, SandboxEnv, Secret, SecretReplace,
-    Transform, TransformConfig,
+    PgDsnSetting, PgDsnSettingValueFrom, PostgresListener, PostgresUpstream, ProxyFragment,
+    SandboxEnv, Secret, SecretReplace, Transform, TransformConfig,
 };
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
@@ -416,6 +416,8 @@ struct PgDsnSecret {
     name: String,
     secret_ref: String,
     database: String,
+    role: Option<String>,
+    settings: Vec<PgDsnSetting>,
 }
 
 /// A `type = "aws_auth"` secret. The in-sandbox AWS SDK signs each request with
@@ -630,10 +632,68 @@ fn parse_pg_dsn_secret(
     secret_ref: String,
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     let database = required_str(table, "database")?.to_owned();
+    let role = optional_str(table, "role").map(ToOwned::to_owned);
+    let settings = parse_pg_dsn_settings(table.get("settings"))?;
     Ok(ToolSecret::PgDsn(PgDsnSecret {
         name,
         secret_ref,
         database,
+        role,
+        settings,
+    }))
+}
+
+fn parse_pg_dsn_settings(
+    value: Option<&TomlValue>,
+) -> Result<Vec<PgDsnSetting>, ToolDiscoveryError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let array = value.as_array().ok_or_else(|| {
+        ToolDiscoveryError::Invalid("pg_dsn settings must be an array".to_owned())
+    })?;
+    array
+        .iter()
+        .map(|item| {
+            let table = item.as_table().ok_or_else(|| {
+                ToolDiscoveryError::Invalid("pg_dsn setting must be a table".to_owned())
+            })?;
+            let name = required_str(table, "name")?.to_owned();
+            let literal = optional_str(table, "value").map(ToOwned::to_owned);
+            let value_from = parse_pg_dsn_setting_value_from(table.get("value_from"))?;
+            if literal.is_some() == value_from.is_some() {
+                return Err(ToolDiscoveryError::Invalid(format!(
+                    "pg_dsn setting {name:?} must declare exactly one of value or value_from"
+                )));
+            }
+            Ok(PgDsnSetting {
+                name,
+                value: literal,
+                value_from,
+            })
+        })
+        .collect()
+}
+
+fn parse_pg_dsn_setting_value_from(
+    value: Option<&TomlValue>,
+) -> Result<Option<PgDsnSettingValueFrom>, ToolDiscoveryError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let table = value.as_table().ok_or_else(|| {
+        ToolDiscoveryError::Invalid("pg_dsn setting value_from must be a table".to_owned())
+    })?;
+    let principal_label = optional_str(table, "principal_label").map(ToOwned::to_owned);
+    let principal_field = optional_str(table, "principal_field").map(ToOwned::to_owned);
+    if principal_label.is_none() && principal_field.is_none() {
+        return Err(ToolDiscoveryError::Invalid(
+            "pg_dsn setting value_from must declare principal_label or principal_field".to_owned(),
+        ));
+    }
+    Ok(Some(PgDsnSettingValueFrom {
+        principal_label,
+        principal_field,
     }))
 }
 
@@ -981,6 +1041,10 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
     by_name
         .into_values()
         .map(|secret| {
+            let mut extra = BTreeMap::new();
+            if let Some(role) = &secret.role {
+                extra.insert("role".to_owned(), yaml_string(role));
+            }
             Ok(PostgresListener {
                 name: Some(secret.name.to_lowercase()),
                 upstream: Some(PostgresUpstream {
@@ -999,6 +1063,8 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
                     database: Some(secret.database.clone()),
                     ..Default::default()
                 }),
+                settings: secret.settings.clone(),
+                extra,
                 ..Default::default()
             })
         })
@@ -1161,12 +1227,27 @@ mod tests {
             name: "RESHIFT_DSN".to_owned(),
             secret_ref: "RESHIFT_DSN".to_owned(),
             database: "warehouse".to_owned(),
+            role: Some("centaur_slack_reader".to_owned()),
+            settings: vec![PgDsnSetting {
+                name: "centaur.slack_channel_id".to_owned(),
+                value: None,
+                value_from: Some(PgDsnSettingValueFrom {
+                    principal_label: Some("slack_channel_id".to_owned()),
+                    principal_field: None,
+                }),
+            }],
         })])
         .unwrap();
 
         let sandbox_env = listeners[0].sandbox_env.as_ref().unwrap();
         assert_eq!(sandbox_env.name.as_deref(), Some("RESHIFT_DSN"));
         assert_eq!(sandbox_env.database.as_deref(), Some("warehouse"));
+        assert_eq!(
+            listeners[0].extra.get("role").and_then(YamlValue::as_str),
+            Some("centaur_slack_reader")
+        );
+        assert_eq!(listeners[0].settings.len(), 1);
+        assert_eq!(listeners[0].settings[0].name, "centaur.slack_channel_id");
     }
 
     #[test]

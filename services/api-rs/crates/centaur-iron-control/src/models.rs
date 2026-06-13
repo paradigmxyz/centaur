@@ -261,7 +261,10 @@ pub struct AwsAuthSecretInput {
 /// ``database`` is the database name to connect to on both the proxied and the
 /// upstream connection (the ``dsn`` source is opaque, so it can't be parsed out
 /// of the connection string); ``role`` is an optional Postgres role the proxy
-/// issues ``SET ROLE`` for.
+/// issues ``SET ROLE`` for. ``settings`` are optional Postgres GUCs the proxy
+/// sets after connecting. A setting can carry either a literal ``value`` or a
+/// structured ``value_from`` reference that iron-control resolves against the
+/// proxy's assigned principal at sync time.
 // Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PgDsnSecretInput {
@@ -275,7 +278,26 @@ pub struct PgDsnSecretInput {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<PgDsnSettingInput>,
     pub dsn: SecretSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PgDsnSettingInput {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<PgDsnSettingValueFromInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PgDsnSettingValueFromInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal_field: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

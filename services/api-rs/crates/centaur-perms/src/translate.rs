@@ -11,11 +11,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use centaur_iron_control::{
     AwsAuthSecretInput, GcpAuthSecretInput, HmacSecretHeader, HmacSecretInput, InjectConfig,
-    OAuthTokenSecretInput, PgDsnSecretInput, ReplaceConfig, RequestRule, SecretInput, SecretSource,
-    StaticSecretInput, gcp_auth_scopes_or_default, managed_labels, slugify,
-    source_from_placeholder, unique_foreign_id,
+    OAuthTokenSecretInput, PgDsnSecretInput, PgDsnSettingInput, PgDsnSettingValueFromInput,
+    ReplaceConfig, RequestRule, SecretInput, SecretSource, StaticSecretInput,
+    gcp_auth_scopes_or_default, managed_labels, slugify, source_from_placeholder,
+    unique_foreign_id,
 };
 use centaur_iron_proxy::SourcePolicy;
+use centaur_iron_proxy::{PgDsnSetting, PgDsnSettingValueFrom};
 
 use crate::tools::{
     AwsAuthSecret, BrokerTokenSecret, FieldSource, GcpAuthSecret, HmacSignSecret, HttpSecret,
@@ -206,9 +208,28 @@ fn pg_dsn_input(namespace: &str, pg: &PgDsnSecret, policy: &SourcePolicy) -> PgD
         name: pg.name.clone(),
         database: pg.database.clone(),
         description: None,
-        role: None,
+        role: pg.role.clone(),
         labels: managed_labels(),
+        settings: pg.settings.iter().map(pg_setting_input).collect(),
         dsn: source_from_placeholder(policy, &pg.secret_ref, None),
+    }
+}
+
+fn pg_setting_input(setting: &PgDsnSetting) -> PgDsnSettingInput {
+    PgDsnSettingInput {
+        name: setting.name.clone(),
+        value: setting.value.clone(),
+        value_from: setting.value_from.as_ref().map(
+            |PgDsnSettingValueFrom {
+                 principal_label,
+                 principal_field,
+             }| {
+                PgDsnSettingValueFromInput {
+                    principal_label: principal_label.clone(),
+                    principal_field: principal_field.clone(),
+                }
+            },
+        ),
     }
 }
 
