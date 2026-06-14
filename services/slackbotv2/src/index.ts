@@ -765,8 +765,12 @@ async function recoverRenderObligations(
       }
 
       const leaseToken = randomUUID()
+      const leaseKey = renderRecoveryLeaseKey(threadId)
+      // The Postgres adapter removes expired cache rows opportunistically in
+      // get(); its atomic insert still conflicts while that row exists.
+      await state.get(leaseKey)
       const leaseAcquired = await state.setIfNotExists(
-        renderRecoveryLeaseKey(threadId),
+        leaseKey,
         leaseToken,
         RENDER_RECOVERY_LEASE_TTL_MS
       )
@@ -781,8 +785,8 @@ async function recoverRenderObligations(
         continue
       }
       const releaseLease = async (): Promise<void> => {
-        const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
-        if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
+        const activeLeaseToken = await state.get<string>(leaseKey)
+        if (activeLeaseToken === leaseToken) await state.delete(leaseKey)
       }
 
       // A single hung recovery (for example an event stream that never

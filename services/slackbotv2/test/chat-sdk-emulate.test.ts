@@ -11,6 +11,7 @@ import { WebClient } from '@slack/web-api'
 import { createEmulator, type Emulator } from 'emulate'
 import { createMemoryState } from '@chat-adapter/state-memory'
 import type { ServerNotification } from '@centaur/harness-events'
+import type { StateAdapter } from 'chat'
 import {
   createSlackbotV2,
   type SlackbotV2,
@@ -2341,6 +2342,71 @@ describe('slackbotv2', () => {
         renderObligation: expect.objectContaining({ executionId: 'exe-hung-recovery' })
       })
     )
+  })
+
+  it('reclaims a Postgres lease after its TTL expires', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+
+    const parent = await postUserMessage('Context before expired lease recovery.')
+    const mentionText = `<@${BOT_USER_ID}> recover after lease expiry`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const leaseKey = `slackbotv2:render:lease:${key}`
+    const message = apiMessageFromSlackEvent({
+      isMention: true,
+      text: mentionText,
+      threadId: key,
+      ts: mention.ts
+    })
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [mention.ts],
+      forwardedMessageIds: [mention.ts],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-expired-lease',
+        message
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered after lease expiry.'))
+
+    // state-pg get() treats an expired row as absent and deletes it, while
+    // setIfNotExists() still conflicts until that cleanup has happened.
+    let expiredLeaseRowExists = true
+    const postgresLikeState = new Proxy(sharedState, {
+      get(target, property) {
+        if (property === 'get') {
+          return async <T>(stateKey: string): Promise<T | null> => {
+            if (stateKey === leaseKey && expiredLeaseRowExists) {
+              expiredLeaseRowExists = false
+              return null
+            }
+            return target.get<T>(stateKey)
+          }
+        }
+        if (property === 'setIfNotExists') {
+          return async (stateKey: string, value: unknown, ttlMs?: number): Promise<boolean> => {
+            if (stateKey === leaseKey && expiredLeaseRowExists) return false
+            return target.setIfNotExists(stateKey, value, ttlMs)
+          }
+        }
+        const value = Reflect.get(target, property)
+        return typeof value === 'function' ? value.bind(target) : value
+      }
+    }) as StateAdapter
+
+    bot = createTestBot({ state: postgresLikeState })
+
+    await waitFor(async () => {
+      const recovered = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return recovered?.renderObligation === null
+    }, 5000)
+    expect(await threadText(parent.ts)).toContain('Recovered after lease expiry.')
+    expect(expiredLeaseRowExists).toBe(false)
   })
 
   it('does not duplicate the live render while the recovery sweep is cycling', async () => {
