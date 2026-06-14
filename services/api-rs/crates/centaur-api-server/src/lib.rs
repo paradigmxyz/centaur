@@ -90,16 +90,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_messages_accepts_payloads_larger_than_axum_default_limit() {
+    async fn append_messages_does_not_apply_a_session_body_limit() {
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
         let app = build_router_with_runtime(
             PgSessionStore::new(pool),
             SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-        );
-        let body = format!(
-            r#"{{"messages":[],"padding":"{}"}}"#,
-            "x".repeat(3 * 1024 * 1024)
         );
 
         let response = app
@@ -108,24 +104,25 @@ mod tests {
                     .method("POST")
                     .uri("/api/session/slack%3AC123%3A123.456/messages")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
+                    .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
+                    .body(Body::from(r#"{"messages":"not-an-array"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
-    async fn execute_accepts_payloads_larger_than_axum_default_limit() {
+    async fn execute_does_not_apply_a_session_body_limit() {
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
         let app = build_router_with_runtime(
             PgSessionStore::new(pool),
             SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
         );
-        let body = format!(r#"{{"input_lines":["{}"]"#, "x".repeat(3 * 1024 * 1024));
 
         let response = app
             .oneshot(
@@ -133,13 +130,15 @@ mod tests {
                     .method("POST")
                     .uri("/api/session/slack%3AC123%3A123.456/execute")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
+                    .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
+                    .body(Body::from(r#"{"input_lines":"not-an-array"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[derive(Default)]

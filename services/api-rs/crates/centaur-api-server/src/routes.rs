@@ -54,7 +54,6 @@ pub struct AppState {
 }
 
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
-const MAX_SESSION_JSON_BODY_BYTES: usize = 256 * 1024 * 1024;
 const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -87,11 +86,11 @@ pub fn build_router_with_session_and_workflow_runtime(
         .route("/api/session/{thread_key}", post(create_or_get_session))
         .route(
             "/api/session/{thread_key}/messages",
-            post(append_messages).layer(DefaultBodyLimit::max(MAX_SESSION_JSON_BODY_BYTES)),
+            post(append_messages).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/api/session/{thread_key}/execute",
-            post(execute_session).layer(DefaultBodyLimit::max(MAX_SESSION_JSON_BODY_BYTES)),
+            post(execute_session).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
