@@ -46,24 +46,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, slackbotv2, agent, iron-proxy]
+        service: [api-rs, slackbotv2, agent, iron-proxy, console]
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
             image: centaur-api-rs
+            context: .
             dockerfile: services/api-rs/Dockerfile
             target: ""
           - service: slackbotv2
             image: centaur-slackbotv2
+            context: .
             dockerfile: services/slackbotv2/Dockerfile
             target: ""
           - service: agent
             image: centaur-agent
+            context: .
             dockerfile: services/sandbox/Dockerfile
             target: sandbox
           - service: iron-proxy
             image: centaur-iron-proxy
+            context: .
             dockerfile: services/iron-proxy/Dockerfile
+            target: ""
+          - service: console
+            image: centaur-console
+            context: services/console
+            dockerfile: services/console/Dockerfile
             target: ""
 
     steps:
@@ -102,7 +111,7 @@ jobs:
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
@@ -150,6 +159,7 @@ jobs:
           - image: centaur-slackbotv2
           - image: centaur-agent
           - image: centaur-iron-proxy
+          - image: centaur-console
 
     steps:
       - name: Download digests
