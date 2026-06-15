@@ -96,7 +96,12 @@ Slack ETL writes normalized Slack data into dedicated tables:
 | `slack_sync_message_attachments` | Slack files attached to synced root messages and replies, including metadata, download status, checksum, and bounded `bytea` content when fetched. |
 | `slack_sync_checkpoints` | Per-channel watermarks and last error state. |
 | `slack_sync_backfill_jobs` | Deferred channel-history and thread-refresh jobs. |
-| `company_context_documents` | Derived channel-day and thread documents for retrieval. |
+| `company_context_documents` | Derived channel-day, thread, and attachment-metadata documents for retrieval. |
+
+Attachment document projection indexes Slack file names, titles, MIME/file
+types, Slack permalinks, download status, checksums, and the message the file
+was attached to. It does not parse attachment bytes or index private Slack
+download URLs.
 
 The first incremental run reads a small recent window so useful data appears
 quickly, then seeds historical backfill jobs for the configured lookback. Later

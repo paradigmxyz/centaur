@@ -29,7 +29,7 @@ FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 SLACK_MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
 SLACK_CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)(?:\|([^>]+))?>")
 COMPANY_CONTEXT_SOURCE_TYPES = {
-    "slack": ("slack_channel_day", "slack_thread"),
+    "slack": ("slack_channel_day", "slack_thread", "slack_attachment"),
     "google_drive": ("google_doc",),
     "google_calendar": ("calendar_event",),
     "linear": ("linear_issue",),
@@ -299,8 +299,10 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
     if since is None:
         where_sql = ""
         args: list[Any] = []
+        attachment_where_sql = ""
     else:
         where_sql = "WHERE updated_at > $1"
+        attachment_where_sql = "WHERE a.updated_at > $1"
         args = [since]
 
     channel_day_rows = await pool.fetch(
@@ -321,10 +323,35 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
         f"FROM slack_sync_messages {where_sql}",
         *args,
     )
+    attachment_rows = await pool.fetch(
+        "SELECT a.channel_id, c.channel_name, a.message_ts, a.slack_file_id, "
+        "a.name, a.title, a.mimetype, a.filetype, a.size_bytes, a.permalink, "
+        "a.download_status, a.download_error, a.content_sha256, a.updated_at, "
+        "m.occurred_at, m.thread_ts, m.parent_message_ts, m.user_id, "
+        "u.user_name, u.real_name, u.display_name, m.text, "
+        "m.permalink AS message_permalink "
+        "FROM slack_sync_message_attachments a "
+        "JOIN slack_sync_messages m "
+        "  ON m.channel_id = a.channel_id AND m.message_ts = a.message_ts "
+        "LEFT JOIN slack_sync_channels c ON c.channel_id = a.channel_id "
+        "LEFT JOIN slack_sync_users u ON u.user_id = m.user_id "
+        f"{attachment_where_sql} "
+        "ORDER BY a.updated_at, a.channel_id, a.message_ts, a.slack_file_id",
+        *args,
+    )
+    attachment_stats = await pool.fetchrow(
+        "SELECT COUNT(*) AS changed_attachments, MAX(updated_at) AS max_updated_at "
+        f"FROM slack_sync_message_attachments a {attachment_where_sql}",
+        *args,
+    )
 
-    max_updated_at = stats["max_updated_at"] if stats else None
-    if isinstance(max_updated_at, dt.datetime):
-        max_updated_at = max_updated_at.astimezone(dt.timezone.utc)
+    max_updated_candidates = []
+    for candidate in (
+        stats["max_updated_at"] if stats else None,
+        attachment_stats["max_updated_at"] if attachment_stats else None,
+    ):
+        if isinstance(candidate, dt.datetime):
+            max_updated_candidates.append(candidate.astimezone(dt.timezone.utc))
 
     return {
         "channel_days": [
@@ -335,8 +362,14 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
         "threads": [
             (str(row["channel_id"]), str(row["thread_ts"])) for row in thread_rows
         ],
+        "attachments": list(attachment_rows),
         "changed_messages": int(stats["changed_messages"] or 0) if stats else 0,
-        "max_updated_at": max_updated_at,
+        "changed_attachments": (
+            int(attachment_stats["changed_attachments"] or 0) if attachment_stats else 0
+        ),
+        "max_updated_at": max(max_updated_candidates)
+        if max_updated_candidates
+        else None,
     }
 
 
@@ -692,6 +725,119 @@ def _thread_document(
         "occurred_at": first["occurred_at"],
         "source_updated_at": last_updated,
         "content_hash": _content_hash(title, body, permalink, metadata),
+        "metadata": metadata,
+    }
+
+
+def _slack_attachment_document(
+    row: Any,
+    *,
+    users_by_id: dict[str, str],
+    channels_by_id: dict[str, str],
+) -> dict[str, Any] | None:
+    """Render one Slack attachment metadata document."""
+    channel_id = str(row["channel_id"] or "")
+    message_ts = str(row["message_ts"] or "")
+    slack_file_id = str(row["slack_file_id"] or "")
+    if not channel_id or not message_ts or not slack_file_id:
+        return None
+
+    channel_name = str(
+        row["channel_name"] or channels_by_id.get(channel_id) or channel_id
+    )
+    filename = str(row["name"] or "")
+    attachment_title = str(row["title"] or "")
+    label = attachment_title or filename or slack_file_id
+    title = f"Slack attachment: {label}"
+    message_permalink = str(row["message_permalink"] or "")
+    attachment_permalink = str(row["permalink"] or "")
+    mimetype = str(row["mimetype"] or "")
+    filetype = str(row["filetype"] or "")
+    download_status = str(row["download_status"] or "")
+    download_error = str(row["download_error"] or "")
+    content_sha256 = str(row["content_sha256"] or "")
+    size_bytes = int(row["size_bytes"] or 0)
+    author_name = _display_name(row)
+    message_text = _resolve_slack_mentions(
+        str(row["text"] or ""),
+        users_by_id=users_by_id,
+        channels_by_id=channels_by_id,
+    )
+
+    lines = [
+        f"# {title}",
+        "",
+        "- Source: Slack attachment",
+        f"- Channel: #{channel_name}",
+        f"- Attached message: {message_permalink}",
+    ]
+    if attachment_permalink:
+        lines.append(f"- Attachment permalink: {attachment_permalink}")
+    if filename:
+        lines.append(f"- Filename: {filename}")
+    if attachment_title:
+        lines.append(f"- Title: {attachment_title}")
+    if mimetype:
+        lines.append(f"- MIME type: {mimetype}")
+    if filetype:
+        lines.append(f"- File type: {filetype}")
+    if size_bytes:
+        lines.append(f"- Size: {size_bytes} bytes")
+    if download_status:
+        lines.append(f"- Download status: {download_status}")
+    if download_error:
+        lines.append(f"- Download error: {download_error}")
+    if content_sha256:
+        lines.append(f"- Content SHA-256: {content_sha256}")
+    lines.extend(
+        [
+            f"- Attached by: {author_name}",
+            f"- Attached at: {_format_time(row['occurred_at'])}",
+            "",
+            "---",
+            "",
+            "Attached to Slack message:",
+            "",
+            message_text,
+        ]
+    )
+
+    body = "\n".join(lines).strip()
+    source_document_id = f"{channel_id}:{message_ts}:{slack_file_id}"
+    metadata = {
+        "channel_id": channel_id,
+        "channel_name": channel_name,
+        "message_ts": message_ts,
+        "thread_ts": str(row["thread_ts"] or ""),
+        "parent_message_ts": str(row["parent_message_ts"] or ""),
+        "slack_file_id": slack_file_id,
+        "filename": filename,
+        "title": attachment_title,
+        "mimetype": mimetype,
+        "filetype": filetype,
+        "size_bytes": size_bytes,
+        "download_status": download_status,
+        "content_sha256": content_sha256,
+        "message_permalink": message_permalink,
+        "attachment_permalink": attachment_permalink,
+    }
+    url = attachment_permalink or message_permalink
+    return {
+        "document_id": f"slack:attachment:{channel_id}:{message_ts}:{slack_file_id}",
+        "source": "slack",
+        "source_type": "slack_attachment",
+        "source_document_id": source_document_id,
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": title,
+        "body": body,
+        "url": url,
+        "author_id": str(row["user_id"] or ""),
+        "author_name": author_name,
+        "access_scope": "company",
+        "occurred_at": row["occurred_at"],
+        "source_updated_at": row["updated_at"],
+        "content_hash": _content_hash(title, body, url, metadata),
         "metadata": metadata,
     }
 
@@ -1166,7 +1312,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     changed = {
         "channel_days": [],
         "threads": [],
+        "attachments": [],
         "changed_messages": 0,
+        "changed_attachments": 0,
         "max_updated_at": None,
     }
     users_by_id: dict[str, str] = {}
@@ -1252,6 +1400,28 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     "slack_thread",
                     "deleted",
                 )
+            continue
+        observe_company_context_document_size(
+            "slack",
+            str(document["source_type"]),
+            len(str(document["body"] or "")),
+        )
+        action = await _upsert_document(ctx._pool, document)
+        record_company_context_documents_changed(
+            "slack",
+            str(document["source_type"]),
+            action,
+        )
+        if action in {"inserted", "updated"}:
+            documents_upserted += 1
+
+    for row in changed["attachments"]:
+        document = _slack_attachment_document(
+            row,
+            users_by_id=users_by_id,
+            channels_by_id=channels_by_id,
+        )
+        if document is None:
             continue
         observe_company_context_document_size(
             "slack",
@@ -1355,11 +1525,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     result = {
         "status": "completed",
         "changed_messages": changed["changed_messages"],
+        "changed_slack_attachments": changed["changed_attachments"],
         "changed_drive_files": drive_changed["changed_files"],
         "changed_calendar_events": calendar_changed["changed_events"],
         "changed_linear_issues": linear_changed["changed_issues"],
         "channel_day_documents": len(changed["channel_days"]),
         "thread_candidates": len(changed["threads"]),
+        "slack_attachment_documents": len(changed["attachments"]),
         "drive_documents": len(drive_changed["files"]),
         "calendar_event_documents": len(calendar_changed["events"]),
         "linear_issue_documents": len(linear_changed["issues"]),
