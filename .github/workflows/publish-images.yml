@@ -184,15 +184,26 @@ jobs:
           docker logs centaur-api-integration-test-postgres
           exit 1
 
+      - name: Prepare API integration workflow overlay
+        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
+        run: |
+          workflow_dir="$RUNNER_TEMP/api-integration-workflows"
+          mkdir -p "$workflow_dir"
+          echo "API_INTEGRATION_WORKFLOW_DIR=$workflow_dir" >> "$GITHUB_ENV"
+
       - name: Start API image
         if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
         run: |
           docker run --detach --name centaur-api-integration-test \
             --network centaur-api-integration-test \
             --publish 127.0.0.1:18080:8080 \
+            --volume "$API_INTEGRATION_WORKFLOW_DIR:/tmp/centaur-api-integration-workflows" \
             --env DATABASE_URL=postgres://postgres:postgres@centaur-api-integration-test-postgres:5432/centaur \
             --env RUN_MIGRATIONS=true \
             --env BIND_ADDR=0.0.0.0:8080 \
+            --env WORKFLOW_DIRS=/tmp/centaur-api-integration-workflows \
+            --env WORKFLOW_RECONCILE_INTERVAL_SECS=1 \
+            --env WORKFLOW_REAP_REMOVED_AFTER_TICKS=1 \
             --env WORKFLOW_HOST_SANDBOX=false \
             --env RUST_LOG=info \
             centaur-api-rs:integration-test

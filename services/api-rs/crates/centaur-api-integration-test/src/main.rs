@@ -1,4 +1,8 @@
-use std::{env, fs, time::Duration};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use centaur_session_core::HarnessType;
@@ -45,6 +49,14 @@ async fn main() -> Result<()> {
         "Session execute forwards model context and completes",
         line,
         test_session_turn(&http, &base_url).await,
+    );
+
+    let line = line!() + 1;
+    record_result(
+        &mut results,
+        "Workflows API runs added workflows and cancels removed workflows",
+        line,
+        test_workflows_api(&http, &base_url).await,
     );
 
     let line = line!() + 1;
@@ -439,8 +451,248 @@ async fn test_metrics(http: &HttpClient, base_url: &str) -> Result<()> {
     Ok(())
 }
 
+async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
+    let workflow_dir = integration_workflow_dir()?;
+    fs::create_dir_all(&workflow_dir)
+        .with_context(|| format!("create workflow dir {}", workflow_dir.display()))?;
+
+    let unique = Uuid::new_v4().simple().to_string();
+    let sentinel_name = format!("api_integration_sentinel_{unique}");
+    let workflow_name = format!("api_integration_workflow_{unique}");
+    let workflow_path = workflow_dir.join(format!("{workflow_name}.py"));
+
+    write_sentinel_workflow(&workflow_dir, &sentinel_name)?;
+    write_test_workflow(&workflow_path, &workflow_name)?;
+
+    wait_for_workflow_schedule(http, base_url, &workflow_name, true)
+        .await
+        .context("wait for added workflow schedule to be discovered")?;
+
+    let completed_run_id = create_workflow_run(
+        http,
+        base_url,
+        &workflow_name,
+        json!({
+            "case": "added-workflow-run",
+            "sleep_ms": 0,
+        }),
+    )
+    .await
+    .context("create added workflow run")?;
+    let completed_run =
+        wait_for_workflow_run_status(http, base_url, &completed_run_id, &["completed"])
+            .await
+            .context("wait for added workflow run completion")?;
+    let output = completed_run
+        .pointer("/result/output")
+        .context("completed workflow run missing result output")?;
+    if output.get("workflow_name").and_then(Value::as_str) != Some(workflow_name.as_str()) {
+        bail!("completed workflow output did not echo workflow name: {completed_run}");
+    }
+    if output.pointer("/received/case").and_then(Value::as_str) != Some("added-workflow-run") {
+        bail!("completed workflow output did not echo input: {completed_run}");
+    }
+
+    let removed_run_id = create_workflow_run(
+        http,
+        base_url,
+        &workflow_name,
+        json!({
+            "case": "removed-workflow-run",
+            "sleep_ms": 60_000,
+        }),
+    )
+    .await
+    .context("create long-running workflow run")?;
+    wait_for_workflow_run_status(http, base_url, &removed_run_id, &["running"])
+        .await
+        .context("wait for long-running workflow run to start")?;
+
+    fs::remove_file(&workflow_path)
+        .with_context(|| format!("remove workflow file {}", workflow_path.display()))?;
+
+    wait_for_workflow_schedule(http, base_url, &workflow_name, false)
+        .await
+        .context("wait for removed workflow schedule to be dropped")?;
+    wait_for_workflow_run_status(http, base_url, &removed_run_id, &["cancelled"])
+        .await
+        .context("wait for removed workflow run to be cancelled")?;
+
+    Ok(())
+}
+
+fn integration_workflow_dir() -> Result<PathBuf> {
+    let path = env::var("API_INTEGRATION_WORKFLOW_DIR")
+        .context("API_INTEGRATION_WORKFLOW_DIR must point at the mounted workflow test dir")?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        bail!("API_INTEGRATION_WORKFLOW_DIR must not be empty");
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+fn write_sentinel_workflow(workflow_dir: &Path, workflow_name: &str) -> Result<()> {
+    let path = workflow_dir.join(format!("{workflow_name}.py"));
+    let source = format!(
+        r#"
+WORKFLOW_NAME = "{workflow_name}"
+
+
+async def handler(params, ctx):
+    return {{"workflow_name": ctx.workflow_name, "received": params}}
+"#
+    );
+    fs::write(&path, source).with_context(|| format!("write sentinel workflow {}", path.display()))
+}
+
+fn write_test_workflow(path: &Path, workflow_name: &str) -> Result<()> {
+    let source = format!(
+        r#"
+import asyncio
+
+WORKFLOW_NAME = "{workflow_name}"
+SCHEDULE = {{
+    "schedule_id": "{workflow_name}",
+    "interval_seconds": 3600,
+    "enabled": True,
+    "no_delivery": True,
+    "input": {{"source": "centaur-api-integration-test"}},
+}}
+
+
+async def handler(params, ctx):
+    sleep_ms = int(params.get("sleep_ms") or 0)
+    if sleep_ms:
+        await asyncio.sleep(sleep_ms / 1000)
+    return {{
+        "workflow_name": ctx.workflow_name,
+        "run_id": ctx.run_id,
+        "task_id": ctx.task_id,
+        "received": params,
+    }}
+"#
+    );
+    fs::write(path, source).with_context(|| format!("write test workflow {}", path.display()))
+}
+
+async fn create_workflow_run(
+    http: &HttpClient,
+    base_url: &str,
+    workflow_name: &str,
+    input: Value,
+) -> Result<String> {
+    let response = post_json_ok(
+        http,
+        format!("{base_url}/api/workflows/runs"),
+        json!({
+            "workflow_name": workflow_name,
+            "input": input,
+            "idempotency_key": format!("{workflow_name}-{}", Uuid::new_v4().simple()),
+            "harness_type": HarnessType::Codex,
+            "max_attempts": 1,
+        }),
+    )
+    .await?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        bail!("workflow create response was not ok: {response}");
+    }
+    if response.get("created").and_then(Value::as_bool) != Some(true) {
+        bail!("workflow create response did not create a new run: {response}");
+    }
+    response
+        .get("run_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .context("workflow create response missing run_id")
+}
+
+async fn wait_for_workflow_run_status(
+    http: &HttpClient,
+    base_url: &str,
+    run_id: &str,
+    expected_statuses: &[&str],
+) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut last_run = Value::Null;
+
+    while Instant::now() < deadline {
+        let body = get_json_ok(http, format!("{base_url}/api/workflows/runs/{run_id}")).await?;
+        let run = body
+            .get("run")
+            .cloned()
+            .context("workflow run response missing run")?;
+        let status = run
+            .get("status")
+            .and_then(Value::as_str)
+            .context("workflow run missing status")?;
+        if expected_statuses.contains(&status) {
+            return Ok(run);
+        }
+        if matches!(status, "completed" | "failed" | "cancelled") {
+            bail!(
+                "workflow run {run_id} reached terminal status {status}, expected one of {:?}: {run}",
+                expected_statuses
+            );
+        }
+        last_run = run;
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    bail!(
+        "workflow run {run_id} did not reach one of {:?} before timeout; last run: {last_run}",
+        expected_statuses
+    )
+}
+
+async fn wait_for_workflow_schedule(
+    http: &HttpClient,
+    base_url: &str,
+    schedule_id: &str,
+    should_exist: bool,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut last_body = Value::Null;
+
+    while Instant::now() < deadline {
+        let body = get_json_ok(http, format!("{base_url}/api/workflows/schedules")).await?;
+        let present = body
+            .get("schedules")
+            .and_then(Value::as_array)
+            .context("workflow schedules response missing schedules")?
+            .iter()
+            .any(|schedule| {
+                schedule.get("schedule_id").and_then(Value::as_str) == Some(schedule_id)
+            });
+        if present == should_exist {
+            return Ok(());
+        }
+        last_body = body;
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    let expectation = if should_exist { "appear" } else { "disappear" };
+    bail!("workflow schedule {schedule_id} did not {expectation}; last response: {last_body}")
+}
+
 fn parse_json(data: &str) -> Result<Value> {
     serde_json::from_str(data).with_context(|| format!("parse event payload as JSON: {data}"))
+}
+
+async fn get_json_ok(http: &HttpClient, url: impl AsRef<str>) -> Result<Value> {
+    let response = http
+        .get(url.as_ref())
+        .send()
+        .await
+        .with_context(|| format!("GET {}", url.as_ref()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        bail!("GET {} returned {status}: {text}", url.as_ref());
+    }
+    response
+        .json::<Value>()
+        .await
+        .with_context(|| format!("parse GET {} response", url.as_ref()))
 }
 
 async fn post_json_ok(http: &HttpClient, url: impl AsRef<str>, body: Value) -> Result<Value> {
