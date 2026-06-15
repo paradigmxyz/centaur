@@ -1,0 +1,39 @@
+api_host:
+  host: api.example.com
+  http_methods: ["POST"]
+  paths: ["/v1/*"]
+
+internal_cidr:
+  cidr: 10.0.0.0/8
+  http_methods: []
+  paths: []
+
+wildcard_host:
+  host: "*"
+  http_methods: ["*"]
+  paths: []
+
+gcp_googleapis:
+  host: "*.googleapis.com"
+  http_methods: []
+  paths: []
+  gcp_auth_secret: acme_bigquery
+
+oauth_gmail_host:
+  host: gmail.googleapis.com
+  http_methods: ["GET"]
+  paths: []
+  oauth_token_secret: acme_gmail_oauth
+
+hmac_webhook_host:
+  host: hooks.example.com
+  http_methods: ["POST"]
+  paths: []
+  hmac_secret: acme_webhook_hmac
+
+aws_cloudwatch_logs_host:
+  host: logs.us-west-2.amazonaws.com
+  http_methods: ["POST"]
+  paths: []
+  position: 0
+  aws_auth_secret: acme_cloudwatch_aws

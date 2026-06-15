@@ -1,0 +1,78 @@
+<%# The form routes are named *_oauth_app_form* to avoid colliding with the
+    read routes, so target them explicitly rather than via model polymorphism. %>
+<% form_url = app.new_record? ? console_oauth_app_forms_path : console_oauth_app_form_path(app) %>
+<%= form_with model: app, url: form_url, method: (app.new_record? ? :post : :patch), scope: :oauth_app, data: { turbo: false } do %>
+  <div class="space-y-6">
+    <section class="form-section">
+      <h2 class="form-section-heading">Identity</h2>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="oauth_app_slug">Slug *</label>
+          <%= text_field_tag "oauth_app[slug]", app.slug, id: "oauth_app_slug", class: "form-input #{field_error_class(app, :slug)}", placeholder: "google" %>
+          <%= field_error(app, :slug) %>
+          <p class="form-hint">Globally unique. The app's whole identity, and the name in the well-known link: <code>/oauth/&lt;slug&gt;/start</code>.</p>
+        </div>
+        <div>
+          <label class="form-label" for="oauth_app_description">Description</label>
+          <%= text_field_tag "oauth_app[description]", app.description, id: "oauth_app_description", class: "form-input #{field_error_class(app, :description)}" %>
+          <%= field_error(app, :description) %>
+        </div>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Provider &amp; OAuth Client</h2>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="oauth_app_provider">Provider *</label>
+          <%= select_tag "oauth_app[provider]",
+                options_for_select(Oauth::Providers.keys.map { |k| [ k.capitalize, k ] }, app.provider),
+                id: "oauth_app_provider", class: "form-input #{field_error_class(app, :provider)}" %>
+          <%= field_error(app, :provider) %>
+        </div>
+        <div>
+          <label class="form-label" for="oauth_app_client_id">Client ID *</label>
+          <%= text_field_tag "oauth_app[client_id]", app.client_id, id: "oauth_app_client_id", class: "form-input #{field_error_class(app, :client_id)}" %>
+          <%= field_error(app, :client_id) %>
+          <p class="form-hint">Not secret. Sent on every authorization and refresh.</p>
+        </div>
+        <div>
+          <label class="form-label" for="oauth_app_client_secret">Client secret<%= " *".html_safe if app.new_record? %></label>
+          <%= password_field_tag "oauth_app[client_secret]", nil, id: "oauth_app_client_secret", class: "form-input #{field_error_class(app, :client_secret)}", autocomplete: "off", placeholder: app.new_record? ? nil : "•••••••• (unchanged)" %>
+          <%= field_error(app, :client_secret) %>
+          <p class="form-hint">Stored encrypted.<%= " Leave blank to keep the current secret." unless app.new_record? %></p>
+        </div>
+        <div>
+          <label class="form-label" for="oauth_app_credential_namespace">Credential namespace</label>
+          <%= text_field_tag "oauth_app[credential_namespace]", app.credential_namespace.presence || "default", id: "oauth_app_credential_namespace", class: "form-input #{field_error_class(app, :credential_namespace)}" %>
+          <%= field_error(app, :credential_namespace) %>
+          <p class="form-hint">Namespace for broker credentials minted by this app's flows.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Flow Config</h2>
+      <div class="grid gap-5">
+        <div>
+          <label class="form-label" for="oauth_app_allowed_scopes">Allowed scopes *</label>
+          <%= text_area_tag "oauth_app[allowed_scopes]", Array(app.allowed_scopes).join("\n"), id: "oauth_app_allowed_scopes", rows: 3, class: "form-input #{field_error_class(app, :allowed_scopes)}", placeholder: "https://www.googleapis.com/auth/gmail.readonly" %>
+          <%= field_error(app, :allowed_scopes) %>
+          <p class="form-hint">One scope per line. A flow's requested scopes must be a subset; omitting them requests all of these.</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <%= check_box_tag "oauth_app[enabled]", "1", app.enabled, id: "oauth_app_enabled", class: "h-4 w-4" %>
+          <label class="form-label mb-0" for="oauth_app_enabled">Enabled</label>
+        </div>
+        <p class="form-hint -mt-2">A disabled app rejects new consent flows; existing credentials keep refreshing.</p>
+      </div>
+    </section>
+
+    <%= render "labels_fields", app: app %>
+
+    <div class="flex items-center gap-3">
+      <%= submit_tag(app.new_record? ? "Create app" : "Save changes", class: "btn-primary") %>
+      <a href="<%= console_oauth_apps_path %>" class="btn-secondary">Cancel</a>
+    </div>
+  </div>
+<% end %>

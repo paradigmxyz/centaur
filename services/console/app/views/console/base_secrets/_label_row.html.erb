@@ -1,0 +1,6 @@
+<div class="flex items-center gap-3" data-nested-fields-row>
+  <%= text_field_tag "labels[#{index}][key]", key, class: "form-input", placeholder: "team" %>
+  <span class="text-zinc-600">=</span>
+  <%= text_field_tag "labels[#{index}][value]", value, class: "form-input", placeholder: "platform" %>
+  <button type="button" data-action="nested-fields#remove" class="shrink-0 text-xs text-zinc-500 transition-colors hover:text-red-400">Remove</button>
+</div>

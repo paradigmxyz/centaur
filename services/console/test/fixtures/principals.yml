@@ -1,0 +1,38 @@
+acme_channel:
+  namespace: acme
+  foreign_id: C0123456789
+  labels:
+    kind: slack_channel
+    team: platform
+  created_by: acme_admin
+
+globex_user:
+  namespace: globex
+  foreign_id: U987654321
+  labels:
+    kind: user
+  created_by: globex_admin
+
+acme_user_alice:
+  namespace: acme
+  foreign_id: U-alice
+  labels:
+    kind: user
+    team: platform
+  created_by: acme_admin
+
+acme_user_bob:
+  namespace: acme
+  foreign_id: U-bob
+  labels:
+    kind: user
+    team: ops
+  created_by: acme_admin
+
+globex_user_overlap:
+  namespace: globex
+  foreign_id: U-overlap
+  labels:
+    kind: user
+    team: platform
+  created_by: globex_admin

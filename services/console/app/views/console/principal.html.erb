@@ -1,0 +1,81 @@
+<% content_for :title, "#{@principal.name || @principal.foreign_id || @principal.oid} · Iron Control" %>
+
+<div class="mb-8">
+  <a href="<%= console_principals_path %>" class="back-link">← back to principals</a>
+  <h1 class="mt-2 page-title">
+    <%= @principal.name.presence || @principal.foreign_id.presence || "Principal" %>
+  </h1>
+  <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+    <span class="text-iron-400 glow"><%= @principal.oid %></span>
+    <span class="text-zinc-600">·</span>
+    <span class="rounded bg-ink-700 px-2 py-0.5 text-xs text-zinc-400"><%= @principal.namespace %></span>
+    <% if @principal.foreign_id.present? %>
+      <span class="text-zinc-600">·</span>
+      <span class="text-zinc-400">foreign_id: <span class="text-zinc-200"><%= @principal.foreign_id %></span></span>
+    <% end %>
+  </div>
+  <% if @principal.labels.present? %>
+    <div class="mt-3 flex flex-wrap gap-1">
+      <% @principal.labels.each do |k, v| %>
+        <span class="label-chip"><%= k %>=<%= v %></span>
+      <% end %>
+    </div>
+  <% end %>
+</div>
+
+<!-- Roles -->
+<section class="mb-8">
+  <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Assigned Roles</h2>
+  <% if @roles.any? %>
+    <div class="flex flex-wrap gap-2">
+      <% @roles.each do |r| %>
+        <span class="inline-flex items-center gap-2 rounded-lg border border-ink-600 bg-ink-800 px-3 py-1.5 text-sm">
+          <span class="text-iron-400"><%= r.oid %></span>
+          <span class="text-zinc-300"><%= r.name.presence || r.foreign_id %></span>
+        </span>
+      <% end %>
+    </div>
+  <% else %>
+    <p class="text-sm text-zinc-600">No roles assigned.</p>
+  <% end %>
+</section>
+
+<!-- Effective grants -->
+<section>
+  <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Effective Grants</h2>
+  <p class="mb-4 text-sm text-zinc-500">Every secret this principal resolves to: direct grants plus grants inherited from its roles.</p>
+
+  <% total = @granted.values.sum(&:size) %>
+  <% if total.zero? %>
+    <div class="rounded-xl border border-dashed border-ink-600 bg-ink-850/40 px-5 py-10 text-center text-zinc-600">
+      This principal has no effective grants.
+    </div>
+  <% else %>
+    <div class="console-panel">
+      <table class="console-table">
+        <thead class="console-table-head">
+          <tr>
+            <th class="console-th">Type</th>
+            <th class="console-th">ID</th>
+            <th class="console-th">Foreign ID</th>
+            <th class="console-th">Name</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-ink-700">
+          <% @granted.each do |kind, records| %>
+            <% records.each do |s| %>
+              <tr class="console-row-hover">
+                <td class="console-td-nowrap">
+                  <span class="resource-badge"><%= secret_kind_label(kind) %></span>
+                </td>
+                <td class="console-td-nowrap text-iron-400"><%= s.oid %></td>
+                <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
+                <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
+              </tr>
+            <% end %>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% end %>
+</section>

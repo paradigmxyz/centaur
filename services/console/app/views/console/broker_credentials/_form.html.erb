@@ -1,0 +1,114 @@
+<%= form_with model: [ :console, credential ], data: { turbo: false } do %>
+  <div class="space-y-6">
+    <section class="form-section">
+      <h2 class="form-section-heading">Identity</h2>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="credential_namespace">Namespace</label>
+          <%= text_field_tag "credential[namespace]", credential.namespace.presence || "default", id: "credential_namespace", class: "form-input #{field_error_class(credential, :namespace)}" %>
+          <%= field_error(credential, :namespace) %>
+        </div>
+        <div>
+          <label class="form-label" for="credential_foreign_id">Foreign ID</label>
+          <%= text_field_tag "credential[foreign_id]", credential.foreign_id, id: "credential_foreign_id", class: "form-input #{field_error_class(credential, :foreign_id)}", placeholder: "stable-handle" %>
+          <%= field_error(credential, :foreign_id) %>
+          <p class="form-hint">Optional. A stable, URL-safe handle operators can reference.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_name">Name</label>
+          <%= text_field_tag "credential[name]", credential.name, id: "credential_name", class: "form-input #{field_error_class(credential, :name)}" %>
+          <%= field_error(credential, :name) %>
+        </div>
+        <div>
+          <label class="form-label" for="credential_description">Description</label>
+          <%= text_field_tag "credential[description]", credential.description, id: "credential_description", class: "form-input #{field_error_class(credential, :description)}" %>
+          <%= field_error(credential, :description) %>
+        </div>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">OAuth Client</h2>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="credential_token_endpoint">Token endpoint *</label>
+          <%= text_field_tag "credential[token_endpoint]", credential.token_endpoint, id: "credential_token_endpoint", class: "form-input #{field_error_class(credential, :token_endpoint)}", placeholder: "https://oauth2.googleapis.com/token" %>
+          <%= field_error(credential, :token_endpoint) %>
+          <p class="form-hint">The IdP endpoint control refreshes against.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_client_id">Client ID *</label>
+          <%= text_field_tag "credential[client_id]", credential.client_id, id: "credential_client_id", class: "form-input #{field_error_class(credential, :client_id)}" %>
+          <%= field_error(credential, :client_id) %>
+          <p class="form-hint">Not secret. Sent on every refresh.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_client_secret">Client secret</label>
+          <%= password_field_tag "credential[client_secret]", nil, id: "credential_client_secret", class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
+          <p class="form-hint">Stored encrypted.<%= " Leave blank to keep the current secret." unless credential.new_record? %></p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_scopes">Scopes</label>
+          <%= text_area_tag "credential[scopes]", Array(credential.scopes).join("\n"), id: "credential_scopes", rows: 3, class: "form-input #{field_error_class(credential, :scopes)}", placeholder: "https://www.googleapis.com/auth/gmail.readonly" %>
+          <%= field_error(credential, :scopes) %>
+          <p class="form-hint">One scope per line.</p>
+        </div>
+      </div>
+    </section>
+
+    <%= render "headers_fields", credential: credential %>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Refresh Policy</h2>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="credential_early_refresh_fraction">Early refresh fraction</label>
+          <%= number_field_tag "credential[early_refresh_fraction]", credential.early_refresh_fraction, id: "credential_early_refresh_fraction", step: "any", min: 0, class: "form-input #{field_error_class(credential, :early_refresh_fraction)}" %>
+          <%= field_error(credential, :early_refresh_fraction) %>
+          <p class="form-hint">Refresh once this fraction of the token's life remains (0 to &lt;1).</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_early_refresh_slack_seconds">Early refresh slack (s)</label>
+          <%= number_field_tag "credential[early_refresh_slack_seconds]", credential.early_refresh_slack_seconds, id: "credential_early_refresh_slack_seconds", min: 1, class: "form-input #{field_error_class(credential, :early_refresh_slack_seconds)}" %>
+          <%= field_error(credential, :early_refresh_slack_seconds) %>
+          <p class="form-hint">Minimum lead time before expiry to refresh.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_max_refresh_interval_seconds">Max refresh interval (s)</label>
+          <%= number_field_tag "credential[max_refresh_interval_seconds]", credential.max_refresh_interval_seconds, id: "credential_max_refresh_interval_seconds", min: 1, class: "form-input #{field_error_class(credential, :max_refresh_interval_seconds)}" %>
+          <%= field_error(credential, :max_refresh_interval_seconds) %>
+          <p class="form-hint">Refresh at least this often, even for long-lived tokens.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_refresh_timeout_seconds">Refresh timeout (s)</label>
+          <%= number_field_tag "credential[refresh_timeout_seconds]", credential.refresh_timeout_seconds, id: "credential_refresh_timeout_seconds", min: 1, class: "form-input #{field_error_class(credential, :refresh_timeout_seconds)}" %>
+          <%= field_error(credential, :refresh_timeout_seconds) %>
+          <p class="form-hint">HTTP timeout for a single refresh request.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Bootstrap</h2>
+      <div>
+        <label class="form-label" for="credential_refresh_token">Refresh token<%= " *".html_safe if credential.new_record? %></label>
+        <%= text_area_tag "credential[refresh_token]", nil, id: "credential_refresh_token", rows: 3, class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? "the initial refresh token to seed the loop" : "•••••••• (unchanged)" %>
+        <p class="form-hint">
+          Write-only seed, stored encrypted. The refresh loop rotates it from here.
+          <% if credential.new_record? %>
+            Required to leave bootstrapping.
+          <% else %>
+            Leave blank to keep the current token; entering a new one re-bootstraps the credential and clears any dead state.
+          <% end %>
+        </p>
+      </div>
+    </section>
+
+    <%= render "labels_fields", credential: credential %>
+
+    <div class="flex items-center gap-3">
+      <%= submit_tag(credential.new_record? ? "Create credential" : "Save changes", class: "btn-primary") %>
+      <a href="<%= console_credentials_path %>" class="btn-secondary">Cancel</a>
+    </div>
+  </div>
+<% end %>

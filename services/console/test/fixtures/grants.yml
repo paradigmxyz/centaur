@@ -1,0 +1,27 @@
+acme_channel_github_token:
+  principal: acme_channel
+  static_secret: github_token_inject
+  created_by: acme_admin
+  priority: 100
+
+acme_channel_db_password:
+  principal: acme_channel
+  static_secret: db_password_replace
+  created_by: acme_admin
+  priority: 100
+
+# Granted to a role rather than a principal: every principal holding acme_infra
+# resolves this secret through the role. Role grants default to a lower priority
+# than direct grants, so a directly-granted secret wins a collision at the proxy.
+acme_infra_prod_api_key:
+  role: acme_infra
+  static_secret: acme_prod_api_key
+  created_by: acme_admin
+  priority: 0
+
+# A Postgres upstream granted to the proxy's principal.
+acme_channel_analytics_pg:
+  principal: acme_channel
+  pg_dsn_secret: acme_analytics_pg
+  created_by: acme_admin
+  priority: 100

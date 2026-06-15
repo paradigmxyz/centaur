@@ -1,0 +1,27 @@
+# client_secret is encrypted and is set in test setup via the model, not here --
+# encrypt_fixtures is off (same as broker_credentials.yml). client_id is not
+# encrypted, so it lives here.
+acme_google:
+  slug: google
+  description: Acme Google integration
+  labels:
+    team: comms
+  provider: google
+  client_id: acme-google-client-id
+  allowed_scopes:
+    - https://www.googleapis.com/auth/gmail.readonly
+    - https://www.googleapis.com/auth/calendar.readonly
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin
+
+acme_google_disabled:
+  slug: google-disabled
+  description: Acme Google integration (disabled)
+  provider: google
+  client_id: acme-google-disabled-client-id
+  allowed_scopes:
+    - https://www.googleapis.com/auth/gmail.readonly
+  credential_namespace: acme
+  enabled: false
+  created_by: acme_admin

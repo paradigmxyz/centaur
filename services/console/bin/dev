@@ -1,0 +1,20 @@
+#!/usr/bin/env sh
+
+# Default to port 3000 if not specified
+export PORT="${PORT:-3000}"
+
+# Let the debug gem allow remote connections,
+# but avoid loading until `debugger` is called
+export RUBY_DEBUG_OPEN="true"
+export RUBY_DEBUG_LAZY="true"
+
+# Runs the web server alongside the Tailwind watcher (see Procfile.dev) so CSS
+# is rebuilt on every view/config change. Prefer overmind; fall back to foreman.
+if command -v overmind >/dev/null 2>&1; then
+  exec overmind start -f Procfile.dev "$@"
+elif command -v foreman >/dev/null 2>&1; then
+  exec foreman start -f Procfile.dev "$@"
+else
+  echo "Install overmind (brew install overmind) or foreman (gem install foreman)." >&2
+  exit 1
+fi
