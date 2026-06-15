@@ -32,4 +32,5 @@ secrets = [
 ]
 optional_secrets = [
     {type = "http", name = "SLACK_SEARCH_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["slack.com"]},
+    {type = "http", name = "SLACK_ETL_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["slack.com", "files.slack.com"]},
 ]

@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
+import mimetypes
 import os
 import re
 import time
 from collections.abc import Callable
 from typing import Any, ClassVar, Protocol
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from centaur_sdk import secret
 from api.runtime_control import canonical_json
 
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+DEFAULT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
 BACKFILL_JOB_CHANNEL_CONTINUATION = "channel_continuation"
 BACKFILL_JOB_CHANNEL_BOOTSTRAP = "channel_bootstrap"
 BACKFILL_JOB_THREAD_REFRESH = "thread_refresh"
@@ -41,6 +46,19 @@ def env_flag_enabled(name: str, default: bool = True) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in FALSE_ENV_VALUES
+
+
+def attachment_download_enabled() -> bool:
+    """Return whether Slack ETL should download attachment bytes into Postgres."""
+    return env_flag_enabled("SLACK_ETL_ATTACHMENTS_ENABLED", default=True)
+
+
+def attachment_max_bytes() -> int:
+    """Return the per-file Slack ETL attachment byte cap."""
+    return positive_int(
+        os.getenv("SLACK_ETL_ATTACHMENT_MAX_BYTES"),
+        DEFAULT_ATTACHMENT_MAX_BYTES,
+    )
 
 
 class SlackSyncClient(Protocol):
@@ -124,9 +142,146 @@ def message_row(
         "reply_count": int(message.get("reply_count") or 0),
         "reply_users": message.get("reply_users") or [],
         "latest_reply_ts": message.get("latest_reply"),
-        "raw_payload": message,
+        "raw_payload": _message_raw_payload(message),
+        "attachments": message.get("files") or [],
         "source_run_id": run_id,
     }
+
+
+def _message_raw_payload(message: dict[str, Any]) -> dict[str, Any]:
+    """Return the message payload without byte content so it can be stored as JSONB."""
+    raw_payload = dict(message)
+    files = raw_payload.get("files")
+    if isinstance(files, list):
+        raw_payload["files"] = [
+            _attachment_raw_payload(file_obj)
+            for file_obj in files
+            if isinstance(file_obj, dict)
+        ]
+    return raw_payload
+
+
+def _attachment_raw_payload(attachment: dict[str, Any]) -> dict[str, Any]:
+    raw_payload = attachment.get("raw_payload")
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    return {
+        key: value for key, value in attachment.items() if key not in {"content_bytes"}
+    }
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _attachment_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project normalized Slack file metadata into DB rows."""
+    attachments = row.get("attachments") or []
+    if not isinstance(attachments, list):
+        return []
+
+    result: list[dict[str, Any]] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        slack_file_id = str(attachment.get("id") or "").strip()
+        if not slack_file_id:
+            continue
+        result.append(
+            {
+                "channel_id": row["channel_id"],
+                "message_ts": row["message_ts"],
+                "slack_file_id": slack_file_id,
+                "name": str(attachment.get("name") or ""),
+                "title": str(attachment.get("title") or ""),
+                "mimetype": str(attachment.get("mimetype") or ""),
+                "filetype": str(attachment.get("filetype") or ""),
+                "size_bytes": _safe_int(attachment.get("size")),
+                "url_private": str(attachment.get("url_private") or ""),
+                "permalink": str(attachment.get("permalink") or ""),
+                "download_status": str(
+                    attachment.get("download_status") or "metadata_only"
+                ),
+                "download_error": str(attachment.get("download_error") or ""),
+                "content_sha256": attachment.get("content_sha256"),
+                "content_bytes": attachment.get("content_bytes"),
+                "raw_payload": _attachment_raw_payload(attachment),
+                "source_run_id": row["source_run_id"],
+            }
+        )
+    return result
+
+
+async def _replace_message_attachments(conn, row: dict[str, Any]) -> int:
+    """Replace attachment rows for one observed Slack message."""
+    attachments = _attachment_rows(row)
+    attachment_ids = [attachment["slack_file_id"] for attachment in attachments]
+
+    for attachment in attachments:
+        await conn.execute(
+            "INSERT INTO slack_sync_message_attachments ("
+            "channel_id, message_ts, slack_file_id, name, title, mimetype, filetype, "
+            "size_bytes, url_private, permalink, download_status, download_error, "
+            "content_sha256, content_bytes, raw_payload, source_run_id, last_seen_at, updated_at"
+            ") VALUES ("
+            "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, "
+            "$15::jsonb, $16, NOW(), NOW()"
+            ") ON CONFLICT (channel_id, message_ts, slack_file_id) DO UPDATE SET "
+            "name = EXCLUDED.name, "
+            "title = EXCLUDED.title, "
+            "mimetype = EXCLUDED.mimetype, "
+            "filetype = EXCLUDED.filetype, "
+            "size_bytes = EXCLUDED.size_bytes, "
+            "url_private = EXCLUDED.url_private, "
+            "permalink = EXCLUDED.permalink, "
+            "download_status = EXCLUDED.download_status, "
+            "download_error = EXCLUDED.download_error, "
+            "content_sha256 = EXCLUDED.content_sha256, "
+            "content_bytes = EXCLUDED.content_bytes, "
+            "raw_payload = EXCLUDED.raw_payload, "
+            "source_run_id = EXCLUDED.source_run_id, "
+            "last_seen_at = NOW(), "
+            "updated_at = NOW()",
+            attachment["channel_id"],
+            attachment["message_ts"],
+            attachment["slack_file_id"],
+            attachment["name"],
+            attachment["title"],
+            attachment["mimetype"],
+            attachment["filetype"],
+            attachment["size_bytes"],
+            attachment["url_private"],
+            attachment["permalink"],
+            attachment["download_status"],
+            attachment["download_error"],
+            attachment["content_sha256"],
+            attachment["content_bytes"],
+            canonical_json(attachment["raw_payload"]),
+            attachment["source_run_id"],
+        )
+
+    if attachment_ids:
+        await conn.execute(
+            "DELETE FROM slack_sync_message_attachments "
+            "WHERE channel_id = $1 "
+            "  AND message_ts = $2 "
+            "  AND NOT (slack_file_id = ANY($3::text[]))",
+            row["channel_id"],
+            row["message_ts"],
+            attachment_ids,
+        )
+    else:
+        await conn.execute(
+            "DELETE FROM slack_sync_message_attachments "
+            "WHERE channel_id = $1 AND message_ts = $2",
+            row["channel_id"],
+            row["message_ts"],
+        )
+    return len(attachments)
 
 
 def channel_ref(channel: dict[str, Any], reason: str | None = None) -> dict[str, str]:
@@ -212,6 +367,7 @@ async def upsert_messages(pool, rows: list[dict[str, Any]]) -> int:
                     canonical_json(row["raw_payload"]),
                     row["source_run_id"],
                 )
+                await _replace_message_attachments(conn, row)
     return len(rows)
 
 
@@ -484,7 +640,10 @@ class SlackEtlClient:
     def _is_auth_error(self, error: Exception) -> bool:
         response = getattr(error, "response", None)
         status_code = getattr(response, "status_code", None)
-        return status_code in {401, 403} or self._slack_error_code(error) in self._AUTH_ERROR_CODES
+        return (
+            status_code in {401, 403}
+            or self._slack_error_code(error) in self._AUTH_ERROR_CODES
+        )
 
     def _raise_slack_api_error(
         self,
@@ -610,6 +769,97 @@ class SlackEtlClient:
 
         return re.sub(r"<@([A-Z0-9]+)>", replace_mention, text)
 
+    def _download_slack_file_bytes(
+        self,
+        url: str,
+        *,
+        max_bytes: int,
+    ) -> tuple[str, bytes]:
+        """Fetch one Slack file with the ETL token, enforcing the byte cap."""
+        request = urllib_request.Request(
+            url,
+            headers={"Authorization": f"Bearer {self.token}"},
+            method="GET",
+        )
+        with urllib_request.urlopen(
+            request,
+            timeout=self._api_timeout_seconds(),
+        ) as response:
+            body = response.read(max_bytes + 1)
+            mime_type = response.headers.get_content_type()
+        if len(body) > max_bytes:
+            raise ValueError(
+                f"slack file exceeds SLACK_ETL_ATTACHMENT_MAX_BYTES ({max_bytes} bytes)"
+            )
+        return mime_type, body
+
+    def _serialize_file(self, file_obj: dict[str, Any]) -> dict[str, Any] | None:
+        """Normalize Slack file metadata and optionally include downloaded bytes."""
+        slack_file_id = str(file_obj.get("id") or "").strip()
+        if not slack_file_id:
+            return None
+
+        name = str(file_obj.get("name") or "")
+        url_private = str(
+            file_obj.get("url_private_download") or file_obj.get("url_private") or ""
+        )
+        mimetype = str(file_obj.get("mimetype") or "")
+        size_bytes = _safe_int(file_obj.get("size"))
+        normalized: dict[str, Any] = {
+            "id": slack_file_id,
+            "name": name,
+            "title": str(file_obj.get("title") or ""),
+            "mimetype": mimetype,
+            "filetype": str(file_obj.get("filetype") or ""),
+            "size": size_bytes,
+            "url_private": url_private,
+            "permalink": str(file_obj.get("permalink") or ""),
+            "download_status": "metadata_only",
+            "download_error": "",
+            "content_sha256": None,
+            "content_bytes": None,
+            "raw_payload": file_obj,
+        }
+
+        if not attachment_download_enabled():
+            normalized["download_status"] = "disabled"
+            return normalized
+        if not url_private:
+            normalized["download_status"] = "missing_url"
+            return normalized
+
+        max_bytes = attachment_max_bytes()
+        if size_bytes > max_bytes:
+            normalized["download_status"] = "skipped_too_large"
+            normalized["download_error"] = (
+                f"slack file size {size_bytes} exceeds SLACK_ETL_ATTACHMENT_MAX_BYTES "
+                f"({max_bytes} bytes)"
+            )
+            return normalized
+
+        try:
+            response_mimetype, body = self._download_slack_file_bytes(
+                url_private,
+                max_bytes=max_bytes,
+            )
+        except (OSError, ValueError, urllib_error.URLError) as exc:
+            normalized["download_status"] = "failed"
+            normalized["download_error"] = str(exc)
+            return normalized
+
+        normalized["download_status"] = "downloaded"
+        normalized["content_bytes"] = body
+        normalized["content_sha256"] = hashlib.sha256(body).hexdigest()
+        if not normalized["mimetype"]:
+            normalized["mimetype"] = (
+                response_mimetype
+                or mimetypes.guess_type(name)[0]
+                or "application/octet-stream"
+            )
+        if not normalized["size"]:
+            normalized["size"] = len(body)
+        return normalized
+
     def _serialize_message(
         self,
         msg: dict[str, Any],
@@ -639,6 +889,13 @@ class SlackEtlClient:
             "subtype": msg.get("subtype"),
             "parent_user_id": msg.get("parent_user_id"),
             "bot_id": msg.get("bot_id"),
+            "files": [
+                normalized
+                for file_obj in msg.get("files", []) or []
+                if isinstance(file_obj, dict)
+                for normalized in [self._serialize_file(file_obj)]
+                if normalized is not None
+            ],
         }
         if channel_name is not None:
             message["channel"] = channel_name
@@ -662,7 +919,9 @@ class SlackEtlClient:
             batch = response.get(result_key, []) or []
             items.extend(batch)
 
-            next_cursor = response.get("response_metadata", {}).get("next_cursor") or None
+            next_cursor = (
+                response.get("response_metadata", {}).get("next_cursor") or None
+            )
             has_more = bool(next_cursor or response.get("has_more"))
             if not has_more or not batch:
                 return items, next_cursor, has_more
@@ -678,7 +937,9 @@ class SlackEtlClient:
         return raw.lstrip("#").strip()
 
     def _looks_like_channel_id(self, channel: str) -> bool:
-        return bool(self._CHANNEL_ID_RE.fullmatch(self._clean_channel_ref(channel).upper()))
+        return bool(
+            self._CHANNEL_ID_RE.fullmatch(self._clean_channel_ref(channel).upper())
+        )
 
     def _resolve_etl_channel(self, channel: str) -> str:
         normalized = self._clean_channel_ref(channel)
@@ -688,7 +949,9 @@ class SlackEtlClient:
         for item in self._list_etl_channels(limit=10_000):
             if item["name"] == normalized:
                 return item["id"]
-        raise RuntimeError(f"Channel '{channel}' not found through Slack ETL user token")
+        raise RuntimeError(
+            f"Channel '{channel}' not found through Slack ETL user token"
+        )
 
     def _resolve_etl_channel_name(self, channel: str, channel_id: str) -> str:
         normalized = channel.lstrip("#")
@@ -820,7 +1083,9 @@ class SlackEtlClient:
                 resolved_channel=channel_id,
             )
 
-        messages = [self._serialize_message(msg, channel_id, user_cache) for msg in raw_messages]
+        messages = [
+            self._serialize_message(msg, channel_id, user_cache) for msg in raw_messages
+        ]
 
         return {
             "channel": channel_name,
@@ -894,7 +1159,9 @@ class SlackEtlClient:
                 resolved_channel=channel_id,
             )
 
-        messages = [self._serialize_message(msg, channel_id, user_cache) for msg in raw_messages]
+        messages = [
+            self._serialize_message(msg, channel_id, user_cache) for msg in raw_messages
+        ]
 
         return {
             "channel_id": channel_id,
@@ -932,9 +1199,13 @@ class SlackEtlClient:
         if cursor is None and normalized_oldest is None:
             if watermark is not None:
                 lookback_seconds = max(lookback_days, 0) * 86400
-                normalized_oldest = self._format_ts(max(float(watermark) - lookback_seconds, 0.0))
+                normalized_oldest = self._format_ts(
+                    max(float(watermark) - lookback_seconds, 0.0)
+                )
             elif lookback_days > 0:
-                normalized_oldest = self._format_ts(max(time.time() - (lookback_days * 86400), 0.0))
+                normalized_oldest = self._format_ts(
+                    max(time.time() - (lookback_days * 86400), 0.0)
+                )
 
         page = self._get_etl_channel_history_page(
             channel=channel,
