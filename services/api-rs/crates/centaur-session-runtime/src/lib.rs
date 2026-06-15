@@ -2213,7 +2213,6 @@ fn tool_labels_from_item(item: &Value) -> Option<ToolCallLabels> {
             name: string_at_path(item, &["tool"]).unwrap_or_else(|| "agent".to_owned()),
             method: "call".to_owned(),
         }),
-        "commandExecution" | "command_execution" => centaur_call_labels_from_command_item(item),
         _ => None,
     }
 }
@@ -2320,60 +2319,6 @@ fn content_blocks(value: &Value) -> Vec<&Value> {
         .and_then(Value::as_array)
         .map(|values| values.iter().collect())
         .unwrap_or_default()
-}
-
-fn centaur_call_labels_from_command_item(item: &Value) -> Option<ToolCallLabels> {
-    let command = string_at_path(item, &["command"])?;
-    let (name, method) = parse_centaur_call_command(&command)?;
-    Some(ToolCallLabels {
-        kind: "centaur_call".to_owned(),
-        name,
-        method,
-    })
-}
-
-fn parse_centaur_call_command(command: &str) -> Option<(String, String)> {
-    let call_start = command
-        .match_indices("call")
-        .find_map(|(index, _)| is_call_command_token(command, index).then_some(index))?;
-    let after_call = command[call_start + "call".len()..]
-        .trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\'' || ch == '"');
-    let mut parts = after_call
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, '\'' | '"' | ';'))
-        .filter(|part| !part.is_empty());
-    let first = parts.next()?;
-    match first {
-        "tools" => Some(("tools".to_owned(), "list".to_owned())),
-        "discover" => Some((
-            parts.next().unwrap_or("unknown").to_owned(),
-            "discover".to_owned(),
-        )),
-        "agent" => Some((
-            "agent".to_owned(),
-            parts.next().unwrap_or("unknown").to_owned(),
-        )),
-        tool => Some((
-            tool.to_owned(),
-            parts.next().unwrap_or("unknown").to_owned(),
-        )),
-    }
-}
-
-fn is_call_command_token(command: &str, index: usize) -> bool {
-    let before = command[..index].chars().next_back();
-    let after = command[index + "call".len()..].chars().next();
-
-    let before_is_boundary = before.is_none_or(|ch| {
-        ch.is_whitespace()
-            || matches!(
-                ch,
-                '\'' | '"' | '`' | ';' | '&' | '|' | '(' | ')' | '{' | '}' | '/'
-            )
-    });
-    let after_is_boundary =
-        after.is_some_and(|ch| ch.is_whitespace() || matches!(ch, '\'' | '"' | ';'));
-
-    before_is_boundary && after_is_boundary
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3004,11 +2949,10 @@ async fn write_input_lines(
     .await
 }
 
-/// Trace identity injected into sandbox stdin lines so the harness wrapper
-/// (codex-app-wrapper) can configure its OTLP export. Without a `trace_id` or
-/// `traceparent` on the first turn the wrapper never writes codex's `[otel]`
-/// config, codex exports no `session_task.turn` spans, and Laminar has no
-/// token usage to price into cost.
+/// Trace identity injected into sandbox stdin lines so the Rust harness server
+/// can configure the harness OTLP export. Without a `trace_id` or `traceparent`
+/// on the first turn, Codex exports no `session_task.turn` spans and Laminar
+/// has no token usage to price into cost.
 #[derive(Clone, Debug)]
 struct SessionTraceContext {
     /// Stable per-thread trace id, derived from the thread key (UUIDv5) so it
@@ -3723,51 +3667,34 @@ mod tests {
     }
 
     #[test]
-    fn command_execution_centaur_call_events_emit_tool_spans() {
+    fn command_execution_items_do_not_emit_tool_spans() {
         let started = json!({
-            "type": "item.started",
-            "item": {
-                "id": "cmd-1",
-                "type": "commandExecution",
-                "command": "/bin/bash -lc 'call websearch search {\"query\":\"redacted\"}'"
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "id": "cmd-1",
+                    "type": "commandExecution",
+                    "command": "ls -la"
+                }
             }
         });
         let completed = json!({
-            "type": "item.completed",
-            "item": {
-                "id": "cmd-1",
-                "type": "commandExecution",
-                "command": "/usr/local/bin/call discover grafana",
-                "exitCode": 0,
-                "durationMs": 42
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "id": "cmd-1",
+                    "type": "commandExecution",
+                    "command": "ls -la",
+                    "exitCode": 0,
+                    "durationMs": 42
+                }
             }
         });
         let mut known = HashMap::new();
 
-        assert_eq!(
-            tool_call_span_events(&started, &mut known),
-            vec![ToolCallSpanEvent {
-                labels: ToolCallLabels {
-                    kind: "centaur_call".to_owned(),
-                    name: "websearch".to_owned(),
-                    method: "search".to_owned(),
-                },
-                status: "started",
-                duration: None,
-            }]
-        );
-        assert_eq!(
-            tool_call_span_events(&completed, &mut known),
-            vec![ToolCallSpanEvent {
-                labels: ToolCallLabels {
-                    kind: "centaur_call".to_owned(),
-                    name: "grafana".to_owned(),
-                    method: "discover".to_owned(),
-                },
-                status: "completed",
-                duration: Some(Duration::from_millis(42)),
-            }]
-        );
+        assert_eq!(tool_call_span_events(&started, &mut known), Vec::new());
+        assert_eq!(tool_call_span_events(&completed, &mut known), Vec::new());
+        assert!(known.is_empty());
     }
 
     #[test]
@@ -3813,27 +3740,6 @@ mod tests {
             }]
         );
         assert!(known.is_empty());
-    }
-
-    #[test]
-    fn centaur_call_command_parser_matches_only_call_tokens() {
-        assert_eq!(
-            parse_centaur_call_command("call websearch search '{}'"),
-            Some(("websearch".to_owned(), "search".to_owned()))
-        );
-        assert_eq!(
-            parse_centaur_call_command("/bin/bash -lc 'call discover grafana'"),
-            Some(("grafana".to_owned(), "discover".to_owned()))
-        );
-        assert_eq!(
-            parse_centaur_call_command("/usr/local/bin/call agent runtime"),
-            Some(("agent".to_owned(), "runtime".to_owned()))
-        );
-        assert_eq!(
-            parse_centaur_call_command("callback websearch search"),
-            None
-        );
-        assert_eq!(parse_centaur_call_command("recall websearch search"), None);
     }
 
     #[test]

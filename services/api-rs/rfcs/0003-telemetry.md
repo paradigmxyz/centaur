@@ -44,7 +44,7 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
 - Harness trace export wiring is implemented: every sandbox stdin line carries
   `thread_key`, a deterministic per-thread `trace_id` (UUIDv5 of the thread
   key — no `thread_traces` table), and the execution span's `traceparent`, so
-  codex-app-wrapper can configure codex's OTLP export and the harness's
+  the Rust harness server can configure Codex's OTLP export and the harness's
   `session_task.turn` spans (token usage that Laminar prices into cost) join
   the execution trace. The api-rs process's own OTLP env
   (`OTEL_EXPORTER_OTLP_{ENDPOINT,TRACES_ENDPOINT,HEADERS}` and

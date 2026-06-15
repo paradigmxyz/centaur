@@ -85,6 +85,9 @@ class WorkflowContext:
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
         tool_shim = resolve_tool_shim()
         if tool_shim is not None:
+            # Sandboxed workflow hosts cannot rely on api-rs having a /tools
+            # backend. Use the generated catalog's method bridge for durable
+            # workflow ctx.call_tool(...); interactive agents use tool CLIs.
             return await call_tool_shim(tool_shim, tool, method, args or {})
         return await self._rpc.request(
             {

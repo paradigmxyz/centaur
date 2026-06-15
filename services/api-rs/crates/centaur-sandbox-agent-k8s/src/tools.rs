@@ -1,8 +1,7 @@
 //! Tool sources for agent sandboxes.
 //!
-//! api-rs serves no `/tools` HTTP registry and the agent's `call <tool>` HTTP
-//! registry is deprecated upstream (control-plane-only). Instead the agent
-//! image installs each tool as a shell CLI shim at entrypoint
+//! api-rs serves no `/tools` HTTP registry. Instead the agent image installs
+//! each tool as a shell CLI shim at entrypoint
 //! (`services/sandbox/install_tool_shims.py`) by scanning `TOOL_DIRS` for
 //! `pyproject.toml [project.scripts]` and `uvx`-installing each. Secrets ride
 //! proxied env (tool placeholder creds + `*_DSN` from `apply_proxy_env`,
