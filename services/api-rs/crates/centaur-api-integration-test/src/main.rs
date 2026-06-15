@@ -239,6 +239,11 @@ async fn test_harness_wire_values(http: &HttpClient, base_url: &str) -> Result<(
 
 async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
     let thread_key = test_thread_key("turn")?;
+    let harness_wire_value = serde_json::to_value(HarnessType::Codex)
+        .context("serialize executable harness type")?
+        .as_str()
+        .context("serialized executable harness type was not a string")?
+        .to_owned();
     post_json_ok(
         http,
         session_url(base_url, &thread_key),
@@ -262,7 +267,10 @@ async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
                 {
                     "client_message_id": "api-integration-test-message-1",
                     "role": "user",
-                    "parts": [{"type": "text", "text": "Reply with exactly PONG."}],
+                    "parts": [{
+                        "type": "text",
+                        "text": "Reply with PONG, the model, and the harness.",
+                    }],
                     "metadata": {
                         "source": "centaur-api-integration-test",
                         "model": TEST_MODEL,
@@ -291,7 +299,10 @@ async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
         },
         "message": {
             "role": "user",
-            "content": [{"type": "text", "text": "Reply with exactly PONG."}],
+            "content": [{
+                "type": "text",
+                "text": "Reply with PONG, the model, and the harness.",
+            }],
         },
     }))
     .context("serialize execute input line")?;
@@ -363,7 +374,6 @@ async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
     }
     let mut events = response.bytes_stream().eventsource();
     timeout(Duration::from_secs(20), async {
-        let mut saw_model_input = false;
         let mut saw_output = false;
         while let Some(event) = events.next().await {
             let event = event.context("read session event")?;
@@ -371,18 +381,11 @@ async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
                 "session.output.line" => {
                     let line = parse_json(&event.data)?;
                     let line_type = line.get("type").and_then(Value::as_str);
-                    if line_type == Some("user")
-                        && line.get("model").and_then(Value::as_str) == Some(TEST_MODEL)
-                        && line.get("thread_key").and_then(Value::as_str)
-                            == Some(thread_key.as_str())
-                    {
-                        saw_model_input = true;
-                    }
                     if line_type == Some("item.agentMessage.delta")
-                        && line
-                            .get("delta")
-                            .and_then(Value::as_str)
-                            .is_some_and(|delta| delta.contains("PONG"))
+                        && let Some(delta) = line.get("delta").and_then(Value::as_str)
+                        && delta.contains("PONG")
+                        && delta.contains(&format!("model={TEST_MODEL}"))
+                        && delta.contains(&format!("harness={harness_wire_value}"))
                     {
                         saw_output = true;
                     }
@@ -392,11 +395,10 @@ async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
                     if payload.get("execution_id").and_then(Value::as_str)
                         == Some(execution_id.as_str())
                     {
-                        if !saw_model_input {
-                            bail!("execution completed before the model input line was observed");
-                        }
                         if !saw_output {
-                            bail!("execution completed before a PONG output line was observed");
+                            bail!(
+                                "execution completed before a PONG model/harness output line was observed"
+                            );
                         }
                         return Ok(());
                     }

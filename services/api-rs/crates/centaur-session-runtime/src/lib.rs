@@ -1612,7 +1612,8 @@ impl SandboxWorkloadMode {
         match self {
             Self::MockAppServer { image } => SandboxSpec::new(image)
                 .command(["/bin/sh", "-lc"])
-                .args([mock_app_server_script()]),
+                .args([mock_app_server_script()])
+                .env("CENTAUR_HARNESS_TYPE", harness.as_ref()),
             Self::CodexAppServer {
                 image, env, mounts, ..
             } => {
@@ -1654,7 +1655,9 @@ fn sandbox_spec_key(spec: &SandboxSpec) -> String {
 
 fn mock_app_server_script() -> &'static str {
     r#"while IFS= read -r line; do
-printf '%s\n' "$line"
+model="$(printf '%s\n' "$line" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')"
+[ -n "$model" ] || model="unknown"
+harness="${CENTAUR_HARNESS_TYPE:-unknown}"
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
 sleep 0.2
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
@@ -1666,7 +1669,7 @@ while [ "$turn_index" -le 3 ]; do
   turn_id="mock-turn-$turn_index"
   printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
   sleep 0.2
-  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG %s"}\n' "$turn_id" "$turn_index"
+  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG model=%s harness=%s"}\n' "$turn_id" "$model" "$harness"
   sleep 0.2
   printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
   sleep 0.2
