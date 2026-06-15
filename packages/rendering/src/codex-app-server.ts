@@ -49,6 +49,7 @@ type CodexMapperState = {
   harnessAnswerText: string
   answerText: string
   commentaryByItemId: Map<string, string>
+  reasoningByItemId: Map<string, string>
   harnessCommentaryText: string
   commentaryText: string
   completedItemIds: Set<string>
@@ -108,6 +109,10 @@ export class CodexAppServerRendererEventMapper
     if (this.state.done) return []
     this.state.done = true
     const out: RendererEvent[] = []
+    // Finalize any reasoning whose deltas never produced a completed item.
+    for (const id of Array.from(this.state.reasoningByItemId.keys())) {
+      this.finalizeReasoning(out, { id })
+    }
     completeThinkingTasks(this.state)
     completeOpenTasks(this.state)
     this.emitActivitySummary(out, { final: true })
@@ -292,17 +297,22 @@ export class CodexAppServerRendererEventMapper
       }
     }
 
-    const reasoningMessage = reasoningText(event).trim()
-    if (reasoningMessage) {
-      const task: HarnessTask = {
-        id: `reasoning-${++this.state.stepCounter}`,
-        title: 'Thinking',
-        status: isReasoningDeltaEvent(event) ? 'in_progress' : 'complete',
-        details: [section([text(reasoningMessage)])],
-        output: []
+    // Reasoning is streamed as many ~per-word deltas, but the chat-sdk layer
+    // emits a task's `details` only once — so a task-per-delta rendered the trace
+    // as one "Thinking" line per word (and a duplicate block per summary part).
+    // Accumulate the deltas and render a single Thinking task from the
+    // consolidated reasoning item, mirroring the pre-rewrite normalizer which
+    // rendered reasoning from the completed item's text, not the deltas.
+    if (isReasoningDeltaEvent(event)) {
+      const id = reasoningItemId(event)
+      if (id) {
+        this.state.reasoningByItemId.set(id, (this.state.reasoningByItemId.get(id) ?? '') + reasoningText(event))
       }
-      this.state.taskByUseId.set(task.id, task)
-      this.emitActivitySummary(out)
+    } else if (event?.type === 'item.completed' && event?.item?.type === 'reasoning') {
+      this.finalizeReasoning(out, event.item)
+    } else if (event?.type === 'reasoning') {
+      // Legacy single-shot reasoning event (full text in one payload).
+      this.finalizeReasoning(out, { id: reasoningItemId(event), summary: [reasoningText(event)] })
     }
 
     if (isTerminalCodexAppServerEvent(event)) {
@@ -383,6 +393,29 @@ export class CodexAppServerRendererEventMapper
       })
     }
     this.emitPendingAssistantText(out)
+  }
+
+  // Render the consolidated reasoning item as a single Thinking task. Prefers the
+  // item's own summary/content (the authoritative full text); falls back to the
+  // deltas accumulated for this item when the completed item carries no text.
+  private finalizeReasoning(out: RendererEvent[], item: any): void {
+    const id = String(item?.id ?? '')
+    const consolidated = [...asStringArray(item?.summary), ...asStringArray(item?.content)]
+      .map(part => part.trim())
+      .filter(Boolean)
+      .join('\n\n')
+    const body = (consolidated || (id ? this.state.reasoningByItemId.get(id) ?? '' : '')).trim()
+    if (id) this.state.reasoningByItemId.delete(id)
+    if (!body) return
+    const taskId = `thinking-${id || `reasoning-${++this.state.stepCounter}`}`
+    this.state.taskByUseId.set(taskId, {
+      id: taskId,
+      title: 'Thinking',
+      status: 'complete',
+      details: [section([text(body)])],
+      output: []
+    })
+    this.emitActivitySummary(out)
   }
 
   private emitPendingAssistantText(
@@ -680,6 +713,7 @@ function newState(): CodexMapperState {
     harnessAnswerText: '',
     answerText: '',
     commentaryByItemId: new Map(),
+    reasoningByItemId: new Map(),
     harnessCommentaryText: '',
     commentaryText: '',
     completedItemIds: new Set(),
@@ -918,6 +952,14 @@ function isReasoningDeltaEvent(event: any): boolean {
     event?.type === 'item.reasoning.summaryTextDelta' ||
     event?.type === 'item.reasoning.textDelta'
   )
+}
+
+function reasoningItemId(event: any): string {
+  return String(event?.itemId ?? event?.item_id ?? event?.item?.id ?? '')
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(item => String(item ?? '')) : []
 }
 
 function terminalResultText(event: any): string {

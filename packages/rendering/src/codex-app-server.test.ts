@@ -53,6 +53,34 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('coalesces streamed reasoning summary deltas into a single Thinking task', async () => {
+    // Codex streams a reasoning summary as many small deltas (≈ one word each).
+    // They must accumulate into one Thinking task keyed by the reasoning itemId,
+    // not a fresh task per delta (which rendered the trace one word per line).
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          { method: 'item/reasoning/summaryTextDelta', params: { threadId: 't', turnId: 'turn-1', itemId: 'reasoning-7', summaryIndex: 0, delta: 'Consider' } },
+          { method: 'item/reasoning/summaryTextDelta', params: { threadId: 't', turnId: 'turn-1', itemId: 'reasoning-7', summaryIndex: 0, delta: 'ing the' } },
+          { method: 'item/reasoning/summaryTextDelta', params: { threadId: 't', turnId: 'turn-1', itemId: 'reasoning-7', summaryIndex: 0, delta: ' investor' } },
+          { method: 'item/reasoning/summaryTextDelta', params: { threadId: 't', turnId: 'turn-1', itemId: 'reasoning-7', summaryIndex: 0, delta: ' update' } },
+          { method: 'item/agentMessage/delta', params: { threadId: 't', turnId: 'turn-1', itemId: 'answer-1', delta: 'Done.' } },
+          { method: 'turn/completed', params: { threadId: 't', turn: { id: 'turn-1', items: [], status: 'completed' } } }
+        ])
+      )
+    )
+
+    const thinking = chunks.filter(
+      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+        chunk.type === 'task_update' && chunk.title === 'Thinking'
+    )
+    // The four deltas coalesce into exactly one Thinking task (no per-word
+    // explosion) finalized at turn end, with the full accumulated summary —
+    // even though no consolidated reasoning item was delivered.
+    expect(new Set(thinking.map(chunk => chunk.id))).toEqual(new Set(['thinking-reasoning-7']))
+    expect(thinking.some(chunk => chunk.details === 'Considering the investor update')).toBe(true)
+  })
+
   it('maps commentary to Thinking task updates instead of message deltas', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
@@ -236,6 +264,12 @@ describe('CodexAppServerRendererEventMapper', () => {
             }
           },
           {
+            method: 'item/completed',
+            params: {
+              item: { type: 'reasoning', id: 'reasoning-1', summary: ['Inspecting the event stream'], content: [] }
+            }
+          },
+          {
             method: 'item/agentMessage/delta',
             params: {
               threadId: 'thread-1',
@@ -268,19 +302,25 @@ describe('CodexAppServerRendererEventMapper', () => {
       title: 'Inspect App Server events',
       status: 'complete'
     })
+    // Reasoning renders as a single Thinking task from the consolidated item,
+    // not one task per streamed delta.
     expect(chunks).toContainEqual({
       type: 'task_update',
-      id: 'reasoning-1',
+      id: 'thinking-reasoning-1',
       title: 'Thinking',
-      status: 'in_progress',
+      status: 'complete',
       details: 'Inspecting the event stream'
     })
-    expect(chunks).toContainEqual({
-      type: 'task_update',
-      id: 'reasoning-1',
-      title: 'Thinking',
-      status: 'complete'
-    })
+    expect(
+      new Set(
+        chunks
+          .filter(
+            (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+              chunk.type === 'task_update' && chunk.title === 'Thinking'
+          )
+          .map(chunk => chunk.id)
+      )
+    ).toEqual(new Set(['thinking-reasoning-1']))
     expect(chunks).toContainEqual({ type: 'markdown_text', text: 'Done.' })
   })
 
