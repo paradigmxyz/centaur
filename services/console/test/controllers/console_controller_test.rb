@@ -178,6 +178,8 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     # Each direct grant exposes a revoke form; each assigned role chip a remove (×) form.
     assert_select "form[action=?]", console_principal_revoke_grant_path(principal.oid, grants(:acme_channel_github_token).oid)
     assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid)
+    # The direct grant's id links to the secret's detail page.
+    assert_select "a[href=?]", console_secret_path("static", static_secrets(:github_token_inject).oid)
   end
 
   test "effective grants table sources each secret as direct or via a role" do
