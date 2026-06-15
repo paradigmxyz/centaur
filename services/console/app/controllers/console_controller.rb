@@ -48,10 +48,18 @@ class ConsoleController < ApplicationController
         (grant.role ? { type: :role, role: grant.role } : { type: :direct })
     end
     # Assignment options for the inline forms. Roles/secrets span all namespaces;
-    # the namespace is shown as a label on each option.
+    # the namespace is shown as a label on each option. Already-directly-granted
+    # secrets are filtered out of the grant dropdown (they're in the table above);
+    # a role-inherited secret stays offered, so it can be promoted to a direct grant.
     @assignable_roles = Role.where.not(id: @principal.role_ids).order(:namespace, :id)
-    @assignable_secrets = SECRET_KINDS.transform_values do |cfg|
-      cfg[:model].order(:namespace, :id)
+    granted_ids = Hash.new { |h, k| h[k] = [] }
+    @direct_grants.each do |grant|
+      assoc = Grant::GRANTABLE_ASSOCIATIONS.find { |a| grant.public_send("#{a}_id") }
+      next unless assoc
+      granted_ids[assoc.to_s.delete_suffix("_secret")] << grant.public_send("#{assoc}_id")
+    end
+    @assignable_secrets = SECRET_KINDS.each_with_object({}) do |(kind, cfg), acc|
+      acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:namespace, :id)
     end
   end
 

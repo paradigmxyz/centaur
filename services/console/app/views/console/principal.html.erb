@@ -153,7 +153,9 @@
                 <td class="console-td-nowrap">
                   <span class="resource-badge"><%= secret_kind_label(kind) %></span>
                 </td>
-                <td class="console-td-nowrap text-centaur-400"><%= s.oid %></td>
+                <td class="console-td-nowrap">
+                  <%= link_to s.oid, console_secret_path(kind, s.oid), class: "console-link" %>
+                </td>
                 <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
                 <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
                 <td class="console-td-nowrap">

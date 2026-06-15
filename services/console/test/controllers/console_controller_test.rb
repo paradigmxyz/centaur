@@ -190,8 +190,23 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "section table th", text: "Source"
     # A directly granted secret is tagged "direct".
     assert_select "td", text: "direct"
-    # The role-inherited secret names the role it comes through.
+    # The role-inherited secret names the role it comes through, and its id links
+    # to the secret (it appears only in the effective table, not the direct one).
     assert_select "td span", text: "via #{roles(:acme_infra).name}"
+    assert_select "a[href=?]", console_secret_path("static", static_secrets(:acme_prod_api_key).oid)
+  end
+
+  test "grant dropdown omits secrets already granted directly but keeps the rest" do
+    principal = principals(:acme_channel) # github_token_inject is granted directly
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    granted = static_secrets(:github_token_inject)
+    ungranted = static_secrets(:acme_staging_api_key)
+    assert_select "select[name=grantable] option[value=?]", "static:#{granted.oid}", count: 0
+    assert_select "select[name=grantable] option[value=?]", "static:#{ungranted.oid}"
+    # A kind with no direct grant on this principal still lists all its secrets.
+    gcp = gcp_auth_secrets(:acme_bigquery)
+    assert_select "select[name=grantable] option[value=?]", "gcp_auth:#{gcp.oid}"
   end
 
   test "header shows the signed-in operator and a sign-out control" do
