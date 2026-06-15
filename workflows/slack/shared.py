@@ -18,6 +18,12 @@ BACKFILL_JOB_CHANNEL_CONTINUATION = "channel_continuation"
 BACKFILL_JOB_CHANNEL_BOOTSTRAP = "channel_bootstrap"
 BACKFILL_JOB_THREAD_REFRESH = "thread_refresh"
 BACKFILL_JOB_PAYLOAD_VERSION = 1
+BACKFILL_JOB_TYPES = (
+    BACKFILL_JOB_CHANNEL_BOOTSTRAP,
+    BACKFILL_JOB_CHANNEL_CONTINUATION,
+    BACKFILL_JOB_THREAD_REFRESH,
+)
+BACKFILL_JOB_STATUSES = ("pending", "running", "completed", "failed")
 
 
 def positive_int(value: int | str | None, default: int) -> int:
@@ -1189,6 +1195,49 @@ async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
                 limit,
             )
     return [dict(row) for row in rows]
+
+
+async def load_backfill_job_metrics(pool) -> list[dict[str, Any]]:
+    """Summarize Slack backfill queue state for dashboard gauges."""
+    rows = await pool.fetch(
+        "SELECT job_type, status, COUNT(*) AS job_count, "
+        "COALESCE("
+        "  EXTRACT(EPOCH FROM NOW() - MIN("
+        "    CASE status "
+        "      WHEN 'pending' THEN COALESCE(last_enqueued_at, updated_at, created_at) "
+        "      WHEN 'running' THEN COALESCE(last_started_at, updated_at, created_at) "
+        "      WHEN 'completed' THEN COALESCE(last_completed_at, updated_at, created_at) "
+        "      ELSE COALESCE(updated_at, last_enqueued_at, created_at) "
+        "    END"
+        "  )), "
+        "  0"
+        ") AS oldest_age_seconds "
+        "FROM slack_sync_backfill_jobs "
+        "GROUP BY job_type, status",
+    )
+    summary = {
+        (job_type, status): {"job_count": 0, "oldest_age_seconds": 0.0}
+        for job_type in BACKFILL_JOB_TYPES
+        for status in BACKFILL_JOB_STATUSES
+    }
+    for row in rows:
+        job_type = str(row["job_type"] or "")
+        status = str(row["status"] or "")
+        if not job_type or not status:
+            continue
+        summary[(job_type, status)] = {
+            "job_count": int(row["job_count"] or 0),
+            "oldest_age_seconds": float(row["oldest_age_seconds"] or 0.0),
+        }
+
+    return [
+        {
+            "job_type": job_type,
+            "status": status,
+            **values,
+        }
+        for (job_type, status), values in sorted(summary.items())
+    ]
 
 
 async def mark_backfill_job_failed(

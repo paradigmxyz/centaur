@@ -13,6 +13,8 @@ from api.vm_metrics import (
     record_etl_items_failed,
     record_etl_items_seen,
     record_etl_items_upserted,
+    set_etl_backfill_job_age_seconds,
+    set_etl_backfill_jobs,
 )
 from api.workflow_engine import WorkflowContext
 from workflows.slack.shared import (
@@ -26,6 +28,7 @@ from workflows.slack.shared import (
     enqueue_backfill_job,
     env_flag_enabled,
     failure_reason,
+    load_backfill_job_metrics,
     mark_thread_refreshed,
     mark_backfill_job_completed,
     mark_backfill_job_failed,
@@ -64,6 +67,20 @@ SCHEDULE = {
     ),
     "no_delivery": True,
 }
+
+
+async def _emit_backfill_job_metrics(pool) -> None:
+    """Publish current Slack backfill queue state for Grafana panels."""
+    for row in await load_backfill_job_metrics(pool):
+        job_type = str(row["job_type"])
+        status = str(row["status"])
+        set_etl_backfill_jobs("slack", job_type, status, int(row["job_count"]))
+        set_etl_backfill_job_age_seconds(
+            "slack",
+            job_type,
+            status,
+            float(row["oldest_age_seconds"]),
+        )
 
 
 @dataclass
@@ -183,6 +200,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     channel_pages_per_job = positive_int(
         inp.channel_pages_per_job, DEFAULT_CHANNEL_PAGES_PER_JOB
     )
+    await _emit_backfill_job_metrics(ctx._pool)
     jobs = await claim_backfill_jobs(ctx._pool, channel_batch_limit)
     if not jobs:
         ctx.log("slack_backfill_skipped_no_jobs")
@@ -190,6 +208,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             "status": "skipped",
             "reason": "no_pending_backfills",
         }
+    await _emit_backfill_job_metrics(ctx._pool)
 
     client = shared_client()
     access_mode = client._etl_access_mode()
@@ -451,6 +470,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         counts=counts,
         error_text=error_text,
     )
+    await _emit_backfill_job_metrics(ctx._pool)
 
     return {
         "status": status,

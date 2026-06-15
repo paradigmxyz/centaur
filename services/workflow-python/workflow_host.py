@@ -304,6 +304,13 @@ def install_vm_metrics_compat_module(api_mod: types.ModuleType) -> None:
     vm_metrics.record_etl_items_failed = record_etl_items_failed
     vm_metrics.record_etl_items_seen = record_etl_items_seen
     vm_metrics.record_etl_items_upserted = record_etl_items_upserted
+    vm_metrics.set_etl_active_scopes = set_etl_active_scopes
+    vm_metrics.set_etl_backfill_job_age_seconds = set_etl_backfill_job_age_seconds
+    vm_metrics.set_etl_backfill_jobs = set_etl_backfill_jobs
+    vm_metrics.set_etl_failed_scopes = set_etl_failed_scopes
+    vm_metrics.set_etl_scope_sync_freshness_seconds = (
+        set_etl_scope_sync_freshness_seconds
+    )
     vm_metrics.record_company_context_documents_changed = (
         record_company_context_documents_changed
     )
@@ -382,6 +389,63 @@ def record_etl_items_failed(
     )
 
 
+def set_etl_active_scopes(source: str, count: int) -> None:
+    set_gauge(
+        "etl_active_scopes",
+        max(count, 0),
+        source=source,
+    )
+
+
+def set_etl_failed_scopes(source: str, count: int) -> None:
+    set_gauge(
+        "etl_failed_scopes",
+        max(count, 0),
+        source=source,
+    )
+
+
+def set_etl_scope_sync_freshness_seconds(
+    source: str,
+    freshness_s: int | float,
+) -> None:
+    set_gauge(
+        "etl_scope_sync_freshness_seconds",
+        max(float(freshness_s), 0.0),
+        source=source,
+    )
+
+
+def set_etl_backfill_jobs(
+    source: str,
+    job_type: str,
+    status: str,
+    count: int,
+) -> None:
+    set_gauge(
+        "etl_backfill_jobs",
+        max(count, 0),
+        source=source,
+        job_type=job_type,
+        status=status,
+    )
+
+
+def set_etl_backfill_job_age_seconds(
+    source: str,
+    job_type: str,
+    status: str,
+    age_s: int | float,
+) -> None:
+    set_gauge(
+        "etl_backfill_job_age_seconds",
+        max(float(age_s), 0.0),
+        source=source,
+        job_type=job_type,
+        status=status,
+    )
+
+
 def record_company_context_documents_changed(
     source: str,
     source_type: str,
@@ -418,7 +482,7 @@ def set_company_context_projection_lag(source: str, projection_lag_s: float) -> 
 
 
 def increment_metric(metric: str, count: int, **labels: str) -> None:
-    if count <= 0:
+    if count < 0:
         return
     labels = metric_runtime_labels(labels)
     key = metric_key(metric, labels)

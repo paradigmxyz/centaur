@@ -43,11 +43,16 @@ pub const SESSION_EXECUTIONS_TOTAL: &str = "centaur_session_executions_total";
 pub const SESSION_EXECUTION_DURATION_SECONDS: &str = "centaur_session_execution_duration_seconds";
 pub const SANDBOX_OPERATIONS_TOTAL: &str = "centaur_sandbox_operations_total";
 pub const SANDBOX_WARM_POOL_CLAIMS_TOTAL: &str = "centaur_sandbox_warm_pool_claims_total";
+pub const ETL_ACTIVE_SCOPES: &str = "etl_active_scopes";
+pub const ETL_FAILED_SCOPES: &str = "etl_failed_scopes";
+pub const ETL_SCOPE_SYNC_FRESHNESS_SECONDS: &str = "etl_scope_sync_freshness_seconds";
 pub const ETL_ITEMS_SEEN_TOTAL: &str = "etl_items_seen_total";
 pub const ETL_ITEMS_ENQUEUED_TOTAL: &str = "etl_items_enqueued_total";
 pub const ETL_ITEMS_UPSERTED_TOTAL: &str = "etl_items_upserted_total";
 pub const ETL_ITEMS_DELETED_TOTAL: &str = "etl_items_deleted_total";
 pub const ETL_ITEMS_FAILED_TOTAL: &str = "etl_items_failed_total";
+pub const ETL_BACKFILL_JOBS: &str = "etl_backfill_jobs";
+pub const ETL_BACKFILL_JOB_AGE_SECONDS: &str = "etl_backfill_job_age_seconds";
 pub const COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL: &str = "company_context_documents_changed_total";
 pub const COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS: &str = "company_context_document_size_chars";
 pub const COMPANY_CONTEXT_PROJECTION_LAG_SECONDS: &str = "company_context_projection_lag_seconds";
@@ -265,9 +270,6 @@ pub fn record_sandbox_warm_pool_claim(result: &'static str) {
 }
 
 pub fn record_workflow_counter(name: &str, labels: &[(String, String)], value: u64) {
-    if value == 0 {
-        return;
-    }
     metrics::counter!(name.to_owned(), workflow_metric_labels(labels)).increment(value);
 }
 
@@ -383,6 +385,13 @@ fn describe_metrics() {
         SANDBOX_WARM_POOL_CLAIMS_TOTAL,
         "Session warm-pool claim attempts by result."
     );
+    metrics::describe_gauge!(ETL_ACTIVE_SCOPES, "Current active ETL scopes by source.");
+    metrics::describe_gauge!(ETL_FAILED_SCOPES, "Current failed ETL scopes by source.");
+    metrics::describe_gauge!(
+        ETL_SCOPE_SYNC_FRESHNESS_SECONDS,
+        metrics::Unit::Seconds,
+        "Oldest successful ETL scope sync age in seconds by source."
+    );
     metrics::describe_counter!(
         ETL_ITEMS_SEEN_TOTAL,
         "Source items fetched or observed by ETL workflows."
@@ -402,6 +411,15 @@ fn describe_metrics() {
     metrics::describe_counter!(
         ETL_ITEMS_FAILED_TOTAL,
         "Source items that failed processing in ETL workflows."
+    );
+    metrics::describe_gauge!(
+        ETL_BACKFILL_JOBS,
+        "Current ETL backfill jobs by source, job type, and status."
+    );
+    metrics::describe_gauge!(
+        ETL_BACKFILL_JOB_AGE_SECONDS,
+        metrics::Unit::Seconds,
+        "Oldest ETL backfill job age in seconds by source, job type, and status."
     );
     metrics::describe_counter!(
         COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL,
@@ -642,10 +660,44 @@ mod tests {
             ],
             7,
         );
+        record_workflow_counter(
+            COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL,
+            &[
+                ("action".to_owned(), "noop".to_owned()),
+                ("environment".to_owned(), "production".to_owned()),
+                ("namespace".to_owned(), "centaur-system".to_owned()),
+                ("source".to_owned(), "slack".to_owned()),
+                ("source_type".to_owned(), "slack_thread".to_owned()),
+            ],
+            0,
+        );
+        set_workflow_gauge(
+            ETL_BACKFILL_JOBS,
+            &[
+                ("environment".to_owned(), "production".to_owned()),
+                ("job_type".to_owned(), "thread_refresh".to_owned()),
+                ("namespace".to_owned(), "centaur-system".to_owned()),
+                ("source".to_owned(), "slack".to_owned()),
+                ("status".to_owned(), "pending".to_owned()),
+            ],
+            3.0,
+        );
+        set_workflow_gauge(
+            ETL_ACTIVE_SCOPES,
+            &[
+                ("environment".to_owned(), "production".to_owned()),
+                ("namespace".to_owned(), "centaur-system".to_owned()),
+                ("source".to_owned(), "slack".to_owned()),
+            ],
+            11.0,
+        );
 
         let metrics = render_metrics().unwrap();
 
         assert!(metrics.contains("etl_items_seen_total{"));
+        assert!(metrics.contains("etl_active_scopes{"));
+        assert!(metrics.contains("company_context_documents_changed_total{"));
+        assert!(metrics.contains("etl_backfill_jobs{"));
         assert!(metrics.contains(r#"environment="production""#));
         assert!(metrics.contains(r#"namespace="centaur-system""#));
         assert!(metrics.contains(r#"source="slack""#));

@@ -13,6 +13,10 @@ from api.runtime_control import canonical_json, decode_jsonb
 from api.vm_metrics import (
     observe_company_context_document_size,
     record_company_context_documents_changed,
+    set_company_context_projection_lag,
+    set_etl_active_scopes,
+    set_etl_failed_scopes,
+    set_etl_scope_sync_freshness_seconds,
 )
 from api.workflow_engine import WorkflowContext
 
@@ -24,6 +28,19 @@ MIN_THREAD_MESSAGES = 5
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 SLACK_MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
 SLACK_CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)(?:\|([^>]+))?>")
+COMPANY_CONTEXT_SOURCE_TYPES = {
+    "slack": ("slack_channel_day", "slack_thread"),
+    "google_drive": ("google_doc",),
+    "google_calendar": ("calendar_event",),
+    "linear": ("linear_issue",),
+}
+COMPANY_CONTEXT_DOCUMENT_ACTIONS = ("inserted", "updated", "deleted", "noop")
+ETL_CHECKPOINT_TABLES = {
+    "slack": "slack_sync_checkpoints",
+    "google_drive": "google_drive_sync_checkpoints",
+    "google_calendar": "google_calendar_sync_checkpoints",
+    "linear": "linear_sync_checkpoints",
+}
 
 
 def _positive_int(value: int | str | None, default: int) -> int:
@@ -170,6 +187,95 @@ async def _latest_successful_watermark(pool, current_run_id: str) -> dt.datetime
         return None
     output = decode_jsonb(row["output_json"], {})
     return _parse_datetime(str(output.get("watermark") or ""))
+
+
+def _emit_company_context_counter_baselines(enabled_sources: list[str]) -> None:
+    """Initialize dashboard counter labelsets even when a run has no changes."""
+    for source in enabled_sources:
+        for source_type in COMPANY_CONTEXT_SOURCE_TYPES.get(source, ()):
+            for action in COMPANY_CONTEXT_DOCUMENT_ACTIONS:
+                record_company_context_documents_changed(
+                    source,
+                    source_type,
+                    action,
+                    0,
+                )
+
+
+async def _emit_company_context_document_size_snapshot(
+    pool,
+    enabled_sources: list[str],
+) -> None:
+    """Observe current projected document sizes so the corpus p95 panel has data."""
+    if not enabled_sources:
+        return
+    rows = await pool.fetch(
+        "SELECT source, source_type, LENGTH(COALESCE(body, '')) AS body_chars "
+        "FROM company_context_documents "
+        "WHERE source = ANY($1::text[]) "
+        "ORDER BY source, source_type, document_id",
+        enabled_sources,
+    )
+    seen_source_types: set[tuple[str, str]] = set()
+    for row in rows:
+        source = str(row["source"] or "")
+        source_type = str(row["source_type"] or "")
+        if not source or not source_type:
+            continue
+        seen_source_types.add((source, source_type))
+        observe_company_context_document_size(
+            source,
+            source_type,
+            int(row["body_chars"] or 0),
+        )
+
+    for source in enabled_sources:
+        for source_type in COMPANY_CONTEXT_SOURCE_TYPES.get(source, ()):
+            if (source, source_type) not in seen_source_types:
+                observe_company_context_document_size(source, source_type, 0)
+
+
+async def _emit_etl_scope_metrics(pool, enabled_sources: list[str]) -> None:
+    """Publish source scope health gauges used by the Grafana overview row."""
+    for source in enabled_sources:
+        table = ETL_CHECKPOINT_TABLES.get(source)
+        if not table:
+            continue
+        row = await pool.fetchrow(
+            "SELECT COUNT(*) AS active_scopes, "
+            "COUNT(*) FILTER (WHERE last_error <> '') AS failed_scopes, "
+            "COALESCE("
+            "  EXTRACT(EPOCH FROM NOW() - MIN(last_success_at) "
+            "    FILTER (WHERE last_success_at IS NOT NULL)"
+            "  ), "
+            "  0"
+            ") AS freshness_seconds "
+            f"FROM {table}",
+        )
+        set_etl_active_scopes(source, int(row["active_scopes"] or 0) if row else 0)
+        set_etl_failed_scopes(source, int(row["failed_scopes"] or 0) if row else 0)
+        set_etl_scope_sync_freshness_seconds(
+            source,
+            float(row["freshness_seconds"] or 0.0) if row else 0.0,
+        )
+
+
+def _emit_company_context_projection_lag(
+    enabled_sources: list[str],
+    source_watermarks: dict[str, dt.datetime | None],
+) -> None:
+    """Set per-source lag gauges from the newest projected source update time."""
+    now = dt.datetime.now(dt.timezone.utc)
+    for source in enabled_sources:
+        watermark = source_watermarks.get(source)
+        if isinstance(watermark, dt.datetime):
+            lag_seconds = max(
+                (now - watermark.astimezone(dt.timezone.utc)).total_seconds(),
+                0.0,
+            )
+        else:
+            lag_seconds = 0.0
+        set_company_context_projection_lag(source, lag_seconds)
 
 
 async def _load_slack_lookup_maps(pool) -> tuple[dict[str, str], dict[str, str]]:
@@ -1046,6 +1152,17 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     google_drive_enabled = _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
     google_calendar_enabled = _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
     linear_enabled = _env_flag_enabled("LINEAR_ETL_ENABLED")
+    enabled_sources = [
+        source
+        for source, enabled in (
+            ("slack", slack_enabled),
+            ("google_drive", google_drive_enabled),
+            ("google_calendar", google_calendar_enabled),
+            ("linear", linear_enabled),
+        )
+        if enabled
+    ]
+    _emit_company_context_counter_baselines(enabled_sources)
     changed = {
         "channel_days": [],
         "threads": [],
@@ -1226,6 +1343,15 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if value is not None
     ]
     watermark = max(watermark_candidates) if watermark_candidates else None
+    source_watermarks = {
+        "slack": changed["max_updated_at"] or last_watermark,
+        "google_drive": drive_changed["max_updated_at"] or last_watermark,
+        "google_calendar": calendar_changed["max_updated_at"] or last_watermark,
+        "linear": linear_changed["max_updated_at"] or last_watermark,
+    }
+    _emit_company_context_projection_lag(enabled_sources, source_watermarks)
+    await _emit_etl_scope_metrics(ctx._pool, enabled_sources)
+    await _emit_company_context_document_size_snapshot(ctx._pool, enabled_sources)
     result = {
         "status": "completed",
         "changed_messages": changed["changed_messages"],
