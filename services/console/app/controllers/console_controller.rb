@@ -90,8 +90,8 @@ class ConsoleController < ApplicationController
 
   def credential
     @credential = BrokerCredential.find_by_oid!(params[:id])
-    # The grantable static secret(s) wrapping this credential, for the cross-link.
-    @wrapping_secrets = @credential.static_secrets.order(:id)
+    # The grantable static secret wrapping this credential, for the cross-link.
+    @wrapping_secret = @credential.static_secret
   end
 
   # Registered OAuth apps and the consent flows they drive. Like credentials,

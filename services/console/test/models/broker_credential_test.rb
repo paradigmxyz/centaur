@@ -32,6 +32,15 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert build_credential.valid?
   end
 
+  test "at most one wrapping static secret per credential" do
+    cred = create_credential
+    StaticSecret.create!(namespace: "default", name: "wrapper", broker_credential: cred,
+                         inject_config: { "header" => "Authorization" })
+    dup = StaticSecret.new(namespace: "default", name: "dup", broker_credential: cred,
+                           inject_config: { "header" => "Authorization" })
+    assert_raises(ActiveRecord::RecordNotUnique) { dup.save!(validate: false) }
+  end
+
   test "invalid without a client_id" do
     bc = build_credential(client_id: nil)
     refute bc.valid?

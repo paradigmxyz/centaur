@@ -160,10 +160,10 @@ module Oauth
       end
 
       cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
-      secret = cred.static_secrets.sole
+      secret = cred.static_secret
       assert_equal cred, secret.broker_credential # first-class link to the credential
       assert_equal cred.namespace, secret.namespace
-      assert_equal cred.foreign_id, secret.foreign_id
+      assert_nil secret.foreign_id # found by association, so no collidable foreign_id
       assert_nil secret.created_by # the unauthenticated flow has no operator
       assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }, secret.inject_config)
       assert_equal "token_broker", secret.source.source_type
@@ -177,7 +177,8 @@ module Oauth
       state1 = start_flow
       stub_exchange(status: 200, body: token_body)
       get oauth_callback_url(slug: "google"), params: { state: state1, code: "code-1" }
-      secret = StaticSecret.find_by(foreign_id: "google-google-google-sub-1")
+      cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
+      secret = cred.static_secret
       assert_not_nil secret
       secret.update!(name: "operator-renamed")
 

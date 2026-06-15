@@ -15,6 +15,10 @@ module Console
       @principal.principal_roles.find_or_create_by!(role: role)
       redirect_to console_principal_path(@principal.oid),
                   notice: "Assigned role #{role_label(role)}."
+    rescue ActiveRecord::RecordNotUnique
+      # A concurrent submit already created the assignment; the end state is what
+      # the operator asked for, so report success rather than 500.
+      redirect_to console_principal_path(@principal.oid), notice: "Assigned role #{role_label(role)}."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
     end
@@ -33,6 +37,10 @@ module Console
       @principal.grants.create_with(created_by: current_user).find_or_create_by!(grantable_assoc(secret) => secret)
       redirect_to console_principal_path(@principal.oid),
                   notice: "Granted #{secret_label(secret)}."
+    rescue ActiveRecord::RecordNotUnique
+      # A concurrent submit already created the grant; the secret is granted either
+      # way, so report success rather than 500.
+      redirect_to console_principal_path(@principal.oid), notice: "Granted #{secret_label(secret)}."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
     end

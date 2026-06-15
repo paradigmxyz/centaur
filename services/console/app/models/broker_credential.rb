@@ -38,10 +38,11 @@ class BrokerCredential < ApplicationRecord
   # Set on credentials minted by the OAuth consent flow; they delegate their
   # client_id/client_secret to the app (see #effective_client_secret).
   belongs_to :oauth_app, optional: true
-  # Grantable static secrets wrapping this credential (the OAuth consent flow
-  # auto-creates one). Nullify on delete -- the before_destroy guard below already
-  # blocks deletion while a token_broker source still references the credential.
-  has_many :static_secrets, dependent: :nullify
+  # The grantable static secret wrapping this credential (the OAuth consent flow
+  # auto-creates one; at most one, enforced by a unique index). Nullify on delete --
+  # the before_destroy guard below already blocks deletion while a token_broker
+  # source still references the credential.
+  has_one :static_secret, dependent: :nullify
 
   attr_writer :refresh_client
 

@@ -315,7 +315,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_15_224547) do
     t.string "namespace", default: "default", null: false
     t.jsonb "replace_config"
     t.datetime "updated_at", null: false
-    t.index ["broker_credential_id"], name: "index_static_secrets_on_broker_credential_id"
+    t.index ["broker_credential_id"], name: "index_static_secrets_on_broker_credential_id", unique: true, where: "(broker_credential_id IS NOT NULL)"
     t.index ["created_by_id"], name: "index_static_secrets_on_created_by_id"
     t.index ["labels"], name: "index_static_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_static_secrets_on_namespace_and_foreign_id", unique: true

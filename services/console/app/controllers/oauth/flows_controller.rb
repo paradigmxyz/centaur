@@ -98,6 +98,11 @@ module Oauth
       # credential. Log the messages only -- never token values.
       Rails.logger.error { "oauth flow credential save failed: #{e.record.errors.full_messages.to_sentence}" }
       render_result(:error, message: "Connecting the integration failed while saving the credential.")
+    rescue ActiveRecord::RecordNotUnique
+      # A concurrent consent for the same account won the unique index on the
+      # credential or its wrapping secret. The winner's record is already saved, so
+      # the user just needs to retry; the next consent upserts cleanly.
+      render_result(:error, message: "Another consent for this account is in progress. Try again.")
     end
 
     private
@@ -187,16 +192,17 @@ module Oauth
     # pointing at the credential, scoped to the provider's API hosts. The token
     # stays fresh because the source resolves the credential live at sync time.
     #
-    # Created once per credential (keyed on the broker_credential association) and
-    # left untouched on re-consent, so any operator edits -- a different header,
-    # extra rules -- survive. Has no created_by: the unauthenticated flow has no
-    # current user, like the credential it wraps.
+    # Created once per credential (keyed on the broker_credential association, which
+    # a unique index enforces) and left untouched on re-consent, so any operator
+    # edits -- a different header, extra rules -- survive. Has no created_by: the
+    # unauthenticated flow has no current user, like the credential it wraps. Left
+    # without a foreign_id: it is found by association, and copying the credential's
+    # would risk colliding with an operator-created secret.
     def ensure_wrapping_secret(credential)
       secret = StaticSecret.find_or_initialize_by(broker_credential: credential)
       return secret unless secret.new_record?
 
       secret.namespace = credential.namespace
-      secret.foreign_id = credential.foreign_id
       secret.name = "#{credential.name} token"
       secret.inject_config = { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }
       secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })
