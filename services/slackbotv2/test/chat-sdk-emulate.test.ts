@@ -1182,13 +1182,15 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
-  it('reposts the durable final answer exactly once when Slack rejects the stream stop as too long', async () => {
+  it('replaces the failed stream with the durable final answer when Slack rejects stop as too long', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
     codexApi.autoRespond = false
     // Every stop fails: the streamed message never finalizes, so its content
-    // breaks in real Slack. The bot must repost the durable answer once.
+    // breaks in real Slack. Size-limit failures should be prevented by
+    // segmentation; if one still happens, replace the broken stream instead of
+    // posting a duplicate fallback reply in the thread.
     slackApi.failStreamStopsLongerThan(10)
 
     const parent = await postUserMessage('Context before an oversized Slack render.')
@@ -1240,13 +1242,10 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
     const texts = await threadTexts(parent.ts)
-    // The streamed message broke ("Something went wrong"), so the durable
-    // final answer must be reposted - exactly once, never duplicated.
-    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(true)
-    const visibleFinalReplies = texts.filter(text =>
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+    expect(texts.filter(text =>
       text.includes('TOO_LONG_FALLBACK_VISIBLE')
-    )
-    expect(visibleFinalReplies).toHaveLength(1)
+    )).toHaveLength(1)
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
       expect.objectContaining({
@@ -1496,6 +1495,71 @@ describe('slackbotv2', () => {
     } finally {
       delete process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET
     }
+  })
+
+  it('keeps card-heavy structured streams below Slack finalization payload limits', async () => {
+    slackApi.failStreamStopsLongerThan(12_000)
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a production-sized card render.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> run enough steps to paginate`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-structured-payload-budget',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> run enough steps to paginate`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    for (let index = 1; index <= 36; index++) {
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: `cmd-payload-${index}`,
+            type: 'commandExecution',
+            command: `step-${index} ${'x'.repeat(220)}`,
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        })
+      )
+    }
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-structured-payload-budget',
+      status: 'completed',
+      result_text: 'STRUCTURED_PAYLOAD_BUDGET_ANSWER_VISIBLE'
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts.length).toBeGreaterThanOrEqual(2)
+    for (const transcript of transcripts) {
+      expect(streamTranscriptPayloadChars(transcript)).toBeLessThanOrEqual(12_000)
+    }
+    const texts = await threadTexts(parent.ts)
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+    expect(texts.filter(text =>
+      text.includes('STRUCTURED_PAYLOAD_BUDGET_ANSWER_VISIBLE')
+    )).toHaveLength(1)
   })
 
   it('recovers the final answer when thread state already advanced past the terminal event', async () => {
@@ -1755,13 +1819,16 @@ describe('slackbotv2', () => {
     expect(transcripts.length).toBeGreaterThan(1)
     expect(transcripts.flatMap(transcript => transcript.chunks).filter(chunk => chunk.type === 'task_update').length)
       .toBeGreaterThan(50)
-    expect(
+    const taskCounts = transcripts.map(transcript =>
       new Set(
-        transcripts[0]!.chunks
+        transcript.chunks
           .filter(chunk => chunk.type === 'task_update')
           .map(chunk => stringField(chunk.id))
       ).size
-    ).toBe(50)
+    )
+    expect(taskCounts[0]).toBeGreaterThan(0)
+    expect(taskCounts[0]).toBeLessThan(50)
+    expect(Math.max(...taskCounts)).toBeLessThanOrEqual(50)
     expect(await threadText(parent.ts)).toContain('TASK_STREAM_CONTINUATION_OK')
   })
 
@@ -3470,6 +3537,7 @@ type StreamCall = {
 
 type StreamRecord = {
   channel: string
+  payloadChars: number
   text: string
   ts: string
 }
@@ -3749,6 +3817,7 @@ async function startStream(
   const channel = stringField(body.channel)
   const threadTs = stringField(body.thread_ts)
   const text = streamBodyText(body) || ' '
+  const payloadChars = streamBodyPayloadChars(body)
   const posted = await postSlack(emulatorUrl, request, '/api/chat.postMessage', {
     channel,
     thread_ts: threadTs || undefined,
@@ -3757,7 +3826,7 @@ async function startStream(
   if (!posted.ok) return Response.json(posted)
   const ts = stringField(posted.ts)
   calls.push({ method: 'chat.startStream', body, streamTs: ts })
-  streams.set(streamKey(channel, ts), { channel, ts, text })
+  streams.set(streamKey(channel, ts), { channel, payloadChars, ts, text })
   return Response.json({ ok: true, channel, ts })
 }
 
@@ -3783,8 +3852,9 @@ async function appendStream(
     return Response.json({ ok: false, error: appendFailure.error })
   }
   if (appendFailure.remaining > 0) appendFailure.remaining -= 1
-  const record = streams.get(streamKey(channel, ts)) ?? { channel, ts, text: '' }
+  const record = streams.get(streamKey(channel, ts)) ?? { channel, payloadChars: 0, ts, text: '' }
   record.text += streamBodyText(body)
+  record.payloadChars += streamBodyPayloadChars(body)
   streams.set(streamKey(channel, ts), record)
   await postSlack(emulatorUrl, request, '/api/chat.update', {
     channel,
@@ -3806,9 +3876,10 @@ async function stopStream(
   const ts = stringField(body.ts)
   calls.push({ method: 'chat.stopStream', body, streamTs: ts })
   const key = streamKey(channel, ts)
-  const record = streams.get(key) ?? { channel, ts, text: '' }
+  const record = streams.get(key) ?? { channel, payloadChars: 0, ts, text: '' }
   const text = [record.text, streamBodyText(body)].filter(part => part.trim()).join('\n')
-  if (maxStreamStopChars !== null && text.length > maxStreamStopChars) {
+  const payloadChars = record.payloadChars + streamBodyPayloadChars(body)
+  if (maxStreamStopChars !== null && payloadChars > maxStreamStopChars) {
     // A stream that is never stopped breaks in real Slack: the message shows
     // "Something went wrong" instead of the streamed content.
     await postSlack(emulatorUrl, request, '/api/chat.update', {
@@ -3858,6 +3929,14 @@ async function postSlack(
 
 function streamBodyText(body: Record<string, unknown>): string {
   return [stringField(body.markdown_text), chunksText(body.chunks)].filter(Boolean).join('\n')
+}
+
+function streamBodyPayloadChars(body: Record<string, unknown>): number {
+  return (
+    stringField(body.markdown_text).length
+    + JSON.stringify(streamChunks(body.chunks)).length
+    + JSON.stringify(body.blocks ?? []).length
+  )
 }
 
 function streamChunks(value: unknown): Record<string, unknown>[] {
@@ -4031,6 +4110,10 @@ function slackStreamTranscripts(calls: StreamCall[]): SlackStreamTranscript[] {
     const chunks = streamCalls.flatMap(call => streamChunks(call.body.chunks))
     return { appends, calls: streamCalls, chunks, start, stop, streamTs }
   })
+}
+
+function streamTranscriptPayloadChars(transcript: SlackStreamTranscript): number {
+  return transcript.calls.reduce((total, call) => total + streamBodyPayloadChars(call.body), 0)
 }
 
 function chunkText(chunk: Record<string, unknown>): string {

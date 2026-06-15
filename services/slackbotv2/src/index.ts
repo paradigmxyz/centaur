@@ -562,6 +562,20 @@ async function renderExecutionAttempt(
       error: errorMessage(error),
       slack_answer_lost: answerLost ?? 'unknown'
     })
+    const replaceMessageId = isSlackStreamSizeLimitError(error)
+      ? slackStreamMessageId(error)
+      : undefined
+    if (isSlackStreamSizeLimitError(error) && !replaceMessageId) {
+      // Size-limit failures should be prevented by stream segmentation. If
+      // Slack still rejects a stream as too large but does not expose the
+      // failed stream message id, do not post a separate duplicate fallback.
+      rendered = true
+      traceLog(options, 'slackbotv2_render_failed_size_limit_no_replacement', trace, {
+        error: errorMessage(error),
+        slack_answer_lost: answerLost ?? 'unknown'
+      })
+      return 'complete'
+    }
     const fallback = await renderFallbackFinalAnswer(
       thread,
       options,
@@ -570,7 +584,8 @@ async function renderExecutionAttempt(
         executionId: input.executionId,
         threadId: input.threadId
       },
-      trace
+      trace,
+      replaceMessageId ? { replaceMessageId } : undefined
     )
     if (fallback) {
       rendered = true
@@ -605,6 +620,29 @@ function slackAnswerLost(error: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined
 }
 
+function isSlackStreamSizeLimitError(error: unknown): boolean {
+  const code = slackStreamErrorCode(error)
+  return code.includes('msg_too_long') || code.includes('msg_blocks_too_long')
+}
+
+function slackStreamMessageId(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const value = (error as { slackStreamMessageId?: unknown }).slackStreamMessageId
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function slackStreamErrorCode(error: unknown): string {
+  if (!error || typeof error !== 'object') return typeof error === 'string' ? error : ''
+  const record = error as Record<string, unknown>
+  if (typeof record.error === 'string') return record.error
+  const data = record.data
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const dataError = (data as Record<string, unknown>).error
+    if (typeof dataError === 'string') return dataError
+  }
+  return typeof record.message === 'string' ? record.message : ''
+}
+
 const FALLBACK_OPEN_MAX_ATTEMPTS = 4
 
 /**
@@ -620,7 +658,8 @@ async function renderFallbackFinalAnswer(
   thread: Thread,
   options: SlackbotV2Options,
   source: { afterEventId: number; executionId?: string; threadId: string },
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  replacement?: { replaceMessageId: string }
 ): Promise<{ lastEventId: number } | null> {
   const startedAtMs = nowMs()
   let lastEventId = source.afterEventId
@@ -665,12 +704,16 @@ async function renderFallbackFinalAnswer(
       })
       return null
     }
-    await thread.post(
-      truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
-    )
+    const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
+    if (replacement) {
+      await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
+    } else {
+      await thread.post(fallbackText)
+    }
     traceLog(options, 'slackbotv2_render_fallback_complete', trace, {
       chars: text.length,
       last_event_id: lastEventId,
+      replacement_message_id: replacement?.replaceMessageId,
       phase_ms: elapsedMs(startedAtMs)
     })
     return { lastEventId }
@@ -916,6 +959,20 @@ async function recoverRenderObligation(
         error: errorMessage(error),
         slack_answer_lost: answerLost ?? 'unknown'
       })
+      const replaceMessageId = isSlackStreamSizeLimitError(error)
+        ? slackStreamMessageId(error)
+        : undefined
+      if (isSlackStreamSizeLimitError(error) && !replaceMessageId) {
+        // Size-limit failures should be prevented by stream segmentation. If
+        // Slack still rejects a stream as too large but does not expose the
+        // failed stream message id, do not post a separate duplicate fallback.
+        rendered = true
+        traceLog(options, 'slackbotv2_render_recovery_failed_size_limit_no_replacement', trace, {
+          error: errorMessage(error),
+          slack_answer_lost: answerLost ?? 'unknown'
+        })
+        return false
+      }
       const fallback = await renderFallbackFinalAnswer(
         thread,
         options,
@@ -924,7 +981,8 @@ async function recoverRenderObligation(
           executionId: obligation.executionId,
           threadId
         },
-        trace
+        trace,
+        replaceMessageId ? { replaceMessageId } : undefined
       )
       if (!fallback) throw error
       rendered = true
