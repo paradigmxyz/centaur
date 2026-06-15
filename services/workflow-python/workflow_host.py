@@ -564,7 +564,8 @@ def push_metric_lines(lines: list[str]) -> None:
         method="POST",
     )
     try:
-        urllib.request.urlopen(request, timeout=2).close()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.open(request, timeout=2).close()
     except Exception as exc:
         print(f"workflow_metric_push_error error={exc}", file=sys.stderr)
 
