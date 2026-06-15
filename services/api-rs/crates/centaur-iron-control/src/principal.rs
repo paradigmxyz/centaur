@@ -205,8 +205,7 @@ mod tests {
 
     #[test]
     fn conversation_name_overrides_the_channel_display_name_but_not_the_key() {
-        let principal =
-            derive_principal("slack:T123:C456:ts", Some("U1"), Some("eng-oncall"));
+        let principal = derive_principal("slack:T123:C456:ts", Some("U1"), Some("eng-oncall"));
         // Key stays derived from ids so renames never split the principal.
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
         assert_eq!(principal.name, "Slack Channel #eng-oncall");
