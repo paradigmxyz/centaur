@@ -141,6 +141,18 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_oauth_app_path(app.oid)
   end
 
+  test "principal detail page renders the role and direct-grant management forms" do
+    principal = principals(:acme_channel)
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    assert_select "h2", text: "Direct Grants"
+    assert_select "select[name=role_id]"
+    assert_select "select[name=grantable] optgroup"
+    # Each direct grant exposes a revoke form; each assigned role chip a remove (×) form.
+    assert_select "form[action=?]", console_principal_revoke_grant_path(principal.oid, grants(:acme_channel_github_token).oid)
+    assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid)
+  end
+
   test "header shows the signed-in operator and a sign-out control" do
     get console_principals_url
     assert_response :ok

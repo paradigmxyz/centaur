@@ -27,23 +27,102 @@
 <section class="mb-8">
   <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Assigned Roles</h2>
   <% if @roles.any? %>
-    <div class="flex flex-wrap gap-2">
+    <div class="mb-4 flex flex-wrap gap-2">
       <% @roles.each do |r| %>
         <span class="inline-flex items-center gap-2 rounded-lg border border-ink-600 bg-ink-800 px-3 py-1.5 text-sm">
           <span class="text-centaur-400"><%= r.oid %></span>
           <span class="text-zinc-300"><%= r.name.presence || r.foreign_id %></span>
+          <%= button_to "×", console_principal_unassign_role_path(@principal.oid, r.oid), method: :delete,
+                form: { class: "inline", data: { turbo_confirm: "Unassign #{r.name.presence || r.foreign_id} from this principal?" } },
+                class: "cursor-pointer leading-none text-zinc-500 transition-colors hover:text-red-400",
+                title: "Unassign role" %>
         </span>
       <% end %>
     </div>
   <% else %>
-    <p class="text-sm text-zinc-600">No roles assigned.</p>
+    <p class="mb-4 text-sm text-zinc-600">No roles assigned.</p>
+  <% end %>
+
+  <% if @assignable_roles.any? %>
+    <%= form_with url: console_principal_assign_role_path(@principal.oid), method: :post, data: { turbo: false } do %>
+      <div class="flex flex-wrap items-center gap-3">
+        <select name="role_id" class="form-input max-w-md">
+          <% @assignable_roles.each do |r| %>
+            <option value="<%= r.oid %>"><%= r.name.presence || r.foreign_id.presence || r.oid %> (<%= r.namespace %>)</option>
+          <% end %>
+        </select>
+        <%= submit_tag "Assign role", class: "btn-primary" %>
+      </div>
+    <% end %>
+  <% else %>
+    <p class="text-sm text-zinc-600">No more roles available to assign.</p>
+  <% end %>
+</section>
+
+<!-- Direct grants -->
+<section class="mb-8">
+  <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Direct Grants</h2>
+  <p class="mb-4 text-sm text-zinc-500">Secrets granted to this principal directly. Grants inherited from roles are managed on the role, not here.</p>
+
+  <% if @direct_grants.any? %>
+    <div class="console-panel mb-4">
+      <table class="console-table">
+        <thead class="console-table-head">
+          <tr>
+            <th class="console-th">Type</th>
+            <th class="console-th">ID</th>
+            <th class="console-th">Foreign ID</th>
+            <th class="console-th">Name</th>
+            <th class="console-th text-right"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-ink-700">
+          <% @direct_grants.each do |grant| %>
+            <% s = grant.grantable %>
+            <tr class="console-row-hover">
+              <td class="console-td-nowrap">
+                <span class="resource-badge"><%= secret_kind_label(s.class.name.underscore.delete_suffix("_secret")) %></span>
+              </td>
+              <td class="console-td-nowrap text-centaur-400"><%= s.oid %></td>
+              <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
+              <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
+              <td class="console-td-nowrap text-right">
+                <%= button_to "Revoke", console_principal_revoke_grant_path(@principal.oid, grant.oid), method: :delete,
+                      form: { data: { turbo_confirm: "Revoke this grant?" } },
+                      class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-red-500/40 hover:text-red-300" %>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% else %>
+    <div class="mb-4 rounded-xl border border-dashed border-ink-600 bg-ink-850/40 px-5 py-10 text-center text-zinc-600">
+      No direct grants. Use the form below to grant a secret.
+    </div>
+  <% end %>
+
+  <%= form_with url: console_principal_grant_secret_path(@principal.oid), method: :post, data: { turbo: false } do %>
+    <div class="flex flex-wrap items-center gap-3">
+      <select name="grantable" class="form-input max-w-md">
+        <% @assignable_secrets.each do |kind, secrets| %>
+          <% next if secrets.empty? %>
+          <optgroup label="<%= secret_kind_label(kind) %>">
+            <% secrets.each do |s| %>
+              <option value="<%= kind %>:<%= s.oid %>"><%= s.try(:name).presence || s.foreign_id.presence || s.oid %> (<%= s.namespace %>)</option>
+            <% end %>
+          </optgroup>
+        <% end %>
+      </select>
+      <%= submit_tag "Grant secret", class: "btn-primary" %>
+    </div>
   <% end %>
 </section>
 
 <!-- Effective grants -->
 <section>
   <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Effective Grants</h2>
-  <p class="mb-4 text-sm text-zinc-500">Every secret this principal resolves to: direct grants plus grants inherited from its roles.</p>
+  <p class="mb-4 text-sm text-zinc-500">Every secret this principal resolves to: the direct grants above plus grants inherited from its roles. Read-only.</p>
 
   <% total = @granted.values.sum(&:size) %>
   <% if total.zero? %>

@@ -31,6 +31,17 @@ class ConsoleController < ApplicationController
       "pg_dsn" => @principal.granted_pg_dsn_secrets,
       "hmac" => @principal.granted_hmac_secrets
     }
+    # Direct grants (revocable here) -- distinct from @granted, which also folds in
+    # grants inherited from roles.
+    @direct_grants = @principal.grants
+      .includes(Grant::GRANTABLE_ASSOCIATIONS)
+      .order(:id)
+    # Assignment options for the inline forms. Roles/secrets span all namespaces;
+    # the namespace is shown as a label on each option.
+    @assignable_roles = Role.where.not(id: @principal.role_ids).order(:namespace, :id)
+    @assignable_secrets = SECRET_KINDS.transform_values do |cfg|
+      cfg[:model].order(:namespace, :id)
+    end
   end
 
   def secrets
