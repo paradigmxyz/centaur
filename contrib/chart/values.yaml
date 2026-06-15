@@ -288,6 +288,25 @@ slackbotv2:
   extraEnv: {}
   resources: {}
 
+# Discord chat ingress — mirrors slackbotv2, forwards to the api-rs control plane (:8080) over a
+# persistent Discord Gateway connection. Off by default; needs a Discord app + Message Content
+# Intent + a guild allowlist. Always exactly one replica (singleton Gateway session).
+discordbot:
+  enabled: false
+  image:
+    repository: centaur-discordbot
+    tag: latest
+    pullPolicy: Always
+  userName: centaur
+  # Comma/space-separated Discord guild IDs. The bot is INERT (ignores all messages) until set.
+  guildAllowlist: ""
+  # Comma/space-separated role IDs whose mentions also trigger the bot.
+  mentionRoleIds: ""
+  # Rename auto-created threads to the triggering message; set false to keep generic names.
+  nameThreads: true
+  extraEnv: {}
+  resources: {}
+
 postgres:
   enabled: true
   image:
