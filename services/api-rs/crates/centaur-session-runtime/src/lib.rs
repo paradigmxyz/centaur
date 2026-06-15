@@ -1654,6 +1654,7 @@ fn sandbox_spec_key(spec: &SandboxSpec) -> String {
 
 fn mock_app_server_script() -> &'static str {
     r#"while IFS= read -r line; do
+printf '%s\n' "$line"
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
 sleep 0.2
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
