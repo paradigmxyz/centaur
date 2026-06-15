@@ -24,6 +24,7 @@ import { conflateChatSdkStream } from './conflate'
 import {
   collectInitialContext,
   forwardToSessionApi,
+  harnessRestartPreamble,
   isRetryableSessionApiError,
   openSessionEventStream,
   serializeMessage,
@@ -320,7 +321,9 @@ async function syncThreadMessageToSession(
     executeContextMessages:
       shouldStartExecution && shouldIncludeContext ? candidateMessages : undefined,
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
-    harnessType: overrides.harnessType,
+    // A harness override only applies when this message starts an execution;
+    // restarting the thread out from under an active execution would kill it.
+    harnessType: shouldStartExecution ? overrides.harnessType : undefined,
     messages: messagesToAppend,
     model: overrides.model,
     onEventId: eventId => {
@@ -329,6 +332,17 @@ async function syncThreadMessageToSession(
     openStream: false,
     threadId: thread.id,
     trace
+  }
+
+  // The previous harness's conversation state dies with its sandbox on a
+  // restart, so re-feed the Slack thread transcript with this turn.
+  const handleSessionRestarted = async (): Promise<void> => {
+    const history = context ?? (await collectInitialContext(thread, message))
+    forwardInput.contextPreamble = harnessRestartPreamble(history, serializedMessage.id)
+    traceLog(input.options, 'slackbotv2_forward_restart_context_built', trace, {
+      history_message_count: history.length,
+      preamble_chars: forwardInput.contextPreamble?.length ?? 0
+    })
   }
 
   const commitMessagesAppended = async (): Promise<void> => {
@@ -419,7 +433,8 @@ async function syncThreadMessageToSession(
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
     await forwardToSessionApi(input.options, forwardInput, {
       onExecutionStarted: commitExecutionStarted,
-      onMessagesAppended: commitMessagesAppended
+      onMessagesAppended: commitMessagesAppended,
+      onSessionRestarted: handleSessionRestarted
     })
     scheduleExecutionRender(
       thread,

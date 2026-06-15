@@ -1539,6 +1539,12 @@ describe('slackbotv2', () => {
       { afterEventId: 0, executionId: 'exe-recovery-consumed', threadKey: key }
     ])
     expect(await threadText(parent.ts)).toContain('Recovered consumed answer.')
+    // Recovery clears the obligation after the Slack stream stops; wait for
+    // the state write instead of racing it.
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )
@@ -2257,6 +2263,12 @@ describe('slackbotv2', () => {
       parentTs: parent.ts
     })
     expect(await threadText(parent.ts)).toContain('Recovered request.')
+    // Recovery clears the obligation after the Slack stream stops; wait for
+    // the state write instead of racing it.
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )
@@ -2527,6 +2539,12 @@ describe('slackbotv2', () => {
       { afterEventId: 0, executionId: 'exe-1', threadKey: key }
     ])
     expect(await threadText(parent.ts)).toContain('Recovered after stream retry.')
+    // Recovery clears the obligation after the Slack stream stops; wait for
+    // the state write instead of racing it.
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )

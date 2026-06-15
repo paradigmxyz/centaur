@@ -14,7 +14,8 @@ use absurd::{
 use centaur_sandbox_core::SandboxSpec;
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
-    ExecuteSessionInput, SESSION_OUTPUT_LINE_EVENT, SandboxRuntime, SessionRuntime,
+    ExecuteSessionInput, HarnessConflictPolicy, SESSION_OUTPUT_LINE_EVENT, SandboxRuntime,
+    SessionRuntime,
 };
 use centaur_session_sqlx::PgSessionStore;
 use chrono::{DateTime, Utc};
@@ -2536,6 +2537,7 @@ async fn run_agent_session_turn(
             &harness_type,
             persona_id.as_deref(),
             Some(session_metadata),
+            HarnessConflictPolicy::Reject,
         )
         .await?;
     session_runtime

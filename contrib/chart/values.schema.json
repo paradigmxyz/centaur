@@ -1,6 +1,56 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "definitions": {
+    "consoleConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer" },
+        "railsEnv": { "type": "string" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "database": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "httpPort": { "type": "integer" }
+          }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "annotations": { "type": "object" },
+            "defaultBackend": { "type": "boolean" },
+            "host": { "type": "string" },
+            "tls": { "type": "array" }
+          }
+        },
+        "worker": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "replicaCount": { "type": "integer" },
+            "resources": { "type": "object" }
+          }
+        },
+        "resources": { "type": "object" }
+      }
+    }
+  },
   "properties": {
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
@@ -62,35 +112,8 @@
         }
       }
     },
-    "ironControl": {
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "replicaCount": { "type": "integer" },
-        "railsEnv": { "type": "string" },
-        "image": {
-          "type": "object",
-          "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string" }
-          }
-        },
-        "database": {
-          "type": "object",
-          "properties": {
-            "name": { "type": "string" }
-          }
-        },
-        "service": {
-          "type": "object",
-          "properties": {
-            "httpPort": { "type": "integer" }
-          }
-        },
-        "resources": { "type": "object" }
-      }
-    },
+    "console": { "$ref": "#/definitions/consoleConfig" },
+    "ironControl": { "$ref": "#/definitions/consoleConfig" },
     "secrets": {
       "type": "object",
       "properties": {
@@ -102,6 +125,27 @@
       "properties": {
         "mountPath": { "type": "string" },
         "systemPrompt": { "type": "string" }
+      }
+    },
+    "overlays": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string" },
+              "ref": { "type": "string" },
+              "toolsSubdir": { "type": "string" },
+              "workflowsSubdir": { "type": "string" },
+              "skillsSubdir": { "type": "string" },
+              "promptPath": { "type": "string" },
+              "personasSubdir": { "type": "string" }
+            },
+            "required": ["repo"]
+          }
+        }
       }
     },
     "sandbox": {

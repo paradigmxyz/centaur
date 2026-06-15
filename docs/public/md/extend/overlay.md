@@ -9,16 +9,19 @@ Use an overlay when your deployment needs organization-specific tools,
 workflows, skills, personas, prompts, or sandbox files without turning the base
 Centaur repo into a fork.
 
-An overlay is a separate repo packaged as an image. The Helm chart mounts that
-image into the API and into sandbox pods. API-loaded extension points, such as
-tools and workflows, use the API mount. Sandbox-loaded extension points, such
-as skills and prompts, use the sandbox mount.
+An overlay is a separate Git repo listed in Helm values under
+`overlays.sources`. The repo-cache DaemonSet checks out each repo on every node;
+the API pod reads those checkouts from `/var/lib/centaur/repos`, and sandbox
+pods read the same revisions from `/home/agent/github`.
+
+Later overlay sources shadow earlier ones when a tool, workflow, or skill name
+collides. This lets the base Centaur repo stay generic while each deployment
+layers in reviewed organization behavior.
 
 ## Overlay layout
 
 ```text
 centaur-overlay/
-├── Dockerfile
 ├── tools/
 │   └── warehouse/
 │       ├── client.py
@@ -36,89 +39,133 @@ centaur-overlay/
 
 Only include the directories your deployment needs.
 
+## Configure ordered sources
+
+Declare every repo that contributes runtime extension points:
+
+```yaml
+overlays:
+  sources:
+    - repo: paradigmxyz/centaur
+      ref: main
+
+    - repo: your-org/centaur-overlay
+      ref: main
+```
+
+`repo` is `owner/name` on GitHub. `ref` can be a branch, tag, or commit SHA;
+omit it, set it to `""`, or set it to `main` to track the repo's default
+branch. Pinning a SHA is recommended when you need a fully reproducible
+production rollout, but many overlay repos intentionally track `main` so a
+reviewed merge is enough for new sandboxes to pick up the change after
+repo-cache refreshes.
+
+Each source defaults to the conventional layout — `toolsSubdir: tools`,
+`workflowsSubdir: workflows`, `skillsSubdir: .agents/skills` — and directories
+a repo does not contain are skipped at runtime, so a skills-only overlay needs
+no extra configuration. Set a subdir to a non-default path to relocate it, or
+to `""` to explicitly disable that surface for a source:
+
+```yaml
+    - repo: your-org/workflows-only
+      ref: main
+      workflowsSubdir: flows
+      toolsSubdir: ""
+      skillsSubdir: ""
+```
+
+For compatibility, when `overlays.sources` is empty the chart maps
+`toolServer.repo`, `toolServer.ref`, `toolServer.subdir`, and
+`toolServer.extraSources[]` into the same ordered overlay list.
+
 ## Mount paths
 
-The same overlay image is mounted in two places:
+Repo-cache-backed overlays appear under different prefixes depending on where
+you are debugging:
 
 | Runtime | Mount | Used for |
 |---------|-------|----------|
-| API | `/app/overlay/org` | Tool discovery, workflow discovery, overlay migrations, API-side prompt assembly. |
-| Sandbox | `/home/agent/overlay/org` | Skills, persona files, sandbox prompt overlay, runtime files available to agents. |
+| API | `/var/lib/centaur/repos/<owner>/<repo>` | Tool-secret discovery and workflow discovery. |
+| Sandbox | `/home/agent/github/<owner>/<repo>` | Workflow-host execution, skills, persona files, prompt fragments, and runtime files available to agents. |
 
 Do not use the sandbox path when debugging API discovery. If a tool or workflow
-is missing, inspect `/app/overlay/org` in the API container. If a skill or prompt
-overlay is missing, inspect `/home/agent/overlay/org` in the sandbox.
+is missing from API discovery, inspect `/var/lib/centaur/repos/...` in the API
+container. If a skill or workflow-host import is missing, inspect
+`/home/agent/github/...` in the sandbox.
 
 ## Discovery paths
 
-When `overlay.image.repository` is configured, the chart adds the overlay to the
-API discovery paths:
+The chart renders API discovery paths from the ordered overlay list:
 
 ```text
-TOOL_DIRS=/app/tools:/app/overlay/org/tools
-WORKFLOW_DIRS=/app/workflows:/app/overlay/org/workflows
+TOOL_DIRS=/var/lib/centaur/repos/paradigmxyz/centaur/tools:/var/lib/centaur/repos/your-org/centaur-overlay/tools
+WORKFLOW_DIRS=/var/lib/centaur/repos/paradigmxyz/centaur/workflows:/var/lib/centaur/repos/your-org/centaur-overlay/workflows
 ```
 
-Later directories can shadow earlier entries. That means an overlay can
-intentionally replace a base tool or workflow with the same name.
-
-Sandbox pods receive:
+The same ordered workflow list is translated for workflow-host sandboxes:
 
 ```text
-CENTAUR_OVERLAY_DIR=/home/agent/overlay/org
+WORKFLOW_DIRS=/home/agent/github/paradigmxyz/centaur/workflows:/home/agent/github/your-org/centaur-overlay/workflows
 ```
 
-The sandbox entrypoint copies overlay skills from
-`$CENTAUR_OVERLAY_DIR/.agents/skills` into the agent workspace during startup.
-The active deployment block in the sandbox prompt also states whether an overlay
-is loaded and where it is mounted.
+Agent sandboxes receive overlay skills through:
 
-## Package the image
-
-Use an image that copies the overlay repo into `/overlay`:
-
-```dockerfile
-FROM alpine:3.20
-WORKDIR /overlay
-COPY . /overlay
+```text
+CENTAUR_SKILL_DIRS=/home/agent/github/paradigmxyz/centaur/.agents/skills:/home/agent/github/your-org/centaur-overlay/.agents/skills
 ```
 
-Configure the chart with the image and source path:
+The sandbox entrypoint copies each existing directory from `CENTAUR_SKILL_DIRS`
+into the agent workspace in order, so later overlay skill directories can
+replace earlier skill names.
+
+## Prompt overlays
+
+For small prompt additions, keep using the chart-level escape hatch:
 
 ```yaml
 overlay:
-  image:
-    repository: ghcr.io/your-org/centaur-overlay
-    tag: sha-abc123
-    pullPolicy: IfNotPresent
-    sourcePath: /overlay
+  systemPrompt: |
+    Add deployment-specific agent guidance here.
 ```
+
+For larger prompt/persona sets, keep files in an overlay repo and expose their
+paths through `overlays.sources` as that surface is wired into your deployment.
+Do not rely on `overlay.image.*`; repo-cache-backed overlays are the default
+delivery path.
 
 ## Verify the overlay
 
-Check the runtime payload for a thread:
+Verify the API pod sees the ordered API-side paths:
 
 ```bash
-curl -s "$CENTAUR_API_URL/agent/runtime?key=$THREAD_KEY" \
-  -H "X-Api-Key: $CENTAUR_API_KEY" | jq '.overlay'
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- sh -lc '
+  echo "$TOOL_DIRS"
+  echo "$WORKFLOW_DIRS"
+  for d in ${TOOL_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -mindepth 1 -type d | sort; done
+  for d in ${WORKFLOW_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
+'
 ```
 
-For API-loaded extensions, verify from the API deployment:
+Verify an agent sandbox sees merged tools and copied skills:
 
 ```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  sh -lc 'echo "$TOOL_DIRS"; echo "$WORKFLOW_DIRS"; ls -la /app/overlay/org'
+kubectl exec -n centaur <agent-sandbox-pod> -- sh -lc '
+  echo "$TOOL_DIRS"
+  echo "$CENTAUR_SKILL_DIRS"
+  ls -la /app/tools
+  find /workspace/.agents/skills -maxdepth 2 -type f -name SKILL.md | sort
+'
 ```
 
-For sandbox-loaded extensions, verify from a sandbox or ask the running agent to
-inspect:
+Verify a workflow-host sandbox sees the sandbox-translated workflow list:
 
 ```bash
-echo "$CENTAUR_OVERLAY_DIR"
-ls "$CENTAUR_OVERLAY_DIR"
-ls "$CENTAUR_OVERLAY_DIR/.agents/skills"
+kubectl exec -n centaur <workflow-host-pod> -- sh -lc '
+  echo "$WORKFLOW_DIRS"
+  for d in ${WORKFLOW_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
+'
 ```
 
-If something is missing, check the overlay image contents first, then the chart
-values, image tag, `sourcePath`, and the API or sandbox mount path relevant to
-the extension type.
+If something is missing, check the configured repo/ref, repo-cache readiness,
+the rendered env vars, and the API or sandbox mount prefix relevant to the
+extension type.

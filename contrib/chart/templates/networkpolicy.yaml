@@ -1,5 +1,6 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $ingressSourceNamespaces := default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -70,15 +71,15 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "discordbot") | nindent 14 }}
 {{- end }}
-{{- if .Values.ironControl.enabled }}
+{{- if $console.enabled }}
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
-{{- if .Values.ironControl.worker.enabled }}
-        # iron-control Solid Queue worker (bin/jobs) reaches the app + queue DBs.
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+{{- if $console.worker.enabled }}
+        # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control-worker") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
 {{- end }}
 {{- end }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
@@ -186,15 +187,15 @@ spec:
           port: {{ .Values.ironProxy.service.proxyPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.pgPort }}
-{{- if .Values.ironControl.enabled }}
-    # iron-control control plane: register principals/roles/grants and per-sandbox proxies.
+{{- if $console.enabled }}
+    # console control plane: register principals/roles/grants and per-sandbox proxies.
     - to:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ .Values.ironControl.service.httpPort }}
+          port: {{ $console.service.httpPort }}
 {{- end }}
 {{- if .Values.networkPolicy.otlpEgress.enabled }}
     # OTLP trace export (e.g. Laminar). The collector lives in another

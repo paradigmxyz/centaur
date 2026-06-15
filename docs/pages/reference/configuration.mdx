@@ -18,7 +18,8 @@ Use these as the main extension points:
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
-| `overlay.*` | Overlay mount path and overlay image passed to the API and sandboxes. |
+| `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
+| `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
 
 Tool credentials are not listed here. Tool plugins declare their own secrets in
 `tools/**/pyproject.toml`; Centaur resolves them through `secret(...)` and
@@ -62,10 +63,8 @@ Optional required-by-mode variables:
 | `WORKFLOW_WORKER_ENABLED` | `api.workflowWorkerEnabled`. | Starts the durable workflow worker. |
 | `WARM_POOL_ENABLED` | `api.warmPoolEnabled`. | Starts warm sandbox replenishment. |
 | `PLUGIN_WATCHER_ENABLED` | `api.pluginWatcherEnabled`. | Enables tool and workflow hot-reload watchers. |
-| `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from base tools and overlay; fallback to `PLUGINS_DIR`. | Tool discovery paths. |
-| `WORKFLOW_DIRS` | Chart-rendered from base workflows and overlay. | Workflow discovery paths. |
-| `CENTAUR_OVERLAY_DIR` | `overlay.mountPath`. | Mounted overlay root for tools, workflows, prompts, migrations, and skills. |
-| `CENTAUR_OVERLAY_IMAGE`, `CENTAUR_OVERLAY_IMAGE_PULL_POLICY`, `CENTAUR_OVERLAY_IMAGE_SOURCE_PATH` | `overlay.image.*`. | Overlay image copied into sandbox pods. |
+| `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from `overlays.sources[*].toolsSubdir` (default `tools`); fallback to `PLUGINS_DIR`. | Tool discovery paths. |
+| `WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`). | Workflow discovery paths. |
 | `SLACKBOT_URL` | Chart-rendered Slackbot service URL. | API callback target for Slack delivery. |
 | `FINAL_DELIVERY_MAX_ATTEMPTS`, `FINAL_DELIVERY_READY_GRACE_S` | `api.extraEnv`. | Final-delivery retry and claim timing. |
 | `CENTAUR_ENABLE_GCLOUD_BOOTSTRAP`, `GCP_GCLOUD_CREDENTIAL`, `GCLOUD_PROJECT` | `api.extraEnv` or Secret. | Optional gcloud ADC bootstrap in the API container. |
@@ -144,6 +143,7 @@ Kubernetes backend:
 | `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
 | `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |
+| `KUBERNETES_WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`) using the sandbox repo-cache mount prefix. | Workflow-host sandbox discovery paths. |
 | `KUBERNETES_FIREWALL_CA_SECRET_NAME`, `KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME` | `firewall.existingCa*` or generated CA Secrets. | CA material for sandbox/proxy TLS interception. |
 | `KUBERNETES_SECRET_ENV_NAME`, `KUBERNETES_SECRET_ENV_PREFIX`, `KUBERNETES_BOOTSTRAP_SECRET_NAME` | `secretManager.*`, `secrets.bootstrapSecretName`. | Secrets read by API-created proxy/sandbox pods. |
 | `KUBERNETES_IRON_PROXY_IMAGE`, `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY`, `KUBERNETES_IRON_PROXY_PORT`, `KUBERNETES_IRON_PROXY_MANAGEMENT_PORT`, `KUBERNETES_IRON_PROXY_HEALTH_PORT` | `ironProxy.*`. | Per-sandbox iron-proxy image and ports. |
@@ -160,6 +160,7 @@ Sandbox entrypoint and wrappers:
 | Env var | Set from | Controls |
 | --- | --- | --- |
 | `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
+| `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |

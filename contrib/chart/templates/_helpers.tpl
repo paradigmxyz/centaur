@@ -59,6 +59,56 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{- define "centaur.overlaySources" -}}
+{{- $sources := list -}}
+{{- with .Values.overlays.sources -}}
+{{- range . -}}
+{{- if .repo -}}
+{{- $source := dict "repo" .repo -}}
+{{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- /*
+Subdir defaults: an omitted key falls back to the conventional layout
+(tools, workflows, .agents/skills); a key explicitly set to "" disables
+that surface for the source. Missing directories are skipped at runtime,
+so the defaults are safe for repos that only carry some surfaces.
+*/ -}}
+{{- if hasKey . "toolsSubdir" -}}
+{{- with .toolsSubdir }}{{- $_ := set $source "toolsSubdir" . -}}{{- end -}}
+{{- else -}}
+{{- $_ := set $source "toolsSubdir" "tools" -}}
+{{- end -}}
+{{- if hasKey . "workflowsSubdir" -}}
+{{- with .workflowsSubdir }}{{- $_ := set $source "workflowsSubdir" . -}}{{- end -}}
+{{- else -}}
+{{- $_ := set $source "workflowsSubdir" "workflows" -}}
+{{- end -}}
+{{- if hasKey . "skillsSubdir" -}}
+{{- with .skillsSubdir }}{{- $_ := set $source "skillsSubdir" . -}}{{- end -}}
+{{- else -}}
+{{- $_ := set $source "skillsSubdir" ".agents/skills" -}}
+{{- end -}}
+{{- with .promptPath }}{{- $_ := set $source "promptPath" . -}}{{- end -}}
+{{- with .personasSubdir }}{{- $_ := set $source "personasSubdir" . -}}{{- end -}}
+{{- $sources = append $sources $source -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}
+{{- if and .Values.toolServer.enabled .Values.toolServer.repo -}}
+{{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "skillsSubdir" ".agents/skills" -}}
+{{- with .Values.toolServer.ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- $sources = append $sources $source -}}
+{{- range .Values.toolServer.extraSources -}}
+{{- if .repo -}}
+{{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) -}}
+{{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- $sources = append $sources $source -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $sources -}}
+{{- end -}}
+
 {{- define "centaur.httpRouteName" -}}
 {{- $suffix := default (printf "route-%v" .index) .route.name -}}
 {{- printf "%s-%s" (include "centaur.fullname" .root) $suffix | trunc 63 | trimSuffix "-" -}}
@@ -104,17 +154,39 @@ namespace as this release, so a short DNS name is enough.
 {{- end -}}
 
 {{- /*
-iron-control — Rails control plane for authenticated API access and encrypted
-secret storage. Flag-gated (ironControl.enabled), in-cluster ClusterIP Service.
+console — Rails control plane (formerly "iron-control") for authenticated API
+access and encrypted secret storage. Flag-gated (console.enabled), in-cluster
+ClusterIP Service.
+
+Backwards compatibility: the canonical values key is `console`; `ironControl` is
+a deprecated alias that is still honored. `centaur.consoleValues` returns the
+effective config by deep-merging the two — chart defaults live under `console`,
+and any explicitly set `ironControl.*` values are layered on top so existing
+deployments that still configure `ironControl` keep working unchanged. If a key
+is set under BOTH, the legacy `ironControl` value wins for that key. All
+templates should consume this helper rather than `.Values.console` /
+`.Values.ironControl` directly.
+
+In-cluster Service/DNS names use the "console" component (e.g.
+`<release>-centaur-console`). The api-rs-facing env vars stay IRON_CONTROL_URL /
+IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
+*value* is derived from `centaur.consoleUrl`, so it tracks the Service name.
 */ -}}
-{{- define "centaur.ironControlName" -}}
-{{- include "centaur.componentName" (dict "root" . "component" "iron-control") -}}
+{{- define "centaur.consoleValues" -}}
+{{- $console := deepCopy (.Values.console | default dict) -}}
+{{- $legacy := .Values.ironControl | default dict -}}
+{{- toYaml (mergeOverwrite $console $legacy) -}}
 {{- end -}}
 
-{{- define "centaur.ironControlHost" -}}
-{{- include "centaur.ironControlName" . -}}
+{{- define "centaur.consoleName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "console") -}}
 {{- end -}}
 
-{{- define "centaur.ironControlUrl" -}}
-{{- printf "http://%s:%v" (include "centaur.ironControlHost" .) .Values.ironControl.service.httpPort -}}
+{{- define "centaur.consoleHost" -}}
+{{- include "centaur.consoleName" . -}}
+{{- end -}}
+
+{{- define "centaur.consoleUrl" -}}
+{{- $console := include "centaur.consoleValues" . | fromYaml -}}
+{{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
 {{- end -}}

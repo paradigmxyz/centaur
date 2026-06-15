@@ -55,6 +55,22 @@ describe('extractMessageOverrides', () => {
     })
     expect(extractMessageOverrides('--sonnet fix it').model).toBe('claude-sonnet-4-6')
     expect(extractMessageOverrides('--haiku fix it').model).toBe('claude-haiku-4-5')
+    expect(extractMessageOverrides('--fable fix it').model).toBe('claude-fable-5')
+  })
+
+  test('--model expands claude aliases to full model ids', () => {
+    expect(extractMessageOverrides('--claude --model opus go')).toEqual({
+      cleanedText: 'go',
+      harnessType: 'claudecode',
+      model: 'claude-opus-4-8'
+    })
+    expect(extractMessageOverrides('--model Sonnet go').model).toBe('claude-sonnet-4-6')
+    expect(extractMessageOverrides('--model fable go').model).toBe('claude-fable-5')
+  })
+
+  test('--model passes non-alias values through verbatim', () => {
+    expect(extractMessageOverrides('--codex --model gpt-5.2-codex go').model).toBe('gpt-5.2-codex')
+    expect(extractMessageOverrides('--amp --model fast go').model).toBe('fast')
   })
 
   test('explicit flags win over shortcut implications', () => {

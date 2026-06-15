@@ -23,8 +23,12 @@ Migrating existing workflows to the api-rs Absurd runtime? See
 [Workflows v2 Migration](/extend/workflows-v2).
 
 Workflows are loaded from `WORKFLOW_DIRS`. In an overlay deployment, workflow
-files must exist under `/app/overlay/org/workflows` in the API container. Files
-in those directories are loaded the same way as built-in workflows.
+files must exist under the source's `workflowsSubdir` — by default
+`workflows/` — in its repo-cache checkout, for example
+`/var/lib/centaur/repos/your-org/centaur-overlay/workflows` in the API
+container. Workflow-host sandboxes receive the same ordered list translated to
+`/home/agent/github/...`. Files in those directories are loaded the same way as
+built-in workflows; sources without the directory are skipped.
 
 ## Define a workflow
 
@@ -270,7 +274,7 @@ same trigger key maps to an existing run.
 
 After deploying an overlay, check API logs for workflow load events and create a
 small run with `eager_start: true`. If the workflow is missing, inspect
-`WORKFLOW_DIRS`, the overlay image contents, and whether the file exports
+`WORKFLOW_DIRS`, the configured repo/ref in repo-cache, and whether the file exports
 `WORKFLOW_NAME`. For webhooks, also check for
 `workflow_webhook_registered` in the API logs and send a signed request to the
 public `/api/webhooks/{slug}` URL.
