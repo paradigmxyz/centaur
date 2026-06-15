@@ -31,7 +31,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api-rs _build-iron-proxy _build-slackbotv2 _build-agent; do
+      for recipe in _build-api-rs _build-iron-proxy _build-slackbotv2 _build-agent _build-console; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -47,6 +47,7 @@ _build-all-sequential:
     just _build-iron-proxy
     just _build-slackbotv2
     just _build-agent
+    just _build-console
 
 build-one service:
     #!/usr/bin/env bash
@@ -57,6 +58,7 @@ build-one service:
       slackbotv2) just _build-slackbotv2 ;;
       agent|sandbox) just _build-agent ;;
       agent-thin|sandbox-thin) just _build-agent-thin ;;
+      console) just _build-console ;;
       *) echo "unknown service: {{service}}" >&2; exit 2 ;;
     esac
 
@@ -72,6 +74,11 @@ _build-slackbotv2:
 _build-agent:
     docker build --target "{{agent_build_target}}" -t "{{agent_image}}" -f "{{agent_dockerfile}}" .
 
+# The console builds from its own subdirectory context (services/console), unlike
+# the other services which build from the repo root.
+_build-console:
+    docker build -t centaur-console:latest -f services/console/Dockerfile services/console
+
 _build-agent-thin:
     docker build --target sandbox -t "{{thin_agent_image}}" -f services/sandbox/Dockerfile.thin .
 
@@ -81,7 +88,7 @@ _build-agent-thin:
 _push-registry:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-iron-proxy centaur-slackbotv2 centaur-agent; do
+    for img in centaur-api-rs centaur-iron-proxy centaur-slackbotv2 centaur-agent centaur-console; do
       target="{{registry}}/library/${img}:latest"
       echo "pushing ${img}:latest -> ${target}..."
       docker tag "${img}:latest" "${target}"
@@ -94,7 +101,7 @@ _push-registry:
 _import-k3s:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-iron-proxy centaur-slackbotv2 centaur-agent; do
+    for img in centaur-api-rs centaur-iron-proxy centaur-slackbotv2 centaur-agent centaur-console; do
       echo "importing ${img}:latest into k3s containerd..."
       docker save "${img}:latest" | {{k3s_ctr}} images import -
     done
@@ -115,6 +122,7 @@ deploy:
           --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
           --set slackbotv2.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbotv2
           --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
+          --set console.image.repository=ghcr.io/paradigmxyz/centaur/centaur-console
         )
         ;;
       *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
