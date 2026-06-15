@@ -127,12 +127,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # Tags are applied by the merge job on the multi-arch manifest;
           # per-arch builds are pushed by digest only. Fork PRs run with a
-          # read-only GITHUB_TOKEN, so they build without pushing. The api-rs
-          # amd64 leg also loads the same built image into Docker for the
-          # API integration test below.
+          # read-only GITHUB_TOKEN, so they build without pushing. Fork PRs
+          # load the api-rs amd64 image into Docker directly; same-repo PRs
+          # and pushes pull the pushed digest for the API integration test.
           outputs: |
             type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
-            ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' && 'type=docker,name=centaur-api-rs:integration-test' || '' }}
+            ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' && github.event.pull_request.head.repo.fork && 'type=docker,name=centaur-api-rs:integration-test' || '' }}
           build-args: |
             RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
           cache-from: |
@@ -143,6 +143,13 @@ jobs:
           cache-to: |
             ${{ !github.event.pull_request.head.repo.fork && format('type=registry,ref={0}/{1}/{2}:buildcache-{3},mode=max', env.REGISTRY, env.IMAGE_NAMESPACE, matrix.image, env.PLATFORM_SLUG) || '' }}
             type=gha,mode=max,scope=${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
+
+      - name: Load API image for integration test
+        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' && !github.event.pull_request.head.repo.fork }}
+        run: |
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+          docker pull "$image"
+          docker tag "$image" centaur-api-rs:integration-test
 
       - name: Set up Rust for API integration test
         if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
