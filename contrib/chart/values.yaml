@@ -66,19 +66,24 @@ toolServer:
     existingSecretName: ""
     secretKey: token
 
-# iron-control — Rails control plane for authenticated API access + encrypted
-# secret storage. Off by default; enable per-environment. Uses a dedicated
-# `iron_control_production` database on the bundled Postgres (its own logical DB so its
-# Rails schema_migrations table never collides with the API's migration table); an
-# init container creates the DB idempotently. DATABASE_URL, bootstrap
-# user/API-key, and the three ActiveRecord encryption keys are injected from the
-# shared infra Secret. Point IRON_CONTROL_DATABASE_URL elsewhere to use an
-# external DB.
-ironControl:
+# console — Rails control plane (formerly "iron-control") for authenticated API
+# access + encrypted secret storage. Off by default; enable per-environment.
+# Uses a dedicated `iron_control_production` database on the bundled Postgres
+# (its own logical DB so its Rails schema_migrations table never collides with
+# the API's migration table); an init container creates the DB idempotently.
+# DATABASE_URL, bootstrap user/API-key, and the three ActiveRecord encryption
+# keys are injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
+# elsewhere to use an external DB.
+#
+# Backwards compatibility: this block used to be named `ironControl`. That key is
+# still honored as a deprecated alias — anything set under `ironControl` is merged
+# on top of these `console` defaults (see the `centaur.consoleValues` helper), so
+# existing values files keep working. Prefer `console` for new configuration.
+console:
   enabled: false
   replicaCount: 1
   image:
-    repository: ironsh/iron-control
+    repository: centaur-console
     tag: latest
     # Default Always: the image is published under the mutable `latest` tag, so
     # IfNotPresent would pin pods to whatever digest a node already cached.
@@ -92,18 +97,18 @@ ironControl:
     name: iron_control_production
   service:
     httpPort: 3000
-  # Optional Ingress for iron-control. Bring your own controller — Tailscale
+  # Optional Ingress for the console. Bring your own controller — Tailscale
   # operator, Cloudflare, ingress-nginx, etc. — via className + annotations +
   # tls. Mirrors the top-level `ingress` block (which is wired to the
   # Slackbot). Add the controller's namespace to
-  # networkPolicy.ingressControllerNamespaces so its pods can reach
-  # iron-control; the iron-control NetworkPolicy admits those namespaces when
+  # networkPolicy.ingressControllerNamespaces so its pods can reach the
+  # console; the console NetworkPolicy admits those namespaces when
   # this is enabled.
   #
-  # Tailscale operator example (serves https://iron-control.<tailnet>.ts.net):
+  # Tailscale operator example (serves https://console.<tailnet>.ts.net):
   #   className: tailscale
   #   defaultBackend: true
-  #   tls: [{hosts: [iron-control]}]
+  #   tls: [{hosts: [console]}]
   ingress:
     enabled: false
     className: ""
@@ -116,11 +121,11 @@ ironControl:
     host: ""
     tls: []
   resources: {}
-  # Solid Queue worker (`bin/jobs`) that runs iron-control's background jobs —
+  # Solid Queue worker (`bin/jobs`) that runs the console's background jobs —
   # most importantly the broker-credential OAuth refresh loop that mints and
   # refreshes the access tokens delivered inline via `token_broker` sources
   # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute. Active only when ironControl.enabled.
+  # without this those jobs never execute. Active only when console.enabled.
   worker:
     enabled: true
     replicaCount: 1

@@ -1,8 +1,9 @@
-{{- if and .Values.ironControl.enabled .Values.ironControl.worker.enabled }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- if and $console.enabled $console.worker.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
-# iron-control background job worker — runs Solid Queue (`bin/jobs`) so
-# iron-control's enqueued jobs actually execute. The most important of these is
+# console background job worker — runs Solid Queue (`bin/jobs`) so
+# console's enqueued jobs actually execute. The most important of these is
 # the broker-credential OAuth refresh loop, which mints and refreshes the access
 # tokens delivered inline via `token_broker` sources (e.g. the `openai-codex`
 # brokered token); the web (Puma) pod runs no worker, so without this those jobs
@@ -12,25 +13,25 @@
 #
 # It shares the web image and the same infra-Secret env (DB URL, ActiveRecord
 # encryption keys, SECRET_KEY_BASE) so it can decrypt stored credentials. It uses
-# its own `iron-control-worker` component label so it is NOT selected by the
-# iron-control Service (which load-balances HTTP to the web pods).
+# its own `console-worker` component label so it is NOT selected by the
+# console Service (which load-balances HTTP to the web pods).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "iron-control-worker") }}
+  name: {{ include "centaur.componentName" (dict "root" . "component" "console-worker") }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control-worker") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" . "component" "console-worker") | nindent 4 }}
 spec:
-  replicas: {{ .Values.ironControl.worker.replicaCount }}
+  replicas: {{ $console.worker.replicaCount }}
   selector:
     matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control-worker") | nindent 6 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 6 }}
   template:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control-worker") | nindent 8 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 8 }}
     spec:
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
@@ -61,15 +62,15 @@ spec:
                   key: {{ printf "%sDATABASE_URL" $prefix }}
             # Rails 8 names the Solid Queue database "<primary>_queue".
             - name: QUEUE_DB_NAME
-              value: {{ printf "%s_queue" .Values.ironControl.database.name | quote }}
+              value: {{ printf "%s_queue" $console.database.name | quote }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             seccompProfile:
               type: RuntimeDefault
       containers:
-        - name: iron-control-worker
-          image: {{ printf "%s:%s" .Values.ironControl.image.repository .Values.ironControl.image.tag | quote }}
-          imagePullPolicy: {{ .Values.ironControl.image.pullPolicy }}
+        - name: console-worker
+          image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}
+          imagePullPolicy: {{ $console.image.pullPolicy }}
           # Solid Queue supervisor. Claims and runs jobs from the
           # <primary>_queue database; serves no HTTP.
           command:
@@ -119,7 +120,7 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
             - name: RAILS_ENV
-              value: {{ .Values.ironControl.railsEnv | quote }}
+              value: {{ $console.railsEnv | quote }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
           securityContext:
@@ -128,19 +129,19 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           resources:
-{{ toYaml .Values.ironControl.worker.resources | nindent 12 }}
+{{ toYaml $console.worker.resources | nindent 12 }}
 {{- if .Values.networkPolicy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "iron-control-worker") }}
+  name: {{ include "centaur.componentName" (dict "root" . "component" "console-worker") }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control-worker") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" . "component" "console-worker") | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control-worker") | nindent 6 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress

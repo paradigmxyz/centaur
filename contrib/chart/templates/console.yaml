@@ -1,8 +1,9 @@
-{{- if .Values.ironControl.enabled }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- if $console.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
-{{- $dbName := .Values.ironControl.database.name }}
-# iron-control — Rails control plane for authenticated API access and encrypted
+{{- $dbName := $console.database.name }}
+# console — Rails control plane for authenticated API access and encrypted
 # secret storage. The chart owns the Deployment shape (image, port, env,
 # security context) so operators tune it via `helm upgrade`. It runs against a
 # dedicated `iron_control_production` database on the bundled Postgres (a separate logical
@@ -11,38 +12,38 @@
 # secret material — the primary DB URL, the bootstrap user/API-key, the three
 # ActiveRecord encryption keys, and SECRET_KEY_BASE — comes from the shared
 # infra Secret via explicit secretKeyRefs (NOT envFrom, which would leak the
-# API's ai_v2 DATABASE_URL into iron-control's env).
+# API's ai_v2 DATABASE_URL into console's env).
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "centaur.ironControlName" . }}
+  name: {{ include "centaur.consoleName" . }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
   selector:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 4 }}
   ports:
     - name: http
-      port: {{ .Values.ironControl.service.httpPort }}
-      targetPort: {{ .Values.ironControl.service.httpPort }}
+      port: {{ $console.service.httpPort }}
+      targetPort: {{ $console.service.httpPort }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "centaur.ironControlName" . }}
+  name: {{ include "centaur.consoleName" . }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
-  replicas: {{ .Values.ironControl.replicaCount }}
+  replicas: {{ $console.replicaCount }}
   selector:
     matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 6 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 6 }}
   template:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 8 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 8 }}
     spec:
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
@@ -50,7 +51,7 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-        # Create the iron-control logical databases on the bundled Postgres: the
+        # Create the console logical databases on the bundled Postgres: the
         # primary plus the Solid Cache/Queue/Cable databases (see
         # config/database.yml). The image entrypoint's `db:prepare` loads schema
         # and migrates each one but does not create them, so they are provisioned
@@ -94,12 +95,12 @@ spec:
             seccompProfile:
               type: RuntimeDefault
       containers:
-        - name: iron-control
-          image: {{ printf "%s:%s" .Values.ironControl.image.repository .Values.ironControl.image.tag | quote }}
-          imagePullPolicy: {{ .Values.ironControl.image.pullPolicy }}
+        - name: console
+          image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}
+          imagePullPolicy: {{ $console.image.pullPolicy }}
           env:
             # Explicit secretKeyRefs only — never envFrom the shared Secret, or
-            # its DATABASE_URL (ai_v2) would leak into iron-control's env. Env
+            # its DATABASE_URL (ai_v2) would leak into console's env. Env
             # var names match the IRON_CONTROL_* secret keys 1:1 (except
             # SECRET_KEY_BASE, which Rails reads by its standard name). The DB
             # URL carries connection info only (no database path) so each Rails
@@ -145,15 +146,15 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
             - name: RAILS_ENV
-              value: {{ .Values.ironControl.railsEnv | quote }}
+              value: {{ $console.railsEnv | quote }}
             - name: PORT
-              value: {{ .Values.ironControl.service.httpPort | quote }}
+              value: {{ $console.service.httpPort | quote }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
             - name: RAILS_SERVE_STATIC_FILES
               value: "1"
           ports:
-            - containerPort: {{ .Values.ironControl.service.httpPort }}
+            - containerPort: {{ $console.service.httpPort }}
               name: http
           startupProbe:
             httpGet:
@@ -182,19 +183,19 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           resources:
-{{ toYaml .Values.ironControl.resources | nindent 12 }}
+{{ toYaml $console.resources | nindent 12 }}
 {{- if .Values.networkPolicy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "centaur.ironControlName" . }}
+  name: {{ include "centaur.consoleName" . }}
   labels:
-{{ include "centaur.componentLabels" (dict "root" . "component" "iron-control") | nindent 4 }}
+{{ include "centaur.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 6 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress
@@ -215,9 +216,9 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-{{- if .Values.ironControl.ingress.enabled }}
+{{- if $console.ingress.enabled }}
         # Ingress controller pods (Tailscale operator, Cloudflare, ...)
-        # forwarding external traffic to iron-control.
+        # forwarding external traffic to console.
 {{- range default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -226,7 +227,7 @@ spec:
 {{- end }}
       ports:
         - protocol: TCP
-          port: {{ .Values.ironControl.service.httpPort }}
+          port: {{ $console.service.httpPort }}
   egress:
 {{- if .Values.postgres.enabled }}
     - to:

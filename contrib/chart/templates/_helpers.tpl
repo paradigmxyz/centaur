@@ -104,17 +104,39 @@ namespace as this release, so a short DNS name is enough.
 {{- end -}}
 
 {{- /*
-iron-control — Rails control plane for authenticated API access and encrypted
-secret storage. Flag-gated (ironControl.enabled), in-cluster ClusterIP Service.
+console — Rails control plane (formerly "iron-control") for authenticated API
+access and encrypted secret storage. Flag-gated (console.enabled), in-cluster
+ClusterIP Service.
+
+Backwards compatibility: the canonical values key is `console`; `ironControl` is
+a deprecated alias that is still honored. `centaur.consoleValues` returns the
+effective config by deep-merging the two — chart defaults live under `console`,
+and any explicitly set `ironControl.*` values are layered on top so existing
+deployments that still configure `ironControl` keep working unchanged. If a key
+is set under BOTH, the legacy `ironControl` value wins for that key. All
+templates should consume this helper rather than `.Values.console` /
+`.Values.ironControl` directly.
+
+In-cluster Service/DNS names use the "console" component (e.g.
+`<release>-centaur-console`). The api-rs-facing env vars stay IRON_CONTROL_URL /
+IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
+*value* is derived from `centaur.consoleUrl`, so it tracks the Service name.
 */ -}}
-{{- define "centaur.ironControlName" -}}
-{{- include "centaur.componentName" (dict "root" . "component" "iron-control") -}}
+{{- define "centaur.consoleValues" -}}
+{{- $console := deepCopy (.Values.console | default dict) -}}
+{{- $legacy := .Values.ironControl | default dict -}}
+{{- toYaml (mergeOverwrite $console $legacy) -}}
 {{- end -}}
 
-{{- define "centaur.ironControlHost" -}}
-{{- include "centaur.ironControlName" . -}}
+{{- define "centaur.consoleName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "console") -}}
 {{- end -}}
 
-{{- define "centaur.ironControlUrl" -}}
-{{- printf "http://%s:%v" (include "centaur.ironControlHost" .) .Values.ironControl.service.httpPort -}}
+{{- define "centaur.consoleHost" -}}
+{{- include "centaur.consoleName" . -}}
+{{- end -}}
+
+{{- define "centaur.consoleUrl" -}}
+{{- $console := include "centaur.consoleValues" . | fromYaml -}}
+{{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
 {{- end -}}

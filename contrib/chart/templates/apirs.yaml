@@ -1,4 +1,5 @@
 {{- if .Values.apiRs.enabled }}
+{{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
 {{- $reposPath := .Values.sandbox.reposPath -}}
 {{- if and .Values.repoCache.enabled (not $reposPath) -}}
@@ -225,12 +226,12 @@ spec:
             - name: SESSION_SANDBOX_EXTRA_ENV
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
-{{- if .Values.ironControl.enabled }}
-            # iron-control control plane: principals/roles/grants + per-sandbox
+{{- if $console.enabled }}
+            # console control plane: principals/roles/grants + per-sandbox
             # proxy sync. When unset, the api-rs falls back to the rendered
             # static proxy config.
             - name: IRON_CONTROL_URL
-              value: {{ include "centaur.ironControlUrl" . | quote }}
+              value: {{ include "centaur.consoleUrl" . | quote }}
             - name: IRON_CONTROL_API_KEY
               valueFrom:
                 secretKeyRef:
