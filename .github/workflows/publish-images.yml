@@ -61,6 +61,7 @@ jobs:
             target: ""
           - service: discordbot
             image: centaur-discordbot
+            context: .
             dockerfile: services/discordbot/Dockerfile
             target: ""
           - service: agent
@@ -164,6 +165,7 @@ jobs:
           - image: centaur-agent
           - image: centaur-iron-proxy
           - image: centaur-console
+          - image: centaur-discordbot
 
     steps:
       - name: Download digests
