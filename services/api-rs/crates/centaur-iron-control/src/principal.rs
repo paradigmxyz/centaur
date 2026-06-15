@@ -51,10 +51,12 @@ impl PrincipalRef {
 ///
 /// ``conversation_name`` is the human-readable channel name (or DM partner's
 /// display name) the slackbot resolves and carries in session metadata. When
-/// present and non-empty it becomes the principal's display ``name``; otherwise
-/// we fall back to a synthetic name built from the ids. The name is cosmetic —
-/// ``foreign_id`` (the upsert key) is always derived from ids, so the same
-/// conversation maps to one stable principal regardless of any later rename.
+/// present and non-empty it is formatted into the principal's display ``name``
+/// (``Slack DM @<name>`` for a DM, ``Slack Channel #<name>`` for a channel);
+/// otherwise we fall back to a synthetic name built from the ids. The name is
+/// cosmetic — ``foreign_id`` (the upsert key) is always derived from ids, so the
+/// same conversation maps to one stable principal regardless of any later
+/// rename.
 pub fn derive_principal(
     thread_key: &str,
     slack_user_id: Option<&str>,
@@ -82,7 +84,7 @@ pub fn derive_principal(
         return PrincipalRef {
             foreign_id: format!("slack-user-{scope}{}", slugify(user)),
             name: display_name
-                .map(ToOwned::to_owned)
+                .map(|name| format!("Slack DM @{name}"))
                 .unwrap_or_else(|| format!("Slack user {user}{team_suffix}")),
             labels,
         };
@@ -93,7 +95,7 @@ pub fn derive_principal(
         return PrincipalRef {
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
             name: display_name
-                .map(ToOwned::to_owned)
+                .map(|name| format!("Slack Channel #{name}"))
                 .unwrap_or_else(|| format!("Slack channel {conversation_id}{team_suffix}")),
             labels,
         };
@@ -207,14 +209,14 @@ mod tests {
             derive_principal("slack:T123:C456:ts", Some("U1"), Some("eng-oncall"));
         // Key stays derived from ids so renames never split the principal.
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
-        assert_eq!(principal.name, "eng-oncall");
+        assert_eq!(principal.name, "Slack Channel #eng-oncall");
     }
 
     #[test]
     fn conversation_name_overrides_the_dm_display_name() {
         let principal = derive_principal("slack:D0420:ts", Some("U07ABC"), Some("Ada Lovelace"));
         assert_eq!(principal.foreign_id, "slack-user-u07abc");
-        assert_eq!(principal.name, "Ada Lovelace");
+        assert_eq!(principal.name, "Slack DM @Ada Lovelace");
     }
 
     #[test]
