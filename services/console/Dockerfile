@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # check=error=true
 
-# This Dockerfile is designed for production, not development. Use with Kamal or build'n'run by hand:
+# This Dockerfile is designed for production, not development. Build'n'run by hand:
 # docker build -t iron_control .
 # docker run -d -p 80:80 -e RAILS_MASTER_KEY=<value from config/master.key> --name iron_control iron_control
 
