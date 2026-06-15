@@ -36,6 +36,7 @@ use tracing::{info, warn};
 
 pub const WORKFLOW_QUEUE: &str = "centaur_workflows";
 pub const WORKFLOW_ETL_QUEUE: &str = "centaur_workflows_etl";
+pub const WORKFLOW_ETL_BACKFILL_QUEUE: &str = "centaur_workflows_etl_backfill";
 pub const WORKFLOW_SCHEDULE_QUEUE: &str = "centaur_workflow_schedules";
 pub const WORKFLOW_TASK: &str = "centaur.workflow";
 pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
@@ -72,8 +73,10 @@ pub struct WorkflowRuntime {
 struct WorkflowRuntimeInner {
     client: Client,
     etl_client: Client,
+    etl_backfill_client: Client,
     _worker: Worker,
     _etl_worker: Worker,
+    _etl_backfill_worker: Worker,
     _schedule_worker: Worker,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
@@ -283,6 +286,19 @@ impl WorkflowRuntime {
         etl_client
             .create_queue(Some(WORKFLOW_ETL_QUEUE), CreateQueueOptions::default())
             .await?;
+        let etl_backfill_client = Client::from_pool_with_options(
+            store.pool().clone(),
+            ClientOptions {
+                queue_name: WORKFLOW_ETL_BACKFILL_QUEUE.to_owned(),
+                ..ClientOptions::default()
+            },
+        )?;
+        etl_backfill_client
+            .create_queue(
+                Some(WORKFLOW_ETL_BACKFILL_QUEUE),
+                CreateQueueOptions::default(),
+            )
+            .await?;
         let schedule_client = Client::from_pool_with_options(
             store.pool().clone(),
             ClientOptions {
@@ -317,9 +333,22 @@ impl WorkflowRuntime {
             let workflow_host_sandbox = etl_workflow_host_sandbox.clone();
             async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
         })?;
+        let etl_backfill_session_runtime = session_runtime.clone();
+        let etl_backfill_workflow_host_sandbox = workflow_host_sandbox.clone();
+        etl_backfill_client.register_task(
+            WORKFLOW_TASK,
+            move |input: WorkflowTaskInput, ctx| {
+                let session_runtime = etl_backfill_session_runtime.clone();
+                let workflow_host_sandbox = etl_backfill_workflow_host_sandbox.clone();
+                async move {
+                    run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await
+                }
+            },
+        )?;
         let schedule_tick_client = schedule_client.clone();
         let workflow_client_for_schedule = client.clone();
         let etl_client_for_schedule = etl_client.clone();
+        let etl_backfill_client_for_schedule = etl_backfill_client.clone();
         let schedule_registry_for_task = schedule_registry.clone();
         schedule_client.register_task_with(
             TaskRegistrationOptions::new(WORKFLOW_SCHEDULE_TASK),
@@ -327,6 +356,7 @@ impl WorkflowRuntime {
                 let schedule_client = schedule_tick_client.clone();
                 let workflow_client = workflow_client_for_schedule.clone();
                 let etl_client = etl_client_for_schedule.clone();
+                let etl_backfill_client = etl_backfill_client_for_schedule.clone();
                 let schedules = schedule_registry_for_task.clone();
                 async move {
                     run_schedule_tick(
@@ -335,6 +365,7 @@ impl WorkflowRuntime {
                         schedule_client,
                         workflow_client,
                         etl_client,
+                        etl_backfill_client,
                         schedules,
                     )
                     .await
@@ -363,6 +394,14 @@ impl WorkflowRuntime {
             })),
             ..WorkerOptions::default()
         });
+        let etl_backfill_worker = etl_backfill_client.start_worker(WorkerOptions {
+            worker_id: Some("centaur-api-rs-workflow-etl-backfill-worker".to_owned()),
+            concurrency: 1,
+            on_error: Some(Arc::new(|error| {
+                warn!(%error, "absurd workflow etl backfill worker error");
+            })),
+            ..WorkerOptions::default()
+        });
         let schedule_worker = schedule_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-schedule-worker".to_owned()),
             concurrency: 1,
@@ -382,6 +421,11 @@ impl WorkflowRuntime {
             "started absurd workflow etl worker"
         );
         info!(
+            queue = WORKFLOW_ETL_BACKFILL_QUEUE,
+            task = WORKFLOW_TASK,
+            "started absurd workflow etl backfill worker"
+        );
+        info!(
             queue = WORKFLOW_SCHEDULE_QUEUE,
             task = WORKFLOW_SCHEDULE_TASK,
             "started absurd workflow schedule worker"
@@ -392,6 +436,7 @@ impl WorkflowRuntime {
                 schedule_client.clone(),
                 client.clone(),
                 etl_client.clone(),
+                etl_backfill_client.clone(),
                 webhook_registry.clone(),
                 schedule_registry.clone(),
                 interval,
@@ -402,8 +447,10 @@ impl WorkflowRuntime {
             inner: Arc::new(WorkflowRuntimeInner {
                 client,
                 etl_client,
+                etl_backfill_client,
                 _worker: worker,
                 _etl_worker: etl_worker,
+                _etl_backfill_worker: etl_backfill_worker,
                 _schedule_worker: schedule_worker,
                 webhook_registry,
                 schedule_registry,
@@ -451,6 +498,10 @@ impl WorkflowRuntime {
         let mut runs = Vec::new();
         runs.extend(self.list_runs_for_queue(WORKFLOW_QUEUE, limit).await?);
         runs.extend(self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit).await?);
+        runs.extend(
+            self.list_runs_for_queue(WORKFLOW_ETL_BACKFILL_QUEUE, limit)
+                .await?,
+        );
         runs.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
@@ -493,7 +544,11 @@ impl WorkflowRuntime {
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<WorkflowRun, WorkflowRuntimeError> {
-        for queue_name in [WORKFLOW_QUEUE, WORKFLOW_ETL_QUEUE] {
+        for queue_name in [
+            WORKFLOW_QUEUE,
+            WORKFLOW_ETL_QUEUE,
+            WORKFLOW_ETL_BACKFILL_QUEUE,
+        ] {
             if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
                 return Ok(run);
             }
@@ -535,6 +590,7 @@ impl WorkflowRuntime {
         for (queue_name, client) in [
             (WORKFLOW_QUEUE, &self.inner.client),
             (WORKFLOW_ETL_QUEUE, &self.inner.etl_client),
+            (WORKFLOW_ETL_BACKFILL_QUEUE, &self.inner.etl_backfill_client),
         ] {
             if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
                 client.cancel_task(&run.task_id, Some(queue_name)).await?;
@@ -555,7 +611,11 @@ impl WorkflowRuntime {
             .await?;
         self.inner
             .etl_client
-            .emit_event(event_name, payload, Some(WORKFLOW_ETL_QUEUE))
+            .emit_event(event_name, payload.clone(), Some(WORKFLOW_ETL_QUEUE))
+            .await?;
+        self.inner
+            .etl_backfill_client
+            .emit_event(event_name, payload, Some(WORKFLOW_ETL_BACKFILL_QUEUE))
             .await?;
         Ok(())
     }
@@ -593,6 +653,7 @@ impl WorkflowRuntime {
         match workflow_queue_class(workflow_name) {
             WorkflowQueueClass::Standard => &self.inner.client,
             WorkflowQueueClass::Etl => &self.inner.etl_client,
+            WorkflowQueueClass::EtlBackfill => &self.inner.etl_backfill_client,
         }
     }
 }
@@ -601,12 +662,13 @@ impl WorkflowRuntime {
 enum WorkflowQueueClass {
     Standard,
     Etl,
+    EtlBackfill,
 }
 
 fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
+        "slack_backfill" => WorkflowQueueClass::EtlBackfill,
         "slack_sync"
-        | "slack_backfill"
         | "google_calendar_sync"
         | "google_drive_sync"
         | "linear_sync"
@@ -624,6 +686,10 @@ fn absurd_queue_tables(
         WORKFLOW_ETL_QUEUE => Ok((
             "absurd.t_centaur_workflows_etl",
             "absurd.r_centaur_workflows_etl",
+        )),
+        WORKFLOW_ETL_BACKFILL_QUEUE => Ok((
+            "absurd.t_centaur_workflows_etl_backfill",
+            "absurd.r_centaur_workflows_etl_backfill",
         )),
         WORKFLOW_SCHEDULE_QUEUE => Ok((
             "absurd.t_centaur_workflow_schedules",
@@ -1187,6 +1253,7 @@ fn spawn_workflow_metadata_reconciler(
     schedule_client: Client,
     workflow_client: Client,
     etl_client: Client,
+    etl_backfill_client: Client,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     interval: Duration,
@@ -1210,6 +1277,7 @@ fn spawn_workflow_metadata_reconciler(
                         .reap(
                             &workflow_client,
                             &etl_client,
+                            &etl_backfill_client,
                             &schedule_client,
                             &metadata,
                             &schedules,
@@ -1288,6 +1356,7 @@ impl RemovedWorkflowReaper {
         &mut self,
         workflow_client: &Client,
         etl_client: &Client,
+        etl_backfill_client: &Client,
         schedule_client: &Client,
         metadata: &PythonWorkflowMetadata,
         schedules: &BTreeMap<String, RegisteredWorkflowSchedule>,
@@ -1306,6 +1375,7 @@ impl RemovedWorkflowReaper {
         for (queue_name, client) in [
             (WORKFLOW_QUEUE, workflow_client),
             (WORKFLOW_ETL_QUEUE, etl_client),
+            (WORKFLOW_ETL_BACKFILL_QUEUE, etl_backfill_client),
         ] {
             for (task_id, name) in
                 fetch_active_named_tasks(client, queue_name, WORKFLOW_TASK, "workflow_name").await?
@@ -1327,10 +1397,10 @@ impl RemovedWorkflowReaper {
             let Some((queue_name, task_id)) = key.split_once(':') else {
                 continue;
             };
-            let client = if queue_name == WORKFLOW_ETL_QUEUE {
-                etl_client
-            } else {
-                workflow_client
+            let client = match queue_name {
+                WORKFLOW_ETL_QUEUE => etl_client,
+                WORKFLOW_ETL_BACKFILL_QUEUE => etl_backfill_client,
+                _ => workflow_client,
             };
             if let Err(error) = client.cancel_task(task_id, Some(queue_name)).await {
                 warn!(%error, queue_name, task_id, "failed to cancel run of removed workflow");
@@ -1449,6 +1519,7 @@ async fn run_schedule_tick(
     schedule_client: Client,
     workflow_client: Client,
     etl_client: Client,
+    etl_backfill_client: Client,
     schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 ) -> Result<Value, absurd::Error> {
     ctx.sleep_until("schedule_tick", input.scheduled_at).await?;
@@ -1492,6 +1563,7 @@ async fn run_schedule_tick(
     let target_client = match workflow_queue_class(&schedule.workflow_name) {
         WorkflowQueueClass::Standard => &workflow_client,
         WorkflowQueueClass::Etl => &etl_client,
+        WorkflowQueueClass::EtlBackfill => &etl_backfill_client,
     };
     let workflow_spawn = target_client
         .spawn(
@@ -2856,10 +2928,9 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_etls_use_etl_queue() {
+    fn scheduled_etls_use_isolated_etl_queues() {
         for workflow_name in [
             "slack_sync",
-            "slack_backfill",
             "google_calendar_sync",
             "google_drive_sync",
             "linear_sync",
@@ -2868,6 +2939,10 @@ mod tests {
         ] {
             assert_eq!(workflow_queue_class(workflow_name), WorkflowQueueClass::Etl);
         }
+        assert_eq!(
+            workflow_queue_class("slack_backfill"),
+            WorkflowQueueClass::EtlBackfill
+        );
         assert_eq!(
             workflow_queue_class("github_issue_triage"),
             WorkflowQueueClass::Standard
