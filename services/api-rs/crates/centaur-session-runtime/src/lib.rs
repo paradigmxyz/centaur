@@ -255,6 +255,14 @@ impl SessionRuntime {
                 .and_then(|metadata| metadata.get("slack_user_id"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
+            // The human-readable channel/DM name the slackbot resolved, used as
+            // the principal's display name. Read it here for the same reason,
+            // before `metadata` is consumed below.
+            let slack_conversation_name = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("slack_conversation_name"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
             let mut harness_switched = false;
             let session = match self
                 .store
@@ -284,7 +292,11 @@ impl SessionRuntime {
                 // to bind to, so a registration failure must fail session creation
                 // rather than silently boot a sandbox with a non-functional proxy.
                 let principal = registrar
-                    .register_session(thread_key.as_str(), slack_user_id.as_deref())
+                    .register_session(
+                        thread_key.as_str(),
+                        slack_user_id.as_deref(),
+                        slack_conversation_name.as_deref(),
+                    )
                     .await?;
                 // Persist the principal OID on the session row so a resumed session
                 // can recreate its sandbox after a restart without re-deriving it.

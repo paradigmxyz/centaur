@@ -334,6 +334,19 @@ export function clearRequesterIdentityCacheForTests(): void {
   requesterIdentityCache.clear()
 }
 
+type ConversationNameCacheEntry = {
+  expiresAtMs: number
+  name: string | null
+}
+
+const CONVERSATION_NAME_CACHE_SUCCESS_TTL_MS = 6 * 60 * 60 * 1000
+const CONVERSATION_NAME_CACHE_MISS_TTL_MS = 10 * 60 * 1000
+const conversationNameCache = new Map<string, ConversationNameCacheEntry>()
+
+export function clearConversationNameCacheForTests(): void {
+  conversationNameCache.clear()
+}
+
 type CreateSessionOutcome = {
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean
@@ -392,13 +405,18 @@ async function postCreateSession(
   onHarnessConflict?: 'reject' | 'restart'
 ): Promise<Response> {
   const fetchFn = options.fetch ?? fetch
+  // The conversation name becomes the session principal's display name in
+  // iron-control; resolve it here so it rides the create-session metadata that
+  // api-rs reads when it registers the principal.
+  const conversationName = message ? await resolveConversationName(options, message) : undefined
   const body: SlackbotV2CreateSessionRequest = {
     harness_type: harnessType,
     metadata: {
       source: 'slackbotv2',
       platform: 'slack',
       thread_id: threadId,
-      ...sessionRequesterMetadata(message)
+      ...sessionRequesterMetadata(message),
+      ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
     ...(onHarnessConflict ? { on_harness_conflict: onHarnessConflict } : {})
   }
@@ -580,6 +598,79 @@ async function fetchSlackUserProfile(
   } catch {
     return null
   }
+}
+
+// Resolve the human-readable name for the conversation a message belongs to,
+// used as the session principal's display name. A 1:1 DM principal keys on the
+// user, so its name is the DM partner's display name (already resolved for the
+// requester); a channel/group principal keys on the channel, so its name is the
+// channel name fetched from Slack. Returns undefined when no name can be
+// resolved, so the principal falls back to its synthetic id-based name.
+async function resolveConversationName(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage
+): Promise<string | undefined> {
+  const conversationId = slackConversationId(message)
+  const kind = slackConversationKind(conversationId)
+  if (kind === 'dm') {
+    const identity = await resolveRequesterIdentity(options, message)
+    return identity.slackDisplayName ?? identity.slackUserName ?? undefined
+  }
+  if (kind === 'channel' && conversationId) {
+    return (await fetchSlackChannelName(options, conversationId)) ?? undefined
+  }
+  return undefined
+}
+
+// The conversation (channel/DM) id, preferring the raw event's `channel` field
+// and falling back to the conversation segment of the thread key
+// (`<source>:[<team>:]<conversation>[:<ts>]`). Slack ids carry their type in the
+// first letter: C/G are channels/groups, D is a direct message.
+function slackConversationId(message: SlackbotV2ApiMessage): string | undefined {
+  const fromRaw = rawSlackString(message.raw, 'channel')
+  if (fromRaw) return fromRaw
+  for (const segment of message.threadId.split(':').slice(1)) {
+    const first = segment.charAt(0)
+    if (first === 'C' || first === 'D' || first === 'G') return segment
+  }
+  return undefined
+}
+
+function slackConversationKind(
+  conversationId: string | undefined
+): 'channel' | 'dm' | undefined {
+  const first = conversationId?.charAt(0)
+  if (first === 'D') return 'dm'
+  if (first === 'C' || first === 'G') return 'channel'
+  return undefined
+}
+
+async function fetchSlackChannelName(
+  options: SlackbotV2Options,
+  channelId: string
+): Promise<string | null> {
+  const token = options.botToken
+  if (!token) return null
+  if (options.fetch && !options.slackApiUrl) return null
+
+  const cached = conversationNameCache.get(channelId)
+  if (cached && cached.expiresAtMs > Date.now()) return cached.name
+
+  let name: string | null = null
+  try {
+    const payload = await slackApiGet(options, 'conversations.info', { channel: channelId })
+    const channel = isJsonObject(payload?.channel) ? payload.channel : undefined
+    name = stringValue(channel?.name_normalized) ?? stringValue(channel?.name) ?? null
+  } catch {
+    name = null
+  }
+  conversationNameCache.set(channelId, {
+    expiresAtMs:
+      Date.now() +
+      (name ? CONVERSATION_NAME_CACHE_SUCCESS_TTL_MS : CONVERSATION_NAME_CACHE_MISS_TTL_MS),
+    name
+  })
+  return name
 }
 
 async function slackApiGet(

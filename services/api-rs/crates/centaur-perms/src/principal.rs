@@ -18,7 +18,9 @@ pub fn resolve_principal(
     namespace: &str,
 ) -> IdentityInput {
     if principal.contains(':') {
-        derive_principal(principal, slack_user).to_identity_input(namespace)
+        // The CLI has no resolved conversation name; the synthetic display name
+        // is fine for operator-driven lookups.
+        derive_principal(principal, slack_user, None).to_identity_input(namespace)
     } else {
         IdentityInput {
             namespace: namespace.to_owned(),

@@ -38,15 +38,18 @@ impl SessionRegistrar {
 
     /// Upsert the principal for ``thread_key`` and assign it the configured
     /// roles. ``slack_user_id`` keys a 1:1 DM principal; it is ignored for
-    /// channel threads. Returns the upserted principal record (its ``id`` is
-    /// the OID) so callers can bind the session's egress proxy to the same
-    /// identity. Idempotent.
+    /// channel threads. ``conversation_name`` is the human-readable channel/DM
+    /// name (when the slackbot resolved one) used as the principal's display
+    /// name. Returns the upserted principal record (its ``id`` is the OID) so
+    /// callers can bind the session's egress proxy to the same identity.
+    /// Idempotent.
     pub async fn register_session(
         &self,
         thread_key: &str,
         slack_user_id: Option<&str>,
+        conversation_name: Option<&str>,
     ) -> Result<Principal> {
-        let principal = derive_principal(thread_key, slack_user_id);
+        let principal = derive_principal(thread_key, slack_user_id, conversation_name);
         let record = self
             .client
             .upsert_principal(&principal.to_identity_input(&self.namespace))

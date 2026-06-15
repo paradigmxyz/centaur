@@ -48,7 +48,18 @@ impl PrincipalRef {
 /// channel so everyone in the channel shares one principal. When the thread key
 /// is not a recognizable Slack conversation, the whole key is slugged so every
 /// thread still maps to a deterministic, distinct principal.
-pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> PrincipalRef {
+///
+/// ``conversation_name`` is the human-readable channel name (or DM partner's
+/// display name) the slackbot resolves and carries in session metadata. When
+/// present and non-empty it becomes the principal's display ``name``; otherwise
+/// we fall back to a synthetic name built from the ids. The name is cosmetic —
+/// ``foreign_id`` (the upsert key) is always derived from ids, so the same
+/// conversation maps to one stable principal regardless of any later rename.
+pub fn derive_principal(
+    thread_key: &str,
+    slack_user_id: Option<&str>,
+    conversation_name: Option<&str>,
+) -> PrincipalRef {
     let (team_id, conversation_id) = parse_slack_segments(thread_key);
     let mut labels = BTreeMap::new();
     if let Some(team) = team_id {
@@ -60,6 +71,9 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
     let team_suffix = team_id
         .map(|team| format!(" (team {team})"))
         .unwrap_or_default();
+    let display_name = conversation_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
 
     if is_direct_message(conversation_id)
         && let Some(user) = slack_user_id.map(str::trim).filter(|user| !user.is_empty())
@@ -67,7 +81,9 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
         labels.insert("slack_user_id".to_owned(), user.to_owned());
         return PrincipalRef {
             foreign_id: format!("slack-user-{scope}{}", slugify(user)),
-            name: format!("Slack user {user}{team_suffix}"),
+            name: display_name
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("Slack user {user}{team_suffix}")),
             labels,
         };
     }
@@ -76,14 +92,18 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
         labels.insert("slack_channel_id".to_owned(), conversation_id.to_owned());
         return PrincipalRef {
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
-            name: format!("Slack channel {conversation_id}{team_suffix}"),
+            name: display_name
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("Slack channel {conversation_id}{team_suffix}")),
             labels,
         };
     }
 
     PrincipalRef {
         foreign_id: format!("thread-{}", slugify(thread_key)),
-        name: thread_key.to_owned(),
+        name: display_name
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| thread_key.to_owned()),
         labels,
     }
 }
@@ -120,7 +140,7 @@ mod tests {
 
     #[test]
     fn dm_with_user_keys_on_the_user() {
-        let principal = derive_principal("slack:D0420:1780000000.0001", Some("U07ABC"));
+        let principal = derive_principal("slack:D0420:1780000000.0001", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-user-u07abc");
         assert_eq!(principal.name, "Slack user U07ABC");
         assert_eq!(
@@ -131,13 +151,13 @@ mod tests {
 
     #[test]
     fn dm_without_user_falls_back_to_the_conversation() {
-        let principal = derive_principal("slack:D0420:1780000000.0001", None);
+        let principal = derive_principal("slack:D0420:1780000000.0001", None, None);
         assert_eq!(principal.foreign_id, "slack-channel-d0420");
     }
 
     #[test]
     fn channel_keys_on_the_channel_even_with_a_user() {
-        let principal = derive_principal("chat:C123:1780000000.000000", Some("U07ABC"));
+        let principal = derive_principal("chat:C123:1780000000.000000", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-channel-c123");
         assert_eq!(principal.name, "Slack channel C123");
         assert_eq!(
@@ -148,13 +168,13 @@ mod tests {
 
     #[test]
     fn private_group_keys_on_the_channel() {
-        let principal = derive_principal("slack:G99:ts", Some("U1"));
+        let principal = derive_principal("slack:G99:ts", Some("U1"), None);
         assert_eq!(principal.foreign_id, "slack-channel-g99");
     }
 
     #[test]
     fn team_id_is_folded_into_the_channel_key() {
-        let principal = derive_principal("slack:T123:C456:1780000000.0001", Some("U1"));
+        let principal = derive_principal("slack:T123:C456:1780000000.0001", Some("U1"), None);
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
         assert_eq!(principal.name, "Slack channel C456 (team T123)");
         assert_eq!(
@@ -169,21 +189,43 @@ mod tests {
 
     #[test]
     fn team_id_is_folded_into_the_dm_user_key() {
-        let principal = derive_principal("slack:T123:D9:ts", Some("U07ABC"));
+        let principal = derive_principal("slack:T123:D9:ts", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
         assert_eq!(principal.name, "Slack user U07ABC (team T123)");
     }
 
     #[test]
     fn non_slack_thread_keys_slug_the_whole_key() {
-        let principal = derive_principal("api", None);
+        let principal = derive_principal("api", None, None);
         assert_eq!(principal.foreign_id, "thread-api");
         assert_eq!(principal.name, "api");
     }
 
     #[test]
+    fn conversation_name_overrides_the_channel_display_name_but_not_the_key() {
+        let principal =
+            derive_principal("slack:T123:C456:ts", Some("U1"), Some("eng-oncall"));
+        // Key stays derived from ids so renames never split the principal.
+        assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
+        assert_eq!(principal.name, "eng-oncall");
+    }
+
+    #[test]
+    fn conversation_name_overrides_the_dm_display_name() {
+        let principal = derive_principal("slack:D0420:ts", Some("U07ABC"), Some("Ada Lovelace"));
+        assert_eq!(principal.foreign_id, "slack-user-u07abc");
+        assert_eq!(principal.name, "Ada Lovelace");
+    }
+
+    #[test]
+    fn blank_conversation_name_falls_back_to_the_synthetic_name() {
+        let principal = derive_principal("chat:C123:ts", None, Some("   "));
+        assert_eq!(principal.name, "Slack channel C123");
+    }
+
+    #[test]
     fn identity_input_carries_namespace_and_managed_label() {
-        let input = derive_principal("chat:C1:ts", None).to_identity_input("default");
+        let input = derive_principal("chat:C1:ts", None, None).to_identity_input("default");
         assert_eq!(input.namespace, "default");
         assert_eq!(input.foreign_id, "slack-channel-c1");
         assert_eq!(
