@@ -1559,15 +1559,35 @@ fn next_schedule_time(
     after: DateTime<Utc>,
 ) -> Result<DateTime<Utc>, WorkflowRuntimeError> {
     match &schedule.kind {
-        WorkflowScheduleKind::Interval { interval_seconds } => Ok(after
-            + chrono::Duration::from_std(Duration::from_secs(*interval_seconds)).map_err(
-                |error| {
+        WorkflowScheduleKind::Interval { interval_seconds } => {
+            // Align the next run to a fixed epoch boundary so the value is
+            // stable across reconcile cycles. `reconcile_schedules` runs on
+            // every reconcile tick and spawns a schedule-tick keyed on this
+            // timestamp's RFC3339. Returning `after + interval` (a moving
+            // target) produces a new key every cycle and therefore a duplicate
+            // tick each cycle -- the schedule-tick firehose. Bucketing to the
+            // next epoch-aligned boundary yields the same value for the whole
+            // window, mirroring how the cron arm produces a stable occurrence.
+            let interval = i64::try_from(*interval_seconds)
+                .ok()
+                .filter(|seconds| *seconds > 0)
+                .ok_or_else(|| {
                     WorkflowRuntimeError::BadRequest(format!(
-                        "invalid interval for schedule {:?}: {error}",
+                        "invalid interval {interval_seconds} for schedule {:?}",
                         schedule.schedule_id
                     ))
-                },
-            )?),
+                })?;
+            // `after.timestamp()` is always >= 0 here, so floor division gives
+            // the boundary at or below `after`; `+ interval` makes it strictly
+            // after, matching the previous "next run is in the future" contract.
+            let next_secs = (after.timestamp() / interval + 1) * interval;
+            DateTime::from_timestamp(next_secs, 0).ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest(format!(
+                    "interval schedule {:?} produced an out-of-range next run",
+                    schedule.schedule_id
+                ))
+            })
+        }
         WorkflowScheduleKind::Cron { cron } => {
             let timezone = schedule.timezone.parse::<Tz>().map_err(|error| {
                 WorkflowRuntimeError::BadRequest(format!(
@@ -2755,6 +2775,40 @@ mod tests {
         assert_eq!(
             workflow_queue_class("github_issue_triage"),
             WorkflowQueueClass::Standard
+        );
+    }
+
+    #[test]
+    fn interval_schedule_next_run_is_stable_across_reconciles() {
+        // Regression guard for the schedule-tick firehose: two reconcile cycles
+        // at different wall-clock instants inside the same interval window must
+        // produce the same next run (hence the same idempotency key), instead of
+        // each computing `now + interval` and spawning a duplicate tick.
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "slack_sync",
+            "schedule_id": "slack_sync",
+            "interval_seconds": 3600,
+            "enabled": true,
+            "no_delivery": true,
+        }))
+        .unwrap();
+
+        let base = Utc.with_ymd_and_hms(2026, 6, 8, 12, 0, 0).unwrap();
+        let next = next_schedule_time(&schedule, base).unwrap();
+        // Epoch-aligned boundary, strictly after `after`.
+        assert!(next > base);
+        assert_eq!(next.timestamp() % 3600, 0);
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 8, 13, 0, 0).unwrap());
+
+        // A later reconcile within the same hour yields the identical boundary.
+        let later = Utc.with_ymd_and_hms(2026, 6, 8, 12, 47, 31).unwrap();
+        assert_eq!(next_schedule_time(&schedule, later).unwrap(), next);
+
+        // A point exactly on a boundary advances to the following one.
+        let on_boundary = Utc.with_ymd_and_hms(2026, 6, 8, 13, 0, 0).unwrap();
+        assert_eq!(
+            next_schedule_time(&schedule, on_boundary).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 8, 14, 0, 0).unwrap()
         );
     }
 
