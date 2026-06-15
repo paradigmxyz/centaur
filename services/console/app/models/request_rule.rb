@@ -18,7 +18,7 @@ class RequestRule < ApplicationRecord
   default_scope { order(:position) }
 
   # Maps to the iron-proxy `hostmatch.RuleConfig` shape. Note the proxy uses
-  # `methods` where iron-control stores `http_methods`. Blank fields are omitted
+  # `methods` where centaur-console stores `http_methods`. Blank fields are omitted
   # so they decode as the proxy's omitempty defaults.
   def to_proxy_rule
     rule = {}

@@ -147,22 +147,22 @@ class UserTest < ActiveSupport::TestCase
   end
 
   test "link_or_provision makes a bootstrap-allowlisted email active and admin" do
-    ENV["IRON_CONTROL_BOOTSTRAP_ADMINS"] = "boss@example.com"
+    ENV["CENTAUR_CONSOLE_BOOTSTRAP_ADMINS"] = "boss@example.com"
     user = User.link_or_provision(provider: "google", identity: identity(subject: "boss-sub", email: "boss@example.com"))
     assert user.active?
     assert user.admin?
   ensure
-    ENV.delete("IRON_CONTROL_BOOTSTRAP_ADMINS")
+    ENV.delete("CENTAUR_CONSOLE_BOOTSTRAP_ADMINS")
   end
 
   test "link_or_provision does not bootstrap admin from an unverified email" do
-    ENV["IRON_CONTROL_BOOTSTRAP_ADMINS"] = "boss@example.com"
+    ENV["CENTAUR_CONSOLE_BOOTSTRAP_ADMINS"] = "boss@example.com"
     user = User.link_or_provision(provider: "google",
                                   identity: identity(subject: "boss-sub", email: "boss@example.com",
                                                      email_verified: false))
     assert user.pending?
     assert_not user.admin?
   ensure
-    ENV.delete("IRON_CONTROL_BOOTSTRAP_ADMINS")
+    ENV.delete("CENTAUR_CONSOLE_BOOTSTRAP_ADMINS")
   end
 end

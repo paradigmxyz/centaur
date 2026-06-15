@@ -4,7 +4,7 @@
 #
 # Each app has a globally-unique +slug+ that names its well-known consent links:
 # a team member who knows the integration ("google") clicks
-# /oauth/<slug>/start, consents, and lands on an iron-control result page. The
+# /oauth/<slug>/start, consents, and lands on an centaur-console result page. The
 # unauthenticated /oauth/:slug/start + /callback endpoints resolve an OauthApp by
 # slug, run the provider's consent flow, and on success upsert a BrokerCredential
 # linked back to this app (see BrokerCredential#oauth_app). The app is the

@@ -940,7 +940,7 @@ One redirect URI is registered with the IdP per app, keyed by its slug:
 https://<iron-control>/oauth/<slug>/callback
 ```
 
-By default the redirect URI and the flow's own origin are derived from the request. Set `IRON_CONTROL_PUBLIC_URL` to override the origin for deployments behind a proxy whose `Host` header does not match the public origin.
+By default the redirect URI and the flow's own origin are derived from the request. Set `CENTAUR_CONSOLE_PUBLIC_URL` to override the origin for deployments behind a proxy whose `Host` header does not match the public origin.
 
 ### Start
 

@@ -1,4 +1,4 @@
-<% content_for :title, "#{@oauth_app.slug} · Iron Control" %>
+<% content_for :title, "#{@oauth_app.slug} · Centaur Console" %>
 
 <div class="mb-8">
   <a href="<%= console_oauth_apps_path %>" class="back-link">← back to OAuth apps</a>
@@ -12,7 +12,7 @@
     <a href="<%= edit_console_oauth_app_form_path(@oauth_app.oid) %>" class="btn-secondary ml-auto">Edit</a>
   </div>
   <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
-    <span class="text-iron-400 glow"><%= @oauth_app.oid %></span>
+    <span class="text-centaur-400 glow"><%= @oauth_app.oid %></span>
     <span class="text-zinc-600">·</span>
     <span class="rounded bg-ink-700 px-2 py-0.5 text-[11px] uppercase tracking-wide text-zinc-300"><%= @oauth_app.provider %></span>
   </div>

@@ -1,4 +1,4 @@
-<% content_for :title, "Principals · Iron Control" %>
+<% content_for :title, "Principals · Centaur Console" %>
 
 <div class="mb-8">
   <h1 class="page-title">Principals</h1>
@@ -24,10 +24,10 @@
             onclick="window.location='<%= console_principal_path(p.oid) %>'">
           <td class="console-td-nowrap">
             <% if p.foreign_id.present? %>
-              <div class="text-iron-400 group-hover:glow" title="<%= p.foreign_id %>"><%= truncate_middle(p.foreign_id) %></div>
+              <div class="text-centaur-400 group-hover:glow" title="<%= p.foreign_id %>"><%= truncate_middle(p.foreign_id) %></div>
               <%= id_meta_line(p.namespace, oid: p.oid) %>
             <% else %>
-              <span class="text-iron-400 group-hover:glow"><%= p.oid %></span>
+              <span class="text-centaur-400 group-hover:glow"><%= p.oid %></span>
               <%= id_meta_line(p.namespace) %>
             <% end %>
           </td>
@@ -49,7 +49,7 @@
               <span class="text-zinc-600">—</span>
             <% end %>
           </td>
-          <td class="console-td text-right text-zinc-600 group-hover:text-iron-400">→</td>
+          <td class="console-td text-right text-zinc-600 group-hover:text-centaur-400">→</td>
         </tr>
       <% end %>
     </tbody>

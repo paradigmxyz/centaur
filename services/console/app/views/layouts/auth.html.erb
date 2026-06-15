@@ -1,15 +1,15 @@
 <!DOCTYPE html>
 <html lang="en" class="min-h-full bg-ink-950">
   <head>
-    <title><%= content_for(:title) || "Iron Control" %></title>
+    <title><%= content_for(:title) || "Centaur Console" %></title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta charset="utf-8">
-    <meta name="theme-color" content="#0c0d0f">
+    <meta name="theme-color" content="#050506">
     <meta name="color-scheme" content="dark">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
 
     <%# Tailwind is compiled by the standalone binary into app/assets/builds/tailwind.css.
-        See config/tailwind.config.js for the iron/ink palette and radii overrides. %>
+        See config/tailwind.config.js for the centaur/ink palette and radii overrides. %>
     <%= stylesheet_link_tag "tailwind", "data-turbo-track": "reload" %>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -17,7 +17,7 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
     <style>
-      ::selection { background: #ff5b04; color: #08090c; }
+      ::selection { background: #28c26a; color: #050506; }
     </style>
   </head>
 

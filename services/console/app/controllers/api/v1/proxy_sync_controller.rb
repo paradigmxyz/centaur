@@ -15,7 +15,7 @@ module Api
     # locally-defined listeners bind to these by foreign_id.
     #
     # The top-level `rules`, `mcp`, and `ingest_token` fields the proxy also
-    # understands are intentionally omitted: iron-control has no models for them
+    # understands are intentionally omitted: centaur-console has no models for them
     # yet. Each secret still carries its own per-secret `rules`.
     class ProxySyncController < Api::ProxyBaseController
       def create

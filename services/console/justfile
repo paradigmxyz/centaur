@@ -2,12 +2,12 @@
 
 set shell := ["bash", "-uc"]
 
-# Hardcoded dev-only bootstrap secrets. iron-control refuses API requests until
+# Hardcoded dev-only bootstrap secrets. centaur-console refuses API requests until
 # a user and API key exist; these are created on first boot from these vars.
 # The API key must be `iak_` + 64 lowercase hex chars. NOT for production use.
-export IRON_CONTROL_INITIAL_USER_EMAIL := "dev@iron.local"
-export IRON_CONTROL_INITIAL_USER_PASSWORD := "dev-password-1234"
-export IRON_CONTROL_INITIAL_API_KEY := "iak_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+export CENTAUR_CONSOLE_INITIAL_USER_EMAIL := "dev@iron.local"
+export CENTAUR_CONSOLE_INITIAL_USER_PASSWORD := "dev-password-1234"
+export CENTAUR_CONSOLE_INITIAL_API_KEY := "iak_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 # List available recipes.
 default:
@@ -20,9 +20,9 @@ dev: deps
     bin/rails db:prepare
     @echo "== Starting overmind (web + css watch) on http://localhost:3000 =="
     @echo "   console:  http://localhost:3000/console/principals"
-    @echo "   user:     $IRON_CONTROL_INITIAL_USER_EMAIL"
-    @echo "   password: $IRON_CONTROL_INITIAL_USER_PASSWORD"
-    @echo "   api key:  $IRON_CONTROL_INITIAL_API_KEY"
+    @echo "   user:     $CENTAUR_CONSOLE_INITIAL_USER_EMAIL"
+    @echo "   password: $CENTAUR_CONSOLE_INITIAL_USER_PASSWORD"
+    @echo "   api key:  $CENTAUR_CONSOLE_INITIAL_API_KEY"
     bin/dev
 
 # Build the Tailwind CSS bundle once (app/assets/builds/tailwind.css).
@@ -39,7 +39,7 @@ deps:
 
 # Print the dev API key for use as a bearer token.
 api-key:
-    @echo "$IRON_CONTROL_INITIAL_API_KEY"
+    @echo "$CENTAUR_CONSOLE_INITIAL_API_KEY"
 
 # Drop, recreate, and migrate the dev database. Re-bootstraps on next `just dev`.
 db-reset:

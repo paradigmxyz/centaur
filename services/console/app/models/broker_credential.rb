@@ -1,4 +1,4 @@
-# A managed OAuth credential whose refresh-token lifecycle iron-control owns
+# A managed OAuth credential whose refresh-token lifecycle centaur-console owns
 # itself: the in-control port of iron-token-broker. control drives a refresh loop
 # (Broker::PollRefreshJob -> Broker::RefreshCredentialJob -> #refresh!) that mints
 # fresh access tokens before expiry.

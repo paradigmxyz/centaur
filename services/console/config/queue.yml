@@ -5,7 +5,7 @@ default: &default
   workers:
     - queues: "*"
       threads: 3
-      processes: <%= ENV.fetch("IRON_CONTROL_JOB_CONCURRENCY", 1) %>
+      processes: <%= ConsoleEnv.fetch("JOB_CONCURRENCY", 1) %>
       polling_interval: 0.1
 
 development:

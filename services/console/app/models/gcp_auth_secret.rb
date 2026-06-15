@@ -1,7 +1,7 @@
 # A gcp_auth transform: mints short-lived GCP OAuth2 access tokens and injects
 # them as Authorization: Bearer on matching requests. Credentials come from
 # either a nested keyfile secret source or Application Default Credentials
-# (credentials_provider). iron-control deliberately does not expose the proxy's
+# (credentials_provider). centaur-console deliberately does not expose the proxy's
 # keyfile_path option, which points at the proxy host's local disk.
 class GcpAuthSecret < ApplicationRecord
   oid_prefix "gas"

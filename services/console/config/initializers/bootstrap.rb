@@ -1,6 +1,6 @@
 Rails.application.config.after_initialize do
   next if Rails.env.test?
-  next if ENV["IRON_CONTROL_INITIAL_USER_EMAIL"].to_s.strip.empty?
+  next if ConsoleEnv["INITIAL_USER_EMAIL"].to_s.strip.empty?
 
   begin
     # after_initialize fires on every boot, including the environment load that

@@ -4,13 +4,13 @@
 # environment (or Rails credentials as a fallback), not a table.
 #
 # Per provider, looks up:
-#   IRON_CONTROL_<PROVIDER>_CLIENT_ID / _CLIENT_SECRET   (ENV)
-#   credentials.console_auth.<provider>.client_id/secret (fallback)
+#   CENTAUR_CONSOLE_<PROVIDER>_CLIENT_ID / _CLIENT_SECRET (ENV)
+#   credentials.console_auth.<provider>.client_id/secret  (fallback)
 # A provider is offered on the login page only when both are present.
 #
 # Bootstrap admins are matched by email and become active + admin on first login
 # (the first admin needs no existing approver):
-#   IRON_CONTROL_BOOTSTRAP_ADMINS="me@acme.com, you@acme.com"   (ENV)
+#   CENTAUR_CONSOLE_BOOTSTRAP_ADMINS="me@acme.com, you@acme.com"   (ENV)
 #   credentials.console_auth.bootstrap_admins                   (fallback: string or array)
 module ConsoleAuth
   # The providers a Login::Providers strategy exists for. A provider must also be
@@ -38,15 +38,15 @@ module ConsoleAuth
   end
 
   def bootstrap_admins
-    raw = ENV["IRON_CONTROL_BOOTSTRAP_ADMINS"].presence || credentials_dig(:bootstrap_admins)
+    raw = ConsoleEnv["BOOTSTRAP_ADMINS"].presence || credentials_dig(:bootstrap_admins)
     list = raw.is_a?(Array) ? raw : raw.to_s.split(/[,\s]+/)
     list.map { |e| e.to_s.strip.downcase }.reject(&:empty?).uniq
   end
 
-  # ENV first (IRON_CONTROL_GOOGLE_CLIENT_ID), then credentials
+  # ENV first (CENTAUR_CONSOLE_GOOGLE_CLIENT_ID), then credentials
   # (console_auth.google.client_id).
   def setting(provider, field)
-    env = ENV["IRON_CONTROL_#{provider.to_s.upcase}_#{field.upcase}"].presence
+    env = ConsoleEnv["#{provider.to_s.upcase}_#{field.upcase}"].presence
     return env if env
     credentials_dig(provider.to_sym, field.to_sym)
   end

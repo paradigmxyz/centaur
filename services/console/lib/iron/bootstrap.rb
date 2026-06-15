@@ -7,15 +7,15 @@ module Iron
     module_function
 
     def run!(logger: Rails.logger)
-      email = ENV["IRON_CONTROL_INITIAL_USER_EMAIL"].to_s.strip
+      email = ConsoleEnv["INITIAL_USER_EMAIL"].to_s.strip
       return if email.empty?
 
-      password = ENV["IRON_CONTROL_INITIAL_USER_PASSWORD"].to_s
+      password = ConsoleEnv["INITIAL_USER_PASSWORD"].to_s
       if password.empty?
-        raise Error, "IRON_CONTROL_INITIAL_USER_EMAIL is set but IRON_CONTROL_INITIAL_USER_PASSWORD is missing"
+        raise Error, "#{ConsoleEnv.key("INITIAL_USER_EMAIL")} is set but #{ConsoleEnv.key("INITIAL_USER_PASSWORD")} is missing"
       end
 
-      supplied_token = ENV["IRON_CONTROL_INITIAL_API_KEY"].to_s
+      supplied_token = ConsoleEnv["INITIAL_API_KEY"].to_s
 
       return unless ActiveRecord::Base.connection.data_source_exists?("users")
 
@@ -34,12 +34,12 @@ module Iron
         end
         api_key.save!
 
-        log_line = "iron-control bootstrap: created user id=#{user.id} email=#{user.email} api_key_id=#{api_key.id}"
+        log_line = "centaur-console bootstrap: created user id=#{user.id} email=#{user.email} api_key_id=#{api_key.id}"
         log_line += " api_key=#{api_key.token}" if supplied_token.empty?
         logger.info(log_line)
       end
     rescue ActiveRecord::RecordInvalid => e
-      raise Error, "iron-control bootstrap failed: #{e.record.class.name.downcase} #{e.record.errors.full_messages.join(", ")}"
+      raise Error, "centaur-console bootstrap failed: #{e.record.class.name.downcase} #{e.record.errors.full_messages.join(", ")}"
     end
   end
 end

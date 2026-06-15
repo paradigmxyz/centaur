@@ -6,7 +6,7 @@ module Oauth
   # The OAuth consent flow, keyed by an app's well-known slug:
   # /oauth/:slug/start sends a team member to the IdP's consent screen, and
   # /oauth/:slug/callback turns the returned authorization code into a managed
-  # BrokerCredential linked to the OauthApp, then renders an iron-control result
+  # BrokerCredential linked to the OauthApp, then renders an centaur-console result
   # page.
   #
   # Deliberately unauthenticated -- a team member connects an integration by

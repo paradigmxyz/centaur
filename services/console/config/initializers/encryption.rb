@@ -1,12 +1,12 @@
-primary_key = ENV["IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY"]
-deterministic_key = ENV["IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY"]
-key_derivation_salt = ENV["IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT"]
+primary_key = ConsoleEnv["AR_ENCRYPTION_PRIMARY_KEY"]
+deterministic_key = ConsoleEnv["AR_ENCRYPTION_DETERMINISTIC_KEY"]
+key_derivation_salt = ConsoleEnv["AR_ENCRYPTION_KEY_DERIVATION_SALT"]
 
 if Rails.env.production? && ENV["SECRET_KEY_BASE_DUMMY"].blank?
   missing = {
-    "IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" => primary_key,
-    "IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY" => deterministic_key,
-    "IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" => key_derivation_salt
+    ConsoleEnv.key("AR_ENCRYPTION_PRIMARY_KEY") => primary_key,
+    ConsoleEnv.key("AR_ENCRYPTION_DETERMINISTIC_KEY") => deterministic_key,
+    ConsoleEnv.key("AR_ENCRYPTION_KEY_DERIVATION_SALT") => key_derivation_salt
   }.select { |_, v| v.to_s.strip.empty? }.keys
 
   if missing.any?

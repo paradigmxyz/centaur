@@ -1,4 +1,4 @@
-<% content_for :title, "Users · Iron Control" %>
+<% content_for :title, "Users · Centaur Console" %>
 
 <div class="mb-8">
   <h1 class="page-title">Users</h1>
@@ -57,7 +57,7 @@
             <div class="flex items-center justify-end gap-2">
               <% unless user.admin? %>
                 <%= button_to "Make admin", promote_console_user_path(user.oid), method: :post,
-                      class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-iron-500/40 hover:text-iron-300" %>
+                      class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
               <% end %>
               <% if user.active? && user != current_user %>
                 <%= button_to "Disable", disable_console_user_path(user.oid), method: :post,

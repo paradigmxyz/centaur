@@ -1,5 +1,5 @@
 <% title = @secret.try(:name).presence || @secret.foreign_id.presence || @secret.oid %>
-<% content_for :title, "Edit #{title} · Iron Control" %>
+<% content_for :title, "Edit #{title} · Centaur Console" %>
 
 <div class="mb-8">
   <a href="<%= console_secret_path(@kind, @secret.oid) %>" class="back-link">← back to secret</a>

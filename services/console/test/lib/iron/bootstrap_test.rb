@@ -26,23 +26,23 @@ class Iron::BootstrapTest < ActiveSupport::TestCase
     UserIdentity.delete_all
     User.delete_all
     @env = ENV.to_hash.slice(
-      "IRON_CONTROL_INITIAL_USER_EMAIL",
-      "IRON_CONTROL_INITIAL_USER_PASSWORD",
-      "IRON_CONTROL_INITIAL_API_KEY"
+      "CENTAUR_CONSOLE_INITIAL_USER_EMAIL",
+      "CENTAUR_CONSOLE_INITIAL_USER_PASSWORD",
+      "CENTAUR_CONSOLE_INITIAL_API_KEY"
     )
   end
 
   teardown do
-    %w[IRON_CONTROL_INITIAL_USER_EMAIL IRON_CONTROL_INITIAL_USER_PASSWORD IRON_CONTROL_INITIAL_API_KEY].each do |k|
+    %w[CENTAUR_CONSOLE_INITIAL_USER_EMAIL CENTAUR_CONSOLE_INITIAL_USER_PASSWORD CENTAUR_CONSOLE_INITIAL_API_KEY].each do |k|
       ENV.delete(k)
     end
     @env.each { |k, v| ENV[k] = v }
   end
 
   def set_env(email: nil, password: nil, api_key: nil)
-    ENV["IRON_CONTROL_INITIAL_USER_EMAIL"] = email
-    ENV["IRON_CONTROL_INITIAL_USER_PASSWORD"] = password
-    ENV["IRON_CONTROL_INITIAL_API_KEY"] = api_key
+    ENV["CENTAUR_CONSOLE_INITIAL_USER_EMAIL"] = email
+    ENV["CENTAUR_CONSOLE_INITIAL_USER_PASSWORD"] = password
+    ENV["CENTAUR_CONSOLE_INITIAL_API_KEY"] = api_key
   end
 
   test "no-op when email not set" do

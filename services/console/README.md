@@ -26,20 +26,24 @@ It is a Rails application backed by Postgres. It provides a JSON API, an operato
 
 Operators manage credentials, principals, roles, and grants through the API or the console. Each `iron-proxy` instance signs in with its own token, fetches the configuration for its assigned principal, and adds the granted credentials to matching outbound requests.
 
+## Environment Variables
+
+All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
+
 ## First Boot
 
-`iron-control` requires an authenticated user and API key before any API endpoint will respond. To bootstrap a fresh deployment without a console, set the following environment variables on startup:
+The console requires an authenticated user and API key before any API endpoint will respond. To bootstrap a fresh deployment without a console, set the following environment variables on startup:
 
 | Variable                          | Required | Description                                                                                              |
 | --------------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
-| `IRON_CONTROL_INITIAL_USER_EMAIL`    | yes      | Email for the initial user.                                                                              |
-| `IRON_CONTROL_INITIAL_USER_PASSWORD` | yes      | Password for the initial user (minimum 12 characters).                                                   |
-| `IRON_CONTROL_INITIAL_API_KEY`       | no       | Plaintext API key for the initial user. Must match `iak_` followed by 64 lowercase hex characters (a 32-byte hex string). If omitted, a token is generated and logged once at startup. |
+| `CENTAUR_CONSOLE_INITIAL_USER_EMAIL`    | yes      | Email for the initial user.                                                                              |
+| `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD` | yes      | Password for the initial user (minimum 12 characters).                                                   |
+| `CENTAUR_CONSOLE_INITIAL_API_KEY`       | no       | Plaintext API key for the initial user. Must match `iak_` followed by 64 lowercase hex characters (a 32-byte hex string). If omitted, a token is generated and logged once at startup. |
 
 Behavior:
 
 - Bootstrap runs after Rails initialization on every boot, but is a no-op if any user already exists. It is safe to leave the env vars set across rolling restarts.
-- If `IRON_CONTROL_INITIAL_USER_EMAIL` is set without `IRON_CONTROL_INITIAL_USER_PASSWORD`, the process exits with a clear error.
+- If `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` is set without `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`, the process exits with a clear error.
 - Concurrent pods racing the first boot are serialized with a Postgres advisory lock; exactly one user is created.
 
 When deploying to Kubernetes, source these values from a `Secret`, not from a `ConfigMap`.
@@ -50,17 +54,17 @@ The operator console always supports email and password sign-in. To add Google o
 
 | Variable                              | Required | Description                                                                                 |
 | ------------------------------------- | -------- | ------------------------------------------------------------------------------------------- |
-| `IRON_CONTROL_PUBLIC_URL`             | recommended | Public origin for this deployment, for example `https://control.example.com`. Use this when `iron-control` runs behind a proxy or load balancer whose internal host does not match the public URL. |
-| `IRON_CONTROL_GOOGLE_CLIENT_ID`       | for Google | Google OAuth client ID for console login.                                                    |
-| `IRON_CONTROL_GOOGLE_CLIENT_SECRET`   | for Google | Google OAuth client secret for console login.                                                |
-| `IRON_CONTROL_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
-| `IRON_CONTROL_SLACK_CLIENT_SECRET`    | for Slack | Slack OpenID Connect client secret for console login.                                        |
-| `IRON_CONTROL_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other new SSO users are created as pending users. |
+| `CENTAUR_CONSOLE_PUBLIC_URL`             | recommended | Public origin for this deployment, for example `https://control.example.com`. Use this when `iron-control` runs behind a proxy or load balancer whose internal host does not match the public URL. |
+| `CENTAUR_CONSOLE_GOOGLE_CLIENT_ID`       | for Google | Google OAuth client ID for console login.                                                    |
+| `CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET`   | for Google | Google OAuth client secret for console login.                                                |
+| `CENTAUR_CONSOLE_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
+| `CENTAUR_CONSOLE_SLACK_CLIENT_SECRET`    | for Slack | Slack OpenID Connect client secret for console login.                                        |
+| `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other new SSO users are created as pending users. |
 
 Register these callback URLs with the provider:
 
-- Google: `<IRON_CONTROL_PUBLIC_URL>/auth/google/callback`
-- Slack: `<IRON_CONTROL_PUBLIC_URL>/auth/slack/callback`
+- Google: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/google/callback`
+- Slack: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/slack/callback`
 
 Both providers request the `openid`, `email`, and `profile` scopes. Client credentials may also be stored in Rails credentials under `console_auth.<provider>.client_id` and `console_auth.<provider>.client_secret`, but environment variables take precedence.
 
@@ -72,9 +76,9 @@ Google OAuth consent apps for broker credentials are configured separately in th
 
 | Variable                                 | Required           | Description                                  |
 | ---------------------------------------- | ------------------ | -------------------------------------------- |
-| `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`         | yes (in production) | Primary key used for non-deterministic encryption. |
-| `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY`   | yes (in production) | Key used for deterministic encryption.       |
-| `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | yes (in production) | Salt used to derive per-attribute keys.      |
+| `CENTAUR_CONSOLE_AR_ENCRYPTION_PRIMARY_KEY`         | yes (in production) | Primary key used for non-deterministic encryption. |
+| `CENTAUR_CONSOLE_AR_ENCRYPTION_DETERMINISTIC_KEY`   | yes (in production) | Key used for deterministic encryption.       |
+| `CENTAUR_CONSOLE_AR_ENCRYPTION_KEY_DERIVATION_SALT` | yes (in production) | Salt used to derive per-attribute keys.      |
 
 Generate suitable values with `bin/rails db:encryption:init` and store them in your secret manager. In production, the process refuses to boot if any of the three are missing. In `development` and `test`, fixed fallback values are used so the suite runs without configuration.
 

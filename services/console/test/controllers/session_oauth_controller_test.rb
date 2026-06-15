@@ -8,14 +8,14 @@ require "test_helper"
 class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   GOOGLE_CLIENT_ID = "google-login-client-id".freeze
   ENV_KEYS = %w[
-    IRON_CONTROL_GOOGLE_CLIENT_ID IRON_CONTROL_GOOGLE_CLIENT_SECRET IRON_CONTROL_BOOTSTRAP_ADMINS
+    CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET CENTAUR_CONSOLE_BOOTSTRAP_ADMINS
   ].freeze
 
   setup do
     @prev_env = ENV.to_hash.slice(*ENV_KEYS)
-    ENV["IRON_CONTROL_GOOGLE_CLIENT_ID"] = GOOGLE_CLIENT_ID
-    ENV["IRON_CONTROL_GOOGLE_CLIENT_SECRET"] = "google-login-secret"
-    ENV["IRON_CONTROL_BOOTSTRAP_ADMINS"] = "boss@acme.example"
+    ENV["CENTAUR_CONSOLE_GOOGLE_CLIENT_ID"] = GOOGLE_CLIENT_ID
+    ENV["CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET"] = "google-login-secret"
+    ENV["CENTAUR_CONSOLE_BOOTSTRAP_ADMINS"] = "boss@acme.example"
   end
 
   teardown do

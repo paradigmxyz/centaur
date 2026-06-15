@@ -12,13 +12,14 @@ class ApplicationController < ActionController::Base
   helper_method :current_user
   helper_method :public_base_url, :oauth_callback_redirect_uri
 
-  # The public origin iron-control is reached at. Derived from the request by
-  # default; IRON_CONTROL_PUBLIC_URL overrides it for deployments behind proxies
-  # whose Host header doesn't match the public origin. Shared by the OAuth flow
-  # controller (the redirect URI it sends the IdP) and the console (the redirect
-  # URI / start-URL template it shows operators), so the two never drift.
+  # The public origin the console is reached at. Derived from the request by
+  # default; CENTAUR_CONSOLE_PUBLIC_URL overrides it for deployments behind
+  # proxies whose Host header doesn't match the public origin. Shared by the
+  # OAuth flow controller (the redirect URI it sends the IdP) and the console
+  # (the redirect URI / start-URL template it shows operators), so the two never
+  # drift.
   def public_base_url
-    ENV["IRON_CONTROL_PUBLIC_URL"].presence || request.base_url
+    ConsoleEnv["PUBLIC_URL"].presence || request.base_url
   end
 
   # The OAuth callback redirect URI registered with the IdP for an app:

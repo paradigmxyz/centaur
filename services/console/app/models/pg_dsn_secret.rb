@@ -2,7 +2,7 @@
 # secret source, plus an optional SET ROLE for the upstream session. Delivered to
 # iron-proxy in the single-listener `postgres` list, where it is keyed for routing
 # by `database` (the dbname a client sends to reach this upstream). `database` is
-# therefore required and must match the database the DSN connects to; iron-control
+# therefore required and must match the database the DSN connects to; centaur-console
 # enforces that match where the DSN is inspectable (control_plane/inline) and
 # documents it otherwise (the proxy returns FATAL 3D000 on a mismatch).
 #

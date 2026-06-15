@@ -1,11 +1,11 @@
-<% content_for :title, "Sign In · Iron Control" %>
+<% content_for :title, "Sign In · Centaur Console" %>
 
-<% input = "w-full rounded border border-ink-600 bg-ink-850/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-iron-500/60 focus:outline-none focus:ring-1 focus:ring-iron-500/40" %>
+<% input = "w-full rounded border border-ink-600 bg-ink-850/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-centaur-500/60 focus:outline-none focus:ring-1 focus:ring-centaur-500/40" %>
 <% label = "mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500" %>
 
 <div class="mb-8 text-center">
-  <h1 class="page-title">iron-<span class="text-iron-500">control</span></h1>
-  <p class="page-subtitle">Operator console sign in.</p>
+  <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "mx-auto h-9 w-auto", width: 497, height: 127 %>
+  <p class="page-subtitle mt-4">Operator console sign in.</p>
 </div>
 
 <% if flash[:notice] %>
@@ -22,7 +22,7 @@
     <div class="space-y-3">
       <% providers.each do |provider| %>
         <%= link_to auth_start_path(provider: provider),
-              class: "flex w-full items-center justify-center rounded border border-ink-600 bg-ink-800/60 px-4 py-2 text-sm text-zinc-200 transition-colors hover:border-iron-500/40 hover:text-iron-200" do %>
+              class: "flex w-full items-center justify-center rounded border border-ink-600 bg-ink-800/60 px-4 py-2 text-sm text-zinc-200 transition-colors hover:border-centaur-500/40 hover:text-centaur-200" do %>
           Continue with <%= provider.capitalize %>
         <% end %>
       <% end %>
@@ -48,7 +48,7 @@
     </div>
 
     <div class="mt-6">
-      <%= f.submit "Sign in", class: "w-full cursor-pointer rounded border border-iron-500/40 bg-iron-500/10 px-4 py-2 text-sm text-iron-300 transition-colors hover:bg-iron-500/20 hover:text-iron-200" %>
+      <%= f.submit "Sign in", class: "w-full cursor-pointer rounded border border-centaur-500/40 bg-centaur-500/10 px-4 py-2 text-sm text-centaur-300 transition-colors hover:bg-centaur-500/20 hover:text-centaur-200" %>
     </div>
   <% end %>
 </div>

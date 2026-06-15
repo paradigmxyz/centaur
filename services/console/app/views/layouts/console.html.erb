@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html lang="en" class="h-full">
   <head>
-    <title><%= content_for(:title) || "Iron Control" %></title>
+    <title><%= content_for(:title) || "Centaur Console" %></title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta charset="utf-8">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
 
     <%# Tailwind is compiled by the standalone binary into app/assets/builds/tailwind.css.
-        See config/tailwind.config.js for the iron/ink palette and radii overrides. %>
+        See config/tailwind.config.js for the centaur/ink palette and radii overrides. %>
     <%= stylesheet_link_tag "tailwind", "data-turbo-track": "reload" %>
     <%= javascript_importmap_tags %>
 
@@ -16,12 +16,12 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
     <style>
-      ::selection { background: #ff5b04; color: #08090c; }
-      .glow { text-shadow: 0 0 18px rgba(255,91,4,0.45); }
+      ::selection { background: #28c26a; color: #050506; }
+      .glow { filter: drop-shadow(0 0 14px rgba(40,194,106,0.45)); }
       *::-webkit-scrollbar { width: 10px; height: 10px; }
-      *::-webkit-scrollbar-track { background: #0b0d12; }
-      *::-webkit-scrollbar-thumb { background: #2b313f; border-radius: 1px; }
-      *::-webkit-scrollbar-thumb:hover { background: #ff5b04; }
+      *::-webkit-scrollbar-track { background: #0b0b0d; }
+      *::-webkit-scrollbar-thumb { background: #33333a; border-radius: 1px; }
+      *::-webkit-scrollbar-thumb:hover { background: #28c26a; }
     </style>
   </head>
 
@@ -30,8 +30,8 @@
       <header class="border-b border-ink-600 bg-ink-850/80 backdrop-blur sticky top-0 z-10">
         <div class="mx-auto max-w-7xl px-6">
           <div class="flex items-center justify-between h-16">
-            <a href="<%= root_path %>" class="group">
-              <span class="text-zinc-100 font-bold tracking-tight">iron-<span class="text-iron-500 glow">control</span></span>
+            <a href="<%= root_path %>" class="group flex items-center" aria-label="Centaur Console">
+              <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "h-7 w-auto glow", width: 497, height: 127 %>
             </a>
             <div class="flex items-center gap-4 text-sm">
               <nav class="flex items-center gap-1">
@@ -40,7 +40,7 @@
                 <% nav.each do |name, path| %>
                   <% active = request.path == path || (name == "principals" && request.path.start_with?("/console/principals")) %>
                   <a href="<%= path %>"
-                     class="px-4 py-2 transition-colors <%= active ? "text-iron-400" : "text-zinc-400 hover:text-zinc-100" %>">
+                     class="px-4 py-2 transition-colors <%= active ? "text-centaur-400" : "text-zinc-400 hover:text-zinc-100" %>">
                     <%= name.capitalize %>
                   </a>
                 <% end %>
@@ -50,7 +50,7 @@
                 <div class="flex items-center gap-3 border-l border-ink-600 pl-4">
                   <span class="text-zinc-500" title="<%= current_user.email %>"><%= current_user.email %></span>
                   <%= button_to "Sign out", logout_path, method: :delete,
-                        class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-iron-500/40 hover:text-iron-300" %>
+                        class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
                 </div>
               <% end %>
             </div>

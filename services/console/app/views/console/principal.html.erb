@@ -1,4 +1,4 @@
-<% content_for :title, "#{@principal.name || @principal.foreign_id || @principal.oid} · Iron Control" %>
+<% content_for :title, "#{@principal.name || @principal.foreign_id || @principal.oid} · Centaur Console" %>
 
 <div class="mb-8">
   <a href="<%= console_principals_path %>" class="back-link">← back to principals</a>
@@ -6,7 +6,7 @@
     <%= @principal.name.presence || @principal.foreign_id.presence || "Principal" %>
   </h1>
   <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
-    <span class="text-iron-400 glow"><%= @principal.oid %></span>
+    <span class="text-centaur-400 glow"><%= @principal.oid %></span>
     <span class="text-zinc-600">·</span>
     <span class="rounded bg-ink-700 px-2 py-0.5 text-xs text-zinc-400"><%= @principal.namespace %></span>
     <% if @principal.foreign_id.present? %>
@@ -30,7 +30,7 @@
     <div class="flex flex-wrap gap-2">
       <% @roles.each do |r| %>
         <span class="inline-flex items-center gap-2 rounded-lg border border-ink-600 bg-ink-800 px-3 py-1.5 text-sm">
-          <span class="text-iron-400"><%= r.oid %></span>
+          <span class="text-centaur-400"><%= r.oid %></span>
           <span class="text-zinc-300"><%= r.name.presence || r.foreign_id %></span>
         </span>
       <% end %>
@@ -68,7 +68,7 @@
                 <td class="console-td-nowrap">
                   <span class="resource-badge"><%= secret_kind_label(kind) %></span>
                 </td>
-                <td class="console-td-nowrap text-iron-400"><%= s.oid %></td>
+                <td class="console-td-nowrap text-centaur-400"><%= s.oid %></td>
                 <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
                 <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
               </tr>

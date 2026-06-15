@@ -40,20 +40,20 @@ registry:
 env:
   secret:
     - RAILS_MASTER_KEY
-    - IRON_CONTROL_DATABASE_PASSWORD
+    - CENTAUR_CONSOLE_DATABASE_PASSWORD
   clear:
     # Run the Solid Queue Supervisor inside the web server's Puma process to do jobs.
     # When you start using multiple servers, you should split out job processing to a dedicated machine.
-    IRON_CONTROL_SOLID_QUEUE_IN_PUMA: true
+    CENTAUR_CONSOLE_SOLID_QUEUE_IN_PUMA: true
 
     # Set number of processes dedicated to Solid Queue (default: 1)
-    # IRON_CONTROL_JOB_CONCURRENCY: 3
+    # CENTAUR_CONSOLE_JOB_CONCURRENCY: 3
 
     # Set number of cores available to the application on each server (default: 1).
     # WEB_CONCURRENCY: 2
 
     # Postgres accessory host on the local Kamal docker network.
-    IRON_CONTROL_DB_HOST: iron_control-db
+    CENTAUR_CONSOLE_DB_HOST: iron_control-db
 
     # Log everything from Rails
     # RAILS_LOG_LEVEL: debug
