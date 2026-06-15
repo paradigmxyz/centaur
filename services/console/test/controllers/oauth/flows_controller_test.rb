@@ -151,6 +151,44 @@ module Oauth
       assert_includes response.body, cred.oid
     end
 
+    test "callback wraps the minted credential in a grantable static secret" do
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+
+      assert_difference -> { StaticSecret.count } => 1 do
+        get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+      end
+
+      cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
+      secret = cred.static_secrets.sole
+      assert_equal cred, secret.broker_credential # first-class link to the credential
+      assert_equal cred.namespace, secret.namespace
+      assert_equal cred.foreign_id, secret.foreign_id
+      assert_nil secret.created_by # the unauthenticated flow has no operator
+      assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }, secret.inject_config)
+      assert_equal "token_broker", secret.source.source_type
+      assert_equal cred.oid, secret.source.config["credential_id"]
+      assert_equal [ "*.googleapis.com" ], secret.rules.map(&:host)
+      # The source resolves the credential's live token at sync time.
+      assert_equal({ "type" => "control_plane", "value" => "AT" }, secret.source.to_proxy_source)
+    end
+
+    test "re-consent neither duplicates the wrapping secret nor clobbers operator edits" do
+      state1 = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: "google"), params: { state: state1, code: "code-1" }
+      secret = StaticSecret.find_by(foreign_id: "google-google-google-sub-1")
+      assert_not_nil secret
+      secret.update!(name: "operator-renamed")
+
+      state2 = start_flow
+      stub_exchange(status: 200, body: token_body)
+      assert_no_difference -> { StaticSecret.count } do
+        get oauth_callback_url(slug: "google"), params: { state: state2, code: "code-2" }
+      end
+      assert_equal "operator-renamed", secret.reload.name
+    end
+
     test "callback works with a disabled console session" do
       user = users(:member_user)
       sign_in user

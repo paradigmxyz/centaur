@@ -38,7 +38,14 @@ class StaticSecret < ApplicationRecord
 
   has_one :source, class_name: "SecretSource", dependent: :destroy
   has_many :rules, class_name: "RequestRule", dependent: :destroy
-  belongs_to :created_by, class_name: "User"
+  # Optional: a static secret auto-created by the OAuth consent flow has no console
+  # operator behind it (the public flow runs unauthenticated), like the credential
+  # it wraps.
+  belongs_to :created_by, class_name: "User", optional: true
+  # Set when this secret wraps a managed broker credential (auto-created by the
+  # OAuth consent flow). The token_broker source carries the credential_id the
+  # proxy resolves at sync; this association is the console-level link.
+  belongs_to :broker_credential, optional: true
 
   # Maps to a single entry in the iron-proxy `secrets` transform array. The
   # caller is responsible for skipping secrets without a source.

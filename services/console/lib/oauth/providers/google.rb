@@ -17,6 +17,11 @@ module Oauth
       # Always requested in addition to the app's scopes, so the token response
       # carries an id_token identifying the Google account.
       IDENTITY_SCOPES = %w[openid https://www.googleapis.com/auth/userinfo.email].freeze
+      # Hosts a minted access token may be sent to, as request-rule host patterns.
+      # Every Google API is served under *.googleapis.com; accounts.google.com is
+      # auth-only and intentionally excluded. Drives the rules on the static secret
+      # auto-created alongside a minted credential.
+      API_HOSTS = %w[*.googleapis.com].freeze
       # The issuers Google stamps into the id_token; both forms are accepted per
       # Google's OIDC discovery document.
       VALID_ISSUERS = %w[https://accounts.google.com accounts.google.com].freeze
@@ -25,6 +30,7 @@ module Oauth
       def authorization_endpoint = AUTHORIZATION_ENDPOINT
       def token_endpoint = TOKEN_ENDPOINT
       def identity_scopes = IDENTITY_SCOPES
+      def api_hosts = API_HOSTS
 
       # Provider-specific query params for the authorization redirect. Both are
       # required to guarantee a refresh token, including on re-consent:

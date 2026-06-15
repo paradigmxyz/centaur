@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_12_100100) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_15_224547) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -304,8 +304,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_12_100100) do
   end
 
   create_table "static_secrets", force: :cascade do |t|
+    t.bigint "broker_credential_id"
     t.datetime "created_at", null: false
-    t.bigint "created_by_id", null: false
+    t.bigint "created_by_id"
     t.string "description"
     t.string "foreign_id"
     t.jsonb "inject_config"
@@ -314,6 +315,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_12_100100) do
     t.string "namespace", default: "default", null: false
     t.jsonb "replace_config"
     t.datetime "updated_at", null: false
+    t.index ["broker_credential_id"], name: "index_static_secrets_on_broker_credential_id"
     t.index ["created_by_id"], name: "index_static_secrets_on_created_by_id"
     t.index ["labels"], name: "index_static_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_static_secrets_on_namespace_and_foreign_id", unique: true
@@ -379,6 +381,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_12_100100) do
   add_foreign_key "secret_sources", "oauth_token_secrets"
   add_foreign_key "secret_sources", "pg_dsn_secrets"
   add_foreign_key "secret_sources", "static_secrets"
+  add_foreign_key "static_secrets", "broker_credentials"
   add_foreign_key "static_secrets", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"
