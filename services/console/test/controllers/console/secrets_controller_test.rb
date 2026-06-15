@@ -33,6 +33,17 @@ module Console
       assert_response :ok
     end
 
+    # The managed-secret guard banner is behavior (a warning), not form markup, so
+    # it is asserted here unlike the rest of the rendered form.
+    test "edit warns when the secret is an OAuth-flow-managed wrapper" do
+      get edit_console_static_secret_url(static_secrets(:acme_managed_gmail_secret).oid)
+      assert_response :ok
+      assert_match "Managed secret", response.body
+      # An ordinary secret shows no such warning.
+      get edit_console_static_secret_url(static_secrets(:acme_prod_api_key).oid)
+      assert_no_match "Managed secret", response.body
+    end
+
     test "POST create builds a static secret with a source and rules" do
       assert_difference -> { StaticSecret.count } => 1,
                         -> { SecretSource.count } => 1,

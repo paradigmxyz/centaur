@@ -86,6 +86,33 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "span", text: credential.status
   end
 
+  test "secrets table badges an OAuth-flow-managed static secret" do
+    secret = static_secrets(:acme_managed_gmail_secret)
+    get console_secrets_url
+    assert_response :ok
+    assert_select "span", text: "managed"
+    # Only the wrapping secret is badged, not ordinary static secrets.
+    assert_select "span", text: "managed", count: StaticSecret.where.not(broker_credential_id: nil).count
+  end
+
+  test "managed secret detail page links to the credential it wraps" do
+    secret = static_secrets(:acme_managed_gmail_secret)
+    cred = secret.broker_credential
+    get console_secret_url("static", secret.oid)
+    assert_response :ok
+    assert_match "Managed secret", response.body
+    assert_select "a[href=?]", console_credential_path(cred.oid)
+  end
+
+  test "credential detail page links to the static secret that makes it grantable" do
+    cred = broker_credentials(:acme_managed_gmail)
+    secret = static_secrets(:acme_managed_gmail_secret)
+    get console_credential_url(cred.oid)
+    assert_response :ok
+    assert_select "h2", text: "Grantable As"
+    assert_select "a[href=?]", console_secret_path("static", secret.oid)
+  end
+
   test "credential detail page shows refresh and client data" do
     credential = broker_credentials(:acme_managed_gmail)
     get console_credential_url(credential.oid)

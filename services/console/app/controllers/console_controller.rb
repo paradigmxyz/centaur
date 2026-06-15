@@ -46,7 +46,11 @@ class ConsoleController < ApplicationController
 
   def secrets
     @secrets_by_kind = SECRET_KINDS.transform_values do |cfg|
-      cfg[:model].includes(cfg[:includes]).order(created_at: :asc, id: :asc)
+      rel = cfg[:model].includes(cfg[:includes]).order(created_at: :asc, id: :asc)
+      # Static secrets may wrap a broker credential (the "managed" badge); eager
+      # load the credential and its app so the list doesn't fan out per row.
+      rel = rel.includes(broker_credential: :oauth_app) if cfg[:model] == StaticSecret
+      rel
     end
   end
 
@@ -67,6 +71,8 @@ class ConsoleController < ApplicationController
 
   def credential
     @credential = BrokerCredential.find_by_oid!(params[:id])
+    # The grantable static secret(s) wrapping this credential, for the cross-link.
+    @wrapping_secrets = @credential.static_secrets.order(:id)
   end
 
   # Registered OAuth apps and the consent flows they drive. Like credentials,

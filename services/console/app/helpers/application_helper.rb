@@ -23,6 +23,16 @@ module ApplicationHelper
     end
   end
 
+  # The broker credential a record wraps when it is an OAuth-flow-managed static
+  # secret; nil for ordinary secrets and for non-static kinds. Drives the "managed"
+  # badge and the credential <-> secret cross-links. Lives in a helper (not a
+  # controller helper_method) so it is available to both the ConsoleController
+  # views and the Console::BaseSecretsController edit form.
+  def managed_credential(record)
+    return nil unless record.respond_to?(:broker_credential)
+    record.broker_credential
+  end
+
   # The muted secondary line shown under a record's primary identifier in console
   # tables: the namespace, optionally preceded by the opaque oid and a small dot.
   # Pass oid: when the primary line is the foreign_id (so the oid still shows);

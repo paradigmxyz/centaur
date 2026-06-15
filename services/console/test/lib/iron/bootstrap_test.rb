@@ -12,9 +12,11 @@ class Iron::BootstrapTest < ActiveSupport::TestCase
     Proxy.delete_all
     RequestRule.delete_all
     SecretSource.delete_all
+    # StaticSecret references BrokerCredential (wrapping secrets), so clear it
+    # first: delete_all bypasses the dependent: :nullify that would handle this.
+    StaticSecret.delete_all
     BrokerCredential.delete_all
     OauthApp.delete_all
-    StaticSecret.delete_all
     GcpAuthSecret.delete_all
     AwsAuthSecret.delete_all
     OauthTokenSecret.delete_all

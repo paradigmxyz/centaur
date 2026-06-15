@@ -25,6 +25,12 @@ oauth_gmail_host:
   paths: []
   oauth_token_secret: acme_gmail_oauth
 
+managed_gmail_host:
+  host: "*.googleapis.com"
+  http_methods: []
+  paths: []
+  static_secret: acme_managed_gmail_secret
+
 hmac_webhook_host:
   host: hooks.example.com
   http_methods: ["POST"]
