@@ -357,6 +357,64 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('summarize the thread so far')
   })
 
+  it('fetches attachments from preceding Slack thread messages for a mid-thread mention', async () => {
+    const parent = await postUserMessage('Root context before an attachment.')
+    const priorReply = await postUserMessage('Screenshot is attached here.', parent.ts)
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    slackApi.addFileToMessage(CHANNEL_ID, priorReply.ts, {
+      id: 'F-thread-context-image',
+      mimetype: 'image/png',
+      name: 'thread-context.png',
+      original_h: 600,
+      original_w: 800,
+      size: 16,
+      url_private: fileUrl
+    })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect the earlier screenshot`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-mid-thread-history-attachment',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> inspect the earlier screenshot`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const appendedAttachment = codexApi.appends[0]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        attachment_type: 'image',
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'thread-context.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+
+    const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
+    expect(executeInput).toContain('Screenshot is attached here.')
+    expect(executeInput).toContain('Earlier Slack thread attachment')
+    expect(executeInput).toContain(
+      `data:image/png;base64,${Buffer.from('captured-image').toString('base64')}`
+    )
+  })
+
   it('injects Slack requester identity and verified GitHub handle into Codex input', async () => {
     slackApi.setUserProfile(USER_ID, {
       name: 'akshaan',
@@ -3530,6 +3588,7 @@ function writeMockSseEvent(stream: ServerResponse, event: MockSessionEvent): voi
 }
 
 type PatchedSlackApi = {
+  addFileToMessage(channel: string, ts: string, file: Record<string, unknown>): void
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
@@ -3572,6 +3631,7 @@ type SlackStreamTranscript = {
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
+  const threadMessageFiles = new Map<string, Record<string, unknown>[]>()
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
@@ -3587,6 +3647,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       port,
       streams,
       threadNotFoundReplies,
+      threadMessageFiles,
       userProfiles,
       userProfileRequests,
       upstreamUrl
@@ -3597,6 +3658,10 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   })
   await listen(server, port)
   return {
+    addFileToMessage(channel: string, ts: string, file: Record<string, unknown>) {
+      const key = slackReplyKey(channel, ts)
+      threadMessageFiles.set(key, [...(threadMessageFiles.get(key) ?? []), file])
+    },
     calls,
     url: `http://127.0.0.1:${port}`,
     failRepliesWithThreadNotFound(channel: string, ts: string) {
@@ -3615,6 +3680,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure.remaining = -1
       appendFailure.error = ''
       threadNotFoundReplies.clear()
+      threadMessageFiles.clear()
       streams.clear()
       userProfiles.clear()
       userProfileRequests.clear()
@@ -3642,6 +3708,7 @@ async function handlePatchedSlackRequest(
     port: number
     streams: Map<string, StreamRecord>
     threadNotFoundReplies: Set<string>
+    threadMessageFiles: Map<string, Record<string, unknown>[]>
     userProfiles: Map<string, Record<string, unknown>>
     userProfileRequests: Map<string, number>
     upstreamUrl: string
@@ -3749,6 +3816,27 @@ async function handlePatchedSlackRequest(
       )
     ) {
       await sendWebResponse(res, Response.json({ ok: false, error: 'thread_not_found' }))
+      return
+    }
+    if (input.threadMessageFiles.size > 0) {
+      const rawBody = await request.arrayBuffer()
+      const proxied = await fetch(new URL(`${path}${url.search}`, input.upstreamUrl), {
+        method: request.method,
+        headers: request.headers,
+        body: rawBody.byteLength > 0 ? rawBody : undefined
+      })
+      const payload = await proxied.json() as Record<string, unknown>
+      if (Array.isArray(payload.messages)) {
+        payload.messages = payload.messages.map(message => {
+          if (!message || typeof message !== 'object' || Array.isArray(message)) return message
+          const item = message as Record<string, unknown>
+          const files = input.threadMessageFiles.get(
+            slackReplyKey(stringField(body.channel), stringField(item.ts))
+          )
+          return files ? { ...item, files: [...slackFileArray(item.files), ...files] } : item
+        })
+      }
+      await sendWebResponse(res, Response.json(payload, { status: proxied.status }))
       return
     }
   }
@@ -4176,6 +4264,14 @@ function slackReplyKey(channel: string, ts: string): string {
 
 function stringField(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+function slackFileArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? (value.filter(item =>
+        item && typeof item === 'object' && !Array.isArray(item)
+      ) as Record<string, unknown>[])
+    : []
 }
 
 function parseMaybeJson(value: string): unknown {

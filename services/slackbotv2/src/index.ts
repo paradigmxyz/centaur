@@ -5,6 +5,7 @@ import {
   Chat,
   StreamingPlan,
   type Adapter,
+  type Attachment,
   type Logger,
   type Message as ChatMessage,
   type StateAdapter,
@@ -27,6 +28,7 @@ import {
   harnessRestartPreamble,
   isRetryableSessionApiError,
   openSessionEventStream,
+  serializeAttachment,
   serializeMessage,
   sessionStreamError
 } from './session-api'
@@ -35,6 +37,7 @@ import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events
 import type {
   ForwardSessionInput,
   SlackbotV2,
+  SlackbotV2ApiAttachment,
   SlackbotV2ApiMessage,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2MessageMode,
@@ -74,6 +77,8 @@ type SlackAssistantAdapter = {
   ): Promise<void>
   setAssistantTitle?(channelId: string, threadTs: string, title: string): Promise<void>
 }
+
+const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 
 type SlackbotV2RequestContext = {
   retryableErrors: unknown[]
@@ -1404,7 +1409,7 @@ async function collectSlackThreadContext(
       const messageTs = stringField(message.ts)
       if (!messageTs || compareSlackTs(messageTs, currentTs) > 0) continue
       if (isSelfSlackBotMessage(options, message)) continue
-      messages.push(slackApiMessageFromSlack(message, currentMessage))
+      messages.push(await slackApiMessageFromSlack(options, message, currentMessage))
     }
     cursor = response.nextCursor
   } while (cursor)
@@ -1419,16 +1424,17 @@ async function collectSlackThreadContext(
   return messages
 }
 
-function slackApiMessageFromSlack(
+async function slackApiMessageFromSlack(
+  options: SlackbotV2Options,
   message: Record<string, unknown>,
   currentMessage: ChatMessage
-): SlackbotV2ApiMessage {
+): Promise<SlackbotV2ApiMessage> {
   const rawCurrent = slackRawRecord(currentMessage)
   const id = stringField(message.ts) || randomUUID()
   const actorId = slackActorId(message)
   const isBot = Boolean(message.bot_id || message.bot_profile)
   return {
-    attachments: [],
+    attachments: await slackApiAttachmentsFromFiles(options, message, rawCurrent),
     author: {
       fullName: actorId,
       isBot,
@@ -1448,6 +1454,82 @@ function slackApiMessageFromSlack(
     threadId: currentMessage.threadId,
     timestamp: slackTimestampToIso(id)
   }
+}
+
+async function slackApiAttachmentsFromFiles(
+  options: SlackbotV2Options,
+  message: Record<string, unknown>,
+  rawCurrent: Record<string, unknown>
+): Promise<SlackbotV2ApiAttachment[]> {
+  const files = slackFiles(message)
+  if (files.length === 0) return []
+  const teamId =
+    stringField(message.team)
+    || stringField(message.team_id)
+    || stringField(rawCurrent.team)
+    || stringField(rawCurrent.team_id)
+  const attachments: SlackbotV2ApiAttachment[] = []
+  for (const file of files.slice(0, MAX_SLACK_MESSAGE_ATTACHMENTS)) {
+    attachments.push(await serializeAttachment(slackFileAttachment(options, file, teamId)))
+  }
+  if (files.length > MAX_SLACK_MESSAGE_ATTACHMENTS) {
+    attachments.push({
+      fetchError:
+        `only the first ${MAX_SLACK_MESSAGE_ATTACHMENTS} Slack message attachments were fetched`,
+      name: 'additional Slack thread attachments',
+      type: 'file'
+    })
+  }
+  return attachments
+}
+
+function slackFiles(message: Record<string, unknown>): Record<string, unknown>[] {
+  return Array.isArray(message.files)
+    ? (message.files.filter(file =>
+        file && typeof file === 'object' && !Array.isArray(file)
+      ) as Record<string, unknown>[])
+    : []
+}
+
+function slackFileAttachment(
+  options: SlackbotV2Options,
+  file: Record<string, unknown>,
+  teamId: string
+): Attachment {
+  const url = stringField(file.url_private_download) || stringField(file.url_private)
+  const mimeType = stringField(file.mimetype)
+  const fetchMetadata: Record<string, string> = {}
+  if (url) fetchMetadata.url = url
+  if (teamId) fetchMetadata.teamId = teamId
+  return {
+    fetchData: url ? () => fetchSlackFile(options, url) : undefined,
+    fetchMetadata: Object.keys(fetchMetadata).length > 0 ? fetchMetadata : undefined,
+    height: numberField(file.original_h),
+    mimeType,
+    name: stringField(file.name) || stringField(file.title) || stringField(file.id),
+    size: numberField(file.size),
+    type: slackFileAttachmentType(mimeType),
+    url,
+    width: numberField(file.original_w)
+  }
+}
+
+async function fetchSlackFile(options: SlackbotV2Options, url: string): Promise<Buffer> {
+  const fetchFn = options.fetch ?? fetch
+  const response = await fetchFn(url, {
+    headers: { authorization: `Bearer ${options.botToken}` }
+  })
+  if (!response.ok) {
+    throw new Error(`failed to fetch Slack file: ${response.status} ${response.statusText}`)
+  }
+  return Buffer.from(await response.arrayBuffer())
+}
+
+function slackFileAttachmentType(mimeType: string): Attachment['type'] {
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType.startsWith('video/')) return 'video'
+  if (mimeType.startsWith('audio/')) return 'audio'
+  return 'file'
 }
 
 function slackRawRecord(message: ChatMessage): Record<string, unknown> {
@@ -1481,6 +1563,10 @@ function isSelfSlackBotMessage(
 
 function stringField(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+function numberField(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function compareSlackTs(a: string, b: string): number {

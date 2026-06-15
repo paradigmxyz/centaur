@@ -264,7 +264,7 @@ export const MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024
 const MAX_CODEX_INPUT_LINE_CHARS = 900 * 1024
 const STAGED_ATTACHMENT_CHUNK_CHARS = 700 * 1024
 
-async function serializeAttachment(attachment: Attachment): Promise<SlackbotV2ApiAttachment> {
+export async function serializeAttachment(attachment: Attachment): Promise<SlackbotV2ApiAttachment> {
   const serialized: SlackbotV2ApiAttachment = {
     fetchMetadata: attachment.fetchMetadata,
     height: attachment.height,
@@ -957,7 +957,7 @@ function toCodexInputLines(
 ): string[] {
   const staged = new Map<SlackbotV2ApiAttachment, string>()
   const lines: string[] = []
-  for (const attachment of message.attachments) {
+  for (const attachment of executableAttachments(message, contextMessages)) {
     if (!attachment.dataBase64) continue
     const inlineLine = toCodexInputLineWithStaged(
       message,
@@ -990,6 +990,19 @@ function toCodexInputLines(
     )
   )
   return lines
+}
+
+function executableAttachments(
+  message: SlackbotV2ApiMessage,
+  contextMessages?: SlackbotV2ApiMessage[]
+): SlackbotV2ApiAttachment[] {
+  const attachments: SlackbotV2ApiAttachment[] = []
+  for (const item of contextMessages ?? []) {
+    if (item.id === message.id) continue
+    attachments.push(...item.attachments)
+  }
+  attachments.push(...message.attachments)
+  return attachments
 }
 
 function toCodexInputLineWithStaged(
@@ -1109,6 +1122,17 @@ function codexInputContent(
       content.push({ type: 'text', text: threadContext })
     }
   }
+  for (const contextAttachment of slackThreadContextAttachments(message, contextMessages)) {
+    content.push({
+      type: 'text',
+      text:
+        `Earlier Slack thread attachment from ${slackContextAuthor(contextAttachment.message)}: `
+        + attachmentDescription(contextAttachment.attachment)
+    })
+    content.push(
+      codexAttachmentInput(contextAttachment.attachment, staged.get(contextAttachment.attachment))
+    )
+  }
   if (message.text.trim()) {
     content.push({ type: 'text', text: message.text })
   }
@@ -1137,6 +1161,23 @@ function slackThreadContext(
   }
   lines.push('', '# Current Request', '', 'The user message follows in the next content block.', '---')
   return lines.join('\n')
+}
+
+function slackThreadContextAttachments(
+  currentMessage: SlackbotV2ApiMessage,
+  contextMessages: SlackbotV2ApiMessage[] | undefined
+): Array<{ attachment: SlackbotV2ApiAttachment; message: SlackbotV2ApiMessage }> {
+  const attachments: Array<{
+    attachment: SlackbotV2ApiAttachment
+    message: SlackbotV2ApiMessage
+  }> = []
+  for (const message of contextMessages ?? []) {
+    if (message.id === currentMessage.id) continue
+    for (const attachment of message.attachments) {
+      attachments.push({ attachment, message })
+    }
+  }
+  return attachments
 }
 
 function slackContextAuthor(message: SlackbotV2ApiMessage): string {
