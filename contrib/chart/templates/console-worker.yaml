@@ -119,6 +119,20 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+{{- if $console.googleOauth.enabled }}
+            # Google OAuth app credentials, needed by the broker-credential
+            # OAuth refresh loop. Gated on console.googleOauth.enabled.
+            - name: IRON_CONTROL_GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_ID" $prefix }}
+            - name: IRON_CONTROL_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_SECRET" $prefix }}
+{{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
             - name: RAILS_LOG_TO_STDOUT

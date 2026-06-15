@@ -145,6 +145,21 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+{{- if $console.googleOauth.enabled }}
+            # Google OAuth app credentials (sign-in + brokered token refresh).
+            # Gated on console.googleOauth.enabled; the keys must exist in the
+            # shared infra Secret when enabled.
+            - name: IRON_CONTROL_GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_ID" $prefix }}
+            - name: IRON_CONTROL_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_SECRET" $prefix }}
+{{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
             - name: PORT

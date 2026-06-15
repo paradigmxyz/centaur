@@ -98,6 +98,14 @@ console:
     # database.yml — the connection URL carries no database path, so Rails
     # resolves the name from there.
     name: iron_control_production
+  # Google as an OAuth identity provider for console sign-in (and the
+  # broker-credential refresh loop). Off by default — not every deployment uses
+  # Google to log in. When enabled, the IRON_CONTROL_GOOGLE_CLIENT_ID and
+  # IRON_CONTROL_GOOGLE_CLIENT_SECRET env vars are sourced from the shared infra
+  # Secret (keys <secretManager.envPrefix>IRON_CONTROL_GOOGLE_CLIENT_ID /
+  # _SECRET), which must exist or the console pods CreateContainerConfigError.
+  googleOauth:
+    enabled: false
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale
