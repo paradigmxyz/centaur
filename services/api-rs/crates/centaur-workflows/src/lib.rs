@@ -1899,6 +1899,9 @@ async fn run_python_workflow_host_local(
                     "python workflow log"
                 );
             }
+            Some("ctx.metric") => {
+                record_python_workflow_metric(&message);
+            }
             Some(message_type) if message_type.starts_with("ctx.") => {
                 let response =
                     handle_python_context_request(&message, &ctx, &session_runtime, &input).await;
@@ -2028,6 +2031,9 @@ where
                     "python workflow log"
                 );
             }
+            Some("ctx.metric") => {
+                record_python_workflow_metric(&message);
+            }
             Some(message_type) if message_type.starts_with("ctx.") => {
                 let response =
                     handle_python_context_request(&message, &ctx, &session_runtime, &input).await;
@@ -2045,6 +2051,114 @@ where
     Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.result: stderr={stderr}"
     )))
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PythonWorkflowMetricKind {
+    Counter,
+    Gauge,
+    Histogram,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PythonWorkflowMetric {
+    kind: PythonWorkflowMetricKind,
+    name: String,
+    value: f64,
+    labels: Vec<(String, String)>,
+}
+
+fn record_python_workflow_metric(message: &Value) {
+    let metric = match parse_python_workflow_metric(message) {
+        Ok(metric) => metric,
+        Err(error) => {
+            warn!(%error, message = %message, "ignored invalid Python workflow metric");
+            return;
+        }
+    };
+
+    match metric.kind {
+        PythonWorkflowMetricKind::Counter => {
+            if metric.value > 0.0 && metric.value.fract() == 0.0 {
+                centaur_telemetry::record_workflow_counter(
+                    &metric.name,
+                    &metric.labels,
+                    metric.value as u64,
+                );
+            } else {
+                warn!(
+                    metric = %metric.name,
+                    value = metric.value,
+                    "ignored invalid Python workflow counter value"
+                );
+            }
+        }
+        PythonWorkflowMetricKind::Gauge => {
+            centaur_telemetry::set_workflow_gauge(&metric.name, &metric.labels, metric.value);
+        }
+        PythonWorkflowMetricKind::Histogram => {
+            centaur_telemetry::record_workflow_histogram(
+                &metric.name,
+                &metric.labels,
+                metric.value,
+            );
+        }
+    }
+}
+
+fn parse_python_workflow_metric(message: &Value) -> Result<PythonWorkflowMetric, String> {
+    let kind = match message.get("kind").and_then(Value::as_str) {
+        Some("counter") => PythonWorkflowMetricKind::Counter,
+        Some("gauge") => PythonWorkflowMetricKind::Gauge,
+        Some("histogram") => PythonWorkflowMetricKind::Histogram,
+        other => return Err(format!("unsupported metric kind {other:?}")),
+    };
+    let name = message
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| is_valid_prometheus_name(name))
+        .ok_or_else(|| "metric name missing or invalid".to_owned())?
+        .to_owned();
+    let value = message
+        .get("value")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "metric value missing or invalid".to_owned())?;
+    let labels = message
+        .get("labels")
+        .and_then(Value::as_object)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter(|(key, _)| is_valid_prometheus_name(key))
+                .map(|(key, value)| {
+                    (
+                        key.to_owned(),
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(PythonWorkflowMetric {
+        kind,
+        name,
+        value,
+        labels,
+    })
+}
+
+fn is_valid_prometheus_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 async fn handle_python_context_request(
@@ -2758,6 +2872,51 @@ mod tests {
             workflow_queue_class("github_issue_triage"),
             WorkflowQueueClass::Standard
         );
+    }
+
+    #[test]
+    fn parses_python_workflow_metric_notification() {
+        let metric = parse_python_workflow_metric(&json!({
+            "type": "ctx.metric",
+            "kind": "counter",
+            "name": "etl_items_seen_total",
+            "value": 12,
+            "labels": {
+                "namespace": "centaur-system",
+                "environment": "production",
+                "source": "slack",
+                "source_type": "channel",
+                "item_type": "thread_refresh_reply",
+            },
+        }))
+        .unwrap();
+
+        assert_eq!(metric.kind, PythonWorkflowMetricKind::Counter);
+        assert_eq!(metric.name, "etl_items_seen_total");
+        assert_eq!(metric.value, 12.0);
+        assert!(
+            metric
+                .labels
+                .contains(&("namespace".to_owned(), "centaur-system".to_owned()))
+        );
+        assert!(
+            metric
+                .labels
+                .contains(&("source".to_owned(), "slack".to_owned()))
+        );
+    }
+
+    #[test]
+    fn rejects_python_workflow_metric_with_invalid_name() {
+        let error = parse_python_workflow_metric(&json!({
+            "type": "ctx.metric",
+            "kind": "counter",
+            "name": "bad-name",
+            "value": 1,
+        }))
+        .unwrap_err();
+
+        assert_eq!(error, "metric name missing or invalid");
     }
 
     #[tokio::test]

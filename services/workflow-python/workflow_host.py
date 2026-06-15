@@ -110,6 +110,7 @@ class RpcClient:
     def __init__(self) -> None:
         self._next_request_id = 1
         self._pending: dict[str, asyncio.Future[Any]] = {}
+        self._notifications: set[asyncio.Task[None]] = set()
         self._write_lock = asyncio.Lock()
 
     async def write(self, payload: dict[str, Any]) -> None:
@@ -118,7 +119,13 @@ class RpcClient:
             sys.stdout.flush()
 
     def notify(self, payload: dict[str, Any]) -> None:
-        asyncio.create_task(self.write(payload))
+        task = asyncio.create_task(self.write(payload))
+        self._notifications.add(task)
+        task.add_done_callback(self._notifications.discard)
+
+    async def drain_notifications(self) -> None:
+        if self._notifications:
+            await asyncio.gather(*list(self._notifications), return_exceptions=True)
 
     async def request(self, payload: dict[str, Any]) -> Any:
         request_id = str(self._next_request_id)
@@ -140,6 +147,9 @@ class RpcClient:
             fut.set_result(response.get("value"))
         else:
             fut.set_exception(RuntimeError(str(response.get("error") or "context RPC failed")))
+
+
+_METRIC_RPC: RpcClient | None = None
 
 
 def resolve_tool_shim() -> str | None:
@@ -410,6 +420,7 @@ def increment_metric(metric: str, count: int, **labels: str) -> None:
     labels = metric_runtime_labels(labels)
     key = metric_key(metric, labels)
     _METRIC_COUNTERS[key] = _METRIC_COUNTERS.get(key, 0.0) + float(count)
+    emit_metric_event("counter", metric, count, labels)
     push_metric_lines([format_metric_line(metric, labels, _METRIC_COUNTERS[key])])
 
 
@@ -417,6 +428,7 @@ def set_gauge(metric: str, value: float, **labels: str) -> None:
     labels = metric_runtime_labels(labels)
     key = metric_key(metric, labels)
     _METRIC_GAUGES[key] = float(value)
+    emit_metric_event("gauge", metric, float(value), labels)
     push_metric_lines([format_metric_line(metric, labels, _METRIC_GAUGES[key])])
 
 
@@ -439,6 +451,7 @@ def observe_histogram(
     numeric = float(value)
     histogram["count"] += 1
     histogram["sum"] += numeric
+    emit_metric_event("histogram", metric, numeric, labels)
     for bucket in buckets:
         if numeric <= bucket:
             histogram["buckets"][bucket] += 1
@@ -468,6 +481,22 @@ def metric_key(
     metric: str, labels: dict[str, str]
 ) -> tuple[str, tuple[tuple[str, str], ...]]:
     return (metric, tuple(sorted((key, str(value)) for key, value in labels.items())))
+
+
+def emit_metric_event(
+    kind: str, metric: str, value: int | float, labels: dict[str, str]
+) -> None:
+    if _METRIC_RPC is None:
+        return
+    _METRIC_RPC.notify(
+        {
+            "type": "ctx.metric",
+            "kind": kind,
+            "name": metric,
+            "value": value,
+            "labels": labels,
+        }
+    )
 
 
 def metric_runtime_labels(labels: dict[str, str]) -> dict[str, str]:
@@ -778,6 +807,7 @@ def normalize_schedule(workflow: RegisteredWorkflow) -> dict[str, Any] | None:
 
 
 async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any]:
+    global _METRIC_RPC
     workflows = discover_workflows()
     workflow_name = str(message.get("workflow_name") or "")
     registered = workflows.get(workflow_name)
@@ -792,6 +822,8 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
         workflow_name=workflow_name,
         pool=pool,
     )
+    previous_metric_rpc = _METRIC_RPC
+    _METRIC_RPC = rpc
     try:
         inp = coerce_input(message.get("input") or {}, registered.input_cls)
         result = registered.handler(inp, ctx)
@@ -799,6 +831,8 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
             result = await result
         return {"type": "workflow.result", "result": jsonable(result)}
     finally:
+        await rpc.drain_notifications()
+        _METRIC_RPC = previous_metric_rpc
         if pool is not None:
             await pool.close()
 
