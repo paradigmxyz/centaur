@@ -85,7 +85,7 @@ pub fn derive_principal(
             foreign_id: format!("slack-user-{scope}{}", slugify(user)),
             name: display_name
                 .map(|name| format!("Slack DM @{name}"))
-                .unwrap_or_else(|| format!("Slack user {user}{team_suffix}")),
+                .unwrap_or_else(|| format!("Slack User {user}{team_suffix}")),
             labels,
         };
     }
@@ -96,7 +96,7 @@ pub fn derive_principal(
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
             name: display_name
                 .map(|name| format!("Slack Channel #{name}"))
-                .unwrap_or_else(|| format!("Slack channel {conversation_id}{team_suffix}")),
+                .unwrap_or_else(|| format!("Slack Channel {conversation_id}{team_suffix}")),
             labels,
         };
     }
@@ -144,7 +144,7 @@ mod tests {
     fn dm_with_user_keys_on_the_user() {
         let principal = derive_principal("slack:D0420:1780000000.0001", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-user-u07abc");
-        assert_eq!(principal.name, "Slack user U07ABC");
+        assert_eq!(principal.name, "Slack User U07ABC");
         assert_eq!(
             principal.labels.get("slack_user_id").map(String::as_str),
             Some("U07ABC")
@@ -161,7 +161,7 @@ mod tests {
     fn channel_keys_on_the_channel_even_with_a_user() {
         let principal = derive_principal("chat:C123:1780000000.000000", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-channel-c123");
-        assert_eq!(principal.name, "Slack channel C123");
+        assert_eq!(principal.name, "Slack Channel C123");
         assert_eq!(
             principal.labels.get("slack_channel_id").map(String::as_str),
             Some("C123")
@@ -178,7 +178,7 @@ mod tests {
     fn team_id_is_folded_into_the_channel_key() {
         let principal = derive_principal("slack:T123:C456:1780000000.0001", Some("U1"), None);
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
-        assert_eq!(principal.name, "Slack channel C456 (team T123)");
+        assert_eq!(principal.name, "Slack Channel C456 (team T123)");
         assert_eq!(
             principal.labels.get("slack_team_id").map(String::as_str),
             Some("T123")
@@ -193,7 +193,7 @@ mod tests {
     fn team_id_is_folded_into_the_dm_user_key() {
         let principal = derive_principal("slack:T123:D9:ts", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
-        assert_eq!(principal.name, "Slack user U07ABC (team T123)");
+        assert_eq!(principal.name, "Slack User U07ABC (team T123)");
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn blank_conversation_name_falls_back_to_the_synthetic_name() {
         let principal = derive_principal("chat:C123:ts", None, Some("   "));
-        assert_eq!(principal.name, "Slack channel C123");
+        assert_eq!(principal.name, "Slack Channel C123");
     }
 
     #[test]
