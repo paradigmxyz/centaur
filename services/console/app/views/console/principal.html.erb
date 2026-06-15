@@ -138,11 +138,14 @@
             <th class="console-th">ID</th>
             <th class="console-th">Foreign ID</th>
             <th class="console-th">Name</th>
+            <th class="console-th">Source</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-ink-700">
           <% @granted.each do |kind, records| %>
             <% records.each do |s| %>
+              <% sources = @grant_sources[[ kind, s.id ]] %>
+              <% roles = sources.select { |x| x[:type] == :role }.map { |x| x[:role] }.uniq %>
               <tr class="console-row-hover">
                 <td class="console-td-nowrap">
                   <span class="resource-badge"><%= secret_kind_label(kind) %></span>
@@ -150,6 +153,17 @@
                 <td class="console-td-nowrap text-centaur-400"><%= s.oid %></td>
                 <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
                 <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
+                <td class="console-td-nowrap">
+                  <div class="flex flex-wrap gap-1">
+                    <% if sources.any? { |x| x[:type] == :direct } %>
+                      <span class="inline-flex items-center rounded bg-centaur-500/10 px-2 py-0.5 text-[11px] text-centaur-300 ring-1 ring-centaur-500/30">direct</span>
+                    <% end %>
+                    <% roles.each do |r| %>
+                      <span class="inline-flex items-center rounded bg-ink-700 px-2 py-0.5 text-[11px] text-zinc-300 ring-1 ring-ink-600"
+                            title="<%= r.oid %>">via <%= r.name.presence || r.foreign_id || r.oid %></span>
+                    <% end %>
+                  </div>
+                </td>
               </tr>
             <% end %>
           <% end %>

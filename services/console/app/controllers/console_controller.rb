@@ -36,6 +36,17 @@ class ConsoleController < ApplicationController
     @direct_grants = @principal.grants
       .includes(Grant::GRANTABLE_ASSOCIATIONS)
       .order(:id)
+    # How each effective secret is reached, for the Source column: keyed by
+    # [kind, secret_id], a list of { type: :direct } / { type: :role, role: } --
+    # a secret can be granted directly and/or through one or more roles.
+    @grant_sources = Hash.new { |h, k| h[k] = [] }
+    @principal.effective_grants.includes(:role).each do |grant|
+      assoc = Grant::GRANTABLE_ASSOCIATIONS.find { |a| grant.public_send("#{a}_id") }
+      next unless assoc
+      kind = assoc.to_s.delete_suffix("_secret")
+      @grant_sources[[ kind, grant.public_send("#{assoc}_id") ]] <<
+        (grant.role ? { type: :role, role: grant.role } : { type: :direct })
+    end
     # Assignment options for the inline forms. Roles/secrets span all namespaces;
     # the namespace is shown as a label on each option.
     @assignable_roles = Role.where.not(id: @principal.role_ids).order(:namespace, :id)

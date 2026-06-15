@@ -180,6 +180,18 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid)
   end
 
+  test "effective grants table sources each secret as direct or via a role" do
+    principal = principals(:acme_channel) # direct grants + acme_prod_api_key via the acme_infra role
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    # The Source column exists.
+    assert_select "section table th", text: "Source"
+    # A directly granted secret is tagged "direct".
+    assert_select "td", text: "direct"
+    # The role-inherited secret names the role it comes through.
+    assert_select "td span", text: "via #{roles(:acme_infra).name}"
+  end
+
   test "header shows the signed-in operator and a sign-out control" do
     get console_principals_url
     assert_response :ok
