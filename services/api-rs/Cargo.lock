@@ -284,6 +284,7 @@ name = "centaur-api-integration-test"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "centaur-session-core",
  "eventsource-stream",
  "futures-util",
  "reqwest",

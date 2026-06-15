@@ -1,6 +1,7 @@
 use std::{env, fs, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use centaur_session_core::HarnessType;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::{Client as HttpClient, StatusCode};
@@ -165,15 +166,32 @@ async fn wait_for_health(http: &HttpClient, base_url: &str) -> Result<()> {
 }
 
 async fn test_harness_wire_values(http: &HttpClient, base_url: &str) -> Result<()> {
-    let cases = ["codex", "amp", "claudecode"];
+    let cases = [
+        (HarnessType::Codex, "codex"),
+        (HarnessType::Amp, "amp"),
+        (HarnessType::ClaudeCode, "claudecode"),
+    ];
 
-    for wire_value in cases {
+    for (harness_type, expected_wire_value) in cases {
+        let harness_wire_value =
+            serde_json::to_value(&harness_type).context("serialize harness type")?;
+        let wire_value = harness_wire_value
+            .as_str()
+            .context("serialized harness type was not a string")?
+            .to_owned();
+        if wire_value != expected_wire_value {
+            bail!(
+                "typed harness {:?} serialized to {wire_value:?}, expected {expected_wire_value:?}",
+                harness_type
+            );
+        }
+
         let thread_key = test_thread_key(format!("harness-{wire_value}"))?;
         let session = post_json_ok(
             http,
             session_url(base_url, &thread_key),
             json!({
-                "harness_type": wire_value,
+                "harness_type": harness_wire_value,
                 "metadata": {
                     "source": "centaur-api-integration-test",
                     "harness_wire_value": wire_value,
@@ -186,7 +204,7 @@ async fn test_harness_wire_values(http: &HttpClient, base_url: &str) -> Result<(
         if session.get("thread_key").and_then(Value::as_str) != Some(thread_key.as_str()) {
             bail!("session thread key mismatch for {wire_value}");
         }
-        if session.get("harness_type").and_then(Value::as_str) != Some(wire_value) {
+        if session.get("harness_type").and_then(Value::as_str) != Some(wire_value.as_str()) {
             bail!(
                 "session harness mismatch for {wire_value}: got {}",
                 session
@@ -225,7 +243,7 @@ async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
         http,
         session_url(base_url, &thread_key),
         json!({
-            "harness_type": "codex",
+            "harness_type": HarnessType::Codex,
             "metadata": {
                     "source": "centaur-api-integration-test",
                     "purpose": "container-api-integration-test",
