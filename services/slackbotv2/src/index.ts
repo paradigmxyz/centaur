@@ -122,21 +122,38 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
   chat.onNewMention(async (thread, message) => {
     if (!isAllowedSlackMessage(message, options, logger)) return
-    await thread.subscribe()
-    await syncThreadMessageToSession(thread, message, {
-      mode: 'execute',
-      options,
-      state
-    })
+    const assistantStatus = setInitialAssistantStatus(thread, options)
+    try {
+      await thread.subscribe()
+      await syncThreadMessageToSession(thread, message, {
+        initialAssistantStatusVisible: await assistantStatus,
+        mode: 'execute',
+        options,
+        state
+      })
+    } catch (error) {
+      if (await assistantStatus) await setAssistantStatus(thread, '')
+      throw error
+    }
   })
 
   chat.onSubscribedMessage(async (thread, message) => {
     if (!isAllowedSlackMessage(message, options, logger)) return
-    await syncThreadMessageToSession(thread, message, {
-      mode: message.isMention === true ? 'execute' : 'append',
-      options,
-      state
-    })
+    const assistantStatus =
+      message.isMention === true
+        ? setInitialAssistantStatus(thread, options)
+        : Promise.resolve(false)
+    try {
+      await syncThreadMessageToSession(thread, message, {
+        initialAssistantStatusVisible: await assistantStatus,
+        mode: message.isMention === true ? 'execute' : 'append',
+        options,
+        state
+      })
+    } catch (error) {
+      if (await assistantStatus) await setAssistantStatus(thread, '')
+      throw error
+    }
   })
 
   const app = new Hono()
@@ -247,6 +264,7 @@ async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   input: {
+    initialAssistantStatusVisible?: boolean
     mode: SlackbotV2MessageMode
     options: SlackbotV2Options
     state: StateAdapter
@@ -273,12 +291,20 @@ async function syncThreadMessageToSession(
   }
   if (isDuplicateIncrementalMessage) {
     traceLog(input.options, 'slackbotv2_forward_duplicate_skipped', trace)
+    if (input.initialAssistantStatusVisible) await setAssistantStatus(thread, '')
     return
   }
   traceLog(input.options, 'slackbotv2_forward_started', trace, {
     active_execution: state.activeExecution === true,
     history_forwarded: state.historyForwarded === true
   })
+  const assistantStatusVisible = shouldStartExecution
+    ? input.initialAssistantStatusVisible ??
+      (await setInitialAssistantStatus(thread, input.options, trace))
+    : false
+  if (!shouldStartExecution && input.initialAssistantStatusVisible) {
+    await setAssistantStatus(thread, '')
+  }
 
   const serializeStartedAtMs = nowMs()
   const serializedMessage = await serializeMessage(message)
@@ -448,6 +474,7 @@ async function syncThreadMessageToSession(
       forwardInput,
       () => lastEventId,
       renderLease,
+      assistantStatusVisible,
       trace
     )
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
@@ -476,11 +503,19 @@ async function syncThreadMessageToSession(
         traceLog(input.options, 'slackbotv2_webhook_retry_marked', trace, {
           error: errorMessage(error)
         })
+        if (assistantStatusVisible) await setAssistantStatus(thread, '')
         throw error
       }
     }
     try {
-      await renderExecutionStream(thread, streamError(error), serializedMessage, input.options, trace)
+      await renderExecutionStream(
+        thread,
+        streamError(error),
+        serializedMessage,
+        input.options,
+        trace,
+        assistantStatusVisible
+      )
     } catch (renderError) {
       // The error notice is best-effort; a Slack render failure here must not
       // mask the original forward failure.
@@ -502,6 +537,7 @@ function scheduleExecutionRender(
   input: ForwardSessionInput,
   getLastEventId: () => number,
   renderLease: { release: (() => Promise<void>) | null },
+  assistantStatusVisible: boolean,
   trace?: SlackbotV2Trace
 ): void {
   const promise = (async () => {
@@ -514,6 +550,7 @@ function scheduleExecutionRender(
           options,
           input,
           getLastEventId,
+          assistantStatusVisible,
           trace
         )
         if (result === 'complete') return
@@ -538,6 +575,7 @@ async function renderExecutionAttempt(
   options: SlackbotV2Options,
   input: ForwardSessionInput,
   getLastEventId: () => number,
+  assistantStatusVisible: boolean,
   trace?: SlackbotV2Trace
 ): Promise<'complete' | 'retry'> {
   let rendered = false
@@ -549,7 +587,8 @@ async function renderExecutionAttempt(
       streamSessionAfterHandoff(options, input),
       message,
       options,
-      trace
+      trace,
+      assistantStatusVisible
     )
     rendered = true
     traceLog(options, 'slackbotv2_render_complete', trace)
@@ -1088,16 +1127,27 @@ async function renderExecutionStream(
   stream: AsyncIterable<SlackbotV2RendererSource>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  assistantStatusVisible = false
 ): Promise<void> {
   if (isPlainTextOnlyRequest(message.text)) {
-    await renderPlainTextExecutionStream(thread, stream, message, options, trace)
+    await renderPlainTextExecutionStream(
+      thread,
+      stream,
+      message,
+      options,
+      trace,
+      assistantStatusVisible
+    )
     return
   }
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
-  await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
+  if (!assistantStatusVisible) {
+    await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
+  }
   traceLog(options, 'slackbotv2_render_slack_metadata_set', trace, {
+    assistant_status_already_visible: assistantStatusVisible,
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   try {
@@ -1171,13 +1221,17 @@ async function renderPlainTextExecutionStream(
   stream: AsyncIterable<SlackbotV2RendererSource>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  assistantStatusVisible = false
 ): Promise<void> {
   const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
-  await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
+  if (!assistantStatusVisible) {
+    await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
+  }
   traceLog(options, 'slackbotv2_render_plain_text_metadata_set', trace, {
+    assistant_status_already_visible: assistantStatusVisible,
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   try {
@@ -1638,11 +1692,25 @@ async function sleep(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function setAssistantStatus(thread: Thread, status: string): Promise<void> {
+async function setInitialAssistantStatus(
+  thread: Thread,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<boolean> {
+  const startedAtMs = nowMs()
+  const visible = await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
+  traceLog(options, 'slackbotv2_forward_initial_status_set', trace, {
+    phase_ms: elapsedMs(startedAtMs),
+    visible
+  })
+  return visible
+}
+
+async function setAssistantStatus(thread: Thread, status: string): Promise<boolean> {
   const target = slackAssistantTarget(thread)
   const adapter = thread.adapter as SlackAssistantAdapter
-  if (!target || !adapter.setAssistantStatus) return
-  await ignoreAssistantError(() =>
+  if (!target || !adapter.setAssistantStatus) return false
+  return await ignoreAssistantError(() =>
     adapter.setAssistantStatus!(
       target.channel,
       target.threadTs,
@@ -1663,11 +1731,13 @@ async function setAssistantTitle(thread: Thread, title: string | undefined): Pro
   )
 }
 
-async function ignoreAssistantError(fn: () => Promise<void>): Promise<void> {
+async function ignoreAssistantError(fn: () => Promise<void>): Promise<boolean> {
   try {
     await fn()
+    return true
   } catch {
     // Assistant status/title are Slack UI polish. Rendering should continue if unsupported.
+    return false
   }
 }
 

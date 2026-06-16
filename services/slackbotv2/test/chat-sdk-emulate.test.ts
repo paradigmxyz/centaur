@@ -2297,7 +2297,7 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('pnpm test')
   })
 
-  it('waits for a slow session execute before acknowledging Slack and starting the stream', async () => {
+  it('shows assistant status while waiting for slow session execute', async () => {
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
 
@@ -2331,6 +2331,11 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.executes.length === 1)
     await sleep(50)
     expect(responseSettled).toBe(false)
+    expect(
+      slackApi.calls
+        .filter(call => call.method === 'assistant.threads.setStatus')
+        .map(call => stringField(call.body.status))
+    ).toEqual(['Thinking...'])
     expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
     expect(codexApi.eventRequests).toHaveLength(0)
 
@@ -2341,6 +2346,11 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
     codexApi.closeStreams()
     await Promise.all(waits)
+    expect(
+      slackApi.calls
+        .filter(call => call.method === 'assistant.threads.setStatus')
+        .map(call => stringField(call.body.status))
+    ).toEqual(['Thinking...', ''])
   })
 
   it('recovers unfinished render obligations from Chat SDK state on startup', async () => {
