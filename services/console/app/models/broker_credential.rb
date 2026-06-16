@@ -151,10 +151,14 @@ class BrokerCredential < ApplicationRecord
       client_id: effective_client_id,
       client_secret: effective_client_secret,
       refresh_token: refresh_token,
-      scopes: scopes,
+      scopes: refresh_scopes_for_provider,
       headers: token_endpoint_headers || {},
       timeout: refresh_timeout_seconds
     )
+  end
+
+  def refresh_scopes_for_provider
+    oauth_app&.provider_strategy&.refresh_scopes(scopes) || scopes
   end
 
   def apply_success!(result, now:)

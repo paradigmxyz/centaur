@@ -70,6 +70,14 @@ module Broker
       assert_equal "invalid_grant", err.reason
     end
 
+    test "Slack-style ok false response is unrecoverable" do
+      client, _ = client_with(status: 200, body: { ok: false, error: "invalid_refresh_token" }.to_json)
+      err = assert_raises(Broker::RefreshError) { client.refresh(**base_args) }
+      refute err.retryable?
+      assert_equal "oauth", err.stage
+      assert_equal "invalid_refresh_token", err.code
+    end
+
     test "5xx is retryable" do
       client, _ = client_with(status: 503, body: "upstream down")
       err = assert_raises(Broker::RefreshError) { client.refresh(**base_args) }

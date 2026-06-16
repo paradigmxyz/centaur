@@ -27,7 +27,8 @@ module Api
       test "index lists apps without the client_secret" do
         get api_v1_oauth_apps_url, headers: auth_headers
         assert_response :ok
-        row = json_body.fetch("data").first
+        row = json_body.fetch("data").find { |app| app["slug"] == "google" }
+        assert_not_nil row
         assert_equal "google", row["provider"]
         refute row.key?("client_secret")
         refute row.key?("namespace")

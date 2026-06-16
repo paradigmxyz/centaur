@@ -13,10 +13,11 @@ module Broker
   # response body. Callers must keep the same discipline. Mirrors RefreshClient's
   # injectable-HTTP design and 64 KiB body cap.
   class AuthorizationCodeClient
-    # Normalized success result. scope is the space-separated granted-scope string
-    # (nil if the IdP omitted it); id_token is the raw JWT (nil if absent -- the
-    # provider strategy decides whether that is fatal).
-    Result = Data.define(:access_token, :refresh_token, :expires_in, :scope, :id_token)
+    # Normalized success result. scope is the granted-scope string in the
+    # provider's native format (nil if omitted); id_token is the raw JWT (nil if
+    # absent -- the provider strategy decides whether that is fatal). response is
+    # the parsed provider response for provider-specific metadata.
+    Result = Data.define(:access_token, :refresh_token, :expires_in, :scope, :id_token, :response)
 
     # The minimal HTTP response shape consumed, so tests can inject a double
     # without Net::HTTP.
@@ -90,6 +91,11 @@ module Broker
 
     def parse_success(response, require_refresh_token:)
       parsed = JSON.parse(response.body)
+      if parsed["ok"] == false && parsed["error"].present?
+        raise ExchangeError.new("token endpoint rejected code: #{parsed["error"]}",
+                                stage: "oauth", code: parsed["error"], status: response.status)
+      end
+
       access_token = parsed["access_token"]
       if access_token.blank?
         raise ExchangeError.new("token endpoint returned an empty access_token",
@@ -111,7 +117,8 @@ module Broker
         refresh_token: refresh_token,
         expires_in: expires_in ? Integer(expires_in) : nil,
         scope: parsed["scope"],
-        id_token: parsed["id_token"]
+        id_token: parsed["id_token"],
+        response: parsed
       )
     rescue JSON::ParserError, ArgumentError, TypeError
       raise ExchangeError.new("parsing token response failed", stage: "parse", status: response.status)

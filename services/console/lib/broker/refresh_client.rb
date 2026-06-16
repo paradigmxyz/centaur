@@ -83,6 +83,12 @@ module Broker
 
     def parse_success(response)
       parsed = JSON.parse(response.body)
+      if parsed["ok"] == false && parsed["error"].present?
+        raise RefreshError.new("token endpoint rejected credential: #{parsed["error"]}",
+                               stage: "oauth", code: parsed["error"],
+                               status: response.status, retryable: false)
+      end
+
       access_token = parsed["access_token"]
       if access_token.blank?
         raise RefreshError.new("token endpoint returned an empty access_token",

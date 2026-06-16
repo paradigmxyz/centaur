@@ -13,8 +13,7 @@
 # the app, so rotating the app's secret fixes every credential it minted.
 #
 # Provider-generic by design: one model with a `provider` column and a small
-# strategy registry (Oauth::Providers), not a table per provider. Today the only
-# provider is Google.
+# strategy registry (Oauth::Providers), not a table per provider.
 class OauthApp < ApplicationRecord
   oid_prefix "oap"
 

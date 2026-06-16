@@ -47,6 +47,7 @@ module Broker
       assert_equal 3600, result.expires_in
       assert_equal "openid email", result.scope
       assert_equal "the.id.token", result.id_token
+      assert_equal "AT", result.response["access_token"]
 
       form = http.captured[:form]
       assert_equal "authorization_code", form["grant_type"]
@@ -68,6 +69,13 @@ module Broker
       assert_equal "oauth", err.stage
       assert_equal "invalid_grant", err.code
       assert_equal "invalid_grant", err.reason
+    end
+
+    test "Slack-style ok false response raises an oauth ExchangeError" do
+      client, _ = client_with(status: 200, body: { ok: false, error: "invalid_code" }.to_json)
+      err = assert_raises(ExchangeError) { client.exchange(**base_args) }
+      assert_equal "oauth", err.stage
+      assert_equal "invalid_code", err.code
     end
 
     test "5xx raises an http ExchangeError" do

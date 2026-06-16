@@ -128,7 +128,7 @@ module Oauth
         "client_id" => @app.client_id,
         "redirect_uri" => oauth_callback_redirect_uri(@app.slug),
         "response_type" => "code",
-        "scope" => (requested_scopes | @provider.identity_scopes).join(" "),
+        "scope" => (requested_scopes | @provider.identity_scopes).join(@provider.scope_separator),
         "state" => state,
         "code_challenge" => challenge,
         "code_challenge_method" => "S256"
@@ -161,7 +161,7 @@ module Oauth
         if credential.new_record?
           credential.namespace = @app.credential_namespace
           credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject]}"
-          credential.name = "#{@app.provider.capitalize} – #{identity[:email]}"
+          credential.name = "#{@app.provider.capitalize} – #{identity[:email].presence || identity[:subject]}"
           credential.token_endpoint = @provider.token_endpoint
           credential.external_user_key = SecureRandom.urlsafe_base64(16)
         end
@@ -171,7 +171,7 @@ module Oauth
         credential.assign_attributes(
           provider_email: identity[:email],
           # Store exactly what the IdP granted, so the refresh POST re-requests it.
-          scopes: (result.scope.presence&.split || Array(state["scopes"])),
+          scopes: granted_scopes(result, state),
           refresh_token: result.refresh_token,
           access_token: result.access_token,
           expires_at: now + expires_in,
@@ -183,6 +183,11 @@ module Oauth
         ensure_wrapping_secret(credential)
         credential
       end
+    end
+
+    def granted_scopes(result, state)
+      return Array(state["scopes"]) if result.scope.blank?
+      @provider.parse_granted_scopes(result.scope)
     end
 
     # Wraps a minted credential in a grantable static secret, so an operator can

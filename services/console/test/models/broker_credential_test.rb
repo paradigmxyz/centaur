@@ -95,6 +95,18 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal "app-secret", captured[:client_secret]
   end
 
+  test "refresh lets the provider choose refresh scopes" do
+    captured = {}
+    app = build_app(provider: "slack", client_id: "app-cid", client_secret: "app-secret",
+                    allowed_scopes: %w[chat:write])
+    bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
+                           provider_subject: "U123", created_by: nil, refresh_token: "rt",
+                           scopes: %w[chat:write openid])
+    bc.refresh_client = StubClient.new { |**kw| captured = kw; result }
+    bc.refresh!
+    assert_equal [], captured[:scopes]
+  end
+
   test "external_user_key must be url-safe and bounded" do
     app = build_app
     bc = build_credential(oauth_app: app, provider_subject: "sub-5", created_by: nil, client_id: nil)

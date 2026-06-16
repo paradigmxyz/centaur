@@ -25,3 +25,15 @@ acme_google_disabled:
   credential_namespace: acme
   enabled: false
   created_by: acme_admin
+
+acme_slack:
+  slug: slack
+  description: Acme Slack integration
+  provider: slack
+  client_id: acme-slack-client-id
+  allowed_scopes:
+    - chat:write
+    - channels:history
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin

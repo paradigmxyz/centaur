@@ -864,7 +864,7 @@ An OAuth app registers an OAuth client (provider, client id, and client secret) 
 
 Only managing the app's configuration requires API key auth. The consent flow endpoints themselves are unauthenticated and live on iron-control's own domain (see [OAuth consent flow](#oauth-consent-flow)).
 
-Google is the only supported provider in this release. The `provider` field is validated against the supported set, so an unknown provider returns `422`.
+Google and Slack are supported providers in this release. The `provider` field is validated against the supported set, so an unknown provider returns `422`.
 
 ### Attributes
 
@@ -873,7 +873,7 @@ Google is the only supported provider in this release. The `provider` field is v
 | `slug`                 | required    | The app's identity: globally-unique, URL-safe, and the name in the well-known consent links (`/oauth/<slug>/start`). Must not start with the opaque-id prefix. |
 | `description`          | optional    | |
 | `labels`               | optional    | |
-| `provider`             | required    | The provider strategy. Currently only `"google"`. |
+| `provider`             | required    | The provider strategy. Currently `"google"` or `"slack"`. |
 | `client_id`            | required    | OAuth client id. Not secret; returned in responses. |
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
@@ -973,6 +973,10 @@ A tampered, expired, or missing flow state or cookie renders an error page with 
 | Provider | `provider` value |
 | -------- | ---------------- |
 | Google   | `google`         |
+| Slack    | `slack`          |
+
+Slack OAuth apps should have token rotation enabled so the callback receives a refresh token for the broker refresh loop.
+Slack OAuth apps should use normal Slack API scopes such as `channels:history`, not Sign in with Slack scopes such as `openid`, `email`, or `profile`.
 
 ## Principals
 

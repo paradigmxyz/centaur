@@ -9,7 +9,10 @@ module Oauth
     # Memoized so a strategy is built once per process. The strategies are
     # stateless, so sharing one instance across flows is safe.
     def self.registry
-      @registry ||= { Google::KEY => Google.new }.freeze
+      @registry ||= {
+        Google::KEY => Google.new,
+        Slack::KEY => Slack.new
+      }.freeze
     end
 
     # The strategy for +key+, or nil for an unknown provider (the flow

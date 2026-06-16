@@ -14,7 +14,7 @@ module Oauth
         id_token = "h.#{payload}.s"
         Broker::AuthorizationCodeClient::Result.new(**{
           access_token: "AT", refresh_token: "RT", expires_in: 3600,
-          scope: "openid email", id_token: id_token
+          scope: "openid email", id_token: id_token, response: {}
         }.merge(overrides))
       end
 
@@ -63,7 +63,7 @@ module Oauth
       test "undecodable payload raises a parse error" do
         result = Broker::AuthorizationCodeClient::Result.new(
           access_token: "AT", refresh_token: "RT", expires_in: 3600,
-          scope: nil, id_token: "h.!!!not-base64!!!.s"
+          scope: nil, id_token: "h.!!!not-base64!!!.s", response: {}
         )
         err = assert_raises(Broker::ExchangeError) { strategy.identity_from(result, client_id: CLIENT_ID) }
         assert_equal "parse", err.stage

@@ -19,6 +19,7 @@ class OauthAppTest < ActiveSupport::TestCase
   test "provider must be a registered provider" do
     refute build_app(provider: "github").valid?
     assert build_app(provider: "google").valid?
+    assert build_app(provider: "slack").valid?
   end
 
   test "client_id and client_secret are required" do
