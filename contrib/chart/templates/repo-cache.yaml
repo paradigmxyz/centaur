@@ -1,12 +1,12 @@
 {{- if .Values.repoCache.enabled }}
+{{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- $repoCacheRepositories := list -}}
 {{- range .Values.repoCache.repositories }}
 {{- $repoCacheRepositories = append $repoCacheRepositories . -}}
 {{- end }}
-{{- if and .Values.toolServer.enabled .Values.toolServer.repo }}
-{{- $repoCacheRepositories = append $repoCacheRepositories .Values.toolServer.repo -}}
-{{- range .Values.toolServer.extraSources }}
-{{- $repoCacheRepositories = append $repoCacheRepositories .repo -}}
+{{- range $source := $overlaySources }}
+{{- with (get $source "repo") }}
+{{- $repoCacheRepositories = append $repoCacheRepositories . -}}
 {{- end }}
 {{- end }}
 {{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
@@ -16,15 +16,17 @@
 {{- $repoCacheImageTag := default .Values.sandbox.image.tag .Values.repoCache.image.tag -}}
 {{- $repoCacheImagePullPolicy := default .Values.sandbox.image.pullPolicy .Values.repoCache.image.pullPolicy -}}
 {{- $repoCacheRepositoryRefs := list -}}
+{{- $repoCacheRepositoryRefRepos := list -}}
 {{- range $repo, $ref := .Values.repoCache.repositoryRefs }}
 {{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
+{{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
 {{- end }}
-{{- if and .Values.toolServer.enabled .Values.toolServer.repo .Values.toolServer.ref (not (hasKey .Values.repoCache.repositoryRefs .Values.toolServer.repo)) }}
-{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" .Values.toolServer.repo .Values.toolServer.ref) -}}
-{{- end }}
-{{- range .Values.toolServer.extraSources }}
-{{- if and .ref (not (hasKey $.Values.repoCache.repositoryRefs .repo)) }}
-{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" .repo .ref) -}}
+{{- range $source := $overlaySources }}
+{{- $repo := get $source "repo" | default "" -}}
+{{- $ref := get $source "ref" | default "" -}}
+{{- if and $repo $ref (not (has $repo $repoCacheRepositoryRefRepos)) }}
+{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
+{{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1

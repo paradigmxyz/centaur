@@ -58,9 +58,11 @@ type CodexMapperState = {
   agentMessagePhase: AgentMessagePhase | null
   agentMessagePhaseByItemId: Map<string, AgentMessagePhase>
   planText: string
+  reasoningTextByItemId: Map<string, string>
+  reasoningSummaryIndexByItemId: Map<string, number>
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
-  emittedActivityRunByTaskId: Set<string>
+  emittedActivityRunByTaskId: Map<string, string>
   emittedActivityOutputByTaskId: Map<string, string>
   emittedActivitySignatureByTaskId: Map<string, string>
   done: boolean
@@ -292,17 +294,65 @@ export class CodexAppServerRendererEventMapper
       }
     }
 
-    const reasoningMessage = reasoningText(event).trim()
-    if (reasoningMessage) {
-      const task: HarnessTask = {
-        id: `reasoning-${++this.state.stepCounter}`,
-        title: 'Thinking',
-        status: isReasoningDeltaEvent(event) ? 'in_progress' : 'complete',
-        details: [section([text(reasoningMessage)])],
-        output: []
+    const reasoningMessage = reasoningText(event)
+    if (reasoningMessage.trim()) {
+      const itemId = reasoningEventItemId(event)
+      if (isReasoningDeltaEvent(event) && itemId) {
+        // Accumulate deltas into one task per reasoning item and keep it
+        // in_progress until the item seals (item.completed) or the
+        // execution finishes (flush). Completing earlier makes the Slack
+        // plan card flip between "Thinking", "Thinking completed", and the
+        // running command.
+        const previous = this.state.reasoningTextByItemId.get(itemId) ?? ''
+        const summaryIndex = reasoningSummaryIndex(event)
+        const needsBreak =
+          summaryIndex !== undefined &&
+          this.state.reasoningSummaryIndexByItemId.get(itemId) !== undefined &&
+          this.state.reasoningSummaryIndexByItemId.get(itemId) !== summaryIndex &&
+          previous.trim() !== ''
+        if (summaryIndex !== undefined) {
+          this.state.reasoningSummaryIndexByItemId.set(itemId, summaryIndex)
+        }
+        const accumulated = previous + (needsBreak ? '\n\n' : '') + reasoningMessage
+        this.state.reasoningTextByItemId.set(itemId, accumulated)
+        this.state.taskByUseId.set(itemId, {
+          id: itemId,
+          title: 'Thinking',
+          status: 'in_progress',
+          details: [section([text(accumulated.trim())])],
+          output: []
+        })
+      } else {
+        const id = itemId || `reasoning-${++this.state.stepCounter}`
+        this.state.taskByUseId.set(id, {
+          id,
+          title: 'Thinking',
+          status: 'complete',
+          details: [section([text(reasoningMessage.trim())])],
+          output: []
+        })
       }
-      this.state.taskByUseId.set(task.id, task)
       this.emitActivitySummary(out)
+    }
+
+    const sealedReasoning = completedReasoningItem(event)
+    if (sealedReasoning) {
+      const id = String(sealedReasoning.id ?? '')
+      const accumulated = id ? this.state.reasoningTextByItemId.get(id) ?? '' : ''
+      const finalText = (reasoningItemText(sealedReasoning) || accumulated).trim()
+      const existing = id ? this.state.taskByUseId.get(id) : undefined
+      if (id && (existing || finalText)) {
+        this.state.taskByUseId.set(id, {
+          id,
+          title: 'Thinking',
+          status: 'complete',
+          details: finalText ? [section([text(finalText)])] : existing?.details ?? [],
+          output: []
+        })
+        this.state.reasoningTextByItemId.delete(id)
+        this.state.reasoningSummaryIndexByItemId.delete(id)
+        this.emitActivitySummary(out)
+      }
     }
 
     if (isTerminalCodexAppServerEvent(event)) {
@@ -689,9 +739,11 @@ function newState(): CodexMapperState {
     agentMessagePhase: null,
     agentMessagePhaseByItemId: new Map(),
     planText: '',
+    reasoningTextByItemId: new Map(),
+    reasoningSummaryIndexByItemId: new Map(),
     taskByUseId: new Map(),
     commandOutputById: new Map(),
-    emittedActivityRunByTaskId: new Set(),
+    emittedActivityRunByTaskId: new Map(),
     emittedActivityOutputByTaskId: new Map(),
     emittedActivitySignatureByTaskId: new Map(),
     done: false
@@ -920,6 +972,34 @@ function isReasoningDeltaEvent(event: any): boolean {
   )
 }
 
+function reasoningEventItemId(event: any): string {
+  return String(event?.itemId ?? event?.item_id ?? '')
+}
+
+function reasoningSummaryIndex(event: any): number | undefined {
+  const value = event?.summaryIndex ?? event?.summary_index
+  return typeof value === 'number' ? value : undefined
+}
+
+function completedReasoningItem(event: any): Record<string, any> | null {
+  if (event?.type !== 'item.completed') return null
+  const item = event.item
+  if (!item || item.type !== 'reasoning') return null
+  return item
+}
+
+function reasoningItemText(item: any): string {
+  const parts = [
+    ...(Array.isArray(item?.content) ? item.content : []),
+    ...(Array.isArray(item?.summary) ? item.summary : [])
+  ]
+  const texts = parts
+    .map(part => (typeof part === 'string' ? part : String(part?.text ?? '')))
+    .filter(part => part.trim())
+  if (texts.length) return texts.join('\n\n')
+  return String(item?.text ?? '')
+}
+
 function terminalResultText(event: any): string {
   for (const key of ['result', 'result_text', 'text', 'final_text']) {
     const value = event?.[key]
@@ -1072,13 +1152,22 @@ function changedActivityTaskUpdates(
     details?: RendererTaskBlock[]
     output?: RendererTaskBlock[]
   }> = []
-  for (const task of tasks) {
+  // Slack derives the plan card header from task statuses: it shows the
+  // current in_progress task, and falls back to "Thinking completed" when
+  // nothing is in progress — even mid-turn (e.g. while the model thinks
+  // between commands without emitting reasoning events). Mid-turn, present
+  // the most recent finished task as still in progress so the header never
+  // claims completion; its true status is emitted with the next batch or at
+  // the final flush.
+  const report = opts.final ? tasks : holdLastFinishedTask(tasks)
+  for (const task of report) {
     let details: RendererTaskBlock[] | undefined
     let output: RendererTaskBlock[] | undefined
     if (task.details.length) {
       const runBlock = activityRunBlock(task)
-      if (runBlock.length && !state.emittedActivityRunByTaskId.has(task.id)) {
-        state.emittedActivityRunByTaskId.add(task.id)
+      const runText = elementsToPlainText(runBlock)
+      if (runBlock.length && state.emittedActivityRunByTaskId.get(task.id) !== runText) {
+        state.emittedActivityRunByTaskId.set(task.id, runText)
         details = runBlock
       }
     }
@@ -1107,6 +1196,20 @@ function changedActivityTaskUpdates(
     updates.push(update)
   }
   return updates
+}
+
+function holdLastFinishedTask(tasks: HarnessTask[]): HarnessTask[] {
+  if (!tasks.length) return tasks
+  if (tasks.some(task => task.status === 'in_progress')) return tasks
+  for (let index = tasks.length - 1; index >= 0; index -= 1) {
+    const task = tasks[index]
+    if (!task) continue
+    if (task.status !== 'complete' && task.status !== 'error') continue
+    const held = [...tasks]
+    held[index] = { ...task, status: 'in_progress' }
+    return held
+  }
+  return tasks
 }
 
 function activityRunBlock(task: HarnessTask): RendererTaskBlock[] {

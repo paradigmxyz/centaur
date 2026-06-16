@@ -11,6 +11,7 @@ centaur-session-core.workspace = true
 centaur-session-runtime.workspace = true
 centaur-session-sqlx.workspace = true
 centaur-sandbox-core.workspace = true
+centaur-telemetry.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 cron.workspace = true

@@ -14,7 +14,8 @@ use absurd::{
 use centaur_sandbox_core::SandboxSpec;
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
-    ExecuteSessionInput, SESSION_OUTPUT_LINE_EVENT, SandboxRuntime, SessionRuntime,
+    ExecuteSessionInput, HarnessConflictPolicy, SESSION_OUTPUT_LINE_EVENT, SandboxRuntime,
+    SessionRuntime,
 };
 use centaur_session_sqlx::PgSessionStore;
 use chrono::{DateTime, Utc};
@@ -35,6 +36,7 @@ use tracing::{info, warn};
 
 pub const WORKFLOW_QUEUE: &str = "centaur_workflows";
 pub const WORKFLOW_ETL_QUEUE: &str = "centaur_workflows_etl";
+pub const WORKFLOW_ETL_BACKFILL_QUEUE: &str = "centaur_workflows_etl_backfill";
 pub const WORKFLOW_SCHEDULE_QUEUE: &str = "centaur_workflow_schedules";
 pub const WORKFLOW_TASK: &str = "centaur.workflow";
 pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
@@ -71,8 +73,10 @@ pub struct WorkflowRuntime {
 struct WorkflowRuntimeInner {
     client: Client,
     etl_client: Client,
+    etl_backfill_client: Client,
     _worker: Worker,
     _etl_worker: Worker,
+    _etl_backfill_worker: Worker,
     _schedule_worker: Worker,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
@@ -282,6 +286,19 @@ impl WorkflowRuntime {
         etl_client
             .create_queue(Some(WORKFLOW_ETL_QUEUE), CreateQueueOptions::default())
             .await?;
+        let etl_backfill_client = Client::from_pool_with_options(
+            store.pool().clone(),
+            ClientOptions {
+                queue_name: WORKFLOW_ETL_BACKFILL_QUEUE.to_owned(),
+                ..ClientOptions::default()
+            },
+        )?;
+        etl_backfill_client
+            .create_queue(
+                Some(WORKFLOW_ETL_BACKFILL_QUEUE),
+                CreateQueueOptions::default(),
+            )
+            .await?;
         let schedule_client = Client::from_pool_with_options(
             store.pool().clone(),
             ClientOptions {
@@ -316,9 +333,22 @@ impl WorkflowRuntime {
             let workflow_host_sandbox = etl_workflow_host_sandbox.clone();
             async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
         })?;
+        let etl_backfill_session_runtime = session_runtime.clone();
+        let etl_backfill_workflow_host_sandbox = workflow_host_sandbox.clone();
+        etl_backfill_client.register_task(
+            WORKFLOW_TASK,
+            move |input: WorkflowTaskInput, ctx| {
+                let session_runtime = etl_backfill_session_runtime.clone();
+                let workflow_host_sandbox = etl_backfill_workflow_host_sandbox.clone();
+                async move {
+                    run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await
+                }
+            },
+        )?;
         let schedule_tick_client = schedule_client.clone();
         let workflow_client_for_schedule = client.clone();
         let etl_client_for_schedule = etl_client.clone();
+        let etl_backfill_client_for_schedule = etl_backfill_client.clone();
         let schedule_registry_for_task = schedule_registry.clone();
         schedule_client.register_task_with(
             TaskRegistrationOptions::new(WORKFLOW_SCHEDULE_TASK),
@@ -326,6 +356,7 @@ impl WorkflowRuntime {
                 let schedule_client = schedule_tick_client.clone();
                 let workflow_client = workflow_client_for_schedule.clone();
                 let etl_client = etl_client_for_schedule.clone();
+                let etl_backfill_client = etl_backfill_client_for_schedule.clone();
                 let schedules = schedule_registry_for_task.clone();
                 async move {
                     run_schedule_tick(
@@ -334,6 +365,7 @@ impl WorkflowRuntime {
                         schedule_client,
                         workflow_client,
                         etl_client,
+                        etl_backfill_client,
                         schedules,
                     )
                     .await
@@ -362,6 +394,14 @@ impl WorkflowRuntime {
             })),
             ..WorkerOptions::default()
         });
+        let etl_backfill_worker = etl_backfill_client.start_worker(WorkerOptions {
+            worker_id: Some("centaur-api-rs-workflow-etl-backfill-worker".to_owned()),
+            concurrency: 1,
+            on_error: Some(Arc::new(|error| {
+                warn!(%error, "absurd workflow etl backfill worker error");
+            })),
+            ..WorkerOptions::default()
+        });
         let schedule_worker = schedule_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-schedule-worker".to_owned()),
             concurrency: 1,
@@ -381,6 +421,11 @@ impl WorkflowRuntime {
             "started absurd workflow etl worker"
         );
         info!(
+            queue = WORKFLOW_ETL_BACKFILL_QUEUE,
+            task = WORKFLOW_TASK,
+            "started absurd workflow etl backfill worker"
+        );
+        info!(
             queue = WORKFLOW_SCHEDULE_QUEUE,
             task = WORKFLOW_SCHEDULE_TASK,
             "started absurd workflow schedule worker"
@@ -391,6 +436,7 @@ impl WorkflowRuntime {
                 schedule_client.clone(),
                 client.clone(),
                 etl_client.clone(),
+                etl_backfill_client.clone(),
                 webhook_registry.clone(),
                 schedule_registry.clone(),
                 interval,
@@ -401,8 +447,10 @@ impl WorkflowRuntime {
             inner: Arc::new(WorkflowRuntimeInner {
                 client,
                 etl_client,
+                etl_backfill_client,
                 _worker: worker,
                 _etl_worker: etl_worker,
+                _etl_backfill_worker: etl_backfill_worker,
                 _schedule_worker: schedule_worker,
                 webhook_registry,
                 schedule_registry,
@@ -450,6 +498,10 @@ impl WorkflowRuntime {
         let mut runs = Vec::new();
         runs.extend(self.list_runs_for_queue(WORKFLOW_QUEUE, limit).await?);
         runs.extend(self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit).await?);
+        runs.extend(
+            self.list_runs_for_queue(WORKFLOW_ETL_BACKFILL_QUEUE, limit)
+                .await?,
+        );
         runs.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
@@ -492,7 +544,11 @@ impl WorkflowRuntime {
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<WorkflowRun, WorkflowRuntimeError> {
-        for queue_name in [WORKFLOW_QUEUE, WORKFLOW_ETL_QUEUE] {
+        for queue_name in [
+            WORKFLOW_QUEUE,
+            WORKFLOW_ETL_QUEUE,
+            WORKFLOW_ETL_BACKFILL_QUEUE,
+        ] {
             if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
                 return Ok(run);
             }
@@ -534,6 +590,7 @@ impl WorkflowRuntime {
         for (queue_name, client) in [
             (WORKFLOW_QUEUE, &self.inner.client),
             (WORKFLOW_ETL_QUEUE, &self.inner.etl_client),
+            (WORKFLOW_ETL_BACKFILL_QUEUE, &self.inner.etl_backfill_client),
         ] {
             if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
                 client.cancel_task(&run.task_id, Some(queue_name)).await?;
@@ -554,7 +611,11 @@ impl WorkflowRuntime {
             .await?;
         self.inner
             .etl_client
-            .emit_event(event_name, payload, Some(WORKFLOW_ETL_QUEUE))
+            .emit_event(event_name, payload.clone(), Some(WORKFLOW_ETL_QUEUE))
+            .await?;
+        self.inner
+            .etl_backfill_client
+            .emit_event(event_name, payload, Some(WORKFLOW_ETL_BACKFILL_QUEUE))
             .await?;
         Ok(())
     }
@@ -592,6 +653,7 @@ impl WorkflowRuntime {
         match workflow_queue_class(workflow_name) {
             WorkflowQueueClass::Standard => &self.inner.client,
             WorkflowQueueClass::Etl => &self.inner.etl_client,
+            WorkflowQueueClass::EtlBackfill => &self.inner.etl_backfill_client,
         }
     }
 }
@@ -600,12 +662,13 @@ impl WorkflowRuntime {
 enum WorkflowQueueClass {
     Standard,
     Etl,
+    EtlBackfill,
 }
 
 fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
+        "slack_backfill" => WorkflowQueueClass::EtlBackfill,
         "slack_sync"
-        | "slack_backfill"
         | "google_calendar_sync"
         | "google_drive_sync"
         | "linear_sync"
@@ -623,6 +686,10 @@ fn absurd_queue_tables(
         WORKFLOW_ETL_QUEUE => Ok((
             "absurd.t_centaur_workflows_etl",
             "absurd.r_centaur_workflows_etl",
+        )),
+        WORKFLOW_ETL_BACKFILL_QUEUE => Ok((
+            "absurd.t_centaur_workflows_etl_backfill",
+            "absurd.r_centaur_workflows_etl_backfill",
         )),
         WORKFLOW_SCHEDULE_QUEUE => Ok((
             "absurd.t_centaur_workflow_schedules",
@@ -1186,6 +1253,7 @@ fn spawn_workflow_metadata_reconciler(
     schedule_client: Client,
     workflow_client: Client,
     etl_client: Client,
+    etl_backfill_client: Client,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     interval: Duration,
@@ -1209,6 +1277,7 @@ fn spawn_workflow_metadata_reconciler(
                         .reap(
                             &workflow_client,
                             &etl_client,
+                            &etl_backfill_client,
                             &schedule_client,
                             &metadata,
                             &schedules,
@@ -1287,6 +1356,7 @@ impl RemovedWorkflowReaper {
         &mut self,
         workflow_client: &Client,
         etl_client: &Client,
+        etl_backfill_client: &Client,
         schedule_client: &Client,
         metadata: &PythonWorkflowMetadata,
         schedules: &BTreeMap<String, RegisteredWorkflowSchedule>,
@@ -1305,6 +1375,7 @@ impl RemovedWorkflowReaper {
         for (queue_name, client) in [
             (WORKFLOW_QUEUE, workflow_client),
             (WORKFLOW_ETL_QUEUE, etl_client),
+            (WORKFLOW_ETL_BACKFILL_QUEUE, etl_backfill_client),
         ] {
             for (task_id, name) in
                 fetch_active_named_tasks(client, queue_name, WORKFLOW_TASK, "workflow_name").await?
@@ -1326,10 +1397,10 @@ impl RemovedWorkflowReaper {
             let Some((queue_name, task_id)) = key.split_once(':') else {
                 continue;
             };
-            let client = if queue_name == WORKFLOW_ETL_QUEUE {
-                etl_client
-            } else {
-                workflow_client
+            let client = match queue_name {
+                WORKFLOW_ETL_QUEUE => etl_client,
+                WORKFLOW_ETL_BACKFILL_QUEUE => etl_backfill_client,
+                _ => workflow_client,
             };
             if let Err(error) = client.cancel_task(task_id, Some(queue_name)).await {
                 warn!(%error, queue_name, task_id, "failed to cancel run of removed workflow");
@@ -1448,6 +1519,7 @@ async fn run_schedule_tick(
     schedule_client: Client,
     workflow_client: Client,
     etl_client: Client,
+    etl_backfill_client: Client,
     schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 ) -> Result<Value, absurd::Error> {
     ctx.sleep_until("schedule_tick", input.scheduled_at).await?;
@@ -1491,6 +1563,7 @@ async fn run_schedule_tick(
     let target_client = match workflow_queue_class(&schedule.workflow_name) {
         WorkflowQueueClass::Standard => &workflow_client,
         WorkflowQueueClass::Etl => &etl_client,
+        WorkflowQueueClass::EtlBackfill => &etl_backfill_client,
     };
     let workflow_spawn = target_client
         .spawn(
@@ -1898,6 +1971,9 @@ async fn run_python_workflow_host_local(
                     "python workflow log"
                 );
             }
+            Some("ctx.metric") => {
+                record_python_workflow_metric(&message);
+            }
             Some(message_type) if message_type.starts_with("ctx.") => {
                 let response =
                     handle_python_context_request(&message, &ctx, &session_runtime, &input).await;
@@ -2027,6 +2103,9 @@ where
                     "python workflow log"
                 );
             }
+            Some("ctx.metric") => {
+                record_python_workflow_metric(&message);
+            }
             Some(message_type) if message_type.starts_with("ctx.") => {
                 let response =
                     handle_python_context_request(&message, &ctx, &session_runtime, &input).await;
@@ -2044,6 +2123,114 @@ where
     Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.result: stderr={stderr}"
     )))
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PythonWorkflowMetricKind {
+    Counter,
+    Gauge,
+    Histogram,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PythonWorkflowMetric {
+    kind: PythonWorkflowMetricKind,
+    name: String,
+    value: f64,
+    labels: Vec<(String, String)>,
+}
+
+fn record_python_workflow_metric(message: &Value) {
+    let metric = match parse_python_workflow_metric(message) {
+        Ok(metric) => metric,
+        Err(error) => {
+            warn!(%error, message = %message, "ignored invalid Python workflow metric");
+            return;
+        }
+    };
+
+    match metric.kind {
+        PythonWorkflowMetricKind::Counter => {
+            if metric.value > 0.0 && metric.value.fract() == 0.0 {
+                centaur_telemetry::record_workflow_counter(
+                    &metric.name,
+                    &metric.labels,
+                    metric.value as u64,
+                );
+            } else {
+                warn!(
+                    metric = %metric.name,
+                    value = metric.value,
+                    "ignored invalid Python workflow counter value"
+                );
+            }
+        }
+        PythonWorkflowMetricKind::Gauge => {
+            centaur_telemetry::set_workflow_gauge(&metric.name, &metric.labels, metric.value);
+        }
+        PythonWorkflowMetricKind::Histogram => {
+            centaur_telemetry::record_workflow_histogram(
+                &metric.name,
+                &metric.labels,
+                metric.value,
+            );
+        }
+    }
+}
+
+fn parse_python_workflow_metric(message: &Value) -> Result<PythonWorkflowMetric, String> {
+    let kind = match message.get("kind").and_then(Value::as_str) {
+        Some("counter") => PythonWorkflowMetricKind::Counter,
+        Some("gauge") => PythonWorkflowMetricKind::Gauge,
+        Some("histogram") => PythonWorkflowMetricKind::Histogram,
+        other => return Err(format!("unsupported metric kind {other:?}")),
+    };
+    let name = message
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| is_valid_prometheus_name(name))
+        .ok_or_else(|| "metric name missing or invalid".to_owned())?
+        .to_owned();
+    let value = message
+        .get("value")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "metric value missing or invalid".to_owned())?;
+    let labels = message
+        .get("labels")
+        .and_then(Value::as_object)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter(|(key, _)| is_valid_prometheus_name(key))
+                .map(|(key, value)| {
+                    (
+                        key.to_owned(),
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(PythonWorkflowMetric {
+        kind,
+        name,
+        value,
+        labels,
+    })
+}
+
+fn is_valid_prometheus_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 async fn handle_python_context_request(
@@ -2536,6 +2723,7 @@ async fn run_agent_session_turn(
             &harness_type,
             persona_id.as_deref(),
             Some(session_metadata),
+            HarnessConflictPolicy::Reject,
         )
         .await?;
     session_runtime
@@ -2740,10 +2928,9 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_etls_use_etl_queue() {
+    fn scheduled_etls_use_isolated_etl_queues() {
         for workflow_name in [
             "slack_sync",
-            "slack_backfill",
             "google_calendar_sync",
             "google_drive_sync",
             "linear_sync",
@@ -2753,9 +2940,58 @@ mod tests {
             assert_eq!(workflow_queue_class(workflow_name), WorkflowQueueClass::Etl);
         }
         assert_eq!(
+            workflow_queue_class("slack_backfill"),
+            WorkflowQueueClass::EtlBackfill
+        );
+        assert_eq!(
             workflow_queue_class("github_issue_triage"),
             WorkflowQueueClass::Standard
         );
+    }
+
+    #[test]
+    fn parses_python_workflow_metric_notification() {
+        let metric = parse_python_workflow_metric(&json!({
+            "type": "ctx.metric",
+            "kind": "counter",
+            "name": "etl_items_seen_total",
+            "value": 12,
+            "labels": {
+                "namespace": "centaur-system",
+                "environment": "production",
+                "source": "slack",
+                "source_type": "channel",
+                "item_type": "thread_refresh_reply",
+            },
+        }))
+        .unwrap();
+
+        assert_eq!(metric.kind, PythonWorkflowMetricKind::Counter);
+        assert_eq!(metric.name, "etl_items_seen_total");
+        assert_eq!(metric.value, 12.0);
+        assert!(
+            metric
+                .labels
+                .contains(&("namespace".to_owned(), "centaur-system".to_owned()))
+        );
+        assert!(
+            metric
+                .labels
+                .contains(&("source".to_owned(), "slack".to_owned()))
+        );
+    }
+
+    #[test]
+    fn rejects_python_workflow_metric_with_invalid_name() {
+        let error = parse_python_workflow_metric(&json!({
+            "type": "ctx.metric",
+            "kind": "counter",
+            "name": "bad-name",
+            "value": 1,
+        }))
+        .unwrap_err();
+
+        assert_eq!(error, "metric name missing or invalid");
     }
 
     #[tokio::test]

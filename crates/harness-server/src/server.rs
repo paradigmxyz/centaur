@@ -34,7 +34,7 @@ use crate::{HarnessServerError, Result};
 
 pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
     match kind {
-        HarnessKind::Codex => Box::new(CodexHarnessServer),
+        HarnessKind::Codex => Box::new(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
     }
@@ -46,7 +46,7 @@ pub fn run_harness_server(kind: HarnessKind) -> Result<()> {
 
 pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
     match kind {
-        HarnessKind::Codex => crate::codex::run_codex_blocks_server(),
+        HarnessKind::Codex => crate::codex::run_codex_blocks_server(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
     }
@@ -92,6 +92,9 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 input,
                 client_user_message_id,
                 model,
+                // Reasoning effort only applies to the codex harness; the
+                // emulated (claude/amp) app-server has no equivalent knob.
+                reasoning: _,
             }) => {
                 if let Some(model) = model {
                     state.model = model;
@@ -196,6 +199,7 @@ pub(crate) enum BlocksCommand {
         input: Vec<UserInput>,
         client_user_message_id: Option<String>,
         model: Option<String>,
+        reasoning: Option<String>,
     },
     Interrupt,
     AttachmentChunk,
@@ -228,6 +232,8 @@ struct BlocksLine {
     client_user_message_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(rename = "attachmentId", default)]
     attachment_id: Option<String>,
     #[serde(default)]
@@ -336,6 +342,10 @@ pub(crate) fn parse_blocks_line_with_state(
                     .model
                     .map(|model| model.trim().to_owned())
                     .filter(|model| !model.is_empty()),
+                reasoning: parsed
+                    .reasoning
+                    .map(|reasoning| reasoning.trim().to_owned())
+                    .filter(|reasoning| !reasoning.is_empty()),
             })
         }
         "attachment.chunk" => {
@@ -1163,6 +1173,33 @@ mod tests {
             panic!("expected user command");
         };
         assert_eq!(model, None);
+    }
+
+    #[test]
+    fn parses_blocks_user_line_with_reasoning_override() {
+        let line = r#"{"type":"user","thread_key":"web:t1","reasoning":"high","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let BlocksCommand::User { reasoning, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(reasoning.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn ignores_blank_reasoning_on_blocks_user_line() {
+        let line = r#"{"type":"user","reasoning":"  ","text":"hi"}"#;
+        let BlocksCommand::User { reasoning, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(reasoning, None);
+    }
+
+    #[test]
+    fn defaults_reasoning_to_none_when_absent() {
+        let line = r#"{"type":"user","text":"hi"}"#;
+        let BlocksCommand::User { reasoning, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(reasoning, None);
     }
 
     #[test]

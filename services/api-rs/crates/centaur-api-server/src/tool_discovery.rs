@@ -1356,19 +1356,11 @@ secrets = [
         );
         assert_eq!(config["rules"].as_sequence().unwrap().len(), 2);
 
-        // The sandbox AWS SDK gets seeded placeholder credentials to sign with.
+        // No sandbox env rides along: the tool embeds its own throwaway SigV4
+        // credentials, so aws_auth contributes nothing to placeholder env.
         let placeholders =
             centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
-        assert_eq!(
-            placeholders.get("AWS_ACCESS_KEY_ID").map(String::as_str),
-            Some("AWS_ACCESS_KEY_ID")
-        );
-        assert_eq!(
-            placeholders
-                .get("AWS_SECRET_ACCESS_KEY")
-                .map(String::as_str),
-            Some("AWS_SECRET_ACCESS_KEY")
-        );
+        assert!(placeholders.is_empty());
 
         let _ = fs::remove_dir_all(temp);
     }

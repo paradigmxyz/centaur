@@ -29,10 +29,9 @@ BROWSER_USE_PROFILE_ID = os.environ.get("BROWSER_USE_PROFILE_ID", "")  # noqa: T
 
 
 def _browser_use_api_key() -> str:
-    value = secret("BROWSER_USE_API_KEY", "")
-    if value == "BROWSER_USE_API_KEY":
-        value = os.environ.get("BROWSER_USE_API_KEY", "")  # noqa: TID251
-    return value
+    # Server mode returns the stub key name; the proxy swaps it for the real
+    # key in the query string (match_query). Local mode returns the env value.
+    return secret("BROWSER_USE_API_KEY", "")
 
 
 def _prepare_playwright_tls() -> None:

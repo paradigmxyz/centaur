@@ -1411,6 +1411,11 @@ class SlackClient:
             return f"\n\n_(requested by @{requester_name})_"
         return ""
 
+    @staticmethod
+    def _normalize_message_text(text: str) -> str:
+        """Convert shell-friendly escaped line breaks into Slack line breaks."""
+        return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\r")
+
     def send_message(
         self,
         channel: str,
@@ -1437,11 +1442,11 @@ class SlackClient:
         """
         channel_id = self._resolve_message_destination(channel)
 
-        message_text = text
+        message_text = self._normalize_message_text(text)
         if not no_attribution:
             attribution = self._format_requester_attribution()
             if attribution:
-                message_text = text + attribution
+                message_text += attribution
 
         try:
             kwargs = {"channel": channel_id, "text": message_text}

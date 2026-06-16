@@ -11,14 +11,14 @@ import types
 from pathlib import Path
 from typing import Any
 
-# client.py inherits from api.integrations.linear.LinearReadonlyClient, which
-# lives in the legacy api service and may not be present. The mutation logic
-# under test never touches readonly behavior, so stub the base class before
-# loading the module.
-if "api.integrations.linear" not in sys.modules:
-    api_pkg = types.ModuleType("api")
-    integrations_pkg = types.ModuleType("api.integrations")
-    linear_mod = types.ModuleType("api.integrations.linear")
+# client.py inherits from workflows.linear.readonly.LinearReadonlyClient, which
+# lives in the workflows package and may not be importable in isolation. The
+# mutation logic under test never touches readonly behavior, so stub the base
+# class before loading the module.
+if "workflows.linear.readonly" not in sys.modules:
+    workflows_pkg = types.ModuleType("workflows")
+    linear_pkg = types.ModuleType("workflows.linear")
+    readonly_mod = types.ModuleType("workflows.linear.readonly")
 
     class LinearReadonlyClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -27,12 +27,12 @@ if "api.integrations.linear" not in sys.modules:
         def _query(self, query: str, variables: dict | None = None) -> dict:
             raise NotImplementedError
 
-    linear_mod.LinearReadonlyClient = LinearReadonlyClient
-    integrations_pkg.linear = linear_mod
-    api_pkg.integrations = integrations_pkg
-    sys.modules["api"] = api_pkg
-    sys.modules["api.integrations"] = integrations_pkg
-    sys.modules["api.integrations.linear"] = linear_mod
+    readonly_mod.LinearReadonlyClient = LinearReadonlyClient
+    linear_pkg.readonly = readonly_mod
+    workflows_pkg.linear = linear_pkg
+    sys.modules["workflows"] = workflows_pkg
+    sys.modules["workflows.linear"] = linear_pkg
+    sys.modules["workflows.linear.readonly"] = readonly_mod
 
 spec = importlib.util.spec_from_file_location(
     "linear_client", Path(__file__).with_name("client.py")

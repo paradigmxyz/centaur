@@ -357,6 +357,64 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('summarize the thread so far')
   })
 
+  it('fetches attachments from preceding Slack thread messages for a mid-thread mention', async () => {
+    const parent = await postUserMessage('Root context before an attachment.')
+    const priorReply = await postUserMessage('Screenshot is attached here.', parent.ts)
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    slackApi.addFileToMessage(CHANNEL_ID, priorReply.ts, {
+      id: 'F-thread-context-image',
+      mimetype: 'image/png',
+      name: 'thread-context.png',
+      original_h: 600,
+      original_w: 800,
+      size: 16,
+      url_private: fileUrl
+    })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect the earlier screenshot`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-mid-thread-history-attachment',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> inspect the earlier screenshot`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const appendedAttachment = codexApi.appends[0]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        attachment_type: 'image',
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'thread-context.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+
+    const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
+    expect(executeInput).toContain('Screenshot is attached here.')
+    expect(executeInput).toContain('Earlier Slack thread attachment')
+    expect(executeInput).toContain(
+      `data:image/png;base64,${Buffer.from('captured-image').toString('base64')}`
+    )
+  })
+
   it('injects Slack requester identity and verified GitHub handle into Codex input', async () => {
     slackApi.setUserProfile(USER_ID, {
       name: 'akshaan',
@@ -1182,13 +1240,15 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
-  it('reposts the durable final answer exactly once when Slack rejects the stream stop as too long', async () => {
+  it('replaces the failed stream with the durable final answer when Slack rejects stop as too long', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
     codexApi.autoRespond = false
     // Every stop fails: the streamed message never finalizes, so its content
-    // breaks in real Slack. The bot must repost the durable answer once.
+    // breaks in real Slack. Size-limit failures should be prevented by
+    // segmentation; if one still happens, replace the broken stream instead of
+    // posting a duplicate fallback reply in the thread.
     slackApi.failStreamStopsLongerThan(10)
 
     const parent = await postUserMessage('Context before an oversized Slack render.')
@@ -1240,13 +1300,10 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
     const texts = await threadTexts(parent.ts)
-    // The streamed message broke ("Something went wrong"), so the durable
-    // final answer must be reposted - exactly once, never duplicated.
-    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(true)
-    const visibleFinalReplies = texts.filter(text =>
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+    expect(texts.filter(text =>
       text.includes('TOO_LONG_FALLBACK_VISIBLE')
-    )
-    expect(visibleFinalReplies).toHaveLength(1)
+    )).toHaveLength(1)
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
       expect.objectContaining({
@@ -1498,6 +1555,71 @@ describe('slackbotv2', () => {
     }
   })
 
+  it('keeps card-heavy structured streams below Slack finalization payload limits', async () => {
+    slackApi.failStreamStopsLongerThan(12_000)
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a production-sized card render.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> run enough steps to paginate`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-structured-payload-budget',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> run enough steps to paginate`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    for (let index = 1; index <= 36; index++) {
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: `cmd-payload-${index}`,
+            type: 'commandExecution',
+            command: `step-${index} ${'x'.repeat(220)}`,
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        })
+      )
+    }
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-structured-payload-budget',
+      status: 'completed',
+      result_text: 'STRUCTURED_PAYLOAD_BUDGET_ANSWER_VISIBLE'
+    })
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts.length).toBeGreaterThanOrEqual(2)
+    for (const transcript of transcripts) {
+      expect(streamTranscriptPayloadChars(transcript)).toBeLessThanOrEqual(12_000)
+    }
+    const texts = await threadTexts(parent.ts)
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+    expect(texts.filter(text =>
+      text.includes('STRUCTURED_PAYLOAD_BUDGET_ANSWER_VISIBLE')
+    )).toHaveLength(1)
+  })
+
   it('recovers the final answer when thread state already advanced past the terminal event', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -1539,6 +1661,12 @@ describe('slackbotv2', () => {
       { afterEventId: 0, executionId: 'exe-recovery-consumed', threadKey: key }
     ])
     expect(await threadText(parent.ts)).toContain('Recovered consumed answer.')
+    // Recovery clears the obligation after the Slack stream stops; wait for
+    // the state write instead of racing it.
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )
@@ -1755,13 +1883,16 @@ describe('slackbotv2', () => {
     expect(transcripts.length).toBeGreaterThan(1)
     expect(transcripts.flatMap(transcript => transcript.chunks).filter(chunk => chunk.type === 'task_update').length)
       .toBeGreaterThan(50)
-    expect(
+    const taskCounts = transcripts.map(transcript =>
       new Set(
-        transcripts[0]!.chunks
+        transcript.chunks
           .filter(chunk => chunk.type === 'task_update')
           .map(chunk => stringField(chunk.id))
       ).size
-    ).toBe(50)
+    )
+    expect(taskCounts[0]).toBeGreaterThan(0)
+    expect(taskCounts[0]).toBeLessThan(50)
+    expect(Math.max(...taskCounts)).toBeLessThanOrEqual(50)
     expect(await threadText(parent.ts)).toContain('TASK_STREAM_CONTINUATION_OK')
   })
 
@@ -2166,7 +2297,7 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('pnpm test')
   })
 
-  it('waits for a slow session execute before acknowledging Slack and starting the stream', async () => {
+  it('shows assistant status while waiting for slow session execute', async () => {
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
 
@@ -2200,6 +2331,11 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.executes.length === 1)
     await sleep(50)
     expect(responseSettled).toBe(false)
+    expect(
+      slackApi.calls
+        .filter(call => call.method === 'assistant.threads.setStatus')
+        .map(call => stringField(call.body.status))
+    ).toEqual(['Thinking...'])
     expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
     expect(codexApi.eventRequests).toHaveLength(0)
 
@@ -2210,6 +2346,11 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
     codexApi.closeStreams()
     await Promise.all(waits)
+    expect(
+      slackApi.calls
+        .filter(call => call.method === 'assistant.threads.setStatus')
+        .map(call => stringField(call.body.status))
+    ).toEqual(['Thinking...', ''])
   })
 
   it('recovers unfinished render obligations from Chat SDK state on startup', async () => {
@@ -2257,6 +2398,12 @@ describe('slackbotv2', () => {
       parentTs: parent.ts
     })
     expect(await threadText(parent.ts)).toContain('Recovered request.')
+    // Recovery clears the obligation after the Slack stream stops; wait for
+    // the state write instead of racing it.
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )
@@ -2527,6 +2674,12 @@ describe('slackbotv2', () => {
       { afterEventId: 0, executionId: 'exe-1', threadKey: key }
     ])
     expect(await threadText(parent.ts)).toContain('Recovered after stream retry.')
+    // Recovery clears the obligation after the Slack stream stops; wait for
+    // the state write instead of racing it.
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
     const recoveredThreadState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${key}`
     )
@@ -3445,6 +3598,7 @@ function writeMockSseEvent(stream: ServerResponse, event: MockSessionEvent): voi
 }
 
 type PatchedSlackApi = {
+  addFileToMessage(channel: string, ts: string, file: Record<string, unknown>): void
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
@@ -3470,6 +3624,7 @@ type StreamCall = {
 
 type StreamRecord = {
   channel: string
+  payloadChars: number
   text: string
   ts: string
 }
@@ -3486,6 +3641,7 @@ type SlackStreamTranscript = {
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
+  const threadMessageFiles = new Map<string, Record<string, unknown>[]>()
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
@@ -3501,6 +3657,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       port,
       streams,
       threadNotFoundReplies,
+      threadMessageFiles,
       userProfiles,
       userProfileRequests,
       upstreamUrl
@@ -3511,6 +3668,10 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   })
   await listen(server, port)
   return {
+    addFileToMessage(channel: string, ts: string, file: Record<string, unknown>) {
+      const key = slackReplyKey(channel, ts)
+      threadMessageFiles.set(key, [...(threadMessageFiles.get(key) ?? []), file])
+    },
     calls,
     url: `http://127.0.0.1:${port}`,
     failRepliesWithThreadNotFound(channel: string, ts: string) {
@@ -3529,6 +3690,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure.remaining = -1
       appendFailure.error = ''
       threadNotFoundReplies.clear()
+      threadMessageFiles.clear()
       streams.clear()
       userProfiles.clear()
       userProfileRequests.clear()
@@ -3556,6 +3718,7 @@ async function handlePatchedSlackRequest(
     port: number
     streams: Map<string, StreamRecord>
     threadNotFoundReplies: Set<string>
+    threadMessageFiles: Map<string, Record<string, unknown>[]>
     userProfiles: Map<string, Record<string, unknown>>
     userProfileRequests: Map<string, number>
     upstreamUrl: string
@@ -3665,6 +3828,27 @@ async function handlePatchedSlackRequest(
       await sendWebResponse(res, Response.json({ ok: false, error: 'thread_not_found' }))
       return
     }
+    if (input.threadMessageFiles.size > 0) {
+      const rawBody = await request.arrayBuffer()
+      const proxied = await fetch(new URL(`${path}${url.search}`, input.upstreamUrl), {
+        method: request.method,
+        headers: request.headers,
+        body: rawBody.byteLength > 0 ? rawBody : undefined
+      })
+      const payload = await proxied.json() as Record<string, unknown>
+      if (Array.isArray(payload.messages)) {
+        payload.messages = payload.messages.map(message => {
+          if (!message || typeof message !== 'object' || Array.isArray(message)) return message
+          const item = message as Record<string, unknown>
+          const files = input.threadMessageFiles.get(
+            slackReplyKey(stringField(body.channel), stringField(item.ts))
+          )
+          return files ? { ...item, files: [...slackFileArray(item.files), ...files] } : item
+        })
+      }
+      await sendWebResponse(res, Response.json(payload, { status: proxied.status }))
+      return
+    }
   }
 
   const body = await request.arrayBuffer()
@@ -3749,6 +3933,7 @@ async function startStream(
   const channel = stringField(body.channel)
   const threadTs = stringField(body.thread_ts)
   const text = streamBodyText(body) || ' '
+  const payloadChars = streamBodyPayloadChars(body)
   const posted = await postSlack(emulatorUrl, request, '/api/chat.postMessage', {
     channel,
     thread_ts: threadTs || undefined,
@@ -3757,7 +3942,7 @@ async function startStream(
   if (!posted.ok) return Response.json(posted)
   const ts = stringField(posted.ts)
   calls.push({ method: 'chat.startStream', body, streamTs: ts })
-  streams.set(streamKey(channel, ts), { channel, ts, text })
+  streams.set(streamKey(channel, ts), { channel, payloadChars, ts, text })
   return Response.json({ ok: true, channel, ts })
 }
 
@@ -3783,8 +3968,9 @@ async function appendStream(
     return Response.json({ ok: false, error: appendFailure.error })
   }
   if (appendFailure.remaining > 0) appendFailure.remaining -= 1
-  const record = streams.get(streamKey(channel, ts)) ?? { channel, ts, text: '' }
+  const record = streams.get(streamKey(channel, ts)) ?? { channel, payloadChars: 0, ts, text: '' }
   record.text += streamBodyText(body)
+  record.payloadChars += streamBodyPayloadChars(body)
   streams.set(streamKey(channel, ts), record)
   await postSlack(emulatorUrl, request, '/api/chat.update', {
     channel,
@@ -3806,9 +3992,10 @@ async function stopStream(
   const ts = stringField(body.ts)
   calls.push({ method: 'chat.stopStream', body, streamTs: ts })
   const key = streamKey(channel, ts)
-  const record = streams.get(key) ?? { channel, ts, text: '' }
+  const record = streams.get(key) ?? { channel, payloadChars: 0, ts, text: '' }
   const text = [record.text, streamBodyText(body)].filter(part => part.trim()).join('\n')
-  if (maxStreamStopChars !== null && text.length > maxStreamStopChars) {
+  const payloadChars = record.payloadChars + streamBodyPayloadChars(body)
+  if (maxStreamStopChars !== null && payloadChars > maxStreamStopChars) {
     // A stream that is never stopped breaks in real Slack: the message shows
     // "Something went wrong" instead of the streamed content.
     await postSlack(emulatorUrl, request, '/api/chat.update', {
@@ -3858,6 +4045,14 @@ async function postSlack(
 
 function streamBodyText(body: Record<string, unknown>): string {
   return [stringField(body.markdown_text), chunksText(body.chunks)].filter(Boolean).join('\n')
+}
+
+function streamBodyPayloadChars(body: Record<string, unknown>): number {
+  return (
+    stringField(body.markdown_text).length
+    + JSON.stringify(streamChunks(body.chunks)).length
+    + JSON.stringify(body.blocks ?? []).length
+  )
 }
 
 function streamChunks(value: unknown): Record<string, unknown>[] {
@@ -4033,6 +4228,10 @@ function slackStreamTranscripts(calls: StreamCall[]): SlackStreamTranscript[] {
   })
 }
 
+function streamTranscriptPayloadChars(transcript: SlackStreamTranscript): number {
+  return transcript.calls.reduce((total, call) => total + streamBodyPayloadChars(call.body), 0)
+}
+
 function chunkText(chunk: Record<string, unknown>): string {
   if (typeof chunk.text === 'string') return chunk.text
   return [chunk.title, chunk.details, chunk.output]
@@ -4075,6 +4274,14 @@ function slackReplyKey(channel: string, ts: string): string {
 
 function stringField(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+function slackFileArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? (value.filter(item =>
+        item && typeof item === 'object' && !Array.isArray(item)
+      ) as Record<string, unknown>[])
+    : []
 }
 
 function parseMaybeJson(value: string): unknown {

@@ -65,7 +65,6 @@ Minimum keys:
 | `SLACK_BOT_TOKEN` | Slackbot | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Static service token; API bootstraps it into Postgres on startup with `agent` scope. |
-| `LOCAL_DEV_API_KEY` | Initial operator/admin access | Optional but recommended for first boot; API bootstraps it into Postgres on startup with `admin`, `agent`, `threads`, and `tools:*` scopes. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password service-account source | Needed when `ironProxy.secretSource` is `onepassword`. |
 | `OP_VAULT` | [iron-proxy](https://docs.iron.sh) 1Password source | Vault name or id used for `op://` references (either mode). |
@@ -81,6 +80,7 @@ Store one secret per enabled harness credential:
 | Harness | API value | Slack selector | Credential to store | Upstream |
 |---------|-----------|----------------|---------------------|----------|
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
+| Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -92,7 +92,12 @@ headers the secret is bound to.
 
 When `ironProxy.secretSource` is `onepassword`, [iron-proxy](https://docs.iron.sh) resolves these values
 from `op://$OP_VAULT/<SECRET_NAME>/credential`. For example, store the default
-Codex credential in a 1Password item named `OPENAI_API_KEY`.
+Codex credential in a 1Password item named `OPENAI_API_KEY`. To run Codex
+through OpenRouter, store `OPENROUTER_API_KEY` and set `OPENROUTER_MODEL` to a
+model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
+alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
+slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
+provider even when `OPENROUTER_MODEL` is unset.
 
 Whatever source you pick, the vault is shared across the whole deployment,
 so any thread can use any configured credential. Per-user and per-channel
@@ -262,8 +267,9 @@ helm upgrade --install centaur contrib/chart \
 
 ## 6. Verify the deployment
 
-Check health from inside the API deployment first. The basic health and
-readiness endpoints do not require auth:
+Check health from inside the API deployment first. Localhost is accepted for
+operator-only routes, so this avoids needing an external admin key for the first
+smoke check:
 
 ```bash
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
@@ -271,75 +277,49 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
   curl -fsS http://localhost:8000/health/ready | jq
-```
 
-Operator routes such as `/health/tools` and `/admin/*` require an admin API key.
-There is no localhost auth bypass. Bootstrap the first admin key by setting
-`LOCAL_DEV_API_KEY` in `centaur-infra-env` before API startup, or patch it in and
-restart the API:
-
-```bash
-export ADMIN_KEY="aiv2_$(openssl rand -hex 32)"
-
-kubectl patch secret -n centaur-system centaur-infra-env \
-  --type merge \
-  -p "{\"stringData\":{\"LOCAL_DEV_API_KEY\":\"${ADMIN_KEY}\"}}"
-
-kubectl rollout restart -n centaur-system deploy/centaur-centaur-api
-kubectl rollout status -n centaur-system deploy/centaur-centaur-api
-```
-
-Then verify tool discovery with that key:
-
-```bash
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health/tools \
-    -H "X-Api-Key: ${ADMIN_KEY}" | jq
+  curl -fsS http://localhost:8000/health/tools | jq
 ```
 
-You can create a named operator key and save the returned plaintext key:
+If you need to call operator routes from outside the cluster, create an admin
+API key from inside the API deployment and save the returned plaintext key:
 
 ```bash
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
   curl -fsS -X POST http://localhost:8000/admin/api-keys \
     -H "Content-Type: application/json" \
-    -H "X-Api-Key: ${ADMIN_KEY}" \
     -d '{"name":"operator","scopes":["admin"],"created_by":"ops"}' | jq
 ```
 
-External operator calls use the same header:
+External operator calls then use:
 
 ```bash
 curl -s "$CENTAUR_API_URL/health/tools" \
   -H "X-Api-Key: $ADMIN_KEY" | jq
 ```
 
-Run one agent turn from inside the API deployment. Use either the admin key or a
-service key with `agent` scope, such as `SLACKBOT_API_KEY`:
+Run one agent turn from inside the API deployment:
 
 ```bash
 THREAD_KEY=production-smoke-codex
 
 SPAWN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/spawn \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: ${ADMIN_KEY}" \
   -d "{\"thread_key\":\"${THREAD_KEY}\"}")
 ASSIGNMENT_GENERATION=$(printf '%s' "$SPAWN" | jq -r '.assignment_generation')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/message \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: ${ADMIN_KEY}" \
   -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}"
 
 EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: ${ADMIN_KEY}" \
   -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"delivery\":{\"platform\":\"dev\"}}")
 EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s \
-  "http://localhost:8000/agent/executions/${EXECUTION_ID}" \
-  -H "X-Api-Key: ${ADMIN_KEY}" | jq
+  "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
 ```
 
 Then run the same prompt through Slack:

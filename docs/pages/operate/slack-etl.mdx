@@ -39,8 +39,8 @@ posting to Slack.
 
 Create a Slack user token for ETL reads and store it as `SLACK_ETL_TOKEN` in
 the same secret source used by tools. The Slack tool declares it as an optional
-HTTP secret for `slack.com`; iron-proxy injects the real value when the tool
-calls Slack.
+HTTP secret for `slack.com` and `files.slack.com`; iron-proxy injects the real
+value when the tool calls Slack.
 
 The token must be able to call:
 
@@ -50,6 +50,7 @@ The token must be able to call:
 | `conversations.history` | Read channel root messages. |
 | `conversations.replies` | Refresh thread replies. |
 | `users.list` | Resolve Slack user metadata for documents. |
+| `files:read` / file URL access | Download message attachment bytes from `files.slack.com`. |
 
 Slack ETL currently syncs public channels visible to the configured ETL user
 token. It does not sync private channels, DMs, or Slackbot-only live thread
@@ -70,6 +71,8 @@ once Slack ETL is enabled, but can be tuned independently.
 | `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `5` | Maximum Slack history pages drained before a job is requeued. |
 | `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS` | `30` | Historical window seeded for first-time channel backfills. |
 | `SLACK_SYNC_THREAD_LOOKBACK_DAYS` | `3` | Recent thread window eligible for reply refresh. |
+| `SLACK_ETL_ATTACHMENTS_ENABLED` | `true` | Download Slack message attachment bytes into Postgres. Metadata rows are still written when downloads are disabled. |
+| `SLACK_ETL_ATTACHMENT_MAX_BYTES` | `10485760` | Per-file byte cap for Slack attachment downloads. Oversized files keep metadata with `skipped_too_large` status. |
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | empty | Comma-separated channel-name globs to skip, without needing the leading `#`. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `true` | Enables projection from Slack sync rows into company context documents. |
 | `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `14400` | How often to project changed Slack rows into documents. |
@@ -90,9 +93,15 @@ Slack ETL writes normalized Slack data into dedicated tables:
 | `slack_sync_users` | Slack user display metadata used when rendering documents. |
 | `slack_sync_runs` | One row per incremental or backfill workflow run, with counts and channel outcomes. |
 | `slack_sync_messages` | Root messages and replies keyed by `(channel_id, message_ts)`. |
+| `slack_sync_message_attachments` | Slack files attached to synced root messages and replies, including metadata, download status, checksum, and bounded `bytea` content when fetched. |
 | `slack_sync_checkpoints` | Per-channel watermarks and last error state. |
 | `slack_sync_backfill_jobs` | Deferred channel-history and thread-refresh jobs. |
-| `company_context_documents` | Derived channel-day and thread documents for retrieval. |
+| `company_context_documents` | Derived channel-day, thread, and attachment-metadata documents for retrieval. |
+
+Attachment document projection indexes Slack file names, titles, MIME/file
+types, Slack permalinks, download status, checksums, and the message the file
+was attached to. It does not parse attachment bytes or index private Slack
+download URLs.
 
 The first incremental run reads a small recent window so useful data appears
 quickly, then seeds historical backfill jobs for the configured lookback. Later

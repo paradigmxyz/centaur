@@ -14,14 +14,14 @@ pub fn load_fragment_str(contents: &str) -> Result<ProxyFragment> {
     })
 }
 
-/// The harness auth fragment for ``engine`` (`codex`/`claude-code`) and
-/// ``auth_mode`` (`api_key`/`access_token`). These are infra — known in advance
-/// — so they are baked in rather than discovered from disk. Returns ``None``
-/// for an unknown engine/mode pair.
+/// The harness auth fragment for ``engine`` and ``auth_mode``. These are infra
+/// — known in advance — so they are baked in rather than discovered from disk.
+/// Returns ``None`` for an unknown engine/mode pair.
 pub fn harness_auth_fragment(engine: &str, auth_mode: &str) -> Result<Option<ProxyFragment>> {
     let yaml = match (engine, normalize_auth_mode(auth_mode).as_str()) {
         ("codex", "api_key") => CODEX_API_KEY_FRAGMENT,
         ("codex", "access_token") => CODEX_ACCESS_TOKEN_FRAGMENT,
+        ("openrouter", "api_key") => OPENROUTER_API_KEY_FRAGMENT,
         ("claude-code", "api_key") => CLAUDE_CODE_API_KEY_FRAGMENT,
         ("claude-code", "access_token") => CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT,
         _ => return Ok(None),
@@ -41,6 +41,20 @@ transforms:
             header: Authorization
             formatter: "Bearer {{.Value}}"
           rules: [{ host: api.openai.com }]
+"#;
+
+const OPENROUTER_API_KEY_FRAGMENT: &str = r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: OPENROUTER_API_KEY_AUTHORIZATION
+          source:
+            placeholder: OPENROUTER_API_KEY
+          inject:
+            header: Authorization
+            formatter: "Bearer {{.Value}}"
+          rules: [{ host: openrouter.ai }]
 "#;
 
 // The `openai-codex` broker credential this references is managed by
@@ -99,8 +113,13 @@ fn normalize_auth_mode(value: &str) -> String {
     value.replace('-', "_")
 }
 
+/// The `PLACEHOLDER=PLACEHOLDER` env for replace-mode secrets whose consumers
+/// read credentials straight from the environment (codex's `OPENAI_API_KEY`,
+/// git's `GITHUB_TOKEN`, …) rather than through the tool SDK, whose
+/// `StubBackend` already hands back the key name. Only the infra/harness
+/// fragments have such consumers; tool fragments are excluded at the call site.
 pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = fragments
+    fragments
         .iter()
         .flat_map(|fragment| &fragment.transforms)
         .filter(|transform| transform.is_secrets())
@@ -108,42 +127,7 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
         .filter_map(|secret| secret.proxy_value())
         .filter(|value| !value.is_empty() && !value.contains('='))
         .map(|value| (value.to_owned(), value.to_owned()))
-        .collect();
-    // The `aws_auth` transform re-signs at the proxy, but the in-sandbox AWS SDK
-    // still needs credentials in its environment to produce the inbound SigV4
-    // signature. Seed each declared placeholder ref (var name == value, the same
-    // convention the secrets transform uses) so the SDK signs with throwaway
-    // values the proxy strips and replaces with the real keys.
-    for transform in fragments
-        .iter()
-        .flat_map(|fragment| &fragment.transforms)
-        .filter(|transform| transform.name == "aws_auth")
-    {
-        for field in ["access_key_id", "secret_access_key", "session_token"] {
-            if let Some(name) = transform
-                .config
-                .extra
-                .get(field)
-                .and_then(placeholder_ref)
-                .filter(|value| !value.is_empty() && !value.contains('='))
-            {
-                env.entry(name.clone()).or_insert(name);
-            }
-        }
-    }
-    env
-}
-
-/// Extract a `{placeholder: NAME}` ref (or a bare `NAME` string) from an
-/// `aws_auth` credential field, matching how iron-control's translator reads it.
-fn placeholder_ref(value: &serde_yaml::Value) -> Option<String> {
-    value
-        .as_mapping()
-        .and_then(|mapping| mapping.get(serde_yaml::Value::from("placeholder")))
-        .and_then(serde_yaml::Value::as_str)
-        .or_else(|| value.as_str())
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// The static catalog of sandbox Postgres DSN env vars declared across

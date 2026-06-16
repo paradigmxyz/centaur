@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
-try:
-    from api.integrations.linear import LinearReadonlyClient
-except ModuleNotFoundError:
-    api_src = Path(__file__).resolve().parents[3] / "services" / "api"
-    if api_src.exists():
-        sys.path.insert(0, str(api_src))
-    from api.integrations.linear import LinearReadonlyClient
+from workflows.linear.readonly import LinearReadonlyClient
 
 
 class LinearClient(LinearReadonlyClient):
     """Tool-facing Linear client.
 
-    Read-only GraphQL methods live in ``api.integrations.linear`` so workflows
+    Read-only GraphQL methods live in ``workflows.linear.readonly`` so workflows
     can reuse them. Tool-only mutations stay here.
     """
 

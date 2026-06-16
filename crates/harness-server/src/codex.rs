@@ -11,8 +11,48 @@ use crate::server::{BlocksCommand, BlocksState, parse_blocks_line_with_state, wr
 use crate::util::write_value;
 use crate::{AppServerRuntime, HarnessServerError, Result};
 
-#[derive(Debug, Default)]
-pub struct CodexHarnessServer;
+#[derive(Debug, Clone, Copy)]
+pub struct CodexHarnessServer {
+    fallback_model_provider: &'static str,
+}
+
+impl CodexHarnessServer {
+    pub fn codex() -> Self {
+        Self {
+            fallback_model_provider: "openai",
+        }
+    }
+
+    fn default_model(&self) -> Option<String> {
+        env::var("CODEX_MODEL")
+            .ok()
+            .or_else(|| env::var("OPENROUTER_MODEL").ok())
+            .map(|model| model.trim().to_owned())
+            .filter(|model| !model.is_empty())
+    }
+
+    fn model_provider_for(&self, model: Option<&str>) -> String {
+        env::var("CODEX_MODEL_PROVIDER")
+            .ok()
+            .map(|provider| provider.trim().to_owned())
+            .filter(|provider| !provider.is_empty())
+            .or_else(|| {
+                model
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .filter(|model| model.contains('/'))
+                    .map(|_| "openrouter".to_string())
+            })
+            .or_else(|| {
+                env::var("OPENROUTER_MODEL")
+                    .ok()
+                    .map(|model| model.trim().to_owned())
+                    .filter(|model| !model.is_empty())
+                    .map(|_| "openrouter".to_string())
+            })
+            .unwrap_or_else(|| self.fallback_model_provider.to_string())
+    }
+}
 
 impl AppServerRuntime for CodexHarnessServer {
     fn run_stdio(&self) -> Result<()> {
@@ -65,7 +105,7 @@ impl AppServerRuntime for CodexHarnessServer {
     }
 }
 
-pub(crate) fn run_codex_blocks_server() -> Result<()> {
+pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> {
     let mut codex = CodexJsonRpcChild::spawn()?;
     let mut stdout = io::stdout().lock();
     let mut request_id = 1_i64;
@@ -100,6 +140,7 @@ pub(crate) fn run_codex_blocks_server() -> Result<()> {
                 input,
                 client_user_message_id,
                 model,
+                reasoning,
             }) => {
                 if let Err(error) = run_codex_user_turn(
                     &mut codex,
@@ -108,7 +149,12 @@ pub(crate) fn run_codex_blocks_server() -> Result<()> {
                     &mut thread_id,
                     input,
                     client_user_message_id,
-                    model,
+                    {
+                        let model = model.or_else(|| config.default_model());
+                        let model_provider = config.model_provider_for(model.as_deref());
+                        (model, model_provider)
+                    },
+                    reasoning,
                 ) {
                     let fallback_thread_id = thread_id.as_deref().unwrap_or("codex");
                     eprintln!("Codex blocks turn failed: {error:#}");
@@ -143,10 +189,17 @@ fn run_codex_user_turn<W: Write>(
     thread_id: &mut Option<String>,
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
-    model: Option<String>,
+    model_and_provider: (Option<String>, String),
+    reasoning: Option<String>,
 ) -> Result<()> {
+    let (model, model_provider) = model_and_provider;
     if thread_id.is_none() {
-        *thread_id = Some(start_or_resume_thread(codex, stdout, request_id)?);
+        *thread_id = Some(start_or_resume_thread(
+            codex,
+            stdout,
+            request_id,
+            &model_provider,
+        )?);
     }
     let current_thread_id = thread_id
         .as_ref()
@@ -162,6 +215,12 @@ fn run_codex_user_turn<W: Write>(
     }
     if let Some(model) = model {
         params["model"] = Value::String(model);
+    }
+    // Per-turn reasoning effort (codex `turn/start.effort`), parsed from the
+    // `-rsn` message flag. Values match codex's ReasoningEffort enum
+    // (none|minimal|low|medium|high|xhigh); validation happens upstream.
+    if let Some(reasoning) = reasoning {
+        params["effort"] = Value::String(reasoning);
     }
 
     let turn_request_id = next_request_id(request_id);
@@ -181,6 +240,7 @@ fn start_or_resume_thread<W: Write>(
     codex: &mut CodexJsonRpcChild,
     stdout: &mut W,
     request_id: &mut i64,
+    model_provider: &str,
 ) -> Result<String> {
     let cwd = env::current_dir()?.display().to_string();
     let resume = env::var("CODEX_CONTINUE_THREAD_ID")
@@ -194,6 +254,7 @@ fn start_or_resume_thread<W: Write>(
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
                 "sandbox": "danger-full-access",
+                "modelProvider": model_provider,
             }),
         )
     } else {
@@ -205,6 +266,7 @@ fn start_or_resume_thread<W: Write>(
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
                 "sandbox": "danger-full-access",
+                "modelProvider": model_provider,
                 "excludeTurns": false,
             }),
         )

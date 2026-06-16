@@ -32,6 +32,10 @@ spec:
               value: "3001"
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # New threads without an explicit --claude/--amp/--codex flag run
+            # the deployment's default harness.
+            - name: SLACKBOTV2_DEFAULT_HARNESS
+              value: {{ .Values.sandbox.harnessEngine | quote }}
             - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:

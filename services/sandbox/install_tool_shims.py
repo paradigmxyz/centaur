@@ -19,6 +19,22 @@ def _split_paths(value: str) -> list[Path]:
     return [Path(part) for part in value.split(":") if part]
 
 
+def _home_dir() -> Path:
+    return Path.home()
+
+
+def _workspace_dir() -> Path:
+    env_workspace = os.environ.get("WORKSPACE_DIR") or os.environ.get("CENTAUR_WORKSPACE_DIR")
+    if env_workspace:
+        return Path(env_workspace)
+
+    home_dir = _home_dir()
+    state_workspace = Path(os.environ.get("CENTAUR_STATE_DIR", str(home_dir / "state"))) / "workspace"
+    if os.environ.get("CENTAUR_PERSISTENT_STATE") == "1" or state_workspace.exists():
+        return state_workspace
+    return home_dir / "workspace"
+
+
 def _git_env() -> tuple[dict[str, str], tempfile.TemporaryDirectory[str] | None]:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -175,6 +191,78 @@ def _refresh_tool_dirs(tool_dirs: list[Path]) -> int:
         if _refresh_tool_dir(tool_dir):
             refreshed += 1
     return refreshed
+
+
+def _copy_skill_dir(skills_src: Path, workspace_skills: Path) -> int:
+    if not skills_src.is_dir():
+        return 0
+
+    copied = 0
+    workspace_skills.mkdir(parents=True, exist_ok=True)
+    for skill_entry in sorted(skills_src.iterdir(), key=lambda entry: entry.name):
+        skill_name = skill_entry.name
+        target = workspace_skills / skill_name
+        if target.exists() or target.is_symlink():
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        if skill_entry.is_dir() and not skill_entry.is_symlink():
+            shutil.copytree(skill_entry, target, symlinks=True)
+        else:
+            shutil.copy2(skill_entry, target, follow_symlinks=False)
+        copied += 1
+    return copied
+
+
+def _first_base_centaur_skills(home_dir: Path) -> Path | None:
+    github_dir = home_dir / "github"
+    if not github_dir.is_dir():
+        return None
+    for skills_dir in sorted(github_dir.glob("*/centaur/.agents/skills")):
+        if skills_dir.is_dir():
+            return skills_dir
+    return None
+
+
+def _skill_sources() -> list[Path]:
+    home_dir = _home_dir()
+    sources = [
+        home_dir / ".agents" / "skills",
+        home_dir / "centaur-skills",
+    ]
+    if base_skills := _first_base_centaur_skills(home_dir):
+        sources.append(base_skills)
+    sources.append(home_dir / "centaur-overlay-skills")
+
+    overlay_dir = os.environ.get("CENTAUR_OVERLAY_DIR")
+    if overlay_dir:
+        overlay_tree_skills = Path(overlay_dir) / ".agents" / "skills"
+        if overlay_tree_skills.is_dir():
+            sources.append(overlay_tree_skills)
+
+    sources.extend(_split_paths(os.environ.get("CENTAUR_SKILL_DIRS", "")))
+    return sources
+
+
+def _refresh_skill_dirs(workspace_dir: Path) -> int:
+    workspace_skills = workspace_dir / ".agents" / "skills"
+    copied = 0
+    for skills_src in _skill_sources():
+        copied += _copy_skill_dir(skills_src, workspace_skills)
+
+    if workspace_skills.is_dir():
+        claude_dir = workspace_dir / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        claude_skills = claude_dir / "skills"
+        if claude_skills.exists() or claude_skills.is_symlink():
+            if claude_skills.is_dir() and not claude_skills.is_symlink():
+                shutil.rmtree(claude_skills)
+            else:
+                claude_skills.unlink()
+        claude_skills.symlink_to(workspace_skills)
+
+    return copied
 
 
 def _discover_scripts(tool_dirs: list[Path]) -> dict[str, dict[str, str]]:
@@ -362,6 +450,8 @@ def main(argv):
             return 1
         return subprocess.call([name, *argv[3:]])
     if command == "call" and len(argv) >= 4:
+        # Internal compatibility for Python workflow ctx.call_tool(...). Agents
+        # should use direct tool CLIs (`<tool> --help`, `<tool> ...`) instead.
         name = argv[2]
         method = argv[3]
         if name not in by_name:
@@ -391,13 +481,21 @@ if __name__ == "__main__":
 
 def main(argv: list[str]) -> int:
     refresh = "--refresh" in argv[1:]
+    refresh_skills_only = "--refresh-skills" in argv[1:]
     tool_dirs = _split_paths(os.environ.get("TOOL_DIRS", ""))
     bin_dir = Path(os.environ.get("CENTAUR_TOOL_BIN_DIR", str(Path.home() / ".local/bin")))
     bin_dir.mkdir(parents=True, exist_ok=True)
 
+    if refresh_skills_only:
+        copied = _refresh_skill_dirs(_workspace_dir())
+        print(f"reloaded {copied} Centaur skill entries", file=sys.stderr)
+        return 0
+
     if refresh:
         refreshed = _refresh_tool_dirs(tool_dirs)
         print(f"refreshed {refreshed} Centaur tool source dirs", file=sys.stderr)
+        copied = _refresh_skill_dirs(_workspace_dir())
+        print(f"reloaded {copied} Centaur skill entries", file=sys.stderr)
 
     scripts = _discover_scripts(tool_dirs)
     pythonpath_parts = [

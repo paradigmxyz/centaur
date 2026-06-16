@@ -12,6 +12,11 @@ fn harness_auth_fragments_are_baked_in() {
         .unwrap();
     assert!(placeholder_env(&[codex_access]).is_empty());
 
+    let openrouter = harness_auth_fragment("openrouter", "api_key")
+        .unwrap()
+        .unwrap();
+    assert!(placeholder_env(&[openrouter]).is_empty());
+
     assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
 
     let infra = infra_fragment().unwrap();

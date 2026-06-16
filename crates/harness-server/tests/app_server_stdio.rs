@@ -107,6 +107,119 @@ fn fake_claude_app_server_streams_codex_v2_notifications() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_uses_openrouter_provider_when_model_is_configured() {
+    let fake_codex = temp_path("fake-openrouter-codex.sh");
+    let fake_codex_log = temp_path("fake-openrouter-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[("OPENROUTER_MODEL", "openrouter/auto")],
+    );
+    let turn = bridge.run_blocks_user_turn("say openrouter blocks", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_codex_v2_turn(&turn);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    let thread_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("thread/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send thread/start; requests={requests:?}"));
+    assert_eq!(
+        thread_start
+            .pointer("/params/modelProvider")
+            .and_then(Value::as_str),
+        Some("openrouter")
+    );
+    let turn_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send turn/start; requests={requests:?}"));
+    assert_eq!(
+        turn_start.pointer("/params/model").and_then(Value::as_str),
+        Some("openrouter/auto")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_uses_openrouter_provider_for_explicit_model_slug() {
+    let fake_codex = temp_path("fake-openrouter-flag-codex.sh");
+    let fake_codex_log = temp_path("fake-openrouter-flag-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+    );
+    let turn = bridge.run_blocks_user_turn_with_model(
+        "say explicit openrouter blocks",
+        Some("anthropic/claude-fable-5"),
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_codex_v2_turn(&turn);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    let thread_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("thread/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send thread/start; requests={requests:?}"));
+    assert_eq!(
+        thread_start
+            .pointer("/params/modelProvider")
+            .and_then(Value::as_str),
+        Some("openrouter")
+    );
+    let turn_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send turn/start; requests={requests:?}"));
+    assert_eq!(
+        turn_start.pointer("/params/model").and_then(Value::as_str),
+        Some("anthropic/claude-fable-5")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_amp_app_server_streams_codex_v2_notifications() {
     let fake_amp = concat!(
         "printf '%s\\n' ",
@@ -240,6 +353,57 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
             .pointer("/params/input/0/text")
             .and_then(Value::as_str),
         Some("say codex blocks")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_forwards_reasoning_as_turn_start_effort() {
+    let fake_codex = temp_path("fake-codex-effort.sh");
+    let fake_codex_log = temp_path("fake-codex-effort-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+    );
+    let turn = bridge.run_blocks_user_line(
+        json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "reasoning": "high",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "say codex blocks"}],
+            },
+        }),
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+    assert_completed_turn(&turn);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let turn_start = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake codex request JSON"))
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .expect("blocks mode did not send turn/start");
+    assert_eq!(
+        turn_start.pointer("/params/effort").and_then(Value::as_str),
+        Some("high"),
+        "reasoning should be forwarded as turn/start effort; turn_start={turn_start}"
     );
 
     let _ = std::fs::remove_file(fake_codex);
@@ -612,7 +776,7 @@ impl BridgeProcess {
         command_override: Option<String>,
         extra_env: Option<(&str, &str)>,
     ) -> Self {
-        Self::spawn_harness_with_args(harness, harness.args(), command_override, extra_env)
+        Self::spawn_harness_with_args(harness, harness.args(), command_override, extra_env, &[])
     }
 
     fn spawn_harness_blocks(
@@ -620,7 +784,28 @@ impl BridgeProcess {
         command_override: Option<String>,
         extra_env: Option<(&str, &str)>,
     ) -> Self {
-        Self::spawn_harness_with_args(harness, harness.blocks_args(), command_override, extra_env)
+        Self::spawn_harness_with_args(
+            harness,
+            harness.blocks_args(),
+            command_override,
+            extra_env,
+            &[],
+        )
+    }
+
+    fn spawn_harness_blocks_envs(
+        harness: Harness,
+        command_override: Option<String>,
+        extra_env: Option<(&str, &str)>,
+        extra_envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_harness_with_args(
+            harness,
+            harness.blocks_args(),
+            command_override,
+            extra_env,
+            extra_envs,
+        )
     }
 
     fn spawn_harness_with_args(
@@ -628,6 +813,7 @@ impl BridgeProcess {
         args: &'static [&'static str],
         command_override: Option<String>,
         extra_env: Option<(&str, &str)>,
+        extra_envs: &[(&str, &str)],
     ) -> Self {
         let bin = env!("CARGO_BIN_EXE_harness-server");
         let mut command = Command::new(bin);
@@ -640,6 +826,9 @@ impl BridgeProcess {
         for env_key in [
             "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
+            "CODEX_MODEL",
+            "CODEX_MODEL_PROVIDER",
+            "OPENROUTER_MODEL",
         ] {
             command.env_remove(env_key);
         }
@@ -649,6 +838,9 @@ impl BridgeProcess {
             command.env(env_key, raw);
         }
         if let Some((key, value)) = extra_env {
+            command.env(key, value);
+        }
+        for (key, value) in extra_envs {
             command.env(key, value);
         }
 
@@ -817,7 +1009,16 @@ impl BridgeProcess {
     }
 
     fn run_blocks_user_turn(&mut self, prompt: &str, timeout: Duration) -> TurnCapture {
-        self.send(json!({
+        self.run_blocks_user_turn_with_model(prompt, None, timeout)
+    }
+
+    fn run_blocks_user_turn_with_model(
+        &mut self,
+        prompt: &str,
+        model: Option<&str>,
+        timeout: Duration,
+    ) -> TurnCapture {
+        let mut input = json!({
             "type": "user",
             "thread_key": "slack:C123:123.456",
             "trace_metadata": {
@@ -828,7 +1029,15 @@ impl BridgeProcess {
                 "role": "user",
                 "content": [{"type": "text", "text": prompt}],
             },
-        }));
+        });
+        if let Some(model) = model {
+            input["model"] = Value::String(model.to_string());
+        }
+        self.run_blocks_user_line(input, timeout)
+    }
+
+    fn run_blocks_user_line(&mut self, user_line: Value, timeout: Duration) -> TurnCapture {
+        self.send(user_line);
 
         let deadline = Instant::now() + timeout;
         let mut capture = TurnCapture::default();

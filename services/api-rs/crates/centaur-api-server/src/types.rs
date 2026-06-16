@@ -1,5 +1,5 @@
 use axum::response::sse::Event;
-use centaur_session_core::{HarnessType, SessionEvent, SessionMessageInput, ThreadKey};
+use centaur_session_core::{HarnessType, Session, SessionEvent, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,6 +10,27 @@ pub struct CreateSessionRequest {
     pub harness_type: HarnessType,
     pub persona_id: Option<String>,
     pub metadata: Option<Value>,
+    /// What to do when the session already exists on a different harness.
+    /// Omitted or `reject`: fail with 409. `restart`: stop the old sandbox and
+    /// restart the thread on the requested harness (the new harness starts
+    /// with no conversational memory).
+    #[serde(default)]
+    pub on_harness_conflict: Option<OnHarnessConflict>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum OnHarnessConflict {
+    Reject,
+    Restart,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CreateSessionResponse {
+    #[serde(flatten)]
+    pub session: Session,
+    /// True when this request restarted the thread onto a different harness.
+    pub harness_switched: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

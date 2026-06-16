@@ -1,0 +1,114 @@
+name: Console CI
+
+on:
+  pull_request:
+    paths:
+      - services/console/**
+      - .github/workflows/console-ci.yml
+  push:
+    branches: [ main ]
+    paths:
+      - services/console/**
+      - .github/workflows/console-ci.yml
+
+defaults:
+  run:
+    working-directory: services/console
+
+jobs:
+  scan_ruby:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      - name: Scan for common Rails security vulnerabilities using static analysis
+        run: bin/brakeman --no-pager
+
+      - name: Scan for known security vulnerabilities in gems used
+        run: bin/bundler-audit
+
+  scan_js:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      - name: Scan for security vulnerabilities in JavaScript dependencies
+        run: bin/importmap audit
+
+  lint:
+    runs-on: ubuntu-latest
+    env:
+      RUBOCOP_CACHE_ROOT: ${{ github.workspace }}/services/console/tmp/rubocop
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      - name: Prepare RuboCop cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        env:
+          DEPENDENCIES_HASH: ${{ hashFiles('services/console/.ruby-version', 'services/console/**/.rubocop.yml', 'services/console/**/.rubocop_todo.yml', 'services/console/Gemfile.lock') }}
+        with:
+          path: ${{ env.RUBOCOP_CACHE_ROOT }}
+          key: rubocop-${{ runner.os }}-${{ env.DEPENDENCIES_HASH }}-${{ github.ref_name == github.event.repository.default_branch && github.run_id || 'default' }}
+          restore-keys: |
+            rubocop-${{ runner.os }}-${{ env.DEPENDENCIES_HASH }}-
+
+      - name: Lint code for consistent style
+        run: bin/rubocop -f github
+
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: --health-cmd="pg_isready -U postgres" --health-interval=10s --health-timeout=5s --health-retries=5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      - name: Run tests
+        env:
+          RAILS_ENV: test
+          IRON_CONTROL_DB_HOST: localhost
+          IRON_CONTROL_DB_PORT: 5432
+          IRON_CONTROL_DB_USERNAME: postgres
+          IRON_CONTROL_DB_PASSWORD: postgres
+          # RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+        run: bin/rails db:test:prepare test

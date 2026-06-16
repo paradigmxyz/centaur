@@ -19,8 +19,10 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_core::{Session, ThreadKey};
-use centaur_session_runtime::{ExecuteSessionInput, SandboxRuntime, SessionRuntime};
+use centaur_session_core::ThreadKey;
+use centaur_session_runtime::{
+    ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionRuntime,
+};
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
     PrometheusHandle, http_status_class, prometheus_handle, record_http_request_finished,
@@ -40,9 +42,9 @@ use tracing::Span;
 use crate::{
     ApiError,
     types::{
-        AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest,
+        AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
-        ListWorkflowRunsQuery, SessionSseEvent, stream_error_sse,
+        ListWorkflowRunsQuery, OnHarnessConflict, SessionSseEvent, stream_error_sse,
     },
 };
 
@@ -54,7 +56,6 @@ pub struct AppState {
 }
 
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
-const MAX_SESSION_JSON_BODY_BYTES: usize = 256 * 1024 * 1024;
 const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -87,11 +88,11 @@ pub fn build_router_with_session_and_workflow_runtime(
         .route("/api/session/{thread_key}", post(create_or_get_session))
         .route(
             "/api/session/{thread_key}/messages",
-            post(append_messages).layer(DefaultBodyLimit::max(MAX_SESSION_JSON_BODY_BYTES)),
+            post(append_messages).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/api/session/{thread_key}/execute",
-            post(execute_session).layer(DefaultBodyLimit::max(MAX_SESSION_JSON_BODY_BYTES)),
+            post(execute_session).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
@@ -193,18 +194,26 @@ async fn create_or_get_session(
     State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,
     Json(request): Json<CreateSessionRequest>,
-) -> Result<Json<Session>, ApiError> {
+) -> Result<Json<CreateSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let session = state
+    let on_harness_conflict = match request.on_harness_conflict {
+        Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
+        Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
+    };
+    let outcome = state
         .runtime
         .create_or_get_session(
             &thread_key,
             &request.harness_type,
             request.persona_id.as_deref(),
             request.metadata,
+            on_harness_conflict,
         )
         .await?;
-    Ok(Json(session))
+    Ok(Json(CreateSessionResponse {
+        session: outcome.session,
+        harness_switched: outcome.harness_switched,
+    }))
 }
 
 async fn append_messages(

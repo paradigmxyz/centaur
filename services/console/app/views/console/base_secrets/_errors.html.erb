@@ -1,0 +1,11 @@
+<% messages = secret_error_messages(secret) %>
+<% if messages.any? %>
+  <div class="alert-error">
+    <p class="mb-1 font-semibold"><%= pluralize(messages.size, "error") %> prevented this secret from saving:</p>
+    <ul class="list-disc space-y-0.5 pl-5">
+      <% messages.each do |msg| %>
+        <li><%= msg %></li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>

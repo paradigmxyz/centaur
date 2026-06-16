@@ -1,0 +1,19 @@
+<% content_for :title, "Awaiting Approval · Centaur Console" %>
+
+<div class="mb-8 text-center">
+  <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "mx-auto h-9 w-auto", width: 497, height: 127 %>
+  <p class="page-subtitle mt-4">Operator console.</p>
+</div>
+
+<div class="rounded-xl border border-ink-600 bg-ink-850/60 p-6 text-center">
+  <h2 class="text-lg font-semibold text-zinc-100">Awaiting approval</h2>
+  <p class="mt-2 text-sm text-zinc-400">
+    You're signed in as <span class="text-zinc-200"><%= current_user.email %></span>, but your account
+    is pending approval by an administrator. You'll have access once it's approved.
+  </p>
+
+  <div class="mt-6">
+    <%= button_to "Sign out", logout_path, method: :delete,
+          class: "w-full cursor-pointer rounded border border-ink-600 px-4 py-2 text-sm text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
+  </div>
+</div>

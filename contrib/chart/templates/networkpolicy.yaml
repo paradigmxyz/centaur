@@ -1,5 +1,6 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $ingressSourceNamespaces := default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -52,21 +53,33 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+        # Python workflow-host sandboxes connect to Postgres directly via
+        # DATABASE_URL (the host process, not its tool calls, which go through
+        # the per-sandbox iron-proxy). api-rs labels them
+        # centaur.ai/component=workflow-run.
+        - podSelector:
+            matchLabels:
+              centaur.ai/component: workflow-run
 {{- end }}
 {{- if .Values.slackbotv2.enabled }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
 {{- end }}
-{{- if .Values.ironControl.enabled }}
+{{- if .Values.discordbot.enabled }}
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
-{{- if .Values.ironControl.worker.enabled }}
-        # iron-control Solid Queue worker (bin/jobs) reaches the app + queue DBs.
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "discordbot") | nindent 14 }}
+{{- end }}
+{{- if $console.enabled }}
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control-worker") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+{{- if $console.worker.enabled }}
+        # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
 {{- end }}
 {{- end }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
@@ -81,6 +94,40 @@ spec:
 ---
 {{- end }}
 {{- if .Values.apiRs.enabled }}
+# Python workflow-host sandboxes (centaur.ai/component=workflow-run) are spawned
+# by api-rs, so the per-sandbox egress policy api-rs renders already covers their
+# proxy, the control plane, and DNS. The host process additionally talks to
+# Postgres directly (DATABASE_URL) and may make direct outbound HTTPS calls
+# (mirroring api-rs), neither of which the per-sandbox policy grants -- without
+# this the host fails to start with ECONNREFUSED to Postgres under any enforcing
+# CNI (the default-deny denies all egress).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-workflow-run
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/component: workflow-run
+  policyTypes:
+    - Egress
+  egress:
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    # Trusted workflow code may make direct outbound HTTPS calls (mirrors api-rs).
+    - ports:
+        - protocol: TCP
+          port: 443
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -100,6 +147,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+{{- end }}
+{{- if .Values.discordbot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "discordbot") | nindent 14 }}
 {{- end }}
         # Sandboxes call back into the control plane. agent-k8s labels its pods
         # centaur.ai/managed-by=api-rs (MANAGED_BY_VALUE in centaur-sandbox-agent-k8s),
@@ -135,15 +187,15 @@ spec:
           port: {{ .Values.ironProxy.service.proxyPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.pgPort }}
-{{- if .Values.ironControl.enabled }}
-    # iron-control control plane: register principals/roles/grants and per-sandbox proxies.
+{{- if $console.enabled }}
+    # console control plane: register principals/roles/grants and per-sandbox proxies.
     - to:
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "iron-control") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ .Values.ironControl.service.httpPort }}
+          port: {{ $console.service.httpPort }}
 {{- end }}
 {{- if .Values.networkPolicy.otlpEgress.enabled }}
     # OTLP trace export (e.g. Laminar). The collector lives in another
@@ -212,6 +264,57 @@ spec:
           port: 5432
 {{- end }}
     # Slack API egress (direct HTTPS; slackbotv2 does not use the firewall proxy).
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
+{{- if .Values.discordbot.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "discordbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "discordbot") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "discordbot") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only health probes reach discordbot; nothing routes traffic to it (the Gateway is outbound).
+    - from:
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- end }}
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    # Discord Gateway (wss), REST, and CDN all need direct HTTPS egress. The Gateway cannot be
+    # proxied (discord.js ignores HTTPS_PROXY), so this rule is load-bearing.
     - ports:
         - protocol: TCP
           port: 443

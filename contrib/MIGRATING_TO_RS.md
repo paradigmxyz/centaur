@@ -47,7 +47,7 @@ after changing values and wait for the application to become `Synced` and
 
 ## 2. Keep secrets available to all new consumers
 
-api-rs, slackbotv2, iron-control, and sandbox pods may not read exactly the same
+api-rs, slackbotv2, console, and sandbox pods may not read exactly the same
 environment variable names as the legacy Python API. During migration, verify
 that each new workload receives the required secrets through the configured
 Kubernetes Secret or secret manager integration.
@@ -57,7 +57,7 @@ Common checks:
 ```bash
 kubectl -n centaur exec deploy/centaur-api-rs -- env | grep -E 'DATABASE_URL|IRON_CONTROL|OP_CONNECT|SLACK|OPENAI|ANTHROPIC'
 kubectl -n centaur exec deploy/centaur-slackbotv2 -- env | grep -E 'SLACK|CENTAUR|API'
-kubectl -n centaur exec deploy/centaur-iron-control -- env | grep -E 'DATABASE_URL|OP_CONNECT|IRON_CONTROL'
+kubectl -n centaur exec deploy/centaur-console -- env | grep -E 'DATABASE_URL|OP_CONNECT|IRON_CONTROL'
 ```
 
 After patching a Secret, restart every workload that consumes it:
@@ -66,8 +66,8 @@ After patching a Secret, restart every workload that consumes it:
 kubectl -n centaur rollout restart \
   deploy/centaur-api-rs \
   deploy/centaur-slackbotv2 \
-  deploy/centaur-iron-control \
-  deploy/centaur-iron-control-worker
+  deploy/centaur-console \
+  deploy/centaur-console-worker
 ```
 
 ## 3. Route sandbox tool calls locally when needed
@@ -125,19 +125,19 @@ from .database import Database
 If a tool imports Centaur SDK modules from the base image, ensure the local
 runner includes the Centaur root (for example `/opt/centaur`) in `PYTHONPATH`.
 
-## 5. Verify iron-control and per-sandbox proxies
+## 5. Verify console and per-sandbox proxies
 
 api-rs-managed sandboxes use per-sandbox iron-proxy pods for outbound access and
-secret injection. When iron-control is enabled, the proxy's effective config is
-owned by iron-control, not by static proxy environment variables alone.
+secret injection. When console is enabled, the proxy's effective config is
+owned by console, not by static proxy environment variables alone.
 
 Important behavior:
 
 - Ready warm-pool sandboxes may start under a bootstrap principal.
 - A bootstrap warm proxy may have no access to secrets or Postgres upstreams.
 - On warm-pool claim, api-rs reassigns the proxy to the session principal via
-  iron-control.
-- Kubernetes annotations on an old proxy pod can be stale; the iron-control
+  console.
+- Kubernetes annotations on an old proxy pod can be stale; the console
   proxy record is the source of truth.
 
 Check a proxy's local listeners:
@@ -212,7 +212,7 @@ Postgres port.
 
 Check whether the value reaching the sandbox or proxy is a placeholder literal
 instead of a real secret. This usually means the required secret is missing from
-the secret manager token path, the Kubernetes Secret, or the iron-control grant.
+the secret manager token path, the Kubernetes Secret, or the console grant.
 
 ### `404` from `/tools/...`
 
@@ -234,7 +234,7 @@ as a package/module from its project directory instead.
 
 Check whether the sandbox is an idle bootstrap warm sandbox or a claimed session
 sandbox. Idle bootstrap warm proxies may not listen on Postgres. Claimed session
-proxies should be reassigned in iron-control and then pick up the Postgres
+proxies should be reassigned in console and then pick up the Postgres
 listener after their next sync.
 
 ### Pods keep coming back after manual deletion

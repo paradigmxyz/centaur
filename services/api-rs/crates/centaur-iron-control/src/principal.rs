@@ -1,8 +1,9 @@
 //! Derive the iron-control principal a session's proxy should act as.
 //!
 //! A principal is the identity that holds roles and owns proxies. For Centaur
-//! the principal is the Slack conversation: a **user** for a 1:1 DM, or a
-//! **channel** for a multi-party channel/group thread. The thread key is
+//! the principal is the conversation: a Discord **channel** (every thread in it
+//! shares one principal), or — for Slack — a **user** for a 1:1 DM and a
+//! **channel** for a multi-party channel/group thread. The Slack thread key is
 //! ``<source>:[<team_id>:]<conversation_id>[:<thread_ts>]`` — segments are
 //! identified by their Slack prefix rather than position, because the optional
 //! team id shifts everything after it (``T`` = team, ``C``/``G`` = channel,
@@ -48,7 +49,45 @@ impl PrincipalRef {
 /// channel so everyone in the channel shares one principal. When the thread key
 /// is not a recognizable Slack conversation, the whole key is slugged so every
 /// thread still maps to a deterministic, distinct principal.
-pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> PrincipalRef {
+///
+/// ``conversation_name`` is the human-readable channel name (or DM partner's
+/// display name) the slackbot resolves and carries in session metadata. When
+/// present and non-empty it is formatted into the principal's display ``name``
+/// (``Slack DM @<name>`` for a DM, ``Slack Channel #<name>`` for a channel);
+/// otherwise we fall back to a synthetic name built from the ids. The name is
+/// cosmetic — ``foreign_id`` (the upsert key) is always derived from ids, so the
+/// same conversation maps to one stable principal regardless of any later
+/// rename.
+pub fn derive_principal(
+    thread_key: &str,
+    slack_user_id: Option<&str>,
+    conversation_name: Option<&str>,
+) -> PrincipalRef {
+    let display_name = conversation_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+
+    // Discord sessions key on the channel so every thread in a channel shares
+    // one principal (mirrors the Slack channel model). The thread key is
+    // ``discord:<guild_id>:<channel_id>[:<thread_id>]``; the guild id is folded
+    // into the key so the same channel id in two guilds never collides.
+    if let Some((guild_id, channel_id)) = parse_discord_segments(thread_key) {
+        let mut labels = BTreeMap::new();
+        labels.insert("discord_guild_id".to_owned(), guild_id.to_owned());
+        let scope = format!("{}-", slugify(guild_id));
+        let key_id = channel_id.unwrap_or(guild_id);
+        if let Some(channel) = channel_id {
+            labels.insert("discord_channel_id".to_owned(), channel.to_owned());
+        }
+        return PrincipalRef {
+            foreign_id: format!("discord-channel-{scope}{}", slugify(key_id)),
+            name: display_name
+                .map(|name| format!("Discord Channel #{name}"))
+                .unwrap_or_else(|| format!("Discord Channel {key_id} (guild {guild_id})")),
+            labels,
+        };
+    }
+
     let (team_id, conversation_id) = parse_slack_segments(thread_key);
     let mut labels = BTreeMap::new();
     if let Some(team) = team_id {
@@ -67,7 +106,9 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
         labels.insert("slack_user_id".to_owned(), user.to_owned());
         return PrincipalRef {
             foreign_id: format!("slack-user-{scope}{}", slugify(user)),
-            name: format!("Slack user {user}{team_suffix}"),
+            name: display_name
+                .map(|name| format!("Slack DM @{name}"))
+                .unwrap_or_else(|| format!("Slack User {user}{team_suffix}")),
             labels,
         };
     }
@@ -76,14 +117,18 @@ pub fn derive_principal(thread_key: &str, slack_user_id: Option<&str>) -> Princi
         labels.insert("slack_channel_id".to_owned(), conversation_id.to_owned());
         return PrincipalRef {
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
-            name: format!("Slack channel {conversation_id}{team_suffix}"),
+            name: display_name
+                .map(|name| format!("Slack Channel #{name}"))
+                .unwrap_or_else(|| format!("Slack Channel {conversation_id}{team_suffix}")),
             labels,
         };
     }
 
     PrincipalRef {
         foreign_id: format!("thread-{}", slugify(thread_key)),
-        name: thread_key.to_owned(),
+        name: display_name
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| thread_key.to_owned()),
         labels,
     }
 }
@@ -107,6 +152,18 @@ fn parse_slack_segments(thread_key: &str) -> (Option<&str>, Option<&str>) {
     (team, conversation)
 }
 
+/// The guild and (optional) channel segments of a ``discord:<guild>:<channel>``
+/// thread key, or ``None`` when the key is not a Discord thread. The discordbot
+/// encodes session threads as ``discord:<guild_id>:<channel_id>[:<thread_id>]``,
+/// so keying on the channel groups every thread in a channel onto one principal.
+fn parse_discord_segments(thread_key: &str) -> Option<(&str, Option<&str>)> {
+    let rest = thread_key.strip_prefix("discord:")?;
+    let mut segments = rest.split(':').map(str::trim);
+    let guild = segments.next().filter(|guild| !guild.is_empty())?;
+    let channel = segments.next().filter(|channel| !channel.is_empty());
+    Some((guild, channel))
+}
+
 /// Slack direct-message conversation ids start with ``D``.
 fn is_direct_message(conversation_id: Option<&str>) -> bool {
     conversation_id
@@ -120,9 +177,9 @@ mod tests {
 
     #[test]
     fn dm_with_user_keys_on_the_user() {
-        let principal = derive_principal("slack:D0420:1780000000.0001", Some("U07ABC"));
+        let principal = derive_principal("slack:D0420:1780000000.0001", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-user-u07abc");
-        assert_eq!(principal.name, "Slack user U07ABC");
+        assert_eq!(principal.name, "Slack User U07ABC");
         assert_eq!(
             principal.labels.get("slack_user_id").map(String::as_str),
             Some("U07ABC")
@@ -131,15 +188,15 @@ mod tests {
 
     #[test]
     fn dm_without_user_falls_back_to_the_conversation() {
-        let principal = derive_principal("slack:D0420:1780000000.0001", None);
+        let principal = derive_principal("slack:D0420:1780000000.0001", None, None);
         assert_eq!(principal.foreign_id, "slack-channel-d0420");
     }
 
     #[test]
     fn channel_keys_on_the_channel_even_with_a_user() {
-        let principal = derive_principal("chat:C123:1780000000.000000", Some("U07ABC"));
+        let principal = derive_principal("chat:C123:1780000000.000000", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-channel-c123");
-        assert_eq!(principal.name, "Slack channel C123");
+        assert_eq!(principal.name, "Slack Channel C123");
         assert_eq!(
             principal.labels.get("slack_channel_id").map(String::as_str),
             Some("C123")
@@ -148,15 +205,15 @@ mod tests {
 
     #[test]
     fn private_group_keys_on_the_channel() {
-        let principal = derive_principal("slack:G99:ts", Some("U1"));
+        let principal = derive_principal("slack:G99:ts", Some("U1"), None);
         assert_eq!(principal.foreign_id, "slack-channel-g99");
     }
 
     #[test]
     fn team_id_is_folded_into_the_channel_key() {
-        let principal = derive_principal("slack:T123:C456:1780000000.0001", Some("U1"));
+        let principal = derive_principal("slack:T123:C456:1780000000.0001", Some("U1"), None);
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
-        assert_eq!(principal.name, "Slack channel C456 (team T123)");
+        assert_eq!(principal.name, "Slack Channel C456 (team T123)");
         assert_eq!(
             principal.labels.get("slack_team_id").map(String::as_str),
             Some("T123")
@@ -169,21 +226,71 @@ mod tests {
 
     #[test]
     fn team_id_is_folded_into_the_dm_user_key() {
-        let principal = derive_principal("slack:T123:D9:ts", Some("U07ABC"));
+        let principal = derive_principal("slack:T123:D9:ts", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
-        assert_eq!(principal.name, "Slack user U07ABC (team T123)");
+        assert_eq!(principal.name, "Slack User U07ABC (team T123)");
     }
 
     #[test]
     fn non_slack_thread_keys_slug_the_whole_key() {
-        let principal = derive_principal("api", None);
+        let principal = derive_principal("api", None, None);
         assert_eq!(principal.foreign_id, "thread-api");
         assert_eq!(principal.name, "api");
     }
 
     #[test]
+    fn conversation_name_overrides_the_channel_display_name_but_not_the_key() {
+        let principal = derive_principal("slack:T123:C456:ts", Some("U1"), Some("eng-oncall"));
+        // Key stays derived from ids so renames never split the principal.
+        assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
+        assert_eq!(principal.name, "Slack Channel #eng-oncall");
+    }
+
+    #[test]
+    fn conversation_name_overrides_the_dm_display_name() {
+        let principal = derive_principal("slack:D0420:ts", Some("U07ABC"), Some("Ada Lovelace"));
+        assert_eq!(principal.foreign_id, "slack-user-u07abc");
+        assert_eq!(principal.name, "Slack DM @Ada Lovelace");
+    }
+
+    #[test]
+    fn blank_conversation_name_falls_back_to_the_synthetic_name() {
+        let principal = derive_principal("chat:C123:ts", None, Some("   "));
+        assert_eq!(principal.name, "Slack Channel C123");
+    }
+
+    #[test]
+    fn discord_sessions_key_on_the_channel() {
+        // Two threads in the same channel resolve to one principal.
+        let thread_a = derive_principal("discord:111:222:333", None, None);
+        let thread_b = derive_principal("discord:111:222:444", None, None);
+        assert_eq!(thread_a.foreign_id, "discord-channel-111-222");
+        assert_eq!(thread_a.foreign_id, thread_b.foreign_id);
+        assert_eq!(thread_a.name, "Discord Channel 222 (guild 111)");
+        assert_eq!(
+            thread_a
+                .labels
+                .get("discord_channel_id")
+                .map(String::as_str),
+            Some("222")
+        );
+        assert_eq!(
+            thread_a.labels.get("discord_guild_id").map(String::as_str),
+            Some("111")
+        );
+    }
+
+    #[test]
+    fn discord_conversation_name_overrides_the_display_name_but_not_the_key() {
+        let principal = derive_principal("discord:111:222:333", None, Some("general"));
+        // Key stays derived from the ids so a channel rename never splits it.
+        assert_eq!(principal.foreign_id, "discord-channel-111-222");
+        assert_eq!(principal.name, "Discord Channel #general");
+    }
+
+    #[test]
     fn identity_input_carries_namespace_and_managed_label() {
-        let input = derive_principal("chat:C1:ts", None).to_identity_input("default");
+        let input = derive_principal("chat:C1:ts", None, None).to_identity_input("default");
         assert_eq!(input.namespace, "default");
         assert_eq!(input.foreign_id, "slack-channel-c1");
         assert_eq!(

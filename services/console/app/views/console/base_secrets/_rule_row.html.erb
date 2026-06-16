@@ -1,0 +1,52 @@
+<%# One request-rule row. `index` is a real array index for existing rules or the
+    literal NEW_RECORD placeholder inside the add-template. %>
+<div class="rounded-lg border border-ink-600 bg-ink-850/40 p-4" data-nested-fields-row>
+  <% if rule.errors[:base].any? %>
+    <p class="field-error mt-0 mb-3"><%= rule.errors[:base].to_sentence %></p>
+  <% end %>
+
+  <div class="grid gap-4 sm:grid-cols-2">
+    <div>
+      <label class="form-label">Host</label>
+      <%= text_field_tag "rules[#{index}][host]", rule.host, class: "form-input #{field_error_class(rule, :host)}", placeholder: "api.example.com" %>
+    </div>
+    <div>
+      <label class="form-label">CIDR</label>
+      <%= text_field_tag "rules[#{index}][cidr]", rule.cidr, class: "form-input #{field_error_class(rule, :cidr)}", placeholder: "10.0.0.0/8" %>
+      <%= field_error(rule, :cidr) %>
+    </div>
+
+    <div class="sm:col-span-2" data-controller="method-chips">
+      <label class="form-label">HTTP methods</label>
+      <%= hidden_field_tag "rules[#{index}][http_methods]", Array(rule.http_methods).join(","), data: { "method-chips-target": "input" } %>
+      <div class="flex flex-wrap gap-2">
+        <% (RequestRule::HTTP_METHODS + [ RequestRule::METHOD_WILDCARD ]).each do |m| %>
+          <% on = Array(rule.http_methods).include?(m) %>
+          <button type="button" data-method-chips-target="button" data-method="<%= m %>" data-action="method-chips#toggle"
+                  aria-pressed="<%= on %>" class="chip <%= "chip-on" if on %>"><%= m == RequestRule::METHOD_WILDCARD ? "ALL" : m %></button>
+        <% end %>
+      </div>
+      <%= field_error(rule, :http_methods) %>
+    </div>
+
+    <div class="sm:col-span-2" data-controller="path-chips">
+      <label class="form-label">Paths</label>
+      <%= hidden_field_tag "rules[#{index}][paths]", Array(rule.paths).join(","), data: { "path-chips-target": "input" } %>
+      <div class="chip-field" data-path-chips-target="list" data-action="click->path-chips#focus">
+        <% Array(rule.paths).each do |p| %>
+          <span class="chip-token" data-path-chips-target="token" data-value="<%= p %>">
+            <span><%= p %></span>
+            <button type="button" class="chip-remove" data-action="path-chips#remove">×</button>
+          </span>
+        <% end %>
+        <input type="text" class="chip-entry" data-path-chips-target="entry"
+               data-action="keydown->path-chips#keydown blur->path-chips#commit" placeholder="/v1/* then comma">
+      </div>
+      <%= field_error(rule, :paths) %>
+    </div>
+  </div>
+
+  <div class="mt-3 text-right">
+    <button type="button" data-action="nested-fields#remove" class="text-xs text-zinc-500 transition-colors hover:text-red-400">Remove rule</button>
+  </div>
+</div>

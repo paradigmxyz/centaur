@@ -1,0 +1,54 @@
+<% content_for :title, "Sign In · Centaur Console" %>
+
+<% input = "w-full rounded border border-ink-600 bg-ink-850/60 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-centaur-500/60 focus:outline-none focus:ring-1 focus:ring-centaur-500/40" %>
+<% label = "mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500" %>
+
+<div class="mb-8 text-center">
+  <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "mx-auto h-9 w-auto", width: 497, height: 127 %>
+  <p class="page-subtitle mt-4">Operator console sign in.</p>
+</div>
+
+<% if flash[:notice] %>
+  <div class="mb-6 rounded border border-ink-600 bg-ink-850/60 px-4 py-3 text-sm text-zinc-400"><%= flash[:notice] %></div>
+<% end %>
+
+<div class="rounded-xl border border-ink-600 bg-ink-850/60 p-6">
+  <% if flash[:alert] %>
+    <div class="alert-error"><%= flash[:alert] %></div>
+  <% end %>
+
+  <% providers = ConsoleAuth.providers %>
+  <% if providers.any? %>
+    <div class="space-y-3">
+      <% providers.each do |provider| %>
+        <%= link_to auth_start_path(provider: provider),
+              class: "flex w-full items-center justify-center rounded border border-ink-600 bg-ink-800/60 px-4 py-2 text-sm text-zinc-200 transition-colors hover:border-centaur-500/40 hover:text-centaur-200" do %>
+          Continue with <%= provider.capitalize %>
+        <% end %>
+      <% end %>
+    </div>
+
+    <div class="my-6 flex items-center gap-3 text-xs uppercase tracking-wider text-zinc-600">
+      <span class="h-px flex-1 bg-ink-600"></span>
+      or sign in with email
+      <span class="h-px flex-1 bg-ink-600"></span>
+    </div>
+  <% end %>
+
+  <%= form_with url: login_path, method: :post do |f| %>
+    <div class="space-y-5">
+      <div>
+        <%= f.label :email, class: label %>
+        <%= f.email_field :email, class: input, placeholder: "you@example.com", autocomplete: "username", autofocus: true %>
+      </div>
+      <div>
+        <%= f.label :password, class: label %>
+        <%= f.password_field :password, class: input, autocomplete: "current-password" %>
+      </div>
+    </div>
+
+    <div class="mt-6">
+      <%= f.submit "Sign in", class: "w-full cursor-pointer rounded border border-centaur-500/40 bg-centaur-500/10 px-4 py-2 text-sm text-centaur-300 transition-colors hover:bg-centaur-500/20 hover:text-centaur-200" %>
+    </div>
+  <% end %>
+</div>

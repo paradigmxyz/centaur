@@ -1,0 +1,13 @@
+acme_admin_google:
+  user: acme_admin
+  provider: google
+  subject: google-existing-sub
+  email: admin@acme.example
+  email_verified: true
+
+pending_user_slack:
+  user: pending_user
+  provider: slack
+  subject: slack-pending-sub
+  email: pending@acme.example
+  email_verified: true

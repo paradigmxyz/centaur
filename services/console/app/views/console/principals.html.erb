@@ -1,0 +1,57 @@
+<% content_for :title, "Principals · Centaur Console" %>
+
+<div class="mb-8">
+  <h1 class="page-title">Principals</h1>
+  <p class="page-subtitle"><%= pluralize(@principals.size, "principal") %> across all namespaces. Click a row to inspect its grants.</p>
+</div>
+
+<div class="console-panel">
+  <table class="console-table">
+    <thead class="console-table-head">
+      <tr>
+        <th class="console-th">ID</th>
+        <th class="console-th">Display Name</th>
+        <th class="console-th">Labels</th>
+        <th class="console-th text-right"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @principals.empty? %>
+        <tr><td colspan="4" class="px-5 py-10 text-center text-zinc-600">No principals yet.</td></tr>
+      <% end %>
+      <% @principals.each do |p| %>
+        <tr class="group cursor-pointer console-row-hover"
+            onclick="window.location='<%= console_principal_path(p.oid) %>'">
+          <td class="console-td-nowrap">
+            <% if p.foreign_id.present? %>
+              <div class="text-centaur-400 group-hover:glow" title="<%= p.foreign_id %>"><%= truncate_middle(p.foreign_id) %></div>
+              <%= id_meta_line(p.namespace, oid: p.oid) %>
+            <% else %>
+              <span class="text-centaur-400 group-hover:glow"><%= p.oid %></span>
+              <%= id_meta_line(p.namespace) %>
+            <% end %>
+          </td>
+          <td class="console-td-nowrap text-zinc-100">
+            <% if p.name.presence %>
+              <span title="<%= p.name %>"><%= truncate_middle(p.name) %></span>
+            <% else %>
+              <span class="text-zinc-600">unnamed</span>
+            <% end %>
+          </td>
+          <td class="console-td">
+            <% if p.labels.present? %>
+              <div class="flex flex-wrap gap-1">
+                <% p.labels.each do |k, v| %>
+                  <span class="label-chip"><%= k %>=<%= v %></span>
+                <% end %>
+              </div>
+            <% else %>
+              <span class="text-zinc-600">—</span>
+            <% end %>
+          </td>
+          <td class="console-td text-right text-zinc-600 group-hover:text-centaur-400">→</td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

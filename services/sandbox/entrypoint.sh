@@ -142,9 +142,35 @@ if [ -f "$HARNESS_CONFIG_DIR/codex/config.toml" ]; then
     CODEX_CONFIG_PATH="$HOME_DIR/.codex/config.toml" python3 - <<'PYEOF'
 from pathlib import Path
 import os
+import sys
 
 path = Path(os.environ["CODEX_CONFIG_PATH"])
 lines = path.read_text().splitlines()
+
+# CODEX_MODEL_REASONING_SUMMARY overrides model_reasoning_summary so deployments
+# can re-enable reasoning summaries (Codex >= 0.139 no longer emits them by
+# default) without rebuilding the sandbox image.
+summary = os.environ.get("CODEX_MODEL_REASONING_SUMMARY", "").strip()
+if summary:
+    if summary not in {"auto", "concise", "detailed", "none"}:
+        print(
+            f"ignoring invalid CODEX_MODEL_REASONING_SUMMARY: {summary!r} "
+            "(expected auto, concise, detailed, or none)",
+            file=sys.stderr,
+        )
+    else:
+        first_section = next(
+            (i for i, line in enumerate(lines) if line.lstrip().startswith("[")),
+            len(lines),
+        )
+        override = f'model_reasoning_summary = "{summary}"'
+        for i in range(first_section):
+            if lines[i].split("=", 1)[0].strip() == "model_reasoning_summary":
+                lines[i] = override
+                break
+        else:
+            lines.insert(first_section, override)
+
 features_start = next((i for i, line in enumerate(lines) if line.strip() == "[features]"), None)
 if features_start is None:
     lines.extend(["", "[features]", "multi_agent = false", "multi_agent_v2 = false"])
@@ -167,7 +193,62 @@ else:
     for name in sorted(feature_names - seen):
         rewritten.append(f"{name} = false")
     lines = lines[: features_start + 1] + rewritten + lines[features_end:]
-path.write_text("\n".join(lines).rstrip() + "\n")
+
+# Optional deploy-time override of the codex reasoning effort. Lets a deployment
+# (e.g. an org overlay via sandbox.extraEnv) set the default without forking the
+# baked-in config.toml. Named after codex's own config key (model_reasoning_effort)
+# and validated against its ReasoningEffort enum; an unknown value is ignored (the
+# config default stands) rather than written.
+effort = (os.environ.get("CODEX_MODEL_REASONING_EFFORT") or "").strip().lower()
+if effort:
+    valid = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    if effort not in valid:
+        print(
+            f"ignoring invalid CODEX_MODEL_REASONING_EFFORT={effort!r}; "
+            f"expected one of {sorted(valid)}",
+            file=sys.stderr,
+        )
+    else:
+        # model_reasoning_effort is a top-level key, before the first [table].
+        first_table = next(
+            (i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines)
+        )
+        override = f'model_reasoning_effort = "{effort}"'
+        for i in range(first_table):
+            if lines[i].split("=", 1)[0].strip() == "model_reasoning_effort":
+                lines[i] = override
+                break
+        else:
+            lines.insert(first_table, override)
+
+text = "\n".join(lines).rstrip() + "\n"
+
+# CODEX_CONFIG_OVERLAY: deep-merge an operator-supplied TOML fragment over the
+# baked config so a deployment can configure codex -- e.g. point it at a custom
+# model provider via a [model_providers.*] block -- through sandbox.extraEnv,
+# without forking config.toml. Unset is a no-op; invalid TOML is ignored (the
+# baked config stands) rather than written.
+overlay_raw = (os.environ.get("CODEX_CONFIG_OVERLAY") or "").strip()
+if overlay_raw:
+    import tomllib
+    import tomli_w
+
+    def _deep_merge(base, overlay):
+        for key, value in overlay.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                _deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    try:
+        merged = _deep_merge(tomllib.loads(text), tomllib.loads(overlay_raw))
+    except tomllib.TOMLDecodeError as exc:
+        print(f"ignoring invalid CODEX_CONFIG_OVERLAY: {exc}", file=sys.stderr)
+    else:
+        text = tomli_w.dumps(merged)
+
+path.write_text(text)
 PYEOF
 else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
@@ -178,6 +259,39 @@ fi
 mkdir -p "$HOME_DIR/.claude"
 if [ -f "$HARNESS_CONFIG_DIR/claude/settings.json" ]; then
     cp "$HARNESS_CONFIG_DIR/claude/settings.json" "$HOME_DIR/.claude/settings.json"
+fi
+
+# CLAUDE_SETTINGS_OVERLAY: deep-merge an operator-supplied JSON fragment over the
+# baked settings.json (symmetric to CODEX_CONFIG_OVERLAY), so a deployment can
+# configure Claude Code via sandbox.extraEnv without forking the image. Unset is
+# a no-op; invalid JSON is ignored.
+if [ -n "${CLAUDE_SETTINGS_OVERLAY:-}" ]; then
+    CLAUDE_SETTINGS_PATH="$HOME_DIR/.claude/settings.json" python3 - <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(os.environ["CLAUDE_SETTINGS_PATH"])
+try:
+    overlay = json.loads(os.environ["CLAUDE_SETTINGS_OVERLAY"])
+except json.JSONDecodeError as exc:
+    print(f"ignoring invalid CLAUDE_SETTINGS_OVERLAY: {exc}", file=sys.stderr)
+    sys.exit(0)
+existing = path.read_text() if path.exists() else ""
+base = json.loads(existing) if existing.strip() else {}
+
+def _deep_merge(b, o):
+    for key, value in o.items():
+        if isinstance(value, dict) and isinstance(b.get(key), dict):
+            _deep_merge(b[key], value)
+        else:
+            b[key] = value
+    return b
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(_deep_merge(base, overlay), indent=2) + "\n")
+PYEOF
 fi
 
 # CLAUDE_CODE_AUTH_MODE selects how Claude Code authenticates with the upstream
@@ -251,30 +365,8 @@ fi
 mkdir -p "$HOME_DIR/uploads"
 
 # ── Copy project skills into workspace (so `skill` tool discovers them) ──────
-BAKED_IN_CENTAUR_SKILLS="$HOME_DIR/.agents/skills"
-MOUNTED_CENTAUR_SKILLS="$HOME_DIR/centaur-skills"
-MOUNTED_ORG_SKILLS="$HOME_DIR/centaur-overlay-skills"
-OVERLAY_TREE_SKILLS=""
-if [ -n "${CENTAUR_OVERLAY_DIR:-}" ] && [ -d "${CENTAUR_OVERLAY_DIR}/.agents/skills" ]; then
-    OVERLAY_TREE_SKILLS="${CENTAUR_OVERLAY_DIR}/.agents/skills"
-fi
-CENTAUR_SKILLS=""
-if [ -d "$HOME_DIR/github" ]; then
-    CENTAUR_SKILLS="$(find "$HOME_DIR/github" -path '*/centaur/.agents/skills' -type d -print -quit 2>/dev/null || true)"
-fi
-WS_SKILLS="$WORKSPACE_DIR/.agents/skills"
-for SKILLS_SRC in "$BAKED_IN_CENTAUR_SKILLS" "$MOUNTED_CENTAUR_SKILLS" "$CENTAUR_SKILLS" "$MOUNTED_ORG_SKILLS" "$OVERLAY_TREE_SKILLS"; do
-    if [ -d "$SKILLS_SRC" ]; then
-        mkdir -p "$WS_SKILLS"
-        cp -r "$SKILLS_SRC"/. "$WS_SKILLS"/
-    fi
-done
-
-if [ -d "$WS_SKILLS" ]; then
-    mkdir -p "$WORKSPACE_DIR/.claude"
-    rm -rf "$WORKSPACE_DIR/.claude/skills"
-    ln -sf "$WS_SKILLS" "$WORKSPACE_DIR/.claude/skills"
-fi
+WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
+    || echo "warning: failed to reload Centaur skills" >&2
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
@@ -289,6 +381,15 @@ fi
 if [ -f "$HOME_DIR/AGENTS_OVERLAY.md" ] && [ -f "$TARGET_PROMPT" ]; then
     printf '\n\n---\n\n' >> "$TARGET_PROMPT"
     cat "$HOME_DIR/AGENTS_OVERLAY.md" >> "$TARGET_PROMPT"
+# Repo-cache-era org prompt: with overlay images gone, point CENTAUR_OVERLAY_DIR
+# at the org repo's clone under the repos mount (e.g. ~/github/<owner>/<repo>)
+# and its SYSTEM_PROMPT.md is appended here, same contract the overlay-bootstrap
+# init container used to fulfil by staging $HOME/AGENTS_OVERLAY.md.
+elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
+    && [ -f "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" ] \
+    && [ -f "$TARGET_PROMPT" ]; then
+    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
+    cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
 fi
 
 # Persona prompt injection is done by the API when it writes AGENTS_BASE.md.

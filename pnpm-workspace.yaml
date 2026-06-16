@@ -1,6 +1,8 @@
 packages:
   - packages/*
   - services/slackbotv2
+  - services/discordbot
 
 patchedDependencies:
-  '@chat-adapter/slack@4.30.0': patches/@chat-adapter__slack@4.30.0.patch
+  '@chat-adapter/discord@4.31.0': patches/@chat-adapter__discord@4.31.0.patch
+  '@chat-adapter/slack@4.31.0': patches/@chat-adapter__slack@4.31.0.patch

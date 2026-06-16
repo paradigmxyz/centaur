@@ -1,0 +1,134 @@
+{{- if .Values.discordbot.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "discordbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "discordbot") | nindent 4 }}
+spec:
+  # Exactly one replica: two pods on the same bot token open two Gateway sessions and every message
+  # is handled twice. Recreate tears the old pod down before the new one logs in, so the token never
+  # holds two sessions during a rollout. Do NOT add an HPA.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "discordbot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "discordbot") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      # Allow the Gateway to drain and close cleanly on SIGTERM (protects the IDENTIFY budget).
+      terminationGracePeriodSeconds: 35
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: discordbot
+          image: {{ printf "%s:%s" .Values.discordbot.image.repository .Values.discordbot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.discordbot.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "3001"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDISCORD_BOT_TOKEN" .Values.secretManager.envPrefix }}
+            - name: DISCORD_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDISCORD_PUBLIC_KEY" .Values.secretManager.envPrefix }}
+            - name: DISCORD_APPLICATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDISCORD_APPLICATION_ID" .Values.secretManager.envPrefix }}
+            - name: DISCORDBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDISCORDBOT_API_KEY" .Values.secretManager.envPrefix }}
+            # api-rs has no auth middleware yet, but discordbot still sends the key as a header;
+            # source it from the same infra secret.
+            - name: CENTAUR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDISCORDBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: DISCORDBOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: DISCORDBOT_USER_NAME
+              value: {{ .Values.discordbot.userName | quote }}
+            - name: DISCORDBOT_GUILD_ALLOWLIST
+              value: {{ .Values.discordbot.guildAllowlist | quote }}
+{{- if .Values.discordbot.mentionRoleIds }}
+            - name: DISCORD_MENTION_ROLE_IDS
+              value: {{ .Values.discordbot.mentionRoleIds | quote }}
+{{- end }}
+{{- if not .Values.discordbot.nameThreads }}
+            - name: DISCORDBOT_NAME_THREADS
+              value: "false"
+{{- end }}
+{{- range $name, $value := .Values.discordbot.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: 3001
+              name: http
+          # /health reflects the Gateway connection. A slow or rate-limited Discord login can take
+          # well over a minute; give startup a generous ~2min window so the liveness probe doesn't
+          # kill the pod mid-login (each restart burns the 1000/24h IDENTIFY budget).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 15
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            # The oven/bun runtime image ships the `bun` user (uid/gid 1000); the Dockerfile drops
+            # to it, so enforce non-root here too.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+{{ toYaml .Values.discordbot.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "discordbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "discordbot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "discordbot") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+{{- end }}

@@ -24,5 +24,12 @@ job_max_runtime_seconds = 1800
 [tools]
 view_image = true
 
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+
 [projects."/"]
 trust_level = "trusted"
