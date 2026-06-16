@@ -160,7 +160,7 @@ module Oauth
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
         if credential.new_record?
           credential.namespace = @app.credential_namespace
-          credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject]}"
+          credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
           credential.name = "#{@app.provider.capitalize} – #{identity_display_name(identity)}"
           credential.token_endpoint = @provider.token_endpoint
           credential.external_user_key = SecureRandom.urlsafe_base64(16)

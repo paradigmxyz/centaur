@@ -203,7 +203,7 @@ module Oauth
       app = oauth_apps(:acme_slack)
       cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0R7MFMJM")
       assert_equal "acme", cred.namespace
-      assert_equal "slack-slack-U0R7MFMJM", cred.foreign_id
+      assert_equal "slack-slack-u0r7mfmjm", cred.foreign_id
       assert_equal "Slack – grace", cred.name
       assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
       assert_nil cred.provider_email
