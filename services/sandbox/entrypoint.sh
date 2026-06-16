@@ -142,9 +142,35 @@ if [ -f "$HARNESS_CONFIG_DIR/codex/config.toml" ]; then
     CODEX_CONFIG_PATH="$HOME_DIR/.codex/config.toml" python3 - <<'PYEOF'
 from pathlib import Path
 import os
+import sys
 
 path = Path(os.environ["CODEX_CONFIG_PATH"])
 lines = path.read_text().splitlines()
+
+# CODEX_MODEL_REASONING_SUMMARY overrides model_reasoning_summary so deployments
+# can re-enable reasoning summaries (Codex >= 0.139 no longer emits them by
+# default) without rebuilding the sandbox image.
+summary = os.environ.get("CODEX_MODEL_REASONING_SUMMARY", "").strip()
+if summary:
+    if summary not in {"auto", "concise", "detailed", "none"}:
+        print(
+            f"ignoring invalid CODEX_MODEL_REASONING_SUMMARY: {summary!r} "
+            "(expected auto, concise, detailed, or none)",
+            file=sys.stderr,
+        )
+    else:
+        first_section = next(
+            (i for i, line in enumerate(lines) if line.lstrip().startswith("[")),
+            len(lines),
+        )
+        override = f'model_reasoning_summary = "{summary}"'
+        for i in range(first_section):
+            if lines[i].split("=", 1)[0].strip() == "model_reasoning_summary":
+                lines[i] = override
+                break
+        else:
+            lines.insert(first_section, override)
+
 features_start = next((i for i, line in enumerate(lines) if line.strip() == "[features]"), None)
 if features_start is None:
     lines.extend(["", "[features]", "multi_agent = false", "multi_agent_v2 = false"])
