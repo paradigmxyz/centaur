@@ -107,14 +107,51 @@ def test_serialize_message_skips_oversized_slack_file(monkeypatch):
     assert message["files"][0]["content_bytes"] is None
 
 
-def test_replace_message_attachments_upserts_and_deletes_stale_rows():
-    class FakeConn:
-        def __init__(self) -> None:
-            self.calls = []
+class FakeConn:
+    """Records statements issued inside ``upsert_messages``/attachment batch."""
 
-        async def execute(self, sql, *args):
-            self.calls.append((sql, args))
+    def __init__(self) -> None:
+        self.execute_calls: list[tuple] = []
+        self.executemany_calls: list[tuple] = []
 
+    async def execute(self, sql, *args):
+        self.execute_calls.append((sql, args))
+
+    async def executemany(self, sql, args_list):
+        # Materialize so assertions are stable even if a generator is passed.
+        self.executemany_calls.append((sql, list(args_list)))
+
+    def transaction(self):
+        conn = self
+
+        class _Txn:
+            async def __aenter__(self_):
+                return conn
+
+            async def __aexit__(self_, *_exc):
+                return False
+
+        return _Txn()
+
+
+class FakePool:
+    def __init__(self, conn: FakeConn) -> None:
+        self._conn = conn
+
+    def acquire(self):
+        conn = self._conn
+
+        class _Acquire:
+            async def __aenter__(self_):
+                return conn
+
+            async def __aexit__(self_, *_exc):
+                return False
+
+        return _Acquire()
+
+
+def test_replace_message_attachments_batch_upserts_and_deletes_stale_rows():
     conn = FakeConn()
     row = shared.message_row(
         {
@@ -140,14 +177,67 @@ def test_replace_message_attachments_upserts_and_deletes_stale_rows():
     )
 
     assert "content_bytes" not in row["raw_payload"]["files"][0]
-    count = asyncio.run(shared._replace_message_attachments(conn, row))
+    asyncio.run(shared._replace_message_attachments_batch(conn, [row]))
 
-    assert count == 1
-    assert len(conn.calls) == 2
-    upsert_sql, upsert_args = conn.calls[0]
-    delete_sql, delete_args = conn.calls[1]
+    # One batched upsert for the attachment, one set-based stale delete.
+    assert len(conn.executemany_calls) == 1
+    upsert_sql, upsert_args_list = conn.executemany_calls[0]
     assert "INSERT INTO slack_sync_message_attachments" in upsert_sql
-    assert upsert_args[0:4] == ("C123", "1770000000.000300", "F123", "report.txt")
-    assert upsert_args[13] == b"hello"
-    assert "NOT (slack_file_id = ANY" in delete_sql
-    assert delete_args == ("C123", "1770000000.000300", ["F123"])
+    assert len(upsert_args_list) == 1
+    assert upsert_args_list[0][0:4] == ("C123", "1770000000.000300", "F123", "report.txt")
+    assert upsert_args_list[0][13] == b"hello"
+
+    assert len(conn.execute_calls) == 1
+    delete_sql, delete_args = conn.execute_calls[0]
+    assert "DELETE FROM slack_sync_message_attachments" in delete_sql
+    assert "NOT EXISTS" in delete_sql
+    # (message keys) then (kept attachment keys) as parallel arrays.
+    assert delete_args == (
+        ["C123"],
+        ["1770000000.000300"],
+        ["C123"],
+        ["1770000000.000300"],
+        ["F123"],
+    )
+
+
+def test_replace_message_attachments_batch_deletes_all_when_no_attachments():
+    conn = FakeConn()
+    row = shared.message_row(
+        {"channel_id": "C123", "timestamp": "1770000000.000400"},
+        "run_123",
+    )
+
+    asyncio.run(shared._replace_message_attachments_batch(conn, [row]))
+
+    # No attachments => no upsert, but the message's attachments are still
+    # reconciled (all removed) via the single delete with an empty keep set.
+    assert conn.executemany_calls == []
+    assert len(conn.execute_calls) == 1
+    _delete_sql, delete_args = conn.execute_calls[0]
+    assert delete_args == (["C123"], ["1770000000.000400"], [], [], [])
+
+
+def test_upsert_messages_batches_writes_in_one_executemany():
+    conn = FakeConn()
+    pool = FakePool(conn)
+    rows = [
+        shared.message_row(
+            {"channel_id": "C123", "timestamp": "1770000000.000300"}, "run_123"
+        ),
+        shared.message_row(
+            {"channel_id": "C123", "timestamp": "1770000000.000400"}, "run_123"
+        ),
+    ]
+
+    count = asyncio.run(shared.upsert_messages(pool, rows))
+
+    assert count == 2
+    message_calls = [
+        call for call in conn.executemany_calls if "slack_sync_messages" in call[0]
+    ]
+    assert len(message_calls) == 1
+    # Both rows upserted in a single batched statement, not one per row.
+    assert len(message_calls[0][1]) == 2
+    assert message_calls[0][1][0][0:2] == ("C123", "1770000000.000300")
+    assert message_calls[0][1][1][0:2] == ("C123", "1770000000.000400")
