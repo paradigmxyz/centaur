@@ -3,11 +3,11 @@ require "test_helper"
 module Oauth
   class EnrichCredentialIdentityJobTest < ActiveJob::TestCase
     setup do
-      Oauth::Providers::Slack.slack_api_http = nil
+      Oauth::EnrichCredentialIdentityJob.slack_api_http = nil
     end
 
     teardown do
-      Oauth::Providers::Slack.slack_api_http = nil
+      Oauth::EnrichCredentialIdentityJob.slack_api_http = nil
     end
 
     def slack_credential(**overrides)
@@ -36,12 +36,12 @@ module Oauth
     end
 
     test "updates the credential and wrapper secret names from Slack profile details" do
-      Oauth::Providers::Slack.slack_api_http = ->(url:, access_token:, params:) {
+      Oauth::EnrichCredentialIdentityJob.slack_api_http = ->(url:, access_token:, params:) {
         assert_equal "AT", access_token
-        if url == Oauth::Providers::Slack::AUTH_TEST_ENDPOINT
+        if url == Oauth::EnrichCredentialIdentityJob::AUTH_TEST_ENDPOINT
           { "ok" => true, "user" => "fallback" }
         else
-          assert_equal Oauth::Providers::Slack::USERS_INFO_ENDPOINT, url
+          assert_equal Oauth::EnrichCredentialIdentityJob::USERS_INFO_ENDPOINT, url
           assert_equal({ "user" => "U12345" }, params)
           {
             "ok" => true,
@@ -64,8 +64,24 @@ module Oauth
       assert_equal "Slack – Grace Hopper token", secret.reload.name
     end
 
+    test "uses auth test username without users read scope" do
+      calls = []
+      Oauth::EnrichCredentialIdentityJob.slack_api_http = ->(url:, access_token:, params:) {
+        calls << [ url, params ]
+        { "ok" => true, "user" => "grace" }
+      }
+      credential = slack_credential(scopes: %w[channels:history])
+      secret = wrap_credential(credential)
+
+      Oauth::EnrichCredentialIdentityJob.perform_now(credential.id)
+
+      assert_equal "Slack – grace", credential.reload.name
+      assert_equal "Slack – grace token", secret.reload.name
+      assert_equal [ [ Oauth::EnrichCredentialIdentityJob::AUTH_TEST_ENDPOINT, {} ] ], calls
+    end
+
     test "does not clobber an operator-renamed wrapper secret" do
-      Oauth::Providers::Slack.slack_api_http = ->(url:, access_token:, params:) {
+      Oauth::EnrichCredentialIdentityJob.slack_api_http = ->(url:, access_token:, params:) {
         { "ok" => true, "user" => "grace" }
       }
       credential = slack_credential(scopes: %w[channels:history])

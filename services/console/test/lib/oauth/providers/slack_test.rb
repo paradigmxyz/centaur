@@ -7,14 +7,6 @@ module Oauth
 
       def strategy = Slack.new
 
-      setup do
-        Slack.slack_api_http = nil
-      end
-
-      teardown do
-        Slack.slack_api_http = nil
-      end
-
       def result_with(claims:, scope: "openid,email,profile", **overrides)
         payload = Base64.urlsafe_encode64(claims.to_json, padding: false)
         id_token = "h.#{payload}.s"
@@ -46,38 +38,6 @@ module Oauth
         assert_equal "U12345", identity[:subject]
         assert_nil identity[:email]
         assert_nil identity[:name]
-      end
-
-      test "looks up users.info profile when user scopes allow it" do
-        calls = []
-        Slack.slack_api_http = ->(url:, access_token:, params:) {
-          calls << [ url, params ]
-          assert_equal "AT", access_token
-          if url == Slack::AUTH_TEST_ENDPOINT
-            { "ok" => true, "user" => "fallback" }
-          else
-            assert_equal Slack::USERS_INFO_ENDPOINT, url
-            assert_equal({ "user" => "U12345" }, params)
-            {
-              "ok" => true,
-              "user" => {
-                "name" => "graceh",
-                "profile" => {
-                  "display_name" => "Grace Hopper",
-                  "email" => "grace@example.com"
-                }
-              }
-            }
-          end
-        }
-
-        profile = strategy.slack_profile(
-          "AT", "U12345", "users:read,users:read.email,channels:history"
-        )
-        assert_equal "Grace Hopper", profile[:name]
-        assert_equal "grace@example.com", profile[:email]
-        assert_equal [ [ Slack::AUTH_TEST_ENDPOINT, {} ],
-                       [ Slack::USERS_INFO_ENDPOINT, { "user" => "U12345" } ] ], calls
       end
 
       test "uses Slack response name when present" do
