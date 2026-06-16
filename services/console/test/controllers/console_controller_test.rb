@@ -27,6 +27,21 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "span[title=?]", secret.name
   end
 
+  test "secret detail page offers delete for an editable kind but not for others" do
+    static = static_secrets(:acme_prod_api_key)
+    get console_secret_url("static", static.oid)
+    assert_response :ok
+    assert_select "form[action=?][method=?]", console_static_secret_path(static.oid), "post" do
+      assert_select "input[name=_method][value=delete]"
+    end
+    assert_select "button", text: "Delete"
+    # A kind without a form (e.g. oauth_token) has no delete route, so no button
+    # (the only delete-method form left is the layout's Sign out).
+    get console_secret_url("oauth_token", oauth_token_secrets(:acme_gmail_oauth).oid)
+    assert_response :ok
+    assert_select "button", text: "Delete", count: 0
+  end
+
   test "secret detail page shows the full source reference" do
     secret = oauth_token_secrets(:acme_gmail_oauth)
     get console_secret_url("oauth_token", secret.oid)

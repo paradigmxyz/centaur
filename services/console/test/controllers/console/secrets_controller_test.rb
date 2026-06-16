@@ -107,14 +107,6 @@ module Console
       assert_equal [ "only.example.com" ], secret.rules.map(&:host)
     end
 
-    test "the edit page offers a delete button" do
-      get edit_console_static_secret_url(static_secrets(:acme_prod_api_key).oid)
-      assert_response :ok
-      assert_select "form[action=?][method=?]", console_static_secret_path(static_secrets(:acme_prod_api_key).oid), "post" do
-        assert_select "input[name=_method][value=delete]"
-      end
-    end
-
     test "DELETE destroy removes the secret and cascades its grants" do
       secret = static_secrets(:github_token_inject) # granted directly to acme_channel
       assert_difference -> { StaticSecret.count } => -1, -> { Grant.count } => -1 do
