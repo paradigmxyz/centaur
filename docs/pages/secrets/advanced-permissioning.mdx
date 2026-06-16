@@ -1,175 +1,238 @@
 ---
-title: 🚧 Advanced Permissioning
-description: Work-in-progress design for per-user and per-channel iron-proxy credential grants.
+title: Per-User Permissions
+description: Configure user and channel-specific access to tool credentials with the Centaur Console and centaur-perms.
 ---
 
-# 🚧 Advanced Permissioning
+# Per-User Permissions
 
-:::warning[🚧 WIP - feedback wanted]
-This is an early design for per-user and per-channel credential grants in
-iron-proxy. We want feedback on the primitive, the channel override behavior,
-and the provider-specific scope model before this becomes production behavior.
-:::
+Centaur routes tool and harness traffic through iron-proxy. The proxy only
+injects a credential when the active principal has a grant for that credential
+and the outbound request matches the credential's request rules.
 
-## Iron-Proxy: Per-User Auth
+Use per-user permissions when different Slack users or channels should receive
+different access to the same Centaur installation. This is the normal production
+model for shared workspaces: sandboxes still receive placeholders, while
+the Centaur Console decides which real credentials each session can use.
 
-Sketch of how iron-proxy scopes upstream credentials based on either the user or
-the channel context.
+## How Access Is Resolved
 
-## Threat model
+Centaur represents every Slack execution context as a console principal.
+Canonical principal ids are:
 
-What we're protecting against:
+| Context | Principal foreign id |
+|---------|----------------------|
+| Slack user | `slack-user-<id>` |
+| Slack channel | `slack-channel-<id>` |
 
-- The agent leaks data the requesting user shouldn't see
-- Users see things they shouldn't via the agent
+Channel grants win when present. If the channel has no matching grants, Centaur
+falls back to the requesting user's grants. DMs and one-person runs normally use
+the user principal directly.
 
-Right now all keys are shared, so users can see everything the Centaur
-deployment has access to regardless of their own permissions. We need to give
-agents identity and permissions based on what users have access to, while still
-allowing multiplayer use cases like multiple people collaborating on a thread.
+Roles group secrets together. A principal's effective access is the union of:
 
-## The primitive
+- Secrets granted directly to the principal.
+- Secrets granted to every role assigned to the principal.
 
-A grant binds a principal to a scoped reference to an upstream secret.
+The standard roles are `infra`, `tools`, and one `tool-<slug>` role per tool.
+For example, granting the `tool-github` role to a user lets that user use every
+GitHub secret registered for the GitHub tool.
 
-```text
-grant := (principal, secret_ref, scope, conditions)
+## Prerequisites
+
+Enable the Centaur Console, then set the admin API connection
+used by `centaur-perms`:
+
+```bash
+export IRON_CONTROL_URL=http://localhost:3000
+export IRON_CONTROL_API_KEY=iak_...
+export IRON_CONTROL_NAMESPACE=default
 ```
 
-- `principal`: a user or a channel
-- `secret_ref`: pointer to a secret in an upstream vault (iron-proxy never holds it)
-- `scope`: normalized capability set for the target provider
-- `conditions`: TTL, MFA, etc.
+Point the CLI at the same tool directories the API uses. Explicit
+`--tools-dir` values are evaluated before the `TOOL_DIRS` environment variable,
+and later directories shadow earlier ones. This matches overlay ordering.
 
-Three tables: `principals`, `secret_refs`, `grants`.
-
-## Resolution
-
-Iron-proxy gets `{requesting_user, channel_id, target}` per request. Control
-plane picks one:
-
-```text
-if channel_id has grants for target:
-    effective = grants(channel_id, target)
-else:
-    effective = grants(requesting_user, target)
+```bash
+export TOOL_DIRS="$PWD/tools:$HOME/centaur-overlay/tools"
 ```
 
-The channel wins when configured. Otherwise fall back to the user. This means a
-channel is an explicit scope context, e.g. admins configure what the agent can do
-in #incident-response regardless of who's asking, and DMs / solo runs use the
-user's own grants.
+Build and run the operator CLI from `services/api-rs`:
 
-Iron-proxy then receives scoped credentials (Postgres SET ROLE, GitHub token,
-etc.) limited to effective and proxies the call.
-
-## Why channel-based auth
-
-Merging user permissions gets complex fast. For example, a permission set like
-“administer GitHub org X” and “read repos on org Y” can’t be cleanly
-intersected: you need some way to flatten everything into some normalized format
-per upstream service.
-
-Channels, meanwhile, are a clear unit of work. They have members who are
-gathered in that channel for an express purpose. It’s reasonable to say that
-everyone in a given channel should be able to see similar things, so making
-channels the unit of authorization gets us most of the security benefit for a
-fraction of the complexity.
-
-## What a grant looks like
-
-A single `secret_ref` can back dozens of grants, each restricting which calls
-iron-proxy will let pass when that secret is substituted in. No per-user token
-minting is required for providers that don't support fine-grained scoping
-natively.
-
-Each grant carries an allowlist of request shapes the principal is permitted to
-make. Iron-proxy enforces these at the egress layer; the upstream token itself
-stays broad.
-
-GitHub (read public repos only, no writes):
-
-```yaml
-principal: user:matt
-secret_ref: gh_pat_acme_org
-scope:
-  github:
-    - allow: GET /repos/acme/{public-*}/**
-    - allow: GET /search/code?q=org:acme+is:public+*
-    - deny:  '*'  # everything else
+```bash
+cd services/api-rs
+cargo run -p centaur-perms -- --help
 ```
 
-Postgres (read-only on specific schemas, would include searching of Slack data):
+## Register Tool Secrets
 
-```yaml
-principal: channel:incident-response
-secret_ref: pg_prod_readonly
-scope:
-  postgres:
-    - set_role: incident_reader
-    - allow_statements: [SELECT, EXPLAIN]
-    - allow_schemas: [public, analytics]
+Granting a tool registers the tool's declared secrets in the Centaur Console, creates
+or updates the matching `tool-<slug>` role, and grants that role to the selected
+principal.
+
+```bash
+cargo run -p centaur-perms -- \
+  --tools-dir ../../tools \
+  principals grant slack-user-u123 \
+  --tool github
 ```
 
-Internal API (path + method allowlist):
+For 1Password-backed secrets, pass the source policy and vault:
 
-```yaml
-principal: user:matt
-secret_ref: internal_api_key
-scope:
-  http:
-    - allow: GET  https://api.acme.internal/customers/**
-    - allow: POST https://api.acme.internal/customers/*/notes
-    - deny:  '*'
+```bash
+cargo run -p centaur-perms -- \
+  --source-policy onepassword-connect \
+  --op-vault Engineering \
+  --tools-dir ../../tools \
+  principals grant slack-user-u123 \
+  --tool github
 ```
 
-The shape is always the same: an ordered list of allow/deny rules against the
-request's method, path, query, and body. Iron-proxy walks the list; first match
-wins; default deny.
+Source policies:
 
-For providers that do have native fine-grained tokens (Postgres roles, GitHub
-fine-grained PATs, scoped Slack apps), the allowlist is belt-and-suspenders: we
-use the native primitive and verify at the proxy. For providers that don't, the
-allowlist is the whole mechanism.
+| Policy | Secret source |
+|--------|---------------|
+| `env` | The Centaur Console resolves from environment variables. |
+| `onepassword` | The Centaur Console resolves from a 1Password service account. |
+| `onepassword-connect` | The Centaur Console resolves through 1Password Connect. |
 
-## OAuth
+## Grant A User
 
-OAuth is a special case since it requires active lifecycle management. Refresh
-tokens have to be updated before they expire, and tokens can be revoked
-upstream. They also typically require a browser-based authentication flow.
+The Centaur Console can grant roles and secrets directly from the UI. Open
+**Principals**, choose the user principal, then use **Assigned Roles** to assign
+a role or **Direct Grants** to grant one secret. The **Effective Grants** table
+shows the union of direct grants and grants inherited from roles.
 
-This means that the Centaur admin panel needs a UI where users can connect their
-own identities per upstream (GitHub, Google, Slack, etc.) and a background
-worker to perform token refresh. The grant model is the same, but the infra
-around it is more complex than just “store a secret and substitute it in.”
+Use `centaur-perms` when you want to script the same changes.
 
-## Examples
+Grant a whole tool to one Slack user:
 
-Solo / DM. Matt asks the agent to query Postgres in a DM. No channel grants
-exist -> effective = grants(matt, postgres) -> SET ROLE matt_readonly.
+```bash
+cargo run -p centaur-perms -- \
+  principals grant slack-user-u123 \
+  --tool github
+```
 
-Configured channel. #incident-response has channel grants for org-wide Slack
-search and prod Postgres read. Anyone in the channel gets that scope when the
-agent runs, regardless of their individual perms.
+Grant an existing role:
 
-Unconfigured channel. Channel exists but no grants registered -> fall back to
-the requesting user's grants.
+```bash
+cargo run -p centaur-perms -- \
+  principals grant slack-user-u123 \
+  --role tool-github
+```
 
-Cross-organization channel. Same flow as above - cross-org channels are no
-different than local channels. Note that the agent will need the ability to
-query Slack data for the remote org, so each Centaur instance will need to keep
-track of both local and remote users.
+Grant one secret directly by OID:
 
-## Hard parts
+```bash
+cargo run -p centaur-perms -- \
+  principals grant slack-user-u123 \
+  --secret ssr_...
+```
 
-Scope normalization. Per-provider adapters flatten capabilities to a normalized
-set so grants are comparable and auditable.
+Use `principals show` to verify the user's direct grants, assigned roles, and
+effective secrets:
 
-Channel grant lifecycle. Channels auto-register on first use with no grants.
-Admins configure them out-of-band. The agent runtime can't modify channel
-grants.
+```bash
+cargo run -p centaur-perms -- \
+  principals show slack-user-u123
+```
 
-## Sequencing
+## Grant A Channel
 
-Start with user grants only, then move onto channel grants as an override. User
-grants will already beat the god-mode service tokens we’re currently using.
+The UI flow is the same for channel principals. Open **Principals**, choose the
+channel principal, then assign roles or grant secrets from the detail page.
+
+Grant the channel principal when everyone in a Slack channel should share the
+same agent permissions:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals grant slack-channel-c456 \
+  --tool linear \
+  --tool github
+```
+
+When a session runs in that channel, Centaur uses the channel's grants for
+matching tools. This is useful for incident channels, support rooms, and other
+shared work contexts where the channel defines the authorization boundary.
+
+Inspect the configured channel:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals show slack-channel-c456
+```
+
+## Revoke Access
+
+In the console, open the principal detail page and revoke direct grants from
+**Direct Grants** or remove role assignments from **Assigned Roles**.
+
+Revoke access using the same selector shape used for grants:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals revoke slack-user-u123 \
+  --tool github
+```
+
+Revoke one direct secret:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals revoke slack-user-u123 \
+  --secret ssr_...
+```
+
+Revoke one grant by grant OID:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals revoke slack-user-u123 \
+  --grant-id grant_...
+```
+
+Revoking a role assignment leaves the role and its secrets in place for other
+principals. Deleting a secret removes grants that point at it.
+
+## Manage Roles
+
+Roles are useful when several users need the same access package.
+
+```bash
+cargo run -p centaur-perms -- roles list --managed
+cargo run -p centaur-perms -- roles show tool-github
+```
+
+Grant an existing secret to a role:
+
+```bash
+cargo run -p centaur-perms -- \
+  roles grant tool-support \
+  --secret ssr_...
+```
+
+Register a tool and grant its declared secrets to a role:
+
+```bash
+cargo run -p centaur-perms -- \
+  --tools-dir ../../tools \
+  roles grant tool-support \
+  --tool github
+```
+
+Then assign the role to users or channels:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals grant slack-channel-c456 \
+  --role tool-support
+```
+
+## OAuth Credentials
+
+OAuth credentials created through the console become broker credentials. The
+consent flow also creates a grantable static secret that references the broker
+credential with a `token_broker` source. Grant that static secret to a user,
+channel, or role like any other secret.
+
+See [OAuth Apps](/secrets/oauth-apps) for the app setup and consent flow.
