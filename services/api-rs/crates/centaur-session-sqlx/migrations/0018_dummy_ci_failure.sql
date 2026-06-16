@@ -1,0 +1,1 @@
+-- Dummy migration for validating CI migration-order failure.
