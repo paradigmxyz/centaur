@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_15_224547) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_16_170000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -219,6 +219,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_15_224547) do
     t.index ["role_id"], name: "index_principal_roles_on_role_id"
   end
 
+  create_table "principal_sync_config_snapshots", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.text "payload", null: false
+    t.bigint "principal_cache_version", null: false
+    t.bigint "principal_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["principal_id", "principal_cache_version"], name: "idx_principal_sync_snapshots_on_principal_version", unique: true
+    t.index ["principal_id"], name: "index_principal_sync_config_snapshots_on_principal_id"
+    t.index ["updated_at"], name: "index_principal_sync_config_snapshots_on_updated_at"
+  end
+
   create_table "principals", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
@@ -226,6 +237,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_15_224547) do
     t.jsonb "labels", default: {}, null: false
     t.string "name"
     t.string "namespace", default: "default", null: false
+    t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"
     t.index ["labels"], name: "index_principals_on_labels", using: :gin
@@ -367,6 +379,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_15_224547) do
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
+  add_foreign_key "principal_sync_config_snapshots", "principals"
   add_foreign_key "principals", "users", column: "created_by_id"
   add_foreign_key "proxies", "principals", on_delete: :nullify
   add_foreign_key "request_rules", "aws_auth_secrets"

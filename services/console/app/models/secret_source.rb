@@ -1,6 +1,8 @@
 class SecretSource < ApplicationRecord
   oid_prefix "scs"
 
+  include SyncConfigOwnerInvalidation
+
   SOURCE_TYPES = %w[env aws_sm aws_ssm 1password 1password_connect control_plane token_broker].freeze
 
   UNIVERSAL_OPTIONAL = %w[json_key ttl].freeze

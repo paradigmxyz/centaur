@@ -1,6 +1,8 @@
 class Grant < ApplicationRecord
   oid_prefix "grant"
 
+  include SyncConfigCacheInvalidation
+
   GRANTEE_ASSOCIATIONS = %i[principal role].freeze
   GRANTABLE_ASSOCIATIONS = %i[static_secret gcp_auth_secret aws_auth_secret oauth_token_secret pg_dsn_secret hmac_secret].freeze
 
@@ -42,6 +44,13 @@ class Grant < ApplicationRecord
   end
 
   private
+
+  def sync_config_affected_principal_ids
+    ids = []
+    ids << principal_id if principal_id.present?
+    ids += PrincipalRole.where(role_id: role_id).pluck(:principal_id) if role_id.present?
+    ids
+  end
 
   # A grant left without an explicit priority defaults by grantee: direct grants
   # outrank role grants. The column is NOT NULL with no DB default, so Grant.new

@@ -45,6 +45,11 @@ class Proxy < ApplicationRecord
     principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG
   end
 
+  def sync_config_snapshot
+    config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
+    { config_hash: config_hash_for(config), config: config }
+  end
+
   # Opaque, deterministic fingerprint of the delivered config. The proxy treats
   # this as an ETag: it echoes its current hash on each sync and only re-applies
   # config when the hash changes.
@@ -52,7 +57,11 @@ class Proxy < ApplicationRecord
     # The principal identity and assignment time are folded in so that any
     # assignment change forces a refresh, even a swap between principals whose
     # effective secrets happen to be identical (or an unassign to empty).
-    payload = sync_config.merge(
+    config_hash_for(sync_config)
+  end
+
+  def config_hash_for(config)
+    payload = config.merge(
       "principal" => principal&.oid,
       "principal_assigned_at" => principal_assigned_at&.utc&.iso8601
     )

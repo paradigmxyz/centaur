@@ -19,3 +19,6 @@ production:
   broker_poll_refresh:
     class: "Broker::PollRefreshJob"
     schedule: every minute
+  prune_principal_sync_config_snapshots:
+    class: "PrunePrincipalSyncConfigSnapshotsJob"
+    schedule: every 10 minutes

@@ -1,6 +1,8 @@
 class PrincipalRole < ApplicationRecord
   oid_prefix "prole"
 
+  include SyncConfigCacheInvalidation
+
   belongs_to :principal
   belongs_to :role
 
@@ -8,6 +10,10 @@ class PrincipalRole < ApplicationRecord
   validate :same_namespace
 
   private
+
+  def sync_config_affected_principal_ids
+    [ principal_id ]
+  end
 
   # A principal may only hold roles from its own namespace; roles are scoped to
   # a namespace and crossing that boundary would leak secrets across tenants.

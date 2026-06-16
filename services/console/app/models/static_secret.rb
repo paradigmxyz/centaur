@@ -2,6 +2,7 @@ class StaticSecret < ApplicationRecord
   oid_prefix "ssr"
 
   include ForeignIdCollisionGuard
+  include SyncConfigCacheInvalidation
 
   has_many :grants, dependent: :destroy
 

@@ -19,7 +19,8 @@ module Api
     # yet. Each secret still carries its own per-secret `rules`.
     class ProxySyncController < Api::ProxyBaseController
       def create
-        current_hash = current_proxy.config_hash
+        snapshot = current_proxy.sync_config_snapshot
+        current_hash = snapshot[:config_hash]
 
         if params[:config_hash].presence == current_hash
           render json: { config_hash: current_hash }
@@ -27,7 +28,7 @@ module Api
           # The config is assembled from the proxy's principal (empty when
           # unassigned). status and principal_id let an unassigned proxy tell "no
           # config yet" apart from "config is genuinely empty", and detect a swap.
-          config = current_proxy.sync_config
+          config = snapshot[:config]
           render json: {
             config_hash: current_hash,
             status: current_proxy.status,

@@ -3,6 +3,8 @@ require "ipaddr"
 class RequestRule < ApplicationRecord
   oid_prefix "rqr"
 
+  include SyncConfigOwnerInvalidation
+
   HTTP_METHODS = %w[GET HEAD POST PUT PATCH DELETE OPTIONS CONNECT].freeze
   METHOD_WILDCARD = "*".freeze
 

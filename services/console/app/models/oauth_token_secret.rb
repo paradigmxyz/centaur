@@ -8,6 +8,7 @@ class OauthTokenSecret < ApplicationRecord
   oid_prefix "ots"
 
   include ForeignIdCollisionGuard
+  include SyncConfigCacheInvalidation
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"

@@ -52,6 +52,39 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute body.key?("ingest_token")
   end
 
+  test "cold sync stores an encrypted principal snapshot" do
+    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    end
+    assert_response :ok
+
+    snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
+    assert_equal @proxy.principal.sync_config_cache_version, snapshot.principal_cache_version
+    assert_equal "s3cr3t-db-pass", snapshot.payload.dig("secrets", 1, "source", "value")
+
+    raw = PrincipalSyncConfigSnapshot.connection.select_value(
+      "SELECT payload FROM principal_sync_config_snapshots WHERE id = #{snapshot.id}"
+    )
+    refute_includes raw, "s3cr3t-db-pass"
+  end
+
+  test "secret changes bump principal cache version and build a new snapshot" do
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    original_version = @proxy.principal.reload.sync_config_cache_version
+
+    @replace.source.update!(secret: "rotated-db-pass")
+
+    assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
+    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    end
+    assert_response :ok
+
+    entry = json_body.fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
+    assert_equal "rotated-db-pass", entry.dig("source", "value")
+  end
+
   test "env source maps inject_config and rules (http_methods -> methods)" do
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok
@@ -244,5 +277,37 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_equal "assigned", json_body.fetch("status")
     assert_equal @proxy.principal.oid, json_body.fetch("principal_id")
+  end
+
+  test "broker credential token changes bump reachable principal cache version" do
+    admin = users(:acme_admin)
+    credential = BrokerCredential.create!(
+      namespace: "acme", foreign_id: "sync-cache-#{SecureRandom.hex(4)}",
+      name: "sync cache broker", token_endpoint: "https://oauth.example.com/token",
+      client_id: "client", refresh_token: "refresh", access_token: "token-1",
+      expires_at: 1.hour.from_now, last_refresh: Time.current, created_by: admin
+    )
+    secret = StaticSecret.new(
+      namespace: "acme", name: "brokered",
+      inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
+      created_by: admin
+    )
+    secret.build_source(source_type: "token_broker", config: { "credential_id" => credential.oid })
+    secret.rules.build(host: "api.example.com", position: 0)
+    secret.save!
+    Grant.create!(principal: @proxy.principal, static_secret: secret, created_by: admin)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    original_version = @proxy.principal.reload.sync_config_cache_version
+
+    credential.update!(access_token: "token-2", expires_at: 2.hours.from_now, last_refresh: Time.current)
+
+    assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    entry = json_body.fetch("secrets").find { |s| s.dig("source", "value") == "token-2" }
+    refute_nil entry
   end
 end

@@ -11,7 +11,10 @@ class Principal < ApplicationRecord
   has_many :proxies, dependent: :nullify
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
+  has_many :sync_config_snapshots, class_name: "PrincipalSyncConfigSnapshot", dependent: :destroy
   belongs_to :created_by, class_name: "User"
+
+  before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
@@ -117,6 +120,37 @@ class Principal < ApplicationRecord
     redact_secrets ? self.class.redact_live_secrets(config) : config
   end
 
+  def self.bump_sync_config_cache_versions(ids)
+    ids = Array(ids).compact.uniq
+    return if ids.empty?
+
+    where(id: ids).update_all("sync_config_cache_version = sync_config_cache_version + 1")
+  end
+
+  def self.effective_grantee_ids_for_grantable(grantable)
+    association = grantable.model_name.singular.to_sym
+    grants = Grant.where(association => grantable)
+    direct_ids = grants.where.not(principal_id: nil).pluck(:principal_id)
+    role_ids = grants.where.not(role_id: nil).pluck(:role_id)
+    role_principal_ids = role_ids.empty? ? [] : PrincipalRole.where(role_id: role_ids).pluck(:principal_id)
+    direct_ids + role_principal_ids
+  end
+
+  # Deep-walk a config payload and blank out the inline value of every
+  # control_plane source, leaving the rest of the structure intact.
+  def self.redact_live_secrets(value)
+    case value
+    when Hash
+      redacted = value.transform_values { |v| redact_live_secrets(v) }
+      redacted["value"] = REDACTED if redacted["type"] == "control_plane" && redacted.key?("value")
+      redacted
+    when Array
+      value.map { |v| redact_live_secrets(v) }
+    else
+      value
+    end
+  end
+
   private
 
   # The single place secret order is decided for every sync array. iron-proxy
@@ -143,20 +177,11 @@ class Principal < ApplicationRecord
       .order(Arel.sql("granted_priorities.effective_priority ASC, #{model.table_name}.id ASC"))
   end
 
-  public
+  def sync_config_fields_changed?
+    previous_changes.key?("name") || previous_changes.key?("labels")
+  end
 
-  # Deep-walk a config payload and blank out the inline value of every
-  # control_plane source, leaving the rest of the structure intact.
-  def self.redact_live_secrets(value)
-    case value
-    when Hash
-      redacted = value.transform_values { |v| redact_live_secrets(v) }
-      redacted["value"] = REDACTED if redacted["type"] == "control_plane" && redacted.key?("value")
-      redacted
-    when Array
-      value.map { |v| redact_live_secrets(v) }
-    else
-      value
-    end
+  def bump_own_sync_config_cache_version
+    self.class.bump_sync_config_cache_versions(id)
   end
 end
