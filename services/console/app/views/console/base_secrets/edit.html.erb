@@ -6,6 +6,9 @@
   <div class="mt-2 flex flex-wrap items-center gap-3">
     <h1 class="page-title">Edit <%= title %></h1>
     <span class="resource-badge"><%= secret_kind_label(@kind) %></span>
+    <%= button_to "Delete", [ :console, @secret ], method: :delete,
+          class: "ml-auto cursor-pointer rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300 transition-colors hover:border-red-500/60 hover:bg-red-500/10",
+          data: { turbo_confirm: "Delete this secret? Any grants of it are removed too. This cannot be undone." } %>
   </div>
 </div>
 

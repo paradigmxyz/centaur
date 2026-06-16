@@ -11,7 +11,7 @@ module Console
     layout "console"
 
     before_action :assign_kind
-    before_action :set_secret, only: %i[edit update]
+    before_action :set_secret, only: %i[edit update destroy]
 
     def new
       @secret = model.new(namespace: "default")
@@ -35,6 +35,18 @@ module Console
         redirect_to console_secret_path(kind, @secret.oid), notice: "Secret updated."
       else
         render :edit, status: :unprocessable_entity
+      end
+    end
+
+    # Destroys the secret and its dependents (source, rules, and any grants of it,
+    # via dependent: :destroy). A managed wrapper can be deleted here too; the OAuth
+    # flow recreates it on the next consent.
+    def destroy
+      if @secret.destroy
+        redirect_to console_secrets_path, notice: "Secret deleted."
+      else
+        redirect_to console_secret_path(kind, @secret.oid),
+                    alert: @secret.errors.full_messages.to_sentence.presence || "Could not delete secret."
       end
     end
 

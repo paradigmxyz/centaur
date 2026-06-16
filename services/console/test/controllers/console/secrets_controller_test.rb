@@ -107,6 +107,24 @@ module Console
       assert_equal [ "only.example.com" ], secret.rules.map(&:host)
     end
 
+    test "the edit page offers a delete button" do
+      get edit_console_static_secret_url(static_secrets(:acme_prod_api_key).oid)
+      assert_response :ok
+      assert_select "form[action=?][method=?]", console_static_secret_path(static_secrets(:acme_prod_api_key).oid), "post" do
+        assert_select "input[name=_method][value=delete]"
+      end
+    end
+
+    test "DELETE destroy removes the secret and cascades its grants" do
+      secret = static_secrets(:github_token_inject) # granted directly to acme_channel
+      assert_difference -> { StaticSecret.count } => -1, -> { Grant.count } => -1 do
+        delete console_static_secret_url(secret.oid)
+      end
+      assert_redirected_to console_secrets_path
+      assert_equal "Secret deleted.", flash[:notice]
+      assert_not StaticSecret.exists?(secret.id)
+    end
+
     # --- pg_dsn -----------------------------------------------------------
 
     test "GET new renders without error" do
@@ -157,6 +175,15 @@ module Console
       secret.reload
       assert_nil secret.role.presence
       assert_equal "REPORTING_DSN", secret.dsn_source.config["var"]
+    end
+
+    test "DELETE destroy removes a pg_dsn secret" do
+      secret = pg_dsn_secrets(:acme_reporting_pg)
+      assert_difference -> { PgDsnSecret.count } => -1 do
+        delete console_pg_dsn_secret_url(secret.oid)
+      end
+      assert_redirected_to console_secrets_path
+      assert_equal "Secret deleted.", flash[:notice]
     end
 
     test "POST create captures ordered session settings and drops blank-name rows" do
