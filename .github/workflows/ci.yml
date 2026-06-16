@@ -13,6 +13,18 @@ permissions:
   contents: read
 
 jobs:
+  migration-order:
+    name: Migration order
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check migration versions
+        run: .github/scripts/check-migration-order.sh "origin/${{ github.base_ref || 'main' }}"
+
   rust-api:
     name: Rust API fmt, clippy, and tests
     runs-on: ubuntu-latest
