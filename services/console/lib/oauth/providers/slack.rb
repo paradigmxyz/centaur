@@ -75,7 +75,8 @@ module Oauth
           profile[:email] = user_profile["email"].presence
         end
         profile
-      rescue StandardError
+      rescue StandardError => e
+        Rails.logger.debug { "slack oauth profile lookup failed: #{e.class}" }
         profile
       end
 
