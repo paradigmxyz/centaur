@@ -1203,6 +1203,7 @@ function holdLastFinishedTask(tasks: HarnessTask[]): HarnessTask[] {
   if (tasks.some(task => task.status === 'in_progress')) return tasks
   for (let index = tasks.length - 1; index >= 0; index -= 1) {
     const task = tasks[index]
+    if (!task) continue
     if (task.status !== 'complete' && task.status !== 'error') continue
     const held = [...tasks]
     held[index] = { ...task, status: 'in_progress' }
