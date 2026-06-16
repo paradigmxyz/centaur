@@ -14,14 +14,14 @@ pub fn load_fragment_str(contents: &str) -> Result<ProxyFragment> {
     })
 }
 
-/// The harness auth fragment for ``engine`` (`codex`/`claude-code`) and
-/// ``auth_mode`` (`api_key`/`access_token`). These are infra — known in advance
-/// — so they are baked in rather than discovered from disk. Returns ``None``
-/// for an unknown engine/mode pair.
+/// The harness auth fragment for ``engine`` and ``auth_mode``. These are infra
+/// — known in advance — so they are baked in rather than discovered from disk.
+/// Returns ``None`` for an unknown engine/mode pair.
 pub fn harness_auth_fragment(engine: &str, auth_mode: &str) -> Result<Option<ProxyFragment>> {
     let yaml = match (engine, normalize_auth_mode(auth_mode).as_str()) {
         ("codex", "api_key") => CODEX_API_KEY_FRAGMENT,
         ("codex", "access_token") => CODEX_ACCESS_TOKEN_FRAGMENT,
+        ("openrouter", "api_key") => OPENROUTER_API_KEY_FRAGMENT,
         ("claude-code", "api_key") => CLAUDE_CODE_API_KEY_FRAGMENT,
         ("claude-code", "access_token") => CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT,
         _ => return Ok(None),
@@ -41,6 +41,20 @@ transforms:
             header: Authorization
             formatter: "Bearer {{.Value}}"
           rules: [{ host: api.openai.com }]
+"#;
+
+const OPENROUTER_API_KEY_FRAGMENT: &str = r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: OPENROUTER_API_KEY_AUTHORIZATION
+          source:
+            placeholder: OPENROUTER_API_KEY
+          inject:
+            header: Authorization
+            formatter: "Bearer {{.Value}}"
+          rules: [{ host: openrouter.ai }]
 "#;
 
 // The `openai-codex` broker credential this references is managed by

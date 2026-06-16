@@ -918,6 +918,15 @@ impl SandboxArgs {
         {
             envs.push(("OPENAI_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()));
         }
+        if !envs
+            .iter()
+            .any(|(existing, _)| existing == "OPENROUTER_API_KEY")
+        {
+            envs.push((
+                "OPENROUTER_API_KEY".to_owned(),
+                "OPENROUTER_API_KEY".to_owned(),
+            ));
+        }
 
         // OTLP trace wiring rides from this process into every sandbox (the
         // same hardcoded set the Python control plane forwarded). The harness
@@ -1654,6 +1663,9 @@ impl IronProxyHarnessArgs {
                 fragments.push(fragment);
             }
         }
+        if let Some(fragment) = harness_auth_fragment("openrouter", "api_key")? {
+            fragments.push(fragment);
+        }
         Ok(fragments)
     }
 }
@@ -2134,6 +2146,10 @@ mod tests {
         assert!(
             env.iter()
                 .any(|(name, value)| name == "OPENAI_API_KEY" && value == "OPENAI_API_KEY")
+        );
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == "OPENROUTER_API_KEY" && value == "OPENROUTER_API_KEY")
         );
     }
 

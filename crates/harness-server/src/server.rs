@@ -34,7 +34,7 @@ use crate::{HarnessServerError, Result};
 
 pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
     match kind {
-        HarnessKind::Codex => Box::new(CodexHarnessServer),
+        HarnessKind::Codex => Box::new(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
     }
@@ -46,7 +46,7 @@ pub fn run_harness_server(kind: HarnessKind) -> Result<()> {
 
 pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
     match kind {
-        HarnessKind::Codex => crate::codex::run_codex_blocks_server(),
+        HarnessKind::Codex => crate::codex::run_codex_blocks_server(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
     }

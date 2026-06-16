@@ -73,7 +73,7 @@ Onboard me to Centaur locally. Use https://centaur.run/llms-full.txt and follow 
       <li>
         <a href="/architecture#execution-path">
           <strong>Harness agnostic.</strong>
-          <span>Use Amp, Codex, Claude Code, pi-mono, or your own CLI harness with the same durable execution model.</span>
+          <span>Use Amp, Codex, Codex through OpenRouter, Claude Code, pi-mono, or your own CLI harness with the same durable execution model.</span>
         </a>
       </li>
       <li>

@@ -80,6 +80,7 @@ Store one secret per enabled harness credential:
 | Harness | API value | Slack selector | Credential to store | Upstream |
 |---------|-----------|----------------|---------------------|----------|
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
+| Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -91,7 +92,12 @@ headers the secret is bound to.
 
 When `ironProxy.secretSource` is `onepassword`, [iron-proxy](https://docs.iron.sh) resolves these values
 from `op://$OP_VAULT/<SECRET_NAME>/credential`. For example, store the default
-Codex credential in a 1Password item named `OPENAI_API_KEY`.
+Codex credential in a 1Password item named `OPENAI_API_KEY`. To run Codex
+through OpenRouter, store `OPENROUTER_API_KEY` and set `OPENROUTER_MODEL` to a
+model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
+alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
+slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
+provider even when `OPENROUTER_MODEL` is unset.
 
 Whatever source you pick, the vault is shared across the whole deployment,
 so any thread can use any configured credential. Per-user and per-channel

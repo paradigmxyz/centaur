@@ -110,6 +110,7 @@ Store enabled harness credentials the same way:
 | Credential | Used for |
 |------------|----------|
 | `OPENAI_API_KEY` | Codex default |
+| `OPENROUTER_API_KEY` | OpenRouter via Codex |
 | `AMP_API_KEY` | Amp |
 | `ANTHROPIC_API_KEY` | Claude Code and pi-mono |
 
