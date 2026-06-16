@@ -59,7 +59,9 @@ class BrokerCredential < ApplicationRecord
   encrypts :token_endpoint_headers
 
   scope :refreshable, -> {
-    where(dead: false).where("next_attempt_at IS NULL OR next_attempt_at <= ?", Time.current)
+    where(dead: false)
+      .where("last_refresh IS NULL OR refresh_token IS NOT NULL")
+      .where("next_attempt_at IS NULL OR next_attempt_at <= ?", Time.current)
   }
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }

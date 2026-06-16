@@ -7,17 +7,23 @@ module Oauth
   # swapping the controller's exchange_client_factory for a client wrapped around
   # an HTTP double returning a canned token response.
   class FlowsControllerTest < ActionDispatch::IntegrationTest
+    include ActiveJob::TestHelper
+
     CLIENT_ID = "acme-google-client-id".freeze
     SLACK_CLIENT_ID = "acme-slack-client-id".freeze
+    GITHUB_CLIENT_ID = "acme-github-client-id".freeze
 
     setup do
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
+      oauth_apps(:acme_github).update!(client_secret: "github-secret")
+      clear_enqueued_jobs
     end
 
     teardown do
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
+      clear_enqueued_jobs
     end
 
     class StubHTTP
@@ -61,6 +67,14 @@ module Oauth
           scope: scope,
           token_type: "user"
         }
+      }.merge(overrides).to_json
+    end
+
+    def github_token_body(scope: "repo,read:user", **overrides)
+      {
+        access_token: "gho-user-token",
+        token_type: "bearer",
+        scope: scope
       }.merge(overrides).to_json
     end
 
@@ -120,6 +134,23 @@ module Oauth
       refute_includes scopes, "openid"
       refute_includes scopes, "email"
       refute_includes scopes, "profile"
+    end
+
+    test "start redirects to GitHub with space separated scopes" do
+      get oauth_start_url(slug: "github")
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "github.com", uri.host
+      assert_equal "/login/oauth/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal GITHUB_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/github/callback", q["redirect_uri"]
+      assert_equal "code", q["response_type"]
+      assert_equal "S256", q["code_challenge_method"]
+      assert_nil q["user_scope"]
+      scopes = q["scope"].split
+      assert_includes scopes, "repo"
+      assert_includes scopes, "read:user"
     end
 
     test "start works without any session" do
@@ -212,6 +243,35 @@ module Oauth
       assert_equal "xoxe-1-refresh", cred.refresh_token
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Slack – grace token", cred.static_secret.name
+    end
+
+    test "callback happy path supports GitHub OAuth app tokens" do
+      state = start_flow(slug: "github", scopes: "repo read:user")
+      stub_exchange(status: 200, body: github_token_body)
+
+      assert_enqueued_with(job: Oauth::EnrichGithubCredentialIdentityJob) do
+        assert_difference -> { BrokerCredential.count } => 1 do
+          get oauth_callback_url(slug: "github"), params: { state: state, code: "auth-code" }
+        end
+      end
+      assert_response :ok
+      assert_match "Connected", response.body
+
+      app = oauth_apps(:acme_github)
+      cred = BrokerCredential.find_by(oauth_app: app)
+      assert_equal "acme", cred.namespace
+      assert_match(/\Agithub-github-pending-[a-f0-9]{32}\z/, cred.foreign_id)
+      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
+      assert_equal "GitHub – Pending GitHub account", cred.name
+      assert_equal "https://github.com/login/oauth/access_token", cred.token_endpoint
+      assert_nil cred.provider_email
+      assert_equal %w[repo read:user], cred.scopes
+      assert_equal "gho-user-token", cred.access_token
+      assert_nil cred.refresh_token
+      assert_nil cred.next_attempt_at
+      assert_equal [ "api.github.com", "github.com" ], cred.static_secret.rules.map(&:host)
+      assert_equal "GitHub – Pending GitHub account token", cred.static_secret.name
+      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback wraps the minted credential in a grantable static secret" do

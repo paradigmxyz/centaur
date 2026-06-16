@@ -147,7 +147,8 @@ module Oauth
         client_secret: @app.client_secret,
         code: code.to_s,
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
-        code_verifier: code_verifier.to_s
+        code_verifier: code_verifier.to_s,
+        require_refresh_token: @provider.refreshable?
       )
     end
 
@@ -162,7 +163,7 @@ module Oauth
         if credential.new_record?
           credential.namespace = @app.credential_namespace
           credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
-          credential.name = "#{@app.provider.capitalize} – #{identity_display_name(identity)}"
+          credential.name = "#{@provider.display_name} – #{identity_display_name(identity)}"
           credential.token_endpoint = @provider.token_endpoint
           credential.external_user_key = SecureRandom.urlsafe_base64(16)
         end
@@ -179,7 +180,7 @@ module Oauth
           last_refresh: now,
           failure_count: 0, dead: false, dead_reason: nil
         )
-        credential.next_attempt_at = credential.compute_next_attempt_at(now: now)
+        credential.next_attempt_at = @provider.refreshable? ? credential.compute_next_attempt_at(now: now) : nil
         credential.save!
         ensure_wrapping_secret(credential)
         credential
@@ -196,8 +197,12 @@ module Oauth
     end
 
     def enqueue_identity_enrichment(credential)
-      return unless @app.provider == Oauth::Providers::Slack::KEY
-      Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
+      case @app.provider
+      when Oauth::Providers::Slack::KEY
+        Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
+      when Oauth::Providers::Github::KEY
+        Oauth::EnrichGithubCredentialIdentityJob.perform_later(credential.id)
+      end
     end
 
     # Wraps a minted credential in a grantable static secret, so an operator can

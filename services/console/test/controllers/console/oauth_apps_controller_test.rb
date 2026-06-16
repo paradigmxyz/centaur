@@ -53,7 +53,7 @@ module Console
       assert_no_difference -> { OauthApp.count } do
         post console_oauth_app_forms_url, params: {
           oauth_app: {
-            provider: "github", slug: "gh", client_id: "cid", client_secret: "shh",
+            provider: "unsupported", slug: "bad-provider", client_id: "cid", client_secret: "shh",
             allowed_scopes: "a"
           }
         }

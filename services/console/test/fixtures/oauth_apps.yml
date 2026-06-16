@@ -37,3 +37,15 @@ acme_slack:
   credential_namespace: acme
   enabled: true
   created_by: acme_admin
+
+acme_github:
+  slug: github
+  description: Acme GitHub integration
+  provider: github
+  client_id: acme-github-client-id
+  allowed_scopes:
+    - repo
+    - read:user
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin

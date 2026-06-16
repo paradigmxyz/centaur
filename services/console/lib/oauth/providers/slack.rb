@@ -14,6 +14,7 @@ module Oauth
       VALID_ISSUERS = %w[https://slack.com].freeze
 
       def key = KEY
+      def display_name = "Slack"
       def authorization_endpoint = AUTHORIZATION_ENDPOINT
       def token_endpoint = TOKEN_ENDPOINT
       def identity_scopes = IDENTITY_SCOPES
@@ -21,6 +22,7 @@ module Oauth
       def authorization_scope_param = "user_scope"
       def scope_separator = ","
       def extra_authorization_params = {}
+      def refreshable? = true
 
       def parse_granted_scopes(scope)
         scope.to_s.split(/[,\s]+/).reject(&:blank?)
