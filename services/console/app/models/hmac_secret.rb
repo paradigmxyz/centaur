@@ -49,6 +49,12 @@ class HmacSecret < ApplicationRecord
     { "name" => "hmac_sign", "config" => config }
   end
 
+  # hmac_sign injects its signature (and companion values) into the named request
+  # headers; used for cross-type conflict detection in Principal#served_credentials.
+  def proxy_conflict_targets
+    headers.map { |h| "header:#{h["name"].downcase}" }
+  end
+
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true

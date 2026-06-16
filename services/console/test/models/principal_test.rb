@@ -261,6 +261,85 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal static_secrets(:acme_prod_api_key).id, ids.last
   end
 
+  # --- cross-type conflict resolution -------------------------------------
+
+  # Builds a static secret injecting `header` on `host`, granted directly to
+  # globex_user (priority 100).
+  def grant_direct_static(host:, header:)
+    secret = StaticSecret.new(namespace: "globex", foreign_id: "static-#{SecureRandom.hex(4)}",
+                              inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
+                              created_by: users(:globex_admin))
+    secret.build_source(source_type: "control_plane", secret: "direct-token")
+    secret.rules.build(host: host, position: 0)
+    secret.save!
+    Grant.create!(principal: principals(:globex_user), static_secret: secret, created_by: users(:globex_admin))
+    secret
+  end
+
+  # Builds a gcp_auth secret (writes Authorization) matching `host`, granted to
+  # globex_user through the globex_infra role (priority 0).
+  def grant_role_gcp(host:)
+    PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
+    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
+                               credentials_provider: { "type" => "workload_identity" },
+                               scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
+                               created_by: users(:globex_admin))
+    secret.rules.build(host: host, position: 0)
+    secret.save!
+    Grant.create!(role: roles(:globex_infra), gcp_auth_secret: secret, created_by: users(:globex_admin))
+    secret
+  end
+
+  test "a direct static secret suppresses a role-granted transform on the same host and header" do
+    grant_direct_static(host: "api.test.com", header: "Authorization")
+    grant_role_gcp(host: "api.test.com")
+    principal = principals(:globex_user)
+
+    assert_equal 1, principal.sync_secrets.length
+    assert_empty principal.sync_transforms, "the lower-priority role gcp_auth should be withheld"
+  end
+
+  test "credentials writing different headers on the same host both serve" do
+    grant_direct_static(host: "api.test.com", header: "X-Api-Key")
+    grant_role_gcp(host: "api.test.com")
+    principal = principals(:globex_user)
+
+    assert_equal 1, principal.sync_secrets.length
+    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+  end
+
+  test "credentials writing the same header on different hosts both serve" do
+    grant_direct_static(host: "api.test.com", header: "Authorization")
+    grant_role_gcp(host: "other.test.com")
+    principal = principals(:globex_user)
+
+    assert_equal 1, principal.sync_secrets.length
+    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+  end
+
+  test "exact and wildcard hosts are treated as distinct conflict scopes" do
+    # Conservative matching: a `*.test.com` rule does not collide with an exact
+    # `api.test.com` rule, so both ship and the proxy settles them by order.
+    grant_direct_static(host: "*.test.com", header: "Authorization")
+    grant_role_gcp(host: "api.test.com")
+    principal = principals(:globex_user)
+
+    assert_equal 1, principal.sync_secrets.length
+    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+  end
+
+  test "a promoted role transform suppresses a lower-priority direct static secret" do
+    grant_direct_static(host: "api.test.com", header: "Authorization")
+    gcp = grant_role_gcp(host: "api.test.com")
+    # Promote the role grant above the direct grant (priority 100): now the
+    # transform wins the conflict and the static secret is withheld.
+    Grant.find_by!(gcp_auth_secret: gcp).update!(priority: 900)
+    principal = principals(:globex_user)
+
+    assert_empty principal.sync_secrets, "the now-lower-priority direct static secret should be withheld"
+    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+  end
+
   test "effective_config redacts inline control_plane values by default but not when asked for live secrets" do
     principal = principals(:acme_channel)
     SecretSource.create!(source_type: "control_plane", secret: "s3cr3t",

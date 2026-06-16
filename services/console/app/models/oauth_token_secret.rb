@@ -46,6 +46,13 @@ class OauthTokenSecret < ApplicationRecord
     entry
   end
 
+  # oauth_token injects the minted bearer into its configured header, defaulting
+  # to Authorization (the proxy's default when none is set); used for cross-type
+  # conflict detection in Principal#served_credentials.
+  def proxy_conflict_targets
+    [ "header:#{(header.presence || "Authorization").downcase}" ]
+  end
+
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true

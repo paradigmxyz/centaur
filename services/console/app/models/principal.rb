@@ -69,27 +69,26 @@ class Principal < ApplicationRecord
   end
 
   # The `secrets` array delivered to iron-proxy. Each entry maps to the proxy's
-  # `secrets` transform `secretEntry` shape. Secrets without a source are skipped
-  # because the proxy requires a source to resolve a value; a brokered source whose
-  # credential has no current access token (bootstrapping or dead) is skipped too,
-  # so the proxy never receives an empty inline value.
+  # `secrets` transform `secretEntry` shape. The served set (see
+  # #served_credentials) has already dropped secrets without a deliverable source
+  # and the losers of any cross-type conflict.
   def sync_secrets
-    granted_static_secrets.filter_map do |ss|
-      next unless ss.source&.deliverable?
-      ss.to_proxy_secret
-    end
+    served_credentials[:static].map(&:to_proxy_secret)
   end
 
   # The `transforms` array delivered to iron-proxy: one gcp_auth transform per
-  # granted GcpAuthSecret, one hmac_sign transform per granted HmacSecret, plus a
-  # single oauth_token transform bundling every granted OauthTokenSecret as one
-  # `tokens` entry.
+  # granted GcpAuthSecret, one aws_auth transform per granted AwsAuthSecret, one
+  # hmac_sign transform per granted HmacSecret, plus a single oauth_token
+  # transform bundling every granted OauthTokenSecret as one `tokens` entry.
+  # Credentials that lost a cross-type conflict are omitted (see
+  # #served_credentials).
   def sync_transforms
-    transforms = granted_gcp_auth_secrets.map(&:to_proxy_transform)
-    transforms += granted_aws_auth_secrets.map(&:to_proxy_transform)
-    transforms += granted_hmac_secrets.map(&:to_proxy_transform)
+    served = served_credentials
+    transforms = served[:gcp_auth].map(&:to_proxy_transform)
+    transforms += served[:aws_auth].map(&:to_proxy_transform)
+    transforms += served[:hmac].map(&:to_proxy_transform)
 
-    oauth_entries = granted_oauth_token_secrets.map(&:to_proxy_entry)
+    oauth_entries = served[:oauth].map(&:to_proxy_entry)
     transforms << { "name" => "oauth_token", "config" => { "tokens" => oauth_entries } } if oauth_entries.any?
 
     transforms
@@ -153,12 +152,93 @@ class Principal < ApplicationRecord
 
   private
 
+  # The credentials actually delivered to the proxy, grouped by type, after
+  # cross-type conflict resolution. Static secrets without a deliverable source
+  # are dropped first (the proxy can't resolve a value for them) so a
+  # non-deliverable winner never suppresses a credential that would otherwise
+  # serve. The result is recomputed on each call so callers see live grant state.
+  def served_credentials
+    static = granted_static_secrets.select { |ss| ss.source&.deliverable? }
+    gcp_auth = granted_gcp_auth_secrets.to_a
+    aws_auth = granted_aws_auth_secrets.to_a
+    hmac = granted_hmac_secrets.to_a
+    oauth = granted_oauth_token_secrets.to_a
+
+    suppressed = suppressed_conflict_credentials(static + gcp_auth + aws_auth + hmac + oauth)
+
+    {
+      static: static - suppressed,
+      gcp_auth: gcp_auth - suppressed,
+      aws_auth: aws_auth - suppressed,
+      hmac: hmac - suppressed,
+      oauth: oauth - suppressed
+    }
+  end
+
+  # Cross-type conflict resolution. The wire protocol applies the `secrets` array
+  # (static secrets) before the `transforms` array (gcp_auth, aws_auth, hmac_sign,
+  # oauth_token), so the proxy's last-transform-wins cannot let a direct static
+  # secret beat a role-granted transform. We resolve it here instead: each
+  # credential claims the (host-or-cidr, header-or-param) pairs it writes;
+  # processing claimants strongest-first, any credential overlapping a pair a
+  # stronger one already took is withheld. Strength is the effective grant
+  # priority (direct outranks role), tie-broken by newest id then class name so
+  # the outcome is deterministic and stable for config_hash.
+  #
+  # Scope matching is exact-string: a wildcard host (`*.googleapis.com`) and an
+  # exact host (`storage.googleapis.com`) count as distinct, and method/path
+  # narrowing on a rule is ignored. This is conservative -- some genuine
+  # conflicts may still ship and be settled by proxy order -- rather than
+  # over-eager, so nothing legitimate is dropped.
+  def suppressed_conflict_credentials(credentials)
+    candidates = credentials.filter_map do |cred|
+      keys = conflict_keys_for(cred)
+      [ cred, keys ] unless keys.empty?
+    end
+
+    candidates.sort_by! do |cred, _keys|
+      [ -cred.effective_priority.to_i, -cred.id, cred.class.name ]
+    end
+
+    claimed = {}
+    suppressed = []
+    candidates.each do |cred, keys|
+      if keys.any? { |key| claimed.key?(key) }
+        suppressed << cred
+      else
+        keys.each { |key| claimed[key] = true }
+      end
+    end
+    suppressed
+  end
+
+  # The [scope, target] pairs a credential writes: the cross product of the
+  # hosts/cidrs its rules match and the headers/params it injects. Empty when the
+  # credential scopes nothing (no rules) or writes no header/param target, in
+  # which case it never participates in a conflict.
+  def conflict_keys_for(cred)
+    scopes = cred.rules.filter_map { |rule| conflict_scope(rule) }
+    targets = cred.proxy_conflict_targets
+    return [] if scopes.empty? || targets.empty?
+    scopes.product(targets)
+  end
+
+  def conflict_scope(rule)
+    if rule.host.present?
+      "host:#{rule.host.strip.downcase.delete_suffix(".")}"
+    elsif rule.cidr.present?
+      "cidr:#{rule.cidr}"
+    end
+  end
+
   # The single place secret order is decided for every sync array. iron-proxy
   # applies matching transforms in array order and the LAST one wins, so we emit
   # in ASCENDING priority: the highest-priority grant lands last and becomes
   # authoritative. A secret reachable by several grants (e.g. both directly and
   # via a role) collapses to one row taking the strongest priority among them
   # (MAX), and the id tiebreak keeps the order deterministic for config_hash.
+  # The selected effective_priority also drives cross-type conflict resolution
+  # (see #suppressed_conflict_credentials).
   #
   # Do NOT add an `.order(:id)`-style sort to the per-type callers above or emit
   # grants in any other order downstream: that would silently let the wrong
@@ -173,6 +253,7 @@ class Principal < ApplicationRecord
     model
       .joins("INNER JOIN (#{priorities.to_sql}) granted_priorities " \
              "ON granted_priorities.secret_id = #{model.table_name}.id")
+      .select("#{model.table_name}.*", "granted_priorities.effective_priority")
       .includes(*includes)
       .order(Arel.sql("granted_priorities.effective_priority ASC, #{model.table_name}.id ASC"))
   end

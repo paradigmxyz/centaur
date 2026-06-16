@@ -41,6 +41,12 @@ class AwsAuthSecret < ApplicationRecord
     { "name" => "aws_auth", "config" => config }
   end
 
+  # aws_auth re-signs requests with SigV4, which owns the Authorization header;
+  # used for cross-type conflict detection in Principal#served_credentials.
+  def proxy_conflict_targets
+    [ "header:authorization" ]
+  end
+
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true

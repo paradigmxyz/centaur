@@ -60,6 +60,27 @@ class StaticSecret < ApplicationRecord
     entry
   end
 
+  # The request targets this secret writes, normalized for cross-type conflict
+  # detection (see Principal#served_credentials): a header (case-insensitive) or
+  # a query param. A replace with no match_headers rewrites the body/path/query
+  # rather than a header, so it claims no target and never collides with a header
+  # injector.
+  def proxy_conflict_targets
+    if inject_config.present?
+      if inject_config["header"].present?
+        [ "header:#{inject_config["header"].downcase}" ]
+      elsif inject_config["query_param"].present?
+        [ "query:#{inject_config["query_param"]}" ]
+      else
+        []
+      end
+    elsif replace_config.present?
+      Array(replace_config["match_headers"]).map { |h| "header:#{h.downcase}" }
+    else
+      []
+    end
+  end
+
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
