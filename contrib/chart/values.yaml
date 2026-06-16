@@ -227,7 +227,7 @@ repoCache:
   # tool server is enabled.
   repositories: []
   repositoryRefs: {}
-  syncIntervalSeconds: 300
+  syncIntervalSeconds: 30
   image:
     repository: ""
     tag: ""
