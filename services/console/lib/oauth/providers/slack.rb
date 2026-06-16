@@ -1,12 +1,12 @@
 module Oauth
   module Providers
-    # Slack user-token consent-flow strategy. Uses Slack's user-centric OAuth v2
-    # endpoints so the broker stores a single user token, with identity carried
-    # by the returned OIDC id_token.
+    # Slack user-token consent-flow strategy. Uses Slack's standard OAuth v2
+    # authorize/access endpoints with user_scope, so the broker stores the nested
+    # authed_user token returned by Slack.
     class Slack
       KEY = "slack"
-      AUTHORIZATION_ENDPOINT = "https://slack.com/oauth/v2_user/authorize"
-      TOKEN_ENDPOINT = "https://slack.com/api/oauth.v2.user.access"
+      AUTHORIZATION_ENDPOINT = "https://slack.com/oauth/v2/authorize"
+      TOKEN_ENDPOINT = "https://slack.com/api/oauth.v2.access"
       # Do not add Sign in with Slack scopes here. Slack rejects requests that
       # mix SIWS scopes with normal API scopes such as channels:history.
       IDENTITY_SCOPES = [].freeze
@@ -18,6 +18,7 @@ module Oauth
       def token_endpoint = TOKEN_ENDPOINT
       def identity_scopes = IDENTITY_SCOPES
       def api_hosts = API_HOSTS
+      def authorization_scope_param = "user_scope"
       def scope_separator = ","
       def extra_authorization_params = {}
 

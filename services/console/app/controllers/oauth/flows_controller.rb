@@ -128,11 +128,11 @@ module Oauth
         "client_id" => @app.client_id,
         "redirect_uri" => oauth_callback_redirect_uri(@app.slug),
         "response_type" => "code",
-        "scope" => (requested_scopes | @provider.identity_scopes).join(@provider.scope_separator),
         "state" => state,
         "code_challenge" => challenge,
         "code_challenge_method" => "S256"
       }.merge(@provider.extra_authorization_params)
+      query[@provider.authorization_scope_param] = (requested_scopes | @provider.identity_scopes).join(@provider.scope_separator)
 
       uri = URI.parse(@provider.authorization_endpoint)
       uri.query = URI.encode_www_form(query)

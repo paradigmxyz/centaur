@@ -49,10 +49,17 @@ module Oauth
 
     def slack_token_body(sub: "U0R7MFMJM", scope: "chat:write", id_token_value: nil, **overrides)
       {
-        ok: true, access_token: "xoxe.xoxp-1-user", refresh_token: "xoxe-1-refresh",
-        expires_in: 43_200, token_type: "user", scope: scope,
+        ok: true, access_token: "xoxe.xoxb-1-bot", refresh_token: "xoxe-1-bot-refresh",
+        expires_in: 43_200, token_type: "bot", scope: "commands",
         id_token: id_token_value,
-        authed_user: { id: sub }
+        authed_user: {
+          id: sub,
+          access_token: "xoxe.xoxp-1-user",
+          refresh_token: "xoxe-1-refresh",
+          expires_in: 43_200,
+          scope: scope,
+          token_type: "user"
+        }
       }.merge(overrides).to_json
     end
 
@@ -99,13 +106,14 @@ module Oauth
       assert_response :redirect
       uri = URI.parse(response.location)
       assert_equal "slack.com", uri.host
-      assert_equal "/oauth/v2_user/authorize", uri.path
+      assert_equal "/oauth/v2/authorize", uri.path
       q = URI.decode_www_form(uri.query).to_h
       assert_equal SLACK_CLIENT_ID, q["client_id"]
       assert_equal "http://www.example.com/oauth/slack/callback", q["redirect_uri"]
       assert_equal "code", q["response_type"]
       assert_equal "S256", q["code_challenge_method"]
-      scopes = q["scope"].split(",")
+      assert_nil q["scope"]
+      scopes = q["user_scope"].split(",")
       assert_includes scopes, "chat:write"
       assert_includes scopes, "channels:history"
       refute_includes scopes, "openid"
@@ -195,7 +203,7 @@ module Oauth
       cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0R7MFMJM")
       assert_equal "acme", cred.namespace
       assert_equal "slack-slack-U0R7MFMJM", cred.foreign_id
-      assert_equal "https://slack.com/api/oauth.v2.user.access", cred.token_endpoint
+      assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
       assert_nil cred.provider_email
       assert_equal %w[chat:write], cred.scopes
       assert_equal "xoxe.xoxp-1-user", cred.access_token

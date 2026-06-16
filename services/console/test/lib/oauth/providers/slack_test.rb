@@ -64,9 +64,10 @@ module Oauth
 
       test "exposes provider constants" do
         assert_equal "slack", strategy.key
-        assert_equal "https://slack.com/oauth/v2_user/authorize", strategy.authorization_endpoint
-        assert_equal "https://slack.com/api/oauth.v2.user.access", strategy.token_endpoint
+        assert_equal "https://slack.com/oauth/v2/authorize", strategy.authorization_endpoint
+        assert_equal "https://slack.com/api/oauth.v2.access", strategy.token_endpoint
         assert_equal [], strategy.identity_scopes
+        assert_equal "user_scope", strategy.authorization_scope_param
         assert_equal ",", strategy.scope_separator
         assert_equal({}, strategy.extra_authorization_params)
       end

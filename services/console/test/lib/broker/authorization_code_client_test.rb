@@ -98,6 +98,30 @@ module Broker
       assert_nil result.refresh_token
     end
 
+    test "parses Slack nested authed_user token payload" do
+      body = {
+        ok: true,
+        access_token: "BOT",
+        refresh_token: "BOT-RT",
+        expires_in: 43_200,
+        scope: "commands",
+        authed_user: {
+          id: "U123",
+          access_token: "USER",
+          refresh_token: "USER-RT",
+          expires_in: 43_200,
+          scope: "channels:history,im:history"
+        }
+      }.to_json
+
+      client, _ = client_with(status: 200, body: body)
+      result = client.exchange(**base_args)
+      assert_equal "USER", result.access_token
+      assert_equal "USER-RT", result.refresh_token
+      assert_equal "channels:history,im:history", result.scope
+      assert_equal "U123", result.response.dig("authed_user", "id")
+    end
+
     test "empty access_token raises a parse error" do
       client, _ = client_with(status: 200, body: success_body(access_token: ""))
       err = assert_raises(ExchangeError) { client.exchange(**base_args) }

@@ -96,13 +96,14 @@ module Broker
                                 stage: "oauth", code: parsed["error"], status: response.status)
       end
 
-      access_token = parsed["access_token"]
+      token_payload = parsed["authed_user"].is_a?(Hash) && parsed.dig("authed_user", "access_token").present? ? parsed["authed_user"] : parsed
+      access_token = token_payload["access_token"]
       if access_token.blank?
         raise ExchangeError.new("token endpoint returned an empty access_token",
                                 stage: "parse", status: response.status)
       end
 
-      refresh_token = parsed["refresh_token"]
+      refresh_token = token_payload["refresh_token"]
       if require_refresh_token && refresh_token.blank?
         # With access_type=offline + prompt=consent a refresh token is always
         # returned; its absence means the app is misconfigured at the IdP. The
@@ -111,13 +112,13 @@ module Broker
                                 stage: "oauth", code: "missing_refresh_token", status: response.status)
       end
 
-      expires_in = parsed["expires_in"]
+      expires_in = token_payload["expires_in"]
       Result.new(
         access_token: access_token,
         refresh_token: refresh_token,
         expires_in: expires_in ? Integer(expires_in) : nil,
-        scope: parsed["scope"],
-        id_token: parsed["id_token"],
+        scope: token_payload["scope"] || parsed["scope"],
+        id_token: token_payload["id_token"] || parsed["id_token"],
         response: parsed
       )
     rescue JSON::ParserError, ArgumentError, TypeError

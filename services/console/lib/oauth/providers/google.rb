@@ -31,6 +31,7 @@ module Oauth
       def token_endpoint = TOKEN_ENDPOINT
       def identity_scopes = IDENTITY_SCOPES
       def api_hosts = API_HOSTS
+      def authorization_scope_param = "scope"
       def scope_separator = " "
 
       def parse_granted_scopes(scope) = scope.to_s.split
