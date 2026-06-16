@@ -220,7 +220,35 @@ if effort:
                 break
         else:
             lines.insert(first_table, override)
-path.write_text("\n".join(lines).rstrip() + "\n")
+
+text = "\n".join(lines).rstrip() + "\n"
+
+# CODEX_CONFIG_OVERLAY: deep-merge an operator-supplied TOML fragment over the
+# baked config so a deployment can configure codex -- e.g. point it at a custom
+# model provider via a [model_providers.*] block -- through sandbox.extraEnv,
+# without forking config.toml. Unset is a no-op; invalid TOML is ignored (the
+# baked config stands) rather than written.
+overlay_raw = (os.environ.get("CODEX_CONFIG_OVERLAY") or "").strip()
+if overlay_raw:
+    import tomllib
+    import tomli_w
+
+    def _deep_merge(base, overlay):
+        for key, value in overlay.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                _deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    try:
+        merged = _deep_merge(tomllib.loads(text), tomllib.loads(overlay_raw))
+    except tomllib.TOMLDecodeError as exc:
+        print(f"ignoring invalid CODEX_CONFIG_OVERLAY: {exc}", file=sys.stderr)
+    else:
+        text = tomli_w.dumps(merged)
+
+path.write_text(text)
 PYEOF
 else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
@@ -231,6 +259,39 @@ fi
 mkdir -p "$HOME_DIR/.claude"
 if [ -f "$HARNESS_CONFIG_DIR/claude/settings.json" ]; then
     cp "$HARNESS_CONFIG_DIR/claude/settings.json" "$HOME_DIR/.claude/settings.json"
+fi
+
+# CLAUDE_SETTINGS_OVERLAY: deep-merge an operator-supplied JSON fragment over the
+# baked settings.json (symmetric to CODEX_CONFIG_OVERLAY), so a deployment can
+# configure Claude Code via sandbox.extraEnv without forking the image. Unset is
+# a no-op; invalid JSON is ignored.
+if [ -n "${CLAUDE_SETTINGS_OVERLAY:-}" ]; then
+    CLAUDE_SETTINGS_PATH="$HOME_DIR/.claude/settings.json" python3 - <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(os.environ["CLAUDE_SETTINGS_PATH"])
+try:
+    overlay = json.loads(os.environ["CLAUDE_SETTINGS_OVERLAY"])
+except json.JSONDecodeError as exc:
+    print(f"ignoring invalid CLAUDE_SETTINGS_OVERLAY: {exc}", file=sys.stderr)
+    sys.exit(0)
+existing = path.read_text() if path.exists() else ""
+base = json.loads(existing) if existing.strip() else {}
+
+def _deep_merge(b, o):
+    for key, value in o.items():
+        if isinstance(value, dict) and isinstance(b.get(key), dict):
+            _deep_merge(b[key], value)
+        else:
+            b[key] = value
+    return b
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(_deep_merge(base, overlay), indent=2) + "\n")
+PYEOF
 fi
 
 # CLAUDE_CODE_AUTH_MODE selects how Claude Code authenticates with the upstream
