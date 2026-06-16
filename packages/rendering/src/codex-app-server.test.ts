@@ -424,6 +424,54 @@ describe('CodexAppServerRendererEventMapper', () => {
     expect(chunks).toContainEqual({ type: 'markdown_text', text: 'Done.' })
   })
 
+  it('coalesces repeated reasoning deltas into one Thinking task', async () => {
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'item/reasoning/summaryTextDelta',
+            params: {
+              itemId: 'reasoning-1',
+              delta: 'Inspecting '
+            }
+          },
+          {
+            method: 'item/reasoning/summaryTextDelta',
+            params: {
+              itemId: 'reasoning-1',
+              delta: 'the event stream'
+            }
+          },
+          {
+            method: 'turn/completed',
+            params: {
+              turn: { id: 'turn-1', items: [], status: 'completed' }
+            }
+          }
+        ])
+      )
+    )
+
+    const thinkingChunks = chunks.filter(
+      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+        chunk.type === 'task_update' && chunk.title === 'Thinking'
+    )
+    expect(new Set(thinkingChunks.map(chunk => chunk.id))).toEqual(new Set(['reasoning-1']))
+    expect(thinkingChunks).toContainEqual({
+      type: 'task_update',
+      id: 'reasoning-1',
+      title: 'Thinking',
+      status: 'in_progress',
+      details: 'Inspecting the event stream'
+    })
+    expect(thinkingChunks).toContainEqual({
+      type: 'task_update',
+      id: 'reasoning-1',
+      title: 'Thinking',
+      status: 'complete'
+    })
+  })
+
   it('streams command details once and command output incrementally', async () => {
     const chunks = await collect(
       codexAppServerToChatSdkStream(
