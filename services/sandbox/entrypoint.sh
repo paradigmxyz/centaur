@@ -251,56 +251,8 @@ fi
 mkdir -p "$HOME_DIR/uploads"
 
 # ── Copy project skills into workspace (so `skill` tool discovers them) ──────
-BAKED_IN_CENTAUR_SKILLS="$HOME_DIR/.agents/skills"
-MOUNTED_CENTAUR_SKILLS="$HOME_DIR/centaur-skills"
-MOUNTED_ORG_SKILLS="$HOME_DIR/centaur-overlay-skills"
-OVERLAY_TREE_SKILLS=""
-if [ -n "${CENTAUR_OVERLAY_DIR:-}" ] && [ -d "${CENTAUR_OVERLAY_DIR}/.agents/skills" ]; then
-    OVERLAY_TREE_SKILLS="${CENTAUR_OVERLAY_DIR}/.agents/skills"
-fi
-CENTAUR_SKILLS=""
-if [ -d "$HOME_DIR/github" ]; then
-    CENTAUR_SKILLS="$(find "$HOME_DIR/github" -path '*/centaur/.agents/skills' -type d -print -quit 2>/dev/null || true)"
-fi
-WS_SKILLS="$WORKSPACE_DIR/.agents/skills"
-
-copy_skill_dir() {
-    local skills_src="$1"
-    local skill_entry skill_name
-    if [ ! -d "$skills_src" ]; then
-        return 0
-    fi
-    mkdir -p "$WS_SKILLS"
-    for skill_entry in "$skills_src"/* "$skills_src"/.[!.]* "$skills_src"/..?*; do
-        if [ ! -e "$skill_entry" ]; then
-            continue
-        fi
-        skill_name="$(basename "$skill_entry")"
-        rm -rf "$WS_SKILLS/$skill_name"
-        cp -R "$skill_entry" "$WS_SKILLS"/
-    done
-}
-
-for SKILLS_SRC in "$BAKED_IN_CENTAUR_SKILLS" "$MOUNTED_CENTAUR_SKILLS" "$CENTAUR_SKILLS" "$MOUNTED_ORG_SKILLS" "$OVERLAY_TREE_SKILLS"; do
-    copy_skill_dir "$SKILLS_SRC"
-done
-
-if [ -n "${CENTAUR_SKILL_DIRS:-}" ]; then
-    IFS=':' read -ra _centaur_skill_dirs <<< "$CENTAUR_SKILL_DIRS"
-    for SKILLS_SRC in "${_centaur_skill_dirs[@]}"; do
-        if [ -n "$SKILLS_SRC" ]; then
-            copy_skill_dir "$SKILLS_SRC"
-        fi
-    done
-    unset _centaur_skill_dirs
-fi
-unset -f copy_skill_dir
-
-if [ -d "$WS_SKILLS" ]; then
-    mkdir -p "$WORKSPACE_DIR/.claude"
-    rm -rf "$WORKSPACE_DIR/.claude/skills"
-    ln -sf "$WS_SKILLS" "$WORKSPACE_DIR/.claude/skills"
-fi
+WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
+    || echo "warning: failed to reload Centaur skills" >&2
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
