@@ -1,0 +1,9 @@
+<div class="flex items-center gap-3" data-nested-fields-row>
+  <%= text_field_tag "settings[#{index}][name]", name, class: "form-input", placeholder: "app.tenant" %>
+  <span class="text-zinc-600">=</span>
+  <%= select_tag "settings[#{index}][kind]",
+        options_for_select([ [ "Literal", "literal" ], [ "Principal label", "principal_label" ], [ "Principal field", "principal_field" ] ], kind),
+        class: "form-input w-44 shrink-0" %>
+  <%= text_field_tag "settings[#{index}][value]", value, class: "form-input", placeholder: "centaur" %>
+  <button type="button" data-action="nested-fields#remove" class="shrink-0 text-xs text-zinc-500 transition-colors hover:text-red-400">Remove</button>
+</div>

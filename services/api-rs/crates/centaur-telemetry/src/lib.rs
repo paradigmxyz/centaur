@@ -43,12 +43,28 @@ pub const SESSION_EXECUTIONS_TOTAL: &str = "centaur_session_executions_total";
 pub const SESSION_EXECUTION_DURATION_SECONDS: &str = "centaur_session_execution_duration_seconds";
 pub const SANDBOX_OPERATIONS_TOTAL: &str = "centaur_sandbox_operations_total";
 pub const SANDBOX_WARM_POOL_CLAIMS_TOTAL: &str = "centaur_sandbox_warm_pool_claims_total";
+pub const ETL_ACTIVE_SCOPES: &str = "etl_active_scopes";
+pub const ETL_FAILED_SCOPES: &str = "etl_failed_scopes";
+pub const ETL_SCOPE_SYNC_FRESHNESS_SECONDS: &str = "etl_scope_sync_freshness_seconds";
+pub const ETL_ITEMS_SEEN_TOTAL: &str = "etl_items_seen_total";
+pub const ETL_ITEMS_ENQUEUED_TOTAL: &str = "etl_items_enqueued_total";
+pub const ETL_ITEMS_UPSERTED_TOTAL: &str = "etl_items_upserted_total";
+pub const ETL_ITEMS_DELETED_TOTAL: &str = "etl_items_deleted_total";
+pub const ETL_ITEMS_FAILED_TOTAL: &str = "etl_items_failed_total";
+pub const ETL_BACKFILL_JOBS: &str = "etl_backfill_jobs";
+pub const ETL_BACKFILL_JOB_AGE_SECONDS: &str = "etl_backfill_job_age_seconds";
+pub const COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL: &str = "company_context_documents_changed_total";
+pub const COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS: &str = "company_context_document_size_chars";
+pub const COMPANY_CONTEXT_PROJECTION_LAG_SECONDS: &str = "company_context_projection_lag_seconds";
 
 const HTTP_REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 const SESSION_EXECUTION_DURATION_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0,
+];
+const COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS: &[f64] = &[
+    100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 25_000.0, 50_000.0, 100_000.0, 250_000.0, 500_000.0,
 ];
 
 static PROMETHEUS_HANDLE: LazyLock<Mutex<Option<PrometheusHandle>>> =
@@ -169,6 +185,10 @@ pub fn prometheus_handle() -> Result<PrometheusHandle, TelemetryError> {
             Matcher::Full(SESSION_EXECUTION_DURATION_SECONDS.to_owned()),
             SESSION_EXECUTION_DURATION_BUCKETS,
         )?
+        .set_buckets_for_metric(
+            Matcher::Full(COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS.to_owned()),
+            COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS,
+        )?
         .install_recorder()?;
     describe_metrics();
     *handle = Some(new_handle.clone());
@@ -247,6 +267,24 @@ pub fn record_sandbox_warm_pool_claim(result: &'static str) {
         "result" => result,
     )
     .increment(1);
+}
+
+pub fn record_workflow_counter(name: &str, labels: &[(String, String)], value: u64) {
+    metrics::counter!(name.to_owned(), workflow_metric_labels(labels)).increment(value);
+}
+
+pub fn set_workflow_gauge(name: &str, labels: &[(String, String)], value: f64) {
+    if !value.is_finite() {
+        return;
+    }
+    metrics::gauge!(name.to_owned(), workflow_metric_labels(labels)).set(value);
+}
+
+pub fn record_workflow_histogram(name: &str, labels: &[(String, String)], value: f64) {
+    if !value.is_finite() {
+        return;
+    }
+    metrics::histogram!(name.to_owned(), workflow_metric_labels(labels)).record(value);
 }
 
 pub fn http_status_class(status: u16) -> &'static str {
@@ -347,6 +385,62 @@ fn describe_metrics() {
         SANDBOX_WARM_POOL_CLAIMS_TOTAL,
         "Session warm-pool claim attempts by result."
     );
+    metrics::describe_gauge!(ETL_ACTIVE_SCOPES, "Current active ETL scopes by source.");
+    metrics::describe_gauge!(ETL_FAILED_SCOPES, "Current failed ETL scopes by source.");
+    metrics::describe_gauge!(
+        ETL_SCOPE_SYNC_FRESHNESS_SECONDS,
+        metrics::Unit::Seconds,
+        "Oldest successful ETL scope sync age in seconds by source."
+    );
+    metrics::describe_counter!(
+        ETL_ITEMS_SEEN_TOTAL,
+        "Source items fetched or observed by ETL workflows."
+    );
+    metrics::describe_counter!(
+        ETL_ITEMS_ENQUEUED_TOTAL,
+        "Source items enqueued by ETL workflows."
+    );
+    metrics::describe_counter!(
+        ETL_ITEMS_UPSERTED_TOTAL,
+        "Source items upserted by ETL workflows."
+    );
+    metrics::describe_counter!(
+        ETL_ITEMS_DELETED_TOTAL,
+        "Source items deleted by ETL workflows."
+    );
+    metrics::describe_counter!(
+        ETL_ITEMS_FAILED_TOTAL,
+        "Source items that failed processing in ETL workflows."
+    );
+    metrics::describe_gauge!(
+        ETL_BACKFILL_JOBS,
+        "Current ETL backfill jobs by source, job type, and status."
+    );
+    metrics::describe_gauge!(
+        ETL_BACKFILL_JOB_AGE_SECONDS,
+        metrics::Unit::Seconds,
+        "Oldest ETL backfill job age in seconds by source, job type, and status."
+    );
+    metrics::describe_counter!(
+        COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL,
+        "Company context document changes observed by ETL workflows."
+    );
+    metrics::describe_histogram!(
+        COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS,
+        "Company context document sizes in characters."
+    );
+    metrics::describe_gauge!(
+        COMPANY_CONTEXT_PROJECTION_LAG_SECONDS,
+        metrics::Unit::Seconds,
+        "Company context projection lag in seconds."
+    );
+}
+
+fn workflow_metric_labels(labels: &[(String, String)]) -> Vec<metrics::Label> {
+    labels
+        .iter()
+        .map(|(key, value)| metrics::Label::new(key.clone(), value.clone()))
+        .collect()
 }
 
 fn build_otlp_tracer_provider(
@@ -550,6 +644,63 @@ mod tests {
             r#"centaur_sandbox_operations_total{backend="local",operation="create",status="success"}"#
         ));
         assert!(metrics.contains(r#"centaur_sandbox_warm_pool_claims_total{result="hit"}"#));
+    }
+
+    #[test]
+    fn prometheus_metrics_render_workflow_metrics() {
+        prometheus_handle().unwrap();
+        record_workflow_counter(
+            ETL_ITEMS_SEEN_TOTAL,
+            &[
+                ("environment".to_owned(), "production".to_owned()),
+                ("item_type".to_owned(), "thread_refresh_reply".to_owned()),
+                ("namespace".to_owned(), "centaur-system".to_owned()),
+                ("source".to_owned(), "slack".to_owned()),
+                ("source_type".to_owned(), "channel".to_owned()),
+            ],
+            7,
+        );
+        record_workflow_counter(
+            COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL,
+            &[
+                ("action".to_owned(), "noop".to_owned()),
+                ("environment".to_owned(), "production".to_owned()),
+                ("namespace".to_owned(), "centaur-system".to_owned()),
+                ("source".to_owned(), "slack".to_owned()),
+                ("source_type".to_owned(), "slack_thread".to_owned()),
+            ],
+            0,
+        );
+        set_workflow_gauge(
+            ETL_BACKFILL_JOBS,
+            &[
+                ("environment".to_owned(), "production".to_owned()),
+                ("job_type".to_owned(), "thread_refresh".to_owned()),
+                ("namespace".to_owned(), "centaur-system".to_owned()),
+                ("source".to_owned(), "slack".to_owned()),
+                ("status".to_owned(), "pending".to_owned()),
+            ],
+            3.0,
+        );
+        set_workflow_gauge(
+            ETL_ACTIVE_SCOPES,
+            &[
+                ("environment".to_owned(), "production".to_owned()),
+                ("namespace".to_owned(), "centaur-system".to_owned()),
+                ("source".to_owned(), "slack".to_owned()),
+            ],
+            11.0,
+        );
+
+        let metrics = render_metrics().unwrap();
+
+        assert!(metrics.contains("etl_items_seen_total{"));
+        assert!(metrics.contains("etl_active_scopes{"));
+        assert!(metrics.contains("company_context_documents_changed_total{"));
+        assert!(metrics.contains("etl_backfill_jobs{"));
+        assert!(metrics.contains(r#"environment="production""#));
+        assert!(metrics.contains(r#"namespace="centaur-system""#));
+        assert!(metrics.contains(r#"source="slack""#));
     }
 
     #[test]

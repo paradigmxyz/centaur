@@ -1,0 +1,28 @@
+<% fid_required = local_assigns.fetch(:foreign_id_required, false) %>
+<section class="form-section">
+  <h2 class="form-section-heading">Identity</h2>
+  <div class="grid gap-5 sm:grid-cols-2">
+    <div>
+      <label class="form-label" for="secret_namespace">Namespace</label>
+      <%= text_field_tag "secret[namespace]", secret.namespace.presence || "default", id: "secret_namespace", class: "form-input #{field_error_class(secret, :namespace)}" %>
+      <%= field_error(secret, :namespace) %>
+    </div>
+    <div>
+      <label class="form-label" for="secret_foreign_id">Foreign ID<%= " *".html_safe if fid_required %></label>
+      <%= text_field_tag "secret[foreign_id]", secret.foreign_id, id: "secret_foreign_id", class: "form-input #{field_error_class(secret, :foreign_id)}", placeholder: "stable-handle" %>
+      <%= field_error(secret, :foreign_id) %>
+      <% unless fid_required %><p class="form-hint">Optional. A stable, URL-safe handle operators can reference.</p><% end %>
+    </div>
+    <div>
+      <label class="form-label" for="secret_name">Name</label>
+      <%= text_field_tag "secret[name]", secret.name, id: "secret_name", class: "form-input #{field_error_class(secret, :name)}" %>
+      <%= field_error(secret, :name) %>
+    </div>
+    <div>
+      <label class="form-label" for="secret_description">Description</label>
+      <%= text_field_tag "secret[description]", secret.description, id: "secret_description", class: "form-input #{field_error_class(secret, :description)}" %>
+      <%= field_error(secret, :description) %>
+    </div>
+  </div>
+  <%= field_error(secret, :labels) %>
+</section>

@@ -263,12 +263,38 @@ if [ -d "$HOME_DIR/github" ]; then
     CENTAUR_SKILLS="$(find "$HOME_DIR/github" -path '*/centaur/.agents/skills' -type d -print -quit 2>/dev/null || true)"
 fi
 WS_SKILLS="$WORKSPACE_DIR/.agents/skills"
-for SKILLS_SRC in "$BAKED_IN_CENTAUR_SKILLS" "$MOUNTED_CENTAUR_SKILLS" "$CENTAUR_SKILLS" "$MOUNTED_ORG_SKILLS" "$OVERLAY_TREE_SKILLS"; do
-    if [ -d "$SKILLS_SRC" ]; then
-        mkdir -p "$WS_SKILLS"
-        cp -r "$SKILLS_SRC"/. "$WS_SKILLS"/
+
+copy_skill_dir() {
+    local skills_src="$1"
+    local skill_entry skill_name
+    if [ ! -d "$skills_src" ]; then
+        return 0
     fi
+    mkdir -p "$WS_SKILLS"
+    for skill_entry in "$skills_src"/* "$skills_src"/.[!.]* "$skills_src"/..?*; do
+        if [ ! -e "$skill_entry" ]; then
+            continue
+        fi
+        skill_name="$(basename "$skill_entry")"
+        rm -rf "$WS_SKILLS/$skill_name"
+        cp -R "$skill_entry" "$WS_SKILLS"/
+    done
+}
+
+for SKILLS_SRC in "$BAKED_IN_CENTAUR_SKILLS" "$MOUNTED_CENTAUR_SKILLS" "$CENTAUR_SKILLS" "$MOUNTED_ORG_SKILLS" "$OVERLAY_TREE_SKILLS"; do
+    copy_skill_dir "$SKILLS_SRC"
 done
+
+if [ -n "${CENTAUR_SKILL_DIRS:-}" ]; then
+    IFS=':' read -ra _centaur_skill_dirs <<< "$CENTAUR_SKILL_DIRS"
+    for SKILLS_SRC in "${_centaur_skill_dirs[@]}"; do
+        if [ -n "$SKILLS_SRC" ]; then
+            copy_skill_dir "$SKILLS_SRC"
+        fi
+    done
+    unset _centaur_skill_dirs
+fi
+unset -f copy_skill_dir
 
 if [ -d "$WS_SKILLS" ]; then
     mkdir -p "$WORKSPACE_DIR/.claude"
@@ -289,6 +315,15 @@ fi
 if [ -f "$HOME_DIR/AGENTS_OVERLAY.md" ] && [ -f "$TARGET_PROMPT" ]; then
     printf '\n\n---\n\n' >> "$TARGET_PROMPT"
     cat "$HOME_DIR/AGENTS_OVERLAY.md" >> "$TARGET_PROMPT"
+# Repo-cache-era org prompt: with overlay images gone, point CENTAUR_OVERLAY_DIR
+# at the org repo's clone under the repos mount (e.g. ~/github/<owner>/<repo>)
+# and its SYSTEM_PROMPT.md is appended here, same contract the overlay-bootstrap
+# init container used to fulfil by staging $HOME/AGENTS_OVERLAY.md.
+elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
+    && [ -f "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" ] \
+    && [ -f "$TARGET_PROMPT" ]; then
+    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
+    cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
 fi
 
 # Persona prompt injection is done by the API when it writes AGENTS_BASE.md.

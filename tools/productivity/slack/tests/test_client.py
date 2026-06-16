@@ -169,6 +169,15 @@ def test_send_message_omits_unfurl_flags_by_default() -> None:
     assert "unfurl_media" not in fake_web_client.last_kwargs
 
 
+def test_send_message_normalizes_escaped_line_breaks() -> None:
+    client, fake_web_client = _make_client()
+
+    client.send_message("paradigm-pulse", "*Title*\\n- one\\r\\n- two", no_attribution=True)
+
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["text"] == "*Title*\n- one\n- two"
+
+
 def test_send_message_opens_dm_for_user_id_destination() -> None:
     client, fake_web_client = _make_client()
 

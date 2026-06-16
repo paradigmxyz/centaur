@@ -2,7 +2,7 @@ diff --git a/dist/index.js b/dist/index.js
 index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22eed819d8e 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -31,6 +31,176 @@ import {
+@@ -31,6 +31,216 @@ import {
    toModalElement,
    toPlainText
  } from "chat";
@@ -11,6 +11,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +var STREAM_CHUNK_LIMIT = 256;
 +var STREAM_TASK_LIMIT = 50;
 +var STREAM_FENCE_RESERVE = 64;
++var STREAM_CARD_OVERHEAD = 320;
 +// Slack hard-expires a streaming message ~300s after chat.startStream
 +// (measured in production: appends fail with message_not_in_streaming_state
 +// at ~303-304s). Rotate segments well before that so long renders survive.
@@ -23,7 +24,11 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +// size cap (msg_too_long). Budget the per-segment structured content too.
 +function streamSegmentTaskCharBudget() {
 +  const value = Number(process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET ?? "");
-+  return Number.isFinite(value) && value > 0 ? value : 16e3;
++  return Number.isFinite(value) && value > 0 ? value : 9e3;
++}
++function streamSegmentPayloadCharBudget() {
++  const value = Number(process.env.SLACK_STREAM_SEGMENT_PAYLOAD_CHAR_BUDGET ?? "");
++  return Number.isFinite(value) && value > 0 ? value : 11e3;
 +}
 +function slackStreamErrorCode(error) {
 +  if (!error || typeof error !== "object") {
@@ -54,6 +59,19 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +  } catch {
 +  }
 +}
++function annotateSlackStreamMessage(error, segment) {
++  if (!error || typeof error !== "object" && typeof error !== "function") {
++    return;
++  }
++  const streamTs = segment?.streamer?.streamTs;
++  if (typeof streamTs !== "string" || streamTs.length === 0) {
++    return;
++  }
++  try {
++    error.slackStreamMessageId = streamTs;
++  } catch {
++  }
++}
 +function slackAnswerLostAnnotation(error) {
 +  if (!error || typeof error !== "object" && typeof error !== "function") {
 +    return void 0;
@@ -61,8 +79,30 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +  const value = error.slackAnswerLost;
 +  return typeof value === "boolean" ? value : void 0;
 +}
++function jsonChars(value) {
++  if (value === void 0) {
++    return 0;
++  }
++  try {
++    return JSON.stringify(value).length;
++  } catch {
++    return 0;
++  }
++}
 +function taskChunkChars(chunk) {
-+  return (typeof chunk.title === "string" ? chunk.title.length : 0) + (typeof chunk.details === "string" ? chunk.details.length : 0) + (typeof chunk.output === "string" ? chunk.output.length : 0) + 64;
++  return (typeof chunk.id === "string" ? chunk.id.length : 0) + (typeof chunk.title === "string" ? chunk.title.length : 0) + (typeof chunk.status === "string" ? chunk.status.length : 0) + (typeof chunk.details === "string" ? chunk.details.length : 0) + (typeof chunk.output === "string" ? chunk.output.length : 0) + jsonChars(chunk.sources) + STREAM_CARD_OVERHEAD;
++}
++function segmentPayloadChars(segment) {
++  return segment.length + segment.taskCharsTotal;
++}
++function segmentMarkdownAvailable(segment) {
++  return Math.max(
++    0,
++    Math.min(
++      STREAM_SEGMENT_LIMIT - segment.length,
++      streamSegmentPayloadCharBudget() - segmentPayloadChars(segment)
++    )
++  );
 +}
 +var FENCE_PATTERN = /^(`{3,}|~{3,})/;
 +var Fence = class {
@@ -179,7 +219,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
  
  // src/cards.ts
  import {
-@@ -3434,26 +3604,210 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3434,26 +3644,216 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -228,10 +268,16 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +      if (segment.stopped || !(segment.hasContent || force)) {
 +        return void 0;
 +      }
-+      const result = await segment.streamer.stop({
-+        token,
-+        ...blocks ? { blocks } : {}
-+      });
++      let result;
++      try {
++        result = await segment.streamer.stop({
++          token,
++          ...blocks ? { blocks } : {}
++        });
++      } catch (error) {
++        annotateSlackStreamMessage(error, segment);
++        throw error;
++      }
 +      segment.stopped = true;
 +      if (result) {
 +        provisionalResult = result;
@@ -317,10 +363,10 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +        if (isExpired(current)) {
 +          await rotateCurrentForAge();
 +        }
-+        if (current.length === STREAM_SEGMENT_LIMIT) {
++        if (current.length === STREAM_SEGMENT_LIMIT || segmentMarkdownAvailable(current) === 0 && current.hasContent) {
 +          await rotateSegment(fence.closing, fence.opening);
 +        }
-+        const available = STREAM_SEGMENT_LIMIT - current.length;
++        const available = segmentMarkdownAvailable(current);
 +        const first = remaining.codePointAt(0);
 +        const width = first !== void 0 && first > 65535 ? 2 : 1;
 +        if (available < width) {
@@ -376,7 +422,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +        } else if (!existing.stopped) {
 +          const previous = existing.taskChars.get(id) ?? 0;
 +          const projected = existing.taskCharsTotal - previous + Math.max(previous, chunkChars);
-+          if (projected <= streamSegmentTaskCharBudget()) {
++          if (projected <= streamSegmentTaskCharBudget() && existing.length + projected <= streamSegmentPayloadCharBudget()) {
 +            return existing;
 +          }
 +          taskSegments.delete(id);
@@ -387,7 +433,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +      if (isExpired(current)) {
 +        await rotateCurrentForAge();
 +      }
-+      if (current.cards >= STREAM_TASK_LIMIT || current.taskCharsTotal + chunkChars > streamSegmentTaskCharBudget()) {
++      if (current.cards >= STREAM_TASK_LIMIT || current.taskCharsTotal + chunkChars > streamSegmentTaskCharBudget() || segmentPayloadChars(current) + chunkChars > streamSegmentPayloadCharBudget()) {
 +        await createStructuredSegment();
 +      } else {
 +        structured.add(current);
@@ -399,7 +445,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
      const sendStructuredChunk = async (chunk) => {
        if (!structuredChunksSupported) {
          return;
-@@ -3463,8 +3817,45 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3463,8 +3863,45 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
@@ -446,7 +492,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
          structuredChunksSupported = false;
          this.logger.warn(
            "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
-@@ -3479,31 +3870,91 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3479,31 +3916,91 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };

@@ -13,6 +13,10 @@ from api.runtime_control import canonical_json, decode_jsonb
 from api.vm_metrics import (
     observe_company_context_document_size,
     record_company_context_documents_changed,
+    set_company_context_projection_lag,
+    set_etl_active_scopes,
+    set_etl_failed_scopes,
+    set_etl_scope_sync_freshness_seconds,
 )
 from api.workflow_engine import WorkflowContext
 
@@ -24,6 +28,19 @@ MIN_THREAD_MESSAGES = 5
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 SLACK_MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
 SLACK_CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)(?:\|([^>]+))?>")
+COMPANY_CONTEXT_SOURCE_TYPES = {
+    "slack": ("slack_channel_day", "slack_thread", "slack_attachment"),
+    "google_drive": ("google_doc",),
+    "google_calendar": ("calendar_event",),
+    "linear": ("linear_issue",),
+}
+COMPANY_CONTEXT_DOCUMENT_ACTIONS = ("inserted", "updated", "deleted", "noop")
+ETL_CHECKPOINT_TABLES = {
+    "slack": "slack_sync_checkpoints",
+    "google_drive": "google_drive_sync_checkpoints",
+    "google_calendar": "google_calendar_sync_checkpoints",
+    "linear": "linear_sync_checkpoints",
+}
 
 
 def _positive_int(value: int | str | None, default: int) -> int:
@@ -172,6 +189,95 @@ async def _latest_successful_watermark(pool, current_run_id: str) -> dt.datetime
     return _parse_datetime(str(output.get("watermark") or ""))
 
 
+def _emit_company_context_counter_baselines(enabled_sources: list[str]) -> None:
+    """Initialize dashboard counter labelsets even when a run has no changes."""
+    for source in enabled_sources:
+        for source_type in COMPANY_CONTEXT_SOURCE_TYPES.get(source, ()):
+            for action in COMPANY_CONTEXT_DOCUMENT_ACTIONS:
+                record_company_context_documents_changed(
+                    source,
+                    source_type,
+                    action,
+                    0,
+                )
+
+
+async def _emit_company_context_document_size_snapshot(
+    pool,
+    enabled_sources: list[str],
+) -> None:
+    """Observe current projected document sizes so the corpus p95 panel has data."""
+    if not enabled_sources:
+        return
+    rows = await pool.fetch(
+        "SELECT source, source_type, LENGTH(COALESCE(body, '')) AS body_chars "
+        "FROM company_context_documents "
+        "WHERE source = ANY($1::text[]) "
+        "ORDER BY source, source_type, document_id",
+        enabled_sources,
+    )
+    seen_source_types: set[tuple[str, str]] = set()
+    for row in rows:
+        source = str(row["source"] or "")
+        source_type = str(row["source_type"] or "")
+        if not source or not source_type:
+            continue
+        seen_source_types.add((source, source_type))
+        observe_company_context_document_size(
+            source,
+            source_type,
+            int(row["body_chars"] or 0),
+        )
+
+    for source in enabled_sources:
+        for source_type in COMPANY_CONTEXT_SOURCE_TYPES.get(source, ()):
+            if (source, source_type) not in seen_source_types:
+                observe_company_context_document_size(source, source_type, 0)
+
+
+async def _emit_etl_scope_metrics(pool, enabled_sources: list[str]) -> None:
+    """Publish source scope health gauges used by the Grafana overview row."""
+    for source in enabled_sources:
+        table = ETL_CHECKPOINT_TABLES.get(source)
+        if not table:
+            continue
+        row = await pool.fetchrow(
+            "SELECT COUNT(*) AS active_scopes, "
+            "COUNT(*) FILTER (WHERE last_error <> '') AS failed_scopes, "
+            "COALESCE("
+            "  EXTRACT(EPOCH FROM NOW() - MIN(last_success_at) "
+            "    FILTER (WHERE last_success_at IS NOT NULL)"
+            "  ), "
+            "  0"
+            ") AS freshness_seconds "
+            f"FROM {table}",
+        )
+        set_etl_active_scopes(source, int(row["active_scopes"] or 0) if row else 0)
+        set_etl_failed_scopes(source, int(row["failed_scopes"] or 0) if row else 0)
+        set_etl_scope_sync_freshness_seconds(
+            source,
+            float(row["freshness_seconds"] or 0.0) if row else 0.0,
+        )
+
+
+def _emit_company_context_projection_lag(
+    enabled_sources: list[str],
+    source_watermarks: dict[str, dt.datetime | None],
+) -> None:
+    """Set per-source lag gauges from the newest projected source update time."""
+    now = dt.datetime.now(dt.timezone.utc)
+    for source in enabled_sources:
+        watermark = source_watermarks.get(source)
+        if isinstance(watermark, dt.datetime):
+            lag_seconds = max(
+                (now - watermark.astimezone(dt.timezone.utc)).total_seconds(),
+                0.0,
+            )
+        else:
+            lag_seconds = 0.0
+        set_company_context_projection_lag(source, lag_seconds)
+
+
 async def _load_slack_lookup_maps(pool) -> tuple[dict[str, str], dict[str, str]]:
     """Load Slack user/channel name maps for document rendering."""
     user_rows = await pool.fetch(
@@ -193,8 +299,10 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
     if since is None:
         where_sql = ""
         args: list[Any] = []
+        attachment_where_sql = ""
     else:
         where_sql = "WHERE updated_at > $1"
+        attachment_where_sql = "WHERE a.updated_at > $1"
         args = [since]
 
     channel_day_rows = await pool.fetch(
@@ -215,10 +323,35 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
         f"FROM slack_sync_messages {where_sql}",
         *args,
     )
+    attachment_rows = await pool.fetch(
+        "SELECT a.channel_id, c.channel_name, a.message_ts, a.slack_file_id, "
+        "a.name, a.title, a.mimetype, a.filetype, a.size_bytes, a.permalink, "
+        "a.download_status, a.download_error, a.content_sha256, a.updated_at, "
+        "m.occurred_at, m.thread_ts, m.parent_message_ts, m.user_id, "
+        "u.user_name, u.real_name, u.display_name, m.text, "
+        "m.permalink AS message_permalink "
+        "FROM slack_sync_message_attachments a "
+        "JOIN slack_sync_messages m "
+        "  ON m.channel_id = a.channel_id AND m.message_ts = a.message_ts "
+        "LEFT JOIN slack_sync_channels c ON c.channel_id = a.channel_id "
+        "LEFT JOIN slack_sync_users u ON u.user_id = m.user_id "
+        f"{attachment_where_sql} "
+        "ORDER BY a.updated_at, a.channel_id, a.message_ts, a.slack_file_id",
+        *args,
+    )
+    attachment_stats = await pool.fetchrow(
+        "SELECT COUNT(*) AS changed_attachments, MAX(updated_at) AS max_updated_at "
+        f"FROM slack_sync_message_attachments a {attachment_where_sql}",
+        *args,
+    )
 
-    max_updated_at = stats["max_updated_at"] if stats else None
-    if isinstance(max_updated_at, dt.datetime):
-        max_updated_at = max_updated_at.astimezone(dt.timezone.utc)
+    max_updated_candidates = []
+    for candidate in (
+        stats["max_updated_at"] if stats else None,
+        attachment_stats["max_updated_at"] if attachment_stats else None,
+    ):
+        if isinstance(candidate, dt.datetime):
+            max_updated_candidates.append(candidate.astimezone(dt.timezone.utc))
 
     return {
         "channel_days": [
@@ -229,8 +362,14 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
         "threads": [
             (str(row["channel_id"]), str(row["thread_ts"])) for row in thread_rows
         ],
+        "attachments": list(attachment_rows),
         "changed_messages": int(stats["changed_messages"] or 0) if stats else 0,
-        "max_updated_at": max_updated_at,
+        "changed_attachments": (
+            int(attachment_stats["changed_attachments"] or 0) if attachment_stats else 0
+        ),
+        "max_updated_at": max(max_updated_candidates)
+        if max_updated_candidates
+        else None,
     }
 
 
@@ -586,6 +725,119 @@ def _thread_document(
         "occurred_at": first["occurred_at"],
         "source_updated_at": last_updated,
         "content_hash": _content_hash(title, body, permalink, metadata),
+        "metadata": metadata,
+    }
+
+
+def _slack_attachment_document(
+    row: Any,
+    *,
+    users_by_id: dict[str, str],
+    channels_by_id: dict[str, str],
+) -> dict[str, Any] | None:
+    """Render one Slack attachment metadata document."""
+    channel_id = str(row["channel_id"] or "")
+    message_ts = str(row["message_ts"] or "")
+    slack_file_id = str(row["slack_file_id"] or "")
+    if not channel_id or not message_ts or not slack_file_id:
+        return None
+
+    channel_name = str(
+        row["channel_name"] or channels_by_id.get(channel_id) or channel_id
+    )
+    filename = str(row["name"] or "")
+    attachment_title = str(row["title"] or "")
+    label = attachment_title or filename or slack_file_id
+    title = f"Slack attachment: {label}"
+    message_permalink = str(row["message_permalink"] or "")
+    attachment_permalink = str(row["permalink"] or "")
+    mimetype = str(row["mimetype"] or "")
+    filetype = str(row["filetype"] or "")
+    download_status = str(row["download_status"] or "")
+    download_error = str(row["download_error"] or "")
+    content_sha256 = str(row["content_sha256"] or "")
+    size_bytes = int(row["size_bytes"] or 0)
+    author_name = _display_name(row)
+    message_text = _resolve_slack_mentions(
+        str(row["text"] or ""),
+        users_by_id=users_by_id,
+        channels_by_id=channels_by_id,
+    )
+
+    lines = [
+        f"# {title}",
+        "",
+        "- Source: Slack attachment",
+        f"- Channel: #{channel_name}",
+        f"- Attached message: {message_permalink}",
+    ]
+    if attachment_permalink:
+        lines.append(f"- Attachment permalink: {attachment_permalink}")
+    if filename:
+        lines.append(f"- Filename: {filename}")
+    if attachment_title:
+        lines.append(f"- Title: {attachment_title}")
+    if mimetype:
+        lines.append(f"- MIME type: {mimetype}")
+    if filetype:
+        lines.append(f"- File type: {filetype}")
+    if size_bytes:
+        lines.append(f"- Size: {size_bytes} bytes")
+    if download_status:
+        lines.append(f"- Download status: {download_status}")
+    if download_error:
+        lines.append(f"- Download error: {download_error}")
+    if content_sha256:
+        lines.append(f"- Content SHA-256: {content_sha256}")
+    lines.extend(
+        [
+            f"- Attached by: {author_name}",
+            f"- Attached at: {_format_time(row['occurred_at'])}",
+            "",
+            "---",
+            "",
+            "Attached to Slack message:",
+            "",
+            message_text,
+        ]
+    )
+
+    body = "\n".join(lines).strip()
+    source_document_id = f"{channel_id}:{message_ts}:{slack_file_id}"
+    metadata = {
+        "channel_id": channel_id,
+        "channel_name": channel_name,
+        "message_ts": message_ts,
+        "thread_ts": str(row["thread_ts"] or ""),
+        "parent_message_ts": str(row["parent_message_ts"] or ""),
+        "slack_file_id": slack_file_id,
+        "filename": filename,
+        "title": attachment_title,
+        "mimetype": mimetype,
+        "filetype": filetype,
+        "size_bytes": size_bytes,
+        "download_status": download_status,
+        "content_sha256": content_sha256,
+        "message_permalink": message_permalink,
+        "attachment_permalink": attachment_permalink,
+    }
+    url = attachment_permalink or message_permalink
+    return {
+        "document_id": f"slack:attachment:{channel_id}:{message_ts}:{slack_file_id}",
+        "source": "slack",
+        "source_type": "slack_attachment",
+        "source_document_id": source_document_id,
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": title,
+        "body": body,
+        "url": url,
+        "author_id": str(row["user_id"] or ""),
+        "author_name": author_name,
+        "access_scope": "company",
+        "occurred_at": row["occurred_at"],
+        "source_updated_at": row["updated_at"],
+        "content_hash": _content_hash(title, body, url, metadata),
         "metadata": metadata,
     }
 
@@ -1046,10 +1298,23 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     google_drive_enabled = _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
     google_calendar_enabled = _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
     linear_enabled = _env_flag_enabled("LINEAR_ETL_ENABLED")
+    enabled_sources = [
+        source
+        for source, enabled in (
+            ("slack", slack_enabled),
+            ("google_drive", google_drive_enabled),
+            ("google_calendar", google_calendar_enabled),
+            ("linear", linear_enabled),
+        )
+        if enabled
+    ]
+    _emit_company_context_counter_baselines(enabled_sources)
     changed = {
         "channel_days": [],
         "threads": [],
+        "attachments": [],
         "changed_messages": 0,
+        "changed_attachments": 0,
         "max_updated_at": None,
     }
     users_by_id: dict[str, str] = {}
@@ -1150,6 +1415,28 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if action in {"inserted", "updated"}:
             documents_upserted += 1
 
+    for row in changed["attachments"]:
+        document = _slack_attachment_document(
+            row,
+            users_by_id=users_by_id,
+            channels_by_id=channels_by_id,
+        )
+        if document is None:
+            continue
+        observe_company_context_document_size(
+            "slack",
+            str(document["source_type"]),
+            len(str(document["body"] or "")),
+        )
+        action = await _upsert_document(ctx._pool, document)
+        record_company_context_documents_changed(
+            "slack",
+            str(document["source_type"]),
+            action,
+        )
+        if action in {"inserted", "updated"}:
+            documents_upserted += 1
+
     for row in drive_changed["files"]:
         document = _drive_document(row)
         if document is None:
@@ -1226,14 +1513,25 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if value is not None
     ]
     watermark = max(watermark_candidates) if watermark_candidates else None
+    source_watermarks = {
+        "slack": changed["max_updated_at"] or last_watermark,
+        "google_drive": drive_changed["max_updated_at"] or last_watermark,
+        "google_calendar": calendar_changed["max_updated_at"] or last_watermark,
+        "linear": linear_changed["max_updated_at"] or last_watermark,
+    }
+    _emit_company_context_projection_lag(enabled_sources, source_watermarks)
+    await _emit_etl_scope_metrics(ctx._pool, enabled_sources)
+    await _emit_company_context_document_size_snapshot(ctx._pool, enabled_sources)
     result = {
         "status": "completed",
         "changed_messages": changed["changed_messages"],
+        "changed_slack_attachments": changed["changed_attachments"],
         "changed_drive_files": drive_changed["changed_files"],
         "changed_calendar_events": calendar_changed["changed_events"],
         "changed_linear_issues": linear_changed["changed_issues"],
         "channel_day_documents": len(changed["channel_days"]),
         "thread_candidates": len(changed["threads"]),
+        "slack_attachment_documents": len(changed["attachments"]),
         "drive_documents": len(drive_changed["files"]),
         "calendar_event_documents": len(calendar_changed["events"]),
         "linear_issue_documents": len(linear_changed["issues"]),

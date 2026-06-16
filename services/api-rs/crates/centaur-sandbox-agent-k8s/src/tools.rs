@@ -1,8 +1,7 @@
 //! Tool sources for agent sandboxes.
 //!
-//! api-rs serves no `/tools` HTTP registry and the agent's `call <tool>` HTTP
-//! registry is deprecated upstream (control-plane-only). Instead the agent
-//! image installs each tool as a shell CLI shim at entrypoint
+//! api-rs serves no `/tools` HTTP registry. Instead the agent image installs
+//! each tool as a shell CLI shim at entrypoint
 //! (`services/sandbox/install_tool_shims.py`) by scanning `TOOL_DIRS` for
 //! `pyproject.toml [project.scripts]` and `uvx`-installing each. Secrets ride
 //! proxied env (tool placeholder creds + `*_DSN` from `apply_proxy_env`,
@@ -207,21 +206,30 @@ pub(crate) fn tools_init_container_json(
     let mut metadata_sources = Vec::new();
     for (index, source) in sources.iter().enumerate() {
         let subdir = &source.source_subdir;
+        let repo = &source.repo;
         if let Some(repo_cache_path) = &tools.repo_cache_path {
             let repo_cache_repo_path = format!(
                 "{}/{}",
                 repo_cache_path.trim_end_matches('/'),
                 source.repo.trim_start_matches('/')
             );
+            // Wait only for the repo checkout itself; a source without the
+            // tools subdir (e.g. a workflows- or skills-only overlay using the
+            // chart's defaulted subdirs) is skipped instead of failing the
+            // sandbox, because an init failure is terminal for the Sandbox.
             publish_steps.push_str(&format!(
                 "attempt=0\n\
                  cache_repo=\"{repo_cache_repo_path}\"\n\
-                 until [ -d \"$cache_repo/.git\" ] && [ -d \"$cache_repo/{subdir}\" ]; do\n\
+                 until [ -d \"$cache_repo/.git\" ]; do\n\
                  attempt=$((attempt + 1))\n\
-                 if [ \"$attempt\" -ge 30 ]; then echo \"tools repo-cache entry unavailable after $attempt attempts: $cache_repo/{subdir}\" >&2; exit 1; fi\n\
+                 if [ \"$attempt\" -ge 30 ]; then echo \"tools repo-cache entry unavailable after $attempt attempts: $cache_repo\" >&2; exit 1; fi\n\
                  sleep 2\n\
                  done\n\
-                 cp -R \"$cache_repo/{subdir}/.\" \"$target\"/\n"
+                 if [ -d \"$cache_repo/{subdir}\" ]; then\n\
+                 cp -R \"$cache_repo/{subdir}/.\" \"$target\"/\n\
+                 else\n\
+                 echo \"skipping tools source {repo}: no {subdir}/ in repo-cache checkout\" >&2\n\
+                 fi\n"
             ));
             metadata_sources.push(json!({
                 "repo": source.repo,
@@ -244,6 +252,10 @@ pub(crate) fn tools_init_container_json(
                 ),
                 None => "git -C \"$source\" checkout --quiet".to_owned(),
             };
+            // The clone retry guards proxy startup; a checked-out source that
+            // simply lacks the subdir is skipped rather than failing the
+            // sandbox (sparse-checkout of a missing path succeeds, so this is
+            // only detectable after checkout).
             publish_steps.push_str(&format!(
                 "source=\"{source_path}\"\n\
                  rm -rf \"$source\"\n\
@@ -256,7 +268,11 @@ pub(crate) fn tools_init_container_json(
                  rm -rf \"$source\"\n\
                  sleep 2\n\
                  done\n\
-                 cp -R \"$source/{subdir}/.\" \"$target\"/\n"
+                 if [ -d \"$source/{subdir}\" ]; then\n\
+                 cp -R \"$source/{subdir}/.\" \"$target\"/\n\
+                 else\n\
+                 echo \"skipping tools source {repo}: no {subdir}/ at the configured ref\" >&2\n\
+                 fi\n"
             ));
             metadata_sources.push(json!({
                 "repo": source.repo,
@@ -407,7 +423,13 @@ mod tests {
         assert!(script.contains("sparse-checkout set \"tools\""));
         assert!(script.contains("fetch --quiet origin \"main\""));
         assert!(script.contains("source=\"$target/.centaur-source\""));
+        // The copy is conditional so a cloned source without the tools subdir
+        // is skipped rather than failing the sandbox init.
+        assert!(script.contains("if [ -d \"$source/tools\" ]; then"));
         assert!(script.contains("cp -R \"$source/tools/.\" \"$target\"/"));
+        assert!(script.contains(
+            "skipping tools source paradigmxyz/centaur: no tools/ at the configured ref"
+        ));
         assert!(script.contains(".centaur-tools-source.json"));
         // No token configured => no askpass, single (tools) volume mount.
         assert!(!script.contains("GIT_ASKPASS"));
@@ -486,6 +508,17 @@ mod tests {
         assert!(script.contains("cp -R \"$cache_repo/tools/.\" \"$target\"/"));
         assert!(script.contains("\"source\":\"repo_cache\""));
         assert!(!script.contains("git clone"));
+        // The wait covers only the repo checkout; a source without the tools
+        // subdir is skipped instead of failing the sandbox, so the chart can
+        // default toolsSubdir for workflows- or skills-only overlay repos.
+        assert!(script.contains("until [ -d \"$cache_repo/.git\" ]; do"));
+        assert!(
+            !script.contains("until [ -d \"$cache_repo/.git\" ] && [ -d \"$cache_repo/tools\" ]")
+        );
+        assert!(script.contains("if [ -d \"$cache_repo/tools\" ]; then"));
+        assert!(script.contains(
+            "skipping tools source paradigmxyz/centaur: no tools/ in repo-cache checkout"
+        ));
         assert!(c["volumeMounts"].as_array().unwrap().iter().any(|mount| {
             mount["name"] == REPO_CACHE_VOLUME
                 && mount["mountPath"] == "/var/lib/centaur/repos"

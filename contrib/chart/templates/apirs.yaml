@@ -1,21 +1,48 @@
 {{- if .Values.apiRs.enabled }}
+{{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
 {{- $reposPath := .Values.sandbox.reposPath -}}
 {{- if and .Values.repoCache.enabled (not $reposPath) -}}
 {{- $reposPath = .Values.repoCache.hostPath -}}
 {{- end -}}
-{{- $toolsUseRepoCache := and .Values.repoCache.enabled .Values.toolServer.enabled .Values.toolServer.repo -}}
+{{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
+{{- $toolSources := list -}}
+{{- $apiWorkflowDirList := list -}}
+{{- $sandboxWorkflowDirList := list -}}
+{{- $skillDirs := list -}}
+{{- range $source := $overlaySources -}}
+{{- $repo := get $source "repo" | default "" -}}
+{{- if $repo -}}
+{{- with (get $source "toolsSubdir") -}}
+{{- $toolSource := dict "repo" $repo "subdir" . -}}
+{{- with (get $source "ref") }}{{- $_ := set $toolSource "ref" . -}}{{- end -}}
+{{- $toolSources = append $toolSources $toolSource -}}
+{{- end -}}
+{{- with (get $source "workflowsSubdir") -}}
+{{- $apiWorkflowDirList = append $apiWorkflowDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
+{{- $sandboxWorkflowDirList = append $sandboxWorkflowDirList (printf "/home/agent/github/%s/%s" $repo .) -}}
+{{- end -}}
+{{- with (get $source "skillsSubdir") -}}
+{{- $skillDirs = append $skillDirs (printf "/home/agent/github/%s/%s" $repo .) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $toolsUseRepoCache := and .Values.repoCache.enabled (gt (len $toolSources) 0) -}}
+{{- $useOverlayRepoCache := and .Values.repoCache.enabled (gt (len $overlaySources) 0) -}}
 {{- $toolDirs := list "/app/tools" -}}
 {{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}
-{{- $toolDirs = list (printf "%s/%s/%s" .Values.repoCache.hostPath .Values.toolServer.repo .Values.toolServer.subdir) -}}
-{{- $workflowDirList := list (printf "%s/%s/workflows" .Values.repoCache.hostPath .Values.toolServer.repo) -}}
-{{- range .Values.toolServer.extraSources }}
-{{- $sourceSubdir := default "tools" .subdir -}}
-{{- $toolDirs = append $toolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath .repo $sourceSubdir) -}}
-{{- $workflowDirList = append $workflowDirList (printf "%s/%s/workflows" $.Values.repoCache.hostPath .repo) -}}
+{{- $toolDirs = list -}}
+{{- range $source := $toolSources }}
+{{- $toolDirs = append $toolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
 {{- end -}}
-{{- $workflowDirs = join ":" $workflowDirList -}}
+{{- end -}}
+{{- if and .Values.repoCache.enabled (gt (len $apiWorkflowDirList) 0) -}}
+{{- $workflowDirs = join ":" $apiWorkflowDirList -}}
+{{- end -}}
+{{- $sandboxWorkflowDirs := "" -}}
+{{- if and .Values.repoCache.enabled (gt (len $sandboxWorkflowDirList) 0) -}}
+{{- $sandboxWorkflowDirs = join ":" $sandboxWorkflowDirList -}}
 {{- end -}}
 {{- $apiRsMetricsAnnotations := dict -}}
 {{- if .Values.apiRs.metrics.scrapeAnnotations -}}
@@ -38,13 +65,13 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "delete", "get", "list", "watch"]
+    verbs: ["create", "delete", "get", "list", "patch", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["delete", "get", "list", "watch"]
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["create", "delete", "get", "list", "watch"]
+    verbs: ["create", "delete", "get", "list", "patch", "watch"]
   - apiGroups: [""]
     resources: ["pods/attach", "pods/exec"]
     verbs: ["create", "get"]
@@ -62,7 +89,7 @@ rules:
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "delete", "get", "list", "watch"]
+    verbs: ["create", "delete", "get", "list", "patch", "watch"]
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
@@ -96,7 +123,7 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
-        checksum/overlay: {{ toJson .Values.overlay | sha256sum }}
+        checksum/overlay: {{ dict "overlay" .Values.overlay "overlays" .Values.overlays | toJson | sha256sum }}
 {{- with $apiRsMetricsAnnotations }}
 {{ toYaml . | nindent 8 }}
 {{- end }}
@@ -130,6 +157,10 @@ spec:
               value: {{ join ":" $toolDirs | quote }}
             - name: WORKFLOW_DIRS
               value: {{ $workflowDirs | quote }}
+{{- if $sandboxWorkflowDirs }}
+            - name: KUBERNETES_WORKFLOW_DIRS
+              value: {{ $sandboxWorkflowDirs | quote }}
+{{- end }}
 {{- if .Values.overlay.systemPrompt }}
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}
@@ -138,12 +169,22 @@ spec:
               value: {{ .Values.apiRs.sandboxBackend | quote }}
             - name: SESSION_SANDBOX_WORKLOAD
               value: {{ .Values.apiRs.sandboxWorkload | quote }}
+            # Default harness for warm sandboxes. Per-session sandboxes run
+            # their session's harness regardless (pinned via container args).
+            - name: SESSION_SANDBOX_HARNESS
+              value: {{ .Values.sandbox.harnessEngine | quote }}
             - name: SESSION_SANDBOX_READY_TIMEOUT_SECS
               value: {{ .Values.apiRs.sandboxReadyTimeoutSecs | quote }}
             - name: SESSION_SANDBOX_WARM_POOL_SIZE
               value: {{ .Values.apiRs.sandboxWarmPoolSize | quote }}
             - name: SESSION_SANDBOX_WARM_POOL_REPLENISH_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
+            - name: SESSION_SANDBOX_IDLE_STOP_TTL_SECS
+              value: {{ .Values.apiRs.sandboxIdleStopTtlSecs | quote }}
+            - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
+              value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
+            - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
+              value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: SESSION_SANDBOX_IMAGE
@@ -207,49 +248,61 @@ spec:
             - name: KUBERNETES_IRON_PROXY_HARNESS_ENGINE
               value: {{ .Values.sandbox.harnessEngine | quote }}
 {{- $sandboxEnvList := list }}
+{{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_SKILL_DIRS" "value" (join ":" $skillDirs)) }}
+{{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}
 {{- end }}
 {{- if and $sandboxEnvList (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_EXTRA_ENV")) }}
-            # Operator sandbox env (sandbox.extraEnv), applied to every codex
-            # sandbox api-rs creates. Carries the harness OTLP trace wiring
-            # (endpoint, service name, NO_PROXY extras) that codex needs to
-            # export usage/cost spans. Same contract as the Python control
-            # plane's KUBERNETES_SANDBOX_EXTRA_ENV.
+            # Operator sandbox env (sandbox.extraEnv) plus chart-rendered
+            # overlay skill dirs, applied to every codex sandbox api-rs creates.
+            # Carries the harness OTLP trace wiring (endpoint, service name,
+            # NO_PROXY extras) that codex needs to export usage/cost spans.
+            # Same contract as the Python control plane's
+            # KUBERNETES_SANDBOX_EXTRA_ENV.
             - name: SESSION_SANDBOX_EXTRA_ENV
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
-{{- if .Values.ironControl.enabled }}
-            # iron-control control plane: principals/roles/grants + per-sandbox
+{{- if $console.enabled }}
+            # console control plane: principals/roles/grants + per-sandbox
             # proxy sync. When unset, the api-rs falls back to the rendered
             # static proxy config.
             - name: IRON_CONTROL_URL
-              value: {{ include "centaur.ironControlUrl" . | quote }}
+              value: {{ include "centaur.consoleUrl" . | quote }}
             - name: IRON_CONTROL_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
 {{- end }}
-{{- if .Values.toolServer.enabled }}
-{{- if not .Values.toolServer.repo }}
+{{- if and .Values.toolServer.enabled (not .Values.toolServer.repo) (eq (len $toolSources) 0) }}
 {{- fail "toolServer.repo (owner/name) must be set when toolServer.enabled=true" }}
 {{- end }}
-            # Base tools are copied from repo-cache into each sandbox at boot by
-            # a tools-bootstrap init container, so adding a tool is a push to the
-            # repo, not an api-rs image rebuild. api-rs reads the same repo-cache
-            # mount for tool-secret discovery and refreshes grants in-process.
+{{- if gt (len $toolSources) 0 }}
+{{- $firstToolSource := index $toolSources 0 }}
+{{- $extraToolSources := list }}
+{{- range $index, $source := $toolSources }}
+{{- if gt $index 0 }}
+{{- $extraToolSources = append $extraToolSources $source }}
+{{- end }}
+{{- end }}
+            # Ordered overlay tools are copied into each sandbox at boot by a
+            # tools-bootstrap init container, so adding a tool is a push to the
+            # repo, not an api-rs image rebuild. api-rs reads the same ordered
+            # source list for tool-secret discovery and refreshes grants
+            # in-process.
             - name: KUBERNETES_TOOLS_REPO
-              value: {{ .Values.toolServer.repo | quote }}
-{{- if .Values.toolServer.ref }}
+              value: {{ get $firstToolSource "repo" | quote }}
+{{- with (get $firstToolSource "ref") }}
             - name: KUBERNETES_TOOLS_REF
-              value: {{ .Values.toolServer.ref | quote }}
+              value: {{ . | quote }}
 {{- end }}
             - name: KUBERNETES_TOOLS_SUBDIR
-              value: {{ .Values.toolServer.subdir | quote }}
-{{- with .Values.toolServer.extraSources }}
+              value: {{ get $firstToolSource "subdir" | quote }}
+{{- if $extraToolSources }}
             - name: KUBERNETES_TOOLS_EXTRA_SOURCES
-              value: {{ toJson . | quote }}
+              value: {{ toJson $extraToolSources | quote }}
 {{- end }}
 {{- if $toolsUseRepoCache }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PATH
@@ -305,13 +358,13 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if $toolsUseRepoCache }}
+{{- if $useOverlayRepoCache }}
           volumeMounts:
             - name: repo-cache
               mountPath: {{ .Values.repoCache.hostPath | quote }}
               readOnly: true
 {{- end }}
-{{- if $toolsUseRepoCache }}
+{{- if $useOverlayRepoCache }}
       volumes:
         - name: repo-cache
           hostPath:

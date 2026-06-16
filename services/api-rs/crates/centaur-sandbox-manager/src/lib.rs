@@ -4,11 +4,13 @@
 //! runtime-specific work needed to make those transitions happen.
 
 mod manager;
+mod reaper;
 mod reconcile;
 mod store;
 mod warm_pool;
 
 pub use manager::{ManagedSandbox, SandboxManager};
+pub use reaper::{SandboxReaper, SandboxReaperConfig};
 pub use reconcile::{DriftReason, ReconcileAction, ReconcileOutcome, ReconcilePlan};
 pub use store::{DesiredStateStore, InMemoryDesiredStateStore};
 pub use warm_pool::{WarmPoolConfig, WarmPoolError, WarmPoolManager, WarmSandboxSpecFactory};

@@ -1,0 +1,45 @@
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+  url: <%= ConsoleEnv.fetch("DATABASE_URL", nil) %>
+  host: <%= ConsoleEnv.fetch("DB_HOST", "localhost") %>
+  port: <%= ConsoleEnv.fetch("DB_PORT", 5432) %>
+  username: <%= ConsoleEnv.fetch("DB_USERNAME", "postgres") %>
+  password: <%= ConsoleEnv.fetch("DB_PASSWORD", "") %>
+
+development:
+  <<: *default
+  database: iron_control_development
+
+# Warning: The database defined as "test" will be erased and
+# re-generated from your development database when you run "rake".
+# Do not set this db to the same as development or production.
+test:
+  <<: *default
+  database: iron_control_test
+
+production:
+  primary:
+    <<: *default
+    database: iron_control_production
+    username: iron_control
+    password: <%= ConsoleEnv["DATABASE_PASSWORD"] %>
+  cache:
+    <<: *default
+    database: iron_control_production_cache
+    username: iron_control
+    password: <%= ConsoleEnv["DATABASE_PASSWORD"] %>
+    migrations_paths: db/cache_migrate
+  queue:
+    <<: *default
+    database: iron_control_production_queue
+    username: iron_control
+    password: <%= ConsoleEnv["DATABASE_PASSWORD"] %>
+    migrations_paths: db/queue_migrate
+  cable:
+    <<: *default
+    database: iron_control_production_cable
+    username: iron_control
+    password: <%= ConsoleEnv["DATABASE_PASSWORD"] %>
+    migrations_paths: db/cable_migrate

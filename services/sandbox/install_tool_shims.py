@@ -362,6 +362,8 @@ def main(argv):
             return 1
         return subprocess.call([name, *argv[3:]])
     if command == "call" and len(argv) >= 4:
+        # Internal compatibility for Python workflow ctx.call_tool(...). Agents
+        # should use direct tool CLIs (`<tool> --help`, `<tool> ...`) instead.
         name = argv[2]
         method = argv[3]
         if name not in by_name:

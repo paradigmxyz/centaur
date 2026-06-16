@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use centaur_iron_proxy::{PgDsnSetting, PgDsnSettingValueFrom};
 use eyre::{Context, Result, bail, eyre};
 use toml::Value;
 
@@ -133,6 +134,8 @@ pub struct PgDsnSecret {
     pub name: String,
     pub secret_ref: String,
     pub database: String,
+    pub role: Option<String>,
+    pub settings: Vec<PgDsnSetting>,
 }
 
 /// One header iron-proxy's `hmac_sign` transform writes onto the upstream
@@ -623,11 +626,61 @@ fn parse_gcp(table: &toml::Table, name: &str, secret_ref: &str) -> Result<GcpAut
 fn parse_pg_dsn(table: &toml::Table, name: &str, secret_ref: &str) -> Result<PgDsnSecret> {
     let database = req_str(table, "database")
         .wrap_err_with(|| format!("pg_dsn entry {name:?} requires a non-empty 'database'"))?;
+    let role = opt_str(table, "role");
+    let settings = parse_pg_dsn_settings(table.get("settings"))?;
     Ok(PgDsnSecret {
         name: name.to_owned(),
         secret_ref: secret_ref.to_owned(),
         database,
+        role,
+        settings,
     })
+}
+
+fn parse_pg_dsn_settings(value: Option<&Value>) -> Result<Vec<PgDsnSetting>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| eyre!("pg_dsn 'settings' must be an array"))?;
+    array
+        .iter()
+        .map(|item| {
+            let table = item
+                .as_table()
+                .ok_or_else(|| eyre!("pg_dsn setting must be a table"))?;
+            let name = req_str(table, "name").wrap_err("pg_dsn setting")?;
+            let literal = opt_str(table, "value");
+            let value_from = parse_pg_dsn_setting_value_from(table.get("value_from"))?;
+            if literal.is_some() == value_from.is_some() {
+                bail!("pg_dsn setting {name:?} must declare exactly one of value or value_from");
+            }
+            Ok(PgDsnSetting {
+                name,
+                value: literal,
+                value_from,
+            })
+        })
+        .collect()
+}
+
+fn parse_pg_dsn_setting_value_from(value: Option<&Value>) -> Result<Option<PgDsnSettingValueFrom>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| eyre!("pg_dsn setting value_from must be a table"))?;
+    let principal_label = opt_str(table, "principal_label");
+    let principal_field = opt_str(table, "principal_field");
+    if principal_label.is_none() && principal_field.is_none() {
+        bail!("pg_dsn setting value_from must declare principal_label or principal_field");
+    }
+    Ok(Some(PgDsnSettingValueFrom {
+        principal_label,
+        principal_field,
+    }))
 }
 
 /// Port of the `hmac_sign` branch of `_parse_secret`. `hosts` is required (no

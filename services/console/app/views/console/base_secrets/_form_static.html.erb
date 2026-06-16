@@ -1,0 +1,73 @@
+<%
+  mode = secret.replace_config.present? ? "replace" : "inject"
+  inj = secret.inject_config || {}
+  rep = secret.replace_config || {}
+%>
+<%= form_with model: [ :console, secret ], data: { turbo: false } do %>
+  <div class="space-y-6">
+    <%= render "identity_fields", secret: secret %>
+
+    <section data-controller="toggle" class="form-section">
+      <h2 class="form-section-heading">Injection</h2>
+      <% inject_errors = secret.errors[:base] + secret.errors[:inject_config] + secret.errors[:replace_config] %>
+      <% if inject_errors.any? %>
+        <p class="field-error mt-0 mb-3"><%= inject_errors.to_sentence %></p>
+      <% end %>
+      <div class="mb-4 flex gap-6 text-sm text-zinc-300">
+        <label class="flex cursor-pointer items-center gap-2">
+          <input type="radio" name="static[mode]" value="inject" <%= "checked" if mode == "inject" %> data-action="toggle#update">
+          <span>Inject a header or query param</span>
+        </label>
+        <label class="flex cursor-pointer items-center gap-2">
+          <input type="radio" name="static[mode]" value="replace" <%= "checked" if mode == "replace" %> data-action="toggle#update">
+          <span>Replace a placeholder value</span>
+        </label>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="inject" class="space-y-4" <%= "hidden" unless mode == "inject" %>>
+        <div class="grid gap-5 sm:grid-cols-2">
+          <div>
+            <label class="form-label">Header</label>
+            <%= text_field_tag "static[header]", inj["header"], class: "form-input", placeholder: "Authorization" %>
+          </div>
+          <div>
+            <label class="form-label">Query param</label>
+            <%= text_field_tag "static[query_param]", inj["query_param"], class: "form-input", placeholder: "api_key" %>
+          </div>
+        </div>
+        <div>
+          <label class="form-label">Formatter (optional)</label>
+          <%= text_field_tag "static[formatter]", inj["formatter"], class: "form-input", placeholder: "Bearer {{ .Value }}" %>
+          <p class="form-hint">Set a header or a query param (exactly one).</p>
+        </div>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="replace" class="space-y-4" <%= "hidden" unless mode == "replace" %>>
+        <div>
+          <label class="form-label">Placeholder value</label>
+          <%= text_field_tag "static[proxy_value]", rep["proxy_value"], class: "form-input", placeholder: "REPLACE_ME" %>
+          <p class="form-hint">The literal value in the request that gets replaced by the resolved secret.</p>
+        </div>
+        <div>
+          <label class="form-label">Match headers (comma-separated)</label>
+          <%= text_field_tag "static[match_headers]", Array(rep["match_headers"]).join(", "), class: "form-input" %>
+        </div>
+        <div class="flex flex-wrap gap-6 text-sm text-zinc-300">
+          <label class="flex items-center gap-2"><%= check_box_tag "static[match_body]", "1", rep["match_body"] %><span>Match body</span></label>
+          <label class="flex items-center gap-2"><%= check_box_tag "static[match_path]", "1", rep["match_path"] %><span>Match path</span></label>
+          <label class="flex items-center gap-2"><%= check_box_tag "static[match_query]", "1", rep["match_query"] %><span>Match query</span></label>
+          <label class="flex items-center gap-2"><%= check_box_tag "static[require]", "1", rep["require"] %><span>Require a match</span></label>
+        </div>
+      </div>
+    </section>
+
+    <%= render "source_fields", secret: secret, source: secret.source %>
+    <%= render "rules_fields", secret: secret %>
+    <%= render "labels_fields", secret: secret %>
+
+    <div class="flex items-center gap-3">
+      <%= submit_tag(secret.new_record? ? "Create secret" : "Save changes", class: "btn-primary") %>
+      <a href="<%= console_secrets_path %>" class="btn-secondary">Cancel</a>
+    </div>
+  </div>
+<% end %>

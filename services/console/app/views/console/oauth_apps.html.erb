@@ -1,0 +1,57 @@
+<% content_for :title, "OAuth Apps · Centaur Console" %>
+
+<div class="mb-8 flex items-start justify-between gap-4">
+  <div>
+    <h1 class="page-title">OAuth Apps</h1>
+    <p class="page-subtitle"><%= pluralize(@oauth_apps.size, "OAuth app") %> driving the public consent flow.</p>
+  </div>
+  <a href="<%= new_console_oauth_app_form_path %>" class="btn-primary">+ Add OAuth App</a>
+</div>
+
+<% if @oauth_apps.empty? %>
+  <p class="empty-state">No OAuth apps.</p>
+<% else %>
+  <div class="console-scroll-panel">
+    <table class="console-table">
+      <thead class="console-table-head">
+        <tr>
+          <th class="console-th">Slug</th>
+          <th class="console-th">Description</th>
+          <th class="console-th">Provider</th>
+          <th class="console-th">Client ID</th>
+          <th class="console-th">Enabled</th>
+          <th class="console-th">Credentials</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-ink-700">
+        <% @oauth_apps.each do |a| %>
+          <tr class="console-row-hover">
+            <td class="console-td-nowrap">
+              <%= link_to a.slug, console_oauth_app_path(a.oid), class: "font-mono console-link" %>
+              <%= id_meta_line(a.oid) %>
+            </td>
+            <td class="console-td-nowrap text-zinc-400">
+              <% if a.description.presence %>
+                <span title="<%= a.description %>"><%= truncate_middle(a.description) %></span>
+              <% else %>
+                <span class="text-zinc-600">—</span>
+              <% end %>
+            </td>
+            <td class="console-td-nowrap">
+              <span class="rounded bg-ink-700 px-2 py-0.5 text-[11px] uppercase tracking-wide text-zinc-300"><%= a.provider %></span>
+            </td>
+            <td class="console-td-nowrap text-zinc-400"><%= truncate_middle(a.client_id) %></td>
+            <td class="console-td-nowrap">
+              <% if a.enabled? %>
+                <span class="rounded px-2 py-0.5 text-xs ring-1 bg-emerald-500/10 text-emerald-300 ring-emerald-500/25">enabled</span>
+              <% else %>
+                <span class="rounded px-2 py-0.5 text-xs ring-1 bg-zinc-500/10 text-zinc-400 ring-zinc-500/25">disabled</span>
+              <% end %>
+            </td>
+            <td class="console-td-nowrap text-zinc-400"><%= @minted_counts.fetch(a.id, 0) %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+<% end %>

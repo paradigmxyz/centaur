@@ -1,0 +1,73 @@
+<% content_for :title, "Users · Centaur Console" %>
+
+<div class="mb-8">
+  <h1 class="page-title">Users</h1>
+  <p class="page-subtitle">Operator accounts. Approve pending sign-ins, promote admins, or disable access.</p>
+</div>
+
+<% if @pending.any? %>
+  <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-amber-300/80"><%= pluralize(@pending.size, "pending approval") %></h2>
+  <div class="mb-10 overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/[0.04]">
+    <table class="console-table">
+      <tbody class="divide-y divide-ink-700">
+        <% @pending.each do |user| %>
+          <tr>
+            <td class="console-td">
+              <div class="text-zinc-100"><%= user.email %></div>
+              <% if user.name.present? %><div class="text-xs text-zinc-500"><%= user.name %></div><% end %>
+            </td>
+            <td class="console-td"><%= user_idp_chips(user) %></td>
+            <td class="console-td text-zinc-500">requested <%= time_ago_in_words(user.created_at) %> ago</td>
+            <td class="console-td text-right">
+              <%= button_to "Approve", approve_console_user_path(user.oid), method: :post,
+                    class: "cursor-pointer rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-emerald-300 transition-colors hover:bg-emerald-500/20" %>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+<% end %>
+
+<div class="console-panel">
+  <table class="console-table">
+    <thead class="console-table-head">
+      <tr>
+        <th class="console-th">Email</th>
+        <th class="console-th">Status</th>
+        <th class="console-th">Role</th>
+        <th class="console-th">IdPs</th>
+        <th class="console-th text-right"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @users.empty? %>
+        <tr><td colspan="5" class="px-5 py-10 text-center text-zinc-600">No approved users yet.</td></tr>
+      <% end %>
+      <% @users.each do |user| %>
+        <tr>
+          <td class="console-td">
+            <div class="text-zinc-100"><%= user.email %><% if user == current_user %><span class="ml-2 text-xs text-zinc-500">(you)</span><% end %></div>
+            <% if user.name.present? %><div class="text-xs text-zinc-500"><%= user.name %></div><% end %>
+          </td>
+          <td class="console-td"><%= user_status_badge(user) %></td>
+          <td class="console-td text-zinc-400"><%= user.admin? ? "admin" : "operator" %></td>
+          <td class="console-td"><%= user_idp_chips(user) %></td>
+          <td class="console-td">
+            <div class="flex items-center justify-end gap-2">
+              <% unless user.admin? %>
+                <%= button_to "Make admin", promote_console_user_path(user.oid), method: :post,
+                      class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
+              <% end %>
+              <% if user.active? && user != current_user %>
+                <%= button_to "Disable", disable_console_user_path(user.oid), method: :post,
+                      form: { data: { turbo_confirm: "Disable #{user.email}?" } },
+                      class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-red-500/40 hover:text-red-300" %>
+              <% end %>
+            </div>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

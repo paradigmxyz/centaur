@@ -1,0 +1,21 @@
+# examples:
+#   periodic_cleanup:
+#     class: CleanSoftDeletedRecordsJob
+#     queue: background
+#     args: [ 1000, { batch_size: 500 } ]
+#     schedule: every hour
+#   periodic_cleanup_with_command:
+#     command: "SoftDeletedRecord.due.delete_all"
+#     priority: 2
+#     schedule: at 5am every day
+
+production:
+  clear_solid_queue_finished_jobs:
+    command: "SolidQueue::Job.clear_finished_in_batches(sleep_between_batches: 0.3)"
+    schedule: every hour at minute 12
+  # Drives the BrokerCredential refresh loop: enqueues a refresh for every
+  # credential whose access token is due to be renewed. iron-token-broker imposes
+  # a 60s floor before expiry, so minute cadence keeps tokens warm.
+  broker_poll_refresh:
+    class: "Broker::PollRefreshJob"
+    schedule: every minute

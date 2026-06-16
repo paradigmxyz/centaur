@@ -1,0 +1,19 @@
+<%# Reusable request-rule editor. The nested-fields controller clones the hidden
+    template to add rows; positions are reassigned server-side on save. %>
+<section data-controller="nested-fields" class="form-section">
+  <div class="mb-2 flex items-center justify-between">
+    <h2 class="form-section-heading mb-0">Request Rules</h2>
+    <button type="button" data-action="nested-fields#add" class="btn-secondary">Add rule</button>
+  </div>
+  <p class="form-hint mb-3">Each rule matches by host or CIDR. With no rules, the secret applies with no request matching.</p>
+
+  <div class="space-y-3" data-nested-fields-target="container">
+    <% secret.rules.each_with_index do |rule, i| %>
+      <%= render "rule_row", index: i, rule: rule %>
+    <% end %>
+  </div>
+
+  <template data-nested-fields-target="template">
+    <%= render "rule_row", index: "NEW_RECORD", rule: RequestRule.new %>
+  </template>
+</section>

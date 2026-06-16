@@ -33,6 +33,13 @@ def get_client():
     return LinearClient()
 
 
+def require_mutation_success(result: dict, action: str) -> None:
+    """Exit with an error if a mutation result carries success=False."""
+    if not result.get("success"):
+        console.print(f"[red]Linear reported the {action} failed.[/]")
+        raise typer.Exit(1)
+
+
 @app.command()
 def me():
     """Show authenticated user info."""
@@ -265,6 +272,8 @@ def create(
         parent_id=parent_id,
     )
 
+    require_mutation_success(result, "issue creation")
+
     console.print(f"[green]Created:[/] [bold]{result.get('identifier')}[/] {result.get('title')}")
     console.print(f"[dim]{result.get('url')}[/]")
 
@@ -344,6 +353,8 @@ def update(
         project_id=project_id,
     )
 
+    require_mutation_success(result, "issue update")
+
     console.print(f"[green]Updated:[/] [bold]{result.get('identifier')}[/] {result.get('title')}")
     console.print(f"State: {result.get('state', {}).get('name', '')}")
     if result.get("project"):
@@ -364,11 +375,8 @@ def comment(
     client = get_client()
     result = client.add_comment(issue_id, body)
 
-    if result:
-        console.print(f"[green]Comment added to {issue_id}[/]")
-    else:
-        console.print("[red]Failed to add comment.[/]")
-        raise typer.Exit(1)
+    require_mutation_success(result, "comment creation")
+    console.print(f"[green]Comment added to {issue_id}[/]")
 
 
 @app.command()

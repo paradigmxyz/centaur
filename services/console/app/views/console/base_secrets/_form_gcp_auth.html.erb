@@ -1,0 +1,55 @@
+<%
+  mode = secret.credentials_provider.present? ? "workload_identity" : "keyfile"
+  scopes_text = Array(secret.scopes).join("\n")
+%>
+<%= form_with model: [ :console, secret ], data: { turbo: false } do %>
+  <div class="space-y-6">
+    <%= render "identity_fields", secret: secret %>
+
+    <section data-controller="toggle" class="form-section">
+      <h2 class="form-section-heading">Credentials</h2>
+      <% cred_errors = secret.errors[:base] + secret.errors[:credentials_provider] + secret.errors[:subject] %>
+      <% if cred_errors.any? %>
+        <p class="field-error mt-0 mb-3"><%= cred_errors.to_sentence %></p>
+      <% end %>
+      <div class="mb-4 flex gap-6 text-sm text-zinc-300">
+        <label class="flex cursor-pointer items-center gap-2">
+          <input type="radio" name="gcp[credential_mode]" value="keyfile" <%= "checked" if mode == "keyfile" %> data-action="toggle#update">
+          <span>Service account keyfile</span>
+        </label>
+        <label class="flex cursor-pointer items-center gap-2">
+          <input type="radio" name="gcp[credential_mode]" value="workload_identity" <%= "checked" if mode == "workload_identity" %> data-action="toggle#update">
+          <span>Workload identity (metadata server)</span>
+        </label>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="keyfile" class="space-y-5" <%= "hidden" unless mode == "keyfile" %>>
+        <%= render "source_fields", secret: secret, source: secret.keyfile_source, heading: "Keyfile Source", bare: true %>
+        <div>
+          <label class="form-label" for="gcp_subject">Subject (optional)</label>
+          <%= text_field_tag "gcp[subject]", secret.subject, id: "gcp_subject", class: "form-input #{field_error_class(secret, :subject)}", placeholder: "user@example.com" %>
+          <p class="form-hint">Domain-wide delegation: impersonate this user. Keyfile credentials only.</p>
+        </div>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="workload_identity" class="space-y-4" <%= "hidden" unless mode == "workload_identity" %>>
+        <p class="form-hint mt-0">Uses Application Default Credentials from the proxy host's metadata server. No keyfile is stored.</p>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Scopes</h2>
+      <%= text_area_tag "gcp[scopes]", scopes_text, rows: 3, class: "form-input #{field_error_class(secret, :scopes)}", placeholder: "https://www.googleapis.com/auth/cloud-platform" %>
+      <%= field_error(secret, :scopes) %>
+      <p class="form-hint">One OAuth scope per line (or comma-separated). At least one is required.</p>
+    </section>
+
+    <%= render "rules_fields", secret: secret %>
+    <%= render "labels_fields", secret: secret %>
+
+    <div class="flex items-center gap-3">
+      <%= submit_tag(secret.new_record? ? "Create secret" : "Save changes", class: "btn-primary") %>
+      <a href="<%= console_secrets_path %>" class="btn-secondary">Cancel</a>
+    </div>
+  </div>
+<% end %>

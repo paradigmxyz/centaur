@@ -15,6 +15,8 @@ pub struct PostgresListener {
     pub client: Option<PostgresClient>,
     #[serde(default, skip_serializing)]
     pub sandbox_env: Option<SandboxEnv>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<PgDsnSetting>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -45,6 +47,23 @@ pub struct SandboxEnv {
     pub database: Option<String>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PgDsnSetting {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<PgDsnSettingValueFrom>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PgDsnSettingValueFrom {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_field: Option<String>,
 }
 
 /// The iron-control `pg_dsn` secret foreign_id for a listener name. Shared so

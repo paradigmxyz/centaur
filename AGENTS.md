@@ -442,17 +442,15 @@ The sandbox image bakes `services/sandbox/SYSTEM_PROMPT.md` into `~/AGENTS.md` a
 
 The system prompt tells the agent:
 - **Identity**: it's running inside a Kubernetes sandbox pod, calling back to the API for tool access
-- **Tools**: three kinds — harness built-ins (Read, Bash, etc.), API tools via the `call` helper, and a headless browser
-- **`call` helper** (`/usr/local/bin/call`): a bash wrapper around `curl` that provides a concise syntax for API tool calls. `call slack get_channel_history '{"channel":"general"}'` instead of a full curl command. Returns TOON format for token efficiency.
+- **Tools**: three kinds — harness built-ins (Read, Bash, etc.), API tools exposed as shell CLI shims, and a headless browser
+- **Tool CLIs**: each tool is installed as a shell command at container startup by `services/sandbox/install_tool_shims.py`, which scans `TOOL_DIRS` for `pyproject.toml [project.scripts]` and `uvx`-installs each. Agents call tools directly (`slack get_channel_history '{"channel":"general"}'`, `<tool> --help` to discover) — there is no `call` helper.
 - **Slack messaging**: the agent's stdout IS the Slack reply — never call `send_message` on the active thread
-- **Dashboard blocks**: fenced code blocks with `dashboard` language tag render structured tables, charts, and KPI cards in compatible Centaur clients
 - **Rules**: never display secrets, show your work, lead with the answer
 
-The `call` helper (`services/sandbox/call.sh`) handles routing:
-- `call <tool> <method> [json]` → `POST /tools/<tool>/<method>`
-- `call discover <tool>` → `GET /tools/<tool>`
-
-Legacy `call search` / `call sql` shorthands were removed. Sandbox agents should call the concrete tool directly, for example `call websearch search '{"query":"..."}'` or another deployment-specific query method discovered via `call discover <tool>`.
+`centaur-tools` is the generated catalog CLI emitted by the same installer:
+- `centaur-tools list` → list available tool CLIs
+- `centaur-tools run <tool> [args]` → run a tool CLI
+- `centaur-tools call <tool> <method> [json]` → internal method bridge kept only for the Python workflow host's `ctx.call_tool(...)`; interactive agents use the direct tool CLIs above.
 
 ### Persona System
 

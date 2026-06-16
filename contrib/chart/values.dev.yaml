@@ -16,6 +16,12 @@ slackbotv2:
   image:
     pullPolicy: IfNotPresent
 
+discordbot:
+  # Enable once DISCORD_* secrets + a guild allowlist are configured.
+  enabled: false
+  image:
+    pullPolicy: IfNotPresent
+
 apiRs:
   image:
     pullPolicy: IfNotPresent

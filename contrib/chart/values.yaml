@@ -34,7 +34,10 @@ ironProxy:
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`
 # fresh on each node and a tools-bootstrap init container copies `subdir` into
 # each sandbox's /app/tools, so adding a tool is a push to the repo, not an image
-# rebuild. `port` is legacy (the deprecated tool-server sidecar) and unused here.
+# rebuild. Prefer overlays.sources for new deployments; toolServer.* remains as
+# a compatibility input and maps to the first ordered overlay source when
+# overlays.sources is empty. `port` is legacy (the deprecated tool-server
+# sidecar) and unused here.
 toolServer:
   enabled: true
   port: 8001
@@ -66,19 +69,24 @@ toolServer:
     existingSecretName: ""
     secretKey: token
 
-# iron-control — Rails control plane for authenticated API access + encrypted
-# secret storage. Off by default; enable per-environment. Uses a dedicated
-# `iron_control_production` database on the bundled Postgres (its own logical DB so its
-# Rails schema_migrations table never collides with the API's migration table); an
-# init container creates the DB idempotently. DATABASE_URL, bootstrap
-# user/API-key, and the three ActiveRecord encryption keys are injected from the
-# shared infra Secret. Point IRON_CONTROL_DATABASE_URL elsewhere to use an
-# external DB.
-ironControl:
+# console — Rails control plane (formerly "iron-control") for authenticated API
+# access + encrypted secret storage. Off by default; enable per-environment.
+# Uses a dedicated `iron_control_production` database on the bundled Postgres
+# (its own logical DB so its Rails schema_migrations table never collides with
+# the API's migration table); an init container creates the DB idempotently.
+# DATABASE_URL, bootstrap user/API-key, and the three ActiveRecord encryption
+# keys are injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
+# elsewhere to use an external DB.
+#
+# Backwards compatibility: this block used to be named `ironControl`. That key is
+# still honored as a deprecated alias — anything set under `ironControl` is merged
+# on top of these `console` defaults (see the `centaur.consoleValues` helper), so
+# existing values files keep working. Prefer `console` for new configuration.
+console:
   enabled: false
   replicaCount: 1
   image:
-    repository: ironsh/iron-control
+    repository: centaur-console
     tag: latest
     # Default Always: the image is published under the mutable `latest` tag, so
     # IfNotPresent would pin pods to whatever digest a node already cached.
@@ -90,14 +98,45 @@ ironControl:
     # database.yml — the connection URL carries no database path, so Rails
     # resolves the name from there.
     name: iron_control_production
+  # Google as an OAuth identity provider for console sign-in (and the
+  # broker-credential refresh loop). Off by default — not every deployment uses
+  # Google to log in. When enabled, the IRON_CONTROL_GOOGLE_CLIENT_ID and
+  # IRON_CONTROL_GOOGLE_CLIENT_SECRET env vars are sourced from the shared infra
+  # Secret (keys <secretManager.envPrefix>IRON_CONTROL_GOOGLE_CLIENT_ID /
+  # _SECRET), which must exist or the console pods CreateContainerConfigError.
+  googleOauth:
+    enabled: false
   service:
     httpPort: 3000
+  # Optional Ingress for the console. Bring your own controller — Tailscale
+  # operator, Cloudflare, ingress-nginx, etc. — via className + annotations +
+  # tls. Mirrors the top-level `ingress` block (which is wired to the
+  # Slackbot). Add the controller's namespace to
+  # networkPolicy.ingressControllerNamespaces so its pods can reach the
+  # console; the console NetworkPolicy admits those namespaces when
+  # this is enabled.
+  #
+  # Tailscale operator example (serves https://console.<tailnet>.ts.net):
+  #   className: tailscale
+  #   defaultBackend: true
+  #   tls: [{hosts: [console]}]
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    # When true, render a single spec.defaultBackend instead of host/path
+    # rules. Required by the Tailscale operator; harmless otherwise.
+    defaultBackend: false
+    # Host for the path rule when not using defaultBackend; empty matches any
+    # host.
+    host: ""
+    tls: []
   resources: {}
-  # Solid Queue worker (`bin/jobs`) that runs iron-control's background jobs —
+  # Solid Queue worker (`bin/jobs`) that runs the console's background jobs —
   # most importantly the broker-credential OAuth refresh loop that mints and
   # refreshes the access tokens delivered inline via `token_broker` sources
   # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute. Active only when ironControl.enabled.
+  # without this those jobs never execute. Active only when console.enabled.
   worker:
     enabled: true
     replicaCount: 1
@@ -122,6 +161,28 @@ overlay:
   mountPath: /app/overlay/org
   systemPrompt: ""
 
+# Ordered repo-cache-backed overlays. Each source repo is synced by repo-cache;
+# api-rs reads tools/workflows from /var/lib/centaur/repos, while sandboxes read
+# matching workflow/skill paths from /home/agent/github. Later sources shadow
+# earlier ones when names collide. When sources is empty, toolServer.repo and
+# toolServer.extraSources are mapped into this shape for compatibility.
+#
+# Subdirs default to the conventional layout — toolsSubdir: tools,
+# workflowsSubdir: workflows, skillsSubdir: .agents/skills — so most sources
+# only need `repo`; set `ref` to a branch, tag, or commit when you do not want
+# the repo's default branch. Directories missing from a repo are skipped at
+# runtime. Set a subdir to "" to explicitly disable that surface for a source.
+overlays:
+  sources: []
+  # - repo: paradigmxyz/centaur
+  #   ref: ""
+  # - repo: your-org/centaur-overlay
+  #   ref: main
+  # - repo: your-org/workflows-only
+  #   ref: main
+  #   toolsSubdir: ""
+  #   skillsSubdir: ""
+
 sandbox:
   controller: pod
   image:
@@ -140,12 +201,14 @@ sandbox:
   #                  subscription token (proxy injects the brokered credential).
   codexAuthMode: api_key
   claudeCodeAuthMode: api_key
-  # Which harness the sandbox runs: codex | amp | claudecode. Selects the
-  # iron-proxy auth fragment api-rs registers and must agree with the sandbox
-  # image's default CMD (services/sandbox/Dockerfile).
-  # NOTE: claudecode is a preview-463 dogfood default — flip back to codex
-  # (together with the Dockerfile CMD) before merging.
-  harnessEngine: claudecode
+  # The deployment's default harness: codex | amp | claudecode. Decides what
+  # warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
+  # fragment is required at startup (the other harnesses' fragments are
+  # registered too when available, so per-session --claude/--amp/--codex
+  # overrides keep working credentials). Per-session sandboxes always run
+  # their session's harness via container args; the sandbox image CMD only
+  # matters for containers started outside api-rs.
+  harnessEngine: codex
   extraEnv: {}
   stateVolume:
     enabled: false
@@ -217,6 +280,11 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 0
   sandboxWarmPoolReplenishIntervalSecs: 5
+  # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
+  # the max lifetime. 0 disables that sweep. Interval must be >= 1.
+  sandboxIdleStopTtlSecs: 10800 # 3 hours
+  sandboxMaxLifetimeSecs: 259200 # 3 days
+  sandboxReapIntervalSecs: 300
   ironProxy:
     mode: enabled
   metrics:
@@ -259,6 +327,25 @@ slackbotv2:
   assistantStatus: ""
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
+  extraEnv: {}
+  resources: {}
+
+# Discord chat ingress — mirrors slackbotv2, forwards to the api-rs control plane (:8080) over a
+# persistent Discord Gateway connection. Off by default; needs a Discord app + Message Content
+# Intent + a guild allowlist. Always exactly one replica (singleton Gateway session).
+discordbot:
+  enabled: false
+  image:
+    repository: centaur-discordbot
+    tag: latest
+    pullPolicy: Always
+  userName: centaur
+  # Comma/space-separated Discord guild IDs. The bot is INERT (ignores all messages) until set.
+  guildAllowlist: ""
+  # Comma/space-separated role IDs whose mentions also trigger the bot.
+  mentionRoleIds: ""
+  # Rename auto-created threads to the triggering message; set false to keep generic names.
+  nameThreads: true
   extraEnv: {}
   resources: {}
 

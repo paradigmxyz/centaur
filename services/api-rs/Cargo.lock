@@ -369,9 +369,11 @@ dependencies = [
  "jiff",
  "k8s-openapi",
  "kube",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -510,6 +512,7 @@ dependencies = [
  "centaur-session-core",
  "centaur-session-runtime",
  "centaur-session-sqlx",
+ "centaur-telemetry",
  "chrono",
  "chrono-tz",
  "cron",

@@ -20,8 +20,8 @@ pub use models::{
     AwsAuthSecretInput, BrokerCredentialInput, BrokerCredentialRecord, EffectiveConfig,
     EffectivePgDsn, EffectiveReplace, EffectiveSecret, GcpAuthSecretInput, Grant, GrantSecret,
     Grantee, HmacSecretHeader, HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput,
-    PgDsnSecretInput, Principal, Proxy, ProxyInput, ReplaceConfig, RequestRule, Role, SECRET_TYPES,
-    SecretRecord, SecretSource, StaticSecretInput,
+    PgDsnSecretInput, PgDsnSettingInput, PgDsnSettingValueFromInput, Principal, Proxy, ProxyInput,
+    ReplaceConfig, RequestRule, Role, SECRET_TYPES, SecretRecord, SecretSource, StaticSecretInput,
 };
 pub use principal::{PrincipalRef, derive_principal};
 pub use registry::{

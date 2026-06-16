@@ -1,0 +1,47 @@
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- if and $console.enabled $console.ingress.enabled }}
+# Optional Ingress for the console; the controller (Tailscale operator,
+# Cloudflare, ingress-nginx, ...) is installed separately and selected via
+# console.ingress.className. defaultBackend renders the single-backend
+# form some controllers (the Tailscale operator) require instead of host/path
+# rules.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "centaur.consoleName" . }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
+  {{- with $console.ingress.annotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $console.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if $console.ingress.defaultBackend }}
+  defaultBackend:
+    service:
+      name: {{ include "centaur.consoleName" . }}
+      port:
+        number: {{ $console.service.httpPort }}
+  {{- else }}
+  rules:
+    - {{- if $console.ingress.host }}
+      host: {{ $console.ingress.host | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "centaur.consoleName" . }}
+                port:
+                  number: {{ $console.service.httpPort }}
+  {{- end }}
+  {{- with $console.ingress.tls }}
+  tls:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
