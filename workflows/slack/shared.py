@@ -265,9 +265,7 @@ def _attachment_upsert_params(attachment: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-async def _replace_message_attachments_batch(
-    conn, rows: list[dict[str, Any]]
-) -> None:
+async def _replace_message_attachments_batch(conn, rows: list[dict[str, Any]]) -> None:
     """Replace attachment rows for a batch of observed Slack messages.
 
     Upserts every attachment across the batch with a single ``executemany`` and
@@ -400,6 +398,14 @@ def _message_upsert_params(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _dedupe_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse duplicate channel/message rows so attachment reconciliation is last-write-wins."""
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        by_key[(row["channel_id"], row["message_ts"])] = row
+    return list(by_key.values())
+
+
 async def upsert_messages(pool, rows: list[dict[str, Any]]) -> int:
     """Upsert Slack messages and replies by their channel-scoped Slack ts.
 
@@ -412,11 +418,12 @@ async def upsert_messages(pool, rows: list[dict[str, Any]]) -> int:
     """
     if not rows:
         return 0
-    message_params = [_message_upsert_params(row) for row in rows]
+    deduped_rows = _dedupe_message_rows(rows)
+    message_params = [_message_upsert_params(row) for row in deduped_rows]
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.executemany(_MESSAGE_UPSERT_SQL, message_params)
-            await _replace_message_attachments_batch(conn, rows)
+            await _replace_message_attachments_batch(conn, deduped_rows)
     return len(rows)
 
 

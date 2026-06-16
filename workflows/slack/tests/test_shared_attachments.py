@@ -184,7 +184,12 @@ def test_replace_message_attachments_batch_upserts_and_deletes_stale_rows():
     upsert_sql, upsert_args_list = conn.executemany_calls[0]
     assert "INSERT INTO slack_sync_message_attachments" in upsert_sql
     assert len(upsert_args_list) == 1
-    assert upsert_args_list[0][0:4] == ("C123", "1770000000.000300", "F123", "report.txt")
+    assert upsert_args_list[0][0:4] == (
+        "C123",
+        "1770000000.000300",
+        "F123",
+        "report.txt",
+    )
     assert upsert_args_list[0][13] == b"hello"
 
     assert len(conn.execute_calls) == 1
@@ -241,3 +246,48 @@ def test_upsert_messages_batches_writes_in_one_executemany():
     assert len(message_calls[0][1]) == 2
     assert message_calls[0][1][0][0:2] == ("C123", "1770000000.000300")
     assert message_calls[0][1][1][0:2] == ("C123", "1770000000.000400")
+
+
+def test_upsert_messages_dedupes_duplicate_message_keys_last_row_wins():
+    conn = FakeConn()
+    pool = FakePool(conn)
+    rows = [
+        shared.message_row(
+            {
+                "channel_id": "C123",
+                "timestamp": "1770000000.000500",
+                "text": "old",
+                "files": [{"id": "F-old", "name": "old.txt"}],
+            },
+            "run_123",
+        ),
+        shared.message_row(
+            {
+                "channel_id": "C123",
+                "timestamp": "1770000000.000500",
+                "text": "new",
+            },
+            "run_123",
+        ),
+    ]
+
+    count = asyncio.run(shared.upsert_messages(pool, rows))
+
+    assert count == 2
+    message_calls = [
+        call for call in conn.executemany_calls if "slack_sync_messages" in call[0]
+    ]
+    assert len(message_calls) == 1
+    assert len(message_calls[0][1]) == 1
+    assert message_calls[0][1][0][0:2] == ("C123", "1770000000.000500")
+    assert message_calls[0][1][0][10] == "new"
+
+    attachment_calls = [
+        call
+        for call in conn.executemany_calls
+        if "slack_sync_message_attachments" in call[0]
+    ]
+    assert attachment_calls == []
+    assert len(conn.execute_calls) == 1
+    _delete_sql, delete_args = conn.execute_calls[0]
+    assert delete_args == (["C123"], ["1770000000.000500"], [], [], [])
