@@ -1230,11 +1230,12 @@ async fn reconcile_schedules(
 ) -> Result<(), WorkflowRuntimeError> {
     for schedule in schedules.values().filter(|schedule| schedule.enabled) {
         let next_run_at = next_schedule_time(schedule, Utc::now())?;
-        spawn_schedule_tick(client, schedule, next_run_at).await?;
+        let spawned = ensure_schedule_tick(client, schedule, next_run_at).await?;
         info!(
             schedule_id = %schedule.schedule_id,
             workflow_name = %schedule.workflow_name,
             next_run_at = %next_run_at.to_rfc3339(),
+            spawned,
             "reconciled absurd workflow schedule"
         );
     }
@@ -1579,7 +1580,8 @@ async fn run_schedule_tick(
             },
         )
         .await?;
-    let next_run_at = next_schedule_time(&schedule, Utc::now()).map_err(absurd_error)?;
+    let next_run_at = next_schedule_time_after_tick(&schedule, input.scheduled_at, Utc::now())
+        .map_err(absurd_error)?;
     spawn_schedule_tick(&schedule_client, &schedule, next_run_at)
         .await
         .map_err(absurd_error)?;
@@ -1593,6 +1595,40 @@ async fn run_schedule_tick(
         "workflow_created": workflow_spawn.created,
         "next_run_at": next_run_at.to_rfc3339(),
     }))
+}
+
+async fn ensure_schedule_tick(
+    client: &Client,
+    schedule: &RegisteredWorkflowSchedule,
+    scheduled_at: DateTime<Utc>,
+) -> Result<bool, WorkflowRuntimeError> {
+    if has_active_schedule_tick(client, &schedule.schedule_id).await? {
+        return Ok(false);
+    }
+    spawn_schedule_tick(client, schedule, scheduled_at).await?;
+    Ok(true)
+}
+
+async fn has_active_schedule_tick(
+    client: &Client,
+    schedule_id: &str,
+) -> Result<bool, WorkflowRuntimeError> {
+    let (task_table, _) = absurd_queue_tables(WORKFLOW_SCHEDULE_QUEUE)?;
+    let row = sqlx::query(&format!(
+        r#"
+        select 1
+        from {task_table} t
+        where t.task_name = $1
+          and t.params->>'schedule_id' = $2
+          and t.state not in {ABSURD_TERMINAL_TASK_STATES}
+        limit 1
+        "#,
+    ))
+    .bind(WORKFLOW_SCHEDULE_TASK)
+    .bind(schedule_id)
+    .fetch_optional(client.pool())
+    .await?;
+    Ok(row.is_some())
 }
 
 async fn spawn_schedule_tick(
@@ -1625,6 +1661,49 @@ async fn spawn_schedule_tick(
         )
         .await?;
     Ok(())
+}
+
+fn next_schedule_time_after_tick(
+    schedule: &RegisteredWorkflowSchedule,
+    scheduled_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, WorkflowRuntimeError> {
+    match &schedule.kind {
+        WorkflowScheduleKind::Interval { interval_seconds } => {
+            if *interval_seconds == 0 {
+                return Err(WorkflowRuntimeError::BadRequest(format!(
+                    "invalid interval for schedule {:?}: interval_seconds must be > 0",
+                    schedule.schedule_id
+                )));
+            }
+            let interval = chrono::Duration::from_std(Duration::from_secs(*interval_seconds))
+                .map_err(|error| {
+                    WorkflowRuntimeError::BadRequest(format!(
+                        "invalid interval for schedule {:?}: {error}",
+                        schedule.schedule_id
+                    ))
+                })?;
+            let mut next = scheduled_at + interval;
+            if next <= now {
+                let elapsed =
+                    u64::try_from(now.signed_duration_since(scheduled_at).num_seconds().max(0))
+                        .unwrap_or(0);
+                let missed_intervals = (elapsed / *interval_seconds).saturating_add(1);
+                let skipped = chrono::Duration::from_std(Duration::from_secs(
+                    interval_seconds.saturating_mul(missed_intervals),
+                ))
+                .map_err(|error| {
+                    WorkflowRuntimeError::BadRequest(format!(
+                        "invalid interval for schedule {:?}: {error}",
+                        schedule.schedule_id
+                    ))
+                })?;
+                next = scheduled_at + skipped;
+            }
+            Ok(next)
+        }
+        WorkflowScheduleKind::Cron { .. } => next_schedule_time(schedule, now),
+    }
 }
 
 fn next_schedule_time(
@@ -2925,6 +3004,40 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc)
         );
+    }
+
+    #[test]
+    fn interval_tick_reschedules_from_scheduled_time_without_drift() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "slack_backfill",
+            "schedule_id": "slack_backfill",
+            "interval_seconds": 600,
+            "enabled": true,
+        }))
+        .unwrap();
+        let scheduled_at = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 5).unwrap();
+
+        let next = next_schedule_time_after_tick(&schedule, scheduled_at, now).unwrap();
+
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 16, 12, 10, 0).unwrap());
+    }
+
+    #[test]
+    fn interval_tick_skips_missed_runs_when_delayed() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "slack_backfill",
+            "schedule_id": "slack_backfill",
+            "interval_seconds": 600,
+            "enabled": true,
+        }))
+        .unwrap();
+        let scheduled_at = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 16, 12, 25, 0).unwrap();
+
+        let next = next_schedule_time_after_tick(&schedule, scheduled_at, now).unwrap();
+
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 16, 12, 30, 0).unwrap());
     }
 
     #[test]
