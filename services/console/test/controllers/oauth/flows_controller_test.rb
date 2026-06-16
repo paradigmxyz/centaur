@@ -14,10 +14,15 @@ module Oauth
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
+      Oauth::Providers::Slack.auth_test_http = ->(access_token:) {
+        assert_equal "xoxe.xoxp-1-user", access_token
+        { "ok" => true, "user" => "grace" }
+      }
     end
 
     teardown do
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
+      Oauth::Providers::Slack.auth_test_http = nil
     end
 
     class StubHTTP
@@ -203,12 +208,14 @@ module Oauth
       cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0R7MFMJM")
       assert_equal "acme", cred.namespace
       assert_equal "slack-slack-U0R7MFMJM", cred.foreign_id
+      assert_equal "Slack – grace", cred.name
       assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
       assert_nil cred.provider_email
       assert_equal %w[chat:write], cred.scopes
       assert_equal "xoxe.xoxp-1-user", cred.access_token
       assert_equal "xoxe-1-refresh", cred.refresh_token
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
+      assert_equal "Slack – grace token", cred.static_secret.name
     end
 
     test "callback wraps the minted credential in a grantable static secret" do
