@@ -14,17 +14,10 @@ module Oauth
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
-      Oauth::Providers::Slack.slack_api_http = ->(url:, access_token:, params:) {
-        assert_equal Oauth::Providers::Slack::AUTH_TEST_ENDPOINT, url
-        assert_equal "xoxe.xoxp-1-user", access_token
-        assert_empty params
-        { "ok" => true, "user" => "grace" }
-      }
     end
 
     teardown do
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
-      Oauth::Providers::Slack.slack_api_http = nil
     end
 
     class StubHTTP

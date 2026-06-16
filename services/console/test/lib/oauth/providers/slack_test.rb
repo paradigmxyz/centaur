@@ -36,12 +36,6 @@ module Oauth
       end
 
       test "uses Slack authed_user id when no id_token is returned for API scopes" do
-        Slack.slack_api_http = ->(url:, access_token:, params:) {
-          assert_equal "AT", access_token
-          assert_empty params
-          assert_equal Slack::AUTH_TEST_ENDPOINT, url
-          { "ok" => true, "user" => "grace" }
-        }
         result = result_with(
           claims: valid_claims,
           id_token: nil,
@@ -51,10 +45,10 @@ module Oauth
         identity = strategy.identity_from(result, client_id: CLIENT_ID)
         assert_equal "U12345", identity[:subject]
         assert_nil identity[:email]
-        assert_equal "grace", identity[:name]
+        assert_nil identity[:name]
       end
 
-      test "uses users.info profile when user scopes allow it" do
+      test "looks up users.info profile when user scopes allow it" do
         calls = []
         Slack.slack_api_http = ->(url:, access_token:, params:) {
           calls << [ url, params ]
@@ -76,16 +70,12 @@ module Oauth
             }
           end
         }
-        result = result_with(
-          claims: valid_claims,
-          id_token: nil,
-          scope: "users:read,users:read.email,channels:history",
-          response: { "authed_user" => { "id" => "U12345" } }
-        )
 
-        identity = strategy.identity_from(result, client_id: CLIENT_ID)
-        assert_equal "Grace Hopper", identity[:name]
-        assert_equal "grace@example.com", identity[:email]
+        profile = strategy.slack_profile(
+          "AT", "U12345", "users:read,users:read.email,channels:history"
+        )
+        assert_equal "Grace Hopper", profile[:name]
+        assert_equal "grace@example.com", profile[:email]
         assert_equal [ [ Slack::AUTH_TEST_ENDPOINT, {} ],
                        [ Slack::USERS_INFO_ENDPOINT, { "user" => "U12345" } ] ], calls
       end

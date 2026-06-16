@@ -89,6 +89,7 @@ module Oauth
       result = exchange_code(params[:code], flow["code_verifier"])
       identity = @provider.identity_from(result, client_id: @app.client_id)
       @credential = upsert_credential(state, result, identity)
+      enqueue_identity_enrichment(@credential)
 
       render_result(:success, identity: identity)
     rescue Broker::ExchangeError => e
@@ -192,6 +193,11 @@ module Oauth
 
     def identity_display_name(identity)
       identity[:name].presence || identity[:email].presence || identity[:subject]
+    end
+
+    def enqueue_identity_enrichment(credential)
+      return unless @app.provider == Oauth::Providers::Slack::KEY
+      Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
     end
 
     # Wraps a minted credential in a grantable static secret, so an operator can

@@ -41,11 +41,10 @@ module Oauth
       def identity_from(result, client_id:)
         user_id = result.response&.dig("authed_user", "id")
         if user_id.present?
-          profile = slack_profile(result.access_token, user_id, result.scope)
           return {
             subject: user_id,
-            email: result.response.dig("authed_user", "email").presence || profile[:email],
-            name: slack_user_name(result.response).presence || profile[:name]
+            email: result.response.dig("authed_user", "email"),
+            name: slack_user_name(result.response)
           }
         end
 
@@ -53,8 +52,6 @@ module Oauth
                                                  valid_issuers: VALID_ISSUERS)
                       .slice(:subject, :email, :name)
       end
-
-      private
 
       def slack_profile(access_token, user_id, scope)
         profile = {}
@@ -80,6 +77,8 @@ module Oauth
         profile
       end
 
+      private
+
       def slack_user_name(response)
         response.dig("authed_user", "name").presence ||
           response.dig("authed_user", "user").presence
@@ -95,7 +94,9 @@ module Oauth
         return nil if access_token.blank?
 
         if self.class.slack_api_http
-          return self.class.slack_api_http.call(url: url, access_token: access_token, params: params)
+          return self.class.slack_api_http.call(
+            url: url, access_token: access_token, params: params
+          )
         end
 
         uri = URI.parse(url)
