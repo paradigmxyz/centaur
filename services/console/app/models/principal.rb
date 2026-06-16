@@ -73,7 +73,7 @@ class Principal < ApplicationRecord
   # #served_credentials) has already dropped secrets without a deliverable source
   # and the losers of any cross-type conflict.
   def sync_secrets
-    served_credentials[:static].map(&:to_proxy_secret)
+    proxy_secrets_for(served_credentials)
   end
 
   # The `transforms` array delivered to iron-proxy: one gcp_auth transform per
@@ -83,15 +83,7 @@ class Principal < ApplicationRecord
   # Credentials that lost a cross-type conflict are omitted (see
   # #served_credentials).
   def sync_transforms
-    served = served_credentials
-    transforms = served[:gcp_auth].map(&:to_proxy_transform)
-    transforms += served[:aws_auth].map(&:to_proxy_transform)
-    transforms += served[:hmac].map(&:to_proxy_transform)
-
-    oauth_entries = served[:oauth].map(&:to_proxy_entry)
-    transforms << { "name" => "oauth_token", "config" => { "tokens" => oauth_entries } } if oauth_entries.any?
-
-    transforms
+    proxy_transforms_for(served_credentials)
   end
 
   # The top-level `postgres` array delivered to iron-proxy: one DSN entry per
@@ -111,9 +103,10 @@ class Principal < ApplicationRecord
   # var name, a secret_id, ...) that is configuration, not a live credential, so
   # it passes through untouched.
   def effective_config(redact_secrets: true)
+    served = served_credentials
     config = {
-      "secrets" => sync_secrets,
-      "transforms" => sync_transforms,
+      "secrets" => proxy_secrets_for(served),
+      "transforms" => proxy_transforms_for(served),
       "postgres" => sync_postgres
     }
     redact_secrets ? self.class.redact_live_secrets(config) : config
@@ -175,59 +168,113 @@ class Principal < ApplicationRecord
     }
   end
 
+  def proxy_secrets_for(served)
+    served[:static].map(&:to_proxy_secret)
+  end
+
+  def proxy_transforms_for(served)
+    transforms = served[:gcp_auth].map(&:to_proxy_transform)
+    transforms += served[:aws_auth].map(&:to_proxy_transform)
+    transforms += served[:hmac].map(&:to_proxy_transform)
+
+    oauth_entries = served[:oauth].map(&:to_proxy_entry)
+    transforms << { "name" => "oauth_token", "config" => { "tokens" => oauth_entries } } if oauth_entries.any?
+
+    transforms
+  end
+
   # Cross-type conflict resolution. The wire protocol applies the `secrets` array
   # (static secrets) before the `transforms` array (gcp_auth, aws_auth, hmac_sign,
   # oauth_token), so the proxy's last-transform-wins cannot let a direct static
   # secret beat a role-granted transform. We resolve it here instead: each
-  # credential claims the (host-or-cidr, header-or-param) pairs it writes;
-  # processing claimants strongest-first, any credential overlapping a pair a
+  # credential claims the host/cidr scopes and header/query params it writes;
+  # processing claimants strongest-first, any credential overlapping a claim a
   # stronger one already took is withheld. Strength is the effective grant
-  # priority (direct outranks role), tie-broken by newest id then class name so
-  # the outcome is deterministic and stable for config_hash.
+  # priority (direct outranks role). Same-priority conflicts are still emitted
+  # and left to proxy order, with id and class name only keeping config_hash
+  # stable.
   #
-  # Scope matching is exact-string: a wildcard host (`*.googleapis.com`) and an
-  # exact host (`storage.googleapis.com`) count as distinct, and method/path
-  # narrowing on a rule is ignored. This is conservative -- some genuine
-  # conflicts may still ship and be settled by proxy order -- rather than
-  # over-eager, so nothing legitimate is dropped.
+  # Host matching follows the proxy's wildcard behavior closely enough for
+  # conflict detection: exact hosts collide with matching wildcard hosts (for
+  # example `gmail.googleapis.com` and `*.googleapis.com`). Method/path narrowing
+  # on a rule is ignored. This may suppress credentials with disjoint paths, but
+  # it prevents a lower-priority transform from overwriting a higher-priority
+  # header at runtime.
   def suppressed_conflict_credentials(credentials)
     candidates = credentials.filter_map do |cred|
-      keys = conflict_keys_for(cred)
-      [ cred, keys ] unless keys.empty?
+      claims = conflict_claims_for(cred)
+      [ cred, claims ] unless claims.empty?
     end
 
     candidates.sort_by! do |cred, _keys|
       [ -cred.effective_priority.to_i, -cred.id, cred.class.name ]
     end
 
-    claimed = {}
+    claimed_by_target = Hash.new { |hash, target| hash[target] = [] }
     suppressed = []
-    candidates.each do |cred, keys|
-      if keys.any? { |key| claimed.key?(key) }
+    candidates.each do |cred, claims|
+      priority = cred.effective_priority.to_i
+      if claims.any? { |claim| stronger_claim_exists?(claim, priority, claimed_by_target) }
         suppressed << cred
       else
-        keys.each { |key| claimed[key] = true }
+        claims.each do |claim|
+          _scope, target = claim
+          claimed_by_target[target] << { claim: claim, priority: priority }
+        end
       end
     end
     suppressed
   end
 
-  # The [scope, target] pairs a credential writes: the cross product of the
+  # The [scope, target] claims a credential writes: the cross product of the
   # hosts/cidrs its rules match and the headers/params it injects. Empty when the
   # credential scopes nothing (no rules) or writes no header/param target, in
   # which case it never participates in a conflict.
-  def conflict_keys_for(cred)
+  def conflict_claims_for(cred)
     scopes = cred.rules.filter_map { |rule| conflict_scope(rule) }
     targets = cred.proxy_conflict_targets
     return [] if scopes.empty? || targets.empty?
     scopes.product(targets)
   end
 
+  def stronger_claim_exists?(claim, priority, claimed_by_target)
+    _scope, target = claim
+    claimed_by_target[target].any? do |prior|
+      prior[:priority] > priority && conflict_claims_overlap?(claim, prior[:claim])
+    end
+  end
+
   def conflict_scope(rule)
     if rule.host.present?
-      "host:#{rule.host.strip.downcase.delete_suffix(".")}"
+      { type: :host, value: rule.host.strip.downcase.delete_suffix(".") }
     elsif rule.cidr.present?
-      "cidr:#{rule.cidr}"
+      { type: :cidr, value: rule.cidr }
+    end
+  end
+
+  def conflict_claims_overlap?(claim, other_claim)
+    scope, target = claim
+    other_scope, other_target = other_claim
+    target == other_target && conflict_scopes_overlap?(scope, other_scope)
+  end
+
+  def conflict_scopes_overlap?(scope, other_scope)
+    return false unless scope[:type] == other_scope[:type]
+    return scope[:value] == other_scope[:value] if scope[:type] == :cidr
+
+    host_patterns_overlap?(scope[:value], other_scope[:value])
+  end
+
+  def host_patterns_overlap?(pattern, other_pattern)
+    return true if pattern == other_pattern
+    return true if pattern == "*" || other_pattern == "*"
+
+    labels = pattern.split(".")
+    other_labels = other_pattern.split(".")
+    return false unless labels.length == other_labels.length
+
+    labels.zip(other_labels).all? do |label, other_label|
+      label == "*" || other_label == "*" || label == other_label
     end
   end
 

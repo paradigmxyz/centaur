@@ -290,6 +290,23 @@ class PrincipalTest < ActiveSupport::TestCase
     secret
   end
 
+  def grant_direct_gcp(host:)
+    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
+                               credentials_provider: { "type" => "workload_identity" },
+                               scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
+                               created_by: users(:globex_admin))
+    secret.rules.build(host: host, position: 0)
+    secret.save!
+    Grant.create!(principal: principals(:globex_user), gcp_auth_secret: secret, created_by: users(:globex_admin))
+    secret
+  end
+
+  def grant_role_oauth(secret = oauth_token_secrets(:acme_gmail_oauth))
+    PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
+    Grant.create!(role: roles(:globex_infra), oauth_token_secret: secret, created_by: users(:globex_admin))
+    secret
+  end
+
   test "a direct static secret suppresses a role-granted transform on the same host and header" do
     grant_direct_static(host: "api.test.com", header: "Authorization")
     grant_role_gcp(host: "api.test.com")
@@ -317,15 +334,31 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
   end
 
-  test "exact and wildcard hosts are treated as distinct conflict scopes" do
-    # Conservative matching: a `*.test.com` rule does not collide with an exact
-    # `api.test.com` rule, so both ship and the proxy settles them by order.
+  test "same-priority credentials writing the same header on the same host both serve" do
+    grant_direct_static(host: "api.test.com", header: "Authorization")
+    grant_direct_gcp(host: "api.test.com")
+    principal = principals(:globex_user)
+
+    assert_equal 1, principal.sync_secrets.length
+    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+  end
+
+  test "a wildcard static secret suppresses a role-granted transform on a matching exact host" do
     grant_direct_static(host: "*.test.com", header: "Authorization")
     grant_role_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
     assert_equal 1, principal.sync_secrets.length
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+    assert_empty principal.sync_transforms, "the lower-priority role gcp_auth should be withheld"
+  end
+
+  test "a wildcard googleapis static secret suppresses oauth token entries on matching exact hosts" do
+    grant_direct_static(host: "*.googleapis.com", header: "Authorization")
+    grant_role_oauth
+    principal = principals(:globex_user)
+
+    assert_equal 1, principal.sync_secrets.length
+    assert_empty principal.sync_transforms, "the lower-priority google oauth_token should be withheld"
   end
 
   test "a promoted role transform suppresses a lower-priority direct static secret" do
