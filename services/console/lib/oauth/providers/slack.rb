@@ -1,7 +1,3 @@
-require "json"
-require "net/http"
-require "uri"
-
 module Oauth
   module Providers
     # Slack user-token consent-flow strategy. Uses Slack's standard OAuth v2
@@ -16,11 +12,6 @@ module Oauth
       IDENTITY_SCOPES = [].freeze
       API_HOSTS = %w[slack.com].freeze
       VALID_ISSUERS = %w[https://slack.com].freeze
-      AUTH_TEST_ENDPOINT = "https://slack.com/api/auth.test"
-
-      class << self
-        attr_accessor :auth_test_http
-      end
 
       def key = KEY
       def authorization_endpoint = AUTHORIZATION_ENDPOINT
@@ -43,7 +34,7 @@ module Oauth
           return {
             subject: user_id,
             email: result.response.dig("authed_user", "email"),
-            name: slack_user_name(result.access_token, result.response)
+            name: slack_user_name(result.response)
           }
         end
 
@@ -54,38 +45,9 @@ module Oauth
 
       private
 
-      def slack_user_name(access_token, response)
+      def slack_user_name(response)
         response.dig("authed_user", "name").presence ||
-          response.dig("authed_user", "user").presence ||
-          auth_test_user(access_token)
-      end
-
-      def auth_test_user(access_token)
-        return nil if access_token.blank?
-
-        response = if self.class.auth_test_http
-          self.class.auth_test_http.call(access_token: access_token)
-        else
-          perform_auth_test(access_token)
-        end
-        return nil unless response.is_a?(Hash) && response["ok"] == true
-        response["user"].presence
-      rescue StandardError
-        nil
-      end
-
-      def perform_auth_test(access_token)
-        uri = URI.parse(AUTH_TEST_ENDPOINT)
-        req = Net::HTTP::Post.new(uri)
-        req["Authorization"] = "Bearer #{access_token}"
-        req["Accept"] = "application/json"
-
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = uri.scheme == "https"
-        http.open_timeout = 5
-        http.read_timeout = 5
-
-        JSON.parse(http.request(req).body.to_s)
+          response.dig("authed_user", "user").presence
       end
     end
   end

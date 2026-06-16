@@ -14,15 +14,10 @@ module Oauth
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
-      Oauth::Providers::Slack.auth_test_http = ->(access_token:) {
-        assert_equal "xoxe.xoxp-1-user", access_token
-        { "ok" => true, "user" => "grace" }
-      }
     end
 
     teardown do
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
-      Oauth::Providers::Slack.auth_test_http = nil
     end
 
     class StubHTTP
@@ -59,6 +54,7 @@ module Oauth
         id_token: id_token_value,
         authed_user: {
           id: sub,
+          user: "grace",
           access_token: "xoxe.xoxp-1-user",
           refresh_token: "xoxe-1-refresh",
           expires_in: 43_200,

@@ -7,14 +7,6 @@ module Oauth
 
       def strategy = Slack.new
 
-      setup do
-        Slack.auth_test_http = nil
-      end
-
-      teardown do
-        Slack.auth_test_http = nil
-      end
-
       def result_with(claims:, scope: "openid,email,profile", **overrides)
         payload = Base64.urlsafe_encode64(claims.to_json, padding: false)
         id_token = "h.#{payload}.s"
@@ -36,10 +28,6 @@ module Oauth
       end
 
       test "uses Slack authed_user id when no id_token is returned for API scopes" do
-        Slack.auth_test_http = ->(access_token:) {
-          assert_equal "AT", access_token
-          { "ok" => true, "user" => "grace" }
-        }
         result = result_with(
           claims: valid_claims,
           id_token: nil,
@@ -49,15 +37,10 @@ module Oauth
         identity = strategy.identity_from(result, client_id: CLIENT_ID)
         assert_equal "U12345", identity[:subject]
         assert_nil identity[:email]
-        assert_equal "grace", identity[:name]
+        assert_nil identity[:name]
       end
 
-      test "uses Slack response name without calling auth.test" do
-        called = false
-        Slack.auth_test_http = ->(access_token:) {
-          called = true
-          { "ok" => true, "user" => "ignored" }
-        }
+      test "uses Slack response name when present" do
         result = result_with(
           claims: valid_claims,
           id_token: nil,
@@ -66,7 +49,6 @@ module Oauth
 
         identity = strategy.identity_from(result, client_id: CLIENT_ID)
         assert_equal "ada", identity[:name]
-        refute called
       end
 
       test "aud mismatch raises an oauth exchange error" do
