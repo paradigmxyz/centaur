@@ -44,7 +44,8 @@ use crate::{
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
-        ListWorkflowRunsQuery, OnHarnessConflict, SessionSseEvent, stream_error_sse,
+        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
+        SlackThreadContext, stream_error_sse,
     },
 };
 
@@ -85,7 +86,10 @@ pub fn build_router_with_session_and_workflow_runtime(
     Router::new()
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics))
-        .route("/api/session/{thread_key}", post(create_or_get_session))
+        .route(
+            "/api/session/{thread_key}",
+            post(create_or_get_session).get(get_session_context),
+        )
         .route(
             "/api/session/{thread_key}/messages",
             post(append_messages).layer(DefaultBodyLimit::disable()),
@@ -214,6 +218,39 @@ async fn create_or_get_session(
         session: outcome.session,
         harness_switched: outcome.harness_switched,
     }))
+}
+
+async fn get_session_context(
+    Path(raw_thread_key): Path<String>,
+) -> Result<Json<SessionContextResponse>, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    Ok(Json(SessionContextResponse {
+        slack: slack_thread_context(&thread_key),
+        thread_key,
+    }))
+}
+
+fn slack_thread_context(thread_key: &ThreadKey) -> Option<SlackThreadContext> {
+    let parts = thread_key.as_str().split(':').collect::<Vec<_>>();
+    let (channel_id, thread_ts) = match parts.as_slice() {
+        ["slack", channel_id, thread_ts] => (*channel_id, *thread_ts),
+        ["slack", _team_id, channel_id, thread_ts] => (*channel_id, *thread_ts),
+        [channel_id, thread_ts] if is_slack_conversation_id(channel_id) => {
+            (*channel_id, *thread_ts)
+        }
+        _ => return None,
+    };
+    if channel_id.is_empty() || thread_ts.is_empty() {
+        return None;
+    }
+    Some(SlackThreadContext {
+        channel_id: channel_id.to_owned(),
+        thread_ts: thread_ts.to_owned(),
+    })
+}
+
+fn is_slack_conversation_id(value: &str) -> bool {
+    matches!(value.as_bytes().first(), Some(b'C' | b'D' | b'G'))
 }
 
 async fn append_messages(

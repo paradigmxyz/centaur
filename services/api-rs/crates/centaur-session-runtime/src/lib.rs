@@ -1759,7 +1759,8 @@ impl SandboxWorkloadMode {
         match self {
             Self::MockAppServer { image } => SandboxSpec::new(image)
                 .command(["/bin/sh", "-lc"])
-                .args([mock_app_server_script()]),
+                .args([mock_app_server_script()])
+                .env("CENTAUR_HARNESS_TYPE", harness.as_ref()),
             Self::CodexAppServer {
                 image, env, mounts, ..
             } => {
@@ -1803,6 +1804,9 @@ fn sandbox_spec_key(spec: &SandboxSpec) -> String {
 
 fn mock_app_server_script() -> &'static str {
     r#"while IFS= read -r line; do
+model="$(printf '%s\n' "$line" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')"
+[ -n "$model" ] || model="unknown"
+harness="${CENTAUR_HARNESS_TYPE:-unknown}"
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
 sleep 0.2
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
@@ -1814,7 +1818,7 @@ while [ "$turn_index" -le 3 ]; do
   turn_id="mock-turn-$turn_index"
   printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
   sleep 0.2
-  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG %s"}\n' "$turn_id" "$turn_index"
+  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG model=%s harness=%s"}\n' "$turn_id" "$model" "$harness"
   sleep 0.2
   printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
   sleep 0.2
@@ -3865,7 +3869,7 @@ mod tests {
 
     #[test]
     fn redacts_sensitive_values_from_output_lines() {
-        let line = r#"{"type":"item.completed","item":{"aggregatedOutput":"Authorization: Bearer sbx1.threadpayload.signature\nCENTAUR_API_KEY=sbx1.otherpayload.othersig\nSLACK_BOT_TOKEN=xoxb-1234567890-abcdef\n"}}"#;
+        let line = r#"{"type":"item.completed","item":{"aggregatedOutput":"Authorization: Bearer sbx1.threadpayload.signature\nSANDBOX_TOKEN=sbx1.otherpayload.othersig\nSLACK_BOT_TOKEN=xoxb-1234567890-abcdef\n"}}"#;
 
         let redacted = redact_sensitive_text(line);
 
@@ -3873,7 +3877,7 @@ mod tests {
         assert!(!redacted.contains("sbx1.otherpayload.othersig"));
         assert!(!redacted.contains("xoxb-1234567890-abcdef"));
         assert!(redacted.contains("Authorization: Bearer [REDACTED_TOKEN]"));
-        assert!(redacted.contains("CENTAUR_API_KEY=[REDACTED_TOKEN]"));
+        assert!(redacted.contains("SANDBOX_TOKEN=[REDACTED_TOKEN]"));
         assert!(redacted.contains("SLACK_BOT_TOKEN=[REDACTED_TOKEN]"));
     }
 

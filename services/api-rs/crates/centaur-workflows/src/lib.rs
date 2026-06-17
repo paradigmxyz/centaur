@@ -2625,10 +2625,7 @@ async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRun
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/tools/{tool}/{method}");
     let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
-    let mut request = reqwest::Client::new().post(&url).json(&args);
-    if let Ok(api_key) = env::var("CENTAUR_API_KEY") {
-        request = request.header("x-api-key", api_key);
-    }
+    let request = reqwest::Client::new().post(&url).json(&args);
     let response = request.send().await?;
     let status = response.status();
     let body: Value = response.json().await.unwrap_or_else(|_| json!({}));

@@ -2298,6 +2298,8 @@ describe('slackbotv2', () => {
   })
 
   it('shows assistant status while waiting for slow session execute', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
 
@@ -2338,10 +2340,57 @@ describe('slackbotv2', () => {
     ).toEqual(['Thinking...'])
     expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
     expect(codexApi.eventRequests).toHaveLength(0)
+    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_started'))
+    expect(logData(logs, 'slackbotv2_handoff_started')).toEqual(
+      expect.objectContaining({
+        assistant_status_requested: true,
+        message_id: mention.ts,
+        mode: 'execute',
+        thread_id: threadKey(parent.ts),
+        trigger: 'new_mention'
+      })
+    )
+    expect(logData(logs, 'slackbotv2_assistant_status_started')).toEqual(
+      expect.objectContaining({
+        message_id: mention.ts,
+        operation: 'set',
+        thread_id: threadKey(parent.ts)
+      })
+    )
+    expect(logData(logs, 'slackbotv2_assistant_status_complete')).toEqual(
+      expect.objectContaining({
+        operation: 'set',
+        visible: true
+      })
+    )
+    expect(logData(logs, 'slackbotv2_handoff_sync_starting')).toEqual(
+      expect.objectContaining({
+        initial_assistant_status_visible: true,
+        trigger: 'new_mention'
+      })
+    )
+    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_started')).toEqual(
+      expect.objectContaining({
+        slack_channel: CHANNEL_ID,
+        slack_event_id: 'Ev-slackbotv2-slow-execute',
+        slack_event_type: 'app_mention',
+        slack_message_ts: mention.ts,
+        slack_thread_ts: parent.ts,
+        task_count: expect.any(Number)
+      })
+    )
 
     releaseExecute()
     const response = await responsePromise
     expect(response.status).toBe(200)
+    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_complete'))
+    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_complete')).toEqual(
+      expect.objectContaining({
+        phase_ms: expect.any(Number),
+        retryable_error_count: 0,
+        slack_event_id: 'Ev-slackbotv2-slow-execute'
+      })
+    )
     await waitFor(() => codexApi.eventRequests.length === 1)
     await waitFor(() => codexApi.streamCount === 1)
     codexApi.closeStreams()
@@ -2924,6 +2973,34 @@ function createTestBot(
     state: createMemoryState(),
     ...overrides
   })
+}
+
+type CapturedLog = {
+  data?: unknown
+  event: string
+  level: 'debug' | 'info' | 'warn' | 'error'
+}
+
+function captureLogger(
+  logs: CapturedLog[]
+): NonNullable<Parameters<typeof createSlackbotV2>[0]['logger']> {
+  const logger: NonNullable<Parameters<typeof createSlackbotV2>[0]['logger']> = {
+    debug: (event: string, data?: unknown) => logs.push({ data, event, level: 'debug' }),
+    info: (event: string, data?: unknown) => logs.push({ data, event, level: 'info' }),
+    warn: (event: string, data?: unknown) => logs.push({ data, event, level: 'warn' }),
+    error: (event: string, data?: unknown) => logs.push({ data, event, level: 'error' }),
+    child: () => logger
+  }
+  return logger
+}
+
+function hasLog(logs: CapturedLog[], event: string): boolean {
+  return logs.some(log => log.event === event)
+}
+
+function logData(logs: CapturedLog[], event: string): Record<string, unknown> | undefined {
+  const data = logs.find(log => log.event === event)?.data
+  return isRecord(data) ? data : undefined
 }
 
 function sampleCodexNotifications(answer: string): ServerNotification[] {

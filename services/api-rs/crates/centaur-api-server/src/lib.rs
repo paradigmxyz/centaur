@@ -141,6 +141,59 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    #[tokio::test]
+    async fn session_context_exposes_slack_channel_and_thread_ts() {
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let app = build_router_with_runtime(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/session/slack%3AC123%3A123.456")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["thread_key"], "slack:C123:123.456");
+        assert_eq!(body["slack"]["channel_id"], "C123");
+        assert_eq!(body["slack"]["thread_ts"], "123.456");
+    }
+
+    #[tokio::test]
+    async fn session_context_omits_slack_for_non_slack_thread_key() {
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let app = build_router_with_runtime(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/session/cli%3Atest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["thread_key"], "cli:test");
+        assert!(body.get("slack").is_none());
+    }
+
     #[derive(Default)]
     struct TestBackend {
         next_id: AtomicU64,

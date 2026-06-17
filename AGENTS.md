@@ -207,7 +207,7 @@ This means clients and the API never need to know about harness-specific quirks.
 
 **Sandbox → API** (REST over Kubernetes services):
 
-Agents call tools via `curl $CENTAUR_API_URL/tools/<tool>/<method>` over the in-cluster service network. Auth is via `CENTAUR_API_KEY` injected when the sandbox Pod is created.
+Agents call tools through the generated `centaur-tools` catalog and direct tool CLIs. The tool runtime handles routing and credential access.
 
 ### Network Isolation
 
@@ -459,7 +459,7 @@ The entrypoint supports persona overlays via `AGENT_PERSONA`. Persona prompts ar
 ### Sandbox Pod Config
 
 - Runs under Kubernetes NetworkPolicies with API reachable through the in-cluster service URL
-- Entrypoint injects `CENTAUR_API_URL` and `CENTAUR_API_KEY` env vars
+- Entrypoint injects the runtime URLs and tool catalog environment needed by the sandbox
 - Stub API keys so harnesses init in API-key mode (not browser login)
 - `HTTPS_PROXY` routes LLM calls through the firewall
 - Resource limits: 4GB memory, 2 CPUs
@@ -488,7 +488,7 @@ Sandbox Pods never see real API keys. The firewall (`services/firewall/addon.py`
 ## Security Model
 
 - **API auth**: All callers authenticate with DB-backed API keys (`aiv2_*` prefix, stored in `api_keys` table). Local in-cluster service calls use the configured bypass paths where applicable.
-- **Sandbox auth**: Sandbox Pods get auto-issued HMAC-signed tokens (`sbx1.*` prefix) minted by the API. These are short-lived (2h TTL) and scoped to `agent` + `tools:*`.
+- **Sandbox auth**: Sandbox Pods use the runtime's tool and workflow surfaces; agents should not depend on a user-visible Centaur API key.
 - **Slack**: HMAC-SHA256 signature verification on all webhooks
 - **Public edge**: The Helm chart exposes public routes only when configured through Ingress, HTTPRoute, or service settings.
 - **Sandbox isolation**: Pods get stub keys only; real keys injected by firewall proxy in-flight
@@ -504,12 +504,11 @@ All API authentication uses **DB-backed keys** stored in the `api_keys` Postgres
 | Type | Prefix | Issued by | Used by | Scopes |
 |------|--------|-----------|---------|--------|
 | DB keys | `aiv2_*` | Admin API | Slackbot, CLI, external callers | Per-key (e.g. `["*"]`, `["agent:execute"]`) |
-| Sandbox tokens | `sbx1.*` | API (automatic) | Sandbox containers → API tool calls | `["agent", "tools:*"]` |
 
 ### How services get their keys
 
 - **Slackbot**: `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and `SLACKBOT_API_KEY` are injected from the local infra Secret.
-- **Sandbox containers**: Auto-issued `sbx1.*` token injected as `CENTAUR_API_KEY` at container creation
+- **Sandbox containers**: Use runtime-provided tool CLIs and workflow context rather than a direct Centaur API key
 - **Local testing**: Use localhost bypass (no key needed from inside the API deployment), or create a key via admin API
 
 ## Secrets

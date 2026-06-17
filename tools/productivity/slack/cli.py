@@ -472,14 +472,19 @@ def users(
 
 @app.command()
 def upload(
-    channel: str = typer.Argument(..., help="Channel name (with or without #)"),
-    files: list[str] = typer.Argument(..., help="File path(s) to upload"),
+    target_or_file: str = typer.Argument(
+        ..., help="Channel name/ID, or file path when using the current Slack thread"
+    ),
+    files: list[str] = typer.Argument(
+        None, help="File path(s) to upload; omit channel to use current Slack thread"
+    ),
     comment: str = typer.Option(None, "--comment", "-c", help="Comment to post with files"),
     thread: str = typer.Option(None, "--thread", "-t", help="Thread timestamp to reply to"),
 ):
-    """Upload file(s) to a channel.
+    """Upload file(s) to Slack.
 
     Examples:
+        slack upload screenshot.png
         slack upload "#eng-ai" screenshot.png
         slack upload eng-ai file1.png file2.jpg -c "Here are the screenshots"
         slack upload eng-ai report.pdf --thread 1234567890.123456
@@ -489,7 +494,9 @@ def upload(
 
     from .client import upload_file
 
-    for file_path in files:
+    channel, upload_paths = _upload_target_and_files(target_or_file, files or [])
+
+    for file_path in upload_paths:
         path = Path(file_path)
         if not path.exists():
             console.print(f"[red]File not found: {file_path}[/]")
@@ -511,6 +518,17 @@ def upload(
         except RuntimeError as e:
             console.print(f"[red]Error uploading {path.name}: {e}[/]")
             raise typer.Exit(1)
+
+
+def _upload_target_and_files(target_or_file: str, files: list[str]) -> tuple[str | None, list[str]]:
+    """Return (channel, files), defaulting channel when the first arg is a file."""
+    from pathlib import Path
+
+    if Path(target_or_file).exists():
+        return None, [target_or_file, *files]
+    if not files:
+        return None, [target_or_file]
+    return target_or_file, files
 
 
 @app.command()
