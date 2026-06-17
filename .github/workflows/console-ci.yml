@@ -2,22 +2,52 @@ name: Console CI
 
 on:
   pull_request:
-    paths:
-      - services/console/**
-      - .github/workflows/console-ci.yml
   push:
     branches: [ main ]
-    paths:
-      - services/console/**
-      - .github/workflows/console-ci.yml
 
 defaults:
   run:
     working-directory: services/console
 
 jobs:
+  console_changes:
+    name: Detect Console CI changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: filter
+        name: Detect changed paths
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            changed_files="$(git diff --name-only "${base}...HEAD")"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            changed_files="$(git diff --name-only "${{ github.event.before }}...HEAD")"
+          else
+            git fetch --no-tags --depth=1 origin main
+            changed_files="$(git diff --name-only origin/main...HEAD)"
+          fi
+
+          if printf '%s\n' "${changed_files}" | grep -Eq '^(services/console/|\.github/workflows/console-ci\.yml$)'; then
+            echo "relevant=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "relevant=false" >>"${GITHUB_OUTPUT}"
+          fi
+
   scan_ruby:
     runs-on: depot-ubuntu-24.04-16
+    needs: console_changes
+    if: needs.console_changes.outputs.relevant == 'true'
 
     steps:
       - name: Checkout code
@@ -37,6 +67,8 @@ jobs:
 
   scan_js:
     runs-on: depot-ubuntu-24.04-16
+    needs: console_changes
+    if: needs.console_changes.outputs.relevant == 'true'
 
     steps:
       - name: Checkout code
@@ -53,6 +85,8 @@ jobs:
 
   lint:
     runs-on: depot-ubuntu-24.04-16
+    needs: console_changes
+    if: needs.console_changes.outputs.relevant == 'true'
     env:
       RUBOCOP_CACHE_ROOT: ${{ github.workspace }}/services/console/tmp/rubocop
     steps:
@@ -80,6 +114,8 @@ jobs:
 
   test:
     runs-on: depot-ubuntu-24.04-16
+    needs: console_changes
+    if: needs.console_changes.outputs.relevant == 'true'
 
     services:
       postgres:
@@ -118,6 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - console_changes
       - scan_ruby
       - scan_js
       - lint

@@ -13,9 +13,77 @@ permissions:
   contents: read
 
 jobs:
+  ci_changes:
+    name: Detect CI changes
+    runs-on: ubuntu-latest
+    outputs:
+      migration_order: ${{ steps.filter.outputs.migration_order }}
+      rust_api: ${{ steps.filter.outputs.rust_api }}
+      slackbotv2_tests: ${{ steps.filter.outputs.slackbotv2_tests }}
+      discordbot_checks: ${{ steps.filter.outputs.discordbot_checks }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: filter
+        name: Detect changed paths
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            changed_files="$(git diff --name-only "${base}...HEAD")"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            changed_files="$(git diff --name-only "${{ github.event.before }}...HEAD")"
+          else
+            git fetch --no-tags --depth=1 origin main
+            changed_files="$(git diff --name-only origin/main...HEAD)"
+          fi
+
+          matches() {
+            local pattern
+            for pattern in "$@"; do
+              if printf '%s\n' "${changed_files}" | grep -Eq "${pattern}"; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          set_output() {
+            local name="$1"
+            shift
+            if matches "$@"; then
+              echo "${name}=true" >>"${GITHUB_OUTPUT}"
+            else
+              echo "${name}=false" >>"${GITHUB_OUTPUT}"
+            fi
+          }
+
+          set_output migration_order \
+            '^services/api-rs/crates/centaur-session-sqlx/migrations/' \
+            '^services/console/db/migrate/' \
+            '^\.github/scripts/check-migration-order\.sh$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output rust_api \
+            '^services/api-rs/' \
+            '^\.github/workflows/ci\.yml$'
+          set_output slackbotv2_tests \
+            '^services/slackbotv2/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output discordbot_checks \
+            '^services/discordbot/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+
   migration-order:
     name: Migration order
     runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.migration_order == 'true'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -28,6 +96,8 @@ jobs:
   rust-api:
     name: Rust API fmt, clippy, and tests
     runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.rust_api == 'true'
     services:
       postgres:
         image: postgres:17
@@ -132,6 +202,8 @@ jobs:
   slackbotv2-tests:
     name: Slackbot v2 tests
     runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.slackbotv2_tests == 'true'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -158,6 +230,8 @@ jobs:
   discordbot-checks:
     name: Discordbot typecheck and tests
     runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.discordbot_checks == 'true'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -192,6 +266,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - ci_changes
       - migration-order
       - rust-api
       - slackbotv2-tests
