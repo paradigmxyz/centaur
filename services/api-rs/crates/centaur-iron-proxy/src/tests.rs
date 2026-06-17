@@ -77,11 +77,11 @@ fn shipped_proxy_allowlist_preserves_railway_project_tokens() {
         .iter()
         .find(|transform| transform["name"].as_str() == Some("header_allowlist"))
         .unwrap();
-    let headers = header_allowlist["config"]["headers"]
-        .as_sequence()
-        .unwrap();
+    let headers = header_allowlist["config"]["headers"].as_sequence().unwrap();
 
-    assert!(headers
-        .iter()
-        .any(|header| header.as_str() == Some("project-access-token")));
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.as_str() == Some("project-access-token"))
+    );
 }
