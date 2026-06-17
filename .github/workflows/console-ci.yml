@@ -17,7 +17,7 @@ defaults:
 
 jobs:
   scan_ruby:
-    runs-on: depot-ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
 
     steps:
       - name: Checkout code
@@ -36,7 +36,7 @@ jobs:
         run: bin/bundler-audit
 
   scan_js:
-    runs-on: depot-ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
 
     steps:
       - name: Checkout code
@@ -52,7 +52,7 @@ jobs:
         run: bin/importmap audit
 
   lint:
-    runs-on: depot-ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
     env:
       RUBOCOP_CACHE_ROOT: ${{ github.workspace }}/services/console/tmp/rubocop
     steps:
@@ -79,7 +79,7 @@ jobs:
         run: bin/rubocop -f github
 
   test:
-    runs-on: depot-ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
 
     services:
       postgres:

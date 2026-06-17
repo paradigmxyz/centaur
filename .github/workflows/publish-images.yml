@@ -42,7 +42,7 @@ jobs:
   # arm64 is only built on pushes to main and release tags — PR and manual
   # dispatch builds stay amd64-only to keep iteration fast.
   build:
-    runs-on: ${{ matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm' || 'depot-ubuntu-latest' }}
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm-16' || 'depot-ubuntu-24.04-16' }}
     strategy:
       fail-fast: false
       matrix:
@@ -146,7 +146,7 @@ jobs:
           retention-days: 1
 
   merge:
-    runs-on: depot-ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
     needs: build
     if: ${{ !github.event.pull_request.head.repo.fork }}
     strategy:
