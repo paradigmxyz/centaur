@@ -2385,6 +2385,16 @@ mod tests {
                                 ..Default::default()
                             }),
                             rules: vec![serde_yaml::from_str("{host: api.tool.test}").unwrap()],
+                            extra: BTreeMap::from([(
+                                "labels".to_owned(),
+                                serde_yaml::from_str(
+                                    r#"
+centaur-tool: tool
+centaur-tool-overlay: overlay
+"#,
+                                )
+                                .unwrap(),
+                            )]),
                             ..Default::default()
                         }],
                         ..Default::default()
@@ -2413,6 +2423,10 @@ mod tests {
                         .as_ref()
                         .and_then(|replace| replace.proxy_value.as_deref())
                         == Some("TOOL_API_KEY")
+                    && secret.extra.get("labels").is_some_and(|labels| {
+                        labels["centaur-tool"].as_str() == Some("tool")
+                            && labels["centaur-tool-overlay"].as_str() == Some("overlay")
+                    })
             })
         }));
     }
