@@ -267,6 +267,33 @@ pub struct WorkflowWebhookSpec {
     pub allowed_methods: Vec<String>,
     #[serde(default = "default_webhook_content_types")]
     pub allowed_content_types: Vec<String>,
+    /// Optional edge pre-filter. When set, the API evaluates it against the
+    /// parsed event (headers + JSON body) and only creates a workflow run when
+    /// it matches. This keeps org-wide webhooks from spawning a sandbox per event.
+    #[serde(default)]
+    pub filter: Option<WebhookFilter>,
+}
+
+/// A declarative webhook pre-filter, evaluated in-process before a run is
+/// created. A node is either a boolean combinator (`any`/`all`) or a leaf that
+/// reads a `header` or a dot-path into the JSON `body` and applies `op`
+/// (`equals` | `in` | `contains` | `prefix`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WebhookFilter {
+    #[serde(default)]
+    pub any: Option<Vec<WebhookFilter>>,
+    #[serde(default)]
+    pub all: Option<Vec<WebhookFilter>>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub op: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub values: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1237,6 +1264,7 @@ fn default_workflow_webhooks() -> Vec<RegisteredWorkflowWebhook> {
                     "application/json".to_owned(),
                     "application/x-www-form-urlencoded".to_owned(),
                 ],
+                filter: None,
             },
         },
         RegisteredWorkflowWebhook {
@@ -1256,6 +1284,7 @@ fn default_workflow_webhooks() -> Vec<RegisteredWorkflowWebhook> {
                     "application/json".to_owned(),
                     "application/x-www-form-urlencoded".to_owned(),
                 ],
+                filter: None,
             },
         },
         RegisteredWorkflowWebhook {
@@ -1270,6 +1299,7 @@ fn default_workflow_webhooks() -> Vec<RegisteredWorkflowWebhook> {
                 trigger_key: None,
                 allowed_methods: vec!["POST".to_owned()],
                 allowed_content_types: vec!["application/json".to_owned()],
+                filter: None,
             },
         },
     ]
@@ -3669,6 +3699,55 @@ mod tests {
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
         );
+    }
+
+    #[test]
+    fn discovery_metadata_preserves_webhook_filter() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [
+                {
+                    "workflow_name": "github_issue_triage",
+                    "source_path": "workflows/github_issue_triage.py",
+                    "webhooks": [
+                        {
+                            "workflow_name": "github_issue_triage",
+                            "source_path": "workflows/github_issue_triage.py",
+                            "spec": {
+                                "slug": "github-issue-triage",
+                                "auth": {
+                                    "type": "github",
+                                    "secret_ref": "GITHUB_WEBHOOK_SECRET"
+                                },
+                                "filter": {
+                                    "all": [
+                                        {
+                                            "source": "header",
+                                            "key": "x-github-event",
+                                            "op": "equals",
+                                            "value": "issue_comment"
+                                        },
+                                        {
+                                            "source": "body",
+                                            "key": "repository.full_name",
+                                            "op": "in",
+                                            "values": ["ethereum-optimism/optimism"]
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    ]
+                }
+            ],
+        }))
+        .unwrap();
+
+        let metadata = metadata_from_discovery_payload(payload);
+        let filter = metadata.webhooks[0].spec.filter.as_ref().unwrap();
+        let all = filter.all.as_ref().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].source.as_deref(), Some("header"));
+        assert_eq!(all[1].key.as_deref(), Some("repository.full_name"));
     }
 
     #[test]
