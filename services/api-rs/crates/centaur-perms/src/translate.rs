@@ -42,6 +42,7 @@ fn rules_from_hosts(hosts: &[String]) -> Vec<RequestRule> {
 
 /// Translate every secret declared by a tool into iron-control inputs to grant
 /// to the tool's role (`role_foreign_id`, e.g. `tool-github`).
+#[cfg(test)]
 pub fn translate(
     namespace: &str,
     role_foreign_id: &str,
