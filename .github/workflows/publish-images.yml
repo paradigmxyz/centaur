@@ -42,10 +42,6 @@ jobs:
   # arm64 is only built on pushes to main and release tags — PR and manual
   # dispatch builds stay amd64-only to keep iteration fast.
   build:
-    permissions:
-      contents: read
-      packages: write
-      pull-requests: write
     runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
@@ -127,12 +123,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # Tags are applied by the merge job on the multi-arch manifest;
           # per-arch builds are pushed by digest only. Fork PRs run with a
-          # read-only GITHUB_TOKEN, so they build without pushing. Fork PRs
-          # load the api-rs amd64 image into Docker directly; same-repo PRs
-          # and pushes pull the pushed digest for the API integration test.
-          outputs: |
-            type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
-            ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' && github.event.pull_request.head.repo.fork && 'type=docker,name=centaur-api-rs:integration-test' || '' }}
+          # read-only GITHUB_TOKEN, so they build without pushing.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
           build-args: |
             RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
           cache-from: |
@@ -143,152 +135,6 @@ jobs:
           cache-to: |
             ${{ !github.event.pull_request.head.repo.fork && format('type=registry,ref={0}/{1}/{2}:buildcache-{3},mode=max', env.REGISTRY, env.IMAGE_NAMESPACE, matrix.image, env.PLATFORM_SLUG) || '' }}
             type=gha,mode=max,scope=${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
-
-      - name: Load API image for integration test
-        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' && !github.event.pull_request.head.repo.fork }}
-        run: |
-          image="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
-          docker pull "$image"
-          docker tag "$image" centaur-api-rs:integration-test
-
-      - name: Set up Rust for API integration test
-        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: stable
-
-      - name: Cache Rust for API integration test
-        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: services/api-rs
-
-      - name: Start API integration test dependencies
-        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        run: |
-          docker network create centaur-api-integration-test
-          docker run --detach --name centaur-api-integration-test-postgres \
-            --network centaur-api-integration-test \
-            --env POSTGRES_USER=postgres \
-            --env POSTGRES_PASSWORD=postgres \
-            --env POSTGRES_DB=centaur \
-            paradedb/paradedb:0.23.0-pg16 \
-            -c shared_preload_libraries=pg_search,pg_cron \
-            -c max_connections=500
-          for attempt in {1..60}; do
-            if docker exec centaur-api-integration-test-postgres pg_isready -U postgres -d centaur; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs centaur-api-integration-test-postgres
-          exit 1
-
-      - name: Prepare API integration workflow overlay
-        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        run: |
-          workflow_dir="$RUNNER_TEMP/api-integration-workflows"
-          mkdir -p "$workflow_dir"
-          echo "API_INTEGRATION_WORKFLOW_DIR=$workflow_dir" >> "$GITHUB_ENV"
-
-      - name: Start API image
-        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        run: |
-          docker run --detach --name centaur-api-integration-test \
-            --network centaur-api-integration-test \
-            --publish 127.0.0.1:18080:8080 \
-            --volume "$API_INTEGRATION_WORKFLOW_DIR:/tmp/centaur-api-integration-workflows" \
-            --env DATABASE_URL=postgres://postgres:postgres@centaur-api-integration-test-postgres:5432/centaur \
-            --env RUN_MIGRATIONS=true \
-            --env BIND_ADDR=0.0.0.0:8080 \
-            --env WORKFLOW_DIRS=/tmp/centaur-api-integration-workflows \
-            --env WORKFLOW_RECONCILE_INTERVAL_SECS=1 \
-            --env WORKFLOW_REAP_REMOVED_AFTER_TICKS=1 \
-            --env WORKFLOW_HOST_SANDBOX=false \
-            --env RUST_LOG=info \
-            centaur-api-rs:integration-test
-
-      - name: Run API integration test
-        if: ${{ matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        working-directory: services/api-rs
-        env:
-          API_INTEGRATION_TEST_REPORT: ${{ runner.temp }}/api-integration-test-report.md
-          API_INTEGRATION_TEST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          CENTAUR_API_URL: http://127.0.0.1:18080
-        run: cargo run --locked -p centaur-api-integration-test
-
-      - name: Comment API integration test results
-        if: ${{ always() && matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
-        continue-on-error: true
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
-        env:
-          API_INTEGRATION_TEST_REPORT: ${{ runner.temp }}/api-integration-test-report.md
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const fs = require('node:fs')
-
-            const marker = '<!-- centaur-api-integration-test-results -->'
-            const reportPath = process.env.API_INTEGRATION_TEST_REPORT
-            let report = ''
-            try {
-              report = fs.readFileSync(reportPath, 'utf8')
-            } catch (error) {
-              console.log(`No API integration test report found at ${reportPath}: ${error.message}`)
-            }
-
-            if (!report.trim()) {
-              const sourceUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/blob/${process.env.SOURCE_SHA}/services/api-rs/crates/centaur-api-integration-test/src/main.rs#L15`
-              report = [
-                '| Test | Result |',
-                '| --- | --- |',
-                `| [API integration test command](${sourceUrl}) | Failed |`,
-                ''
-              ].join('\n')
-            }
-
-            const body = `${marker}\n\n### API integration test results\n\n${report}`
-            const issueNumber = context.payload.pull_request.number
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-            })
-            const existingComment = comments.find(comment =>
-              comment.user?.login === 'github-actions[bot]' &&
-              comment.body?.includes(marker)
-            )
-
-            if (existingComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existingComment.id,
-                body,
-              })
-              console.log('Updated API integration test results comment')
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body,
-              })
-              console.log('Created API integration test results comment')
-            }
-
-      - name: Dump API integration test logs
-        if: ${{ failure() && matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        run: |
-          docker logs centaur-api-integration-test || true
-          docker logs centaur-api-integration-test-postgres || true
-
-      - name: Cleanup API integration test containers
-        if: ${{ always() && matrix.service == 'api-rs' && matrix.platform == 'linux/amd64' }}
-        run: |
-          docker rm -f centaur-api-integration-test centaur-api-integration-test-postgres || true
-          docker network rm centaur-api-integration-test || true
 
       - name: Export digest
         if: ${{ !github.event.pull_request.head.repo.fork }}

@@ -263,7 +263,7 @@ async fn test_session_turn(http: &HttpClient, base_url: &str) -> Result<()> {
             "harness_type": HarnessType::Codex,
             "metadata": {
                     "source": "centaur-api-integration-test",
-                    "purpose": "container-api-integration-test",
+                    "purpose": "api-integration-test",
             },
             "on_harness_conflict": "restart",
         }),
