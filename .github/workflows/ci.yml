@@ -28,6 +28,19 @@ jobs:
   rust-api:
     name: Rust API fmt, clippy, and tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -52,6 +65,8 @@ jobs:
 
       - name: Test
         working-directory: services/api-rs
+        env:
+          SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test --workspace
 
       - name: Start API integration test dependencies

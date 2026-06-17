@@ -28,6 +28,35 @@ def _load_shared():
     return importlib.import_module("workflows.slack.shared")
 
 
+def _load_backfill():
+    api_module = sys.modules.setdefault("api", types.ModuleType("api"))
+
+    vm_metrics = types.ModuleType("api.vm_metrics")
+    for name in (
+        "record_etl_items_deleted",
+        "record_etl_items_enqueued",
+        "record_etl_items_failed",
+        "record_etl_items_seen",
+        "record_etl_items_upserted",
+        "set_etl_backfill_job_age_seconds",
+        "set_etl_backfill_jobs",
+    ):
+        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
+    api_module.vm_metrics = vm_metrics
+    sys.modules["api.vm_metrics"] = vm_metrics
+
+    workflow_engine = types.ModuleType("api.workflow_engine")
+
+    class WorkflowContext:
+        pass
+
+    workflow_engine.WorkflowContext = WorkflowContext
+    api_module.workflow_engine = workflow_engine
+    sys.modules["api.workflow_engine"] = workflow_engine
+
+    return importlib.import_module("workflows.slack.backfill")
+
+
 shared = _load_shared()
 
 
@@ -149,6 +178,132 @@ class FakePool:
                 return False
 
         return _Acquire()
+
+
+class FakeExecutePool:
+    def __init__(self) -> None:
+        self.execute_calls: list[tuple] = []
+
+    async def execute(self, sql, *args):
+        self.execute_calls.append((sql, args))
+
+
+def test_permanent_slack_backfill_error_classifier():
+    assert shared.is_permanent_slack_backfill_error(
+        "Slack API error: thread_not_found"
+    )
+    assert shared.is_permanent_slack_backfill_error(
+        "Slack API error: channel_not_found"
+    )
+    assert not shared.is_permanent_slack_backfill_error(
+        "Slack API error: rate_limited"
+    )
+    assert not shared.is_permanent_slack_backfill_error("database write failed")
+
+
+def test_mark_backfill_job_terminal_skipped_completes_without_retry():
+    pool = FakeExecutePool()
+
+    asyncio.run(
+        shared.mark_backfill_job_terminal_skipped(
+            pool,
+            job_id=123,
+            run_id="run_123",
+            error="Slack API error: thread_not_found",
+        )
+    )
+
+    assert len(pool.execute_calls) == 1
+    sql, args = pool.execute_calls[0]
+    assert "status = 'completed'" in sql
+    assert "terminal_skip_reason" in sql
+    assert "terminal_skip_at" in sql
+    assert "last_error = ''" in sql
+    assert args == (123, "run_123", "Slack API error: thread_not_found")
+
+
+def test_backfill_handler_terminally_skips_permanent_slack_errors(monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.setenv("SLACK_BACKFILL_ENABLED", "true")
+    backfill = _load_backfill()
+    calls: dict[str, list] = {
+        "finish": [],
+        "terminal_skip": [],
+        "failure_metrics": [],
+    }
+
+    class FakeClient:
+        def _etl_access_mode(self):
+            return "test"
+
+        def _get_etl_thread_replies_page(self, *_args, **_kwargs):
+            raise RuntimeError("Slack API error: thread_not_found")
+
+    class FakeContext:
+        run_id = "wfr_123"
+        _pool = object()
+
+        def __init__(self) -> None:
+            self.logs: list[tuple] = []
+
+        def log(self, name, **fields):
+            self.logs.append((name, fields))
+
+    async def fake_claim_jobs(_pool, _limit):
+        return [
+            {
+                "job_id": 123,
+                "job_key": "thread_refresh:C123:1770000000.000100",
+                "job_type": shared.BACKFILL_JOB_THREAD_REFRESH,
+                "payload_version": shared.BACKFILL_JOB_PAYLOAD_VERSION,
+                "channel_id": "C123",
+                "payload_json": {"thread_ts": "1770000000.000100"},
+                "priority": 200,
+                "attempt_count": 1,
+            }
+        ]
+
+    async def fake_noop(*_args, **_kwargs):
+        return None
+
+    async def fake_record_finish(_pool, **kwargs):
+        calls["finish"].append(kwargs)
+
+    async def fake_terminal_skip(_pool, **kwargs):
+        calls["terminal_skip"].append(kwargs)
+
+    monkeypatch.setattr(backfill, "_emit_backfill_job_metrics", fake_noop)
+    monkeypatch.setattr(backfill, "claim_backfill_jobs", fake_claim_jobs)
+    monkeypatch.setattr(backfill, "shared_client", lambda: FakeClient())
+    monkeypatch.setattr(backfill, "record_run_start", fake_noop)
+    monkeypatch.setattr(backfill, "record_run_finish", fake_record_finish)
+    monkeypatch.setattr(
+        backfill, "mark_backfill_job_terminal_skipped", fake_terminal_skip
+    )
+    monkeypatch.setattr(
+        backfill,
+        "record_etl_items_failed",
+        lambda *args, **kwargs: calls["failure_metrics"].append((args, kwargs)),
+    )
+
+    ctx = FakeContext()
+    result = asyncio.run(backfill.handler(backfill.Input(channel_batch_limit=1), ctx))
+
+    assert result["status"] == "completed"
+    assert result["channels_skipped"] == 1
+    assert result["channels_failed"] == 0
+    assert calls["failure_metrics"] == []
+    assert calls["terminal_skip"] == [
+        {
+            "job_id": 123,
+            "run_id": "slack_sync_wfr_123",
+            "error": "Slack API error: thread_not_found",
+        }
+    ]
+    assert calls["finish"][0]["status"] == "completed"
+    assert len(calls["finish"][0]["skipped"]) == 1
+    assert calls["finish"][0]["failed"] == []
+    assert any(name == "slack_backfill_job_terminal_skipped" for name, _ in ctx.logs)
 
 
 def test_replace_message_attachments_batch_upserts_and_deletes_stale_rows():

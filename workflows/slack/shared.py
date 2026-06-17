@@ -29,6 +29,10 @@ BACKFILL_JOB_TYPES = (
     BACKFILL_JOB_THREAD_REFRESH,
 )
 BACKFILL_JOB_STATUSES = ("pending", "running", "completed", "failed")
+PERMANENT_SLACK_BACKFILL_ERRORS = (
+    "channel_not_found",
+    "thread_not_found",
+)
 
 
 def positive_int(value: int | str | None, default: int) -> int:
@@ -343,6 +347,15 @@ def failure_reason(error: str) -> str:
     if "write" in lowered or "database" in lowered or "postgres" in lowered:
         return "write_error"
     return "unknown_error"
+
+
+def is_permanent_slack_backfill_error(error: str) -> bool:
+    """Return whether a Slack backfill error should terminally skip the job."""
+    lowered = error.lower()
+    return any(
+        f"slack api error: {error_code}" in lowered
+        for error_code in PERMANENT_SLACK_BACKFILL_ERRORS
+    )
 
 
 _MESSAGE_UPSERT_SQL = (
@@ -1578,6 +1591,32 @@ async def mark_backfill_job_failed(
     await pool.execute(
         "UPDATE slack_sync_backfill_jobs SET "
         "status = 'failed', last_run_id = $2, last_error = $3, updated_at = NOW() "
+        "WHERE job_id = $1",
+        job_id,
+        run_id,
+        error,
+    )
+
+
+async def mark_backfill_job_terminal_skipped(
+    pool,
+    *,
+    job_id: int,
+    run_id: str,
+    error: str,
+) -> None:
+    """Mark a permanently unrefreshable backfill job terminal without retrying."""
+    await pool.execute(
+        "UPDATE slack_sync_backfill_jobs SET "
+        "status = 'completed', "
+        "last_run_id = $2, "
+        "payload_json = COALESCE(payload_json, '{}'::jsonb) || jsonb_build_object("
+        "    'terminal_skip_reason', $3::text, "
+        "    'terminal_skip_at', NOW()::text"
+        "), "
+        "last_completed_at = NOW(), "
+        "last_error = '', "
+        "updated_at = NOW() "
         "WHERE job_id = $1",
         job_id,
         run_id,
