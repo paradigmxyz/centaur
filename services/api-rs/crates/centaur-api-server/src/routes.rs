@@ -29,8 +29,8 @@ use centaur_telemetry::{
     record_http_request_started,
 };
 use centaur_workflows::{
-    CreateWorkflowRunRequest, WorkflowRuntime, WorkflowWebhookAuth, WorkflowWebhookSpec,
-    WorkflowWebhookTriggerKey,
+    CreateWorkflowRunRequest, WebhookFilter, WorkflowRuntime, WorkflowWebhookAuth,
+    WorkflowWebhookSpec, WorkflowWebhookTriggerKey,
 };
 use futures_util::{Stream, StreamExt};
 use hmac::{Hmac, Mac};
@@ -408,6 +408,18 @@ async fn invoke_workflow_webhook(
 
     let raw_body_sha256 = hex::encode(Sha256::digest(&raw_body));
     let body = parse_webhook_body(&headers, &raw_body)?;
+
+    // Edge pre-filter: drop events no handler could match, in-process, before
+    // spawning a sandbox-backed run. Keeps org-wide webhooks cheap.
+    if let Some(filter) = &spec.filter {
+        if !webhook_filter_matches(filter, &headers, &body) {
+            return Ok((
+                StatusCode::OK,
+                Json(json!({ "ok": true, "filtered": true })),
+            ));
+        }
+    }
+
     let trigger_key = webhook_trigger_key(&slug, &raw_body_sha256, spec, &headers);
     let request = CreateWorkflowRunRequest {
         workflow_name: registered.workflow_name.clone(),
@@ -683,6 +695,58 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Read a dot-path (e.g. "repository.full_name") out of a JSON body.
+fn webhook_body_path<'a>(body: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = body;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+/// Evaluate a declarative webhook pre-filter against the event.
+fn webhook_filter_matches(filter: &WebhookFilter, headers: &HeaderMap, body: &Value) -> bool {
+    if let Some(any) = &filter.any {
+        return any.iter().any(|f| webhook_filter_matches(f, headers, body));
+    }
+    if let Some(all) = &filter.all {
+        return all.iter().all(|f| webhook_filter_matches(f, headers, body));
+    }
+    let actual = match filter.source.as_deref() {
+        Some("header") => filter
+            .key
+            .as_deref()
+            .and_then(|key| header_value(headers, key)),
+        Some("body") => filter
+            .key
+            .as_deref()
+            .and_then(|key| webhook_body_path(body, key))
+            .and_then(|value| value.as_str().map(ToOwned::to_owned)),
+        // An empty node is a no-op, but unknown sources should not match.
+        None => return true,
+        Some(_) => return false,
+    };
+    let Some(actual) = actual else {
+        return false;
+    };
+    match filter.op.as_deref() {
+        Some("equals") => filter.value.as_deref() == Some(actual.as_str()),
+        Some("in") => filter
+            .values
+            .as_ref()
+            .is_some_and(|values| values.iter().any(|v| v == &actual)),
+        Some("contains") => filter
+            .value
+            .as_deref()
+            .is_some_and(|needle| actual.contains(needle)),
+        Some("prefix") => filter
+            .value
+            .as_deref()
+            .is_some_and(|prefix| actual.trim_start().starts_with(prefix)),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod webhook_tests {
     use super::*;
@@ -719,6 +783,7 @@ mod webhook_tests {
             trigger_key: None,
             allowed_methods: vec!["POST".to_owned()],
             allowed_content_types: vec!["application/json".to_owned()],
+            filter: None,
         };
         let safe = safe_webhook_headers(&headers, &spec);
         assert_eq!(safe, json!({"x-test-delivery": "delivery-1"}));
@@ -737,6 +802,7 @@ mod webhook_tests {
             }),
             allowed_methods: vec!["POST".to_owned()],
             allowed_content_types: vec!["application/json".to_owned()],
+            filter: None,
         };
         assert_eq!(
             webhook_trigger_key("unit", "abc", &spec, &headers),
@@ -765,6 +831,74 @@ mod webhook_tests {
             raw_body,
         )
         .unwrap();
+    }
+
+    fn webhook_filter(value: Value) -> WebhookFilter {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn webhook_filter_evaluates() {
+        let body = json!({
+            "repository": {"full_name": "ethereum-optimism/ethereum-optimism.github.io"},
+            "comment": {"body": "/review claude please"}
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "issue_comment".parse().unwrap());
+
+        // union: a /review comment on any repo matches the command branch
+        let filter = webhook_filter(json!({
+            "any": [
+                {"source": "header", "key": "x-github-event", "op": "equals", "value": "pull_request"},
+                {"all": [
+                    {"source": "header", "key": "x-github-event", "op": "equals", "value": "issue_comment"},
+                    {"source": "body", "key": "comment.body", "op": "contains", "value": "/review"}
+                ]}
+            ]
+        }));
+        assert!(webhook_filter_matches(&filter, &headers, &body));
+
+        // a plain comment on an unrelated repo doesn't match a repo-scoped filter
+        let other = json!({
+            "repository": {"full_name": "ethereum-optimism/k8s"},
+            "comment": {"body": "lgtm"}
+        });
+        let repo_filter = webhook_filter(json!({
+            "all": [
+                {"source": "header", "key": "x-github-event", "op": "equals", "value": "issue_comment"},
+                {"source": "body", "key": "repository.full_name", "op": "in",
+                 "values": ["ethereum-optimism/ethereum-optimism.github.io"]}
+            ]
+        }));
+        assert!(!webhook_filter_matches(&repo_filter, &headers, &other));
+
+        // missing field -> no match; empty node -> pass-through.
+        let missing = webhook_filter(json!({
+            "source": "body",
+            "key": "a.b",
+            "op": "equals",
+            "value": "x"
+        }));
+        assert!(!webhook_filter_matches(&missing, &headers, &body));
+
+        let unknown_source = webhook_filter(json!({
+            "source": "query",
+            "key": "event",
+            "op": "equals",
+            "value": "issue_comment"
+        }));
+        assert!(!webhook_filter_matches(&unknown_source, &headers, &body));
+
+        let unknown_op = webhook_filter(json!({
+            "source": "body",
+            "key": "comment.body",
+            "op": "regex",
+            "value": "/review"
+        }));
+        assert!(!webhook_filter_matches(&unknown_op, &headers, &body));
+
+        let empty = webhook_filter(json!({}));
+        assert!(webhook_filter_matches(&empty, &headers, &body));
     }
 
     #[test]
