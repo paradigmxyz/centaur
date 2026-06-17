@@ -15,7 +15,7 @@ permissions:
 jobs:
   migration-order:
     name: Migration order
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -27,7 +27,7 @@ jobs:
 
   rust-api:
     name: Rust API fmt, clippy, and tests
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     services:
       postgres:
         image: postgres:17
@@ -131,7 +131,7 @@ jobs:
 
   slackbotv2-tests:
     name: Slackbot v2 tests
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -157,7 +157,7 @@ jobs:
 
   discordbot-checks:
     name: Discordbot typecheck and tests
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
