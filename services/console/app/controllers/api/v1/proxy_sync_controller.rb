@@ -11,8 +11,8 @@ module Api
     # whole transforms the proxy splices into its pipeline: a gcp_auth transform
     # per granted GcpAuthSecret, an hmac_sign transform per granted HmacSecret,
     # and one bundled oauth_token transform. `postgres` carries one upstream-DSN
-    # entry per granted PgDsnSecret; the proxy routes sessions by database, while
-    # foreign_id is retained for sandbox env-var derivation and operator lookup.
+    # entry per granted PgDsnSecret, keyed by foreign_id; the proxy's
+    # locally-defined listeners bind to these by foreign_id.
     #
     # The top-level `rules`, `mcp`, and `ingest_token` fields the proxy also
     # understands are intentionally omitted: centaur-console has no models for them

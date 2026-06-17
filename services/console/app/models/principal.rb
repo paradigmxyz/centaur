@@ -87,10 +87,8 @@ class Principal < ApplicationRecord
   end
 
   # The top-level `postgres` array delivered to iron-proxy: one DSN entry per
-  # granted PgDsnSecret. The proxy routes by database, while foreign_id is
-  # retained for sandbox env-var derivation and operator lookup. Entries without
-  # a DSN source are skipped because the proxy can't dial an upstream without
-  # one.
+  # granted PgDsnSecret, keyed by foreign_id. Entries without a DSN source are
+  # skipped because the proxy can't dial an upstream without one.
   def sync_postgres
     granted_pg_dsn_secrets.filter_map do |pg|
       next unless pg.dsn_source

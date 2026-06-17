@@ -1,12 +1,13 @@
 # A Postgres upstream credential: a connection-string (DSN) resolved from a
 # secret source, plus an optional SET ROLE for the upstream session. Delivered to
-# iron-proxy in the single-listener `postgres` list. The proxy routes by
-# `database` (the dbname a client sends to reach this upstream), so it must be
-# unique per namespace and must match the upstream DSN's database where
-# inspectable.
+# iron-proxy in the single-listener `postgres` list, where it is keyed for routing
+# by `database` (the dbname a client sends to reach this upstream). `database` is
+# therefore required and must match the database the DSN connects to; centaur-console
+# enforces that match where the DSN is inspectable (control_plane/inline) and
+# documents it otherwise (the proxy returns FATAL 3D000 on a mismatch).
 #
-# `foreign_id` is also required: api-rs derives the sandbox env var name from it,
-# and it is the stable handle operators reference.
+# `foreign_id` is also required: it identifies the upstream for credential
+# delivery (env-var supplied DSNs) and is the stable handle operators reference.
 # The listener bind address and client auth remain proxy-host deployment concerns
 # and are not modeled here.
 class PgDsnSecret < ApplicationRecord
@@ -36,11 +37,10 @@ class PgDsnSecret < ApplicationRecord
   has_many :grants, dependent: :destroy
   belongs_to :created_by, class_name: "User"
 
-  # One entry in the proxy's synced `postgres` list, with `foreign_id` retained
-  # for sandbox env-var derivation and operator lookup. The proxy routes by the
-  # `database` field. The opaque id is carried too so the proxy can refer back to
-  # the canonical resource (it ignores fields it does not use). The DSN reuses
-  # the shared secrets source shape.
+  # One entry in the proxy's synced `postgres` list, keyed for routing by
+  # `database`. The opaque id is carried too so the proxy can refer back to the
+  # canonical resource (it ignores fields it does not use). The DSN reuses the
+  # shared secrets source shape.
   def to_proxy_dsn(principal: nil)
     entry = {
       "id" => oid,
