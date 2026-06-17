@@ -622,6 +622,54 @@ def test_upload_file_infers_slack_thread_from_tool_context() -> None:
     assert fake_web_client.last_kwargs["initial_comment"] == "Uploaded `chart.png`."
 
 
+def test_upload_file_defaults_to_api_slack_thread_context(monkeypatch) -> None:
+    import slack.client as slack_client_module
+
+    client, fake_web_client = _make_client()
+    monkeypatch.setattr(
+        slack_client_module,
+        "current_slack_thread",
+        lambda: {"channel_id": "C-api", "thread_ts": "200.000000"},
+    )
+    client._resolve_channel = lambda channel: channel  # type: ignore[method-assign]
+
+    client.upload_file(content_base64="dGVzdA==", filename="chart.png")
+
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["channel"] == "C-api"
+    assert fake_web_client.last_kwargs["thread_ts"] == "200.000000"
+
+
+def test_upload_file_explicit_destination_overrides_api_context(monkeypatch) -> None:
+    import slack.client as slack_client_module
+
+    resolved_channels: list[str] = []
+    client, fake_web_client = _make_client()
+    monkeypatch.setattr(
+        slack_client_module,
+        "current_slack_thread",
+        lambda: {"channel_id": "C-api", "thread_ts": "200.000000"},
+    )
+
+    def resolve_channel(channel: str) -> str:
+        resolved_channels.append(channel)
+        return channel
+
+    client._resolve_channel = resolve_channel  # type: ignore[method-assign]
+
+    client.upload_file(
+        channel_id="C-explicit",
+        thread_ts="201.000000",
+        content_base64="dGVzdA==",
+        filename="chart.png",
+    )
+
+    assert resolved_channels == ["C-explicit"]
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["channel"] == "C-explicit"
+    assert fake_web_client.last_kwargs["thread_ts"] == "201.000000"
+
+
 def test_upload_file_infers_destination_from_team_scoped_thread_key() -> None:
     """The slackbot emits slack:<team>:<channel>:<thread_ts>; upload_file must
     infer the channel and thread from that 4-part key, not just the legacy

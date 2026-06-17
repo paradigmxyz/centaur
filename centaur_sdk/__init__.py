@@ -11,6 +11,8 @@ from __future__ import annotations
 from centaur_sdk.cli_tables import Table, render_text_table
 from centaur_sdk.tool_sdk import (
     ToolContext,
+    current_session_context,
+    current_slack_thread,
     current_thread_key,
     get_tool_context,
     reset_tool_context,
@@ -23,6 +25,8 @@ from centaur_sdk.tool_sdk import (
 __all__ = [
     "Table",
     "ToolContext",
+    "current_session_context",
+    "current_slack_thread",
     "current_thread_key",
     "get_tool_context",
     "render_text_table",

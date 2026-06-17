@@ -18,7 +18,12 @@ import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import get_tool_context, save_attachment, secret
+from centaur_sdk.tool_sdk import (
+    current_slack_thread,
+    get_tool_context,
+    save_attachment,
+    secret,
+)
 
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
@@ -1499,12 +1504,21 @@ class SlackClient:
         )
 
     def _current_slack_destination(self) -> tuple[str | None, str | None]:
-        """Return the active Slack channel/thread from the tool context, if any.
+        """Return the active Slack channel/thread, if any.
 
-        Slack thread keys are ``slack:<team>:<channel>:<thread_ts>`` (the format
-        the slackbot emits). The older ``slack:<channel>:<thread_ts>`` form is
-        still accepted for backwards compatibility.
+        Prefer API-owned session context so warm pooled sandboxes do not depend
+        on per-thread environment mutation. Fall back to parsing the tool
+        context's thread_key for older runtimes/tests.
         """
+        try:
+            slack = current_slack_thread()
+            channel = slack.get("channel_id")
+            thread_ts = slack.get("thread_ts")
+            if channel and thread_ts:
+                return channel, thread_ts
+        except Exception:
+            pass
+
         try:
             thread_key = get_tool_context().thread_key or ""
         except LookupError:
