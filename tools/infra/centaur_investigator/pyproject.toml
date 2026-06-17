@@ -1,10 +1,9 @@
 [project]
 name = "centaur_investigator"
-description = "Investigate Centaur Slack threads and sessions from read-only Postgres views"
+description = "Privacy-safe Centaur Slack thread investigation helper"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "asyncpg>=0.30.0",
     "httpx>=0.27.0",
     "typer>=0.12.0",
     "rich>=13.0.0",
@@ -27,6 +26,3 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 hosts = []
-secrets = [
-    {type = "pg_dsn", name = "CENTAUR_READONLY_DSN", database = "ai_v2", secret_ref = "DATABASE_URL", role = "centaur_readonly"},
-]

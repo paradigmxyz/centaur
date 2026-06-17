@@ -1,4 +1,4 @@
-"""CLI for Centaur read-only thread investigations."""
+"""CLI for privacy-safe Centaur thread investigations."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.json import JSON
-from rich.table import Table
 
 from .client import CentaurInvestigatorClient
 
@@ -17,7 +16,7 @@ load_dotenv()
 
 app = typer.Typer(
     name="centaur-investigator",
-    help="Investigate Centaur threads and sessions from read-only Postgres.",
+    help="Investigate Centaur threads without exposing message context.",
 )
 console = Console()
 
@@ -43,24 +42,6 @@ def _print_investigation(result: dict[str, Any]) -> None:
     warnings = analysis.get("warnings") or []
     for warning in warnings:
         console.print(f"[yellow]warning:[/] {warning}")
-
-    executions = (result.get("postgres") or {}).get("session_executions", {}).get("rows", [])
-    if executions:
-        table = Table(title="Executions")
-        table.add_column("Execution", style="cyan", max_width=28)
-        table.add_column("Status", style="green", max_width=14)
-        table.add_column("Created", max_width=24)
-        table.add_column("Started", max_width=24)
-        table.add_column("Completed", max_width=24)
-        for row in executions[:10]:
-            table.add_row(
-                str(row.get("execution_id") or ""),
-                str(row.get("status") or ""),
-                str(row.get("created_at") or ""),
-                str(row.get("started_at") or ""),
-                str(row.get("completed_at") or ""),
-            )
-        console.print(table)
 
 
 @app.command("investigate")
@@ -120,7 +101,7 @@ def session(
     logs_limit: int = typer.Option(100, "--logs-limit", help="Max log rows."),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
-    """Inspect source-of-truth state for a thread_key."""
+    """Inspect identifiers and observability for a thread_key."""
     result = CentaurInvestigatorClient().session_state(
         thread_key,
         limit=limit,
@@ -141,7 +122,7 @@ def parse(
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
     """Parse a Slack reference without querying Postgres."""
-    result = CentaurInvestigatorClient("").parse_thread_reference(reference)
+    result = CentaurInvestigatorClient().parse_thread_reference(reference)
     _require_ok(result)
     if json_output:
         _print_json(result)
@@ -151,53 +132,6 @@ def parse(
     console.print("[bold]Candidates:[/]")
     for candidate in result.get("thread_key_candidates") or []:
         console.print(f"  {candidate}")
-
-
-@app.command("search-sessions")
-def search_sessions(
-    query: str = typer.Option("", "--query", "-q", help="Thread key substring."),
-    channel_id: str = typer.Option("", "--channel", help="Slack channel id."),
-    status: str = typer.Option("", "--status", help="Session status."),
-    limit: int = typer.Option(25, "--limit", "-n", help="Max rows."),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
-) -> None:
-    """Search sessions by thread key, channel, or status."""
-    result = CentaurInvestigatorClient().search_sessions(
-        query=query,
-        channel_id=channel_id,
-        status=status,
-        limit=limit,
-    )
-    _require_ok(result)
-    if json_output:
-        _print_json(result)
-        return
-
-    table = Table(title=f"Sessions ({result.get('count', 0)})")
-    table.add_column("Thread Key", style="cyan", max_width=64)
-    table.add_column("Harness", max_width=12)
-    table.add_column("Status", style="green", max_width=14)
-    table.add_column("Updated", max_width=24)
-    for row in result.get("sessions") or []:
-        table.add_row(
-            str(row.get("thread_key") or ""),
-            str(row.get("harness_type") or ""),
-            str(row.get("status") or ""),
-            str(row.get("updated_at") or ""),
-        )
-    console.print(table)
-
-
-@app.command("views")
-def views(json_output: bool = typer.Option(False, "--json", help="Output raw JSON.")) -> None:
-    """List available centaur_readonly views."""
-    result = CentaurInvestigatorClient().list_readonly_views()
-    _require_ok(result)
-    if json_output:
-        _print_json(result)
-        return
-    for view in result.get("views") or []:
-        console.print(view)
 
 
 if __name__ == "__main__":

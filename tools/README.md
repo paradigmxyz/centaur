@@ -44,8 +44,8 @@ Use `secret("KEY")` to access. Never use `os.environ` — tool secrets are scope
 
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 
-- `centaur_investigator`: inspect Centaur Slack thread and session state from
-  read-only PostgreSQL views, with best-effort vlogs/vmetrics enrichment.
+- `centaur_investigator`: parse Centaur Slack thread references and enrich them
+  with best-effort vlogs/vmetrics context without exposing message context.
 
 ## Sandbox Tool Paths
 
