@@ -138,7 +138,6 @@ pub async fn grant_inputs_to_role(
     inputs: Vec<SecretInput>,
 ) -> Result<Vec<String>, IronControlError> {
     let existing = client.list_role_grants(role_oid).await?;
-    let inputs = coalesce_secret_inputs(inputs);
     let mut grant_ids = Vec::with_capacity(inputs.len());
     for input in inputs {
         let secret = match input {
@@ -174,43 +173,6 @@ pub async fn grant_inputs_to_role(
         grant_ids.push(grant.id);
     }
     Ok(grant_ids)
-}
-
-fn coalesce_secret_inputs(inputs: Vec<SecretInput>) -> Vec<SecretInput> {
-    let mut out: Vec<SecretInput> = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        if let Some(position) = out
-            .iter()
-            .position(|existing| static_secret_name(existing) == static_secret_name(&input))
-        {
-            if let (SecretInput::Static(existing), SecretInput::Static(mut next)) =
-                (&out[position], input)
-            {
-                next.foreign_id.clone_from(&existing.foreign_id);
-                next.labels = merged_labels(&existing.labels, &next.labels);
-                out[position] = SecretInput::Static(next);
-            }
-        } else {
-            out.push(input);
-        }
-    }
-    out
-}
-
-fn static_secret_name(input: &SecretInput) -> Option<&str> {
-    let SecretInput::Static(input) = input else {
-        return None;
-    };
-    Some(input.name.as_str())
-}
-
-fn merged_labels(
-    existing: &BTreeMap<String, String>,
-    next: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut labels = existing.clone();
-    labels.extend(next.clone());
-    labels
 }
 
 /// Pure translation: a fragment's transforms → the secret resources to upsert.
@@ -977,53 +939,6 @@ transforms:
         );
         assert_eq!(input.rules.len(), 1);
         assert_eq!(input.rules[0].host.as_deref(), Some("api.x.ai"));
-    }
-
-    #[test]
-    fn coalesces_duplicate_inputs_without_losing_tool_labels() {
-        let fragment = load_fragment_str(
-            r#"
-transforms:
-  - name: secrets
-    config:
-      secrets:
-        - replace:
-            proxy_value: SHARED_API_KEY
-            match_headers: ["Authorization"]
-          rules: [{ host: base.example.com }]
-        - replace:
-            proxy_value: SHARED_API_KEY
-            match_headers: ["Authorization"]
-          labels:
-            centaur-tool: shared-tool
-            centaur-tool-overlay: overlay
-          rules: [{ host: tool.example.com }]
-"#,
-        )
-        .unwrap();
-        let inputs =
-            secret_inputs_from_fragment("default", "infra", &fragment, &env_policy()).unwrap();
-        assert_eq!(inputs.len(), 2);
-
-        let inputs = coalesce_secret_inputs(inputs);
-
-        assert_eq!(inputs.len(), 1);
-        let SecretInput::Static(input) = &inputs[0] else {
-            panic!("expected a static secret");
-        };
-        assert_eq!(input.foreign_id, "infra-shared-api-key");
-        assert_eq!(
-            input.labels.get("managed-by").map(String::as_str),
-            Some("centaur")
-        );
-        assert_eq!(
-            input.labels.get("centaur-tool").map(String::as_str),
-            Some("shared-tool")
-        );
-        assert_eq!(
-            input.labels.get("centaur-tool-overlay").map(String::as_str),
-            Some("overlay")
-        );
     }
 
     #[test]
