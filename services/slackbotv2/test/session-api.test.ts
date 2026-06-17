@@ -120,6 +120,45 @@ describe('forwardToSessionApi overrides', () => {
     expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
   })
 
+  test('adds rendered Slack block content to stored and executed messages', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const message = apiMessage('CircleCI job failed.')
+    message.raw = {
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '*Job*: contracts-bedrock-tests-develop CUSTOM_GAS_TOKEN\n*Branch*: develop'
+          }
+        },
+        {
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: 'Pinged <!subteam^S123|security-oncall>' }]
+        }
+      ]
+    }
+
+    await forwardToSessionApi(options(fetchFn), forwardInput(message))
+
+    const append = requests.find(request => request.url.endsWith('/messages'))
+    const appended = append?.body as { messages: Array<{ parts: Array<{ text?: string }> }> }
+    const appendedBlockPart = appended.messages[0]?.parts.find(part =>
+      part.text?.includes('# Slack Block Kit Content')
+    )
+    expect(appendedBlockPart?.text).toContain('contracts-bedrock-tests-develop')
+    expect(appendedBlockPart?.text).toContain('security-oncall')
+
+    const execute = requests.find(request => request.url.endsWith('/execute'))
+    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
+    const content = line.message.content as Array<{ text?: string; type: string }>
+    const executedBlockPart = content.find(part =>
+      part.text?.includes('# Slack Block Kit Content')
+    )
+    expect(executedBlockPart?.text).toContain('Branch*: develop')
+    expect(executedBlockPart?.text).not.toContain('"blocks"')
+  })
+
   test('omits model field when no override is set', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))

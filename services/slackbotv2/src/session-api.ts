@@ -263,6 +263,7 @@ export function sessionStreamError(error: unknown): RustSessionStreamEvent {
 /** Largest attachment we are willing to buffer in memory and inline as base64. */
 export const MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024
 const MAX_CODEX_INPUT_LINE_CHARS = 900 * 1024
+const MAX_SLACK_BLOCK_TEXT_CHARS = 12_000
 const STAGED_ATTACHMENT_CHUNK_CHARS = 700 * 1024
 
 export async function serializeAttachment(attachment: Attachment): Promise<SlackbotV2ApiAttachment> {
@@ -913,6 +914,10 @@ function sessionMessageParts(
   if (message.text.trim()) {
     parts.push({ type: 'text', text: message.text })
   }
+  const blockText = slackBlockContentText(message)
+  if (blockText) {
+    parts.push({ type: 'text', text: blockText })
+  }
   for (const attachment of message.attachments) {
     parts.push(sessionAttachmentPart(attachment))
   }
@@ -1144,6 +1149,10 @@ function codexInputContent(
   if (message.text.trim()) {
     content.push({ type: 'text', text: message.text })
   }
+  const blockText = slackBlockContentText(message)
+  if (blockText) {
+    content.push({ type: 'text', text: blockText })
+  }
   for (const attachment of message.attachments) {
     content.push(codexAttachmentInput(attachment, staged.get(attachment)))
   }
@@ -1198,11 +1207,126 @@ function slackContextAuthor(message: SlackbotV2ApiMessage): string {
 }
 
 function slackContextMessageText(message: SlackbotV2ApiMessage): string {
-  const fields = [message.text.trim()]
+  const fields = [message.text.trim(), slackBlockContentText(message)]
   for (const attachment of message.attachments) {
     fields.push(attachmentDescription(attachment))
   }
   return fields.filter(Boolean).join('\n')
+}
+
+function slackBlockContentText(message: SlackbotV2ApiMessage): string | undefined {
+  const rendered = renderSlackBlocks(message.raw)
+  if (!rendered) return undefined
+  if (sameRenderedSlackText(message.text, rendered)) return undefined
+  return [
+    '# Slack Block Kit Content',
+    '',
+    'The Slack message also included rendered Block Kit content that may not be present in the plain text field:',
+    '',
+    rendered
+  ].join('\n')
+}
+
+function renderSlackBlocks(raw: unknown): string | undefined {
+  if (!isJsonObject(raw) || !Array.isArray(raw.blocks)) return undefined
+  const lines: string[] = []
+  for (const block of raw.blocks) {
+    const rendered = renderSlackBlock(block)
+    if (rendered) lines.push(rendered)
+  }
+  return boundedSlackBlockText(lines.join('\n\n'))
+}
+
+function renderSlackBlock(block: unknown): string | undefined {
+  if (!isJsonObject(block)) return undefined
+  switch (stringValue(block.type)) {
+    case 'section':
+      return joinSlackLines([
+        renderSlackTextObject(block.text),
+        ...renderSlackArray(block.fields)
+      ])
+    case 'context':
+      return joinSlackLines(renderSlackArray(block.elements))
+    case 'header':
+      return renderSlackTextObject(block.text)
+    case 'rich_text':
+      return joinSlackLines(renderSlackArray(block.elements))
+    case 'image':
+      return joinSlackLines([
+        renderSlackTextObject(block.title),
+        stringValue(block.alt_text)
+      ])
+    case 'actions':
+      return joinSlackLines(renderSlackArray(block.elements))
+    default:
+      return joinSlackLines([
+        renderSlackTextObject(block.text),
+        ...renderSlackArray(block.fields),
+        ...renderSlackArray(block.elements)
+      ])
+  }
+}
+
+function renderSlackArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.map(item => renderSlackElement(item)).filter((item): item is string => Boolean(item))
+}
+
+function renderSlackElement(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() || undefined
+  if (!isJsonObject(value)) return undefined
+
+  const type = stringValue(value.type)
+  if (type === 'plain_text' || type === 'mrkdwn') return renderSlackTextObject(value)
+  if (type === 'text') return stringValue(value.text)
+  if (type === 'link') {
+    const text = stringValue(value.text)
+    const url = stringValue(value.url)
+    return text && url && text !== url ? `${text} (${url})` : text ?? url
+  }
+  if (type === 'user') return stringValue(value.user_id) ? `<@${stringValue(value.user_id)}>` : undefined
+  if (type === 'channel') {
+    return stringValue(value.channel_id) ? `<#${stringValue(value.channel_id)}>` : undefined
+  }
+  if (type === 'emoji') return stringValue(value.name) ? `:${stringValue(value.name)}:` : undefined
+  if (type === 'date') return stringValue(value.fallback) ?? stringValue(value.text)
+  if (type === 'button') return renderSlackTextObject(value.text)
+
+  return joinSlackLines([
+    renderSlackTextObject(value.text),
+    ...renderSlackArray(value.fields),
+    ...renderSlackArray(value.elements)
+  ])
+}
+
+function renderSlackTextObject(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() || undefined
+  if (!isJsonObject(value)) return undefined
+  return stringValue(value.text)
+}
+
+function joinSlackLines(values: Array<string | undefined>): string | undefined {
+  const lines = values.map(value => value?.trim()).filter((value): value is string => Boolean(value))
+  if (lines.length === 0) return undefined
+  return lines.join('\n')
+}
+
+function boundedSlackBlockText(value: string): string | undefined {
+  const normalized = value
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(line => line.trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  if (!normalized) return undefined
+  if (normalized.length <= MAX_SLACK_BLOCK_TEXT_CHARS) return normalized
+  return `${normalized.slice(0, MAX_SLACK_BLOCK_TEXT_CHARS)}\n…(Slack block content truncated)`
+}
+
+function sameRenderedSlackText(left: string, right: string): boolean {
+  const normalize = (value: string): string => value.replace(/\s+/g, ' ').trim()
+  return Boolean(left.trim()) && normalize(left) === normalize(right)
 }
 
 function indentSlackContext(text: string): string {
