@@ -3,6 +3,7 @@ import type { JsonObject, SlackbotV2Options, SlackbotV2Trace } from './types'
 
 const PENDING_OPERATION_WARN_AFTER_MS = 5_000
 const PENDING_OPERATION_REPEAT_MS = 30_000
+export type TraceLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export const noopLogger: Logger = {
   debug: () => undefined,
@@ -24,10 +25,11 @@ export function traceLog(
   options: SlackbotV2Options,
   event: string,
   trace?: SlackbotV2Trace,
-  fields: JsonObject = {}
+  fields: JsonObject = {},
+  level: TraceLogLevel = 'info'
 ): void {
   const logger = options.logger ?? noopLogger
-  logger.info(event, {
+  logger[level](event, {
     ...traceFields(trace),
     ...fields
   })
@@ -39,11 +41,7 @@ export function traceWarn(
   trace?: SlackbotV2Trace,
   fields: JsonObject = {}
 ): void {
-  const logger = options.logger ?? noopLogger
-  logger.warn(event, {
-    ...traceFields(trace),
-    ...fields
-  })
+  traceLog(options, event, trace, fields, 'warn')
 }
 
 export function startPendingOperationLog(

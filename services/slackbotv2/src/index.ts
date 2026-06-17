@@ -701,6 +701,7 @@ async function renderExecutionAttempt(
   assistantStatusVisible: boolean,
   trace?: SlackbotV2Trace
 ): Promise<'complete' | 'retry'> {
+  const renderStartedAtMs = nowMs()
   let rendered = false
   let retry = false
   let fallbackLastEventId = 0
@@ -724,10 +725,16 @@ async function renderExecutionAttempt(
     const answerLost = slackAnswerLost(error)
     if (answerLost === undefined && isRetryableSessionApiError(error)) {
       retry = true
-      traceLog(options, 'slackbotv2_render_deferred', trace, {
-        error: errorMessage(error),
-        last_event_id: getLastEventId()
-      })
+      traceLog(
+        options,
+        'slackbotv2_render_deferred',
+        trace,
+        {
+          error: errorMessage(error),
+          last_event_id: getLastEventId()
+        },
+        'warn'
+      )
       return 'retry'
     }
     if (answerLost === false) {
@@ -735,15 +742,27 @@ async function renderExecutionAttempt(
       // (for example a progress-card stop failed). Reposting would duplicate
       // the answer, so record the failure and finish.
       rendered = true
-      traceLog(options, 'slackbotv2_render_failed_answer_visible', trace, {
-        error: errorMessage(error)
-      })
+      traceLog(
+        options,
+        'slackbotv2_render_failed_answer_visible',
+        trace,
+        {
+          error: errorMessage(error)
+        },
+        'warn'
+      )
       return 'complete'
     }
-    traceLog(options, 'slackbotv2_render_failed', trace, {
-      error: errorMessage(error),
-      slack_answer_lost: answerLost ?? 'unknown'
-    })
+    traceLog(
+      options,
+      'slackbotv2_render_failed',
+      trace,
+      {
+        error: errorMessage(error),
+        slack_answer_lost: answerLost ?? 'unknown'
+      },
+      'warn'
+    )
     const replaceMessageId = isSlackStreamSizeLimitError(error)
       ? slackStreamMessageId(error)
       : undefined
@@ -752,10 +771,16 @@ async function renderExecutionAttempt(
       // Slack still rejects a stream as too large but does not expose the
       // failed stream message id, do not post a separate duplicate fallback.
       rendered = true
-      traceLog(options, 'slackbotv2_render_failed_size_limit_no_replacement', trace, {
-        error: errorMessage(error),
-        slack_answer_lost: answerLost ?? 'unknown'
-      })
+      traceLog(
+        options,
+        'slackbotv2_render_failed_size_limit_no_replacement',
+        trace,
+        {
+          error: errorMessage(error),
+          slack_answer_lost: answerLost ?? 'unknown'
+        },
+        'warn'
+      )
       return 'complete'
     }
     const fallback = await renderFallbackFinalAnswer(
@@ -784,6 +809,7 @@ async function renderExecutionAttempt(
     })
     traceLog(options, 'slackbotv2_render_finalized', trace, {
       obligation_cleared: rendered,
+      render_duration_ms: elapsedMs(renderStartedAtMs),
       retry_scheduled: retry,
       last_event_id: getLastEventId()
     })
@@ -900,10 +926,16 @@ async function renderFallbackFinalAnswer(
     })
     return { lastEventId }
   } catch (error) {
-    traceLog(options, 'slackbotv2_render_fallback_failed', trace, {
-      error: errorMessage(error),
-      phase_ms: elapsedMs(startedAtMs)
-    })
+    traceLog(
+      options,
+      'slackbotv2_render_fallback_failed',
+      trace,
+      {
+        error: errorMessage(error),
+        phase_ms: elapsedMs(startedAtMs)
+      },
+      'error'
+    )
     return null
   }
 }
@@ -934,16 +966,18 @@ async function recoverRenderObligationsWithRetry(
       if (deferredCount === 0) return
       const delayMs = renderRetryDelayMs(attempt)
       attempt += 1
-      traceLog(options, 'slackbotv2_render_recovery_retry_scheduled', undefined, {
-        deferred_count: deferredCount,
-        retry_delay_ms: delayMs,
-        retry_attempt: attempt
-      })
+      recordRenderRecoveryRetry(options, { attempt, deferredCount, delayMs })
       await sleep(delayMs)
     } catch (error) {
-      traceLog(options, 'slackbotv2_render_recovery_failed', undefined, {
-        error: errorMessage(error)
-      })
+      traceLog(
+        options,
+        'slackbotv2_render_recovery_failed',
+        undefined,
+        {
+          error: errorMessage(error)
+        },
+        'error'
+      )
       return
     }
   }
@@ -960,8 +994,16 @@ async function recoverRenderObligations(
   const indexedThreadIds = await state.getList<string>(RENDER_OBLIGATION_INDEX_KEY)
   const threadIds = Array.from(new Set(indexedThreadIds))
   const timeoutMs = options.renderRecoveryThreadTimeoutMs ?? RENDER_RECOVERY_THREAD_TIMEOUT_MS
+  let abandonedCount = 0
+  let activeObligationCount = 0
   let deferredCount = 0
+  let failedCount = 0
+  let leaseSkippedCount = 0
+  let resolvedCount = 0
+  let retryableDeferredCount = 0
+  let timedOutCount = 0
   traceLog(options, 'slackbotv2_render_recovery_scan', undefined, {
+    indexed_thread_count: threadIds.length,
     obligation_count: threadIds.length,
     phase_ms: elapsedMs(startedAtMs)
   })
@@ -972,15 +1014,24 @@ async function recoverRenderObligations(
       const threadState = await thread.state
       const obligation = threadState?.renderObligation
       if (!obligation) continue
+      activeObligationCount += 1
 
       // An obligation that keeps failing non-retryably (for example corrupt
       // state that can never address a Slack thread) must not poison the
       // retry loop forever: give up on it and unwedge the thread.
       if ((failureCounts.get(threadId) ?? 0) >= RENDER_RECOVERY_MAX_THREAD_FAILURES) {
-        traceLog(options, 'slackbotv2_render_recovery_abandoned', undefined, {
-          failure_count: failureCounts.get(threadId),
-          thread_id: threadId
-        })
+        abandonedCount += 1
+        traceLog(
+          options,
+          'slackbotv2_render_recovery_abandoned',
+          undefined,
+          {
+            ...renderObligationFields(obligation),
+            failure_count: failureCounts.get(threadId),
+            thread_id: threadId
+          },
+          'error'
+        )
         await thread.setState({
           activeExecution: false,
           lastEventId: threadState?.lastEventId ?? 0,
@@ -1000,6 +1051,7 @@ async function recoverRenderObligations(
         // owns this thread. Count it as deferred so the retry loop keeps
         // running until the obligation is actually resolved.
         deferredCount += 1
+        leaseSkippedCount += 1
         traceLog(options, 'slackbotv2_render_recovery_lease_skipped', undefined, {
           thread_id: threadId
         })
@@ -1029,33 +1081,65 @@ async function recoverRenderObligations(
       if (outcome.timedOut) {
         void recovery.catch(() => undefined)
         deferredCount += 1
+        timedOutCount += 1
         // Count timeouts toward the abandonment budget: an obligation whose
         // recovery hangs on every claim (for example an event stream that
         // never yields) would otherwise keep the sweep loop spinning forever,
         // racing every live render in the process.
         failureCounts.set(threadId, (failureCounts.get(threadId) ?? 0) + 1)
-        traceLog(options, 'slackbotv2_render_recovery_thread_timeout', undefined, {
-          failure_count: failureCounts.get(threadId),
-          thread_id: threadId,
-          timeout_ms: timeoutMs
-        })
+        traceLog(
+          options,
+          'slackbotv2_render_recovery_thread_timeout',
+          undefined,
+          {
+            ...renderObligationFields(obligation),
+            failure_count: failureCounts.get(threadId),
+            thread_id: threadId,
+            timeout_ms: timeoutMs
+          },
+          'warn'
+        )
         continue
       }
       await releaseLease()
-      if (outcome.deferred) deferredCount += 1
+      if (outcome.deferred) {
+        deferredCount += 1
+        retryableDeferredCount += 1
+      } else {
+        resolvedCount += 1
+      }
     } catch (error) {
       // One thread's corrupt state or failed render must not abort the scan:
       // log it, count it as deferred so a later pass retries it (up to the
       // failure budget above), and keep recovering the remaining threads.
       failureCounts.set(threadId, (failureCounts.get(threadId) ?? 0) + 1)
       deferredCount += 1
-      traceLog(options, 'slackbotv2_render_recovery_thread_failed', undefined, {
-        error: errorMessage(error),
-        failure_count: failureCounts.get(threadId),
-        thread_id: threadId
-      })
+      failedCount += 1
+      traceLog(
+        options,
+        'slackbotv2_render_recovery_thread_failed',
+        undefined,
+        {
+          error: errorMessage(error),
+          failure_count: failureCounts.get(threadId),
+          thread_id: threadId
+        },
+        'warn'
+      )
     }
   }
+  recordRenderRecoveryScan(options, {
+    abandonedCount,
+    activeObligationCount,
+    deferredCount,
+    failedCount,
+    indexedThreadCount: threadIds.length,
+    leaseSkippedCount,
+    phaseMs: elapsedMs(startedAtMs),
+    resolvedCount,
+    retryableDeferredCount,
+    timedOutCount
+  })
   return deferredCount
 }
 
@@ -1137,10 +1221,16 @@ async function recoverRenderObligation(
         error: errorMessage(error)
       })
     } else {
-      traceLog(options, 'slackbotv2_render_recovery_render_failed', trace, {
-        error: errorMessage(error),
-        slack_answer_lost: answerLost ?? 'unknown'
-      })
+      traceLog(
+        options,
+        'slackbotv2_render_recovery_render_failed',
+        trace,
+        {
+          error: errorMessage(error),
+          slack_answer_lost: answerLost ?? 'unknown'
+        },
+        'warn'
+      )
       const replaceMessageId = isSlackStreamSizeLimitError(error)
         ? slackStreamMessageId(error)
         : undefined
@@ -1149,10 +1239,16 @@ async function recoverRenderObligation(
         // Slack still rejects a stream as too large but does not expose the
         // failed stream message id, do not post a separate duplicate fallback.
         rendered = true
-        traceLog(options, 'slackbotv2_render_recovery_failed_size_limit_no_replacement', trace, {
-          error: errorMessage(error),
-          slack_answer_lost: answerLost ?? 'unknown'
-        })
+        traceLog(
+          options,
+          'slackbotv2_render_recovery_failed_size_limit_no_replacement',
+          trace,
+          {
+            error: errorMessage(error),
+            slack_answer_lost: answerLost ?? 'unknown'
+          },
+          'warn'
+        )
         return false
       }
       const fallback = await renderFallbackFinalAnswer(
@@ -1209,6 +1305,61 @@ async function* streamOpenedSession(
 
 function renderRecoveryLeaseKey(threadId: string): string {
   return `slackbotv2:render:lease:${threadId}`
+}
+
+function recordRenderRecoveryRetry(
+  options: SlackbotV2Options,
+  observation: { attempt: number; deferredCount: number; delayMs: number }
+): void {
+  const fields = {
+    deferred_count: observation.deferredCount,
+    retry_delay_ms: observation.delayMs,
+    retry_attempt: observation.attempt
+  }
+  traceLog(options, 'slackbotv2_render_recovery_retry_scheduled', undefined, fields)
+}
+
+function recordRenderRecoveryScan(
+  options: SlackbotV2Options,
+  observation: {
+    abandonedCount: number
+    activeObligationCount: number
+    deferredCount: number
+    failedCount: number
+    indexedThreadCount: number
+    leaseSkippedCount: number
+    phaseMs: number
+    resolvedCount: number
+    retryableDeferredCount: number
+    timedOutCount: number
+  }
+): void {
+  const fields = {
+    abandoned_count: observation.abandonedCount,
+    active_obligation_count: observation.activeObligationCount,
+    deferred_count: observation.deferredCount,
+    failed_count: observation.failedCount,
+    indexed_thread_count: observation.indexedThreadCount,
+    lease_skipped_count: observation.leaseSkippedCount,
+    phase_ms: observation.phaseMs,
+    resolved_count: observation.resolvedCount,
+    retryable_deferred_count: observation.retryableDeferredCount,
+    timed_out_count: observation.timedOutCount
+  }
+  traceLog(options, 'slackbotv2_render_recovery_scan_complete', undefined, fields)
+}
+
+function renderObligationFields(obligation: SlackbotV2RenderObligation): JsonObject {
+  const messageTimestampMs = Date.parse(obligation.message.timestamp)
+  return {
+    after_event_id: obligation.afterEventId,
+    execution_id: obligation.executionId,
+    message_id: obligation.message.id,
+    message_timestamp: obligation.message.timestamp,
+    ...(Number.isFinite(messageTimestampMs)
+      ? { obligation_age_ms: Math.max(0, Date.now() - messageTimestampMs) }
+      : {})
+  }
 }
 
 /**
