@@ -112,9 +112,6 @@ def save_attachment(
         }
     ).encode()
     headers = {"Content-Type": "application/json"}
-    api_key = secret("CENTAUR_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         f"{base_url}/agent/attachments/upload",
         data=payload,

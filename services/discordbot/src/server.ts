@@ -34,7 +34,7 @@ const options: DiscordbotOptions = {
   activeExecutionTtlMs: optionalNumberEnv("DISCORDBOT_ACTIVE_EXECUTION_TTL_MS"),
   answerEditIntervalMs: optionalNumberEnv("DISCORDBOT_ANSWER_EDIT_INTERVAL_MS"),
   apiUrl,
-  apiKey: optionalEnv("DISCORDBOT_API_KEY") ?? optionalEnv("CENTAUR_API_KEY"),
+  apiKey: optionalEnv("DISCORDBOT_API_KEY"),
   applicationId,
   botToken,
   publicKey,

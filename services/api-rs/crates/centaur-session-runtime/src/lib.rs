@@ -3865,7 +3865,7 @@ mod tests {
 
     #[test]
     fn redacts_sensitive_values_from_output_lines() {
-        let line = r#"{"type":"item.completed","item":{"aggregatedOutput":"Authorization: Bearer sbx1.threadpayload.signature\nCENTAUR_API_KEY=sbx1.otherpayload.othersig\nSLACK_BOT_TOKEN=xoxb-1234567890-abcdef\n"}}"#;
+        let line = r#"{"type":"item.completed","item":{"aggregatedOutput":"Authorization: Bearer sbx1.threadpayload.signature\nSANDBOX_TOKEN=sbx1.otherpayload.othersig\nSLACK_BOT_TOKEN=xoxb-1234567890-abcdef\n"}}"#;
 
         let redacted = redact_sensitive_text(line);
 
@@ -3873,7 +3873,7 @@ mod tests {
         assert!(!redacted.contains("sbx1.otherpayload.othersig"));
         assert!(!redacted.contains("xoxb-1234567890-abcdef"));
         assert!(redacted.contains("Authorization: Bearer [REDACTED_TOKEN]"));
-        assert!(redacted.contains("CENTAUR_API_KEY=[REDACTED_TOKEN]"));
+        assert!(redacted.contains("SANDBOX_TOKEN=[REDACTED_TOKEN]"));
         assert!(redacted.contains("SLACK_BOT_TOKEN=[REDACTED_TOKEN]"));
     }
 
