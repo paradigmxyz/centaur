@@ -11,7 +11,7 @@ const SLACK_ATTACHMENTS_RLS_SQL: &str =
     include_str!("../migrations/0017_slack_sync_message_attachments.sql");
 const SLACK_CONTEXT_ADMIN_CHANNELS_SQL: &str =
     include_str!("../migrations/0018_slack_context_rls_admin_channels.sql");
-const ETL_CONTEXT_RLS_SQL: &str = include_str!("../migrations/0020_etl_context_rls.sql");
+const ETL_CONTEXT_RLS_SQL: &str = include_str!("../migrations/0021_etl_context_rls.sql");
 
 const RLS_TABLES: &[&str] = &[
     "slack_sync_channels",
