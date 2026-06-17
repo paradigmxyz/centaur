@@ -38,7 +38,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert_includes secret.errors[:foreign_id], "can't be blank"
   end
 
-  test "requires a database (it is the routing key)" do
+  test "requires a database (it is the client dbname)" do
     secret = with_dsn(PgDsnSecret.new(base_attrs(database: nil)))
     assert_not secret.valid?
     assert_includes secret.errors[:database], "can't be blank"
@@ -55,11 +55,12 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "database is unique within a namespace" do
+  test "database may be shared by secrets with distinct foreign_id" do
     with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "first-pg", database: "shared-db"))).save!
-    dup = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "second-pg", database: "shared-db")))
-    assert_not dup.valid?
-    assert_includes dup.errors[:database], "has already been taken"
+    shared_db = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "second-pg", database: "shared-db")))
+
+    assert shared_db.valid?
+    assert shared_db.save
   end
 
   test "an inline DSN whose database matches is valid" do
