@@ -353,8 +353,11 @@ import importlib
 import importlib.util
 import inspect
 import json
+import os
 from pathlib import Path
 import sys
+
+from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 
 project_dir = Path(sys.argv[1])
 client_module = sys.argv[2]
@@ -382,14 +385,22 @@ if target is None and hasattr(module, "_client"):
 if target is None:
     raise RuntimeError(f"tool has no method {{method}}")
 
-if isinstance(payload, dict):
-    result = target(**payload)
-elif payload is None:
-    result = target()
-else:
-    result = target(payload)
-if inspect.isawaitable(result):
-    result = asyncio.run(result)
+ctx_token = None
+thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
+if thread_key:
+    ctx_token = set_tool_context(ToolContext(name=project_dir.name, thread_key=thread_key))
+try:
+    if isinstance(payload, dict):
+        result = target(**payload)
+    elif payload is None:
+        result = target()
+    else:
+        result = target(payload)
+    if inspect.isawaitable(result):
+        result = asyncio.run(result)
+finally:
+    if ctx_token is not None:
+        reset_tool_context(ctx_token)
 print(json.dumps(result, default=str, separators=(",", ":")))
 '''
 

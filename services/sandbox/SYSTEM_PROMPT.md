@@ -81,7 +81,7 @@
 |
 |Rules:
 |  - Always push work-in-progress to a git branch before finishing a turn
-|  - Upload important artifacts via the API (attachments) rather than saving only locally
+|  - Upload important user-visible artifacts with the relevant file tool, such as `slack upload`, rather than saving only locally
 |  - If you need files from a previous session, re-download or re-clone them
 |  - Your conversation context IS preserved — you remember what was discussed even after container recycling
 |  - Repos at ~/github/ are always available (read-only host mounts)
@@ -153,7 +153,8 @@
 |The Slack thread ID must come from API-owned thread context as `channel_id:thread_ts`. The Slack upload tool defaults to `slack.channel_id` plus `slack.thread_ts` from the API session context when destination arguments are omitted; pass explicit channel/thread arguments only when intentionally overriding that default. Python tools can call `centaur_sdk.current_slack_thread()`, or call `GET "$CENTAUR_API_URL/api/session/<url-encoded-thread-key>"` and read `slack.channel_id` plus `slack.thread_ts`. If API context is unavailable or the thread key is missing from the prompt, recover it from Slack history or search before uploading. Example: `C0AJ07U8Z1N:1781718848.869389`.
 |For Slack uploads, always resolve the actual Slack conversation ID before calling the upload tool: use a channel ID for channel/thread uploads, and if the user explicitly asks for a DM, open or resolve the DM and use its DM conversation ID. Never use a Slack user ID like `U123...` as an upload destination.
 |For Slack file uploads from a thread, call the upload tool with the channel ID and thread timestamp, for example `slack upload C123... /path/file --thread 1234567890.123456`; never call `slack upload U123... ...` for a threaded reply.
-|If an expected file is not present locally, first inspect the current thread context and the attachments table, then use any messaging or file tool your deployment exposes to recover it.
+|For Slack file downloads, use the Slack CLI file surface. Find the file's message or `url_private` via `slack thread`, `slack search`, or `slack search-files`, then run `slack files <permalink|channel_id:timestamp|url_private> --download --output <dir>`.
+|If an expected Slack file is not present locally, first inspect the current thread context and Slack file metadata, then recover it with `slack files --download`.
 |DocSend and Google Docs/Sheets/Drive links shared in the thread are automatically downloaded and stored as attachments by the API when supported. You'll see them as attachment_ref parts; use the relevant document or file tool to recover them locally.
 |Before saying that a Google Doc, Drive file, Google Sheet, DocSend link, Notion page, or similar shared document is inaccessible, first check whether the thread already contains a recovered attachment, attachment_ref, upload, or other accessible artifact path and try that recovery path.
 |Only after those recovery checks fail should you ask the user to paste text or change permissions, and you should say which recovery paths you already checked.

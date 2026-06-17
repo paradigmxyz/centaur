@@ -784,7 +784,7 @@ def dump(
 
 @app.command()
 def files(
-    permalink: str = typer.Argument(..., help="Slack permalink to message with attachments"),
+    permalink: str = typer.Argument(..., help="Slack message permalink, channel:timestamp, or url_private"),
     download: bool = typer.Option(
         False, "--download", "-d", help="Download files to current directory"
     ),
@@ -794,13 +794,33 @@ def files(
 
     Examples:
         slack files "https://slack.com/archives/C01234567/p1234567890123456"
+        slack files "https://files.slack.com/files-pri/T1-F1/report.pdf" --download
         slack files "https://..." --download
         slack files "https://..." -d -o /tmp/slack-files
     """
     import re
     from pathlib import Path
+    from urllib.parse import urlparse
 
     from .client import _fetch_slack_file, get_message_files
+
+    parsed = urlparse(permalink)
+    if parsed.scheme == "https" and (parsed.hostname or "").lower() == "files.slack.com":
+        if not download:
+            console.print("[red]Pass --download to download a direct Slack file URL[/]")
+            raise typer.Exit(1)
+        output_dir = Path(output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            filename, _mime_type, body = _fetch_slack_file(permalink)
+            out_path = output_dir / filename
+            out_path.write_bytes(body)
+            console.print(f"[green]✓ Downloaded {filename}[/] ({len(body)} bytes)")
+            console.print(f"[dim]{out_path.absolute()}[/]")
+        except Exception as e:
+            console.print(f"[red]Error downloading Slack file: {e}[/]")
+            raise typer.Exit(1)
+        return
 
     if permalink.startswith("https://"):
         match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)

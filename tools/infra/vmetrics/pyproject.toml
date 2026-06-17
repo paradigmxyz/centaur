@@ -5,7 +5,19 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
 ]
+
+[project.scripts]
+vmetrics = "centaur_tool_vmetrics.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_vmetrics"
 
 [build-system]
 requires = ["hatchling"]

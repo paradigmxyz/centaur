@@ -1,586 +1,288 @@
 ---
 name: qa
-description: "Run comprehensive QA and integration tests against the local Centaur stack. Use when asked to QA the stack, run integration tests, verify a deployment, or check stack health after a refactor."
+description: "Smoke test the full running Centaur system from a new Slack thread. Use when asked to QA the stack, run a smoke test, verify a deployment, check stack health, check deploy readiness, or prove Slack tools, file upload/download, company context, logs, metrics, and tool loading work end to end."
 ---
 
 # Centaur QA
 
-Test the Centaur stack in three progressive layers — same core operations at each level, proving successively more surface area works.
+Run this skill from a new Slack thread in a channel where the bot is present. The goal is to prove the user-facing agent path works, not just that APIs respond.
 
-## Layers
+Default behavior: start immediately, run the in-thread smoke test, and return a concise pass/fail report. Do not ask clarifying questions unless the current Slack channel or thread cannot be inferred.
 
-```
-Layer 1: Internal API     kubectl exec → API directly. Proves core works.
-Layer 2: External route    curl from host → API route. Proves routing + auth.
-Layer 3: User Interfaces   Slackbot webhooks + Thread Viewer UI. Proves E2E UX.
-```
+If the user asks for deploy readiness, staging QA, preview QA, promotion gating, concurrency checks, scheduler checks, or deadlock checks, run the in-thread smoke test first, then run the relevant extended checks below.
 
-If layer 1 passes but layer 2 fails → problem is nginx/auth.
-If 1+2 pass but 3 fails → problem is slackbot or web app.
+## Success Criteria
 
-## Execution Pipeline
+The smoke test passes only when all core workflows work from the running agent session:
 
-```
-┌─────────────────────────┐
-│  Layer 1: Internal API  │  ← Run first, sequential. Must pass before continuing.
-│  (services, tools,      │
-│   agent/execute,        │
-│   personas, logs)       │
-└──────────┬──────────────┘
-           │ all pass
-     ┌─────┴──────┬──────────────┐
-     ▼            ▼              ▼
-┌─────────┐ ┌──────────┐ ┌────────────┐
-│ Layer 2  │ │ Layer 3a │ │ Layer 3b   │   ← Parallel subagents
-│ Nginx    │ │ Slackbot │ │ Web App    │
-│          │ │          │ │ (dogfood)  │
-└─────────┘ └──────────┘ └────────────┘
-```
+- A list of tools loads and includes expected tools.
+- Slack file upload to the current thread works.
+- Slack file download from the current thread works.
+- Slack file download from the current channel, then re-upload to the current thread, works.
+- Slack token search works after bounded retries.
+- Slack overall message search works.
+- Current thread history works.
+- Company context can connect to the Paradigm database and return indexed documents or a valid empty result.
+- VictoriaLogs and VictoriaMetrics queries work.
 
-Use the **Task** tool to run layers 2, 3a, and 3b as parallel subagents once layer 1 passes.
+Treat auth, permission, DNS, schema, and timeout errors as failures. Treat empty search results as warnings only when the tool successfully queried the backing service.
 
-## Setup
+For promotion or deploy-readiness requests, the final status is `PASS` only if the requested extended checks also pass or are explicitly accepted by the owner.
 
-| Parameter | Default | Example override |
-|-----------|---------|-----------------|
-| **API Key** | Fetch from secrets service (see below) | |
-| **Output directory** | `./tool-qa-output/` | `Output directory: /tmp/qa` |
-| **Tool scope** | Sample (~10 tools) | `Full tools` or `Focus on slack, linear` |
-| **Layer scope** | All three layers | `Just layer 1` or `Layers 1 and 2` |
+## In-Thread Smoke Test
 
-**Getting the API key:** `API_SECRET_KEY` is NOT in `.env` — it's in the secrets manager. Fetch it:
+Use direct tool CLIs when available. Use `centaur-tools call <tool> <method> '<json>'` when a tool has no standalone CLI command for the method you need.
+
+First capture session context:
 
 ```bash
-API_KEY=$(kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://firewall:8081/secrets/API_SECRET_KEY | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")
+echo "THREAD_KEY=${CENTAUR_THREAD_KEY:-}"
+echo "SLACK_CHANNEL_ID=${SLACK_CHANNEL_ID:-}"
+echo "SLACK_THREAD_TS=${SLACK_THREAD_TS:-}"
+echo "SLACK_CHANNEL_NAME=${SLACK_CHANNEL_NAME:-}"
 ```
 
-Use `$API_KEY` (not `$API_SECRET_KEY`) in all curl commands below.
+If `SLACK_CHANNEL_ID` or `SLACK_THREAD_TS` is missing, infer it from `CENTAUR_THREAD_KEY` when possible. Slack thread keys are usually `slack:<channel_id>:<thread_ts>`.
 
-If the user says "QA", "QA the stack", or "health check", start immediately with defaults (sample tools, all layers). Do not ask clarifying questions.
-
----
-
-## Layer 1: Internal API
-
-All calls via `kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://localhost:8000/...` — bypasses external auth, no key needed.
-
-### 1a. Services & Health
+### 1. Tool Loading
 
 ```bash
-kubectl get pods -n centaur
+centaur-tools list
 ```
 
-All required local deployments must be Ready: postgres, secrets, iron-proxy/firewall-manager, and api. Slackbot is disabled in the default dev overlay.
+Verify that the list is non-empty and includes at least `slack`, `company_context`, `vlogs`, and `vmetrics`. If a tool is absent, record the failure before continuing.
+
+### 2. Upload File To Current Thread
+
+Upload a tiny deterministic file to the current Slack thread:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://localhost:8000/health/ready
-# → {"status":"ok"}
+QA_TOKEN="centaur-qa-$(date +%s)"
+QA_B64=$(printf '%s\n' "$QA_TOKEN" | base64 | tr -d '\n')
+centaur-tools call slack upload_file "{
+  \"channel_id\": \"${SLACK_CHANNEL_ID}\",
+  \"thread_ts\": \"${SLACK_THREAD_TS}\",
+  \"filename\": \"centaur-qa-upload.txt\",
+  \"title\": \"Centaur QA Upload\",
+  \"comment\": \"QA upload smoke test: ${QA_TOKEN}\",
+  \"content_base64\": \"${QA_B64}\"
+}"
 ```
 
-### 1b. Tool Testing
+Verify the response contains a Slack file object, permalink, or URL. Save any `url_private` value for the next step. If the response omits file metadata, use thread history in step 4 to find the uploaded file.
 
-Test tools via `POST /tools/{tool}/{method}`.
+### 3. Download File From Current Thread
 
-**Sample mode (default):** ~10 tools across categories for a fast smoke test:
-
-| Tool | Method | Args | Category |
-|------|--------|------|----------|
-| demo | echo | `{"message":"hello"}` | internal |
-| slack | list_channels | `{"limit":2}` | comms |
-| linear | issues | `{"limit":2}` | productivity |
-| coingecko | get_price | `{"ids":"bitcoin","vs_currencies":"usd"}` | crypto |
-| defillama | list_protocols | `{}` | defi |
-| googlenews | search | `{"query":"bitcoin","limit":2}` | news |
-| congress | list_bills | `{"limit":2}` | gov |
-| etherscan | get_balance | `{"address":"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"}` | crypto |
-| websearch | search | `{"query":"bitcoin","num_results":2}` | research |
-| vlogs | query | `{"query":"*","limit":2}` | infra |
-
-Auth failures on etherscan/websearch are known — note but don't block.
-
-**Full mode** (user says "full tools"): Test every registered tool. See [references/test-inputs.md](references/test-inputs.md) for default inputs. Batch by group, append results incrementally.
-
-**Classifying results:**
-
-| Result | Criteria |
-|--------|----------|
-| ✅ PASS | Non-error response with plausible data |
-| ❌ FAIL (auth) | Missing API key, expired token |
-| ❌ FAIL (schema) | Column/field name error |
-| ❌ FAIL (connection) | Upstream unreachable |
-| ❌ FAIL (runtime) | Other runtime error |
-| ⏭️ SKIP | Write operation or complex setup |
-| ⚠️ WARN | Empty results but no error |
-
-**Rules:** Never call write/mutate methods. Use `limit: 2`. Chain dependent calls. See [references/test-inputs.md](references/test-inputs.md).
-
-### 1c. Agent Execute (connect + execute protocol)
-
-The API uses a two-wire protocol: `/agent/connect` opens a persistent SSE stream, `/agent/execute` injects messages into stdin. Output appears on the connect wire.
-
-**Step 1: Open connect wire** (run in background, write to file):
+Fetch the current thread history and find the uploaded file's `url_private`:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- bash -c "curl -s -N -X POST http://localhost:8000/agent/connect \
-  -H 'Content-Type: application/json' \
-  -d '{\"thread_key\": \"test:qa-execute\", \"harness\": \"amp\"}' \
-  > /tmp/sse_qa.txt 2>&1" &
-sleep 5
+slack thread "${SLACK_CHANNEL_ID}:${SLACK_THREAD_TS}" --json --limit 20
 ```
 
-**Step 2: Execute a message:**
+Then download it to a sandbox-local temp directory:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
-  -H "Content-Type: application/json" \
-  -d '{"thread_key":"test:qa-execute","message":"Say hello and nothing else","harness":"amp"}'
-# → {"ok": true, "injected": true, "turn_id": 1}
+QA_DOWNLOAD_DIR="/tmp/centaur-qa-files-${QA_TOKEN}"
+mkdir -p "$QA_DOWNLOAD_DIR"
+slack files "${URL_PRIVATE_FROM_CURRENT_THREAD}" --download --output "$QA_DOWNLOAD_DIR"
 ```
 
-Wait ~10s, then check the SSE output:
+Verify the command prints a downloaded path and that the file exists with non-zero size.
+
+### 4. Current Thread History
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- cat /tmp/sse_qa.txt
+slack thread "${SLACK_CHANNEL_ID}:${SLACK_THREAD_TS}" --json --limit 20
 ```
 
-**Verify:** SSE output contains `wire.ready`, `system.init`, `assistant` with response text, and exactly one `turn.done` per turn with non-empty `result`.
+Verify the returned messages include the QA request and the file upload message. Record the number of messages returned.
 
-**Step 3: Back-to-back follow-up** (same thread, same container):
+### 5. Search Uploaded Token
 
-```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
-  -H "Content-Type: application/json" \
-  -d '{"thread_key":"test:qa-execute","message":"Now say goodbye"}'
-```
-
-**Verify:** Second `turn.done` appears on the connect wire with `turn_id: 2`.
-
-### 1c-ii. Handoff Test
-
-Handoffs are transparent — the amp-wrapper detects handoff tool calls, suppresses handoff noise, kills amp, and chains into the new thread. The API sees one continuous stream.
+Search for the unique token uploaded in step 2:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
-  -H "Content-Type: application/json" \
-  -d '{"thread_key":"test:qa-execute","message":"handoff and say hi 3 times"}'
-```
-
-Wait ~30s, then check SSE output:
-
-**Verify:**
-- No `tool_use` or `tool_result` events for the handoff tool visible in the stream
-- A new `system.init` with a different `session_id` appears (the chained thread)
-- The chained thread's response appears with a `turn.done`
-- No duplicate content — user should NOT see the same text twice
-
-### 1c-iii. Auto-chain (context pressure)
-
-The wrapper auto-chains when context usage exceeds 85% (`AMP_CONTEXT_THRESHOLD` env var). To test, use a low threshold. This requires setting the env var on the sandbox container, which isn't easily done via the API — test locally instead:
-
-```bash
-cd /tmp && mkdir -p test-autochain && cd test-autochain && git init . 2>/dev/null
-(
-  echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"say hello"}]}}'
-  sleep 30
-) | AMP_CONTEXT_THRESHOLD=0.01 timeout 30 python3 services/sandbox/amp-wrapper.py 2>/dev/null
-```
-
-**Verify:** Output shows first thread's response + `result`, then seamlessly a new `system.init` with the same `session_id` (continued thread), followed by the chained thread's response.
-
-Clean up: `POST /agent/stop` with `{"thread_key":"test:qa-execute"}`.
-
-### 1d. Personas
-
-Check loaded personas:
-
-```bash
-kubectl logs -n centaur deploy/centaur-centaur-api --tail 50 | grep persona_loaded
-```
-
-For each persona (typically eng, legal, invest, events):
-
-```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "thread_key": "test:qa-persona-{NAME}",
-    "message": "Run: echo $AGENT_PERSONA && head -3 ~/AGENTS.md 2>/dev/null || echo NO_AGENTS_MD",
-    "harness": "{NAME}"
-  }'
-```
-
-**Verify:** `AGENT_PERSONA` is set, prompt content is persona-specific, different `cache_creation_input_tokens` across personas.
-
-Also test invalid persona — should fall back gracefully.
-
-Clean up all `test:qa-persona-*` containers.
-
-### 1e. Log Pipeline
-
-```bash
-# All services present in VictoriaLogs?
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
-  --data-urlencode "query=* | uniq_values(service) limit 1000" --data-urlencode "limit=1"
-
-# _msg field populated (not "missing _msg field")?
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
-  --data-urlencode 'query=service:"api"' --data-urlencode "limit=3"
-
-# Structured fields (level, event) searchable?
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
-  --data-urlencode 'query=service:"api" AND level:"info" AND event:*' --data-urlencode "limit=3"
-
-# Sandbox container logs collected?
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://victorialogs:9428/select/logsql/query" \
-  --data-urlencode 'query=container:"pipe-"' --data-urlencode "limit=2"
-```
-
-### 1f. Attachments
-
-Test the attachment pipeline: inline extraction, upload endpoint, and sandbox download.
-
-**Inline base64 extraction roundtrip:**
-
-```bash
-# Buffer a message with inline base64 image
-B64=$(echo -n "FAKE_PNG_BYTES_FOR_QA_TEST" | base64)
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/messages \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"thread_key\": \"test:qa-att-inline\",
-    \"messages\": [{
-      \"role\": \"user\",
-      \"parts\": [
-        {\"type\": \"text\", \"text\": \"analyze this\"},
-        {\"type\": \"image\", \"source\": {\"type\": \"base64\", \"media_type\": \"image/png\", \"data\": \"$B64\"}}
-      ]
-    }]
-  }"
-# → {"ok": true, "inserted": 1}
-
-# List attachments — should have 1 entry
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments?thread_key=test:qa-att-inline"
-# → [{"id":"att-...","name":"image.png","mime_type":"image/png",...}]
-
-# Download and verify bytes
-ATT_ID=$(kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments?thread_key=test:qa-att-inline" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments/$ATT_ID/download" | base64 | head -c 40
-```
-
-**Verify:** List returns 1 attachment with `mime_type: image/png`. Download returns non-empty bytes. Original message parts in `chat_messages` contain `attachment_ref`, not base64 blob.
-
-**Upload endpoint:**
-
-```bash
-B64=$(echo -n "UPLOAD_TEST_CONTENT" | base64)
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/attachments/upload \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"thread_key\": \"test:qa-att-upload\",
-    \"name\": \"test-upload.txt\",
-    \"mime_type\": \"text/plain\",
-    \"data\": \"$B64\"
-  }"
-# → {"id":"att-...","name":"test-upload.txt","download_url":"/agent/attachments/att-.../download"}
-
-# Download and verify
-ATT_ID=$(kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/attachments/upload \
-  -H "Content-Type: application/json" \
-  -d "{\"thread_key\":\"test:qa-att-upload2\",\"name\":\"verify.txt\",\"mime_type\":\"text/plain\",\"data\":\"$(echo -n hello | base64)\"}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s "http://localhost:8000/agent/attachments/$ATT_ID/download"
-# → hello
-```
-
-**Verify:** Upload returns `id`, `name`, `download_url`. Download returns exact bytes uploaded.
-
-**Negative cases:**
-
-```bash
-# Missing fields → 422
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/attachments/upload \
-  -H "Content-Type: application/json" \
-  -d '{"thread_key":"test:qa-att-bad"}'
-# → 422
-
-# Nonexistent attachment → 404
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -o /dev/null -w "%{http_code}" \
-  http://localhost:8000/agent/attachments/att-doesnotexist/download
-# → 404
-```
-
-**Verify:** Missing fields returns 422. Nonexistent attachment returns 404.
-
----
-
-## Layer 2: Nginx (parallel subagent)
-
-Same operations as layer 1, but via `curl http://localhost:8000` from the host — goes through nginx → auth → API. Source `.env` for `$API_SECRET_KEY`.
-
-### 2a. Health & Tools
-
-```bash
-curl -s http://localhost:8000/health
-curl -s http://localhost:8000/tools -H "Authorization: Bearer $API_KEY" | python3 -c "
-import sys,json; d=json.load(sys.stdin); print(f'{len(d)} tools via nginx')
-"
-```
-
-**Watch for:** If `/tools` returns `{"detail":"Invalid API key"}`, the API key is wrong — re-fetch from secrets (see Setup).
-
-### 2b. Tool Calls via Nginx
-
-Run the same sample tool tests from 1b, but via nginx with Bearer auth:
-
-```bash
-curl -s -X POST http://localhost:8000/tools/demo/echo \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" -d '{"message":"hello"}'
-```
-
-### 2c. Agent Execute via Nginx
-
-```bash
-curl -s --max-time 120 -X POST http://localhost:8000/agent/execute \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"thread_key":"test:qa-nginx","message":"What persona are you? One word.","harness":"amp"}'
-```
-
-**Verify:** SSE stream arrives (not 502). `turn.done` event has non-empty `result`.
-
-**Known issue (fixed):** The `/agent/` route needs SSE-friendly buffering and timeout settings. Without these, the external route can return 502 while the internal API path works.
-
-### 2d. Agent Execute — Personas via Nginx
-
-Test each persona (eng, events, invest, legal) through nginx:
-
-```bash
-for PERSONA in eng events invest legal; do
-  echo "=== Persona: $PERSONA ==="
-  curl -s --max-time 120 -X POST http://localhost:8000/agent/execute \
-    -H "Authorization: Bearer $API_KEY" \
-    -H "Content-Type: application/json" \
-    -d "{\"thread_key\":\"test:qa-persona-$PERSONA\",\"message\":\"What persona are you? One word.\",\"harness\":\"$PERSONA\"}" \
-    | grep 'turn.done'
-  echo ""
+for attempt in 1 2 3; do
+  slack search "$QA_TOKEN" --limit 5 --full && break
+  sleep 10
 done
 ```
 
-**Verify:** Each returns a persona-specific answer. Do NOT run these in a bash loop with `&` — containers need time to spin up; run sequentially with `--max-time 120`.
+Verify at least one result points to the current channel or current thread. Retry up to three total attempts with 10 seconds between attempts to handle Slack indexing lag. If all three attempts complete successfully but return no matching result, record `WARN: token not indexed yet` and continue.
 
-### 2e. Message Persistence
+### 6. Search Overall Messages
 
-After agent execute, verify both user AND assistant messages are in postgres:
-
-```bash
-kubectl exec -n centaur statefulset/centaur-centaur-postgres -- psql -U tempo -d ai_v2 -c \
-  "SELECT role, substring(parts::text,1,150) FROM chat_messages WHERE thread_key='test:qa-nginx' ORDER BY created_at;"
-```
-
-**Verify:** Two rows — one `user`, one `assistant` with the agent's response text.
-
-**Known issue (fixed):** `stream_exec` previously expected `turn.done.result` to be a `dict` with a `.text` field, but it's actually a plain string. This caused assistant messages to never be persisted. If you see user messages but no assistant messages in `chat_messages`, check the result extraction logic in `services/api/api/agent.py` → `stream_exec()`.
-
-### 2f. Fire-and-Forget + Status Poll
-
-Test the async execution flow — fire a job and poll `/agent/status` for completion:
+Run a separate broader message search for a stable term from the current channel:
 
 ```bash
-# Fire (background, don't wait for stream)
-curl -s --max-time 5 -X POST http://localhost:8000/agent/execute \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"thread_key":"test:qa-async","message":"Say DONE","harness":"amp"}' > /dev/null 2>&1 &
-
-# Poll status after ~15s
-sleep 15
-curl -s "http://localhost:8000/agent/status?key=test:qa-async" \
-  -H "Authorization: Bearer $API_KEY" | python3 -m json.tool
+slack search "${SLACK_CHANNEL_NAME:-centaur}" --limit 5 --full
 ```
 
-**Verify:** Response includes `"busy": false` and `"last_result": "DONE"` (or similar).
+Pass when the command succeeds and returns valid search output. Empty results are a warning only when the query reached Slack successfully.
 
-### 2h. Cross-Persona Dispatch (from inside sandbox)
+### 7. Download File From Current Channel And Re-Upload
 
-Test that one agent can spawn another persona via `call agent execute`, then poll for results. This is the most important integration test — it proves the full multi-agent orchestration pipeline.
+Find another accessible Slack file from the current channel. Prefer a result outside the current thread, but do not use files from other channels. `search_files` filters by filename or title, so start broad with an empty query:
 
 ```bash
-curl -s --max-time 300 -X POST http://localhost:8000/agent/execute \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "thread_key":"test:qa-cross-persona",
-    "message":"Run these commands in order:\n1. call agent execute '\''{ \"thread_key\": \"test:qa-legal-sub\", \"message\": \"What is a SAFE? One sentence.\", \"harness\": \"legal\" }'\''\\n2. sleep 30\\n3. call agent status '\''?key=test:qa-legal-sub'\''\\n4. Show me the last_result.",
-    "harness":"eng"
-  }'
+centaur-tools call slack search_files '{"query":"", "max_results":5}'
 ```
 
-**Verify the SSE trace shows:**
-1. eng agent runs `call agent execute` → gets SSE stream back (legal container spawned)
-2. eng agent runs `call agent status` → gets `busy: false` + `last_result` with legal's answer
-3. eng agent presents the result
-
-**If `call agent execute` returns "Tool 'agent' not found":** The sandbox container has an old `call.sh` without the `agent` case. Fix:
-1. Rebuild sandbox image: `just build-one agent`
-2. Delete stale sandbox pods: `kubectl delete pod -n centaur -l centaur-agent=true --ignore-not-found`
-3. Redeploy API: `just deploy`
-4. Wait for rollout, then retry
-
-### 2g. Auth Gate
+Pick a result whose `channels` includes `${SLACK_CHANNEL_ID}`. If possible, avoid the file uploaded earlier in this QA run so the check proves download-and-reupload of an existing channel file. Download it:
 
 ```bash
-# Unauthenticated browser request should redirect to /login
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/
-# → 302
+QA_REUPLOAD_DIR="/tmp/centaur-qa-reupload-${QA_TOKEN}"
+mkdir -p "$QA_REUPLOAD_DIR"
+slack files "${URL_PRIVATE_FROM_CURRENT_CHANNEL}" --download --output "$QA_REUPLOAD_DIR"
 ```
 
----
-
-## Layer 3a: Slackbot (parallel subagent)
-
-Test the slackbot by crafting HMAC-signed Slack webhook payloads. This proves the full Slack → slackbot → API → sandbox → response path.
-
-### Automated integration test script
-
-Run the automated integration test suite (URL verification, signature rejection, app_mention with/without file attachments, thread messages, edge cases):
+Save the downloaded file path, then re-upload it to the current thread:
 
 ```bash
-source .env
-{SKILL_DIR}/scripts/integration-slackbot.sh
+slack upload "${SLACK_CHANNEL_ID}" "${DOWNLOADED_FILE_FROM_CURRENT_CHANNEL}" \
+  --thread "${SLACK_THREAD_TS}" \
+  --comment "QA re-upload from current channel"
 ```
 
-Set `SLACKBOT_URL` if the slackbot is only reachable inside the cluster:
+Verify the current thread now shows the re-uploaded file. If no accessible current-channel file exists, record `SKIP: no readable file in current channel` and include the `search_files` result.
+
+### 8. Paradigm DB Via Company Context
+
+This verifies the database-backed context path and row-level permissions:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- bash -c 'SLACKBOT_URL=http://slackbot:3001 SLACK_SIGNING_SECRET=<secret> /path/to/integration-slackbot.sh'
+company_context list --limit 3 --json
+company_context search "centaur" --limit 3 --json
 ```
 
-### 3a-i. URL Verification (signed)
+Pass when the tool returns a valid JSON payload with `status: ok`, even if no documents match. Fail on database connection errors, permission errors, missing `COMPANY_CONTEXT_DSN`, or malformed results.
+
+### 9. Logs Via VictoriaLogs
 
 ```bash
-source .env
-SIGNING_SECRET="$SLACK_SIGNING_SECRET"
-TIMESTAMP=$(date +%s)
-BODY='{"type":"url_verification","challenge":"test-challenge-qa"}'
-SIG_BASESTRING="v0:${TIMESTAMP}:${BODY}"
-SIGNATURE="v0=$(echo -n "$SIG_BASESTRING" | openssl dgst -sha256 -hmac "$SIGNING_SECRET" | awk '{print $2}')"
-
-# Direct to slackbot
-curl -s -X POST http://localhost:3001/api/slack/events \
-  -H "Content-Type: application/json" \
-  -H "x-slack-signature: $SIGNATURE" \
-  -H "x-slack-request-timestamp: $TIMESTAMP" \
-  -d "$BODY"
-# → {"challenge":"test-challenge-qa"}
+vlogs health
+vlogs query '*' --limit 3 --json
+vlogs query "centaur.thread_key:\"${CENTAUR_THREAD_KEY}\"" --limit 10 --json
 ```
 
-Note: If slackbot is enabled without an external route, use `kubectl exec` to reach it on the internal network:
+Pass when VictoriaLogs is reachable and returns JSON log entries or a valid empty list for the thread-specific query. Fail on DNS, HTTP, or LogsQL errors.
+
+### 10. Metrics Via VictoriaMetrics
+
+`vmetrics` may not have a direct CLI, so use the tool bridge:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST http://slackbot:3001/api/slack/events \
-  -H "Content-Type: application/json" \
-  -H "x-slack-signature: $SIGNATURE" \
-  -H "x-slack-request-timestamp: $TIMESTAMP" \
-  -d "$BODY"
+centaur-tools call vmetrics query '{"expr":"up"}'
+centaur-tools call vmetrics series '{"match":"{__name__=~\".*\"}"}'
 ```
 
-### 3a-ii. Signature Rejection
+Pass when the responses are valid VictoriaMetrics API results. Fail on DNS, HTTP, or malformed response errors.
 
-```bash
-curl -s -X POST http://localhost:3001/api/slack/events \
-  -H "Content-Type: application/json" \
-  -H "x-slack-signature: v0=bad" \
-  -H "x-slack-request-timestamp: $(date +%s)" \
-  -d '{"type":"url_verification","challenge":"test"}'
-# → 401 {"error":"Invalid Slack signature"}
-```
+## Extended Checks
 
-### 3a-iii. Via Nginx (production path)
+Run these after the core smoke test when the user asks for staging, preview, deploy readiness, scheduler, concurrency, or promotion confidence.
 
-```bash
-# Same signed payload through nginx → API webhook proxy
-curl -s -X POST http://localhost:8000/api/webhooks/slack \
-  -H "Content-Type: application/json" \
-  -H "x-slack-signature: $SIGNATURE" \
-  -H "x-slack-request-timestamp: $TIMESTAMP" \
-  -d "$BODY"
-```
+### Deployment Health
 
----
+Record the target environment, namespace or URL, commit/build if visible, current timestamp, and thread key. Verify:
 
-## Layer 3b: Web App / Thread Viewer (parallel subagent)
+- The target is serving traffic.
+- `centaur-tools list` succeeds from the running session.
+- Recent `vlogs errors --start 1h` or equivalent log query has no new critical errors for the QA run.
+- The user-visible Slack thread receives the final QA report.
 
-Use the **dogfood** skill to systematically test the thread viewer UI.
+### Concurrent Agent Turns
 
-```
-Load skill: skill("dogfood")
-Target: http://localhost:8000
-Auth: Log in via /login with UI_PASSWORD from .env
-```
+When asked to check concurrency or deadlocks, start 3-5 QA prompts in separate Slack threads in the same channel. Use distinct `QA_TOKEN` values and ask each agent to do a different read-only task:
 
-**Key flows to test:**
-- Login page works, cookie set after auth
-- Thread list view loads, shows recent threads
-- Thread detail view renders messages, tool calls, dashboard blocks
-- Agent execution from the UI (if supported)
-- SSE streaming in thread viewer
-- Static assets load (_next/ routes)
+- Read thread history and summarize earlier messages.
+- Call two tools and summarize grounded results.
+- Query logs for its own thread key.
+- Search messages for a synthetic token.
+- Use company context for a small internal DB lookup.
 
-The dogfood skill produces its own report with screenshots and repro steps.
+Pass when every turn reaches a terminal response in Slack, no thread remains stuck busy, and vlogs show one coherent execution per prompt without duplicate final delivery.
 
----
+### User Context
 
-## Report
+Verify requester context when the user asks for Slack/user-context coverage:
 
-Copy the template and fill in results:
+- The response can refer to the current Slack channel and thread.
+- The agent can identify or mention the requesting user only from available Slack context.
+- Missing GitHub handles or profile fields are reported as unavailable, not invented.
+- Mid-thread prompts use earlier thread facts accurately.
 
-```bash
-cp {SKILL_DIR}/templates/tool-qa-report-template.md {OUTPUT_DIR}/report.md
-```
+### Scheduler Checks
+
+Run only when the target includes scheduler workflows, alerts, cron jobs, or background smoke loops. Use the scheduler's canonical workflow state, DB rows, or logs. Verify:
+
+- The scheduler creates the expected current tick.
+- It does not create a duplicate tick while a prior tick is pending or running.
+- It does not backfill every missed tick when the last run is far in the past; it creates only the most recent eligible tick.
+
+Pass only with evidence from scheduler-owned state and logs, not just absence of visible failures.
+
+### Promotion Gate
+
+A deployment is ready for promotion only when:
+
+- The core in-thread smoke test passes.
+- Requested extended checks pass or failures are explicitly accepted by the owner.
+- The same commit/build was tested and is the one being promoted.
+- The report includes enough evidence for another engineer to verify: Slack permalinks, thread key, execution IDs, workflow IDs, log query windows, or DB row counts.
+
+## Report Format
+
+Reply in the Slack thread with a compact table:
+
+| Check | Result | Evidence |
+|-------|--------|----------|
+| Tool loading | PASS/FAIL | tool count and missing expected tools |
+| Upload current-thread file | PASS/FAIL | file id or permalink |
+| Download current-thread file | PASS/FAIL | filename and size |
+| Re-upload current-channel file | PASS/FAIL/SKIP | source and new file id |
+| Search uploaded token | PASS/WARN/FAIL | attempts and result count |
+| Search overall messages | PASS/WARN/FAIL | query and result count |
+| Thread history | PASS/FAIL | message count |
+| Paradigm DB | PASS/FAIL | document count or error |
+| VictoriaLogs | PASS/FAIL | result count or error |
+| VictoriaMetrics | PASS/FAIL | query status or error |
+| Extended checks | PASS/FAIL/SKIP | concurrency, scheduler, user context, or promotion evidence |
+
+End with `Overall: PASS`, `Overall: FAIL`, or `Overall: PARTIAL`. Include the highest-signal failure details, suggested next owner, and promotion recommendation when relevant. Do not include secrets or raw credential values.
 
 ## Known Gotchas
 
-| Symptom | Root Cause | Fix |
-|---------|-----------|-----|
-| 502 on `/agent/execute` via ingress | Missing SSE directives (`proxy_buffering off`, `proxy_read_timeout`) | Add SSE config to the ingress/route handling `/agent/` |
-| Assistant messages missing from `chat_messages` | `stream_exec` result extraction expected dict, got string | Fix in `services/api/api/agent.py` — handle both string and dict `result` |
-| `API_SECRET_KEY` empty from `.env` | Key is in secrets manager, not `.env` | Fetch via `curl http://firewall:8081/secrets/API_SECRET_KEY` |
-| vlogs tool fails with DNS error | VictoriaLogs is not part of the default local Helm stack | Expected unless observability is installed separately |
-| Slackbot is not running locally | Default dev values disable slackbot | Enable it in values only when testing Slack-specific flows |
-| `call agent execute` returns "Tool 'agent' not found" | Sandbox pods have old `call.sh` without `agent` case | Rebuild sandbox image, delete stale sandbox pods, redeploy API |
-| Sandbox pods stale after sandbox rebuild | `just build-one agent` doesn't update already-running pods | Delete sandbox pods with `kubectl delete pod -n centaur -l centaur-agent=true --ignore-not-found` |
-| Duplicate `turn.done` per turn | `is_turn_done` fires on both `end_turn` and `result` events | The amp-wrapper suppresses `result` events — only `end_turn` triggers `turn.done`. If you see doubles, the sandbox has an old wrapper |
-| Handoff output invisible / missing | amp-wrapper suppresses handoff tool events and chains transparently | Expected behavior — check for a new `system.init` with a different `session_id` in the stream |
-| Agent says "handoffs are disabled" | Sandbox has old SYSTEM_PROMPT.md baked in | Rebuild sandbox: `just build-one agent`, delete stale sandbox pods |
+| Symptom | Likely Cause | Action |
+|---------|--------------|--------|
+| Missing Slack env vars | Invocation did not come through Slack, or runtime metadata was not injected | Derive from `CENTAUR_THREAD_KEY`; otherwise fail early |
+| `slack files --download` rejects URL | URL is not a Slack `url_private` file URL | Read thread history or `search_files` JSON and use `url_private` |
+| Search cannot find just-uploaded token | Slack search indexing lag | Retry up to three total attempts, then warn and run the separate overall message search |
+| `company_context` permission denied | Principal lacks DB-backed reader grant | Report principal/channel and ask owner to grant company context access |
+| `vlogs` or `vmetrics` DNS failure | Observability service unavailable from sandbox | Check local stack or cluster service deployment |
+| Expected tools missing | Tool catalog did not load or overlay masked base tools | Report the missing tool names and include `centaur-tools list` output |
+| Concurrent runs hang | Runtime assignment, execution queue, or final delivery issue | Check execution state, vlogs thread trace, and delivery outbox |
+| Scheduler duplicate or catch-up storm | Scheduler idempotency regression | Inspect scheduler-owned DB rows and logs before proposing a code fix |
 
-## Issue Investigation
+## Failure Triage
 
-When something fails:
+When a flow fails, inspect runtime evidence before redesigning:
 
-1. **Service crash** — `kubectl logs -n centaur deploy/centaur-centaur-{component} --tail 30`
-2. **Schema mismatch** — Check DB/API schema vs tool code
-3. **Missing credentials** — `kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s http://centaur-centaur-firewall-manager:8081/secrets/{KEY}` (NOT direct 1Password access)
-4. **Connection failure** — Check upstream, tunnel, firewall
-5. **Routing issue** — Compare ingress/HTTPRoute config with expected path
-6. **Postgres persistence** — Check `chat_messages` table: `kubectl exec -n centaur statefulset/centaur-centaur-postgres -- psql -U tempo -d ai_v2 -c "SELECT role, parts FROM chat_messages WHERE thread_key='...'"` 
-
-Note root cause and suggested fix for each failure.
-
-## Fixing Issues
-
-1. Fix the bug in the relevant service/tool code
-2. Tools: commit + push (hot-reload, no restart)
-3. Services: `just build-one {service} && just deploy`
-4. Re-test, update report from FAIL → PASS (fixed)
+- Stuck execution: check execution state, `agent_execution_events`, and `vlogs thread_trace`.
+- Missing Slack response: check Slackbot logs, final delivery state, and the Slack thread surface.
+- File failure: check Slack file metadata, `url_private`, downloaded byte size, and upload response.
+- Tool failure: classify credential, DNS, upstream, schema, timeout, or runtime errors separately.
+- Context bug: inspect thread history, requester context, and message ordering.
+- Scheduler bug: inspect scheduler-owned rows and logs for duplicate or catch-up decisions.
 
 ## References
 
-| Reference | When to Read |
+| Reference | When To Read |
 |-----------|--------------|
-| [references/test-inputs.md](references/test-inputs.md) | Before tool testing — default inputs by category |
+| [references/test-inputs.md](references/test-inputs.md) | When doing broader tool-by-tool QA beyond the smoke test |
 
 ## Templates
 
 | Template | Purpose |
 |----------|---------|
-| [templates/tool-qa-report-template.md](templates/tool-qa-report-template.md) | QA report file |
+| [templates/tool-qa-report-template.md](templates/tool-qa-report-template.md) | Optional full QA report file for local stack runs |
