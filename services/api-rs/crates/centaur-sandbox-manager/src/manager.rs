@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use centaur_sandbox_core::{
     DesiredSandboxState, ObservedSandbox, SandboxBackend, SandboxHandle, SandboxId, SandboxIo,
     SandboxResult, SandboxSpec, SandboxStatus,
 };
-use centaur_telemetry::record_sandbox_operation;
+use centaur_telemetry::{record_sandbox_operation, record_sandbox_startup_duration};
+use tokio::time::Instant;
 use tracing::{Instrument, error, info, info_span};
 
 use crate::{
@@ -55,6 +56,7 @@ where
         );
 
         async {
+            let started_at = Instant::now();
             info!(
                 component = "sandbox_manager",
                 event = "sandbox_create_started",
@@ -64,11 +66,15 @@ where
             let handle = match self.backend.create(spec.clone()).await {
                 Ok(handle) => handle,
                 Err(error) => {
+                    let startup_duration = started_at.elapsed();
                     record_sandbox_operation(backend, "create", "error");
+                    record_sandbox_startup_duration(backend, "error", startup_duration);
                     error!(
                         component = "sandbox_manager",
                         event = "sandbox_create_failed",
                         backend,
+                        startup_duration_ms = duration_millis_u64(startup_duration),
+                        startup_duration_seconds = startup_duration.as_secs_f64(),
                         %error,
                         "failed to create sandbox"
                     );
@@ -77,14 +83,18 @@ where
             };
             span.record("centaur.sandbox_id", handle.id.as_str());
             span.record("sandbox_id", handle.id.as_str());
+            let startup_duration = started_at.elapsed();
             self.store
                 .set(handle.id.clone(), DesiredSandboxState::Running(spec));
             record_sandbox_operation(backend, "create", "success");
+            record_sandbox_startup_duration(backend, "success", startup_duration);
             info!(
                 component = "sandbox_manager",
                 event = "sandbox_create_completed",
                 backend,
                 sandbox_id = %handle.id.as_str(),
+                startup_duration_ms = duration_millis_u64(startup_duration),
+                startup_duration_seconds = startup_duration.as_secs_f64(),
                 "sandbox created"
             );
             Ok(handle)
@@ -305,6 +315,10 @@ where
         }
         Ok(reconciled)
     }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
