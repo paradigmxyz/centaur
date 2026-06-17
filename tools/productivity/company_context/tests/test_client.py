@@ -13,13 +13,17 @@ import client as company_context_client
 from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 from client import CompanyContextClient
 
+from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
+
 
 class _FakeConnection:
-    def __init__(self, *, rows=None, row=None) -> None:
+    def __init__(self, *, rows=None, row=None, val=None) -> None:
         self.rows = rows or []
         self.row = row
+        self.val = val
         self.fetch_calls = []
         self.fetchrow_calls = []
+        self.fetchval_calls = []
         self.closed = False
 
     async def fetch(self, query, *args):
@@ -30,6 +34,10 @@ class _FakeConnection:
         self.fetchrow_calls.append((query, args))
         return self.row
 
+    async def fetchval(self, query, *args):
+        self.fetchval_calls.append((query, args))
+        return self.val
+
     async def close(self):
         self.closed = True
 
@@ -39,8 +47,8 @@ class _FakeSlackClient:
         self.messages = messages or []
         self.calls = []
 
-    def search_messages(self, query, max_results=20):
-        self.calls.append((query, max_results))
+    def search_messages(self, query, max_results=20, channels=None):
+        self.calls.append((query, max_results, channels))
         return self.messages
 
 
@@ -121,6 +129,7 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
 
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
     monkeypatch.setattr(company_context_client, "_load_slack_client", lambda: fake_slack)
+    monkeypatch.setattr(company_context_client, "_current_slack_channel_id", lambda: "C123")
 
     result = CompanyContextClient("postgresql://example").search(
         "ParadeDB BM25",
@@ -134,7 +143,7 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
     assert result["indexed_count"] == 1
     assert result["live_count"] == 0
     assert result["indexed_cutoff"] == "2026-05-10T15:30:00+00:00"
-    assert fake_slack.calls == [("ParadeDB BM25 after:2026-05-10", 5)]
+    assert fake_slack.calls == [("ParadeDB BM25 after:2026-05-10", 5, ["C123"])]
     assert result["results"][0] == {
         "document_id": "slack:thread:C123:1770000000.000000",
         "source": "slack",
@@ -207,6 +216,7 @@ def test_search_appends_live_slack_gap_results(monkeypatch):
 
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
     monkeypatch.setattr(company_context_client, "_load_slack_client", lambda: fake_slack)
+    monkeypatch.setattr(company_context_client, "_current_slack_channel_id", lambda: "C123")
 
     result = CompanyContextClient("postgresql://example").search(
         "state root mismatch",
@@ -220,7 +230,7 @@ def test_search_appends_live_slack_gap_results(monkeypatch):
     assert result["live_count"] == 1
     assert result["indexed_cutoff"] == "2026-05-10T15:30:00+00:00"
     assert result["live_error"] is None
-    assert fake_slack.calls == [("state root mismatch after:2026-05-10", 7)]
+    assert fake_slack.calls == [("state root mismatch after:2026-05-10", 7, ["C123"])]
     assert result["results"] == [
         {
             "document_id": "",
@@ -269,6 +279,7 @@ def test_search_preserves_existing_slack_after_modifier(monkeypatch):
 
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
     monkeypatch.setattr(company_context_client, "_load_slack_client", lambda: fake_slack)
+    monkeypatch.setattr(company_context_client, "_current_slack_channel_id", lambda: "C123")
 
     result = CompanyContextClient("postgresql://example").search(
         "state root after:2026-05-11",
@@ -276,7 +287,7 @@ def test_search_preserves_existing_slack_after_modifier(monkeypatch):
     )
 
     assert result["status"] == "ok"
-    assert fake_slack.calls == [("state root after:2026-05-11", 10)]
+    assert fake_slack.calls == [("state root after:2026-05-11", 10, ["C123"])]
 
 
 def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):

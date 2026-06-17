@@ -13,7 +13,7 @@ from typing import Any
 
 import asyncpg
 
-from centaur_sdk.tool_sdk import secret
+from centaur_sdk.tool_sdk import get_tool_context, secret
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
@@ -247,6 +247,28 @@ def _slack_after_query(query: str, latest_date: str | None) -> str:
     return f"{query} after:{latest_date[:10]}"
 
 
+def _current_slack_channel_id() -> str | None:
+    """Return the channel/group id for the active Slack thread, or None for DMs."""
+    try:
+        thread_key = get_tool_context().thread_key
+    except LookupError:
+        return None
+    if not thread_key:
+        return None
+    for segment in str(thread_key).split(":")[1:]:
+        clean = segment.strip()
+        if clean.startswith(("C", "G")):
+            return clean
+        if clean.startswith("D"):
+            return None
+    return None
+
+
+async def _is_etl_admin_channel(conn: asyncpg.Connection) -> bool:
+    value = await conn.fetchval("SELECT centaur_etl_admin_channel()")
+    return bool(value)
+
+
 def _load_slack_client() -> Any:
     """Load the sibling Slack tool client without making company_context import it eagerly."""
     candidate_roots = [
@@ -409,12 +431,18 @@ class CompanyContextClient:
                     source_type=source_type,
                 )
                 try:
-                    live_query = _slack_after_query(query, latest.get("latest_date"))
-                    live_messages = _load_slack_client().search_messages(
-                        live_query,
-                        max_results=limit,
-                    )
-                    live_results = [_live_slack_result(message) for message in live_messages]
+                    slack_channel_id = _current_slack_channel_id()
+                    if slack_channel_id is None:
+                        live_error = "live Slack search requires a channel-scoped thread"
+                    else:
+                        live_channels = None if await _is_etl_admin_channel(conn) else [slack_channel_id]
+                        live_query = _slack_after_query(query, latest.get("latest_date"))
+                        live_messages = _load_slack_client().search_messages(
+                            live_query,
+                            max_results=limit,
+                            channels=live_channels,
+                        )
+                        live_results = [_live_slack_result(message) for message in live_messages]
                 except Exception as exc:
                     live_error = str(exc)
 
