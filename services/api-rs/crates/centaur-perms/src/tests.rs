@@ -645,6 +645,46 @@ fn duplicate_secret_names_get_unique_foreign_ids() {
     assert_eq!(b.foreign_id, "tool-x-tok-2");
 }
 
+#[test]
+fn translate_for_tool_adds_tool_identity_labels() {
+    let secrets = vec![tools::parse_secret(
+        &entry(
+            r#"{ type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"] }"#,
+        ),
+        &[],
+    )
+    .unwrap()];
+    let labels = translate::ToolLabels {
+        tool: "slack".to_owned(),
+        overlay: "centaur-paradigm".to_owned(),
+    };
+    let out = translate::translate_for_tool(
+        "default",
+        "tool-slack",
+        &labels,
+        &secrets,
+        &SourcePolicy::env(),
+    );
+    let SecretInput::Static(secret) = &out.inputs[0] else {
+        panic!()
+    };
+    assert_eq!(
+        secret.labels.get("managed-by").map(String::as_str),
+        Some("centaur")
+    );
+    assert_eq!(
+        secret.labels.get("centaur-tool").map(String::as_str),
+        Some("slack")
+    );
+    assert_eq!(
+        secret
+            .labels
+            .get("centaur-tool-overlay")
+            .map(String::as_str),
+        Some("centaur-paradigm")
+    );
+}
+
 // ----- overlay resolution ---------------------------------------------------
 
 fn tmp_root(tag: &str) -> PathBuf {
@@ -695,6 +735,21 @@ fn finds_tool_in_category_subdir() {
     let manifest = tools::find_tool(&[base], "slack").unwrap();
     assert_eq!(manifest.name, "slack");
     assert_eq!(manifest.secrets[0].name(), "SLACK_BOT_TOKEN");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn overlay_name_uses_parent_when_root_is_tools_dir() {
+    let root = tmp_root("overlay-name");
+    let tools_dir = root.join("centaur-paradigm").join("tools");
+    write_tool(&tools_dir, "productivity/slack", SLACK_A);
+
+    let manifest = tools::find_tool(std::slice::from_ref(&tools_dir), "slack").unwrap();
+    assert_eq!(
+        tools::overlay_name_for_tool_dir(&manifest.dir, &[tools_dir]),
+        "centaur-paradigm"
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }

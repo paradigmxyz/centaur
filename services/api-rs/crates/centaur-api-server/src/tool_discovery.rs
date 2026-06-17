@@ -156,6 +156,60 @@ fn clean_optional_path(value: Option<&Path>) -> Option<PathBuf> {
     })
 }
 
+fn tool_labels(tool: &str, overlay: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("centaur-tool".to_owned(), tool.to_owned()),
+        ("centaur-tool-overlay".to_owned(), overlay.to_owned()),
+    ])
+}
+
+fn overlay_name_for_root(root: &Path) -> String {
+    let candidate = if root.file_name().and_then(|name| name.to_str()) == Some("tools") {
+        root.parent().and_then(|parent| parent.file_name())
+    } else {
+        root.file_name()
+    };
+    candidate
+        .and_then(|name| name.to_str())
+        .map(centaur_iron_control::slugify)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn merge_tool_labels(target: &mut BTreeMap<String, String>, incoming: &BTreeMap<String, String>) {
+    merge_csv_label(target, incoming, "centaur-tool");
+    merge_csv_label(target, incoming, "centaur-tool-overlay");
+}
+
+fn merge_csv_label(
+    target: &mut BTreeMap<String, String>,
+    incoming: &BTreeMap<String, String>,
+    key: &str,
+) {
+    let mut values = BTreeSet::new();
+    if let Some(existing) = target.get(key) {
+        values.extend(
+            existing
+                .split(',')
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    if let Some(next) = incoming.get(key) {
+        values.extend(
+            next.split(',')
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    if !values.is_empty() {
+        target.insert(
+            key.to_owned(),
+            values.into_iter().collect::<Vec<_>>().join(","),
+        );
+    }
+}
+
 fn default_tools_config() -> Option<PathBuf> {
     let cwd = env::current_dir().ok()?;
     find_ancestor_file(&cwd, "tools.toml")
@@ -233,7 +287,7 @@ fn collect_tools(tool_dirs: &[PathBuf]) -> Result<Vec<LoadedToolMeta>, ToolDisco
             if !pyproject_path.exists() {
                 continue;
             }
-            let Some(meta) = load_tool_meta(&tool_dir, &pyproject_path)? else {
+            let Some(meta) = load_tool_meta(base_dir, &tool_dir, &pyproject_path)? else {
                 continue;
             };
             if let Some(prev_dir_idx) = seen.insert(meta.name.clone(), dir_idx) {
@@ -299,6 +353,7 @@ fn is_visible_dir(path: &Path) -> bool {
 }
 
 fn load_tool_meta(
+    source_root: &Path,
     tool_dir: &Path,
     pyproject_path: &Path,
 ) -> Result<Option<LoadedToolMeta>, ToolDiscoveryError> {
@@ -334,24 +389,26 @@ fn load_tool_meta(
         })?
         .to_owned();
     let default_hosts = string_array(tool_conf.get("hosts"));
-    let secrets =
-        match parse_secret_list(tool_conf.get("secrets"), &default_hosts).and_then(|mut secrets| {
+    let labels = tool_labels(&name, &overlay_name_for_root(source_root));
+    let secrets = match parse_secret_list(tool_conf.get("secrets"), &default_hosts, &labels)
+        .and_then(|mut secrets| {
             secrets.extend(parse_secret_list(
                 tool_conf.get("optional_secrets"),
                 &default_hosts,
+                &labels,
             )?);
             Ok(secrets)
         }) {
-            Ok(secrets) => secrets,
-            Err(error) => {
-                warn!(
-                    tool = %name,
-                    error = %error,
-                    "api-rs tool invalid secret metadata"
-                );
-                return Ok(None);
-            }
-        };
+        Ok(secrets) => secrets,
+        Err(error) => {
+            warn!(
+                tool = %name,
+                error = %error,
+                "api-rs tool invalid secret metadata"
+            );
+            return Ok(None);
+        }
+    };
     Ok(Some(LoadedToolMeta { name, secrets }))
 }
 
@@ -368,6 +425,7 @@ enum ToolSecret {
 struct HttpSecret {
     name: String,
     secret_ref: String,
+    labels: BTreeMap<String, String>,
     mode: HttpSecretMode,
     hosts: Vec<String>,
     replacer: String,
@@ -394,6 +452,7 @@ struct OAuthFieldSource {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct OAuthTokenSecret {
     name: String,
+    labels: BTreeMap<String, String>,
     grant: String,
     hosts: Vec<String>,
     fields: Vec<(String, OAuthFieldSource)>,
@@ -407,6 +466,7 @@ struct OAuthTokenSecret {
 struct GcpAuthSecret {
     name: String,
     secret_ref: String,
+    labels: BTreeMap<String, String>,
     hosts: Vec<String>,
     scopes: Vec<String>,
 }
@@ -415,6 +475,7 @@ struct GcpAuthSecret {
 struct PgDsnSecret {
     name: String,
     secret_ref: String,
+    labels: BTreeMap<String, String>,
     database: String,
     role: Option<String>,
     settings: Vec<PgDsnSetting>,
@@ -430,6 +491,7 @@ struct PgDsnSecret {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AwsAuthSecret {
     name: String,
+    labels: BTreeMap<String, String>,
     hosts: Vec<String>,
     access_key_id_ref: String,
     secret_access_key_ref: String,
@@ -441,6 +503,7 @@ struct AwsAuthSecret {
 fn parse_secret_list(
     value: Option<&TomlValue>,
     default_hosts: &[String],
+    labels: &BTreeMap<String, String>,
 ) -> Result<Vec<ToolSecret>, ToolDiscoveryError> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -450,13 +513,14 @@ fn parse_secret_list(
         .ok_or_else(|| ToolDiscoveryError::Invalid("'secrets' must be an array".to_owned()))?;
     entries
         .iter()
-        .map(|entry| parse_secret(entry, default_hosts))
+        .map(|entry| parse_secret(entry, default_hosts, labels))
         .collect()
 }
 
 fn parse_secret(
     value: &TomlValue,
     default_hosts: &[String],
+    labels: &BTreeMap<String, String>,
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     if let Some(name) = value.as_str() {
         let name = nonempty(name, "secret name")?.to_owned();
@@ -469,6 +533,7 @@ fn parse_secret(
         return Ok(ToolSecret::Http(HttpSecret {
             name: name.clone(),
             secret_ref: name.clone(),
+            labels: labels.clone(),
             mode: HttpSecretMode::Replace,
             hosts: default_hosts.to_vec(),
             replacer: name,
@@ -491,11 +556,11 @@ fn parse_secret(
         .unwrap_or(name.as_str())
         .to_owned();
     match optional_str(table, "type").unwrap_or("http") {
-        "http" | "header" => parse_http_secret(table, name, secret_ref, default_hosts),
-        "oauth_token" => parse_oauth_token_secret(table, name),
-        "gcp_auth" => parse_gcp_auth_secret(table, name, secret_ref),
-        "pg_dsn" => parse_pg_dsn_secret(table, name, secret_ref),
-        "aws_auth" => parse_aws_auth_secret(table, name),
+        "http" | "header" => parse_http_secret(table, name, secret_ref, default_hosts, labels),
+        "oauth_token" => parse_oauth_token_secret(table, name, labels),
+        "gcp_auth" => parse_gcp_auth_secret(table, name, secret_ref, labels),
+        "pg_dsn" => parse_pg_dsn_secret(table, name, secret_ref, labels),
+        "aws_auth" => parse_aws_auth_secret(table, name, labels),
         "brokered_token" | "hmac_sign" => Err(ToolDiscoveryError::Invalid(format!(
             "api-rs iron-control tool discovery does not yet support secret type {:?}",
             optional_str(table, "type").unwrap_or("unknown")
@@ -511,6 +576,7 @@ fn parse_http_secret(
     name: String,
     secret_ref: String,
     default_hosts: &[String],
+    labels: &BTreeMap<String, String>,
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     let hosts =
         optional_string_array(table.get("hosts"))?.unwrap_or_else(|| default_hosts.to_vec());
@@ -537,6 +603,7 @@ fn parse_http_secret(
             Ok(ToolSecret::Http(HttpSecret {
                 name,
                 secret_ref,
+                labels: labels.clone(),
                 mode: HttpSecretMode::Replace,
                 hosts,
                 replacer,
@@ -571,6 +638,7 @@ fn parse_http_secret(
             Ok(ToolSecret::Http(HttpSecret {
                 name,
                 secret_ref,
+                labels: labels.clone(),
                 mode: HttpSecretMode::Inject,
                 hosts,
                 replacer: String::new(),
@@ -591,6 +659,7 @@ fn parse_http_secret(
 fn parse_oauth_token_secret(
     table: &toml::Table,
     name: String,
+    labels: &BTreeMap<String, String>,
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     let grant = required_str(table, "grant")?.to_owned();
     let hosts = required_string_array(table.get("hosts"), "hosts")?;
@@ -603,6 +672,7 @@ fn parse_oauth_token_secret(
     let audience = optional_str(table, "audience").map(ToOwned::to_owned);
     Ok(ToolSecret::OAuthToken(OAuthTokenSecret {
         name,
+        labels: labels.clone(),
         grant,
         hosts,
         fields,
@@ -617,10 +687,12 @@ fn parse_gcp_auth_secret(
     table: &toml::Table,
     name: String,
     secret_ref: String,
+    labels: &BTreeMap<String, String>,
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     Ok(ToolSecret::GcpAuth(GcpAuthSecret {
         name,
         secret_ref,
+        labels: labels.clone(),
         hosts: optional_string_array(table.get("hosts"))?.unwrap_or_default(),
         scopes: optional_string_array(table.get("scopes"))?.unwrap_or_default(),
     }))
@@ -630,6 +702,7 @@ fn parse_pg_dsn_secret(
     table: &toml::Table,
     name: String,
     secret_ref: String,
+    labels: &BTreeMap<String, String>,
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     let database = required_str(table, "database")?.to_owned();
     let role = optional_str(table, "role").map(ToOwned::to_owned);
@@ -637,6 +710,7 @@ fn parse_pg_dsn_secret(
     Ok(ToolSecret::PgDsn(PgDsnSecret {
         name,
         secret_ref,
+        labels: labels.clone(),
         database,
         role,
         settings,
@@ -700,6 +774,7 @@ fn parse_pg_dsn_setting_value_from(
 fn parse_aws_auth_secret(
     table: &toml::Table,
     name: String,
+    labels: &BTreeMap<String, String>,
 ) -> Result<ToolSecret, ToolDiscoveryError> {
     // `hosts` is required (no tool-level fallback, matching the centaur-perms
     // loader); the credential refs are placeholders the proxy re-signs with.
@@ -715,6 +790,7 @@ fn parse_aws_auth_secret(
         optional_string_array(table.get("allowed_services"))?.unwrap_or_default();
     Ok(ToolSecret::AwsAuth(AwsAuthSecret {
         name,
+        labels: labels.clone(),
         hosts,
         access_key_id_ref,
         secret_access_key_ref,
@@ -776,21 +852,21 @@ fn fragment_from_secrets(secrets: Vec<ToolSecret>) -> Result<ProxyFragment, Tool
 }
 
 fn http_secret_transform(secrets: &[ToolSecret]) -> Result<Option<Transform>, ToolDiscoveryError> {
-    let mut grouped = BTreeMap::<HttpSecretKey, BTreeSet<String>>::new();
+    let mut grouped =
+        BTreeMap::<HttpSecretKey, (BTreeSet<String>, BTreeMap<String, String>)>::new();
     for secret in secrets {
         let ToolSecret::Http(secret) = secret else {
             continue;
         };
-        grouped
-            .entry(HttpSecretKey::from(secret))
-            .or_default()
-            .extend(secret.hosts.iter().cloned());
+        let entry = grouped.entry(HttpSecretKey::from(secret)).or_default();
+        entry.0.extend(secret.hosts.iter().cloned());
+        merge_tool_labels(&mut entry.1, &secret.labels);
     }
     if grouped.is_empty() {
         return Ok(None);
     }
     let mut entries = Vec::new();
-    for (key, hosts) in grouped {
+    for (key, (hosts, labels)) in grouped {
         let mut extra = BTreeMap::new();
         let mut entry = Secret {
             id: Some(key.name.clone()),
@@ -798,6 +874,7 @@ fn http_secret_transform(secrets: &[ToolSecret]) -> Result<Option<Transform>, To
             rules: host_rules(hosts)?,
             ..Default::default()
         };
+        entry.extra.insert("labels".to_owned(), yaml_value(labels)?);
         match key.mode {
             HttpSecretMode::Replace => {
                 extra.insert("match_headers".to_owned(), yaml_value(&key.match_headers)?);
@@ -870,7 +947,8 @@ impl From<&HttpSecret> for HttpSecretKey {
 }
 
 fn gcp_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDiscoveryError> {
-    let mut by_ref = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
+    let mut by_ref =
+        BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>, BTreeMap<String, String>)>::new();
     for secret in secrets {
         let ToolSecret::GcpAuth(secret) = secret else {
             continue;
@@ -878,9 +956,10 @@ fn gcp_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
         let entry = by_ref.entry(secret.secret_ref.clone()).or_default();
         entry.0.extend(secret.hosts.iter().cloned());
         entry.1.extend(secret.scopes.iter().cloned());
+        merge_tool_labels(&mut entry.2, &secret.labels);
     }
     let mut transforms = Vec::new();
-    for (secret_ref, (hosts, scopes)) in by_ref {
+    for (secret_ref, (hosts, scopes, labels)) in by_ref {
         let mut config = BTreeMap::new();
         config.insert(
             "keyfile".to_owned(),
@@ -900,6 +979,7 @@ fn gcp_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
             hosts
         };
         config.insert("rules".to_owned(), yaml_value(host_rules(hosts)?)?);
+        config.insert("labels".to_owned(), yaml_value(labels)?);
         transforms.push(Transform {
             name: "gcp_auth".to_owned(),
             config: TransformConfig {
@@ -919,8 +999,15 @@ fn aws_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
     // the access-key placeholder) instead of colliding foreign_ids. Mirrors the
     // dedup `gcp_auth_transforms` does by secret_ref.
     type AwsCredKey = (String, String, Option<String>);
-    let mut by_cred =
-        BTreeMap::<AwsCredKey, (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)>::new();
+    let mut by_cred = BTreeMap::<
+        AwsCredKey,
+        (
+            BTreeSet<String>,
+            BTreeSet<String>,
+            BTreeSet<String>,
+            BTreeMap<String, String>,
+        ),
+    >::new();
     for secret in secrets {
         let ToolSecret::AwsAuth(secret) = secret else {
             continue;
@@ -935,11 +1022,12 @@ fn aws_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
         entry.0.extend(secret.hosts.iter().cloned());
         entry.1.extend(secret.allowed_regions.iter().cloned());
         entry.2.extend(secret.allowed_services.iter().cloned());
+        merge_tool_labels(&mut entry.3, &secret.labels);
     }
     let mut transforms = Vec::new();
     for (
         (access_key_id_ref, secret_access_key_ref, session_token_ref),
-        (hosts, regions, services),
+        (hosts, regions, services, labels),
     ) in by_cred
     {
         let mut config = BTreeMap::new();
@@ -970,6 +1058,7 @@ fn aws_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
             );
         }
         config.insert("rules".to_owned(), yaml_value(host_rules(hosts)?)?);
+        config.insert("labels".to_owned(), yaml_value(labels)?);
         transforms.push(Transform {
             name: "aws_auth".to_owned(),
             config: TransformConfig {
@@ -990,6 +1079,7 @@ fn oauth_token_transform(secrets: &[ToolSecret]) -> Result<Option<Transform>, To
         };
         let mut token = BTreeMap::new();
         token.insert("grant".to_owned(), yaml_string(&secret.grant));
+        token.insert("labels".to_owned(), yaml_value(&secret.labels)?);
         for (field_name, source) in &secret.fields {
             token.insert(field_name.clone(), oauth_field_source(source)?);
         }
@@ -1036,7 +1126,10 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
         let ToolSecret::PgDsn(secret) = secret else {
             continue;
         };
-        by_name.entry(secret.name.clone()).or_insert(secret.clone());
+        by_name
+            .entry(secret.name.clone())
+            .and_modify(|existing| merge_tool_labels(&mut existing.labels, &secret.labels))
+            .or_insert(secret.clone());
     }
     by_name
         .into_values()
@@ -1045,6 +1138,7 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
             if let Some(role) = &secret.role {
                 extra.insert("role".to_owned(), yaml_string(role));
             }
+            extra.insert("labels".to_owned(), yaml_value(&secret.labels)?);
             Ok(PostgresListener {
                 name: Some(secret.name.to_lowercase()),
                 upstream: Some(PostgresUpstream {
@@ -1226,6 +1320,7 @@ mod tests {
         let listeners = postgres_listeners(&[ToolSecret::PgDsn(PgDsnSecret {
             name: "RESHIFT_DSN".to_owned(),
             secret_ref: "RESHIFT_DSN".to_owned(),
+            labels: tool_labels("company_context", "centaur"),
             database: "warehouse".to_owned(),
             role: Some("centaur_slack_reader".to_owned()),
             settings: vec![PgDsnSetting {
@@ -1295,10 +1390,31 @@ secrets = [
         let secrets = discovered.fragment.transforms[0].config.secrets.clone();
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].id.as_deref(), Some("OVERLAY_TOKEN"));
+        let labels = secrets[0]
+            .extra
+            .get("labels")
+            .and_then(YamlValue::as_mapping)
+            .expect("static secret labels");
+        assert_eq!(
+            labels
+                .get(YamlValue::String("centaur-tool".to_owned()))
+                .and_then(YamlValue::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            labels
+                .get(YamlValue::String("centaur-tool-overlay".to_owned()))
+                .and_then(YamlValue::as_str),
+            Some("overlay")
+        );
         assert_eq!(
             discovered.fragment.transforms[1].name,
             "oauth_token".to_owned()
         );
+        let tokens = discovered.fragment.transforms[1].config.extra["tokens"]
+            .as_sequence()
+            .expect("oauth tokens");
+        assert_eq!(tokens[0]["labels"]["centaur-tool"].as_str(), Some("gsuite"));
 
         let _ = fs::remove_dir_all(temp);
     }

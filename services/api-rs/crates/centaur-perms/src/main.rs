@@ -459,12 +459,22 @@ async fn principals_grant(
     for tool in &args.tools {
         let manifest = tools::find_tool(&dirs, tool)?;
         let role = RoleSpec::tool(&manifest.name);
+        let tool_labels = translate::ToolLabels {
+            tool: manifest.name.clone(),
+            overlay: tools::overlay_name_for_tool_dir(&manifest.dir, &dirs),
+        };
         let role_id = client
             .upsert_role(&role_identity(&role, &cli.namespace))
             .await?
             .id;
         let secrets: Vec<_> = manifest.all_secrets().cloned().collect();
-        let translation = translate::translate(&cli.namespace, &role.foreign_id, &secrets, &policy);
+        let translation = translate::translate_for_tool(
+            &cli.namespace,
+            &role.foreign_id,
+            &tool_labels,
+            &secrets,
+            &policy,
+        );
         let granted = grant_inputs_to_role(client, &role_id, translation.inputs).await?;
         assign_role_idempotent(client, &principal_id, &role_id).await?;
         println!(
@@ -613,7 +623,17 @@ async fn roles_grant(cli: &Cli, client: &IronControlClient, args: &RoleGrantArgs
         // Key the secret resources on the tool's canonical role so the same
         // secret object is shared no matter which role it's granted to.
         let tool_role = RoleSpec::tool(&manifest.name).foreign_id;
-        let translation = translate::translate(&cli.namespace, &tool_role, &selected, &policy);
+        let tool_labels = translate::ToolLabels {
+            tool: manifest.name.clone(),
+            overlay: tools::overlay_name_for_tool_dir(&manifest.dir, &dirs),
+        };
+        let translation = translate::translate_for_tool(
+            &cli.namespace,
+            &tool_role,
+            &tool_labels,
+            &selected,
+            &policy,
+        );
         let granted = grant_inputs_to_role(client, &role.id, translation.inputs).await?;
         println!(
             "  tool {} (from {}): {} secret(s) registered and granted to {}",
