@@ -252,6 +252,26 @@
         }
       }
     },
+    "slackbotv2": {
+      "type": "object",
+      "properties": {
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "extraEnv": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
     "postgres": {
       "type": "object",
       "properties": {

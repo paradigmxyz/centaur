@@ -14,6 +14,7 @@ import type {
   SlackbotV2RendererSource,
   SlackbotV2SessionMessage
 } from './types'
+import { observeSeconds, slackbotMetrics } from './metrics'
 import { elapsedMs, isJsonObject, nowMs, stringValue, toAsyncIterable, traceLog } from './utils'
 
 export class SessionApiError extends Error {
@@ -47,6 +48,26 @@ export function isRetryableSessionApiError(error: unknown): boolean {
   if (error instanceof SessionApiError) return error.retryable
   if (!(error instanceof Error)) return false
   return error.name === 'AbortError' || error.name === 'TypeError'
+}
+
+async function recordSessionApiOperation<T>(
+  operation: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const startedAtMs = nowMs()
+  let outcome = 'success'
+  try {
+    return await fn()
+  } catch (error) {
+    outcome = isRetryableSessionApiError(error) ? 'retryable_error' : 'error'
+    throw error
+  } finally {
+    slackbotMetrics.sessionApiOperations.inc({ operation, outcome })
+    slackbotMetrics.sessionApiOperationDuration.observe(
+      { operation, outcome },
+      observeSeconds(startedAtMs)
+    )
+  }
 }
 
 type ForwardSessionApiCallbacks = {
@@ -150,11 +171,13 @@ export async function forwardToSessionApi(
   callbacks: ForwardSessionApiCallbacks = {}
 ): Promise<AsyncIterable<SlackbotV2RendererSource> | null> {
   const createStartedAtMs = nowMs()
-  const created = await createSession(
-    options,
-    input.threadId,
-    input.harnessType,
-    sessionRequesterMessage(input)
+  const created = await recordSessionApiOperation('create_session', () =>
+    createSession(
+      options,
+      input.threadId,
+      input.harnessType,
+      sessionRequesterMessage(input)
+    )
   )
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
     harness_switched: created.harnessSwitched,
@@ -165,7 +188,9 @@ export async function forwardToSessionApi(
   }
   if (input.messages.length > 0) {
     const appendStartedAtMs = nowMs()
-    await appendSessionMessages(options, input.threadId, input.messages, !input.executeMessage)
+    await recordSessionApiOperation('append_messages', () =>
+      appendSessionMessages(options, input.threadId, input.messages, !input.executeMessage)
+    )
     traceLog(options, 'slackbotv2_session_append_complete', input.trace, {
       message_count: input.messages.length,
       phase_ms: elapsedMs(appendStartedAtMs)
@@ -177,16 +202,19 @@ export async function forwardToSessionApi(
     })
   }
   if (!input.executeMessage) return null
+  const executeMessage = input.executeMessage
 
   const executeStartedAtMs = nowMs()
-  const execution = await executeSession(
-    options,
-    input.threadId,
-    input.executeMessage,
-    input.model,
-    input.executeContextMessages,
-    input.contextPreamble,
-    input.reasoning
+  const execution = await recordSessionApiOperation('execute_session', () =>
+    executeSession(
+      options,
+      input.threadId,
+      executeMessage,
+      input.model,
+      input.executeContextMessages,
+      input.contextPreamble,
+      input.reasoning
+    )
   )
   traceLog(options, 'slackbotv2_session_execute_complete', input.trace, {
     execution_id: execution.execution_id,
@@ -203,12 +231,14 @@ export async function openSessionEventStream(
   input: Pick<ForwardSessionInput, 'afterEventId' | 'executionId' | 'onEventId' | 'threadId' | 'trace'>
 ): Promise<AsyncIterable<SlackbotV2RendererSource>> {
   const streamStartedAtMs = nowMs()
-  const stream = await streamSessionNotifications(
-    options,
-    input.threadId,
-    input.afterEventId,
-    input.executionId,
-    input.onEventId
+  const stream = await recordSessionApiOperation('open_event_stream', () =>
+    streamSessionNotifications(
+      options,
+      input.threadId,
+      input.afterEventId,
+      input.executionId,
+      input.onEventId
+    )
   )
   traceLog(options, 'slackbotv2_session_events_opened', input.trace, {
     after_event_id: input.afterEventId,

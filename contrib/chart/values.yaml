@@ -327,6 +327,12 @@ slackbotv2:
   assistantStatus: ""
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
+  metrics:
+    # slackbotv2 serves Prometheus text metrics at /metrics. This flag only
+    # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
   extraEnv: {}
   resources: {}
 
