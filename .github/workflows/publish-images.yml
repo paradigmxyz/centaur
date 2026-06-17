@@ -20,7 +20,7 @@ on:
 
 concurrency:
   group: publish-images-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
