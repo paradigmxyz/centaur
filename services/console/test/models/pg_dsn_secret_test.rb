@@ -32,13 +32,13 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert_includes secret.errors[:dsn_source], "can't be blank"
   end
 
-  test "requires a foreign_id (it is the proxy's binding key)" do
+  test "requires a foreign_id (it derives the sandbox env var)" do
     secret = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: nil)))
     assert_not secret.valid?
     assert_includes secret.errors[:foreign_id], "can't be blank"
   end
 
-  test "requires a database (it is the client dbname)" do
+  test "requires a database (it is the routing key)" do
     secret = with_dsn(PgDsnSecret.new(base_attrs(database: nil)))
     assert_not secret.valid?
     assert_includes secret.errors[:database], "can't be blank"
@@ -55,12 +55,11 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "database may be shared by secrets with distinct foreign_id" do
+  test "database is unique within a namespace" do
     with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "first-pg", database: "shared-db"))).save!
-    shared_db = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "second-pg", database: "shared-db")))
-
-    assert shared_db.valid?
-    assert shared_db.save
+    dup = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "second-pg", database: "shared-db")))
+    assert_not dup.valid?
+    assert_includes dup.errors[:database], "has already been taken"
   end
 
   test "an inline DSN whose database matches is valid" do

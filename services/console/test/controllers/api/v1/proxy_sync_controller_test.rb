@@ -188,7 +188,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_equal [], json_body.fetch("transforms")
   end
 
-  test "postgres carries a DSN entry per granted PgDsnSecret, keyed by foreign_id" do
+  test "postgres carries a DSN entry per granted PgDsnSecret with foreign_id" do
     # acme_channel is granted acme_analytics_pg (see grants.yml).
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok

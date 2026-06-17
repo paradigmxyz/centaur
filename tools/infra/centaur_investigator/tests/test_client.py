@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 import client as centaur_client
 from client import CentaurInvestigatorClient, parse_slack_reference
+
+
+def test_readonly_dsn_manifest_targets_centaur_database() -> None:
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    secrets = pyproject["tool"]["centaur"]["secrets"]
+    readonly = next(secret for secret in secrets if secret["name"] == "CENTAUR_READONLY_DSN")
+
+    assert readonly["type"] == "pg_dsn"
+    assert readonly["secret_ref"] == "DATABASE_URL"
+    assert readonly["database"] == "centaur"
 
 
 class _FakeConnection:

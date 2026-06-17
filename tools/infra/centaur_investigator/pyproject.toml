@@ -28,5 +28,5 @@ build-backend = "hatchling.build"
 module = "client.py"
 hosts = []
 secrets = [
-    {type = "pg_dsn", name = "CENTAUR_READONLY_DSN", database = "ai_v2", secret_ref = "DATABASE_URL", role = "centaur_readonly"},
+    {type = "pg_dsn", name = "CENTAUR_READONLY_DSN", database = "centaur", secret_ref = "DATABASE_URL", role = "centaur_readonly"},
 ]

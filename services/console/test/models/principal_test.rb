@@ -176,7 +176,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_empty principals(:globex_user).sync_transforms
   end
 
-  test "sync_postgres emits a DSN entry per granted PgDsnSecret, keyed by foreign_id" do
+  test "sync_postgres emits a DSN entry per granted PgDsnSecret with foreign_id" do
     entries = principal_with_grants(pg_dsn_secrets(:acme_analytics_pg)).sync_postgres
     assert_equal 1, entries.length
     assert_equal pg_dsn_secrets(:acme_analytics_pg).foreign_id, entries.first["foreign_id"]
