@@ -138,6 +138,7 @@ pub async fn grant_inputs_to_role(
     inputs: Vec<SecretInput>,
 ) -> Result<Vec<String>, IronControlError> {
     let existing = client.list_role_grants(role_oid).await?;
+    let inputs = coalesce_secret_inputs(inputs);
     let mut grant_ids = Vec::with_capacity(inputs.len());
     for input in inputs {
         let secret = match input {
@@ -173,6 +174,93 @@ pub async fn grant_inputs_to_role(
         grant_ids.push(grant.id);
     }
     Ok(grant_ids)
+}
+
+fn coalesce_secret_inputs(inputs: Vec<SecretInput>) -> Vec<SecretInput> {
+    let mut out: Vec<SecretInput> = Vec::with_capacity(inputs.len());
+    for mut input in inputs {
+        let Some(key) = secret_input_key(&input) else {
+            out.push(input);
+            continue;
+        };
+        if let Some(position) = out
+            .iter()
+            .position(|existing| secret_input_key(existing).as_ref() == Some(&key))
+        {
+            merge_secret_input_labels(&out[position], &mut input);
+            preserve_secret_input_foreign_id(&out[position], &mut input);
+            out[position] = input;
+        } else {
+            out.push(input);
+        }
+    }
+    out
+}
+
+fn secret_input_key(input: &SecretInput) -> Option<(&'static str, &str)> {
+    match input {
+        SecretInput::Static(input) => Some(("static", input.name.as_str())),
+        SecretInput::OAuthToken(input) => Some(("oauth_token", input.foreign_id.as_str())),
+        SecretInput::GcpAuth(input) => input
+            .foreign_id
+            .as_deref()
+            .map(|foreign_id| ("gcp_auth", foreign_id)),
+        SecretInput::PgDsn(input) => Some(("pg_dsn", input.foreign_id.as_str())),
+        SecretInput::Hmac(input) => Some(("hmac", input.foreign_id.as_str())),
+        SecretInput::AwsAuth(input) => Some(("aws_auth", input.foreign_id.as_str())),
+    }
+}
+
+fn preserve_secret_input_foreign_id(existing: &SecretInput, next: &mut SecretInput) {
+    match (existing, next) {
+        (SecretInput::Static(existing), SecretInput::Static(next)) => {
+            next.foreign_id.clone_from(&existing.foreign_id);
+        }
+        (SecretInput::OAuthToken(existing), SecretInput::OAuthToken(next)) => {
+            next.foreign_id.clone_from(&existing.foreign_id);
+        }
+        (SecretInput::GcpAuth(existing), SecretInput::GcpAuth(next)) => {
+            next.foreign_id.clone_from(&existing.foreign_id);
+        }
+        (SecretInput::PgDsn(existing), SecretInput::PgDsn(next)) => {
+            next.foreign_id.clone_from(&existing.foreign_id);
+        }
+        (SecretInput::Hmac(existing), SecretInput::Hmac(next)) => {
+            next.foreign_id.clone_from(&existing.foreign_id);
+        }
+        (SecretInput::AwsAuth(existing), SecretInput::AwsAuth(next)) => {
+            next.foreign_id.clone_from(&existing.foreign_id);
+        }
+        _ => {}
+    }
+}
+
+fn merge_secret_input_labels(existing: &SecretInput, next: &mut SecretInput) {
+    let mut labels = secret_input_labels(existing).clone();
+    labels.extend(secret_input_labels(next).clone());
+    *secret_input_labels_mut(next) = labels;
+}
+
+fn secret_input_labels(input: &SecretInput) -> &BTreeMap<String, String> {
+    match input {
+        SecretInput::Static(input) => &input.labels,
+        SecretInput::OAuthToken(input) => &input.labels,
+        SecretInput::GcpAuth(input) => &input.labels,
+        SecretInput::PgDsn(input) => &input.labels,
+        SecretInput::Hmac(input) => &input.labels,
+        SecretInput::AwsAuth(input) => &input.labels,
+    }
+}
+
+fn secret_input_labels_mut(input: &mut SecretInput) -> &mut BTreeMap<String, String> {
+    match input {
+        SecretInput::Static(input) => &mut input.labels,
+        SecretInput::OAuthToken(input) => &mut input.labels,
+        SecretInput::GcpAuth(input) => &mut input.labels,
+        SecretInput::PgDsn(input) => &mut input.labels,
+        SecretInput::Hmac(input) => &mut input.labels,
+        SecretInput::AwsAuth(input) => &mut input.labels,
+    }
 }
 
 /// Pure translation: a fragment's transforms → the secret resources to upsert.
@@ -939,6 +1027,53 @@ transforms:
         );
         assert_eq!(input.rules.len(), 1);
         assert_eq!(input.rules[0].host.as_deref(), Some("api.x.ai"));
+    }
+
+    #[test]
+    fn coalesces_duplicate_inputs_without_losing_tool_labels() {
+        let fragment = load_fragment_str(
+            r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - replace:
+            proxy_value: SHARED_API_KEY
+            match_headers: ["Authorization"]
+          rules: [{ host: base.example.com }]
+        - replace:
+            proxy_value: SHARED_API_KEY
+            match_headers: ["Authorization"]
+          labels:
+            centaur-tool: shared-tool
+            centaur-tool-overlay: overlay
+          rules: [{ host: tool.example.com }]
+"#,
+        )
+        .unwrap();
+        let inputs =
+            secret_inputs_from_fragment("default", "infra", &fragment, &env_policy()).unwrap();
+        assert_eq!(inputs.len(), 2);
+
+        let inputs = coalesce_secret_inputs(inputs);
+
+        assert_eq!(inputs.len(), 1);
+        let SecretInput::Static(input) = &inputs[0] else {
+            panic!("expected a static secret");
+        };
+        assert_eq!(input.foreign_id, "infra-shared-api-key");
+        assert_eq!(
+            input.labels.get("managed-by").map(String::as_str),
+            Some("centaur")
+        );
+        assert_eq!(
+            input.labels.get("centaur-tool").map(String::as_str),
+            Some("shared-tool")
+        );
+        assert_eq!(
+            input.labels.get("centaur-tool-overlay").map(String::as_str),
+            Some("overlay")
+        );
     }
 
     #[test]
