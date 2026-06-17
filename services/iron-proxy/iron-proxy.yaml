@@ -66,6 +66,7 @@ transforms:
         - "api-access-key"
         - "api-signature"
         - "api-timestamp"
+        - "project-access-token"
         - "fx-access-key"
         - "fx-access-sign"
         - "fx-access-timestamp"
