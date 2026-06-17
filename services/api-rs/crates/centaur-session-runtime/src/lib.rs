@@ -155,6 +155,16 @@ struct EventStreamState {
     span: Span,
 }
 
+struct SandboxReadyObservation<'a> {
+    thread_key: &'a ThreadKey,
+    execution_id: &'a str,
+    sandbox_id: &'a str,
+    harness_type: &'a HarnessType,
+    source: &'static str,
+    ready_duration: Duration,
+    startup_duration: Option<Duration>,
+}
+
 impl SessionRuntime {
     pub fn new(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Self {
         Self {
@@ -965,15 +975,15 @@ impl SessionRuntime {
                             span.record("centaur.sandbox_id", sandbox_id);
                             span.record("sandbox_id", sandbox_id);
                             let ready_duration = ensure_started.elapsed();
-                            self.record_sandbox_ready(
+                            self.record_sandbox_ready(SandboxReadyObservation {
                                 thread_key,
                                 execution_id,
                                 sandbox_id,
                                 harness_type,
-                                "reused",
+                                source: "reused",
                                 ready_duration,
-                                None,
-                            )
+                                startup_duration: None,
+                            })
                             .await;
                             info!(
                                 component = COMPONENT_SESSION_RUNTIME,
@@ -1007,15 +1017,15 @@ impl SessionRuntime {
                                             }),
                                         )
                                         .await?;
-                                    self.record_sandbox_ready(
+                                    self.record_sandbox_ready(SandboxReadyObservation {
                                         thread_key,
                                         execution_id,
                                         sandbox_id,
                                         harness_type,
-                                        "resumed",
+                                        source: "resumed",
                                         ready_duration,
-                                        None,
-                                    )
+                                        startup_duration: None,
+                                    })
                                     .await;
                                     info!(
                                         component = COMPONENT_SESSION_RUNTIME,
@@ -1117,15 +1127,15 @@ impl SessionRuntime {
                                 }),
                             )
                             .await?;
-                        self.record_sandbox_ready(
+                        self.record_sandbox_ready(SandboxReadyObservation {
                             thread_key,
                             execution_id,
-                            sandbox_id.as_str(),
+                            sandbox_id: sandbox_id.as_str(),
                             harness_type,
-                            "warm_pool",
+                            source: "warm_pool",
                             ready_duration,
-                            None,
-                        )
+                            startup_duration: None,
+                        })
                         .await;
                         info!(
                             component = COMPONENT_SESSION_RUNTIME,
@@ -1163,15 +1173,15 @@ impl SessionRuntime {
             self.store
                 .update_sandbox_id(thread_key, Some(handle.id.as_str()))
                 .await?;
-            self.record_sandbox_ready(
+            self.record_sandbox_ready(SandboxReadyObservation {
                 thread_key,
                 execution_id,
-                handle.id.as_str(),
+                sandbox_id: handle.id.as_str(),
                 harness_type,
-                "cold_create",
+                source: "cold_create",
                 ready_duration,
-                Some(startup_duration),
-            )
+                startup_duration: Some(startup_duration),
+            })
             .await;
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
@@ -1204,16 +1214,16 @@ impl SessionRuntime {
         result
     }
 
-    async fn record_sandbox_ready(
-        &self,
-        thread_key: &ThreadKey,
-        execution_id: &str,
-        sandbox_id: &str,
-        harness_type: &HarnessType,
-        source: &'static str,
-        ready_duration: Duration,
-        startup_duration: Option<Duration>,
-    ) {
+    async fn record_sandbox_ready(&self, observation: SandboxReadyObservation<'_>) {
+        let SandboxReadyObservation {
+            thread_key,
+            execution_id,
+            sandbox_id,
+            harness_type,
+            source,
+            ready_duration,
+            startup_duration,
+        } = observation;
         let ready_duration_ms = duration_millis_u64(ready_duration);
         let startup_duration_ms = startup_duration.map(duration_millis_u64).unwrap_or(0);
         let sandbox_started_for_request = startup_duration.is_some();
