@@ -1,13 +1,161 @@
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 import client as centaur_client
 from client import CentaurInvestigatorClient, parse_slack_reference
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.execute_calls: list[str] = []
+        self.fetch_calls: list[tuple[str, tuple]] = []
+        self.fetchrow_calls: list[tuple[str, tuple]] = []
+        self.closed = False
+        self.now = dt.datetime(2026, 6, 17, 12, 0, tzinfo=dt.UTC)
+
+    async def execute(self, query: str) -> None:
+        self.execute_calls.append(query)
+
+    async def fetchrow(self, query: str, *args):
+        self.fetchrow_calls.append((query, args))
+        if "current_setting('role'" in query:
+            return {
+                "session_user": "centaur",
+                "current_user": "centaur_readonly",
+                "active_role": "centaur_readonly",
+            }
+        if "FROM slack_sync_channels" in query:
+            return {
+                "channel_id": "C123",
+                "channel_name": "eng",
+                "is_archived": False,
+                "is_syncable": True,
+                "member_count": 42,
+                "first_seen_at": self.now,
+                "last_seen_at": self.now,
+                "updated_at": self.now,
+            }
+        if "FROM slack_sync_checkpoints" in query:
+            return {
+                "channel_id": "C123",
+                "watermark_ts": "1778000000.000000",
+                "last_run_id": "run_1",
+                "last_success_at": self.now,
+                "has_error": False,
+                "created_at": self.now,
+                "updated_at": self.now,
+            }
+        return None
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        if "FROM sessions" in query and "BETWEEN" not in query:
+            return [
+                {
+                    "thread_key": "slack:C123:1777910337.403889",
+                    "sandbox_id": "asbx_1",
+                    "harness_type": "codex",
+                    "harness_thread_id": "harness_1",
+                    "persona_id": "default",
+                    "status": "idle",
+                    "source": "slack",
+                    "platform": "slack",
+                    "external_thread_id": "1777910337.403889",
+                    "created_at": self.now,
+                    "updated_at": self.now,
+                }
+            ]
+        if "FROM session_executions" in query:
+            return [
+                {
+                    "execution_id": "exe_1",
+                    "thread_key": "slack:C123:1777910337.403889",
+                    "status": "completed",
+                    "model": "gpt-test",
+                    "created_at": self.now,
+                    "started_at": self.now,
+                    "completed_at": self.now,
+                    "duration_seconds": 42.0,
+                }
+            ]
+        if "FROM session_messages" in query:
+            return [
+                {
+                    "message_id": "msg_1",
+                    "thread_key": "slack:C123:1777910337.403889",
+                    "role": "user",
+                    "part_count": 1,
+                    "part_types": ["text"],
+                    "source": "slack",
+                    "platform": "slack",
+                    "created_at": self.now,
+                }
+            ]
+        if "FROM session_events" in query:
+            return [
+                {
+                    "event_id": 1,
+                    "thread_key": "slack:C123:1777910337.403889",
+                    "execution_id": "exe_1",
+                    "event_type": "session.execution_completed",
+                    "payload_type": "result",
+                    "payload_keys": ["type", "status"],
+                    "has_error": False,
+                    "created_at": self.now,
+                }
+            ]
+        if "FROM slack_sync_messages" in query:
+            return [
+                {
+                    "channel_id": "C123",
+                    "message_ts": "1777910337.403889",
+                    "thread_ts": "1777910337.403889",
+                    "is_thread_root": True,
+                    "user_id": "U123",
+                    "message_type": "message",
+                    "reply_count": 2,
+                    "updated_at": self.now,
+                }
+            ]
+        if "FROM slack_sync_message_attachments" in query:
+            return [
+                {
+                    "channel_id": "C123",
+                    "message_ts": "1777910337.403889",
+                    "slack_file_id": "F123",
+                    "name": "debug.log",
+                    "mimetype": "text/plain",
+                    "size_bytes": 100,
+                    "download_status": "metadata_only",
+                    "has_content_hash": False,
+                    "updated_at": self.now,
+                }
+            ]
+        if "FROM slack_sync_backfill_jobs" in query:
+            return []
+        if "FROM slack_sync_runs" in query:
+            return []
+        if "FROM sessions" in query and "BETWEEN" in query:
+            return []
+        if "FROM agent_runtime_assignments" in query:
+            raise RuntimeError("relation does not exist")
+        if "FROM agent_execution_requests" in query:
+            raise RuntimeError("relation does not exist")
+        if "FROM sandbox_sessions" in query:
+            raise RuntimeError("relation does not exist")
+        if "FROM thread_traces" in query:
+            raise RuntimeError("relation does not exist")
+        return []
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def test_parse_slack_permalink_prefers_thread_ts_query() -> None:
@@ -25,6 +173,7 @@ def test_parse_slack_permalink_prefers_thread_ts_query() -> None:
         "slack:C123:1777910337.403889",
         "chat:C123:1777910337.403889",
     ]
+    assert result["thread_key_like"] == "%:C123:1777910337.403889"
 
 
 def test_parse_slack_thread_key_with_team() -> None:
@@ -41,23 +190,46 @@ def test_parse_slack_thread_key_with_team() -> None:
     ]
 
 
-def test_investigation_never_returns_message_context() -> None:
-    result = CentaurInvestigatorClient().investigate_slack_thread(
+def test_investigation_queries_readonly_tables_without_message_context(monkeypatch) -> None:
+    fake = _FakeConnection()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(centaur_client.asyncpg, "connect", fake_connect)
+
+    result = CentaurInvestigatorClient("postgresql://example").investigate_slack_thread(
         "https://example.slack.com/archives/C123/p1777910337403889",
         include_observability=False,
     )
 
     assert result["status"] == "ok"
-    assert result["postgres"]["status"] == "role_only"
-    assert "session_messages" not in str(result)
-    assert "session_events" not in str(result)
-    assert "slack_sync_messages" not in str(result)
-    assert "attachments" not in str(result)
+    assert result["postgres"]["status"] == "ok"
+    assert result["postgres"]["role"] == "centaur_readonly"
+    assert result["postgres"]["connection"]["row"]["current_user"] == "centaur_readonly"
+    assert result["analysis"]["primary_source"] == "postgres_readonly_tables"
+    assert fake.execute_calls == ["SET ROLE centaur_readonly"]
+    assert fake.closed is True
+
+    all_queries = "\n".join(query for query, _args in fake.fetch_calls + fake.fetchrow_calls)
+    assert "centaur_readonly_" not in all_queries
+    assert "SELECT *" not in all_queries
+    assert "FROM sessions" in all_queries
+    assert "FROM session_messages" in all_queries
+    assert "FROM slack_sync_messages" in all_queries
+
     assert "raw_payload" not in str(result)
-    assert result["analysis"]["primary_source"] == "identifiers_and_observability"
+    assert "url_private" not in str(result)
+    assert "content_bytes" not in str(result)
+    assert "secret user message" not in str(result)
 
 
 def test_observability_never_requests_raw_log_context(monkeypatch) -> None:
+    fake = _FakeConnection()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
     class FakeVlogs:
         def hits(self, query: str, step: str | None = None) -> dict:
             return {"query": query, "step": step, "hits": []}
@@ -97,15 +269,16 @@ def test_observability_never_requests_raw_log_context(monkeypatch) -> None:
             return SimpleNamespace(VictoriaLogsClient=FakeVlogs)
         return None
 
+    monkeypatch.setattr(centaur_client.asyncpg, "connect", fake_connect)
     monkeypatch.setattr(centaur_client, "_safe_load_module", fake_load_module)
 
-    result = CentaurInvestigatorClient().investigate_slack_thread(
+    result = CentaurInvestigatorClient("postgresql://example").investigate_slack_thread(
         "https://example.slack.com/archives/C123/p1777910337403889",
         include_observability=True,
     )
 
     assert result["status"] == "ok"
     assert result["observability"]["vlogs"]["status"] == "ok"
-    assert "thread_trace" not in str(result)
-    assert "execution_logs" not in str(result)
+    assert "thread_trace" not in str(result["observability"])
+    assert "execution_logs" not in str(result["observability"])
     assert "raw_payload" not in str(result)
