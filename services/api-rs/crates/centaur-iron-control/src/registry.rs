@@ -178,18 +178,18 @@ pub async fn grant_inputs_to_role(
 
 fn coalesce_secret_inputs(inputs: Vec<SecretInput>) -> Vec<SecretInput> {
     let mut out: Vec<SecretInput> = Vec::with_capacity(inputs.len());
-    for mut input in inputs {
-        let Some(key) = secret_input_key(&input) else {
-            out.push(input);
-            continue;
-        };
+    for input in inputs {
         if let Some(position) = out
             .iter()
-            .position(|existing| secret_input_key(existing).as_ref() == Some(&key))
+            .position(|existing| static_secret_name(existing) == static_secret_name(&input))
         {
-            merge_secret_input_labels(&out[position], &mut input);
-            preserve_secret_input_foreign_id(&out[position], &mut input);
-            out[position] = input;
+            if let (SecretInput::Static(existing), SecretInput::Static(mut next)) =
+                (&out[position], input)
+            {
+                next.foreign_id.clone_from(&existing.foreign_id);
+                next.labels = merged_labels(&existing.labels, &next.labels);
+                out[position] = SecretInput::Static(next);
+            }
         } else {
             out.push(input);
         }
@@ -197,70 +197,20 @@ fn coalesce_secret_inputs(inputs: Vec<SecretInput>) -> Vec<SecretInput> {
     out
 }
 
-fn secret_input_key(input: &SecretInput) -> Option<(&'static str, &str)> {
-    match input {
-        SecretInput::Static(input) => Some(("static", input.name.as_str())),
-        SecretInput::OAuthToken(input) => Some(("oauth_token", input.foreign_id.as_str())),
-        SecretInput::GcpAuth(input) => input
-            .foreign_id
-            .as_deref()
-            .map(|foreign_id| ("gcp_auth", foreign_id)),
-        SecretInput::PgDsn(input) => Some(("pg_dsn", input.foreign_id.as_str())),
-        SecretInput::Hmac(input) => Some(("hmac", input.foreign_id.as_str())),
-        SecretInput::AwsAuth(input) => Some(("aws_auth", input.foreign_id.as_str())),
-    }
+fn static_secret_name(input: &SecretInput) -> Option<&str> {
+    let SecretInput::Static(input) = input else {
+        return None;
+    };
+    Some(input.name.as_str())
 }
 
-fn preserve_secret_input_foreign_id(existing: &SecretInput, next: &mut SecretInput) {
-    match (existing, next) {
-        (SecretInput::Static(existing), SecretInput::Static(next)) => {
-            next.foreign_id.clone_from(&existing.foreign_id);
-        }
-        (SecretInput::OAuthToken(existing), SecretInput::OAuthToken(next)) => {
-            next.foreign_id.clone_from(&existing.foreign_id);
-        }
-        (SecretInput::GcpAuth(existing), SecretInput::GcpAuth(next)) => {
-            next.foreign_id.clone_from(&existing.foreign_id);
-        }
-        (SecretInput::PgDsn(existing), SecretInput::PgDsn(next)) => {
-            next.foreign_id.clone_from(&existing.foreign_id);
-        }
-        (SecretInput::Hmac(existing), SecretInput::Hmac(next)) => {
-            next.foreign_id.clone_from(&existing.foreign_id);
-        }
-        (SecretInput::AwsAuth(existing), SecretInput::AwsAuth(next)) => {
-            next.foreign_id.clone_from(&existing.foreign_id);
-        }
-        _ => {}
-    }
-}
-
-fn merge_secret_input_labels(existing: &SecretInput, next: &mut SecretInput) {
-    let mut labels = secret_input_labels(existing).clone();
-    labels.extend(secret_input_labels(next).clone());
-    *secret_input_labels_mut(next) = labels;
-}
-
-fn secret_input_labels(input: &SecretInput) -> &BTreeMap<String, String> {
-    match input {
-        SecretInput::Static(input) => &input.labels,
-        SecretInput::OAuthToken(input) => &input.labels,
-        SecretInput::GcpAuth(input) => &input.labels,
-        SecretInput::PgDsn(input) => &input.labels,
-        SecretInput::Hmac(input) => &input.labels,
-        SecretInput::AwsAuth(input) => &input.labels,
-    }
-}
-
-fn secret_input_labels_mut(input: &mut SecretInput) -> &mut BTreeMap<String, String> {
-    match input {
-        SecretInput::Static(input) => &mut input.labels,
-        SecretInput::OAuthToken(input) => &mut input.labels,
-        SecretInput::GcpAuth(input) => &mut input.labels,
-        SecretInput::PgDsn(input) => &mut input.labels,
-        SecretInput::Hmac(input) => &mut input.labels,
-        SecretInput::AwsAuth(input) => &mut input.labels,
-    }
+fn merged_labels(
+    existing: &BTreeMap<String, String>,
+    next: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut labels = existing.clone();
+    labels.extend(next.clone());
+    labels
 }
 
 /// Pure translation: a fragment's transforms → the secret resources to upsert.
