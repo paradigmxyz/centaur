@@ -1,7 +1,7 @@
 #!/bin/bash
 # git-branch — create a writable working copy from a read-only mounted repo.
 #
-# Usage:  git-branch <org/repo> [branch slug]
+# Usage:  git-branch <org/repo> <branch slug>
 # Example: git-branch owner/centaur fix-flaky-slack-delivery
 #
 # Creates ~/branches/<org>/<repo> as a --shared clone from ~/github/<org>/<repo>
@@ -10,15 +10,32 @@
 
 set -euo pipefail
 
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-    echo "Usage: git-branch <org/repo> [branch slug]" >&2
+usage() {
+    echo "Usage: git-branch <org/repo> <branch slug>" >&2
+    echo "Example: git-branch owner/centaur fix-flaky-slack-delivery" >&2
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+    exit 0
+fi
+
+if [ $# -ne 2 ]; then
+    usage
+    echo "Error: branch slug is required; choose a short descriptive kebab-case name." >&2
     exit 1
 fi
 
 REPO="$1"
-SLUG="${2:-}"
+SLUG="$2"
 SRC="$HOME/github/$REPO"
 DEST="$HOME/branches/$REPO"
+
+if [[ ! "$SLUG" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]]; then
+    usage
+    echo "Error: branch slug must be lowercase kebab-case using only a-z, 0-9, and hyphens." >&2
+    exit 1
+fi
 
 if [ ! -d "$SRC/.git" ] && ! git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Error: $SRC is not a valid git repository" >&2
@@ -46,11 +63,7 @@ if [ -n "$UPSTREAM_URL" ]; then
     git -C "$DEST" remote set-url origin "$UPSTREAM_URL"
 fi
 
-if [ -n "$SLUG" ]; then
-    BRANCH="centaur/$SLUG-$(date +%s)"
-else
-    BRANCH="centaur/$(date +%s)-${RANDOM}-${RANDOM}"
-fi
+BRANCH="centaur/$SLUG-$(date +%s)"
 git -C "$DEST" checkout -q -b "$BRANCH"
 
 echo "$DEST"
