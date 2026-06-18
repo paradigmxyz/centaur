@@ -30,7 +30,6 @@ from workflows.slack.shared import (
     positive_int,
     record_run_finish,
     record_run_start,
-    seed_channel_bootstrap_job,
     upsert_messages,
     widen_channel_bootstrap_job,
     workflow_run_id_to_sync_run_id,
@@ -39,7 +38,6 @@ from workflows.slack.shared import (
 WORKFLOW_NAME = "slack_sync"
 
 DEFAULT_LOOKBACK_DAYS = 30
-DEFAULT_BOOTSTRAP_RECENT_HOURS = 6
 DEFAULT_THREAD_LOOKBACK_DAYS = 3
 DEFAULT_THREAD_REFRESH_INTERVAL_HOURS = 12
 DEFAULT_CHANNEL_PAGE_LIMIT = 100
@@ -132,12 +130,6 @@ def _ts_minus_days(ts: str | None, days: int) -> str | None:
     except (TypeError, ValueError):
         return None
     return f"{seconds:.6f}"
-
-
-def _ts_now_minus_hours(hours: int) -> str:
-    """Return the current time minus a fixed-hour window as a Slack timestamp."""
-    now = dt.datetime.now(dt.timezone.utc).timestamp()
-    return f"{max(now - (hours * 3_600), 0.0):.6f}"
 
 
 def _ts_now_minus_days(days: int) -> str:
@@ -434,7 +426,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                         str(state["watermark"]), thread_lookback_days
                     )
                 else:
-                    oldest = _ts_now_minus_hours(DEFAULT_BOOTSTRAP_RECENT_HOURS)
+                    oldest = _ts_now_minus_days(lookback_days)
 
             page = client._sync_etl_channel_history(
                 channel_id,
@@ -505,33 +497,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             next_state = page.get("sync_state") or {}
             initial_backfill_seeded = False
             bootstrap_widened = False
-            if checkpoint_watermark is None and oldest and inp.oldest is None:
-                bootstrap_oldest = _ts_now_minus_days(lookback_days)
-                initial_backfill_seeded = await seed_channel_bootstrap_job(
-                    ctx._pool,
-                    channel_id=channel_id,
-                    window_oldest=bootstrap_oldest,
-                    window_latest=oldest,
-                    lookback_days=lookback_days,
-                    thread_lookback_days=thread_lookback_days,
-                    run_id=run_id,
-                    priority=200,
-                )
-                if initial_backfill_seeded:
-                    record_etl_items_enqueued(
-                        "slack", "channel", "channel_bootstrap_job", 1
-                    )
-                    ctx.log(
-                        "slack_sync_backfill_seeded",
-                        channel_id=channel_id,
-                        channel_name=channel_name,
-                        job_type=BACKFILL_JOB_CHANNEL_BOOTSTRAP,
-                        job_key=_bootstrap_backfill_job_key(channel_id),
-                        bootstrap_recent_hours=DEFAULT_BOOTSTRAP_RECENT_HOURS,
-                        window_oldest_ts=bootstrap_oldest,
-                        window_latest_ts=oldest,
-                    )
-            elif checkpoint_watermark is not None and inp.oldest is None:
+            if checkpoint_watermark is not None and inp.oldest is None:
                 desired_oldest = _ts_now_minus_days(lookback_days)
                 bootstrap_widened = await widen_channel_bootstrap_job(
                     ctx._pool,
