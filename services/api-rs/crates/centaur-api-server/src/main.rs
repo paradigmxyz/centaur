@@ -1,7 +1,7 @@
 mod args;
 mod tool_discovery;
 
-use centaur_api_server::build_router_with_session_and_workflow_runtime;
+use centaur_api_server::{AppState, build_router_with_app_state};
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{TelemetryConfig, init_telemetry};
@@ -19,7 +19,41 @@ async fn main() -> Result<(), ServerError> {
     let telemetry = init_telemetry(TelemetryConfig::from_env())?;
 
     let args = Args::parse();
+    let listener = TcpListener::bind(args.server.bind_addr).await?;
+    info!(
+        bind_addr = %args.server.bind_addr,
+        "starting centaur api-rs server"
+    );
 
+    let app_state = AppState::unready();
+    let app = build_router_with_app_state(app_state.clone());
+    let mut server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    });
+
+    tokio::select! {
+        result = &mut server => {
+            result??;
+            telemetry.shutdown();
+            return Ok(());
+        }
+        result = initialize_runtime(args, app_state) => {
+            if let Err(error) = result {
+                server.abort();
+                telemetry.shutdown();
+                return Err(error);
+            }
+        }
+    }
+
+    server.await??;
+    telemetry.shutdown();
+    Ok(())
+}
+
+async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.server.database_url).await?;
     if args.server.run_migrations {
         store.run_migrations().await?;
@@ -63,16 +97,8 @@ async fn main() -> Result<(), ServerError> {
         adoption_runtime.adopt_orphaned_executions().await;
     });
 
-    let listener = TcpListener::bind(args.server.bind_addr).await?;
-    info!(bind_addr = %args.server.bind_addr, "starting centaur api-rs server");
-
-    axum::serve(
-        listener,
-        build_router_with_session_and_workflow_runtime(runtime, workflows),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
-    telemetry.shutdown();
+    app_state.mark_ready(runtime, workflows);
+    info!("centaur api-rs runtime initialized");
     Ok(())
 }
 
@@ -88,6 +114,8 @@ async fn shutdown_signal() {
 pub(crate) enum ServerError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
     #[error(transparent)]
     Store(#[from] centaur_session_sqlx::SessionStoreError),
     #[error(transparent)]

@@ -350,7 +350,7 @@ spec:
             timeoutSeconds: {{ .Values.apiRs.startupProbe.timeoutSeconds }}
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: {{ .Values.apiRs.port }}
             failureThreshold: {{ .Values.apiRs.readinessProbe.failureThreshold }}
             periodSeconds: {{ .Values.apiRs.readinessProbe.periodSeconds }}

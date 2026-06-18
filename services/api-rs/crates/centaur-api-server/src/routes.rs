@@ -3,6 +3,7 @@ use std::{
     convert::Infallible,
     convert::TryFrom,
     env,
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
@@ -51,9 +52,63 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
-    runtime: SessionRuntime,
+    initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
+}
+
+#[derive(Clone)]
+struct AppRuntimeState {
+    runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
+}
+
+impl AppState {
+    pub fn unready() -> Self {
+        Self {
+            initialized: Arc::new(RwLock::new(None)),
+            metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
+        }
+    }
+
+    pub fn ready(runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) -> Self {
+        let state = Self::unready();
+        state.mark_ready(runtime, workflows);
+        state
+    }
+
+    pub fn mark_ready(&self, runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) {
+        let mut initialized = self
+            .initialized
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *initialized = Some(AppRuntimeState { runtime, workflows });
+    }
+
+    fn initialized(&self) -> Option<AppRuntimeState> {
+        self.initialized
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.initialized().is_some()
+    }
+
+    fn runtime(&self) -> Result<SessionRuntime, ApiError> {
+        self.initialized()
+            .map(|initialized| initialized.runtime)
+            .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))
+    }
+
+    fn workflows(&self) -> Result<WorkflowRuntime, ApiError> {
+        let initialized = self
+            .initialized()
+            .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))?;
+        initialized
+            .workflows
+            .ok_or_else(|| ApiError::BadRequest("workflow runtime is not enabled".to_owned()))
+    }
 }
 
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
@@ -81,10 +136,13 @@ pub fn build_router_with_session_and_workflow_runtime(
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
 ) -> Router {
-    let metrics_handle =
-        prometheus_handle().expect("failed to initialize Prometheus metrics recorder");
+    build_router_with_app_state(AppState::ready(runtime, workflows))
+}
+
+pub fn build_router_with_app_state(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route(
             "/api/session/{thread_key}",
@@ -149,15 +207,22 @@ pub fn build_router_with_session_and_workflow_runtime(
                 }),
         )
         .layer(middleware::from_fn(http_metrics))
-        .with_state(AppState {
-            runtime,
-            metrics: metrics_handle,
-            workflows,
-        })
+        .with_state(state)
 }
 
 async fn healthz() -> Json<Value> {
     Json(json!({"ok": true}))
+}
+
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if state.is_ready() {
+        (StatusCode::OK, Json(json!({"ok": true, "ready": true})))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"ok": false, "ready": false, "error": "api-rs is still starting"})),
+        )
+    }
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
@@ -205,7 +270,7 @@ async fn create_or_get_session(
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
     };
     let outcome = state
-        .runtime
+        .runtime()?
         .create_or_get_session(
             &thread_key,
             &request.harness_type,
@@ -260,7 +325,7 @@ async fn append_messages(
 ) -> Result<Json<AppendMessagesResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let message_ids = state
-        .runtime
+        .runtime()?
         .append_messages(&thread_key, &request.messages)
         .await?;
     Ok(Json(AppendMessagesResponse {
@@ -276,7 +341,7 @@ async fn execute_session(
 ) -> Result<Json<ExecuteSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let execution = state
-        .runtime
+        .runtime()?
         .execute_session(
             &thread_key,
             ExecuteSessionInput {
@@ -297,7 +362,7 @@ async fn execute_session(
 }
 
 async fn drain_sandboxes(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let report = state.runtime.drain().await?;
+    let report = state.runtime()?.drain().await?;
     let failed = report
         .failed
         .iter()
@@ -318,7 +383,7 @@ async fn stream_events(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let events = state
-        .runtime
+        .runtime()?
         .stream_events(
             &thread_key,
             query.after_event_id.unwrap_or(0),
@@ -483,11 +548,8 @@ async fn invoke_workflow_webhook(
     ))
 }
 
-fn workflow_runtime(state: &AppState) -> Result<&WorkflowRuntime, ApiError> {
-    state
-        .workflows
-        .as_ref()
-        .ok_or_else(|| ApiError::BadRequest("workflow runtime is not enabled".to_owned()))
+fn workflow_runtime(state: &AppState) -> Result<WorkflowRuntime, ApiError> {
+    state.workflows()
 }
 
 fn content_type(headers: &HeaderMap) -> String {
