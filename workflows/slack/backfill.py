@@ -25,6 +25,7 @@ from workflows.slack.shared import (
     channel_ref,
     claim_backfill_jobs,
     client as shared_client,
+    emit_slack_checkpoint_metrics,
     enqueue_backfill_job,
     env_flag_enabled,
     failure_reason,
@@ -202,6 +203,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     channel_pages_per_job = positive_int(
         inp.channel_pages_per_job, DEFAULT_CHANNEL_PAGES_PER_JOB
     )
+    await emit_slack_checkpoint_metrics(ctx._pool)
     await _emit_backfill_job_metrics(ctx._pool)
     jobs = await claim_backfill_jobs(ctx._pool, channel_batch_limit)
     if not jobs:
@@ -492,6 +494,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         counts=counts,
         error_text=error_text,
     )
+    await emit_slack_checkpoint_metrics(ctx._pool)
     await _emit_backfill_job_metrics(ctx._pool)
 
     return {

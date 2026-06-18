@@ -16,6 +16,11 @@ from urllib import request as urllib_request
 
 from centaur_sdk import secret
 from api.runtime_control import canonical_json
+from api.vm_metrics import (
+    set_etl_active_scopes,
+    set_etl_failed_scopes,
+    set_etl_scope_sync_freshness_seconds,
+)
 
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 DEFAULT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
@@ -355,6 +360,30 @@ def is_permanent_slack_backfill_error(error: str) -> bool:
     return any(
         f"slack api error: {error_code}" in lowered
         for error_code in PERMANENT_SLACK_BACKFILL_ERRORS
+    )
+
+
+async def emit_slack_checkpoint_metrics(pool) -> None:
+    """Publish current Slack checkpoint health gauges for Grafana panels."""
+    row = await pool.fetchrow(
+        "SELECT COUNT(*) AS active_scopes, "
+        "COUNT(*) FILTER (WHERE c.last_error <> '') AS failed_scopes, "
+        "COALESCE("
+        "  EXTRACT(EPOCH FROM NOW() - MIN(c.last_success_at) "
+        "    FILTER (WHERE c.last_success_at IS NOT NULL)"
+        "  ), "
+        "  0"
+        ") AS freshness_seconds "
+        "FROM slack_sync_checkpoints c "
+        "JOIN slack_sync_channels ch ON ch.channel_id = c.channel_id "
+        "WHERE ch.is_syncable IS TRUE "
+        "AND ch.is_archived IS FALSE",
+    )
+    set_etl_active_scopes("slack", int(row["active_scopes"] or 0) if row else 0)
+    set_etl_failed_scopes("slack", int(row["failed_scopes"] or 0) if row else 0)
+    set_etl_scope_sync_freshness_seconds(
+        "slack",
+        float(row["freshness_seconds"] or 0.0) if row else 0.0,
     )
 
 

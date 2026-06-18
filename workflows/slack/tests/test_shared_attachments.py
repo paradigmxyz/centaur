@@ -21,6 +21,16 @@ def _load_shared():
     sys.modules.setdefault("api", api_module)
     sys.modules.setdefault("api.runtime_control", runtime_control)
 
+    vm_metrics = types.ModuleType("api.vm_metrics")
+    for name in (
+        "set_etl_active_scopes",
+        "set_etl_failed_scopes",
+        "set_etl_scope_sync_freshness_seconds",
+    ):
+        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
+    api_module.vm_metrics = vm_metrics
+    sys.modules["api.vm_metrics"] = vm_metrics
+
     centaur_sdk = types.ModuleType("centaur_sdk")
     centaur_sdk.secret = lambda _name, default=None: default
     sys.modules.setdefault("centaur_sdk", centaur_sdk)
@@ -38,8 +48,11 @@ def _load_backfill():
         "record_etl_items_failed",
         "record_etl_items_seen",
         "record_etl_items_upserted",
+        "set_etl_active_scopes",
         "set_etl_backfill_job_age_seconds",
         "set_etl_backfill_jobs",
+        "set_etl_failed_scopes",
+        "set_etl_scope_sync_freshness_seconds",
     ):
         setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
     api_module.vm_metrics = vm_metrics
@@ -188,6 +201,60 @@ class FakeExecutePool:
         self.execute_calls.append((sql, args))
 
 
+class FakeFetchRowPool:
+    def __init__(self, row) -> None:
+        self.row = row
+        self.fetchrow_calls: list[tuple] = []
+
+    async def fetchrow(self, sql, *args):
+        self.fetchrow_calls.append((sql, args))
+        return self.row
+
+
+def test_emit_slack_checkpoint_metrics_reads_slack_checkpoints(monkeypatch):
+    calls: dict[str, list] = {
+        "active": [],
+        "failed": [],
+        "freshness": [],
+    }
+    monkeypatch.setattr(
+        shared,
+        "set_etl_active_scopes",
+        lambda *args: calls["active"].append(args),
+    )
+    monkeypatch.setattr(
+        shared,
+        "set_etl_failed_scopes",
+        lambda *args: calls["failed"].append(args),
+    )
+    monkeypatch.setattr(
+        shared,
+        "set_etl_scope_sync_freshness_seconds",
+        lambda *args: calls["freshness"].append(args),
+    )
+    pool = FakeFetchRowPool(
+        {
+            "active_scopes": 42,
+            "failed_scopes": 3,
+            "freshness_seconds": 123.5,
+        }
+    )
+
+    asyncio.run(shared.emit_slack_checkpoint_metrics(pool))
+
+    assert len(pool.fetchrow_calls) == 1
+    query = pool.fetchrow_calls[0][0]
+    assert "FROM slack_sync_checkpoints c" in query
+    assert "JOIN slack_sync_channels ch ON ch.channel_id = c.channel_id" in query
+    assert "ch.is_syncable IS TRUE" in query
+    assert "ch.is_archived IS FALSE" in query
+    assert calls == {
+        "active": [("slack", 42)],
+        "failed": [("slack", 3)],
+        "freshness": [("slack", 123.5)],
+    }
+
+
 def test_permanent_slack_backfill_error_classifier():
     assert shared.is_permanent_slack_backfill_error(
         "Slack API error: thread_not_found"
@@ -273,6 +340,7 @@ def test_backfill_handler_terminally_skips_permanent_slack_errors(monkeypatch):
         calls["terminal_skip"].append(kwargs)
 
     monkeypatch.setattr(backfill, "_emit_backfill_job_metrics", fake_noop)
+    monkeypatch.setattr(backfill, "emit_slack_checkpoint_metrics", fake_noop)
     monkeypatch.setattr(backfill, "claim_backfill_jobs", fake_claim_jobs)
     monkeypatch.setattr(backfill, "shared_client", lambda: FakeClient())
     monkeypatch.setattr(backfill, "record_run_start", fake_noop)

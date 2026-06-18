@@ -36,7 +36,6 @@ COMPANY_CONTEXT_SOURCE_TYPES = {
 }
 COMPANY_CONTEXT_DOCUMENT_ACTIONS = ("inserted", "updated", "deleted", "noop")
 ETL_CHECKPOINT_TABLES = {
-    "slack": "slack_sync_checkpoints",
     "google_drive": "google_drive_sync_checkpoints",
     "google_calendar": "google_calendar_sync_checkpoints",
     "linear": "linear_sync_checkpoints",
