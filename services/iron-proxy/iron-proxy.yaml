@@ -4,6 +4,10 @@ dns:
 
 proxy:
   tunnel_listen: ":8080"
+  # Codex compaction calls can legitimately take longer than iron-proxy's
+  # default 30s response-header timeout. Keep model-provider calls from being
+  # cut off while OpenAI is still computing the first response byte.
+  upstream_response_header_timeout: "120s"
 
 management:
   listen: ":9092"

@@ -20,6 +20,10 @@ fn harness_auth_fragments_are_baked_in() {
     assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
 
     let infra = infra_fragment().unwrap();
+    assert_eq!(
+        infra.top_level["proxy"]["upstream_response_header_timeout"].as_str(),
+        Some("120s")
+    );
     let placeholders = placeholder_env(&[infra]);
     for name in ["AMP_API_KEY", "GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
         assert_eq!(placeholders.get(name).map(String::as_str), Some(name));
