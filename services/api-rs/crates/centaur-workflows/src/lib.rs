@@ -55,6 +55,21 @@ const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER
 const DEFAULT_WORKFLOW_REAP_REMOVED_AFTER_TICKS: u32 = 3;
 const ABSURD_TERMINAL_TASK_STATES: &str = "('completed', 'failed', 'cancelled')";
 
+/// Per-queue worker concurrency. The defaults preserve historical behavior; each
+/// can be overridden via its env var to scale a queue independently (e.g. raise
+/// the standard queue when webhook/agent workflows back up). A value that is
+/// unset, empty, non-numeric, or zero falls back to the default (absurd also
+/// clamps zero to one, since a queue at concurrency zero would never drain).
+const WORKFLOW_WORKER_CONCURRENCY_ENV: &str = "WORKFLOW_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_WORKER_CONCURRENCY: usize = 4;
+const WORKFLOW_ETL_WORKER_CONCURRENCY_ENV: &str = "WORKFLOW_ETL_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_ETL_WORKER_CONCURRENCY: usize = 1;
+const WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY_ENV: &str =
+    "WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY: usize = 1;
+const WORKFLOW_SCHEDULE_WORKER_CONCURRENCY_ENV: &str = "WORKFLOW_SCHEDULE_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_SCHEDULE_WORKER_CONCURRENCY: usize = 1;
+
 struct WorkflowTaskHeartbeatGuard {
     task: JoinHandle<()>,
 }
@@ -380,7 +395,10 @@ impl WorkflowRuntime {
 
         let worker = client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-worker".to_owned()),
-            concurrency: 4,
+            concurrency: worker_concurrency(
+                WORKFLOW_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow worker error");
             })),
@@ -388,7 +406,10 @@ impl WorkflowRuntime {
         });
         let etl_worker = etl_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-worker".to_owned()),
-            concurrency: 1,
+            concurrency: worker_concurrency(
+                WORKFLOW_ETL_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_ETL_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow etl worker error");
             })),
@@ -396,7 +417,10 @@ impl WorkflowRuntime {
         });
         let etl_backfill_worker = etl_backfill_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-backfill-worker".to_owned()),
-            concurrency: 1,
+            concurrency: worker_concurrency(
+                WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow etl backfill worker error");
             })),
@@ -404,7 +428,10 @@ impl WorkflowRuntime {
         });
         let schedule_worker = schedule_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-schedule-worker".to_owned()),
-            concurrency: 1,
+            concurrency: worker_concurrency(
+                WORKFLOW_SCHEDULE_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_SCHEDULE_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow schedule worker error");
             })),
@@ -1248,6 +1275,20 @@ fn workflow_reconcile_interval() -> Option<Duration> {
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS);
     (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// Resolve a worker concurrency from `env_name`, falling back to `default` when
+/// the value is unset, empty, non-numeric, or zero.
+fn worker_concurrency(env_name: &str, default: usize) -> usize {
+    parse_worker_concurrency(env::var(env_name).ok().as_deref(), default)
+}
+
+/// Pure parse for [`worker_concurrency`], split out so it is testable without
+/// mutating process environment.
+fn parse_worker_concurrency(raw: Option<&str>, default: usize) -> usize {
+    raw.and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 fn spawn_workflow_metadata_reconciler(
@@ -2956,6 +2997,19 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn parse_worker_concurrency_uses_override_or_default() {
+        // Override wins.
+        assert_eq!(parse_worker_concurrency(Some("16"), 4), 16);
+        assert_eq!(parse_worker_concurrency(Some("  8 "), 4), 8);
+        // Unset / empty / non-numeric / zero / negative fall back to the default.
+        assert_eq!(parse_worker_concurrency(None, 4), 4);
+        assert_eq!(parse_worker_concurrency(Some(""), 4), 4);
+        assert_eq!(parse_worker_concurrency(Some("lots"), 4), 4);
+        assert_eq!(parse_worker_concurrency(Some("0"), 4), 4);
+        assert_eq!(parse_worker_concurrency(Some("-2"), 1), 1);
+    }
 
     #[test]
     fn normalizes_interval_schedule_with_delivery_metadata() {
