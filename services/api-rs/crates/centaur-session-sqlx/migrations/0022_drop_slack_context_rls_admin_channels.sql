@@ -152,6 +152,7 @@ revoke select on
 from centaur_slack_admin;
 
 revoke usage on schema public from centaur_slack_admin;
+revoke execute on function centaur_current_slack_channel_id() from centaur_slack_admin;
 
 drop function if exists centaur_etl_admin_channel();
 drop table if exists slack_context_rls_admin_channels;
