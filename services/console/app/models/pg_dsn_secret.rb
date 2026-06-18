@@ -1,10 +1,10 @@
 # A Postgres upstream credential: a connection-string (DSN) resolved from a
 # secret source, plus an optional SET ROLE for the upstream session. Delivered to
 # iron-proxy in the single-listener `postgres` list, where it is keyed for routing
-# by `database` (the dbname a client sends to reach this upstream). `database` is
-# therefore required and must match the database the DSN connects to; centaur-console
-# enforces that match where the DSN is inspectable (control_plane/inline) and
-# documents it otherwise (the proxy returns FATAL 3D000 on a mismatch).
+# by `database` (the dbname a client sends to reach this upstream). Multiple
+# secrets may target the same database so different principals can route that
+# database through different upstream roles. Principal sync emits only one
+# effective route per database, chosen by grant priority.
 #
 # `foreign_id` is also required: it identifies the upstream for credential
 # delivery (env-var supplied DSNs) and is the stable handle operators reference.
@@ -70,7 +70,7 @@ class PgDsnSecret < ApplicationRecord
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, presence: true, uniqueness: { scope: :namespace },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :database, presence: true, uniqueness: { scope: :namespace }
+  validates :database, presence: true
   validate :labels_is_a_hash
   validate :settings_are_valid
   validate :dsn_source_present

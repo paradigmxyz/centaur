@@ -10,14 +10,15 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
 import asyncpg
 
 from centaur_sdk import secret
 
-CENTAUR_READONLY_DSN_ENV = "CENTAUR_READONLY_DSN"
-READONLY_ROLE = "centaur_readonly"
+CENTAUR_POSTGRES_DSN_ENV = "CENTAUR_POSTGRES_DSN"
+CENTAUR_INVESTIGATOR_DATABASE_ENV = "CENTAUR_INVESTIGATOR_POSTGRES_DATABASE"
+DEFAULT_POSTGRES_DATABASE = "ai_v2"
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 200
 DEFAULT_WINDOW_HOURS = 24
@@ -39,13 +40,25 @@ def _clamp(value: int, *, minimum: int, maximum: int) -> int:
 
 
 def _scoped_database_url() -> str:
-    value = os.getenv(CENTAUR_READONLY_DSN_ENV)  # noqa: TID251
+    value = os.getenv(CENTAUR_POSTGRES_DSN_ENV)  # noqa: TID251
     if value is None:
-        value = secret(CENTAUR_READONLY_DSN_ENV, default="")
+        value = secret(CENTAUR_POSTGRES_DSN_ENV, default="")
     value = value.strip()
-    if value == CENTAUR_READONLY_DSN_ENV:
+    if value == CENTAUR_POSTGRES_DSN_ENV:
         return ""
     return value
+
+
+def _database_url_with_name(value: str, database: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+        return urlunparse(parsed._replace(path=f"/{database}"))
+    return value
+
+
+def _postgres_database_name() -> str:
+    value = os.getenv(CENTAUR_INVESTIGATOR_DATABASE_ENV, DEFAULT_POSTGRES_DATABASE)  # noqa: TID251
+    return value.strip() or DEFAULT_POSTGRES_DATABASE
 
 
 def _isoformat(value: Any) -> str | None:
@@ -69,6 +82,13 @@ def _record_to_dict(row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return {key: _serialize(value) for key, value in row.items()}
     return {key: _serialize(row[key]) for key in row}
+
+
+def _connection_role(connection: dict[str, Any]) -> str | None:
+    row = connection.get("row") if isinstance(connection, dict) else None
+    if not isinstance(row, dict):
+        return None
+    return str(row.get("active_role") or row.get("current_user") or "") or None
 
 
 def _normalize_ts(value: str | None) -> str | None:
@@ -284,17 +304,14 @@ class CentaurInvestigatorClient:
 
     def _require_database_url(self) -> str:
         if not self._database_url:
-            raise RuntimeError(f"{CENTAUR_READONLY_DSN_ENV} is required")
+            raise RuntimeError(f"{CENTAUR_POSTGRES_DSN_ENV} is required")
         return self._database_url
 
     async def _connect(self) -> asyncpg.Connection:
-        conn = await asyncpg.connect(self._require_database_url(), command_timeout=30)
-        try:
-            await conn.execute(f"SET ROLE {READONLY_ROLE}")
-        except Exception:
-            await conn.close()
-            raise
-        return conn
+        return await asyncpg.connect(
+            _database_url_with_name(self._require_database_url(), _postgres_database_name()),
+            command_timeout=30,
+        )
 
     async def _safe_fetch(
         self,
@@ -903,7 +920,7 @@ class CentaurInvestigatorClient:
             ),
             "postgres": {
                 "status": "ok",
-                "role": READONLY_ROLE,
+                "role": _connection_role(connection),
                 "connection": connection,
                 "sessions": sessions,
                 "nearby_sessions": nearby_sessions,

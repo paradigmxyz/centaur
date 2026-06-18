@@ -1148,10 +1148,11 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
                     )])?),
                     ..Default::default()
                 }),
-                // Retain the declared DSN env var name + database so api-rs can
-                // bake the sandbox PG DSNs from the static fragment catalog
-                // (see `pg_sandbox_dsns`). This is an api-rs-internal annotation
-                // (`skip_serializing`) and never reaches the proxy.
+                // Retain the declared DSN env var name + database as an
+                // api-rs-internal annotation (`skip_serializing`) for older
+                // fragment consumers. The shared Centaur Postgres route is now
+                // injected by the sandbox backend independently of tool
+                // discovery.
                 sandbox_env: Some(SandboxEnv {
                     name: Some(secret.name.clone()),
                     database: Some(secret.database.clone()),

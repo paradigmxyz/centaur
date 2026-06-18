@@ -296,7 +296,7 @@ module Api
         assert_equal "pg-upsert", json_body.dig("data", "foreign_id")
       end
 
-      test "PUT rejects a pg_dsn secret when another secret uses the same database" do
+      test "PUT can upsert a pg_dsn secret sharing another secret's database" do
         existing = pg_dsn_secrets(:acme_analytics_pg)
         body = {
           data: {
@@ -307,13 +307,13 @@ module Api
           }
         }
 
-        assert_no_difference -> { PgDsnSecret.count } do
+        assert_difference -> { PgDsnSecret.count } => 1 do
           put api_v1_pg_dsn_secret_url(id: "pg-shared-database"),
               params: body.to_json,
               headers: auth_headers
         end
-        assert_response :unprocessable_entity
-        assert_includes json_body.dig("error", "details", "database"), "has already been taken"
+        assert_response :created
+        assert_equal existing.database, json_body.dig("data", "database")
       end
 
       test "GET index is scoped by namespace" do

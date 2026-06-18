@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,17 +9,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 import client as centaur_client
-from client import CentaurInvestigatorClient, parse_slack_reference
+from client import (
+    CentaurInvestigatorClient,
+    _database_url_with_name,
+    _postgres_database_name,
+    parse_slack_reference,
+)
 
 
-def test_readonly_dsn_manifest_targets_centaur_database() -> None:
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-    secrets = pyproject["tool"]["centaur"]["secrets"]
-    readonly = next(secret for secret in secrets if secret["name"] == "CENTAUR_READONLY_DSN")
+def test_database_url_with_name_appends_database_to_base_dsn() -> None:
+    assert (
+        _database_url_with_name("postgresql://user:pass@proxy:5432", "ai_v2")
+        == "postgresql://user:pass@proxy:5432/ai_v2"
+    )
+    assert (
+        _database_url_with_name("postgresql://user:pass@proxy:5432/other", "ai_v2")
+        == "postgresql://user:pass@proxy:5432/other"
+    )
+    assert (
+        _database_url_with_name("postgresql://user:pass@proxy:5432?sslmode=require", "ai_v2")
+        == "postgresql://user:pass@proxy:5432/ai_v2?sslmode=require"
+    )
 
-    assert readonly["type"] == "pg_dsn"
-    assert readonly["secret_ref"] == "DATABASE_URL"
-    assert readonly["database"] == "centaur"
+
+def test_postgres_database_name_defaults_to_ai_v2(monkeypatch) -> None:
+    monkeypatch.delenv("CENTAUR_INVESTIGATOR_POSTGRES_DATABASE", raising=False)
+
+    assert _postgres_database_name() == "ai_v2"
+
+
+def test_postgres_database_name_can_be_overridden(monkeypatch) -> None:
+    monkeypatch.setenv("CENTAUR_INVESTIGATOR_POSTGRES_DATABASE", "centaur")
+
+    assert _postgres_database_name() == "centaur"
+
+
+def test_postgres_database_name_uses_default_for_blank_override(monkeypatch) -> None:
+    monkeypatch.setenv("CENTAUR_INVESTIGATOR_POSTGRES_DATABASE", " ")
+
+    assert _postgres_database_name() == "ai_v2"
 
 
 class _FakeConnection:
@@ -219,7 +246,7 @@ def test_investigation_queries_readonly_tables_without_message_context(monkeypat
     assert result["postgres"]["role"] == "centaur_readonly"
     assert result["postgres"]["connection"]["row"]["current_user"] == "centaur_readonly"
     assert result["analysis"]["primary_source"] == "postgres_readonly_tables"
-    assert fake.execute_calls == ["SET ROLE centaur_readonly"]
+    assert fake.execute_calls == []
     assert fake.closed is True
 
     all_queries = "\n".join(query for query, _args in fake.fetch_calls + fake.fetchrow_calls)

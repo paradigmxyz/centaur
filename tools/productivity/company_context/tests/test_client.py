@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sys
 from pathlib import Path
 
@@ -10,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 import client as company_context_client
-from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 from client import CompanyContextClient
 
 from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
@@ -60,7 +60,7 @@ def test_search_rejects_empty_query(query):
 
 
 def test_default_database_url_uses_company_context_dsn_env(monkeypatch):
-    monkeypatch.setenv("COMPANY_CONTEXT_DSN", "postgresql://scoped")
+    monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://scoped")
     monkeypatch.setenv("DATABASE_URL", "postgresql://raw-app-db")
 
     client = CompanyContextClient()
@@ -69,12 +69,12 @@ def test_default_database_url_uses_company_context_dsn_env(monkeypatch):
 
 
 def test_default_database_url_uses_tool_context_secret(monkeypatch):
-    monkeypatch.delenv("COMPANY_CONTEXT_DSN", raising=False)
+    monkeypatch.delenv("CENTAUR_POSTGRES_DSN", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://raw-app-db")
     token = set_tool_context(
         ToolContext(
             name="company_context",
-            secrets={"COMPANY_CONTEXT_DSN": "postgresql://context-scoped"},
+            secrets={"CENTAUR_POSTGRES_DSN": "postgresql://context-scoped"},
         )
     )
     try:
@@ -86,16 +86,34 @@ def test_default_database_url_uses_tool_context_secret(monkeypatch):
 
 
 def test_default_database_url_does_not_fall_back_to_raw_database_url(monkeypatch):
-    monkeypatch.delenv("COMPANY_CONTEXT_DSN", raising=False)
+    monkeypatch.delenv("CENTAUR_POSTGRES_DSN", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://raw-app-db")
     token = set_tool_context(ToolContext(name="company_context", secrets={}))
     try:
         client = CompanyContextClient()
 
-        with pytest.raises(RuntimeError, match="COMPANY_CONTEXT_DSN is required"):
+        with pytest.raises(RuntimeError, match="CENTAUR_POSTGRES_DSN is required"):
             client._require_database_url()
     finally:
         reset_tool_context(token)
+
+
+def test_postgres_database_name_defaults_to_ai_v2(monkeypatch):
+    monkeypatch.delenv("COMPANY_CONTEXT_POSTGRES_DATABASE", raising=False)
+
+    assert company_context_client._postgres_database_name() == "ai_v2"
+
+
+def test_postgres_database_name_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", "centaur")
+
+    assert company_context_client._postgres_database_name() == "centaur"
+
+
+def test_postgres_database_name_uses_default_for_blank_override(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", " ")
+
+    assert company_context_client._postgres_database_name() == "ai_v2"
 
 
 def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
@@ -165,8 +183,8 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
     }
     query, args = fake.fetch_calls[0]
     assert "title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2)" in query
-    assert "title ||| $2::text::pdb.boost(4) OR body ||| $2" in query
-    assert "title ||| $3::text::pdb.boost(4) OR body ||| $3" in query
+    assert "title ||| $2::text::pdb.boost(4) OR body ||| $2::text" in query
+    assert "title ||| $3::text::pdb.boost(4) OR body ||| $3::text" in query
     assert ") OR (" in query
     assert "WHEN 'slack_thread' THEN 1.25" in query
     assert "WHEN 'slack_channel_day' THEN 0.75" in query
@@ -181,6 +199,7 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
         None,
         None,
         5,
+        "C123",
     )
     assert fake.closed is True
 
@@ -306,11 +325,13 @@ def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
     assert result["status"] == "ok"
     query, args = fake.fetch_calls[0]
     assert "WHERE (title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2))" in query
-    assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2)" in query
-    assert "OR (title ||| $3::text::pdb.boost(4) OR body ||| $3)" in query
-    assert "OR (title ||| $4::text::pdb.boost(4) OR body ||| $4)" in query
-    assert "OR (title ||| $5::text::pdb.boost(4) OR body ||| $5)" in query
+    assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2::text)" in query
+    assert "OR (title ||| $3::text::pdb.boost(4) OR body ||| $3::text)" in query
+    assert "OR (title ||| $4::text::pdb.boost(4) OR body ||| $4::text)" in query
+    assert "OR (title ||| $5::text::pdb.boost(4) OR body ||| $5::text)" in query
     assert "title ||| $6::text::pdb.boost(4)" not in query
+    placeholders = {int(match.group(1)) for match in re.finditer(r"\$(\d+)", query)}
+    assert placeholders == set(range(1, len(args) + 1))
     assert args == (
         "what is the state root state mismatch in prod",
         "state",
@@ -322,6 +343,7 @@ def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
         None,
         None,
         3,
+        None,
     )
 
 
@@ -356,6 +378,7 @@ def test_search_applies_occurred_at_filters(monkeypatch):
         dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
         dt.datetime(2026, 5, 8, 12, 30, tzinfo=dt.UTC),
         4,
+        None,
     )
 
 
@@ -448,6 +471,7 @@ def test_list_documents_returns_date_bounded_document_summaries(monkeypatch):
     query, args = fake.fetch_calls[0]
     assert "ORDER BY occurred_at ASC NULLS LAST" in query
     assert args == (
+        None,
         "google_calendar",
         "calendar_event",
         dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
@@ -487,7 +511,7 @@ def test_latest_date_returns_latest_indexed_slack_timestamp(monkeypatch):
         "latest_occurred_at": "2026-05-10T14:00:00+00:00",
     }
     _, args = fake.fetchrow_calls[0]
-    assert args == ("slack", "slack_thread")
+    assert args == (None, "slack", "slack_thread")
     assert fake.closed is True
 
 
@@ -553,7 +577,7 @@ def test_read_document_returns_full_content_by_default(monkeypatch):
     assert result["content"] == body
     assert result["metadata"] == {"channel_name": "eng-ai"}
     _, args = fake.fetchrow_calls[0]
-    assert args == ("slack:channel_day:C123:2026-05-08",)
+    assert args == ("slack:channel_day:C123:2026-05-08", None)
     assert fake.closed is True
 
 
@@ -591,7 +615,7 @@ def test_read_document_can_return_bounded_content(monkeypatch):
     assert result["content"] == "x" * 1_200
     assert result["metadata"] == {"channel_name": "eng-ai"}
     _, args = fake.fetchrow_calls[0]
-    assert args == ("slack:channel_day:C123:2026-05-08",)
+    assert args == ("slack:channel_day:C123:2026-05-08", None)
     assert fake.closed is True
 
 

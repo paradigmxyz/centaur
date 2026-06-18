@@ -86,14 +86,18 @@ class Principal < ApplicationRecord
     proxy_transforms_for(served_credentials)
   end
 
-  # The top-level `postgres` array delivered to iron-proxy: one DSN entry per
-  # granted PgDsnSecret, keyed by foreign_id. Entries without a DSN source are
-  # skipped because the proxy can't dial an upstream without one.
+  # The top-level `postgres` array delivered to iron-proxy: one effective DSN
+  # entry per database. Entries without a DSN source are skipped because the
+  # proxy can't dial an upstream without one. When several granted PG DSNs route
+  # the same database, existing grant priority ordering decides the winner:
+  # higher-priority grants appear later and overwrite lower-priority routes.
   def sync_postgres
-    granted_pg_dsn_secrets.filter_map do |pg|
+    winners = {}
+    granted_pg_dsn_secrets.each do |pg|
       next unless pg.dsn_source
-      pg.to_proxy_dsn(principal: self)
+      winners[pg.database] = pg
     end
+    winners.values.map { |pg| pg.to_proxy_dsn(principal: self) }
   end
 
   # The config this principal resolves to, in the same shape iron-proxy receives

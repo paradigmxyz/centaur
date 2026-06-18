@@ -10,6 +10,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 
@@ -25,7 +26,9 @@ CHANNEL_DAY_SCORE_MULTIPLIER = 0.75
 DEFAULT_PREVIEW_CHARS = 280
 MAX_RELATED_CHILDREN = 25
 SLACK_LIVE_SOURCE_TYPE = "slack_live_message"
-COMPANY_CONTEXT_DSN_ENV = "COMPANY_CONTEXT_DSN"
+COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
+COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
+DEFAULT_POSTGRES_DATABASE = "ai_v2"
 _SLACK_AFTER_RE = re.compile(r"\bafter:\d{4}-\d{2}-\d{2}\b", re.IGNORECASE)
 
 _SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
@@ -80,13 +83,25 @@ def _clamp(value: int, *, minimum: int, maximum: int) -> int:
 
 
 def _scoped_database_url() -> str:
-    value = os.getenv(COMPANY_CONTEXT_DSN_ENV)
+    value = os.getenv(COMPANY_CONTEXT_DSN_ENV)  # noqa: TID251
     if value is None:
         value = secret(COMPANY_CONTEXT_DSN_ENV, default="")
     value = value.strip()
     if value == COMPANY_CONTEXT_DSN_ENV:
         return ""
     return value
+
+
+def _database_url_with_name(value: str, database: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+        return urlunparse(parsed._replace(path=f"/{database}"))
+    return value
+
+
+def _postgres_database_name() -> str:
+    value = os.getenv(COMPANY_CONTEXT_DATABASE_ENV, DEFAULT_POSTGRES_DATABASE)  # noqa: TID251
+    return value.strip() or DEFAULT_POSTGRES_DATABASE
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -171,7 +186,8 @@ def _search_where_clause(term_count: int) -> str:
     ]
     for index in range(2, term_count + 2):
         clauses.append(
-            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index})"
+            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) "
+            f"OR body ||| ${index}::text)"
         )
     return " OR ".join(clauses)
 
@@ -264,8 +280,34 @@ def _current_slack_channel_id() -> str | None:
     return None
 
 
-async def _is_etl_admin_channel(conn: asyncpg.Connection) -> bool:
-    value = await conn.fetchval("SELECT centaur_etl_admin_channel()")
+def _context_scope_clause(
+    param_index: int,
+    source_expr: str = "source",
+    metadata_expr: str = "metadata",
+) -> str:
+    """SQL predicate matching the app-level company_context visibility boundary."""
+    return (
+        "EXISTS ("
+        "SELECT 1 FROM slack_context_rls_admin_channels admins "
+        f"WHERE admins.channel_id = ${param_index}::text"
+        ") OR ("
+        f"${param_index}::text IS NOT NULL AND {source_expr} = 'slack' "
+        f"AND {metadata_expr} ->> 'channel_id' = ${param_index}::text"
+        ")"
+    )
+
+
+async def _is_etl_admin_channel(conn: asyncpg.Connection, slack_channel_id: str | None) -> bool:
+    value = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM slack_context_rls_admin_channels
+            WHERE channel_id = $1
+        )
+        """,
+        slack_channel_id,
+    )
     return bool(value)
 
 
@@ -339,7 +381,10 @@ class CompanyContextClient:
         return self._database_url
 
     async def _connect(self) -> asyncpg.Connection:
-        return await asyncpg.connect(self._require_database_url(), command_timeout=30)
+        return await asyncpg.connect(
+            _database_url_with_name(self._require_database_url(), _postgres_database_name()),
+            command_timeout=30,
+        )
 
     async def _search_async(
         self,
@@ -353,6 +398,7 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
+            slack_channel_id = _current_slack_channel_id()
             terms = _search_terms(query)
             search_terms = [query, *terms]
             source_param = len(search_terms) + 1
@@ -360,6 +406,7 @@ class CompanyContextClient:
             occurred_after_param = len(search_terms) + 3
             occurred_before_param = len(search_terms) + 4
             limit_param = len(search_terms) + 5
+            slack_channel_param = len(search_terms) + 6
             rows = await conn.fetch(
                 f"""
                 SELECT
@@ -380,6 +427,7 @@ class CompanyContextClient:
                     paradedb.score(document_id) AS score
                 FROM company_context_documents
                 WHERE {_search_where_clause(len(terms))}
+                  AND ({_context_scope_clause(slack_channel_param)})
                   AND (${source_param}::text IS NULL OR source = ${source_param})
                   AND (${source_type_param}::text IS NULL OR source_type = ${source_type_param})
                   AND (${occurred_after_param}::timestamptz IS NULL
@@ -402,6 +450,7 @@ class CompanyContextClient:
                 occurred_after,
                 occurred_before,
                 limit,
+                slack_channel_id,
             )
             results = []
             for row in rows:
@@ -431,11 +480,14 @@ class CompanyContextClient:
                     source_type=source_type,
                 )
                 try:
-                    slack_channel_id = _current_slack_channel_id()
                     if slack_channel_id is None:
                         live_error = "live Slack search requires a channel-scoped thread"
                     else:
-                        live_channels = None if await _is_etl_admin_channel(conn) else [slack_channel_id]
+                        live_channels = (
+                            None
+                            if await _is_etl_admin_channel(conn, slack_channel_id)
+                            else [slack_channel_id]
+                        )
                         live_query = _slack_after_query(query, latest.get("latest_date"))
                         live_messages = _load_slack_client().search_messages(
                             live_query,
@@ -483,9 +535,22 @@ class CompanyContextClient:
                 MAX(occurred_at) AS latest_occurred_at,
                 COUNT(*)::bigint AS document_count
             FROM company_context_documents
-            WHERE ($1::text IS NULL OR source = $1)
-              AND ($2::text IS NULL OR source_type = $2)
+            WHERE (
+                EXISTS (
+                    SELECT 1
+                    FROM slack_context_rls_admin_channels admins
+                    WHERE admins.channel_id = $1::text
+                )
+                OR (
+                    $1::text IS NOT NULL
+                    AND source = 'slack'
+                    AND metadata ->> 'channel_id' = $1::text
+                )
+            )
+              AND ($2::text IS NULL OR source = $2)
+              AND ($3::text IS NULL OR source_type = $3)
             """,
+            _current_slack_channel_id(),
             source,
             source_type,
         )
@@ -557,6 +622,7 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
+            slack_channel_id = _current_slack_channel_id()
             rows = await conn.fetch(
                 """
                 SELECT
@@ -575,14 +641,27 @@ class CompanyContextClient:
                     source_updated_at,
                     metadata
                 FROM company_context_documents
-                WHERE ($1::text IS NULL OR source = $1)
-                  AND ($2::text IS NULL OR source_type = $2)
-                  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
-                  AND ($4::timestamptz IS NULL OR occurred_at < $4)
+                WHERE (
+                    EXISTS (
+                        SELECT 1
+                        FROM slack_context_rls_admin_channels admins
+                        WHERE admins.channel_id = $1::text
+                    )
+                    OR (
+                        $1::text IS NOT NULL
+                        AND source = 'slack'
+                        AND metadata ->> 'channel_id' = $1::text
+                    )
+                )
+                  AND ($2::text IS NULL OR source = $2)
+                  AND ($3::text IS NULL OR source_type = $3)
+                  AND ($4::timestamptz IS NULL OR occurred_at >= $4)
+                  AND ($5::timestamptz IS NULL OR occurred_at < $5)
                 ORDER BY occurred_at ASC NULLS LAST, source_updated_at DESC NULLS LAST,
                          document_id ASC
-                LIMIT $5
+                LIMIT $6
                 """,
+                slack_channel_id,
                 source,
                 source_type,
                 occurred_after,
@@ -674,6 +753,7 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         parent = None
         if row["parent_document_id"]:
+            slack_channel_id = _current_slack_channel_id()
             parent_row = await conn.fetchrow(
                 """
                 SELECT
@@ -692,8 +772,21 @@ class CompanyContextClient:
                     metadata
                 FROM company_context_documents
                 WHERE document_id = $1
+                  AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM slack_context_rls_admin_channels admins
+                        WHERE admins.channel_id = $2::text
+                    )
+                    OR (
+                        $2::text IS NOT NULL
+                        AND source = 'slack'
+                        AND metadata ->> 'channel_id' = $2::text
+                    )
+                  )
                 """,
                 row["parent_document_id"],
+                slack_channel_id,
             )
             if parent_row:
                 parent = _document_summary(parent_row)
@@ -716,11 +809,24 @@ class CompanyContextClient:
                 metadata
             FROM company_context_documents
             WHERE parent_document_id = $1
+              AND (
+                EXISTS (
+                    SELECT 1
+                    FROM slack_context_rls_admin_channels admins
+                    WHERE admins.channel_id = $3::text
+                )
+                OR (
+                    $3::text IS NOT NULL
+                    AND source = 'slack'
+                    AND metadata ->> 'channel_id' = $3::text
+                )
+              )
             ORDER BY occurred_at ASC NULLS LAST, document_id ASC
             LIMIT $2
             """,
             row["document_id"],
             max_children,
+            _current_slack_channel_id(),
         )
         children = [_document_summary(child_row) for child_row in child_rows]
         return {
@@ -739,6 +845,7 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
+            slack_channel_id = _current_slack_channel_id()
             row = await conn.fetchrow(
                 """
                 SELECT
@@ -758,8 +865,21 @@ class CompanyContextClient:
                     metadata
                 FROM company_context_documents
                 WHERE document_id = $1
+                  AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM slack_context_rls_admin_channels admins
+                        WHERE admins.channel_id = $2::text
+                    )
+                    OR (
+                        $2::text IS NOT NULL
+                        AND source = 'slack'
+                        AND metadata ->> 'channel_id' = $2::text
+                    )
+                  )
                 """,
                 document_id,
+                slack_channel_id,
             )
             if not row:
                 return {

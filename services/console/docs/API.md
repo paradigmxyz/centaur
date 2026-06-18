@@ -543,7 +543,7 @@ Returns `201`. Response shape (note that `credentials` and `token_endpoint_heade
 
 ## PG DSN secrets
 
-A PG DSN secret is a Postgres upstream credential: a connection string (DSN) resolved from a single secret [source](#secret-sources), plus an optional `SET ROLE` for the upstream session. It is delivered to `iron-proxy` with a required `foreign_id` for sandbox env-var derivation and a required `database` for routing. The proxy multiplexes upstreams through one listener and routes by the Postgres database name the client sends, so `database` must be unique per namespace and must match the upstream DSN's database.
+A PG DSN secret is a Postgres upstream credential: a connection string (DSN) resolved from a single secret [source](#secret-sources), plus an optional `SET ROLE` for the upstream session. It is delivered to `iron-proxy` with a required `foreign_id` and a required `database` for routing. The proxy multiplexes upstreams through one listener and routes by the Postgres database name the client sends. Multiple secrets may use the same `database` so different principals can route that database through different upstream roles. A principal's effective proxy config emits only one route per database, with higher-priority grants winning.
 
 Listener and client knobs (bind address, client auth) are deliberately not modeled: they are proxy-host deployment concerns. There are no [request rules](#request-rules) either: a Postgres listener matches by port, not by request.
 
@@ -556,7 +556,7 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 | `name`        | optional    | |
 | `description` | optional    | |
 | `labels`      | optional    | Object; defaults to `{}`. |
-| `database`    | required    | Database name clients connect to through the proxy. Must be unique per namespace and match the upstream DSN's database. |
+| `database`    | required    | Database name clients connect to through the proxy. Must match the upstream DSN's database. If several granted secrets use the same database, grant priority selects the effective route. |
 | `role`        | optional    | Upstream `SET ROLE` applied to the session. |
 | `settings`    | optional    | Ordered array of session variables (GUCs) the proxy SETs at session start, before the `SET ROLE`, and pins so clients cannot override them. Each entry is `{ "name", "value" }` for a literal value, or `{ "name", "value_from" }` to resolve the value from the assigned proxy principal at sync time (see [principal-derived values](#principal-derived-setting-values)). Names must be a bare or dotted identifier; `role` and `session_authorization` are reserved. Replaced wholesale on update. |
 | `dsn`         | required    | A [secret source](#secret-sources) resolving to the connection string. Replaced wholesale on update. |
