@@ -12,6 +12,8 @@ const SLACK_ATTACHMENTS_RLS_SQL: &str =
 const SLACK_CONTEXT_ADMIN_CHANNELS_SQL: &str =
     include_str!("../migrations/0018_slack_context_rls_admin_channels.sql");
 const ETL_CONTEXT_RLS_SQL: &str = include_str!("../migrations/0021_etl_context_rls.sql");
+const DROP_SLACK_CONTEXT_ADMIN_CHANNELS_SQL: &str =
+    include_str!("../migrations/0022_drop_slack_context_rls_admin_channels.sql");
 
 const RLS_TABLES: &[&str] = &[
     "slack_sync_channels",
@@ -75,11 +77,12 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
     execute_migration(conn, SLACK_CONTEXT_ADMIN_CHANNELS_SQL).await?;
     create_minimal_non_slack_etl_tables(conn).await?;
     execute_migration(conn, ETL_CONTEXT_RLS_SQL).await?;
+    execute_migration(conn, DROP_SLACK_CONTEXT_ADMIN_CHANNELS_SQL).await?;
     grant_schema_usage(conn, schema).await?;
 
     assert_rls_enabled(conn).await?;
     assert_expected_policies(conn).await?;
-    assert_admin_channels_are_not_seeded(conn).await?;
+    assert_admin_channels_table_is_removed(conn).await?;
 
     insert_fixture_rows(conn).await?;
 
@@ -138,8 +141,30 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
     let unset_channel = visible_rows(conn, schema, "centaur_slack_reader", None).await?;
     assert_eq!(unset_channel, empty_visible_rows());
 
-    let admin_channel = visible_rows(conn, schema, "centaur_slack_reader", Some("C_ADMIN")).await?;
-    assert_eq!(admin_channel, all_visible_rows());
+    let formerly_admin_channel =
+        visible_rows(conn, schema, "centaur_slack_reader", Some("C_ADMIN")).await?;
+    assert_eq!(
+        formerly_admin_channel,
+        VisibleRows {
+            slack_channels: vec!["C_ADMIN".to_owned()],
+            slack_users: vec![],
+            slack_messages: vec![],
+            slack_attachments: vec![],
+            context_docs: vec![],
+            google_drive_runs: 0,
+            google_drive_files: 0,
+            google_drive_checkpoints: 0,
+            google_calendar_runs: 0,
+            google_calendar_calendars: 0,
+            google_calendar_events: 0,
+            google_calendar_checkpoints: 0,
+            linear_runs: 0,
+            linear_projects: 0,
+            linear_issues: 0,
+            linear_comments: 0,
+            linear_checkpoints: 0,
+        }
+    );
 
     let db_admin_role = visible_rows(conn, schema, "centaur_slack_admin", None).await?;
     assert_eq!(db_admin_role, all_visible_rows());
@@ -429,19 +454,33 @@ fn expected_policies() -> Vec<(String, String)> {
     .collect()
 }
 
-async fn assert_admin_channels_are_not_seeded(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-    let count: i64 = sqlx::query_scalar("select count(*) from slack_context_rls_admin_channels")
-        .fetch_one(&mut *conn)
-        .await?;
-    assert_eq!(count, 0, "admin channels must be deployment-configured");
+async fn assert_admin_channels_table_is_removed(
+    conn: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
+    let table_name: Option<String> =
+        sqlx::query_scalar("select to_regclass('slack_context_rls_admin_channels')::text")
+            .fetch_one(&mut *conn)
+            .await?;
+    assert_eq!(
+        table_name, None,
+        "admin channels must be managed by iron-control"
+    );
+
+    let function_count: i64 = sqlx::query_scalar(
+        "select count(*) from pg_proc where proname = 'centaur_etl_admin_channel'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    assert_eq!(
+        function_count, 0,
+        "admin-channel lookup function must be removed"
+    );
     Ok(())
 }
 
 async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
         r#"
-        insert into slack_context_rls_admin_channels (channel_id) values ('C_ADMIN');
-
         insert into slack_sync_channels (channel_id, channel_name) values
             ('C_ALPHA', 'alpha'),
             ('C_BETA', 'beta'),
