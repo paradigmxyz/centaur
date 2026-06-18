@@ -120,6 +120,11 @@
 |  vlogs tool_analytics --start 7d                        → tool usage stats
 |  vlogs query 'level:error AND event:tool_call_completed' --limit 20 → raw LogsQL
 |
+[Ethereum Mainnet RPC]
+|When you need an Ethereum mainnet RPC endpoint and the user has not specified another provider, use the Reth-hosted mainnet endpoints:
+|  HTTP: https://ethereum.reth.rs/rpc
+|  WSS:  wss://ethereum.reth.rs/ws
+|
 [Common Tool CLIs]
 |NEVER call external APIs directly via curl unless you are downloading a file the prompt explicitly told you to fetch that way.
 |Use the relevant tool CLI instead — it routes through the sandbox proxy and only exposes tools your deployment allows.
