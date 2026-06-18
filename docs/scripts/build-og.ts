@@ -33,7 +33,7 @@ import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, existsSy
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import matter from 'gray-matter'
+import { parse as parseYaml } from 'yaml'
 import { Resvg, initWasm } from '@resvg/resvg-wasm'
 
 import { sidebar } from '../sidebar'
@@ -392,6 +392,16 @@ function routeSlug(route: string): string {
   return route.replace(/^\//, '').replace(/\//g, '_')
 }
 
+function parseFrontmatter(raw: string): Record<string, unknown> {
+  if (!raw.startsWith('---\n')) return {}
+  const end = raw.indexOf('\n---', 4)
+  if (end === -1) return {}
+  const parsed = parseYaml(raw.slice(4, end))
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {}
+}
+
 async function main() {
   console.log('Initializing resvg-wasm...')
   // Resolve the wasm binary that ships in @resvg/resvg-wasm and feed it to
@@ -415,7 +425,7 @@ async function main() {
       svg = HOME_SVG
     } else {
       const raw = readFileSync(mdxPath, 'utf-8')
-      const { data } = matter(raw)
+      const data = parseFrontmatter(raw)
       const title = String(data.title ?? '').trim() || route
       const description = String(data.description ?? '').trim()
       const category = getCategoryForPath(route)
