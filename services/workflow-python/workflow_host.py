@@ -304,6 +304,7 @@ def install_vm_metrics_compat_module(api_mod: types.ModuleType) -> None:
     vm_metrics.record_etl_items_failed = record_etl_items_failed
     vm_metrics.record_etl_items_seen = record_etl_items_seen
     vm_metrics.record_etl_items_upserted = record_etl_items_upserted
+    vm_metrics.record_slack_etl_rate_limit = record_slack_etl_rate_limit
     vm_metrics.set_etl_active_scopes = set_etl_active_scopes
     vm_metrics.set_etl_backfill_job_age_seconds = set_etl_backfill_job_age_seconds
     vm_metrics.set_etl_backfill_jobs = set_etl_backfill_jobs
@@ -386,6 +387,26 @@ def record_etl_items_failed(
         source_type=source_type,
         item_type=item_type,
         reason=reason,
+    )
+
+
+def record_slack_etl_rate_limit(
+    workflow: str,
+    method: str,
+    outcome: str,
+    retry_after_seconds: int | float,
+) -> None:
+    retry_after = max(float(retry_after_seconds), 0.0)
+    labels = {
+        "workflow": workflow,
+        "method": method,
+        "outcome": outcome,
+    }
+    increment_metric("slack_etl_rate_limits_total", 1, **labels)
+    increment_metric(
+        "slack_etl_rate_limit_retry_after_seconds_total",
+        retry_after,
+        **labels,
     )
 
 

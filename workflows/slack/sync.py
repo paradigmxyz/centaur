@@ -255,7 +255,7 @@ async def _load_checkpoint(pool, channel_id: str) -> dict[str, Any] | None:
 
 def _client():
     """Compatibility wrapper for tests patching the old helper."""
-    return shared_client()
+    return shared_client(workflow_name=WORKFLOW_NAME)
 
 
 async def _upsert_messages(pool, rows: list[dict[str, Any]]) -> int:

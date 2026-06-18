@@ -214,7 +214,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         }
     await _emit_backfill_job_metrics(ctx._pool)
 
-    client = shared_client()
+    client = shared_client(workflow_name=WORKFLOW_NAME)
     access_mode = client._etl_access_mode()
     run_id = workflow_run_id_to_sync_run_id(ctx.run_id)
     requested = [
