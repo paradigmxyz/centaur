@@ -57,7 +57,7 @@ struct VisibleRows {
 }
 
 #[tokio::test]
-async fn etl_context_rls_enforces_channel_and_admin_visibility() -> Result<(), Box<dyn Error>> {
+async fn etl_context_rls_enforces_channel_visibility() -> Result<(), Box<dyn Error>> {
     let Some(database_url) = test_database_url() else {
         return Ok(());
     };
@@ -82,7 +82,7 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
 
     assert_rls_enabled(conn).await?;
     assert_expected_policies(conn).await?;
-    assert_admin_channels_table_is_removed(conn).await?;
+    assert_legacy_admin_state_is_removed(conn).await?;
 
     insert_fixture_rows(conn).await?;
 
@@ -166,9 +166,6 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         }
     );
 
-    let db_admin_role = visible_rows(conn, schema, "centaur_slack_admin", None).await?;
-    assert_eq!(db_admin_role, all_visible_rows());
-
     Ok(())
 }
 
@@ -212,7 +209,7 @@ async fn set_search_path(conn: &mut PgConnection, schema: &str) -> Result<(), sq
 async fn grant_schema_usage(conn: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
     conn.execute(
         format!(
-            r#"grant usage on schema "{}" to centaur_slack_reader, centaur_slack_admin"#,
+            r#"grant usage on schema "{}" to centaur_slack_reader"#,
             schema
         )
         .as_str(),
@@ -336,21 +333,14 @@ async fn assert_expected_policies(conn: &mut PgConnection) -> Result<(), sqlx::E
 
 fn expected_policies() -> Vec<(String, String)> {
     [
-        ("slack_sync_channels", "centaur_slack_channels_admin_select"),
         (
             "slack_sync_channels",
             "centaur_slack_channels_reader_select",
         ),
-        ("slack_sync_users", "centaur_slack_users_admin_select"),
         ("slack_sync_users", "centaur_slack_users_reader_select"),
-        ("slack_sync_messages", "centaur_slack_messages_admin_select"),
         (
             "slack_sync_messages",
             "centaur_slack_messages_reader_select",
-        ),
-        (
-            "slack_sync_message_attachments",
-            "centaur_slack_message_attachments_admin_select",
         ),
         (
             "slack_sync_message_attachments",
@@ -358,15 +348,7 @@ fn expected_policies() -> Vec<(String, String)> {
         ),
         (
             "company_context_documents",
-            "centaur_context_docs_admin_select",
-        ),
-        (
-            "company_context_documents",
             "centaur_context_docs_reader_select",
-        ),
-        (
-            "google_drive_sync_runs",
-            "centaur_google_drive_runs_admin_select",
         ),
         (
             "google_drive_sync_runs",
@@ -374,15 +356,7 @@ fn expected_policies() -> Vec<(String, String)> {
         ),
         (
             "google_drive_sync_files",
-            "centaur_google_drive_files_admin_select",
-        ),
-        (
-            "google_drive_sync_files",
             "centaur_google_drive_files_reader_select",
-        ),
-        (
-            "google_drive_sync_checkpoints",
-            "centaur_google_drive_checkpoints_admin_select",
         ),
         (
             "google_drive_sync_checkpoints",
@@ -390,15 +364,7 @@ fn expected_policies() -> Vec<(String, String)> {
         ),
         (
             "google_calendar_sync_runs",
-            "centaur_google_calendar_runs_admin_select",
-        ),
-        (
-            "google_calendar_sync_runs",
             "centaur_google_calendar_runs_reader_select",
-        ),
-        (
-            "google_calendar_sync_calendars",
-            "centaur_google_calendar_calendars_admin_select",
         ),
         (
             "google_calendar_sync_calendars",
@@ -406,43 +372,21 @@ fn expected_policies() -> Vec<(String, String)> {
         ),
         (
             "google_calendar_sync_events",
-            "centaur_google_calendar_events_admin_select",
-        ),
-        (
-            "google_calendar_sync_events",
             "centaur_google_calendar_events_reader_select",
-        ),
-        (
-            "google_calendar_sync_checkpoints",
-            "centaur_google_calendar_checkpoints_admin_select",
         ),
         (
             "google_calendar_sync_checkpoints",
             "centaur_google_calendar_checkpoints_reader_select",
         ),
-        ("linear_sync_runs", "centaur_linear_runs_admin_select"),
         ("linear_sync_runs", "centaur_linear_runs_reader_select"),
-        (
-            "linear_sync_projects",
-            "centaur_linear_projects_admin_select",
-        ),
         (
             "linear_sync_projects",
             "centaur_linear_projects_reader_select",
         ),
-        ("linear_sync_issues", "centaur_linear_issues_admin_select"),
         ("linear_sync_issues", "centaur_linear_issues_reader_select"),
         (
             "linear_sync_comments",
-            "centaur_linear_comments_admin_select",
-        ),
-        (
-            "linear_sync_comments",
             "centaur_linear_comments_reader_select",
-        ),
-        (
-            "linear_sync_checkpoints",
-            "centaur_linear_checkpoints_admin_select",
         ),
         (
             "linear_sync_checkpoints",
@@ -454,9 +398,7 @@ fn expected_policies() -> Vec<(String, String)> {
     .collect()
 }
 
-async fn assert_admin_channels_table_is_removed(
-    conn: &mut PgConnection,
-) -> Result<(), sqlx::Error> {
+async fn assert_legacy_admin_state_is_removed(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
     let table_name: Option<String> =
         sqlx::query_scalar("select to_regclass('slack_context_rls_admin_channels')::text")
             .fetch_one(&mut *conn)
@@ -474,6 +416,15 @@ async fn assert_admin_channels_table_is_removed(
     assert_eq!(
         function_count, 0,
         "admin-channel lookup function must be removed"
+    );
+
+    let admin_role_count: i64 =
+        sqlx::query_scalar("select count(*) from pg_roles where rolname = 'centaur_slack_admin'")
+            .fetch_one(&mut *conn)
+            .await?;
+    assert_eq!(
+        admin_role_count, 0,
+        "legacy slack admin DB role must be removed"
     );
     Ok(())
 }
@@ -626,43 +577,5 @@ fn empty_visible_rows() -> VisibleRows {
         linear_issues: 0,
         linear_comments: 0,
         linear_checkpoints: 0,
-    }
-}
-
-fn all_visible_rows() -> VisibleRows {
-    VisibleRows {
-        slack_channels: vec![
-            "C_ADMIN".to_owned(),
-            "C_ALPHA".to_owned(),
-            "C_BETA".to_owned(),
-        ],
-        slack_users: vec!["U_ALPHA".to_owned(), "U_BETA".to_owned()],
-        slack_messages: vec![
-            "C_ALPHA:1000.000001".to_owned(),
-            "C_BETA:1000.000002".to_owned(),
-        ],
-        slack_attachments: vec![
-            "C_ALPHA:1000.000001:F_ALPHA".to_owned(),
-            "C_BETA:1000.000002:F_BETA".to_owned(),
-        ],
-        context_docs: vec![
-            "doc_gcal".to_owned(),
-            "doc_gdrive".to_owned(),
-            "doc_linear".to_owned(),
-            "doc_slack_alpha".to_owned(),
-            "doc_slack_beta".to_owned(),
-        ],
-        google_drive_runs: 1,
-        google_drive_files: 1,
-        google_drive_checkpoints: 1,
-        google_calendar_runs: 1,
-        google_calendar_calendars: 1,
-        google_calendar_events: 1,
-        google_calendar_checkpoints: 1,
-        linear_runs: 1,
-        linear_projects: 1,
-        linear_issues: 1,
-        linear_comments: 1,
-        linear_checkpoints: 1,
     }
 }
