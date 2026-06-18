@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
   Chat,
-  StreamingPlan,
   type Adapter,
   type Attachment,
   type Logger,
@@ -808,7 +807,7 @@ async function renderExecutionAttempt(
   let retry = false
   let fallbackLastEventId = 0
   try {
-    await renderExecutionStream(
+    const streamResult = await renderExecutionStream(
       thread,
       streamSessionAfterHandoff(options, input),
       message,
@@ -818,7 +817,34 @@ async function renderExecutionAttempt(
     )
     rendered = true
     outcome = 'complete'
-    traceLog(options, 'slackbotv2_render_complete', trace)
+    let divergenceReconciled = false
+    if (streamResult.diverged && streamResult.messageId) {
+      // The live answer stream diverged from the recomposed answer, so the delta
+      // stream was frozen at the last clean prefix to avoid interleaving. Swap
+      // the (possibly truncated) streamed message for the durable, de-duplicated
+      // final answer so the user sees the complete response instead of a message
+      // that looks cut off. Reuses the final-answer fallback, which derives the
+      // answer from the terminal result rather than the doubled live buffer.
+      const reconciled = await renderFallbackFinalAnswer(
+        thread,
+        options,
+        {
+          afterEventId: input.afterEventId,
+          executionId: input.executionId,
+          threadId: input.threadId
+        },
+        trace,
+        { replaceMessageId: streamResult.messageId }
+      )
+      if (reconciled) {
+        divergenceReconciled = true
+        fallbackLastEventId = reconciled.lastEventId
+      }
+    }
+    traceLog(options, 'slackbotv2_render_complete', trace, {
+      answer_diverged: streamResult.diverged,
+      divergence_reconciled: divergenceReconciled
+    })
     return 'complete'
   } catch (error) {
     // Check the Slack adapter's delivery annotation before retryability:
@@ -1340,7 +1366,7 @@ async function recoverRenderObligation(
       activeExecution: true,
       lastEventId
     })
-    await renderRecoveredExecutionStream(
+    const streamResult = await renderRecoveredExecutionStream(
       thread,
       streamOpenedSession(input, openedStream),
       obligation.message,
@@ -1349,7 +1375,31 @@ async function recoverRenderObligation(
     )
     rendered = true
     renderOutcome = 'complete'
-    traceLog(options, 'slackbotv2_render_recovery_complete', trace)
+    let divergenceReconciled = false
+    if (streamResult.diverged && streamResult.messageId) {
+      // Same divergence reconcile as the live path: the answer stream was
+      // frozen at the last clean prefix, so swap the streamed message for the
+      // durable, de-duplicated final answer instead of leaving it truncated.
+      const reconciled = await renderFallbackFinalAnswer(
+        thread,
+        options,
+        {
+          afterEventId: obligation.afterEventId,
+          executionId: obligation.executionId,
+          threadId
+        },
+        trace,
+        { replaceMessageId: streamResult.messageId }
+      )
+      if (reconciled) {
+        divergenceReconciled = true
+        lastEventId = Math.max(lastEventId, reconciled.lastEventId)
+      }
+    }
+    traceLog(options, 'slackbotv2_render_recovery_complete', trace, {
+      answer_diverged: streamResult.diverged,
+      divergence_reconciled: divergenceReconciled
+    })
   } catch (error) {
     const answerLost = slackAnswerLost(error)
     if (answerLost === false) {
@@ -1547,7 +1597,7 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false
-): Promise<void> {
+): Promise<{ diverged: boolean; messageId?: string }> {
   if (isPlainTextOnlyRequest(message.text)) {
     await renderPlainTextExecutionStream(
       thread,
@@ -1557,7 +1607,7 @@ async function renderExecutionStream(
       trace,
       assistantStatusVisible
     )
-    return
+    return { diverged: false }
   }
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
@@ -1568,24 +1618,30 @@ async function renderExecutionStream(
     assistant_status_already_visible: assistantStatusVisible,
     phase_ms: elapsedMs(titleStartedAtMs)
   })
+  const capture = { diverged: false }
   try {
     const visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           codexAppServerToChatSdkStream(
             stream,
-            rendererOptions(thread, options)
+            rendererOptions(thread, options, capture)
           )
         )
       )
     )
-    if (!visibleStream) return
-    await thread.post(
-      new StreamingPlan(
-        visibleStream,
-        { groupTasks: options.streamTaskDisplayMode ?? 'plan' }
-      )
-    )
+    if (!visibleStream) return { diverged: false }
+    // Stream via the adapter (as renderRecoveredExecutionStream does) so the
+    // posted message id is available for divergence reconciliation. For Slack
+    // this matches thread.post(StreamingPlan): updateIntervalMs is a no-op
+    // (Slack streams server-side) and the recipient context is the message
+    // author.
+    const sent = await thread.adapter.stream!(thread.id, visibleStream, {
+      recipientTeamId: message.teamId,
+      recipientUserId: message.author.userId,
+      taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
+    })
+    return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     await setAssistantStatus(thread, '', options, trace)
   }
@@ -1597,10 +1653,10 @@ async function renderRecoveredExecutionStream(
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
-): Promise<void> {
+): Promise<{ diverged: boolean; messageId?: string }> {
   if (isPlainTextOnlyRequest(message.text)) {
     await renderPlainTextExecutionStream(thread, stream, message, options, trace)
-    return
+    return { diverged: false }
   }
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
@@ -1608,19 +1664,20 @@ async function renderRecoveredExecutionStream(
   traceLog(options, 'slackbotv2_render_slack_metadata_set', trace, {
     phase_ms: elapsedMs(titleStartedAtMs)
   })
+  const capture = { diverged: false }
   try {
     const visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           codexAppServerToChatSdkStream(
             stream,
-            rendererOptions(thread, options)
+            rendererOptions(thread, options, capture)
           )
         )
       )
     )
-    if (!visibleStream) return
-    await thread.adapter.stream!(
+    if (!visibleStream) return { diverged: false }
+    const sent = await thread.adapter.stream!(
       thread.id,
       visibleStream,
       {
@@ -1629,6 +1686,7 @@ async function renderRecoveredExecutionStream(
         taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
       }
     )
+    return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     await setAssistantStatus(thread, '', options, trace)
   }
@@ -2096,10 +2154,33 @@ function normalizeSlackText(input: string): string {
     .trim()
 }
 
-function rendererOptions(thread: Thread, options: SlackbotV2Options): CodexAppServerToChatStreamOptions {
+// Surfaces the renderer's structured diagnostics (otherwise a no-op: nothing
+// wires logInfo), turns the answer-divergence guard into a Prometheus signal so
+// the real rate is measurable, and flips the per-render `capture.diverged` flag
+// so the caller can reconcile the message with the durable final answer.
+function rendererLogInfo(
+  options: SlackbotV2Options,
+  capture?: { diverged: boolean }
+): (event: string, fields: Record<string, unknown>) => void {
+  return (event, fields) => {
+    options.mapper?.logInfo?.(event, fields)
+    options.logger?.info(event, fields)
+    if (event === 'codex_renderer_stream_divergence_suppressed') {
+      slackbotMetrics.renderAnswerDivergence.inc()
+      if (capture) capture.diverged = true
+    }
+  }
+}
+
+function rendererOptions(
+  thread: Thread,
+  options: SlackbotV2Options,
+  capture?: { diverged: boolean }
+): CodexAppServerToChatStreamOptions {
   const mapper = options.mapper
   return {
     ...mapper,
+    logInfo: rendererLogInfo(options, capture),
     async onRendererEvent(event: RendererEvent) {
       await mapper?.onRendererEvent?.(event)
       if (event.type === 'renderer.title.update') {
@@ -2118,6 +2199,7 @@ function fallbackRendererOptions(options: SlackbotV2Options): CodexAppServerToCh
   const mapper = options.mapper
   return {
     ...mapper,
+    logInfo: rendererLogInfo(options),
     async onRendererEvent(event: RendererEvent) {
       try {
         await mapper?.onRendererEvent?.(event)

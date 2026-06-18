@@ -258,6 +258,10 @@ export const slackbotMetrics = {
     labelNames: ['source'],
     name: 'slackbotv2_last_successful_render_timestamp_seconds'
   }),
+  renderAnswerDivergence: counter({
+    help: 'Live renders where the recomposed answer diverged from already-streamed text, so a delta was suppressed to avoid interleaving the message (once per render).',
+    name: 'slackbotv2_render_answer_divergence_total'
+  }),
   renderAttempts: counter({
     help: 'Slack render attempts by source and outcome.',
     labelNames: ['source', 'outcome'],
