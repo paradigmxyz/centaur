@@ -283,9 +283,7 @@ impl AgentSandboxBackend {
             .stdin(true)
             .stdout(true)
             .stderr(true)
-            .tty(false)
-            .max_stdout_buf_size(1024 * 1024)
-            .max_stderr_buf_size(1024 * 1024);
+            .tty(false);
         let mut attached = self
             .pods()
             .attach(id.as_str(), &params)

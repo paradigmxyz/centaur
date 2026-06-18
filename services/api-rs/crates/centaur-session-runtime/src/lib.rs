@@ -38,7 +38,6 @@ use tracing::{Instrument, Span, error, info, info_span, warn};
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
-const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1327,10 +1326,7 @@ impl SessionRuntime {
                 .await?
                 .into_parts();
             let pipe = SessionPipe {
-                stdin: Arc::new(Mutex::new(FramedWrite::new(
-                    io.stdin,
-                    LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
-                ))),
+                stdin: Arc::new(Mutex::new(FramedWrite::new(io.stdin, LinesCodec::new()))),
             };
 
             self.sandbox_pipes
@@ -1934,10 +1930,7 @@ async fn run_stdout_pump(
         sandbox_id,
     );
     async {
-        let mut stdout = FramedRead::new(
-            stdout,
-            LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
-        );
+        let mut stdout = FramedRead::new(stdout, LinesCodec::new());
         info!(
             component = COMPONENT_SESSION_RUNTIME,
             event = "session_stdout_pump_started",
@@ -1951,13 +1944,8 @@ async fn run_stdout_pump(
             let line = match line {
                 Ok(line) => line,
                 Err(error) => {
-                    record_stdout_pump_failure(
-                        &ctx,
-                        &thread_key,
-                        sandbox_id,
-                        stdout_pump_error_message(&error),
-                    )
-                    .await?;
+                    let message = stdout_pump_error_message(&error);
+                    record_stdout_pump_failure(&ctx, &thread_key, sandbox_id, message).await?;
                     return Ok(());
                 }
             };
@@ -2089,7 +2077,6 @@ async fn record_stdout_pump_failure(
             json!({
                 "sandbox_id": sandbox_id,
                 "error": error.as_str(),
-                "max_line_bytes": MAX_SESSION_OUTPUT_LINE_BYTES,
                 "terminalized_execution": execution_id.is_some(),
             }),
         )
@@ -3550,9 +3537,9 @@ fn validate_input_lines(lines: &[String]) -> Result<(), SessionRuntimeError> {
 
 fn stdout_pump_error_message(error: &LinesCodecError) -> String {
     match error {
-        LinesCodecError::MaxLineLengthExceeded => format!(
-            "sandbox stdout line exceeded maximum length of {MAX_SESSION_OUTPUT_LINE_BYTES} bytes"
-        ),
+        LinesCodecError::MaxLineLengthExceeded => {
+            "sandbox stdout line exceeded codec maximum length".to_owned()
+        }
         LinesCodecError::Io(error) => format!("sandbox stdout I/O failed: {error}"),
     }
 }
@@ -3668,14 +3655,6 @@ mod tests {
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
-
-    #[test]
-    fn stdout_pump_max_line_error_is_stable() {
-        assert_eq!(
-            stdout_pump_error_message(&LinesCodecError::MaxLineLengthExceeded),
-            "sandbox stdout line exceeded maximum length of 8388608 bytes"
-        );
-    }
 
     #[test]
     fn turn_completed_without_answer_text_is_terminal() {
