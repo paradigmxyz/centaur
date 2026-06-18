@@ -59,6 +59,7 @@ impl IntoResponse for ApiError {
                 ..
             })) => StatusCode::CONFLICT,
             Self::Workflow(WorkflowRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
+            Self::Workflow(WorkflowRuntimeError::Disabled(_)) => StatusCode::FORBIDDEN,
             Self::Workflow(WorkflowRuntimeError::NotFound(_)) => StatusCode::NOT_FOUND,
             Self::Workflow(WorkflowRuntimeError::Upstream(_)) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) | Self::Runtime(_) | Self::Workflow(_) | Self::Serialize(_) => {

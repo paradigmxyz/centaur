@@ -280,6 +280,11 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
+  # Workflow enablement policy. Production defaults to all workflows enabled.
+  # Set workflowEnableMode: allowlist in staging and list allowed workflow names
+  # in workflowAllowedNames as a comma/whitespace-separated string.
+  workflowEnableMode: all
+  workflowAllowedNames: ""
   # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
   # the max lifetime. 0 disables that sweep. Interval must be >= 1.
   sandboxIdleStopTtlSecs: 10800 # 3 hours

@@ -161,6 +161,14 @@ spec:
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
 {{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ENABLE_MODE") }}
+            - name: WORKFLOW_ENABLE_MODE
+              value: {{ .Values.apiRs.workflowEnableMode | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ALLOWED_NAMES") }}
+            - name: WORKFLOW_ALLOWED_NAMES
+              value: {{ .Values.apiRs.workflowAllowedNames | quote }}
+{{- end }}
 {{- if .Values.overlay.systemPrompt }}
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}

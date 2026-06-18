@@ -691,6 +691,24 @@ def workflow_dirs() -> list[Path]:
     return dirs
 
 
+def workflow_allowed_names() -> set[str]:
+    raw = os.getenv("WORKFLOW_ALLOWED_NAMES", "")
+    return {
+        name
+        for name in (part.strip() for part in raw.replace(",", " ").split())
+        if name
+    }
+
+
+def workflow_enabled(workflow_name: str) -> bool:
+    mode = os.getenv("WORKFLOW_ENABLE_MODE", "").strip().lower()
+    if not mode or mode == "all":
+        return True
+    if mode == "allowlist":
+        return workflow_name.strip() in workflow_allowed_names()
+    raise RuntimeError(f'WORKFLOW_ENABLE_MODE must be "all" or "allowlist", got {mode!r}')
+
+
 def configure_workflow_import_paths(dirs: list[Path]) -> None:
     for directory in dirs:
         candidate_paths = [directory.parent, directory]
@@ -761,6 +779,8 @@ def discover_workflows() -> dict[str, RegisteredWorkflow]:
                 print(f"workflow_load_error path={path} error={exc}", file=sys.stderr)
                 continue
             if registered is None:
+                continue
+            if not workflow_enabled(registered.workflow_name):
                 continue
             if registered.workflow_name in discovered:
                 raise RuntimeError(f"duplicate workflow name {registered.workflow_name!r}")

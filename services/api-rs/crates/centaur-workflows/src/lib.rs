@@ -49,6 +49,8 @@ const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
+const WORKFLOW_ENABLE_MODE_ENV: &str = "WORKFLOW_ENABLE_MODE";
+const WORKFLOW_ALLOWED_NAMES_ENV: &str = "WORKFLOW_ALLOWED_NAMES";
 /// How many consecutive reconcile passes a workflow must be missing from
 /// discovery before its active tasks are cancelled. 0 disables reaping.
 const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
@@ -80,6 +82,93 @@ struct WorkflowRuntimeInner {
     _schedule_worker: Worker,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkflowEnablement {
+    mode: WorkflowEnableMode,
+    allowed_names: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowEnableMode {
+    All,
+    Allowlist,
+}
+
+impl WorkflowEnablement {
+    fn all() -> Self {
+        Self {
+            mode: WorkflowEnableMode::All,
+            allowed_names: BTreeSet::new(),
+        }
+    }
+
+    fn allowlist(raw_allowed_names: &str) -> Self {
+        Self {
+            mode: WorkflowEnableMode::Allowlist,
+            allowed_names: parse_workflow_allowed_names(raw_allowed_names),
+        }
+    }
+
+    fn from_env() -> Result<Self, WorkflowRuntimeError> {
+        let raw_mode = env::var(WORKFLOW_ENABLE_MODE_ENV).unwrap_or_default();
+        let mode = raw_mode.trim();
+        if mode.is_empty() || mode.eq_ignore_ascii_case("all") {
+            return Ok(Self::all());
+        }
+        if mode.eq_ignore_ascii_case("allowlist") {
+            return Ok(Self::allowlist(
+                &env::var(WORKFLOW_ALLOWED_NAMES_ENV).unwrap_or_default(),
+            ));
+        }
+        Err(WorkflowRuntimeError::BadRequest(format!(
+            "{WORKFLOW_ENABLE_MODE_ENV} must be \"all\" or \"allowlist\", got {mode:?}"
+        )))
+    }
+
+    fn is_enabled(&self, workflow_name: &str) -> bool {
+        match self.mode {
+            WorkflowEnableMode::All => true,
+            WorkflowEnableMode::Allowlist => self.allowed_names.contains(workflow_name.trim()),
+        }
+    }
+
+    fn ensure_enabled(&self, workflow_name: &str) -> Result<(), WorkflowRuntimeError> {
+        if self.is_enabled(workflow_name) {
+            return Ok(());
+        }
+        Err(WorkflowRuntimeError::Disabled(format!(
+            "workflow {workflow_name:?} is disabled by {WORKFLOW_ENABLE_MODE_ENV}"
+        )))
+    }
+
+    fn filter_metadata(&self, metadata: &mut PythonWorkflowMetadata) {
+        if self.mode == WorkflowEnableMode::All {
+            return;
+        }
+        metadata
+            .workflow_names
+            .retain(|workflow_name| self.is_enabled(workflow_name));
+        metadata
+            .webhooks
+            .retain(|webhook| self.is_enabled(&webhook.workflow_name));
+        metadata.schedules.retain(|schedule| {
+            schedule
+                .get("workflow_name")
+                .and_then(Value::as_str)
+                .is_some_and(|workflow_name| self.is_enabled(workflow_name))
+        });
+    }
+}
+
+fn parse_workflow_allowed_names(raw: &str) -> BTreeSet<String> {
+    raw.split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter_map(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -316,8 +405,15 @@ impl WorkflowRuntime {
                 warn!(%error, "python workflow discovery failed");
                 PythonWorkflowMetadata::default()
             });
-        let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(&discovery)?));
-        let webhook_registry = Arc::new(RwLock::new(build_webhook_registry(&discovery)?));
+        let enablement = WorkflowEnablement::from_env()?;
+        let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(
+            &discovery,
+            &enablement,
+        )?));
+        let webhook_registry = Arc::new(RwLock::new(build_webhook_registry(
+            &discovery,
+            &enablement,
+        )?));
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
@@ -468,6 +564,7 @@ impl WorkflowRuntime {
                 "workflow_name must not be empty".to_owned(),
             ));
         }
+        WorkflowEnablement::from_env()?.ensure_enabled(workflow_name)?;
         let client = self.client_for_workflow(workflow_name);
         let spawn = client
             .spawn(
@@ -703,12 +800,19 @@ fn absurd_queue_tables(
 
 fn build_webhook_registry(
     discovery: &PythonWorkflowMetadata,
+    enablement: &WorkflowEnablement,
 ) -> Result<BTreeMap<String, RegisteredWorkflowWebhook>, WorkflowRuntimeError> {
     let mut registry = BTreeMap::new();
     for webhook in discovery.webhooks.clone() {
+        if !enablement.is_enabled(&webhook.workflow_name) {
+            continue;
+        }
         insert_webhook(&mut registry, webhook)?;
     }
     for webhook in default_workflow_webhooks() {
+        if !enablement.is_enabled(&webhook.workflow_name) {
+            continue;
+        }
         insert_webhook_if_absent(&mut registry, webhook)?;
     }
     if let Ok(raw) = env::var("WORKFLOW_WEBHOOKS_JSON") {
@@ -716,6 +820,9 @@ fn build_webhook_registry(
         if !trimmed.is_empty() {
             let webhooks: Vec<RegisteredWorkflowWebhook> = serde_json::from_str(trimmed)?;
             for webhook in webhooks {
+                if !enablement.is_enabled(&webhook.workflow_name) {
+                    continue;
+                }
                 insert_webhook_replace(&mut registry, webhook)?;
             }
         }
@@ -725,10 +832,14 @@ fn build_webhook_registry(
 
 fn build_schedule_registry(
     discovery: &PythonWorkflowMetadata,
+    enablement: &WorkflowEnablement,
 ) -> Result<BTreeMap<String, RegisteredWorkflowSchedule>, WorkflowRuntimeError> {
     let mut registry = BTreeMap::new();
     for schedule in &discovery.schedules {
         let schedule = normalize_schedule(schedule.clone())?;
+        if !enablement.is_enabled(&schedule.workflow_name) {
+            continue;
+        }
         if registry
             .insert(schedule.schedule_id.clone(), schedule.clone())
             .is_some()
@@ -1195,7 +1306,9 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
             Some("workflow.discovery") => {
                 let _ = child.wait().await;
                 let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(message)?;
-                return Ok(metadata_from_discovery_payload(payload));
+                let mut metadata = metadata_from_discovery_payload(payload);
+                WorkflowEnablement::from_env()?.filter_metadata(&mut metadata);
+                return Ok(metadata);
             }
             Some("host.error") | Some("workflow.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
@@ -1305,9 +1418,10 @@ async fn reconcile_workflow_metadata_once(
     ),
     WorkflowRuntimeError,
 > {
+    let enablement = WorkflowEnablement::from_env()?;
     let discovery = discover_python_workflow_metadata().await?;
-    let next_webhooks = build_webhook_registry(&discovery)?;
-    let next_schedules = build_schedule_registry(&discovery)?;
+    let next_webhooks = build_webhook_registry(&discovery, &enablement)?;
+    let next_schedules = build_schedule_registry(&discovery, &enablement)?;
     {
         let mut webhooks = webhook_registry
             .write()
@@ -1765,6 +1879,9 @@ async fn run_centaur_workflow(
 ) -> absurd::Result<WorkflowResult> {
     let _heartbeat_guard = start_workflow_task_heartbeat(ctx.clone())
         .await
+        .map_err(absurd_error)?;
+    WorkflowEnablement::from_env()
+        .and_then(|enablement| enablement.ensure_enabled(&input.workflow_name))
         .map_err(absurd_error)?;
     match input.workflow_name.as_str() {
         "echo" => {
@@ -2924,6 +3041,10 @@ pub enum WorkflowRuntimeError {
     /// Maps to HTTP 400.
     #[error("{0}")]
     BadRequest(String),
+    /// The workflow exists but is disabled by environment policy. Maps to
+    /// HTTP 403.
+    #[error("{0}")]
+    Disabled(String),
     #[error("workflow run not found: {0}")]
     NotFound(String),
     /// Server-side failure (workflow host spawn/protocol, internal dispatch).
@@ -3169,6 +3290,85 @@ mod tests {
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
         );
+    }
+
+    #[test]
+    fn workflow_allowlist_parses_comma_and_whitespace_names() {
+        let enablement = WorkflowEnablement::allowlist("agent_turn, slack_sync\ncompany_context");
+        assert!(enablement.is_enabled("agent_turn"));
+        assert!(enablement.is_enabled("slack_sync"));
+        assert!(enablement.is_enabled("company_context"));
+        assert!(!enablement.is_enabled("google_drive_sync"));
+    }
+
+    #[test]
+    fn workflow_allowlist_filters_discovered_metadata() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [
+                {
+                    "workflow_name": "allowed_workflow",
+                    "source_path": "workflows/allowed_workflow.py",
+                    "schedule": {"schedule_id": "allowed", "cron": "*/5 * * * *"},
+                    "webhooks": [{
+                        "workflow_name": "allowed_workflow",
+                        "source_path": "workflows/allowed_workflow.py",
+                        "spec": {
+                            "slug": "allowed",
+                            "auth": {"type": "none"}
+                        }
+                    }]
+                },
+                {
+                    "workflow_name": "blocked_workflow",
+                    "source_path": "workflows/blocked_workflow.py",
+                    "schedule": {"schedule_id": "blocked", "cron": "*/10 * * * *"},
+                    "webhooks": [{
+                        "workflow_name": "blocked_workflow",
+                        "source_path": "workflows/blocked_workflow.py",
+                        "spec": {
+                            "slug": "blocked",
+                            "auth": {"type": "none"}
+                        }
+                    }]
+                },
+            ],
+        }))
+        .unwrap();
+        let mut metadata = metadata_from_discovery_payload(payload);
+        WorkflowEnablement::allowlist("allowed_workflow").filter_metadata(&mut metadata);
+
+        assert_eq!(
+            metadata.workflow_names,
+            BTreeSet::from(["allowed_workflow".to_owned()])
+        );
+        assert_eq!(metadata.schedules.len(), 1);
+        assert_eq!(
+            metadata.schedules[0].get("schedule_id"),
+            Some(&json!("allowed"))
+        );
+        assert_eq!(metadata.webhooks.len(), 1);
+        assert_eq!(metadata.webhooks[0].workflow_name, "allowed_workflow");
+    }
+
+    #[test]
+    fn workflow_allowlist_filters_default_webhooks() {
+        let metadata = PythonWorkflowMetadata::default();
+        let registry = build_webhook_registry(
+            &metadata,
+            &WorkflowEnablement::allowlist("github_issue_triage"),
+        )
+        .unwrap();
+        assert!(registry.contains_key("github-issue-triage"));
+        assert!(!registry.contains_key("github-consensus-ci-triage"));
+        assert!(!registry.contains_key("trivy-vulnerability-intake"));
+    }
+
+    #[test]
+    fn disabled_workflow_returns_policy_error() {
+        let error = WorkflowEnablement::allowlist("agent_turn")
+            .ensure_enabled("slack_sync")
+            .unwrap_err();
+        assert!(matches!(error, WorkflowRuntimeError::Disabled(_)));
     }
 
     #[test]
