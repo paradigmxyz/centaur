@@ -13,7 +13,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use centaur_api_server::SandboxRuntime;
 use centaur_iron_control::{
-    IdentityInput, IronControlClient, RoleSpec, SessionRegistrar, register_role,
+    IdentityInput, IronControlClient, IronControlError, RegisterError, RoleSpec, SessionRegistrar,
+    register_role,
 };
 use centaur_iron_proxy::{
     ProxyFragment, SourceKind, SourcePolicy, harness_auth_fragment, infra_fragment,
@@ -610,7 +611,9 @@ impl SandboxArgs {
         let roles = self.iron_proxy.roles_to_register(tool_fragment.as_ref())?;
         let mut role_ids = Vec::with_capacity(roles.len());
         for (spec, fragment) in &roles {
-            role_ids.push(register_role(&client, &namespace, spec, fragment, &policy).await?);
+            role_ids.push(
+                register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?,
+            );
         }
         let bootstrap = client
             .upsert_principal(&IdentityInput {
@@ -1156,6 +1159,52 @@ impl SandboxArgs {
             interval: Duration::from_secs(self.sandbox_reap_interval_secs),
             idle_ttl: ttl(self.sandbox_idle_stop_ttl_secs),
             max_lifetime: ttl(self.sandbox_max_lifetime_secs),
+        }
+    }
+}
+
+const IRON_CONTROL_REGISTER_MAX_ATTEMPTS: u32 = 5;
+const IRON_CONTROL_REGISTER_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+
+async fn register_role_with_retry(
+    client: &IronControlClient,
+    namespace: &str,
+    spec: &RoleSpec,
+    fragment: &ProxyFragment,
+    policy: &SourcePolicy,
+) -> Result<String, RegisterError> {
+    let mut backoff = IRON_CONTROL_REGISTER_INITIAL_BACKOFF;
+    for attempt in 1..=IRON_CONTROL_REGISTER_MAX_ATTEMPTS {
+        match register_role(client, namespace, spec, fragment, policy).await {
+            Ok(role_id) => return Ok(role_id),
+            Err(error)
+                if attempt < IRON_CONTROL_REGISTER_MAX_ATTEMPTS
+                    && should_retry_iron_control_register(&error) =>
+            {
+                warn!(
+                    %error,
+                    role = %spec.foreign_id,
+                    attempt,
+                    max_attempts = IRON_CONTROL_REGISTER_MAX_ATTEMPTS,
+                    backoff_ms = backoff.as_millis(),
+                    "iron-control role registration failed; retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("iron-control registration retry loop always returns");
+}
+
+fn should_retry_iron_control_register(error: &RegisterError) -> bool {
+    match error {
+        RegisterError::Translate(_) => false,
+        RegisterError::Control(IronControlError::Transport { .. }) => true,
+        RegisterError::Control(IronControlError::Decode { .. }) => false,
+        RegisterError::Control(IronControlError::Status { status, .. }) => {
+            *status == 429 || (500..600).contains(status)
         }
     }
 }
@@ -1836,6 +1885,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn iron_control_registration_retry_policy_is_transient_only() {
+        let status_error = |status| {
+            RegisterError::Control(IronControlError::Status {
+                method: "PUT".to_owned(),
+                path: "/api/v1/static_secrets/example".to_owned(),
+                status,
+                body: String::new(),
+            })
+        };
+
+        assert!(should_retry_iron_control_register(&status_error(500)));
+        assert!(should_retry_iron_control_register(&status_error(503)));
+        assert!(should_retry_iron_control_register(&status_error(429)));
+        assert!(!should_retry_iron_control_register(&status_error(400)));
+        assert!(!should_retry_iron_control_register(
+            &RegisterError::Translate(centaur_iron_control::TranslateError::Unsupported {
+                what: "unsupported transform".to_owned(),
+            })
+        ));
     }
 
     #[test]
