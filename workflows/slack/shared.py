@@ -1157,6 +1157,7 @@ class SlackEtlClient:
                     {
                         "id": channel.get("id", ""),
                         "name": channel.get("name", ""),
+                        "created": channel.get("created"),
                         "purpose": channel.get("purpose", {}).get("value", ""),
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
