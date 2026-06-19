@@ -64,6 +64,45 @@ class FakeScopeMetricsPool:
         }
 
 
+class FakeWatermarkPool:
+    def __init__(self) -> None:
+        self.query = ""
+        self.args: tuple = ()
+
+    async def fetchrow(self, query, *args):
+        self.query = query
+        self.args = args
+        return {
+            "completed_payload": {
+                "status": "completed",
+                "watermark": "2026-06-18T22:59:36+00:00",
+            }
+        }
+
+
+def test_latest_successful_watermark_reads_absurd_etl_queue():
+    pool = FakeWatermarkPool()
+
+    watermark = asyncio.run(
+        projection._latest_successful_watermark(
+            pool,
+            "4b2eb33c-6377-4b1a-97f0-ec28e4427eb5",
+        )
+    )
+
+    assert watermark == dt.datetime(2026, 6, 18, 22, 59, 36, tzinfo=dt.UTC)
+    assert "absurd.t_centaur_workflows_etl" in pool.query
+    assert "absurd.r_centaur_workflows_etl" in pool.query
+    assert "workflow_runs" not in pool.query
+    assert "t.completed_payload" in pool.query
+    assert "t.params->>'workflow_name' = $1" in pool.query
+    assert "r.run_id::text <> $2" in pool.query
+    assert pool.args == (
+        "company_context_documents",
+        "4b2eb33c-6377-4b1a-97f0-ec28e4427eb5",
+    )
+
+
 def test_etl_scope_metrics_no_longer_emit_slack_scope_gauges(monkeypatch):
     calls: list[tuple] = []
     monkeypatch.setattr(

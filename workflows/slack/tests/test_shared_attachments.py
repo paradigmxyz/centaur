@@ -162,6 +162,58 @@ def test_retry_on_ratelimit_records_failed_fast_by_workflow(monkeypatch):
     ]
 
 
+def test_list_etl_channels_preserves_slack_created_timestamp():
+    client = object.__new__(shared.SlackEtlClient)
+    client._workflow_name = "slack_sync"
+
+    def fake_conversations_list(**_kwargs):
+        raise AssertionError("wrapped Slack client call should not be used directly")
+
+    client._client = types.SimpleNamespace(conversations_list=fake_conversations_list)
+
+    def fake_retry(_func, **_kwargs):
+        return {
+            "channels": [
+                {
+                    "id": "C123",
+                    "name": "eng-infra",
+                    "created": 1718123456,
+                    "purpose": {"value": "infra"},
+                    "topic": {"value": "ops"},
+                    "num_members": 42,
+                    "is_archived": False,
+                    "is_private": False,
+                    "is_member": True,
+                },
+                {
+                    "id": "G123",
+                    "name": "private-room",
+                    "created": 1718123000,
+                    "is_private": True,
+                },
+            ],
+            "response_metadata": {},
+        }
+
+    client._retry_on_ratelimit = fake_retry
+
+    channels = client._list_etl_channels()
+
+    assert channels == [
+        {
+            "id": "C123",
+            "name": "eng-infra",
+            "created": 1718123456,
+            "purpose": "infra",
+            "topic": "ops",
+            "member_count": 42,
+            "is_archived": False,
+            "is_private": False,
+            "is_member": True,
+        }
+    ]
+
+
 def test_serialize_message_downloads_slack_file_bytes(monkeypatch):
     monkeypatch.setenv("SLACK_ETL_ATTACHMENTS_ENABLED", "true")
     monkeypatch.setenv("SLACK_ETL_ATTACHMENT_MAX_BYTES", "100")

@@ -280,6 +280,11 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
+  # When true, api-rs upserts the shared iron-control infra role and its
+  # backing secrets at startup and on tool-secret reconciliation intervals.
+  # Set false when multiple Centaur instances share one console/1Password
+  # Connect control plane and infra secrets are managed out of band.
+  syncInfraSecrets: true
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.

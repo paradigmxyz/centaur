@@ -120,8 +120,8 @@ From inside the API deployment, localhost bypass avoids needing an external API
 key:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST \
-  http://localhost:8000/workflows/runs \
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- curl -s -X POST \
+  http://localhost:8080/api/workflows/runs \
   -H "Content-Type: application/json" \
   -d '{
     "workflow_name": "slack_sync",
@@ -135,15 +135,15 @@ Then inspect the run:
 ```bash
 RUN_ID=wfr_...
 
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s \
-  "http://localhost:8000/workflows/runs/${RUN_ID}" | jq
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- curl -s \
+  "http://localhost:8080/api/workflows/runs/${RUN_ID}" | jq
 ```
 
 To drain pending historical work immediately:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST \
-  http://localhost:8000/workflows/runs \
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- curl -s -X POST \
+  http://localhost:8080/api/workflows/runs \
   -H "Content-Type: application/json" \
   -d '{
     "workflow_name": "slack_backfill",
@@ -155,8 +155,8 @@ kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST \
 To force document projection after rows have synced:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST \
-  http://localhost:8000/workflows/runs \
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- curl -s -X POST \
+  http://localhost:8080/api/workflows/runs \
   -H "Content-Type: application/json" \
   -d '{
     "workflow_name": "company_context_documents",
@@ -170,12 +170,25 @@ kubectl exec -n centaur deploy/centaur-centaur-api -- curl -s -X POST \
 Check the workflow schedules:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- \
-  psql "$DATABASE_URL" -c \
-  "SELECT schedule_id, workflow_name, enabled, interval_seconds, next_run_at
-   FROM workflow_schedules
-   WHERE schedule_id IN ('slack_sync', 'slack_backfill', 'company_context_documents')
-   ORDER BY schedule_id;"
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- curl -s \
+  http://localhost:8080/api/workflows/schedules | jq \
+  '.schedules[]
+   | select(.schedule_id == "slack_sync"
+     or .schedule_id == "slack_backfill"
+     or .schedule_id == "company_context_documents")
+   | {schedule_id, workflow_name, enabled, interval_seconds}'
+```
+
+Check recent workflow runs:
+
+```bash
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- curl -s \
+  "http://localhost:8080/api/workflows/runs?limit=20" | jq \
+  '.runs[]
+   | select(.workflow_name == "slack_sync"
+     or .workflow_name == "slack_backfill"
+     or .workflow_name == "company_context_documents")
+   | {workflow_name, status, created_at, attempts}'
 ```
 
 Check sync health:

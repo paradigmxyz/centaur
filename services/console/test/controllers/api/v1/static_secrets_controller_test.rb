@@ -201,6 +201,49 @@ module Api
         assert_equal "upserted", data["name"]
       end
 
+      test "PUT retries when a concurrent create wins the foreign_id race" do
+        body = {
+          data: {
+            namespace: "acme",
+            name: "retry-upserted",
+            inject_config: { "header" => "Authorization" },
+            source: { source_type: "env", config: { "var" => "UP" } }
+          }
+        }
+        calls = 0
+        original = Api::V1::StaticSecretsController.instance_method(:assign_and_save!)
+
+        Api::V1::StaticSecretsController.define_method(:assign_and_save!) do |ref, attrs|
+          calls += 1
+          if calls == 1
+            StaticSecret.create!(
+              namespace: "acme",
+              foreign_id: "raced-ref",
+              name: "winner",
+              inject_config: { "header" => "X-Old" }
+            )
+            raise ActiveRecord::RecordNotUnique, "duplicate key value violates unique constraint"
+          end
+
+          original.bind_call(self, ref, attrs)
+        end
+        Api::V1::StaticSecretsController.send(:private, :assign_and_save!)
+
+        assert_difference -> { StaticSecret.count } => 1 do
+          put api_v1_static_secret_url(id: "raced-ref"), params: body.to_json, headers: auth_headers
+        end
+        assert_response :ok
+
+        ref = StaticSecret.find_by!(namespace: "acme", foreign_id: "raced-ref")
+        assert_equal "retry-upserted", ref.name
+        assert_equal({ "header" => "Authorization" }, ref.inject_config)
+        assert_equal "UP", ref.source.config["var"]
+        assert_equal 2, calls
+      ensure
+        Api::V1::StaticSecretsController.define_method(:assign_and_save!, original)
+        Api::V1::StaticSecretsController.send(:private, :assign_and_save!)
+      end
+
       test "PUT by foreign_id updates an existing secret without creating" do
         ref = static_secrets(:acme_prod_api_key)
         body = {
@@ -227,7 +270,8 @@ module Api
 
       test "PUT updates SSR fields and replaces source and rules" do
         ref = static_secrets(:github_token_inject)
-        SecretSource.create!(source_type: "env", config: { "var" => "OLD" }, static_secret: ref)
+        old_source = SecretSource.create!(source_type: "env", config: { "var" => "OLD" },
+                                          static_secret: ref)
         old_rule = RequestRule.create!(host: "old.example.com", http_methods: [ "GET" ],
                                        paths: [ "/" ], position: 0, static_secret: ref)
 
@@ -249,8 +293,31 @@ module Api
         assert_equal "updated", ref.description
         assert_equal({ "header" => "X-New" }, ref.inject_config)
         assert_equal "NEW", ref.source.config["var"]
+        refute_equal old_source.id, ref.source.id
         assert_equal [ "new.example.com" ], ref.rules.map(&:host)
+        assert_nil SecretSource.find_by(id: old_source.id), "old source should be deleted"
         assert_nil RequestRule.find_by(id: old_rule.id), "old rule should be deleted"
+      end
+
+      test "PUT does not retain omitted source fields" do
+        ref = static_secrets(:github_token_inject)
+        SecretSource.create!(source_type: "control_plane", secret: "OLD",
+                             static_secret: ref)
+
+        body = {
+          data: {
+            namespace: ref.namespace,
+            name: ref.name,
+            inject_config: { "header" => "Authorization" },
+            source: { source_type: "control_plane" }
+          }
+        }
+
+        put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
+        assert_response :unprocessable_content
+
+        ref.reload
+        assert_equal "OLD", ref.source.secret
       end
 
       test "PUT switches a secret from replace_config to inject_config" do

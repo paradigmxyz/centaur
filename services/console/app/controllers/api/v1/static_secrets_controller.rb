@@ -27,9 +27,7 @@ module Api
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
       # is a foreign_id that is created when absent.
       def update
-        ref = resolve_for_upsert(StaticSecret)
-        was_new = ref.new_record?
-        assign_and_save!(ref, data_params)
+        ref, was_new = assign_upsert_with_retry
         render status: (was_new ? :created : :ok), json: { data: record_payload(ref) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -46,6 +44,22 @@ module Api
       end
 
       private
+
+      def assign_upsert_with_retry
+        attempts = 0
+
+        begin
+          attempts += 1
+          ref = resolve_for_upsert(StaticSecret)
+          was_new = ref.new_record?
+          assign_and_save!(ref, data_params)
+          [ ref, was_new ]
+        rescue ActiveRecord::RecordNotUnique
+          raise if attempts >= 2
+
+          retry
+        end
+      end
 
       def assign_and_save!(ref, attrs)
         ss_attrs = permit_document(
@@ -64,6 +78,7 @@ module Api
         end
 
         StaticSecret.transaction do
+          ref.lock! unless ref.new_record?
           ref.assign_attributes(ss_attrs)
           ref.save!
 
