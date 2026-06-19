@@ -11,9 +11,13 @@ const SLACK_ATTACHMENTS_RLS_SQL: &str =
     include_str!("../migrations/0017_slack_sync_message_attachments.sql");
 const SLACK_CONTEXT_ADMIN_CHANNELS_SQL: &str =
     include_str!("../migrations/0018_slack_context_rls_admin_channels.sql");
+const CENTAUR_READONLY_ROLE_ONLY_SQL: &str =
+    include_str!("../migrations/0020_centaur_readonly_role_only.sql");
 const ETL_CONTEXT_RLS_SQL: &str = include_str!("../migrations/0021_etl_context_rls.sql");
 const DROP_SLACK_CONTEXT_ADMIN_CHANNELS_SQL: &str =
     include_str!("../migrations/0022_drop_slack_context_rls_admin_channels.sql");
+const CENTAUR_READONLY_RLS_POLICIES_SQL: &str =
+    include_str!("../migrations/0023_centaur_readonly_rls_policies.sql");
 
 const RLS_TABLES: &[&str] = &[
     "slack_sync_channels",
@@ -76,8 +80,10 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
     execute_migration(conn, SLACK_ATTACHMENTS_RLS_SQL).await?;
     execute_migration(conn, SLACK_CONTEXT_ADMIN_CHANNELS_SQL).await?;
     create_minimal_non_slack_etl_tables(conn).await?;
+    execute_migration(conn, CENTAUR_READONLY_ROLE_ONLY_SQL).await?;
     execute_migration(conn, ETL_CONTEXT_RLS_SQL).await?;
     execute_migration(conn, DROP_SLACK_CONTEXT_ADMIN_CHANNELS_SQL).await?;
+    execute_migration(conn, CENTAUR_READONLY_RLS_POLICIES_SQL).await?;
     grant_schema_usage(conn, schema).await?;
 
     assert_rls_enabled(conn).await?;
@@ -166,6 +172,9 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         }
     );
 
+    let readonly_role = visible_rows(conn, schema, "centaur_readonly", None).await?;
+    assert_eq!(readonly_role, all_visible_rows());
+
     Ok(())
 }
 
@@ -209,7 +218,15 @@ async fn set_search_path(conn: &mut PgConnection, schema: &str) -> Result<(), sq
 async fn grant_schema_usage(conn: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
     conn.execute(
         format!(
-            r#"grant usage on schema "{}" to centaur_slack_reader"#,
+            r#"grant usage on schema "{}" to centaur_slack_reader, centaur_readonly"#,
+            schema
+        )
+        .as_str(),
+    )
+    .await?;
+    conn.execute(
+        format!(
+            r#"grant select on all tables in schema "{}" to centaur_readonly"#,
             schema
         )
         .as_str(),
@@ -328,6 +345,16 @@ async fn assert_expected_policies(conn: &mut PgConnection) -> Result<(), sqlx::E
             expected.0
         );
     }
+
+    for table in RLS_TABLES {
+        let expected = (*table, format!("centaur_readonly_{table}_select"));
+        assert!(
+            policies
+                .iter()
+                .any(|(table, policy)| table == expected.0 && policy == &expected.1),
+            "missing centaur_readonly RLS policy on {table}"
+        );
+    }
     Ok(())
 }
 
@@ -351,46 +378,114 @@ fn expected_policies() -> Vec<(String, String)> {
             "centaur_context_docs_reader_select",
         ),
         (
+            "company_context_documents",
+            "centaur_readonly_company_context_documents_select",
+        ),
+        (
             "google_drive_sync_runs",
             "centaur_google_drive_runs_reader_select",
+        ),
+        (
+            "google_drive_sync_runs",
+            "centaur_readonly_google_drive_sync_runs_select",
         ),
         (
             "google_drive_sync_files",
             "centaur_google_drive_files_reader_select",
         ),
         (
+            "google_drive_sync_files",
+            "centaur_readonly_google_drive_sync_files_select",
+        ),
+        (
             "google_drive_sync_checkpoints",
             "centaur_google_drive_checkpoints_reader_select",
+        ),
+        (
+            "google_drive_sync_checkpoints",
+            "centaur_readonly_google_drive_sync_checkpoints_select",
         ),
         (
             "google_calendar_sync_runs",
             "centaur_google_calendar_runs_reader_select",
         ),
         (
+            "google_calendar_sync_runs",
+            "centaur_readonly_google_calendar_sync_runs_select",
+        ),
+        (
             "google_calendar_sync_calendars",
             "centaur_google_calendar_calendars_reader_select",
+        ),
+        (
+            "google_calendar_sync_calendars",
+            "centaur_readonly_google_calendar_sync_calendars_select",
         ),
         (
             "google_calendar_sync_events",
             "centaur_google_calendar_events_reader_select",
         ),
         (
+            "google_calendar_sync_events",
+            "centaur_readonly_google_calendar_sync_events_select",
+        ),
+        (
             "google_calendar_sync_checkpoints",
             "centaur_google_calendar_checkpoints_reader_select",
         ),
+        (
+            "google_calendar_sync_checkpoints",
+            "centaur_readonly_google_calendar_sync_checkpoints_select",
+        ),
         ("linear_sync_runs", "centaur_linear_runs_reader_select"),
+        (
+            "linear_sync_runs",
+            "centaur_readonly_linear_sync_runs_select",
+        ),
         (
             "linear_sync_projects",
             "centaur_linear_projects_reader_select",
         ),
+        (
+            "linear_sync_projects",
+            "centaur_readonly_linear_sync_projects_select",
+        ),
         ("linear_sync_issues", "centaur_linear_issues_reader_select"),
+        (
+            "linear_sync_issues",
+            "centaur_readonly_linear_sync_issues_select",
+        ),
         (
             "linear_sync_comments",
             "centaur_linear_comments_reader_select",
         ),
         (
+            "linear_sync_comments",
+            "centaur_readonly_linear_sync_comments_select",
+        ),
+        (
             "linear_sync_checkpoints",
             "centaur_linear_checkpoints_reader_select",
+        ),
+        (
+            "linear_sync_checkpoints",
+            "centaur_readonly_linear_sync_checkpoints_select",
+        ),
+        (
+            "slack_sync_channels",
+            "centaur_readonly_slack_sync_channels_select",
+        ),
+        (
+            "slack_sync_users",
+            "centaur_readonly_slack_sync_users_select",
+        ),
+        (
+            "slack_sync_messages",
+            "centaur_readonly_slack_sync_messages_select",
+        ),
+        (
+            "slack_sync_message_attachments",
+            "centaur_readonly_slack_sync_message_attachments_select",
         ),
     ]
     .into_iter()
@@ -577,5 +672,43 @@ fn empty_visible_rows() -> VisibleRows {
         linear_issues: 0,
         linear_comments: 0,
         linear_checkpoints: 0,
+    }
+}
+
+fn all_visible_rows() -> VisibleRows {
+    VisibleRows {
+        slack_channels: vec![
+            "C_ADMIN".to_owned(),
+            "C_ALPHA".to_owned(),
+            "C_BETA".to_owned(),
+        ],
+        slack_users: vec!["U_ALPHA".to_owned(), "U_BETA".to_owned()],
+        slack_messages: vec![
+            "C_ALPHA:1000.000001".to_owned(),
+            "C_BETA:1000.000002".to_owned(),
+        ],
+        slack_attachments: vec![
+            "C_ALPHA:1000.000001:F_ALPHA".to_owned(),
+            "C_BETA:1000.000002:F_BETA".to_owned(),
+        ],
+        context_docs: vec![
+            "doc_gcal".to_owned(),
+            "doc_gdrive".to_owned(),
+            "doc_linear".to_owned(),
+            "doc_slack_alpha".to_owned(),
+            "doc_slack_beta".to_owned(),
+        ],
+        google_drive_runs: 1,
+        google_drive_files: 1,
+        google_drive_checkpoints: 1,
+        google_calendar_runs: 1,
+        google_calendar_calendars: 1,
+        google_calendar_events: 1,
+        google_calendar_checkpoints: 1,
+        linear_runs: 1,
+        linear_projects: 1,
+        linear_issues: 1,
+        linear_comments: 1,
+        linear_checkpoints: 1,
     }
 }
