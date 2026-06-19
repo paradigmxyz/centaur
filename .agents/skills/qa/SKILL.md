@@ -233,23 +233,70 @@ A deployment is ready for promotion only when:
 
 ## Report Format
 
-Reply in the Slack thread with a compact table:
+Reply in the Slack thread with a digestible QA report, not a prose paragraph. The
+first line must answer the outcome:
 
-| Check | Result | Evidence |
-|-------|--------|----------|
-| Tool loading | PASS/FAIL | tool count and missing expected tools |
-| Upload current-thread file | PASS/FAIL | file id or permalink |
-| Download current-thread file | PASS/FAIL | filename and size |
-| Re-upload current-channel file | PASS/FAIL/SKIP | source and new file id |
-| Search uploaded token | PASS/WARN/FAIL | attempts and result count |
-| Search overall messages | PASS/WARN/FAIL | query and result count |
-| Thread history | PASS/FAIL | message count |
-| Paradigm DB | PASS/FAIL | document count or error |
-| VictoriaLogs | PASS/FAIL | result count or error |
-| VictoriaMetrics | PASS/FAIL | query status or error |
-| Extended checks | PASS/FAIL/SKIP | concurrency, scheduler, user context, or promotion evidence |
+```text
+Overall: PASS|FAIL|PARTIAL - <one short reason>
+```
 
-End with `Overall: PASS`, `Overall: FAIL`, or `Overall: PARTIAL`. Include the highest-signal failure details, suggested next owner, and promotion recommendation when relevant. Do not include secrets or raw credential values.
+Use `PASS` only when every required smoke check passed. Use `PARTIAL` when the
+user-facing path mostly worked but at least one required check warned, skipped,
+or could not be verified. Use `FAIL` when any required check hit an auth,
+permission, DNS, schema, timeout, malformed-response, upload/download, or
+backing-service error.
+
+Then include a Slack-friendly digest. Do not use Markdown tables in Slack
+responses; Slack does not render them reliably. Use this exact shape:
+
+```text
+*Setup*
+- *Thread context:* PASS - C123:1712345678.000000, key slack:C123:...
+- *Tool loading:* PASS - 72 tools; expected slack/company_context/vlogs/vmetrics present
+
+*Slack*
+- *Upload current-thread file:* PASS - F123, centaur-qa-upload.txt
+- *Download current-thread file:* PASS - centaur-qa-upload.txt, 22 bytes, token matched
+- *Re-upload current-channel file:* SKIP - no readable prior file found in channel
+- *Search uploaded token:* WARN - 3 attempts, 0 results; likely indexing lag
+- *Search overall messages:* PASS - query "centaur", 5 results
+- *Current thread history:* PASS - 4 messages; QA request and upload present
+
+*Data + Observability*
+- *Company context:* PASS - list 0, search 0, status ok
+- *VictoriaLogs:* PASS - health ok, sample 3, thread query 0
+- *VictoriaMetrics:* PASS - health ok, up query ok, series ok
+
+*Extended*
+- *Requested extended checks:* SKIP - not requested
+```
+
+Rules for the digest:
+
+- Keep each evidence phrase to one short sentence fragment. Prefer concrete IDs,
+  counts, filenames, byte counts, query names, and attempt counts.
+- Do not write `mostly PASS`. Use `PARTIAL` and put each warning or skipped item
+  on its own line.
+- Do not paste raw JSON, stack traces, credentials, tokens, or long command
+  output. Summarize the failure class and the command or endpoint that failed.
+- If Slack file upload creates visible artifacts, mention the uploaded filenames
+  and file IDs so the user can correlate them with thread attachments.
+- If a check is skipped because no suitable input exists, mark only that row
+  `SKIP`; do not hide it in prose.
+- If using the Slack API directly, a Block Kit version is acceptable only when
+  the message still contains the same information: headline, grouped sections,
+  per-check result, and evidence. Do not require Block Kit for normal assistant
+  replies.
+
+After the grouped digest, add at most three short bullets:
+
+- `Failures:` highest-signal failed rows and likely owner.
+- `Warnings:` non-blocking warnings such as Slack indexing lag or empty-but-valid
+  search/log results.
+- `Promotion:` `ready`, `not ready`, or `not evaluated`, with one reason.
+
+Omit any bullet that has no content. The whole report should fit comfortably in
+one Slack message.
 
 ## Known Gotchas
 
