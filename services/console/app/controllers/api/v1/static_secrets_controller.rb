@@ -68,7 +68,10 @@ module Api
           ref.assign_attributes(ss_attrs)
           ref.save!
 
-          replace_source!(ref, source_attrs)
+          ref.source&.destroy!
+          if source_attrs
+            SecretSource.create!(source_attrs.to_h.merge(static_secret: ref))
+          end
 
           ref.rules.destroy_all
           rules_attrs.each_with_index do |r, i|
@@ -76,23 +79,6 @@ module Api
           end
 
           ref.reload
-        end
-      end
-
-      def replace_source!(ref, source_attrs)
-        source = SecretSource.lock.where(static_secret: ref).first
-        unless source_attrs
-          source&.destroy!
-          return
-        end
-
-        attrs = source_attrs.to_h
-        if source && source.source_type == attrs["source_type"]
-          source.assign_attributes(attrs.except("source_type"))
-          source.save!
-        else
-          source&.destroy!
-          SecretSource.create!(attrs.merge(static_secret: ref))
         end
       end
 

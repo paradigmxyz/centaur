@@ -227,7 +227,8 @@ module Api
 
       test "PUT updates SSR fields and replaces source and rules" do
         ref = static_secrets(:github_token_inject)
-        old_source = SecretSource.create!(source_type: "env", config: { "var" => "OLD" }, static_secret: ref)
+        old_source = SecretSource.create!(source_type: "env", config: { "var" => "OLD" },
+                                          static_secret: ref)
         old_rule = RequestRule.create!(host: "old.example.com", http_methods: [ "GET" ],
                                        paths: [ "/" ], position: 0, static_secret: ref)
 
@@ -249,36 +250,31 @@ module Api
         assert_equal "updated", ref.description
         assert_equal({ "header" => "X-New" }, ref.inject_config)
         assert_equal "NEW", ref.source.config["var"]
-        assert_equal old_source.id, ref.source.id
+        refute_equal old_source.id, ref.source.id
         assert_equal [ "new.example.com" ], ref.rules.map(&:host)
+        assert_nil SecretSource.find_by(id: old_source.id), "old source should be deleted"
         assert_nil RequestRule.find_by(id: old_rule.id), "old rule should be deleted"
       end
 
-      test "PUT recreates the source only when the source type changes" do
+      test "PUT does not retain omitted source fields" do
         ref = static_secrets(:github_token_inject)
-        old_source = SecretSource.create!(source_type: "env", config: { "var" => "OLD" },
-                                          static_secret: ref)
+        SecretSource.create!(source_type: "control_plane", secret: "OLD",
+                             static_secret: ref)
 
         body = {
           data: {
             namespace: ref.namespace,
             name: ref.name,
             inject_config: { "header" => "Authorization" },
-            source: {
-              source_type: "1password_connect",
-              config: { "secret_ref" => "op://vault/item/field" }
-            }
+            source: { source_type: "control_plane" }
           }
         }
 
         put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
-        assert_response :ok
+        assert_response :unprocessable_content
 
         ref.reload
-        assert_equal "1password_connect", ref.source.source_type
-        assert_equal({ "secret_ref" => "op://vault/item/field" }, ref.source.config)
-        refute_equal old_source.id, ref.source.id
-        assert_nil SecretSource.find_by(id: old_source.id), "old source should be deleted"
+        assert_equal "OLD", ref.source.secret
       end
 
       test "PUT switches a secret from replace_config to inject_config" do
