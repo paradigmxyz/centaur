@@ -201,6 +201,49 @@ module Api
         assert_equal "upserted", data["name"]
       end
 
+      test "PUT retries when a concurrent create wins the foreign_id race" do
+        body = {
+          data: {
+            namespace: "acme",
+            name: "retry-upserted",
+            inject_config: { "header" => "Authorization" },
+            source: { source_type: "env", config: { "var" => "UP" } }
+          }
+        }
+        calls = 0
+        original = Api::V1::StaticSecretsController.instance_method(:assign_and_save!)
+
+        Api::V1::StaticSecretsController.define_method(:assign_and_save!) do |ref, attrs|
+          calls += 1
+          if calls == 1
+            StaticSecret.create!(
+              namespace: "acme",
+              foreign_id: "raced-ref",
+              name: "winner",
+              inject_config: { "header" => "X-Old" }
+            )
+            raise ActiveRecord::RecordNotUnique, "duplicate key value violates unique constraint"
+          end
+
+          original.bind_call(self, ref, attrs)
+        end
+        Api::V1::StaticSecretsController.send(:private, :assign_and_save!)
+
+        assert_difference -> { StaticSecret.count } => 1 do
+          put api_v1_static_secret_url(id: "raced-ref"), params: body.to_json, headers: auth_headers
+        end
+        assert_response :ok
+
+        ref = StaticSecret.find_by!(namespace: "acme", foreign_id: "raced-ref")
+        assert_equal "retry-upserted", ref.name
+        assert_equal({ "header" => "Authorization" }, ref.inject_config)
+        assert_equal "UP", ref.source.config["var"]
+        assert_equal 2, calls
+      ensure
+        Api::V1::StaticSecretsController.define_method(:assign_and_save!, original)
+        Api::V1::StaticSecretsController.send(:private, :assign_and_save!)
+      end
+
       test "PUT by foreign_id updates an existing secret without creating" do
         ref = static_secrets(:acme_prod_api_key)
         body = {
