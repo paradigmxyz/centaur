@@ -286,8 +286,10 @@ async fn create_or_get_session(
 }
 
 async fn get_session_context(
+    State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,
 ) -> Result<Json<SessionContextResponse>, ApiError> {
+    let _runtime = state.runtime()?;
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     Ok(Json(SessionContextResponse {
         slack: slack_thread_context(&thread_key),

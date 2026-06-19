@@ -20,7 +20,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode, header},
+        http::{Method, Request, StatusCode, header},
     };
     use centaur_sandbox_core::{
         ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
@@ -142,6 +142,86 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn runtime_routes_report_unavailable_until_runtime_is_ready() {
+        for request in [
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/session/slack%3AC123%3A123.456")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"harness_type":"codex"}"#))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456/messages")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"messages":[]}"#))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456/execute")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"input_lines":[]}"#))
+                .unwrap(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/session/slack%3AC123%3A123.456/events")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/sandboxes/drain")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/workflows/schedules")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/workflows/runs")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/workflows/runs")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"workflow_name":"agent_turn","input":{}}"#))
+                .unwrap(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/workflows/runs/run-1")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/workflows/runs/run-1/cancel")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/workflows/events")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webhooks/test")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let app = build_router_with_app_state(AppState::unready());
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
 
     #[tokio::test]
