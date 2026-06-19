@@ -577,6 +577,13 @@ struct SandboxArgs {
     #[command(flatten)]
     iron_control: IronControlArgs,
     #[arg(
+        long = "iron-control-sync-infra-secrets",
+        env = "IRON_CONTROL_SYNC_INFRA_SECRETS",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    iron_control_sync_infra_secrets: bool,
+    #[arg(
         long = "workflow-host-sandbox",
         env = "WORKFLOW_HOST_SANDBOX",
         default_value_t = true
@@ -606,15 +613,31 @@ impl SandboxArgs {
             return Ok(None);
         };
         let namespace = self.iron_control.namespace.clone();
-        let policy = self.iron_proxy.source_policy();
-        let tool_fragment = self.discover_tool_proxy_fragment()?;
-        let roles = self.iron_proxy.roles_to_register(tool_fragment.as_ref())?;
-        let mut role_ids = Vec::with_capacity(roles.len());
-        for (spec, fragment) in &roles {
-            role_ids.push(
-                register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?,
-            );
-        }
+        let role_ids = if self.iron_control_sync_infra_secrets {
+            let policy = self.iron_proxy.source_policy();
+            let tool_fragment = self.discover_tool_proxy_fragment()?;
+            let roles = self.iron_proxy.roles_to_register(tool_fragment.as_ref())?;
+            let mut role_ids = Vec::with_capacity(roles.len());
+            for (spec, fragment) in &roles {
+                role_ids.push(
+                    register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?,
+                );
+            }
+            role_ids
+        } else {
+            let spec = RoleSpec::infra();
+            vec![
+                client
+                    .upsert_role(&IdentityInput {
+                        namespace: namespace.clone(),
+                        foreign_id: spec.foreign_id,
+                        name: spec.name,
+                        labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+                    })
+                    .await?
+                    .id,
+            ]
+        };
         let bootstrap = client
             .upsert_principal(&IdentityInput {
                 namespace: namespace.clone(),
@@ -654,6 +677,9 @@ impl SandboxArgs {
     fn iron_control_tool_reconciler(
         &self,
     ) -> Result<Option<IronControlToolReconciler>, ServerError> {
+        if !self.iron_control_sync_infra_secrets {
+            return Ok(None);
+        }
         let Some(client) = self.iron_control.client() else {
             return Ok(None);
         };
@@ -2485,6 +2511,30 @@ mod tests {
                         == Some("TOOL_API_KEY")
             })
         }));
+    }
+
+    #[test]
+    fn iron_control_infra_secret_sync_can_be_disabled() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+            "--iron-control-sync-infra-secrets",
+            "false",
+        ])
+        .unwrap();
+
+        assert!(!args.sandbox.iron_control_sync_infra_secrets);
+        assert!(
+            args.sandbox
+                .iron_control_tool_reconciler()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -21,6 +21,17 @@ def _load_shared():
     sys.modules.setdefault("api", api_module)
     sys.modules.setdefault("api.runtime_control", runtime_control)
 
+    vm_metrics = types.ModuleType("api.vm_metrics")
+    for name in (
+        "record_slack_etl_rate_limit",
+        "set_etl_active_scopes",
+        "set_etl_failed_scopes",
+        "set_etl_scope_sync_freshness_seconds",
+    ):
+        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
+    api_module.vm_metrics = vm_metrics
+    sys.modules["api.vm_metrics"] = vm_metrics
+
     centaur_sdk = types.ModuleType("centaur_sdk")
     centaur_sdk.secret = lambda _name, default=None: default
     sys.modules.setdefault("centaur_sdk", centaur_sdk)
@@ -38,8 +49,12 @@ def _load_backfill():
         "record_etl_items_failed",
         "record_etl_items_seen",
         "record_etl_items_upserted",
+        "record_slack_etl_rate_limit",
+        "set_etl_active_scopes",
         "set_etl_backfill_job_age_seconds",
         "set_etl_backfill_jobs",
+        "set_etl_failed_scopes",
+        "set_etl_scope_sync_freshness_seconds",
     ):
         setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
     api_module.vm_metrics = vm_metrics
@@ -58,6 +73,93 @@ def _load_backfill():
 
 
 shared = _load_shared()
+
+
+class _FakeSlackResponse(dict):
+    def __init__(
+        self,
+        *,
+        error: str = "ratelimited",
+        headers: dict[str, str] | None = None,
+        status_code: int = 429,
+    ) -> None:
+        super().__init__({"error": error})
+        self.headers = headers or {}
+        self.status_code = status_code
+
+
+class _FakeSlackError(Exception):
+    def __init__(self, response: _FakeSlackResponse) -> None:
+        super().__init__("rate limited")
+        self.response = response
+
+
+def test_retry_on_ratelimit_records_slept_retry_by_workflow(monkeypatch):
+    client = object.__new__(shared.SlackEtlClient)
+    client._workflow_name = "slack_backfill"
+    client._ratelimit_deadlines = {}
+    calls = {"api": 0, "sleep": [], "metrics": []}
+    clock = {"now": 1000.0}
+
+    def fake_api_call():
+        calls["api"] += 1
+        if calls["api"] == 1:
+            raise _FakeSlackError(_FakeSlackResponse(headers={"Retry-After": "2"}))
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        shared,
+        "record_slack_etl_rate_limit",
+        lambda *args: calls["metrics"].append(args),
+    )
+
+    def fake_sleep(seconds):
+        calls["sleep"].append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(shared.time, "sleep", fake_sleep)
+    monkeypatch.setattr(shared.time, "time", lambda: clock["now"])
+
+    result = client._retry_on_ratelimit(
+        fake_api_call,
+        method_key="etl.conversations.history",
+    )
+
+    assert result == {"ok": True}
+    assert calls["sleep"] == [2.25]
+    assert calls["metrics"] == [
+        ("slack_backfill", "etl.conversations.history", "slept_retry", 2.25)
+    ]
+
+
+def test_retry_on_ratelimit_records_failed_fast_by_workflow(monkeypatch):
+    client = object.__new__(shared.SlackEtlClient)
+    client._workflow_name = "slack_sync"
+    client._ratelimit_deadlines = {}
+    calls = []
+
+    def fake_api_call():
+        raise _FakeSlackError(_FakeSlackResponse(headers={"Retry-After": "45"}))
+
+    monkeypatch.setattr(
+        shared,
+        "record_slack_etl_rate_limit",
+        lambda *args: calls.append(args),
+    )
+
+    try:
+        client._retry_on_ratelimit(
+            fake_api_call,
+            method_key="etl.conversations.replies",
+        )
+    except shared.SlackEtlRateLimitError as exc:
+        assert exc.payload["retry_after_seconds"] == 45.25
+    else:
+        raise AssertionError("expected SlackEtlRateLimitError")
+
+    assert calls == [
+        ("slack_sync", "etl.conversations.replies", "failed_fast", 45.25)
+    ]
 
 
 def test_serialize_message_downloads_slack_file_bytes(monkeypatch):
@@ -188,6 +290,60 @@ class FakeExecutePool:
         self.execute_calls.append((sql, args))
 
 
+class FakeFetchRowPool:
+    def __init__(self, row) -> None:
+        self.row = row
+        self.fetchrow_calls: list[tuple] = []
+
+    async def fetchrow(self, sql, *args):
+        self.fetchrow_calls.append((sql, args))
+        return self.row
+
+
+def test_emit_slack_checkpoint_metrics_reads_slack_checkpoints(monkeypatch):
+    calls: dict[str, list] = {
+        "active": [],
+        "failed": [],
+        "freshness": [],
+    }
+    monkeypatch.setattr(
+        shared,
+        "set_etl_active_scopes",
+        lambda *args: calls["active"].append(args),
+    )
+    monkeypatch.setattr(
+        shared,
+        "set_etl_failed_scopes",
+        lambda *args: calls["failed"].append(args),
+    )
+    monkeypatch.setattr(
+        shared,
+        "set_etl_scope_sync_freshness_seconds",
+        lambda *args: calls["freshness"].append(args),
+    )
+    pool = FakeFetchRowPool(
+        {
+            "active_scopes": 42,
+            "failed_scopes": 3,
+            "freshness_seconds": 123.5,
+        }
+    )
+
+    asyncio.run(shared.emit_slack_checkpoint_metrics(pool))
+
+    assert len(pool.fetchrow_calls) == 1
+    query = pool.fetchrow_calls[0][0]
+    assert "FROM slack_sync_checkpoints c" in query
+    assert "JOIN slack_sync_channels ch ON ch.channel_id = c.channel_id" in query
+    assert "ch.is_syncable IS TRUE" in query
+    assert "ch.is_archived IS FALSE" in query
+    assert calls == {
+        "active": [("slack", 42)],
+        "failed": [("slack", 3)],
+        "freshness": [("slack", 123.5)],
+    }
+
+
 def test_permanent_slack_backfill_error_classifier():
     assert shared.is_permanent_slack_backfill_error(
         "Slack API error: thread_not_found"
@@ -273,8 +429,9 @@ def test_backfill_handler_terminally_skips_permanent_slack_errors(monkeypatch):
         calls["terminal_skip"].append(kwargs)
 
     monkeypatch.setattr(backfill, "_emit_backfill_job_metrics", fake_noop)
+    monkeypatch.setattr(backfill, "emit_slack_checkpoint_metrics", fake_noop)
     monkeypatch.setattr(backfill, "claim_backfill_jobs", fake_claim_jobs)
-    monkeypatch.setattr(backfill, "shared_client", lambda: FakeClient())
+    monkeypatch.setattr(backfill, "shared_client", lambda **_kwargs: FakeClient())
     monkeypatch.setattr(backfill, "record_run_start", fake_noop)
     monkeypatch.setattr(backfill, "record_run_finish", fake_record_finish)
     monkeypatch.setattr(

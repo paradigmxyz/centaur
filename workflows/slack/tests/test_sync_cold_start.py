@@ -26,6 +26,10 @@ def _load_sync():
         "record_etl_items_failed",
         "record_etl_items_seen",
         "record_etl_items_upserted",
+        "record_slack_etl_rate_limit",
+        "set_etl_active_scopes",
+        "set_etl_failed_scopes",
+        "set_etl_scope_sync_freshness_seconds",
     ):
         setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
     api_module.vm_metrics = vm_metrics
@@ -135,6 +139,7 @@ def _patch_handler_io(monkeypatch, sync, *, checkpoint=None, client=None):
     monkeypatch.setattr(sync, "_update_checkpoint_success", fake_update_checkpoint_success)
     monkeypatch.setattr(sync, "_update_checkpoint_failure", _noop)
     monkeypatch.setattr(sync, "enqueue_backfill_job", fake_enqueue_backfill_job)
+    monkeypatch.setattr(sync, "emit_slack_checkpoint_metrics", _noop)
     monkeypatch.setattr(sync, "record_run_start", _noop)
     monkeypatch.setattr(sync, "record_run_finish", fake_record_run_finish)
     monkeypatch.setattr(
@@ -198,4 +203,3 @@ def test_watermarked_channel_keeps_incremental_overlap(monkeypatch):
             "priority": 150,
         }
     ]
-

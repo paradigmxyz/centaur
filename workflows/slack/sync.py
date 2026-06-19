@@ -22,6 +22,7 @@ from workflows.slack.shared import (
     BACKFILL_JOB_THREAD_REFRESH,
     channel_ref,
     client as shared_client,
+    emit_slack_checkpoint_metrics,
     enqueue_backfill_job,
     env_flag_enabled,
     failure_reason,
@@ -254,7 +255,7 @@ async def _load_checkpoint(pool, channel_id: str) -> dict[str, Any] | None:
 
 def _client():
     """Compatibility wrapper for tests patching the old helper."""
-    return shared_client()
+    return shared_client(workflow_name=WORKFLOW_NAME)
 
 
 async def _upsert_messages(pool, rows: list[dict[str, Any]]) -> int:
@@ -353,6 +354,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             access_mode=access_mode,
             reason=reason,
         )
+        await emit_slack_checkpoint_metrics(ctx._pool)
         return {
             "status": "skipped",
             "reason": reason,
@@ -367,6 +369,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             reason=reason,
             channels_skipped=excluded_channels,
         )
+        await emit_slack_checkpoint_metrics(ctx._pool)
         return {
             "status": "skipped",
             "reason": reason,
@@ -617,6 +620,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         counts=counts,
         error_text=error_text,
     )
+    await emit_slack_checkpoint_metrics(ctx._pool)
 
     return {
         "status": status,

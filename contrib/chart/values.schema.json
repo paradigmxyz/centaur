@@ -235,6 +235,7 @@
     "apiRs": {
       "type": "object",
       "properties": {
+        "syncInfraSecrets": { "type": "boolean" },
         "metrics": {
           "type": "object",
           "properties": {
