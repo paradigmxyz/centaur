@@ -53,10 +53,52 @@ async fn main() -> Result<(), ServerError> {
     Ok(())
 }
 
+/// Apply overlay (dbmate-format) migrations after the core migrations. Waits
+/// (bounded) for the repo-cache readiness marker first, when configured, so we
+/// apply against a complete clone rather than a half-written tree. No-op when no
+/// overlay migration directories are configured.
+async fn apply_overlay_migrations(
+    store: &PgSessionStore,
+    server: &args::ServerArgs,
+) -> Result<(), ServerError> {
+    let dirs: Vec<std::path::PathBuf> = server
+        .overlay_migration_dirs
+        .as_deref()
+        .unwrap_or_default()
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect();
+    if dirs.is_empty() {
+        return Ok(());
+    }
+    if let Some(marker) = &server.overlay_migrations_ready_marker {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(server.overlay_migrations_ready_timeout_secs);
+        while !tokio::fs::try_exists(marker).await.unwrap_or(false) {
+            if std::time::Instant::now() >= deadline {
+                info!(
+                    marker = %marker.display(),
+                    "repo-cache ready marker absent after timeout; skipping overlay migrations"
+                );
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+    let applied = store.apply_overlay_migrations(&dirs).await?;
+    info!(applied, "overlay migrations applied");
+    Ok(())
+}
+
 async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.server.database_url).await?;
     if args.server.run_migrations {
         store.run_migrations().await?;
+        // Overlay migrations run AFTER the core migrations so overlay schema may
+        // depend on core (the overlay set is tracked separately and applied from
+        // the repo-cache mount; see `args.server.overlay_migration_dirs`).
+        apply_overlay_migrations(&store, &args.server).await?;
     }
     let sandbox_runtime = args.sandbox_runtime().await?;
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime);

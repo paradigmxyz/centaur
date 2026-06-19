@@ -125,7 +125,83 @@ from .database import Database
 If a tool imports Centaur SDK modules from the base image, ensure the local
 runner includes the Centaur root (for example `/opt/centaur`) in `PYTHONPATH`.
 
-## 5. Verify console and per-sandbox proxies
+## 5. Apply overlay database migrations
+
+api-rs applies only its own embedded core migrations. The legacy Python `api`
+also applied an overlay's `services/api/db/migrations/*.sql` (dbmate format,
+tracked in a `schema_migrations_overlay` table) whenever `CENTAUR_OVERLAY_DIR`
+was set; the Rust control plane does not. Without this, overlay-owned tables are
+never created and overlay workflows fail at runtime with
+`relation "..." does not exist`.
+
+api-rs restores this: **after** it runs its core migrations, it applies overlay
+migrations from the repo-cache clone (so overlay schema may depend on core),
+tracked in `schema_migrations_overlay` — a ledger independent of the core
+`schema_migrations`, so an applied version is never re-run (an upgrade from the
+legacy dbmate path skips versions it already recorded).
+
+It is **opt-in per source**: set `migrationsSubdir` (conventionally
+`services/api/db/migrations`) on an `overlays.sources` entry to enable it for that
+overlay. Unlike `toolsSubdir`/`workflowsSubdir`/`skillsSubdir`, it has no default,
+so the common case — sources that carry no DB migrations, including the base repo
+— applies nothing and adds no startup wait.
+
+```yaml
+overlays:
+  sources:
+    - repo: your-org/your-overlay
+      ref: main
+      migrationsSubdir: services/api/db/migrations  # opt in to overlay migrations
+```
+
+When at least one source opts in (and `repoCache.enabled` + `apiRs.runMigrations`
+are true), api-rs waits for the repo-cache readiness marker, then applies each
+pending `-- migrate:up` section in `NNN_` filename order, recording the numeric
+version. A migration body and its ledger insert commit together, so a failure
+rolls back and retries on the next start. A configured source whose migrations
+directory is absent at runtime is skipped, matching the overlay-subdir model.
+
+Because overlay migrations run **after** the core migrations but as a separate,
+independently-numbered set, they should be **self-contained** relative to each
+other (numbered independently of core). Migration files must follow dbmate
+conventions:
+
+- A **zero-padded numeric `NNN_` prefix** (e.g. `001_…`, `010_…`) — the prefix is
+  the version (files without one are skipped), and applies in lexical filename
+  order, so pad consistently.
+- `-- migrate:up` / `-- migrate:down` markers at the **start of a line**; the
+  `migrate:up` section must be non-empty (a malformed migration fails startup
+  rather than being silently recorded as applied).
+- `-- migrate:up transaction:false` is honored for a migration that cannot run in
+  a transaction (e.g. `CREATE INDEX CONCURRENTLY`); such a migration must contain a
+  **single statement** (Postgres wraps a multi-statement string in an implicit
+  transaction).
+
+If more than one source opts in, all opted-in sources share the single
+`schema_migrations_overlay` ledger keyed by version, so they must use **distinct
+version prefixes** (e.g. partition the number space) — otherwise a colliding
+version from a later source is treated as already applied and skipped.
+
+Tuning (`values.yaml`, under `apiRs`):
+
+- `applyOverlayMigrations` (default `true`) — master toggle; disables overlay
+  migrations even when a source opts in.
+- `overlayMigrations.readyTimeoutSeconds` (default `300`) — how long api-rs waits
+  for the repo-cache readiness marker before applying (on timeout it logs and
+  skips, and api-rs still starts).
+
+Verify (the apply runs in the api-rs container, logged at startup):
+
+```sh
+kubectl -n <ns> logs <api-rs-pod> | grep overlay
+kubectl -n <ns> exec deploy/<postgres> -- \
+  psql "$DATABASE_URL" -c "SELECT version FROM schema_migrations_overlay ORDER BY version"
+```
+
+The applied versions and the ledger rows should match the overlay's `NNN_`
+migration prefixes, and the overlay-owned tables should exist.
+
+## 6. Verify console and per-sandbox proxies
 
 api-rs-managed sandboxes use per-sandbox iron-proxy pods for outbound access and
 secret injection. When console is enabled, the proxy's effective config is
@@ -151,7 +227,7 @@ For Postgres-backed tools, a claimed session proxy with the right grants should
 eventually listen on `5432`. An idle bootstrap warm proxy may not listen on
 `5432`; that is expected.
 
-## 6. Understand the SQL-backed warm pool
+## 7. Understand the SQL-backed warm pool
 
 The api-rs warm pool is tracked in Postgres, not only through Kubernetes
 objects. Inspect it from the database used by api-rs:
@@ -178,7 +254,7 @@ kubectl -n centaur delete sandbox.agents.x-k8s.io <sandbox-id> \
   --ignore-not-found --wait=false
 ```
 
-## 7. Validate an end-to-end session
+## 8. Validate an end-to-end session
 
 At minimum, validate that a fresh api-rs sandbox can:
 
@@ -206,7 +282,7 @@ For a Postgres-backed tool, also verify that the sandbox receives a DSN pointing
 at its per-sandbox proxy and that the proxy is listening on the expected
 Postgres port.
 
-## 8. Common failure modes
+## 9. Common failure modes
 
 ### `401 Unauthorized` from an LLM provider
 

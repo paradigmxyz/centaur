@@ -16,6 +16,9 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod overlay;
+pub use overlay::apply_overlay_migrations;
+
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
@@ -61,6 +64,16 @@ impl PgSessionStore {
     pub async fn run_migrations(&self) -> Result<(), SessionStoreError> {
         MIGRATOR.run(&self.pool).await?;
         Ok(())
+    }
+
+    /// Apply overlay (dbmate-format) migrations from `dirs`, AFTER the core
+    /// migrations, tracked in a separate `schema_migrations_overlay` ledger.
+    /// See [`apply_overlay_migrations`]. Returns the number newly applied.
+    pub async fn apply_overlay_migrations(
+        &self,
+        dirs: &[std::path::PathBuf],
+    ) -> Result<usize, SessionStoreError> {
+        overlay::apply_overlay_migrations(&self.pool, dirs).await
     }
 
     pub async fn listen_session_events(&self) -> Result<SessionEventListener, SessionStoreError> {
@@ -748,6 +761,8 @@ pub enum SessionStoreError {
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    #[error("overlay migration failed: {0}")]
+    OverlayMigration(String),
 }
 
 #[derive(Debug, FromRow)]

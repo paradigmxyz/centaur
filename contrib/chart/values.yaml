@@ -275,6 +275,21 @@ apiRs:
     pullPolicy: Always
   port: 8080
   runMigrations: true
+  # Apply an overlay's dbmate-format DB migrations from the repo-cache mount,
+  # AFTER api-rs runs its embedded core migrations (so overlay schema may depend
+  # on core). Restores the legacy `api` behavior of materializing overlay-owned
+  # tables, tracked in a separate schema_migrations_overlay ledger. OPT-IN: only
+  # takes effect for an overlays.sources entry that sets `migrationsSubdir`
+  # (conventionally "services/api/db/migrations") and only when repoCache is
+  # enabled and runMigrations is true; no-op for default/overlay-less installs.
+  # This master toggle additionally lets operators disable it even when a source
+  # opts in.
+  applyOverlayMigrations: true
+  overlayMigrations:
+    # api-rs waits up to this long for the repo-cache readiness marker before
+    # applying overlay migrations, so it does not read a not-yet-cloned tree. On
+    # timeout it logs and skips (api-rs still starts).
+    readyTimeoutSeconds: 300
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90

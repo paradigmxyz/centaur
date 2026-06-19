@@ -443,6 +443,27 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
+    /// Colon-separated overlay migration directories (each a dbmate
+    /// `services/api/db/migrations` dir on the repo-cache mount). Applied AFTER
+    /// the core migrations when `run_migrations` is set. Unset or empty disables
+    /// it. A single String (not a clap value-delimited list) so an empty env var
+    /// is a no-op rather than a hard startup error; split on ':' by the caller.
+    #[arg(long = "overlay-migration-dirs", env = "OVERLAY_MIGRATION_DIRS")]
+    pub(crate) overlay_migration_dirs: Option<String>,
+    /// Optional repo-cache readiness marker. When set, api-rs waits (bounded)
+    /// for this file before applying overlay migrations, so it does not read a
+    /// not-yet-cloned or half-written tree.
+    #[arg(
+        long = "overlay-migrations-ready-marker",
+        env = "OVERLAY_MIGRATIONS_READY_MARKER"
+    )]
+    pub(crate) overlay_migrations_ready_marker: Option<PathBuf>,
+    #[arg(
+        long = "overlay-migrations-ready-timeout-secs",
+        env = "OVERLAY_MIGRATIONS_READY_TIMEOUT_SECS",
+        default_value_t = 300
+    )]
+    pub(crate) overlay_migrations_ready_timeout_secs: u64,
 }
 
 #[derive(Debug, ClapArgs)]

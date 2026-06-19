@@ -87,6 +87,14 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- else -}}
 {{- $_ := set $source "skillsSubdir" ".agents/skills" -}}
 {{- end -}}
+{{- /*
+Overlay DB migrations are OPT-IN per source (unlike tools/workflows/skills,
+which default on): set migrationsSubdir (conventionally "services/api/db/migrations")
+to have api-rs apply that source's dbmate migrations before startup. Left unset
+so the common case — sources that carry no DB migrations, including the base
+repo — renders no migration init-container and adds no startup wait.
+*/ -}}
+{{- with .migrationsSubdir }}{{- $_ := set $source "migrationsSubdir" . -}}{{- end -}}
 {{- with .promptPath }}{{- $_ := set $source "promptPath" . -}}{{- end -}}
 {{- with .personasSubdir }}{{- $_ := set $source "personasSubdir" . -}}{{- end -}}
 {{- $sources = append $sources $source -}}
