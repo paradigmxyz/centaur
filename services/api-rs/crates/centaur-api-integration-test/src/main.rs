@@ -38,6 +38,14 @@ async fn main() -> Result<()> {
     let line = line!() + 1;
     record_result(
         &mut results,
+        "API readiness endpoint responds",
+        line,
+        wait_for_ready(&http, &base_url).await,
+    );
+
+    let line = line!() + 1;
+    record_result(
+        &mut results,
         "Harness wire values match the API contract",
         line,
         test_harness_wire_values(&http, &base_url).await,
@@ -175,6 +183,38 @@ async fn wait_for_health(http: &HttpClient, base_url: &str) -> Result<()> {
     }
 
     bail!("api did not become healthy at {url}: {last_error}")
+}
+
+async fn wait_for_ready(http: &HttpClient, base_url: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let url = format!("{base_url}/readyz");
+    let mut last_error = String::new();
+
+    while Instant::now() < deadline {
+        match http.get(&url).send().await {
+            Ok(response) if response.status() == StatusCode::OK => {
+                let body = response
+                    .json::<Value>()
+                    .await
+                    .context("parse /readyz body")?;
+                if body.get("ok").and_then(Value::as_bool) == Some(true)
+                    && body.get("ready").and_then(Value::as_bool) == Some(true)
+                {
+                    return Ok(());
+                }
+                last_error = format!("unexpected /readyz body: {body}");
+            }
+            Ok(response) => {
+                last_error = format!("/readyz returned {}", response.status());
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    bail!("api did not become ready at {url}: {last_error}")
 }
 
 async fn test_harness_wire_values(http: &HttpClient, base_url: &str) -> Result<()> {
