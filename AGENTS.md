@@ -397,7 +397,7 @@ Runs go through: `queued → running → sleeping/waiting → running → … �
 
 - **Worker pool**: `WORKFLOW_WORKER_CONCURRENCY` workers (default 2) poll for claimable runs.
 - **Lease-based fencing**: Each worker holds a lease on its run, extended by a heartbeat. If the worker dies, the lease expires and another worker reclaims the run.
-- **Schedules**: Cron-based or interval-based schedules are configured in `workflow_schedules` table and ticked by the worker loop.
+- **Schedules**: Cron-based or interval-based schedules are discovered from workflow metadata by `api-rs`. The scheduler stores tick tasks in the Absurd `centaur_workflow_schedules` queue.
 - **External events**: `POST /workflows/events` delivers events that wake waiting runs.
 - **Child workflows**: Parent→child relationships are tracked; cancelling a parent cascels linked executions.
 
@@ -425,10 +425,13 @@ Runs go through: `queued → running → sleeping/waiting → running → … �
 
 | Table | What |
 |-------|------|
-| `workflow_runs` | Run metadata, status, input/output, parent/root hierarchy |
-| `workflow_checkpoints` | Per-step cached results, linked execution/child-run IDs |
-| `workflow_schedules` | Cron/interval schedule definitions with next_run_at tracking |
-| `workflow_events` | External events for `wait_for_event` correlation |
+| `absurd.queues` | Registered workflow queues, including standard, ETL, backfill, Slack-live, and schedule queues |
+| `absurd.t_centaur_workflows*` | Workflow task metadata, state, input params, idempotency keys, and completed payloads |
+| `absurd.r_centaur_workflows*` | Per-attempt run state, leases, timing, result payloads, and failures |
+| `absurd.c_centaur_workflows*` | Per-step checkpoint state |
+| `absurd.e_centaur_workflows*` | Emitted workflow events for event-driven resumes |
+| `absurd.w_centaur_workflows*` | Wait registrations for sleeps and external events |
+| `absurd.t_centaur_workflow_schedules` | Scheduler tick tasks for registered cron and interval schedules |
 
 ## Agent Sandbox
 
