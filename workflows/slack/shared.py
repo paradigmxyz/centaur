@@ -16,6 +16,12 @@ from urllib import request as urllib_request
 
 from centaur_sdk import secret
 from api.runtime_control import canonical_json
+from api.vm_metrics import (
+    record_slack_etl_rate_limit,
+    set_etl_active_scopes,
+    set_etl_failed_scopes,
+    set_etl_scope_sync_freshness_seconds,
+)
 
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 DEFAULT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
@@ -29,6 +35,10 @@ BACKFILL_JOB_TYPES = (
     BACKFILL_JOB_THREAD_REFRESH,
 )
 BACKFILL_JOB_STATUSES = ("pending", "running", "completed", "failed")
+PERMANENT_SLACK_BACKFILL_ERRORS = (
+    "channel_not_found",
+    "thread_not_found",
+)
 
 
 def positive_int(value: int | str | None, default: int) -> int:
@@ -345,6 +355,39 @@ def failure_reason(error: str) -> str:
     return "unknown_error"
 
 
+def is_permanent_slack_backfill_error(error: str) -> bool:
+    """Return whether a Slack backfill error should terminally skip the job."""
+    lowered = error.lower()
+    return any(
+        f"slack api error: {error_code}" in lowered
+        for error_code in PERMANENT_SLACK_BACKFILL_ERRORS
+    )
+
+
+async def emit_slack_checkpoint_metrics(pool) -> None:
+    """Publish current Slack checkpoint health gauges for Grafana panels."""
+    row = await pool.fetchrow(
+        "SELECT COUNT(*) AS active_scopes, "
+        "COUNT(*) FILTER (WHERE c.last_error <> '') AS failed_scopes, "
+        "COALESCE("
+        "  EXTRACT(EPOCH FROM NOW() - MIN(c.last_success_at) "
+        "    FILTER (WHERE c.last_success_at IS NOT NULL)"
+        "  ), "
+        "  0"
+        ") AS freshness_seconds "
+        "FROM slack_sync_checkpoints c "
+        "JOIN slack_sync_channels ch ON ch.channel_id = c.channel_id "
+        "WHERE ch.is_syncable IS TRUE "
+        "AND ch.is_archived IS FALSE",
+    )
+    set_etl_active_scopes("slack", int(row["active_scopes"] or 0) if row else 0)
+    set_etl_failed_scopes("slack", int(row["failed_scopes"] or 0) if row else 0)
+    set_etl_scope_sync_freshness_seconds(
+        "slack",
+        float(row["freshness_seconds"] or 0.0) if row else 0.0,
+    )
+
+
 _MESSAGE_UPSERT_SQL = (
     "INSERT INTO slack_sync_messages ("
     "channel_id, message_ts, occurred_at, thread_ts, parent_message_ts, "
@@ -657,16 +700,39 @@ class SlackEtlClient:
         }
     )
 
-    def __init__(self, etl_token: str | None = None) -> None:
+    def __init__(
+        self,
+        etl_token: str | None = None,
+        *,
+        workflow_name: str = "slack_unknown",
+    ) -> None:
         from slack_sdk import WebClient
 
         token = (etl_token or secret("SLACK_ETL_TOKEN", default="")).strip()
         if not token:
             raise RuntimeError("SLACK_ETL_TOKEN not set for Slack ETL workflow")
         self.token = token
+        self._workflow_name = workflow_name
         self._client = WebClient(token=token, timeout=self._api_timeout_seconds())
         self._user_cache: dict[str, str] = {}
         self._ratelimit_deadlines: dict[str, float] = {}
+
+    def _record_rate_limit(
+        self,
+        *,
+        method: str,
+        outcome: str,
+        retry_after_seconds: float,
+    ) -> None:
+        try:
+            record_slack_etl_rate_limit(
+                getattr(self, "_workflow_name", "slack_unknown"),
+                method,
+                outcome,
+                retry_after_seconds,
+            )
+        except Exception:
+            pass
 
     @classmethod
     def _api_timeout_seconds(cls) -> int:
@@ -749,10 +815,20 @@ class SlackEtlClient:
             remaining = blocked_until - time.time()
             if remaining > 0:
                 if remaining > max_sleep:
+                    self._record_rate_limit(
+                        method=key,
+                        outcome="failed_fast",
+                        retry_after_seconds=round(remaining, 3),
+                    )
                     raise SlackEtlRateLimitError(
                         slack_method=key,
                         retry_after=round(remaining, 3),
                     )
+                self._record_rate_limit(
+                    method=key,
+                    outcome="slept_retry",
+                    retry_after_seconds=remaining,
+                )
                 time.sleep(remaining)
 
             try:
@@ -767,8 +843,18 @@ class SlackEtlClient:
                     )
                     self._ratelimit_deadlines[key] = time.time() + retry_after
                     if attempt < max_retries - 1 and retry_after <= max_sleep:
+                        self._record_rate_limit(
+                            method=key,
+                            outcome="slept_retry",
+                            retry_after_seconds=retry_after,
+                        )
                         time.sleep(retry_after)
                         continue
+                    self._record_rate_limit(
+                        method=key,
+                        outcome="failed_fast",
+                        retry_after_seconds=retry_after,
+                    )
                     raise SlackEtlRateLimitError(
                         slack_method=key,
                         retry_after=retry_after,
@@ -1071,6 +1157,7 @@ class SlackEtlClient:
                     {
                         "id": channel.get("id", ""),
                         "name": channel.get("name", ""),
+                        "created": channel.get("created"),
                         "purpose": channel.get("purpose", {}).get("value", ""),
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
@@ -1340,9 +1427,9 @@ class SlackEtlClient:
         return sorted(users[:limit], key=lambda x: x["name"])
 
 
-def client() -> SlackSyncClient:
+def client(*, workflow_name: str = "slack_unknown") -> SlackSyncClient:
     """Construct the workflow-owned Slack ETL client."""
-    return SlackEtlClient()
+    return SlackEtlClient(workflow_name=workflow_name)
 
 
 async def enqueue_backfill_job(
@@ -1578,6 +1665,32 @@ async def mark_backfill_job_failed(
     await pool.execute(
         "UPDATE slack_sync_backfill_jobs SET "
         "status = 'failed', last_run_id = $2, last_error = $3, updated_at = NOW() "
+        "WHERE job_id = $1",
+        job_id,
+        run_id,
+        error,
+    )
+
+
+async def mark_backfill_job_terminal_skipped(
+    pool,
+    *,
+    job_id: int,
+    run_id: str,
+    error: str,
+) -> None:
+    """Mark a permanently unrefreshable backfill job terminal without retrying."""
+    await pool.execute(
+        "UPDATE slack_sync_backfill_jobs SET "
+        "status = 'completed', "
+        "last_run_id = $2, "
+        "payload_json = COALESCE(payload_json, '{}'::jsonb) || jsonb_build_object("
+        "    'terminal_skip_reason', $3::text, "
+        "    'terminal_skip_at', NOW()::text"
+        "), "
+        "last_completed_at = NOW(), "
+        "last_error = '', "
+        "updated_at = NOW() "
         "WHERE job_id = $1",
         job_id,
         run_id,

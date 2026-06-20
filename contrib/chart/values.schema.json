@@ -235,6 +235,27 @@
     "apiRs": {
       "type": "object",
       "properties": {
+        "syncInfraSecrets": { "type": "boolean" },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "extraEnv": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "slackbotv2": {
+      "type": "object",
+      "properties": {
         "metrics": {
           "type": "object",
           "properties": {

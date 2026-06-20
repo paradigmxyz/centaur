@@ -107,7 +107,6 @@ Execution tuning:
 | `PORT` | Runtime env. | Slackbot HTTP port. |
 | `SLACK_API_URL` | `slackbot.extraEnv`. | Optional Slack Web API base URL override. |
 | `CENTAUR_API_URL` | Chart-rendered API service URL. | API base URL used by Slackbot. |
-| `CENTAUR_API_KEY` | Secret/env fallback. | Used only when `SLACKBOT_API_KEY` is unset. |
 | `CENTAUR_SLACK_EVENTS_PATH` | `slackbot.extraEnv`. | Slack Events API route; defaults to `/api/webhooks/slack`. |
 | `RUNTIME_ERROR_ALERT_CHANNEL` | `slackbot.runtimeErrorAlertChannel`. | Slack channel for runtime error alerts. |
 | `SLACK_EVENT_DEDUP_TTL_MS` | `slackbot.extraEnv`. | Slack event dedupe window. |
@@ -127,7 +126,7 @@ API-set variables:
 | --- | --- | --- |
 | `AGENT_IMAGE` | `sandbox.image.*`. | Sandbox image used by the Kubernetes backend. |
 | `AGENT_API_URL` | Chart-rendered API service URL. | Source for sandbox `CENTAUR_API_URL`; required by Kubernetes backend. |
-| `CENTAUR_API_URL`, `CENTAUR_API_KEY`, `CENTAUR_THREAD_KEY`, `CENTAUR_TRACE_ID` | API sandbox creation. | API callback, short-lived sandbox token, thread key, and trace id. |
+| `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY`, `CENTAUR_TRACE_ID` | API sandbox creation. | API callback, thread key, and trace id. |
 | `AMP_MODE`, `AMP_THREAD_VISIBILITY`, `AMP_CONTINUE_THREAD_ID` | API env or resume path. | Amp mode and resume behavior. |
 | `FIREWALL_HOST`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase variants | API sandbox creation. | Routes sandbox egress through per-sandbox iron-proxy. |
 | `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | API sandbox creation. | Trust bundle for proxied TLS. |
@@ -167,6 +166,8 @@ Sandbox entrypoint and wrappers:
 | `CODEX_AUTH_MODE` | `sandbox.extraEnv`. | Codex auth flow: `api_key` (default, hits `api.openai.com`) or `access_token` (hits `chatgpt.com` via the brokered ChatGPT login). See [Codex Auth Modes](/deploying-in-production#codex-auth-modes). |
 | `CODEX_MODEL_REASONING_SUMMARY` | `sandbox.extraEnv`. | Sets `model_reasoning_summary` in the Codex config (`auto`, `concise`, `detailed`, `none`). Codex >= 0.139 emits no reasoning summaries unless this is set, so renderers show no thinking trace. |
 | `CODEX_MODEL_REASONING_EFFORT` | `sandbox.extraEnv`. | Overrides the codex `model_reasoning_effort` (baked into `harness/codex/config.toml`) by patching the per-sandbox `~/.codex/config.toml` at boot, without forking the image. One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; an unknown value is ignored (the config default stands). |
+| `CODEX_BEDROCK_REGION` | `sandbox.extraEnv`. | Opt-in switch and single source of truth for the Bedrock region. When set, the control plane registers the AWS SigV4 re-signing credential (scoped to the `bedrock` service and this region, upstream `bedrock-mantle.<region>.api.aws`), injects the placeholder `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env so codex can sign requests iron-proxy re-signs with the real IAM keys, and pins codex's `amazon-bedrock` provider to this region at sandbox boot (so the in-sandbox client and the proxy agree). Unset disables Bedrock; defaults to `us-east-1`. See [Codex with Amazon Bedrock](/deploying-in-production#codex-with-amazon-bedrock). |
+| `CODEX_BEDROCK_SESSION_TOKEN` | `sandbox.extraEnv`. | Set truthy when the Bedrock IAM credentials are temporary (STS) and carry a session token, so the `AWS_SESSION_TOKEN` placeholder is declared and injected. Omit for long-term IAM user keys. |
 | `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
 | `CLAUDE_CODE_AUTH_MODE` | `sandbox.extraEnv`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
@@ -219,5 +220,6 @@ Google Workspace ETL workflows:
 | --- | --- | --- |
 | `CENTAUR_NAMESPACE`, `CENTAUR_RELEASE` | Local shell or `.env`. | Namespace/release used by `just` and debug scripts. |
 | `JUST_BUILD_SEQUENTIAL` | Local shell. | Builds service images sequentially. |
-| `CENTAUR_API_URL`, `CENTAUR_API_KEY` | Local shell. | API target/key for contrib scripts. |
+| `CENTAUR_API_URL` | Local shell. | API target for contrib scripts. |
+| `MUESLI_API_KEY` | Local shell. | API key for the Muesli meeting ingest helper. |
 | `MUESLI_CLI`, `MUESLI_HOST`, `MUESLI_PUSH_LOG`, `MUESLI_SLACK_CHANNEL` | Local shell. | Muesli meeting ingest helper behavior. |

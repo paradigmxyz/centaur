@@ -81,6 +81,7 @@ Store one secret per enabled harness credential:
 |---------|-----------|----------------|---------------------|----------|
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
 | Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
+| Codex with Bedrock provider | `codex` | `--bedrock` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `bedrock-mantle.<region>.api.aws` |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -103,6 +104,48 @@ Whatever source you pick, the vault is shared across the whole deployment,
 so any thread can use any configured credential. Per-user and per-channel
 scoping is on the roadmap; until then, scope tool and harness access
 accordingly. See [Security](/security) for the full threat model.
+
+### Codex with Amazon Bedrock
+
+Codex can run against [Amazon Bedrock](https://aws.amazon.com/bedrock/) through
+its built-in `amazon-bedrock` provider, which talks to the Bedrock
+OpenAI-compatible Responses endpoint (`bedrock-mantle.<region>.api.aws`). It is
+opt-in and is never the default provider.
+
+Authentication uses AWS SigV4, not a bearer token, but the sandbox never sees
+real AWS credentials. Codex signs each request with *placeholder* credentials
+and [iron-proxy](https://docs.iron.sh) re-signs it with the real read-only IAM
+keys — the same placeholder-swap model as every other harness credential, just
+for SigV4 (this is exactly how the `cloudwatch` tool works). The re-signing is
+scoped to the `bedrock` service and the configured region only.
+
+To enable it:
+
+1. Store `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the vault. Scope the
+   IAM principal to Bedrock inference only (e.g. `bedrock:InvokeModel`,
+   `bedrock:InvokeModelWithResponseStream`) — least privilege, like the
+   read-only CloudWatch user. If the keys are temporary (STS) and carry a
+   session token, also store `AWS_SESSION_TOKEN` and set
+   `CODEX_BEDROCK_SESSION_TOKEN=1` (via `sandbox.extraEnv`).
+2. Set `CODEX_BEDROCK_REGION` (via `sandbox.extraEnv`) to your Bedrock region.
+   This single setting opts the provider in and is the one source of truth for
+   the region: it registers the SigV4 re-signing credential (scoped to that
+   region), injects the placeholder AWS env into sandboxes, and pins codex's
+   `amazon-bedrock` provider to the same region at sandbox boot — so the
+   in-sandbox client and the proxy can never disagree. Defaults to `us-east-1`
+   when unset. (You can still layer further codex provider config via
+   `CODEX_CONFIG_OVERLAY`, which is applied on top.)
+3. If you have locked egress down (it is open by default), allowlist
+   `bedrock-mantle.<region>.api.aws`.
+
+Select it per thread with the `--bedrock` Slack flag (it implies the codex
+harness), and pick the Bedrock model with `--model <bedrock-model-id>` (for
+example `--model anthropic.claude-sonnet-4-...` or `--model openai.gpt-oss-120b`)
+or by setting a default `CODEX_MODEL`. The provider is fixed when the codex
+thread starts. `--bedrock` on a thread pinned to another harness restarts it onto
+codex+Bedrock; to move an existing codex thread between providers, start a new
+thread (a mid-thread provider switch is logged and ignored rather than applied
+silently).
 
 ### Codex Auth Modes
 

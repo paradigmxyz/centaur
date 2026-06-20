@@ -280,6 +280,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "centaur-api-integration-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "centaur-session-core",
+ "eventsource-stream",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "centaur-api-server"
 version = "0.1.0"
 dependencies = [
@@ -484,6 +498,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "time",
+ "tokio",
  "uuid",
 ]
 

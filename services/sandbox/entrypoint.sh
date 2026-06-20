@@ -223,6 +223,28 @@ if effort:
 
 text = "\n".join(lines).rstrip() + "\n"
 
+# CODEX_BEDROCK_REGION: when codex's built-in `amazon-bedrock` provider is enabled
+# (the api-rs sandbox env injects this), pin its AWS region from the SAME env var
+# that scopes iron-proxy's SigV4 re-signing, so the in-sandbox client signs/sends
+# for the region the proxy is bound to. One source of truth instead of a
+# hand-written CODEX_CONFIG_OVERLAY that can silently disagree and fail signing.
+# Applied before the overlay below, so an operator can still override it. tomli_w
+# quotes the value (no TOML injection); a parse failure just skips the patch.
+bedrock_region = (os.environ.get("CODEX_BEDROCK_REGION") or "").strip()
+if bedrock_region:
+    import tomllib
+    import tomli_w
+
+    try:
+        config = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"ignoring CODEX_BEDROCK_REGION patch: {exc}", file=sys.stderr)
+    else:
+        config.setdefault("model_providers", {}).setdefault(
+            "amazon-bedrock", {}
+        ).setdefault("aws", {})["region"] = bedrock_region
+        text = tomli_w.dumps(config)
+
 # CODEX_CONFIG_OVERLAY: deep-merge an operator-supplied TOML fragment over the
 # baked config so a deployment can configure codex -- e.g. point it at a custom
 # model provider via a [model_providers.*] block -- through sandbox.extraEnv,

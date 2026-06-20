@@ -31,11 +31,17 @@ impl CodexHarnessServer {
             .filter(|model| !model.is_empty())
     }
 
-    fn model_provider_for(&self, model: Option<&str>) -> String {
-        env::var("CODEX_MODEL_PROVIDER")
-            .ok()
-            .map(|provider| provider.trim().to_owned())
+    fn model_provider_for(&self, provider_override: Option<&str>, model: Option<&str>) -> String {
+        provider_override
+            .map(str::trim)
             .filter(|provider| !provider.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                env::var("CODEX_MODEL_PROVIDER")
+                    .ok()
+                    .map(|provider| provider.trim().to_owned())
+                    .filter(|provider| !provider.is_empty())
+            })
             .or_else(|| {
                 model
                     .map(str::trim)
@@ -110,6 +116,10 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
     let mut stdout = io::stdout().lock();
     let mut request_id = 1_i64;
     let mut thread_id: Option<String> = None;
+    // The provider the thread was started/resumed on. codex pins the provider at
+    // thread start (the app-server protocol has no per-turn provider), so this
+    // lets a later conflicting override be surfaced rather than silently dropped.
+    let mut thread_provider: Option<String> = None;
     let mut blocks_state = BlocksState::default();
 
     let initialize_id = next_request_id(&mut request_id);
@@ -140,20 +150,22 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 input,
                 client_user_message_id,
                 model,
+                provider,
                 reasoning,
             }) => {
+                let model = model.or_else(|| config.default_model());
+                let model_provider =
+                    config.model_provider_for(provider.as_deref(), model.as_deref());
                 if let Err(error) = run_codex_user_turn(
                     &mut codex,
                     &mut stdout,
                     &mut request_id,
                     &mut thread_id,
+                    &mut thread_provider,
                     input,
                     client_user_message_id,
-                    {
-                        let model = model.or_else(|| config.default_model());
-                        let model_provider = config.model_provider_for(model.as_deref());
-                        (model, model_provider)
-                    },
+                    (model, model_provider),
+                    provider,
                     reasoning,
                 ) {
                     let fallback_thread_id = thread_id.as_deref().unwrap_or("codex");
@@ -187,9 +199,11 @@ fn run_codex_user_turn<W: Write>(
     stdout: &mut W,
     request_id: &mut i64,
     thread_id: &mut Option<String>,
+    thread_provider: &mut Option<String>,
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
     model_and_provider: (Option<String>, String),
+    requested_provider: Option<String>,
     reasoning: Option<String>,
 ) -> Result<()> {
     let (model, model_provider) = model_and_provider;
@@ -200,6 +214,21 @@ fn run_codex_user_turn<W: Write>(
             request_id,
             &model_provider,
         )?);
+        *thread_provider = Some(model_provider.clone());
+    } else if let (Some(requested), Some(pinned)) =
+        (requested_provider.as_deref(), thread_provider.as_deref())
+        && requested != pinned
+    {
+        // codex pins the provider at thread start, so an explicit mid-thread
+        // override (e.g. a later `--bedrock`) cannot take effect. Surface it
+        // rather than silently staying on the pinned provider; switching
+        // providers requires a new thread (a harness flag like `--bedrock`
+        // already restarts across harnesses, but a codex->codex provider switch
+        // does not).
+        eprintln!(
+            "Codex provider `{requested}` ignored: this thread is pinned to `{pinned}` \
+             (provider is fixed at thread start; start a new thread to switch providers)"
+        );
     }
     let current_thread_id = thread_id
         .as_ref()
@@ -504,4 +533,36 @@ fn codex_supports_stdio_listen(bin: &str) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     stdout.contains("--listen") || stderr.contains("--listen")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A non-empty explicit provider override (the `--bedrock` blocks `provider`
+    // field) short-circuits before any env/model heuristic, so these assertions
+    // are deterministic regardless of CODEX_MODEL_PROVIDER / OPENROUTER_MODEL.
+    #[test]
+    fn explicit_provider_override_wins_over_model_heuristic() {
+        let codex = CodexHarnessServer::codex();
+        assert_eq!(
+            codex.model_provider_for(Some("amazon-bedrock"), None),
+            "amazon-bedrock"
+        );
+        assert_eq!(
+            codex.model_provider_for(Some("amazon-bedrock"), Some("anthropic/claude-fable-5")),
+            "amazon-bedrock"
+        );
+    }
+
+    #[test]
+    fn blank_provider_override_is_ignored() {
+        // A blank override falls through to the model `/`-slug heuristic, which
+        // selects openrouter — i.e. the override does not pin an empty provider.
+        let codex = CodexHarnessServer::codex();
+        assert_eq!(
+            codex.model_provider_for(Some("   "), Some("vendor/model")),
+            "openrouter"
+        );
+    }
 }

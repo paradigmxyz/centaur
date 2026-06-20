@@ -38,7 +38,6 @@ use tracing::{Instrument, Span, error, info, info_span, warn};
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 
-const MAX_SESSION_OUTPUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -164,6 +163,16 @@ struct EventStreamState {
     done: bool,
     emitted_count: u64,
     span: Span,
+}
+
+struct SandboxReadyObservation<'a> {
+    thread_key: &'a ThreadKey,
+    execution_id: &'a str,
+    sandbox_id: &'a str,
+    harness_type: &'a HarnessType,
+    source: &'static str,
+    ready_duration: Duration,
+    startup_duration: Option<Duration>,
 }
 
 impl SessionRuntime {
@@ -1210,6 +1219,7 @@ impl SessionRuntime {
             existing_sandbox_id = existing_sandbox_id.unwrap_or(""),
             iron_control_principal_present = iron_control_principal.is_some(),
         );
+        let ensure_started = Instant::now();
         let result = async {
             if let Some(sandbox_id) = existing_sandbox_id {
                 let id = SandboxId::new(sandbox_id);
@@ -1218,12 +1228,26 @@ impl SessionRuntime {
                         ExistingSandboxAction::Reuse => {
                             span.record("centaur.sandbox_id", sandbox_id);
                             span.record("sandbox_id", sandbox_id);
+                            let ready_duration = ensure_started.elapsed();
+                            self.record_sandbox_ready(SandboxReadyObservation {
+                                thread_key,
+                                execution_id,
+                                sandbox_id,
+                                harness_type,
+                                source: "reused",
+                                ready_duration,
+                                startup_duration: None,
+                            })
+                            .await;
                             info!(
                                 component = COMPONENT_SESSION_RUNTIME,
                                 event = "sandbox_ensure_reused",
                                 thread_key = %thread_key,
                                 execution_id,
                                 sandbox_id,
+                                harness_type = %harness_type,
+                                sandbox_ready_source = "reused",
+                                sandbox_ready_duration_ms = duration_millis_u64(ready_duration),
                                 "reusing existing session sandbox"
                             );
                             return Ok(sandbox_id.to_owned());
@@ -1234,6 +1258,7 @@ impl SessionRuntime {
                                 Ok(()) => {
                                     span.record("centaur.sandbox_id", sandbox_id);
                                     span.record("sandbox_id", sandbox_id);
+                                    let ready_duration = ensure_started.elapsed();
                                     self.store
                                         .append_event(
                                             thread_key,
@@ -1246,12 +1271,25 @@ impl SessionRuntime {
                                             }),
                                         )
                                         .await?;
+                                    self.record_sandbox_ready(SandboxReadyObservation {
+                                        thread_key,
+                                        execution_id,
+                                        sandbox_id,
+                                        harness_type,
+                                        source: "resumed",
+                                        ready_duration,
+                                        startup_duration: None,
+                                    })
+                                    .await;
                                     info!(
                                         component = COMPONENT_SESSION_RUNTIME,
                                         event = "sandbox_ensure_resumed",
                                         thread_key = %thread_key,
                                         execution_id,
                                         sandbox_id,
+                                        harness_type = %harness_type,
+                                        sandbox_ready_source = "resumed",
+                                        sandbox_ready_duration_ms = duration_millis_u64(ready_duration),
                                         "resumed existing session sandbox"
                                     );
                                     return Ok(sandbox_id.to_owned());
@@ -1327,6 +1365,7 @@ impl SessionRuntime {
                         record_sandbox_warm_pool_claim("hit");
                         span.record("centaur.sandbox_id", sandbox_id.as_str());
                         span.record("sandbox_id", sandbox_id.as_str());
+                        let ready_duration = ensure_started.elapsed();
                         self.store
                             .update_sandbox_id(thread_key, Some(sandbox_id.as_str()))
                             .await?;
@@ -1342,12 +1381,25 @@ impl SessionRuntime {
                                 }),
                             )
                             .await?;
+                        self.record_sandbox_ready(SandboxReadyObservation {
+                            thread_key,
+                            execution_id,
+                            sandbox_id: sandbox_id.as_str(),
+                            harness_type,
+                            source: "warm_pool",
+                            ready_duration,
+                            startup_duration: None,
+                        })
+                        .await;
                         info!(
                             component = COMPONENT_SESSION_RUNTIME,
                             event = "sandbox_ensure_warm_claimed",
                             thread_key = %thread_key,
                             execution_id,
                             sandbox_id = %sandbox_id,
+                            harness_type = %harness_type,
+                            sandbox_ready_source = "warm_pool",
+                            sandbox_ready_duration_ms = duration_millis_u64(ready_duration),
                             workload_key = warm_pool.workload_key(),
                             "claimed warm session sandbox"
                         );
@@ -1366,18 +1418,36 @@ impl SessionRuntime {
             if let Some(principal) = iron_control_principal {
                 spec.iron_control_principal = Some(principal.to_owned());
             }
+            let create_started = Instant::now();
             let handle = self.sandbox_runtime.manager.create_running(spec).await?;
+            let startup_duration = create_started.elapsed();
+            let ready_duration = ensure_started.elapsed();
             span.record("centaur.sandbox_id", handle.id.as_str());
             span.record("sandbox_id", handle.id.as_str());
             self.store
                 .update_sandbox_id(thread_key, Some(handle.id.as_str()))
                 .await?;
+            self.record_sandbox_ready(SandboxReadyObservation {
+                thread_key,
+                execution_id,
+                sandbox_id: handle.id.as_str(),
+                harness_type,
+                source: "cold_create",
+                ready_duration,
+                startup_duration: Some(startup_duration),
+            })
+            .await;
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "sandbox_ensure_created",
                 thread_key = %thread_key,
                 execution_id,
                 sandbox_id = %handle.id.as_str(),
+                harness_type = %harness_type,
+                sandbox_ready_source = "cold_create",
+                sandbox_ready_duration_ms = duration_millis_u64(ready_duration),
+                sandbox_startup_duration_ms = duration_millis_u64(startup_duration),
+                sandbox_startup_duration_seconds = startup_duration.as_secs_f64(),
                 "created new session sandbox"
             );
             Ok(handle.id.into_string())
@@ -1396,6 +1466,65 @@ impl SessionRuntime {
             );
         }
         result
+    }
+
+    async fn record_sandbox_ready(&self, observation: SandboxReadyObservation<'_>) {
+        let SandboxReadyObservation {
+            thread_key,
+            execution_id,
+            sandbox_id,
+            harness_type,
+            source,
+            ready_duration,
+            startup_duration,
+        } = observation;
+        let ready_duration_ms = duration_millis_u64(ready_duration);
+        let startup_duration_ms = startup_duration.map(duration_millis_u64).unwrap_or(0);
+        let sandbox_started_for_request = startup_duration.is_some();
+
+        if let Err(error) = self
+            .store
+            .append_event(
+                thread_key,
+                Some(execution_id),
+                "session.sandbox_ready",
+                json!({
+                    "execution_id": execution_id,
+                    "thread_key": thread_key.as_str(),
+                    "sandbox_id": sandbox_id,
+                    "harness_type": harness_type.to_string(),
+                    "sandbox_ready_source": source,
+                    "sandbox_ready_duration_ms": ready_duration_ms,
+                    "sandbox_startup_duration_ms": startup_duration_ms,
+                    "sandbox_started_for_request": sandbox_started_for_request,
+                }),
+            )
+            .await
+        {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "sandbox_ready_event_append_failed",
+                thread_key = %thread_key,
+                execution_id,
+                sandbox_id,
+                %error,
+                "failed to append sandbox ready event"
+            );
+        }
+
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "sandbox_ready",
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id,
+            harness_type = %harness_type,
+            sandbox_ready_source = source,
+            sandbox_ready_duration_ms = ready_duration_ms,
+            sandbox_startup_duration_ms = startup_duration_ms,
+            sandbox_started_for_request,
+            "session sandbox ready"
+        );
     }
 
     async fn ensure_session_pipe_if_live(
@@ -1452,10 +1581,7 @@ impl SessionRuntime {
                 .await?
                 .into_parts();
             let pipe = SessionPipe {
-                stdin: Arc::new(Mutex::new(FramedWrite::new(
-                    io.stdin,
-                    LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
-                ))),
+                stdin: Arc::new(Mutex::new(FramedWrite::new(io.stdin, LinesCodec::new()))),
             };
 
             self.sandbox_pipes
@@ -1884,7 +2010,8 @@ impl SandboxWorkloadMode {
         match self {
             Self::MockAppServer { image } => SandboxSpec::new(image)
                 .command(["/bin/sh", "-lc"])
-                .args([mock_app_server_script()]),
+                .args([mock_app_server_script()])
+                .env("CENTAUR_HARNESS_TYPE", harness.as_ref()),
             Self::CodexAppServer {
                 image, env, mounts, ..
             } => {
@@ -1892,6 +2019,8 @@ impl SandboxWorkloadMode {
                 // kept) so the sandbox runs the session's harness rather than
                 // whatever the image CMD defaults to.
                 let mut spec = SandboxSpec::new(image)
+                    .label("centaur.ai/component", "session-sandbox")
+                    .label("centaur.ai/harness", harness.to_string())
                     .args(["harness-server", harness_server_subcommand(harness)]);
                 if let Some(thread_key) = thread_key {
                     spec = spec.env("CENTAUR_THREAD_KEY", thread_key.as_str());
@@ -1926,6 +2055,9 @@ fn sandbox_spec_key(spec: &SandboxSpec) -> String {
 
 fn mock_app_server_script() -> &'static str {
     r#"while IFS= read -r line; do
+model="$(printf '%s\n' "$line" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')"
+[ -n "$model" ] || model="unknown"
+harness="${CENTAUR_HARNESS_TYPE:-unknown}"
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
 sleep 0.2
 printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
@@ -1937,7 +2069,7 @@ while [ "$turn_index" -le 3 ]; do
   turn_id="mock-turn-$turn_index"
   printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
   sleep 0.2
-  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG %s"}\n' "$turn_id" "$turn_index"
+  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG model=%s harness=%s"}\n' "$turn_id" "$model" "$harness"
   sleep 0.2
   printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
   sleep 0.2
@@ -2053,10 +2185,7 @@ async fn run_stdout_pump(
         sandbox_id,
     );
     async {
-        let mut stdout = FramedRead::new(
-            stdout,
-            LinesCodec::new_with_max_length(MAX_SESSION_OUTPUT_LINE_BYTES),
-        );
+        let mut stdout = FramedRead::new(stdout, LinesCodec::new());
         info!(
             component = COMPONENT_SESSION_RUNTIME,
             event = "session_stdout_pump_started",
@@ -2070,13 +2199,8 @@ async fn run_stdout_pump(
             let line = match line {
                 Ok(line) => line,
                 Err(error) => {
-                    record_stdout_pump_failure(
-                        &ctx,
-                        &thread_key,
-                        sandbox_id,
-                        stdout_pump_error_message(&error),
-                    )
-                    .await?;
+                    let message = stdout_pump_error_message(&error);
+                    record_stdout_pump_failure(&ctx, &thread_key, sandbox_id, message).await?;
                     return Ok(());
                 }
             };
@@ -2208,7 +2332,6 @@ async fn record_stdout_pump_failure(
             json!({
                 "sandbox_id": sandbox_id,
                 "error": error.as_str(),
-                "max_line_bytes": MAX_SESSION_OUTPUT_LINE_BYTES,
                 "terminalized_execution": execution_id.is_some(),
             }),
         )
@@ -3669,9 +3792,9 @@ fn validate_input_lines(lines: &[String]) -> Result<(), SessionRuntimeError> {
 
 fn stdout_pump_error_message(error: &LinesCodecError) -> String {
     match error {
-        LinesCodecError::MaxLineLengthExceeded => format!(
-            "sandbox stdout line exceeded maximum length of {MAX_SESSION_OUTPUT_LINE_BYTES} bytes"
-        ),
+        LinesCodecError::MaxLineLengthExceeded => {
+            "sandbox stdout line exceeded codec maximum length".to_owned()
+        }
         LinesCodecError::Io(error) => format!("sandbox stdout I/O failed: {error}"),
     }
 }
@@ -3787,14 +3910,6 @@ mod tests {
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
-
-    #[test]
-    fn stdout_pump_max_line_error_is_stable() {
-        assert_eq!(
-            stdout_pump_error_message(&LinesCodecError::MaxLineLengthExceeded),
-            "sandbox stdout line exceeded maximum length of 8388608 bytes"
-        );
-    }
 
     #[test]
     fn turn_completed_without_answer_text_is_terminal() {
@@ -3988,7 +4103,7 @@ mod tests {
 
     #[test]
     fn redacts_sensitive_values_from_output_lines() {
-        let line = r#"{"type":"item.completed","item":{"aggregatedOutput":"Authorization: Bearer sbx1.threadpayload.signature\nCENTAUR_API_KEY=sbx1.otherpayload.othersig\nSLACK_BOT_TOKEN=xoxb-1234567890-abcdef\n"}}"#;
+        let line = r#"{"type":"item.completed","item":{"aggregatedOutput":"Authorization: Bearer sbx1.threadpayload.signature\nSANDBOX_TOKEN=sbx1.otherpayload.othersig\nSLACK_BOT_TOKEN=xoxb-1234567890-abcdef\n"}}"#;
 
         let redacted = redact_sensitive_text(line);
 
@@ -3996,7 +4111,7 @@ mod tests {
         assert!(!redacted.contains("sbx1.otherpayload.othersig"));
         assert!(!redacted.contains("xoxb-1234567890-abcdef"));
         assert!(redacted.contains("Authorization: Bearer [REDACTED_TOKEN]"));
-        assert!(redacted.contains("CENTAUR_API_KEY=[REDACTED_TOKEN]"));
+        assert!(redacted.contains("SANDBOX_TOKEN=[REDACTED_TOKEN]"));
         assert!(redacted.contains("SLACK_BOT_TOKEN=[REDACTED_TOKEN]"));
     }
 
@@ -4468,6 +4583,27 @@ mod tests {
         assert_eq!(amp_spec.args, vec!["harness-server", "amp"]);
         // The image entrypoint must be preserved: only CMD is overridden.
         assert_eq!(codex_spec.command, None);
+    }
+
+    #[test]
+    fn codex_workload_labels_session_sandbox_for_observability() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+
+        let spec = workload.spec(&thread_key, &HarnessType::ClaudeCode);
+
+        assert_eq!(
+            spec.labels.get("centaur.ai/component").map(String::as_str),
+            Some("session-sandbox")
+        );
+        assert_eq!(
+            spec.labels.get("centaur.ai/harness").map(String::as_str),
+            Some("claudecode")
+        );
     }
 
     #[test]

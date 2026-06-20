@@ -33,6 +33,19 @@ pub struct CreateSessionResponse {
     pub harness_switched: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionContextResponse {
+    pub thread_key: ThreadKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack: Option<SlackThreadContext>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SlackThreadContext {
+    pub channel_id: String,
+    pub thread_ts: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppendMessagesRequest {
     pub messages: Vec<SessionMessageInput>,

@@ -287,6 +287,32 @@ pub fn find_tool(dirs: &[PathBuf], name: &str) -> Result<ToolManifest> {
     parse_manifest(&tool_dir)
 }
 
+/// Derive the operator-facing overlay identity for the root that supplied a
+/// tool manifest. A root ending in `tools` is treated as a repo/overlay tools
+/// directory, so `/repo/centaur/tools` becomes `centaur`.
+pub fn overlay_name_for_tool_dir(tool_dir: &Path, dirs: &[PathBuf]) -> String {
+    let matching_root = dirs
+        .iter()
+        .filter(|root| tool_dir.starts_with(root))
+        .max_by_key(|root| root.components().count());
+    matching_root
+        .map(|root| overlay_name_for_root(root))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn overlay_name_for_root(root: &Path) -> String {
+    let candidate = if root.file_name().and_then(|n| n.to_str()) == Some("tools") {
+        root.parent().and_then(|p| p.file_name())
+    } else {
+        root.file_name()
+    };
+    candidate
+        .and_then(|n| n.to_str())
+        .map(centaur_iron_control::slugify)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 /// Candidate tool directories under `base`: direct children carrying a
 /// `pyproject.toml`, plus the children of category folders (one level deep).
 fn collect_candidate_dirs(base: &Path) -> Vec<PathBuf> {

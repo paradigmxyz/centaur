@@ -26,6 +26,3 @@ packages = ["."]
 
 [tool.centaur]
 module = "client.py"
-secrets = [
-    {type = "pg_dsn", name = "COMPANY_CONTEXT_DSN", database = "ai_v2", secret_ref = "DATABASE_URL", role = "centaur_slack_reader", settings = [{name = "centaur.slack_channel_id", value_from = {principal_label = "slack_channel_id"}}]},
-]

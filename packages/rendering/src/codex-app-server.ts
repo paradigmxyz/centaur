@@ -55,6 +55,7 @@ type CodexMapperState = {
   firstBufferedTextAt: number | null
   streamedCommentaryText: string
   streamedAnswerText: string
+  answerStreamDiverged: boolean
   agentMessagePhase: AgentMessagePhase | null
   agentMessagePhaseByItemId: Map<string, AgentMessagePhase>
   planText: string
@@ -454,6 +455,31 @@ export class CodexAppServerRendererEventMapper
     if (!canStream) return
 
     if (this.state.commentaryText.length > this.state.streamedCommentaryText.length) return
+    // Text already streamed to the consumer is immutable: Slack streaming, the
+    // chat adapter, and this delta stream all only ever append. answerText is
+    // recomposed on every event from compose(answerByItemId, harnessAnswerText),
+    // so when a non-trailing item grows, or an item.completed/assistant event
+    // rewrites an already-streamed region, the recomposed answerText stops being
+    // an extension of what we have already sent. Slicing by byte offset would
+    // then append misaligned bytes and interleave the answer with fragments of
+    // its own earlier text. Stream only a genuine continuation; the divergent
+    // text is left to the terminal reconcile rather than corrupting the live
+    // message. When the invariant holds (the common case) this is identical to a
+    // plain suffix slice.
+    if (!this.state.answerText.startsWith(this.state.streamedAnswerText)) {
+      if (!this.state.answerStreamDiverged) {
+        this.state.answerStreamDiverged = true
+        this.log('codex_renderer_stream_divergence_suppressed', {
+          agent_session_id: this.sessionId,
+          codex_session_id: this.state.threadId || undefined,
+          streamed_chars: this.state.streamedAnswerText.length,
+          answer_chars: this.state.answerText.length,
+          streamed_hash: textHash(this.state.streamedAnswerText),
+          answer_hash: textHash(this.state.answerText)
+        })
+      }
+      return
+    }
     if (this.state.answerText.length <= this.state.streamedAnswerText.length) return
     const delta = this.state.answerText.slice(this.state.streamedAnswerText.length)
     if (!delta) return
@@ -736,6 +762,7 @@ function newState(): CodexMapperState {
     firstBufferedTextAt: null,
     streamedCommentaryText: '',
     streamedAnswerText: '',
+    answerStreamDiverged: false,
     agentMessagePhase: null,
     agentMessagePhaseByItemId: new Map(),
     planText: '',

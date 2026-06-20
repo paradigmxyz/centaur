@@ -278,7 +278,7 @@ fn static_secret_from_secret(
         foreign_id: format!("{role}-{}", slugify(&identity)),
         name: identity,
         description: None,
-        labels: managed_labels(),
+        labels: resource_labels(secret.extra.get("labels")),
         inject_config,
         replace_config,
         source,
@@ -536,7 +536,7 @@ fn pg_dsn_from_listener(
         database,
         description: None,
         role: role_to_set,
-        labels: managed_labels(),
+        labels: resource_labels(listener.extra.get("labels")),
         settings: listener
             .settings
             .iter()
@@ -608,6 +608,7 @@ const OAUTH_RESERVED_KEYS: &[&str] = &[
     "scopes",
     "audience",
     "header",
+    "labels",
     "value_prefix",
 ];
 
@@ -672,6 +673,7 @@ fn oauth_token_from_value(
         foreign_id: format!("{role}-oauth-{}", slugify(identity)),
         name: format!("OAuth {grant}"),
         grant,
+        labels: resource_labels(yaml_get(token, "labels")),
         token_endpoint: yaml_str(token, "token_endpoint").map(ToOwned::to_owned),
         scopes: yaml_string_array(yaml_get(token, "scopes")),
         audience: yaml_str(token, "audience").map(ToOwned::to_owned),
@@ -726,6 +728,7 @@ fn gcp_auth_from_transform(
         namespace: namespace.to_owned(),
         foreign_id,
         name: Some(format!("GCP Auth ({role})")),
+        labels: resource_labels(config.get("labels")),
         scopes,
         subject: config
             .get("subject")
@@ -774,7 +777,7 @@ fn aws_auth_from_transform(
         foreign_id: format!("{role}-aws-{}", slugify(&placeholder)),
         name: Some(format!("AWS Auth ({role})")),
         description: None,
-        labels: managed_labels(),
+        labels: resource_labels(config.get("labels")),
         access_key_id,
         secret_access_key,
         session_token,
@@ -835,6 +838,21 @@ fn yaml_bool(value: Option<&YamlValue>) -> bool {
     value.and_then(YamlValue::as_bool).unwrap_or(false)
 }
 
+fn resource_labels(value: Option<&YamlValue>) -> BTreeMap<String, String> {
+    let mut labels = managed_labels();
+    if let Some(mapping) = value.and_then(YamlValue::as_mapping) {
+        for (key, value) in mapping {
+            let (Some(key), Some(value)) = (key.as_str(), value.as_str()) else {
+                continue;
+            };
+            if !key.is_empty() {
+                labels.insert(key.to_owned(), value.to_owned());
+            }
+        }
+    }
+    labels
+}
+
 fn sequence(value: Option<&YamlValue>) -> Vec<YamlValue> {
     value
         .and_then(YamlValue::as_sequence)
@@ -886,6 +904,9 @@ transforms:
         - replace:
             proxy_value: XAI_API_KEY
             match_headers: ["Authorization"]
+          labels:
+            centaur-tool: xai
+            centaur-tool-overlay: centaur
           rules: [{ host: api.x.ai }]
 "#,
         )
@@ -904,6 +925,18 @@ transforms:
         assert!(input.inject_config.is_none());
         assert_eq!(input.source.source_type, "env");
         assert_eq!(input.source.config, json!({ "var": "XAI_API_KEY" }));
+        assert_eq!(
+            input.labels.get("managed-by").map(String::as_str),
+            Some("centaur")
+        );
+        assert_eq!(
+            input.labels.get("centaur-tool").map(String::as_str),
+            Some("xai")
+        );
+        assert_eq!(
+            input.labels.get("centaur-tool-overlay").map(String::as_str),
+            Some("centaur")
+        );
         assert_eq!(input.rules.len(), 1);
         assert_eq!(input.rules[0].host.as_deref(), Some("api.x.ai"));
     }

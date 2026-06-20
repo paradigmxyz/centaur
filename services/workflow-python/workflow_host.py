@@ -304,6 +304,7 @@ def install_vm_metrics_compat_module(api_mod: types.ModuleType) -> None:
     vm_metrics.record_etl_items_failed = record_etl_items_failed
     vm_metrics.record_etl_items_seen = record_etl_items_seen
     vm_metrics.record_etl_items_upserted = record_etl_items_upserted
+    vm_metrics.record_slack_etl_rate_limit = record_slack_etl_rate_limit
     vm_metrics.set_etl_active_scopes = set_etl_active_scopes
     vm_metrics.set_etl_backfill_job_age_seconds = set_etl_backfill_job_age_seconds
     vm_metrics.set_etl_backfill_jobs = set_etl_backfill_jobs
@@ -386,6 +387,26 @@ def record_etl_items_failed(
         source_type=source_type,
         item_type=item_type,
         reason=reason,
+    )
+
+
+def record_slack_etl_rate_limit(
+    workflow: str,
+    method: str,
+    outcome: str,
+    retry_after_seconds: int | float,
+) -> None:
+    retry_after = max(float(retry_after_seconds), 0.0)
+    labels = {
+        "workflow": workflow,
+        "method": method,
+        "outcome": outcome,
+    }
+    increment_metric("slack_etl_rate_limits_total", 1, **labels)
+    increment_metric(
+        "slack_etl_rate_limit_retry_after_seconds_total",
+        retry_after,
+        **labels,
     )
 
 
@@ -691,6 +712,24 @@ def workflow_dirs() -> list[Path]:
     return dirs
 
 
+def workflow_allowed_names() -> set[str]:
+    raw = os.getenv("WORKFLOW_ALLOWED_NAMES", "")
+    return {
+        name
+        for name in (part.strip() for part in raw.replace(",", " ").split())
+        if name
+    }
+
+
+def workflow_enabled(workflow_name: str) -> bool:
+    mode = os.getenv("WORKFLOW_ENABLE_MODE", "").strip().lower()
+    if not mode or mode == "all":
+        return True
+    if mode == "allowlist":
+        return workflow_name.strip() in workflow_allowed_names()
+    raise RuntimeError(f'WORKFLOW_ENABLE_MODE must be "all" or "allowlist", got {mode!r}')
+
+
 def configure_workflow_import_paths(dirs: list[Path]) -> None:
     for directory in dirs:
         candidate_paths = [directory.parent, directory]
@@ -761,6 +800,8 @@ def discover_workflows() -> dict[str, RegisteredWorkflow]:
                 print(f"workflow_load_error path={path} error={exc}", file=sys.stderr)
                 continue
             if registered is None:
+                continue
+            if not workflow_enabled(registered.workflow_name):
                 continue
             if registered.workflow_name in discovered:
                 raise RuntimeError(f"duplicate workflow name {registered.workflow_name!r}")

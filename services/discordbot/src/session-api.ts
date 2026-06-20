@@ -498,10 +498,7 @@ function ensureTrailingSlash(value: string): string {
 }
 
 function apiHeaders(options: DiscordbotOptions, jsonBody = true): HeadersInit {
-  const apiKey =
-    options.apiKey ??
-    process.env.DISCORDBOT_API_KEY ??
-    process.env.CENTAUR_API_KEY;
+  const apiKey = options.apiKey ?? process.env.DISCORDBOT_API_KEY;
   return {
     ...(jsonBody ? { "content-type": "application/json" } : {}),
     ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),

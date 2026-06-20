@@ -151,6 +151,8 @@ spec:
               value: {{ printf "0.0.0.0:%v" .Values.apiRs.port | quote }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+            - name: IRON_CONTROL_SYNC_INFRA_SECRETS
+              value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG
               value: info
             - name: TOOL_DIRS
@@ -160,6 +162,14 @@ spec:
 {{- if $sandboxWorkflowDirs }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ENABLE_MODE") }}
+            - name: WORKFLOW_ENABLE_MODE
+              value: {{ .Values.apiRs.workflowEnableMode | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ALLOWED_NAMES") }}
+            - name: WORKFLOW_ALLOWED_NAMES
+              value: {{ .Values.apiRs.workflowAllowedNames | quote }}
 {{- end }}
 {{- if .Values.overlay.systemPrompt }}
             - name: CENTAUR_OVERLAY_DIR
@@ -342,7 +352,7 @@ spec:
             timeoutSeconds: {{ .Values.apiRs.startupProbe.timeoutSeconds }}
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: {{ .Values.apiRs.port }}
             failureThreshold: {{ .Values.apiRs.readinessProbe.failureThreshold }}
             periodSeconds: {{ .Values.apiRs.readinessProbe.periodSeconds }}

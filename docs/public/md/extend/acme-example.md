@@ -224,7 +224,7 @@ You can also inspect the runtime payload for a thread:
 
 ```bash
 curl -s "$CENTAUR_API_URL/agent/runtime?key=$THREAD_KEY" \
-  -H "X-Api-Key: $CENTAUR_API_KEY" | jq '.overlay'
+  -H "X-Api-Key: $RUNTIME_API_KEY" | jq '.overlay'
 ```
 
 ## What to change first

@@ -35,6 +35,7 @@ use tokio::{
 use tracing::{info, warn};
 
 pub const WORKFLOW_QUEUE: &str = "centaur_workflows";
+pub const WORKFLOW_SLACK_LIVE_QUEUE: &str = "centaur_workflows_slack_live";
 pub const WORKFLOW_ETL_QUEUE: &str = "centaur_workflows_etl";
 pub const WORKFLOW_ETL_BACKFILL_QUEUE: &str = "centaur_workflows_etl_backfill";
 pub const WORKFLOW_SCHEDULE_QUEUE: &str = "centaur_workflow_schedules";
@@ -49,11 +50,28 @@ const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
+const WORKFLOW_ENABLE_MODE_ENV: &str = "WORKFLOW_ENABLE_MODE";
+const WORKFLOW_ALLOWED_NAMES_ENV: &str = "WORKFLOW_ALLOWED_NAMES";
 /// How many consecutive reconcile passes a workflow must be missing from
 /// discovery before its active tasks are cancelled. 0 disables reaping.
 const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
 const DEFAULT_WORKFLOW_REAP_REMOVED_AFTER_TICKS: u32 = 3;
 const ABSURD_TERMINAL_TASK_STATES: &str = "('completed', 'failed', 'cancelled')";
+
+/// Per-queue worker concurrency. The defaults preserve historical behavior; each
+/// can be overridden via its env var to scale a queue independently (e.g. raise
+/// the standard queue when webhook/agent workflows back up). A value that is
+/// unset, empty, non-numeric, or zero falls back to the default (absurd also
+/// clamps zero to one, since a queue at concurrency zero would never drain).
+const WORKFLOW_WORKER_CONCURRENCY_ENV: &str = "WORKFLOW_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_WORKER_CONCURRENCY: usize = 4;
+const WORKFLOW_ETL_WORKER_CONCURRENCY_ENV: &str = "WORKFLOW_ETL_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_ETL_WORKER_CONCURRENCY: usize = 1;
+const WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY_ENV: &str =
+    "WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY: usize = 1;
+const WORKFLOW_SCHEDULE_WORKER_CONCURRENCY_ENV: &str = "WORKFLOW_SCHEDULE_WORKER_CONCURRENCY";
+const DEFAULT_WORKFLOW_SCHEDULE_WORKER_CONCURRENCY: usize = 1;
 
 struct WorkflowTaskHeartbeatGuard {
     task: JoinHandle<()>,
@@ -72,14 +90,111 @@ pub struct WorkflowRuntime {
 
 struct WorkflowRuntimeInner {
     client: Client,
+    slack_live_client: Client,
     etl_client: Client,
     etl_backfill_client: Client,
     _worker: Worker,
+    _slack_live_worker: Worker,
     _etl_worker: Worker,
     _etl_backfill_worker: Worker,
     _schedule_worker: Worker,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkflowEnablement {
+    mode: WorkflowEnableMode,
+    allowed_names: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowEnableMode {
+    All,
+    Allowlist,
+}
+
+impl WorkflowEnablement {
+    fn all() -> Self {
+        Self {
+            mode: WorkflowEnableMode::All,
+            allowed_names: BTreeSet::new(),
+        }
+    }
+
+    fn allowlist(raw_allowed_names: &str) -> Self {
+        Self {
+            mode: WorkflowEnableMode::Allowlist,
+            allowed_names: parse_workflow_allowed_names(raw_allowed_names),
+        }
+    }
+
+    fn from_env() -> Result<Self, WorkflowRuntimeError> {
+        let raw_mode = env::var(WORKFLOW_ENABLE_MODE_ENV).unwrap_or_default();
+        let mode = raw_mode.trim();
+        if mode.is_empty() || mode.eq_ignore_ascii_case("all") {
+            return Ok(Self::all());
+        }
+        if mode.eq_ignore_ascii_case("allowlist") {
+            return Ok(Self::allowlist(
+                &env::var(WORKFLOW_ALLOWED_NAMES_ENV).unwrap_or_default(),
+            ));
+        }
+        Err(WorkflowRuntimeError::BadRequest(format!(
+            "{WORKFLOW_ENABLE_MODE_ENV} must be \"all\" or \"allowlist\", got {mode:?}"
+        )))
+    }
+
+    fn is_enabled(&self, workflow_name: &str) -> bool {
+        match self.mode {
+            WorkflowEnableMode::All => true,
+            WorkflowEnableMode::Allowlist => self.allowed_names.contains(workflow_name.trim()),
+        }
+    }
+
+    fn ensure_enabled(&self, workflow_name: &str) -> Result<(), WorkflowRuntimeError> {
+        if self.is_enabled(workflow_name) {
+            return Ok(());
+        }
+        Err(WorkflowRuntimeError::Disabled(format!(
+            "workflow {workflow_name:?} is disabled by {WORKFLOW_ENABLE_MODE_ENV}"
+        )))
+    }
+
+    fn filter_metadata(&self, metadata: &mut PythonWorkflowMetadata) {
+        if self.mode == WorkflowEnableMode::All {
+            return;
+        }
+        metadata
+            .workflow_names
+            .retain(|workflow_name| self.is_enabled(workflow_name));
+        metadata
+            .webhooks
+            .retain(|webhook| self.is_enabled(&webhook.workflow_name));
+        metadata.schedules.retain(|schedule| {
+            schedule
+                .get("workflow_name")
+                .and_then(Value::as_str)
+                .is_some_and(|workflow_name| self.is_enabled(workflow_name))
+        });
+    }
+}
+
+fn parse_workflow_allowed_names(raw: &str) -> BTreeSet<String> {
+    raw.split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter_map(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct WorkflowQueueClients {
+    standard: Client,
+    slack_live: Client,
+    etl: Client,
+    etl_backfill: Client,
 }
 
 #[derive(Clone)]
@@ -276,6 +391,19 @@ impl WorkflowRuntime {
         client
             .create_queue(Some(WORKFLOW_QUEUE), CreateQueueOptions::default())
             .await?;
+        let slack_live_client = Client::from_pool_with_options(
+            store.pool().clone(),
+            ClientOptions {
+                queue_name: WORKFLOW_SLACK_LIVE_QUEUE.to_owned(),
+                ..ClientOptions::default()
+            },
+        )?;
+        slack_live_client
+            .create_queue(
+                Some(WORKFLOW_SLACK_LIVE_QUEUE),
+                CreateQueueOptions::default(),
+            )
+            .await?;
         let etl_client = Client::from_pool_with_options(
             store.pool().clone(),
             ClientOptions {
@@ -316,14 +444,28 @@ impl WorkflowRuntime {
                 warn!(%error, "python workflow discovery failed");
                 PythonWorkflowMetadata::default()
             });
-        let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(&discovery)?));
-        let webhook_registry = Arc::new(RwLock::new(build_webhook_registry(&discovery)?));
+        let enablement = WorkflowEnablement::from_env()?;
+        let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(
+            &discovery,
+            &enablement,
+        )?));
+        let webhook_registry = Arc::new(RwLock::new(build_webhook_registry(
+            &discovery,
+            &enablement,
+        )?));
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
         client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
             let session_runtime = task_session_runtime.clone();
             let workflow_host_sandbox = task_workflow_host_sandbox.clone();
+            async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
+        })?;
+        let slack_live_session_runtime = session_runtime.clone();
+        let slack_live_workflow_host_sandbox = workflow_host_sandbox.clone();
+        slack_live_client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
+            let session_runtime = slack_live_session_runtime.clone();
+            let workflow_host_sandbox = slack_live_workflow_host_sandbox.clone();
             async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
         })?;
         let etl_session_runtime = session_runtime.clone();
@@ -346,29 +488,22 @@ impl WorkflowRuntime {
             },
         )?;
         let schedule_tick_client = schedule_client.clone();
-        let workflow_client_for_schedule = client.clone();
-        let etl_client_for_schedule = etl_client.clone();
-        let etl_backfill_client_for_schedule = etl_backfill_client.clone();
+        let workflow_clients_for_schedule = WorkflowQueueClients {
+            standard: client.clone(),
+            slack_live: slack_live_client.clone(),
+            etl: etl_client.clone(),
+            etl_backfill: etl_backfill_client.clone(),
+        };
         let schedule_registry_for_task = schedule_registry.clone();
         schedule_client.register_task_with(
             TaskRegistrationOptions::new(WORKFLOW_SCHEDULE_TASK),
             move |input: ScheduleTickInput, ctx| {
                 let schedule_client = schedule_tick_client.clone();
-                let workflow_client = workflow_client_for_schedule.clone();
-                let etl_client = etl_client_for_schedule.clone();
-                let etl_backfill_client = etl_backfill_client_for_schedule.clone();
+                let workflow_clients = workflow_clients_for_schedule.clone();
                 let schedules = schedule_registry_for_task.clone();
                 async move {
-                    run_schedule_tick(
-                        input,
-                        ctx,
-                        schedule_client,
-                        workflow_client,
-                        etl_client,
-                        etl_backfill_client,
-                        schedules,
-                    )
-                    .await
+                    run_schedule_tick(input, ctx, schedule_client, workflow_clients, schedules)
+                        .await
                 }
             },
         )?;
@@ -380,15 +515,29 @@ impl WorkflowRuntime {
 
         let worker = client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-worker".to_owned()),
-            concurrency: 4,
+            concurrency: worker_concurrency(
+                WORKFLOW_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow worker error");
             })),
             ..WorkerOptions::default()
         });
+        let slack_live_worker = slack_live_client.start_worker(WorkerOptions {
+            worker_id: Some("centaur-api-rs-workflow-slack-live-worker".to_owned()),
+            concurrency: 1,
+            on_error: Some(Arc::new(|error| {
+                warn!(%error, "absurd workflow slack live worker error");
+            })),
+            ..WorkerOptions::default()
+        });
         let etl_worker = etl_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-worker".to_owned()),
-            concurrency: 1,
+            concurrency: worker_concurrency(
+                WORKFLOW_ETL_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_ETL_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow etl worker error");
             })),
@@ -396,7 +545,10 @@ impl WorkflowRuntime {
         });
         let etl_backfill_worker = etl_backfill_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-backfill-worker".to_owned()),
-            concurrency: 1,
+            concurrency: worker_concurrency(
+                WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow etl backfill worker error");
             })),
@@ -404,7 +556,10 @@ impl WorkflowRuntime {
         });
         let schedule_worker = schedule_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-schedule-worker".to_owned()),
-            concurrency: 1,
+            concurrency: worker_concurrency(
+                WORKFLOW_SCHEDULE_WORKER_CONCURRENCY_ENV,
+                DEFAULT_WORKFLOW_SCHEDULE_WORKER_CONCURRENCY,
+            ),
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow schedule worker error");
             })),
@@ -414,6 +569,11 @@ impl WorkflowRuntime {
             queue = WORKFLOW_QUEUE,
             task = WORKFLOW_TASK,
             "started absurd workflow worker"
+        );
+        info!(
+            queue = WORKFLOW_SLACK_LIVE_QUEUE,
+            task = WORKFLOW_TASK,
+            "started absurd workflow slack live worker"
         );
         info!(
             queue = WORKFLOW_ETL_QUEUE,
@@ -434,9 +594,12 @@ impl WorkflowRuntime {
         if let Some(interval) = workflow_reconcile_interval() {
             spawn_workflow_metadata_reconciler(
                 schedule_client.clone(),
-                client.clone(),
-                etl_client.clone(),
-                etl_backfill_client.clone(),
+                WorkflowQueueClients {
+                    standard: client.clone(),
+                    slack_live: slack_live_client.clone(),
+                    etl: etl_client.clone(),
+                    etl_backfill: etl_backfill_client.clone(),
+                },
                 webhook_registry.clone(),
                 schedule_registry.clone(),
                 interval,
@@ -446,9 +609,11 @@ impl WorkflowRuntime {
         Ok(Self {
             inner: Arc::new(WorkflowRuntimeInner {
                 client,
+                slack_live_client,
                 etl_client,
                 etl_backfill_client,
                 _worker: worker,
+                _slack_live_worker: slack_live_worker,
                 _etl_worker: etl_worker,
                 _etl_backfill_worker: etl_backfill_worker,
                 _schedule_worker: schedule_worker,
@@ -468,6 +633,7 @@ impl WorkflowRuntime {
                 "workflow_name must not be empty".to_owned(),
             ));
         }
+        WorkflowEnablement::from_env()?.ensure_enabled(workflow_name)?;
         let client = self.client_for_workflow(workflow_name);
         let spawn = client
             .spawn(
@@ -497,6 +663,10 @@ impl WorkflowRuntime {
         let limit = limit.clamp(1, 200);
         let mut runs = Vec::new();
         runs.extend(self.list_runs_for_queue(WORKFLOW_QUEUE, limit).await?);
+        runs.extend(
+            self.list_runs_for_queue(WORKFLOW_SLACK_LIVE_QUEUE, limit)
+                .await?,
+        );
         runs.extend(self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit).await?);
         runs.extend(
             self.list_runs_for_queue(WORKFLOW_ETL_BACKFILL_QUEUE, limit)
@@ -546,6 +716,7 @@ impl WorkflowRuntime {
     pub async fn get_run(&self, run_id: &str) -> Result<WorkflowRun, WorkflowRuntimeError> {
         for queue_name in [
             WORKFLOW_QUEUE,
+            WORKFLOW_SLACK_LIVE_QUEUE,
             WORKFLOW_ETL_QUEUE,
             WORKFLOW_ETL_BACKFILL_QUEUE,
         ] {
@@ -589,6 +760,7 @@ impl WorkflowRuntime {
     pub async fn cancel_run(&self, run_id: &str) -> Result<(), WorkflowRuntimeError> {
         for (queue_name, client) in [
             (WORKFLOW_QUEUE, &self.inner.client),
+            (WORKFLOW_SLACK_LIVE_QUEUE, &self.inner.slack_live_client),
             (WORKFLOW_ETL_QUEUE, &self.inner.etl_client),
             (WORKFLOW_ETL_BACKFILL_QUEUE, &self.inner.etl_backfill_client),
         ] {
@@ -608,6 +780,10 @@ impl WorkflowRuntime {
         self.inner
             .client
             .emit_event(event_name, payload.clone(), Some(WORKFLOW_QUEUE))
+            .await?;
+        self.inner
+            .slack_live_client
+            .emit_event(event_name, payload.clone(), Some(WORKFLOW_SLACK_LIVE_QUEUE))
             .await?;
         self.inner
             .etl_client
@@ -652,6 +828,7 @@ impl WorkflowRuntime {
     fn client_for_workflow(&self, workflow_name: &str) -> &Client {
         match workflow_queue_class(workflow_name) {
             WorkflowQueueClass::Standard => &self.inner.client,
+            WorkflowQueueClass::SlackLive => &self.inner.slack_live_client,
             WorkflowQueueClass::Etl => &self.inner.etl_client,
             WorkflowQueueClass::EtlBackfill => &self.inner.etl_backfill_client,
         }
@@ -661,15 +838,16 @@ impl WorkflowRuntime {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkflowQueueClass {
     Standard,
+    SlackLive,
     Etl,
     EtlBackfill,
 }
 
 fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
+        "slack_sync" => WorkflowQueueClass::SlackLive,
         "slack_backfill" => WorkflowQueueClass::EtlBackfill,
-        "slack_sync"
-        | "google_calendar_sync"
+        "google_calendar_sync"
         | "google_drive_sync"
         | "linear_sync"
         | "company_context_documents"
@@ -678,11 +856,24 @@ fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     }
 }
 
+fn queue_name_for_class(class: WorkflowQueueClass) -> &'static str {
+    match class {
+        WorkflowQueueClass::Standard => WORKFLOW_QUEUE,
+        WorkflowQueueClass::SlackLive => WORKFLOW_SLACK_LIVE_QUEUE,
+        WorkflowQueueClass::Etl => WORKFLOW_ETL_QUEUE,
+        WorkflowQueueClass::EtlBackfill => WORKFLOW_ETL_BACKFILL_QUEUE,
+    }
+}
+
 fn absurd_queue_tables(
     queue_name: &str,
 ) -> Result<(&'static str, &'static str), WorkflowRuntimeError> {
     match queue_name {
         WORKFLOW_QUEUE => Ok(("absurd.t_centaur_workflows", "absurd.r_centaur_workflows")),
+        WORKFLOW_SLACK_LIVE_QUEUE => Ok((
+            "absurd.t_centaur_workflows_slack_live",
+            "absurd.r_centaur_workflows_slack_live",
+        )),
         WORKFLOW_ETL_QUEUE => Ok((
             "absurd.t_centaur_workflows_etl",
             "absurd.r_centaur_workflows_etl",
@@ -703,12 +894,19 @@ fn absurd_queue_tables(
 
 fn build_webhook_registry(
     discovery: &PythonWorkflowMetadata,
+    enablement: &WorkflowEnablement,
 ) -> Result<BTreeMap<String, RegisteredWorkflowWebhook>, WorkflowRuntimeError> {
     let mut registry = BTreeMap::new();
     for webhook in discovery.webhooks.clone() {
+        if !enablement.is_enabled(&webhook.workflow_name) {
+            continue;
+        }
         insert_webhook(&mut registry, webhook)?;
     }
     for webhook in default_workflow_webhooks() {
+        if !enablement.is_enabled(&webhook.workflow_name) {
+            continue;
+        }
         insert_webhook_if_absent(&mut registry, webhook)?;
     }
     if let Ok(raw) = env::var("WORKFLOW_WEBHOOKS_JSON") {
@@ -716,6 +914,9 @@ fn build_webhook_registry(
         if !trimmed.is_empty() {
             let webhooks: Vec<RegisteredWorkflowWebhook> = serde_json::from_str(trimmed)?;
             for webhook in webhooks {
+                if !enablement.is_enabled(&webhook.workflow_name) {
+                    continue;
+                }
                 insert_webhook_replace(&mut registry, webhook)?;
             }
         }
@@ -725,10 +926,14 @@ fn build_webhook_registry(
 
 fn build_schedule_registry(
     discovery: &PythonWorkflowMetadata,
+    enablement: &WorkflowEnablement,
 ) -> Result<BTreeMap<String, RegisteredWorkflowSchedule>, WorkflowRuntimeError> {
     let mut registry = BTreeMap::new();
     for schedule in &discovery.schedules {
         let schedule = normalize_schedule(schedule.clone())?;
+        if !enablement.is_enabled(&schedule.workflow_name) {
+            continue;
+        }
         if registry
             .insert(schedule.schedule_id.clone(), schedule.clone())
             .is_some()
@@ -1195,7 +1400,9 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
             Some("workflow.discovery") => {
                 let _ = child.wait().await;
                 let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(message)?;
-                return Ok(metadata_from_discovery_payload(payload));
+                let mut metadata = metadata_from_discovery_payload(payload);
+                WorkflowEnablement::from_env()?.filter_metadata(&mut metadata);
+                return Ok(metadata);
             }
             Some("host.error") | Some("workflow.error") => {
                 let stderr = stderr_task.await.unwrap_or_default();
@@ -1250,11 +1457,23 @@ fn workflow_reconcile_interval() -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
+/// Resolve a worker concurrency from `env_name`, falling back to `default` when
+/// the value is unset, empty, non-numeric, or zero.
+fn worker_concurrency(env_name: &str, default: usize) -> usize {
+    parse_worker_concurrency(env::var(env_name).ok().as_deref(), default)
+}
+
+/// Pure parse for [`worker_concurrency`], split out so it is testable without
+/// mutating process environment.
+fn parse_worker_concurrency(raw: Option<&str>, default: usize) -> usize {
+    raw.and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 fn spawn_workflow_metadata_reconciler(
     schedule_client: Client,
-    workflow_client: Client,
-    etl_client: Client,
-    etl_backfill_client: Client,
+    workflow_clients: WorkflowQueueClients,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     interval: Duration,
@@ -1262,6 +1481,7 @@ fn spawn_workflow_metadata_reconciler(
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         let mut reaper = RemovedWorkflowReaper::from_env();
+        let mut queue_metrics = WorkflowQueueMetricsRecorder::default();
         // Startup discovery already ran; wait one full period before refreshing.
         ticker.tick().await;
         loop {
@@ -1274,15 +1494,22 @@ fn spawn_workflow_metadata_reconciler(
             .await
             {
                 Ok((metadata, schedules)) => {
+                    if let Err(error) = record_workflow_queue_metrics(
+                        &mut queue_metrics,
+                        [
+                            (WORKFLOW_QUEUE, &workflow_clients.standard),
+                            (WORKFLOW_SLACK_LIVE_QUEUE, &workflow_clients.slack_live),
+                            (WORKFLOW_ETL_QUEUE, &workflow_clients.etl),
+                            (WORKFLOW_ETL_BACKFILL_QUEUE, &workflow_clients.etl_backfill),
+                        ],
+                        &metadata.workflow_names,
+                    )
+                    .await
+                    {
+                        warn!(%error, "failed to record workflow queue metrics");
+                    }
                     if let Err(error) = reaper
-                        .reap(
-                            &workflow_client,
-                            &etl_client,
-                            &etl_backfill_client,
-                            &schedule_client,
-                            &metadata,
-                            &schedules,
-                        )
+                        .reap(&workflow_clients, &schedule_client, &metadata, &schedules)
                         .await
                     {
                         warn!(%error, "failed to reap removed workflow tasks");
@@ -1305,9 +1532,10 @@ async fn reconcile_workflow_metadata_once(
     ),
     WorkflowRuntimeError,
 > {
+    let enablement = WorkflowEnablement::from_env()?;
     let discovery = discover_python_workflow_metadata().await?;
-    let next_webhooks = build_webhook_registry(&discovery)?;
-    let next_schedules = build_schedule_registry(&discovery)?;
+    let next_webhooks = build_webhook_registry(&discovery, &enablement)?;
+    let next_schedules = build_schedule_registry(&discovery, &enablement)?;
     {
         let mut webhooks = webhook_registry
             .write()
@@ -1340,6 +1568,158 @@ struct RemovedWorkflowReaper {
     schedule_miss_counts: BTreeMap<String, u32>,
 }
 
+#[derive(Default)]
+struct WorkflowQueueMetricsRecorder {
+    seen_queue_states: BTreeSet<(String, String)>,
+    seen_workflow_states: BTreeSet<(String, String, String)>,
+}
+
+struct WorkflowQueueMetricRow {
+    queue_name: String,
+    workflow_name: String,
+    state: String,
+    task_count: i64,
+    oldest_age_seconds: f64,
+}
+
+const WORKFLOW_QUEUE_METRIC_STATES: &[&str] = &["pending", "running", "sleeping"];
+
+async fn record_workflow_queue_metrics(
+    recorder: &mut WorkflowQueueMetricsRecorder,
+    queues: [(&str, &Client); 4],
+    workflow_names: &BTreeSet<String>,
+) -> Result<(), WorkflowRuntimeError> {
+    let mut rows = Vec::new();
+    for (queue_name, client) in queues {
+        for state in WORKFLOW_QUEUE_METRIC_STATES {
+            recorder
+                .seen_queue_states
+                .insert((queue_name.to_owned(), (*state).to_owned()));
+        }
+        rows.extend(fetch_workflow_queue_metric_rows(client, queue_name).await?);
+    }
+
+    for workflow_name in workflow_names {
+        let queue_name = queue_name_for_class(workflow_queue_class(workflow_name));
+        for state in WORKFLOW_QUEUE_METRIC_STATES {
+            recorder.seen_workflow_states.insert((
+                queue_name.to_owned(),
+                (*state).to_owned(),
+                workflow_name.clone(),
+            ));
+        }
+    }
+
+    for row in &rows {
+        recorder
+            .seen_queue_states
+            .insert((row.queue_name.clone(), row.state.clone()));
+        recorder.seen_workflow_states.insert((
+            row.queue_name.clone(),
+            row.state.clone(),
+            row.workflow_name.clone(),
+        ));
+    }
+
+    for (queue_name, state) in &recorder.seen_queue_states {
+        centaur_telemetry::set_workflow_queue_tasks(queue_name, state, 0.0);
+        centaur_telemetry::set_workflow_queue_oldest_task_age_seconds(queue_name, state, 0.0);
+    }
+    for (queue_name, state, workflow_name) in &recorder.seen_workflow_states {
+        centaur_telemetry::set_workflow_queue_tasks_by_workflow(
+            queue_name,
+            state,
+            workflow_name,
+            0.0,
+        );
+        centaur_telemetry::set_workflow_queue_oldest_task_age_by_workflow_seconds(
+            queue_name,
+            state,
+            workflow_name,
+            0.0,
+        );
+    }
+
+    let mut queue_totals: BTreeMap<(String, String), (i64, f64)> = BTreeMap::new();
+    for row in rows {
+        let total = queue_totals
+            .entry((row.queue_name.clone(), row.state.clone()))
+            .or_insert((0, 0.0));
+        total.0 += row.task_count;
+        total.1 = total.1.max(row.oldest_age_seconds);
+
+        centaur_telemetry::set_workflow_queue_tasks_by_workflow(
+            &row.queue_name,
+            &row.state,
+            &row.workflow_name,
+            row.task_count as f64,
+        );
+        centaur_telemetry::set_workflow_queue_oldest_task_age_by_workflow_seconds(
+            &row.queue_name,
+            &row.state,
+            &row.workflow_name,
+            row.oldest_age_seconds,
+        );
+    }
+
+    for ((queue_name, state), (task_count, oldest_age_seconds)) in queue_totals {
+        centaur_telemetry::set_workflow_queue_tasks(&queue_name, &state, task_count as f64);
+        centaur_telemetry::set_workflow_queue_oldest_task_age_seconds(
+            &queue_name,
+            &state,
+            oldest_age_seconds,
+        );
+    }
+
+    Ok(())
+}
+
+async fn fetch_workflow_queue_metric_rows(
+    client: &Client,
+    queue_name: &str,
+) -> Result<Vec<WorkflowQueueMetricRow>, WorkflowRuntimeError> {
+    let (task_table, _) = absurd_queue_tables(queue_name)?;
+    let rows = sqlx::query(&format!(
+        r#"
+        select
+            coalesce(nullif(t.params->>'workflow_name', ''), 'unknown') as workflow_name,
+            t.state,
+            count(*)::bigint as task_count,
+            coalesce(
+                extract(
+                    epoch from now() - min(
+                        case
+                            when t.state = 'running'
+                                then coalesce(t.first_started_at, t.enqueue_at)
+                            else t.enqueue_at
+                        end
+                    )
+                ),
+                0
+            )::float8 as oldest_age_seconds
+        from {task_table} t
+        where t.task_name = $1
+          and t.state not in {ABSURD_TERMINAL_TASK_STATES}
+        group by 1, 2
+        "#,
+    ))
+    .bind(WORKFLOW_TASK)
+    .fetch_all(client.pool())
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(WorkflowQueueMetricRow {
+                queue_name: queue_name.to_owned(),
+                workflow_name: row.try_get("workflow_name")?,
+                state: row.try_get("state")?,
+                task_count: row.try_get("task_count")?,
+                oldest_age_seconds: row.try_get("oldest_age_seconds")?,
+            })
+        })
+        .collect()
+}
+
 impl RemovedWorkflowReaper {
     fn from_env() -> Self {
         let threshold = env::var(WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV)
@@ -1355,9 +1735,7 @@ impl RemovedWorkflowReaper {
 
     async fn reap(
         &mut self,
-        workflow_client: &Client,
-        etl_client: &Client,
-        etl_backfill_client: &Client,
+        workflow_clients: &WorkflowQueueClients,
         schedule_client: &Client,
         metadata: &PythonWorkflowMetadata,
         schedules: &BTreeMap<String, RegisteredWorkflowSchedule>,
@@ -1374,9 +1752,10 @@ impl RemovedWorkflowReaper {
 
         let mut active_runs = Vec::new();
         for (queue_name, client) in [
-            (WORKFLOW_QUEUE, workflow_client),
-            (WORKFLOW_ETL_QUEUE, etl_client),
-            (WORKFLOW_ETL_BACKFILL_QUEUE, etl_backfill_client),
+            (WORKFLOW_QUEUE, &workflow_clients.standard),
+            (WORKFLOW_SLACK_LIVE_QUEUE, &workflow_clients.slack_live),
+            (WORKFLOW_ETL_QUEUE, &workflow_clients.etl),
+            (WORKFLOW_ETL_BACKFILL_QUEUE, &workflow_clients.etl_backfill),
         ] {
             for (task_id, name) in
                 fetch_active_named_tasks(client, queue_name, WORKFLOW_TASK, "workflow_name").await?
@@ -1399,9 +1778,10 @@ impl RemovedWorkflowReaper {
                 continue;
             };
             let client = match queue_name {
-                WORKFLOW_ETL_QUEUE => etl_client,
-                WORKFLOW_ETL_BACKFILL_QUEUE => etl_backfill_client,
-                _ => workflow_client,
+                WORKFLOW_SLACK_LIVE_QUEUE => &workflow_clients.slack_live,
+                WORKFLOW_ETL_QUEUE => &workflow_clients.etl,
+                WORKFLOW_ETL_BACKFILL_QUEUE => &workflow_clients.etl_backfill,
+                _ => &workflow_clients.standard,
             };
             if let Err(error) = client.cancel_task(task_id, Some(queue_name)).await {
                 warn!(%error, queue_name, task_id, "failed to cancel run of removed workflow");
@@ -1518,9 +1898,7 @@ async fn run_schedule_tick(
     input: ScheduleTickInput,
     ctx: TaskContext,
     schedule_client: Client,
-    workflow_client: Client,
-    etl_client: Client,
-    etl_backfill_client: Client,
+    workflow_clients: WorkflowQueueClients,
     schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 ) -> Result<Value, absurd::Error> {
     ctx.sleep_until("schedule_tick", input.scheduled_at).await?;
@@ -1562,9 +1940,10 @@ async fn run_schedule_tick(
         input.scheduled_at.to_rfc3339()
     );
     let target_client = match workflow_queue_class(&schedule.workflow_name) {
-        WorkflowQueueClass::Standard => &workflow_client,
-        WorkflowQueueClass::Etl => &etl_client,
-        WorkflowQueueClass::EtlBackfill => &etl_backfill_client,
+        WorkflowQueueClass::Standard => &workflow_clients.standard,
+        WorkflowQueueClass::SlackLive => &workflow_clients.slack_live,
+        WorkflowQueueClass::Etl => &workflow_clients.etl,
+        WorkflowQueueClass::EtlBackfill => &workflow_clients.etl_backfill,
     };
     let workflow_spawn = target_client
         .spawn(
@@ -1765,6 +2144,9 @@ async fn run_centaur_workflow(
 ) -> absurd::Result<WorkflowResult> {
     let _heartbeat_guard = start_workflow_task_heartbeat(ctx.clone())
         .await
+        .map_err(absurd_error)?;
+    WorkflowEnablement::from_env()
+        .and_then(|enablement| enablement.ensure_enabled(&input.workflow_name))
         .map_err(absurd_error)?;
     match input.workflow_name.as_str() {
         "echo" => {
@@ -2625,10 +3007,7 @@ async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRun
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/tools/{tool}/{method}");
     let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
-    let mut request = reqwest::Client::new().post(&url).json(&args);
-    if let Ok(api_key) = env::var("CENTAUR_API_KEY") {
-        request = request.header("x-api-key", api_key);
-    }
+    let request = reqwest::Client::new().post(&url).json(&args);
     let response = request.send().await?;
     let status = response.status();
     let body: Value = response.json().await.unwrap_or_else(|_| json!({}));
@@ -2927,6 +3306,10 @@ pub enum WorkflowRuntimeError {
     /// Maps to HTTP 400.
     #[error("{0}")]
     BadRequest(String),
+    /// The workflow exists but is disabled by environment policy. Maps to
+    /// HTTP 403.
+    #[error("{0}")]
+    Disabled(String),
     #[error("workflow run not found: {0}")]
     NotFound(String),
     /// Server-side failure (workflow host spawn/protocol, internal dispatch).
@@ -2959,6 +3342,19 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn parse_worker_concurrency_uses_override_or_default() {
+        // Override wins.
+        assert_eq!(parse_worker_concurrency(Some("16"), 4), 16);
+        assert_eq!(parse_worker_concurrency(Some("  8 "), 4), 8);
+        // Unset / empty / non-numeric / zero / negative fall back to the default.
+        assert_eq!(parse_worker_concurrency(None, 4), 4);
+        assert_eq!(parse_worker_concurrency(Some(""), 4), 4);
+        assert_eq!(parse_worker_concurrency(Some("lots"), 4), 4);
+        assert_eq!(parse_worker_concurrency(Some("0"), 4), 4);
+        assert_eq!(parse_worker_concurrency(Some("-2"), 1), 1);
+    }
 
     #[test]
     fn normalizes_interval_schedule_with_delivery_metadata() {
@@ -3042,8 +3438,11 @@ mod tests {
 
     #[test]
     fn scheduled_etls_use_isolated_etl_queues() {
+        assert_eq!(
+            workflow_queue_class("slack_sync"),
+            WorkflowQueueClass::SlackLive
+        );
         for workflow_name in [
-            "slack_sync",
             "google_calendar_sync",
             "google_drive_sync",
             "linear_sync",
@@ -3172,6 +3571,85 @@ mod tests {
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
         );
+    }
+
+    #[test]
+    fn workflow_allowlist_parses_comma_and_whitespace_names() {
+        let enablement = WorkflowEnablement::allowlist("agent_turn, slack_sync\ncompany_context");
+        assert!(enablement.is_enabled("agent_turn"));
+        assert!(enablement.is_enabled("slack_sync"));
+        assert!(enablement.is_enabled("company_context"));
+        assert!(!enablement.is_enabled("google_drive_sync"));
+    }
+
+    #[test]
+    fn workflow_allowlist_filters_discovered_metadata() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [
+                {
+                    "workflow_name": "allowed_workflow",
+                    "source_path": "workflows/allowed_workflow.py",
+                    "schedule": {"schedule_id": "allowed", "cron": "*/5 * * * *"},
+                    "webhooks": [{
+                        "workflow_name": "allowed_workflow",
+                        "source_path": "workflows/allowed_workflow.py",
+                        "spec": {
+                            "slug": "allowed",
+                            "auth": {"type": "none"}
+                        }
+                    }]
+                },
+                {
+                    "workflow_name": "blocked_workflow",
+                    "source_path": "workflows/blocked_workflow.py",
+                    "schedule": {"schedule_id": "blocked", "cron": "*/10 * * * *"},
+                    "webhooks": [{
+                        "workflow_name": "blocked_workflow",
+                        "source_path": "workflows/blocked_workflow.py",
+                        "spec": {
+                            "slug": "blocked",
+                            "auth": {"type": "none"}
+                        }
+                    }]
+                },
+            ],
+        }))
+        .unwrap();
+        let mut metadata = metadata_from_discovery_payload(payload);
+        WorkflowEnablement::allowlist("allowed_workflow").filter_metadata(&mut metadata);
+
+        assert_eq!(
+            metadata.workflow_names,
+            BTreeSet::from(["allowed_workflow".to_owned()])
+        );
+        assert_eq!(metadata.schedules.len(), 1);
+        assert_eq!(
+            metadata.schedules[0].get("schedule_id"),
+            Some(&json!("allowed"))
+        );
+        assert_eq!(metadata.webhooks.len(), 1);
+        assert_eq!(metadata.webhooks[0].workflow_name, "allowed_workflow");
+    }
+
+    #[test]
+    fn workflow_allowlist_filters_default_webhooks() {
+        let metadata = PythonWorkflowMetadata::default();
+        let registry = build_webhook_registry(
+            &metadata,
+            &WorkflowEnablement::allowlist("github_issue_triage"),
+        )
+        .unwrap();
+        assert!(registry.contains_key("github-issue-triage"));
+        assert!(!registry.contains_key("github-consensus-ci-triage"));
+        assert!(!registry.contains_key("trivy-vulnerability-intake"));
+    }
+
+    #[test]
+    fn disabled_workflow_returns_policy_error() {
+        let error = WorkflowEnablement::allowlist("agent_turn")
+            .ensure_enabled("slack_sync")
+            .unwrap_err();
+        assert!(matches!(error, WorkflowRuntimeError::Disabled(_)));
     }
 
     #[test]

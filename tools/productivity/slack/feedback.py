@@ -29,7 +29,6 @@ from .client import (
 
 # Feedback database location
 FEEDBACK_DB_PATH = Path.home() / ".cache" / "paradigm-slack" / "feedback.db"
-SANDBOX_API_KEY_PATH = Path("/home/agent/.api_key")
 
 # Heuristic signals for feedback detection
 NEGATIVE_REACTIONS = {"thumbsdown", "-1", "x", "confused", "thinking_face", "bug", "facepalm"}
@@ -120,7 +119,7 @@ class CentaurAgentClient:
         self.base_url = (base_url or os.environ.get("CENTAUR_API_URL") or "http://api:8000").rstrip("/")
         self.api_key = api_key or _load_centaur_api_key()
         if not self.api_key:
-            raise RuntimeError("CENTAUR_API_KEY not set")
+            raise RuntimeError("CENTAUR_AGENT_API_KEY not set")
 
     def _request_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         headers = {
@@ -245,11 +244,7 @@ def _severity_filter_clause(min_severity: str | None) -> tuple[str, list[str]]:
 
 
 def _load_centaur_api_key() -> str | None:
-    if SANDBOX_API_KEY_PATH.exists():
-        token = SANDBOX_API_KEY_PATH.read_text(encoding="utf-8").strip()
-        if token:
-            return token
-    return os.environ.get("CENTAUR_API_KEY")
+    return os.environ.get("CENTAUR_AGENT_API_KEY")
 
 
 def _bot_message_looks_like_error(text: str) -> bool:

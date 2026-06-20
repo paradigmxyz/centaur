@@ -42,6 +42,7 @@ pub const HTTP_REQUESTS_IN_FLIGHT: &str = "http_server_requests_in_flight";
 pub const SESSION_EXECUTIONS_TOTAL: &str = "centaur_session_executions_total";
 pub const SESSION_EXECUTION_DURATION_SECONDS: &str = "centaur_session_execution_duration_seconds";
 pub const SANDBOX_OPERATIONS_TOTAL: &str = "centaur_sandbox_operations_total";
+pub const SANDBOX_STARTUP_DURATION_SECONDS: &str = "centaur_sandbox_startup_duration_seconds";
 pub const SANDBOX_WARM_POOL_CLAIMS_TOTAL: &str = "centaur_sandbox_warm_pool_claims_total";
 pub const ETL_ACTIVE_SCOPES: &str = "etl_active_scopes";
 pub const ETL_FAILED_SCOPES: &str = "etl_failed_scopes";
@@ -56,6 +57,11 @@ pub const ETL_BACKFILL_JOB_AGE_SECONDS: &str = "etl_backfill_job_age_seconds";
 pub const COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL: &str = "company_context_documents_changed_total";
 pub const COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS: &str = "company_context_document_size_chars";
 pub const COMPANY_CONTEXT_PROJECTION_LAG_SECONDS: &str = "company_context_projection_lag_seconds";
+pub const WORKFLOW_QUEUE_TASKS: &str = "workflow_queue_tasks";
+pub const WORKFLOW_QUEUE_TASKS_BY_WORKFLOW: &str = "workflow_queue_tasks_by_workflow";
+pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_SECONDS: &str = "workflow_queue_oldest_task_age_seconds";
+pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS: &str =
+    "workflow_queue_oldest_task_age_by_workflow_seconds";
 
 const HTTP_REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
@@ -63,6 +69,8 @@ const HTTP_REQUEST_DURATION_BUCKETS: &[f64] = &[
 const SESSION_EXECUTION_DURATION_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0,
 ];
+const SANDBOX_STARTUP_DURATION_BUCKETS: &[f64] =
+    &[0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0];
 const COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS: &[f64] = &[
     100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 25_000.0, 50_000.0, 100_000.0, 250_000.0, 500_000.0,
 ];
@@ -186,6 +194,10 @@ pub fn prometheus_handle() -> Result<PrometheusHandle, TelemetryError> {
             SESSION_EXECUTION_DURATION_BUCKETS,
         )?
         .set_buckets_for_metric(
+            Matcher::Full(SANDBOX_STARTUP_DURATION_SECONDS.to_owned()),
+            SANDBOX_STARTUP_DURATION_BUCKETS,
+        )?
+        .set_buckets_for_metric(
             Matcher::Full(COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS.to_owned()),
             COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS,
         )?
@@ -261,6 +273,15 @@ pub fn record_sandbox_operation(backend: &str, operation: &'static str, status: 
     .increment(1);
 }
 
+pub fn record_sandbox_startup_duration(backend: &str, status: &'static str, duration: Duration) {
+    metrics::histogram!(
+        SANDBOX_STARTUP_DURATION_SECONDS,
+        "backend" => normalize_label(backend),
+        "status" => status,
+    )
+    .record(duration.as_secs_f64());
+}
+
 pub fn record_sandbox_warm_pool_claim(result: &'static str) {
     metrics::counter!(
         SANDBOX_WARM_POOL_CLAIMS_TOTAL,
@@ -285,6 +306,60 @@ pub fn record_workflow_histogram(name: &str, labels: &[(String, String)], value:
         return;
     }
     metrics::histogram!(name.to_owned(), workflow_metric_labels(labels)).record(value);
+}
+
+pub fn set_workflow_queue_tasks(queue: &str, state: &str, value: f64) {
+    metrics::gauge!(
+        WORKFLOW_QUEUE_TASKS,
+        "queue" => queue.to_owned(),
+        "state" => state.to_owned(),
+    )
+    .set(value);
+}
+
+pub fn set_workflow_queue_tasks_by_workflow(
+    queue: &str,
+    state: &str,
+    workflow_name: &str,
+    value: f64,
+) {
+    metrics::gauge!(
+        WORKFLOW_QUEUE_TASKS_BY_WORKFLOW,
+        "queue" => queue.to_owned(),
+        "state" => state.to_owned(),
+        "workflow_name" => workflow_name.to_owned(),
+    )
+    .set(value);
+}
+
+pub fn set_workflow_queue_oldest_task_age_seconds(queue: &str, state: &str, value: f64) {
+    if !value.is_finite() {
+        return;
+    }
+    metrics::gauge!(
+        WORKFLOW_QUEUE_OLDEST_TASK_AGE_SECONDS,
+        "queue" => queue.to_owned(),
+        "state" => state.to_owned(),
+    )
+    .set(value);
+}
+
+pub fn set_workflow_queue_oldest_task_age_by_workflow_seconds(
+    queue: &str,
+    state: &str,
+    workflow_name: &str,
+    value: f64,
+) {
+    if !value.is_finite() {
+        return;
+    }
+    metrics::gauge!(
+        WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS,
+        "queue" => queue.to_owned(),
+        "state" => state.to_owned(),
+        "workflow_name" => workflow_name.to_owned(),
+    )
+    .set(value);
 }
 
 pub fn http_status_class(status: u16) -> &'static str {
@@ -381,6 +456,11 @@ fn describe_metrics() {
         SANDBOX_OPERATIONS_TOTAL,
         "Sandbox manager operation attempts by backend, operation, and status."
     );
+    metrics::describe_histogram!(
+        SANDBOX_STARTUP_DURATION_SECONDS,
+        metrics::Unit::Seconds,
+        "Sandbox create-to-ready latency in seconds by backend and status."
+    );
     metrics::describe_counter!(
         SANDBOX_WARM_POOL_CLAIMS_TOTAL,
         "Session warm-pool claim attempts by result."
@@ -433,6 +513,24 @@ fn describe_metrics() {
         COMPANY_CONTEXT_PROJECTION_LAG_SECONDS,
         metrics::Unit::Seconds,
         "Company context projection lag in seconds."
+    );
+    metrics::describe_gauge!(
+        WORKFLOW_QUEUE_TASKS,
+        "Current non-terminal workflow task count by queue and state."
+    );
+    metrics::describe_gauge!(
+        WORKFLOW_QUEUE_TASKS_BY_WORKFLOW,
+        "Current non-terminal workflow task count by queue, state, and workflow name."
+    );
+    metrics::describe_gauge!(
+        WORKFLOW_QUEUE_OLDEST_TASK_AGE_SECONDS,
+        metrics::Unit::Seconds,
+        "Oldest non-terminal workflow task age in seconds by queue and state."
+    );
+    metrics::describe_gauge!(
+        WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS,
+        metrics::Unit::Seconds,
+        "Oldest non-terminal workflow task age in seconds by queue, state, and workflow name."
     );
 }
 
@@ -624,6 +722,7 @@ mod tests {
         record_session_execution_started("codex");
         record_session_execution_finished("codex", "completed", Some(Duration::from_secs(2)));
         record_sandbox_operation("local", "create", "success");
+        record_sandbox_startup_duration("local", "success", Duration::from_secs(4));
         record_sandbox_warm_pool_claim("hit");
 
         let metrics = render_metrics().unwrap();
@@ -642,6 +741,9 @@ mod tests {
         ));
         assert!(metrics.contains(
             r#"centaur_sandbox_operations_total{backend="local",operation="create",status="success"}"#
+        ));
+        assert!(metrics.contains(
+            r#"centaur_sandbox_startup_duration_seconds_count{backend="local",status="success"}"#
         ));
         assert!(metrics.contains(r#"centaur_sandbox_warm_pool_claims_total{result="hit"}"#));
     }
@@ -691,6 +793,20 @@ mod tests {
             ],
             11.0,
         );
+        set_workflow_queue_tasks("centaur_workflows_slack_live", "pending", 1.0);
+        set_workflow_queue_oldest_task_age_seconds("centaur_workflows_slack_live", "pending", 42.0);
+        set_workflow_queue_tasks_by_workflow(
+            "centaur_workflows_slack_live",
+            "pending",
+            "slack_sync",
+            1.0,
+        );
+        set_workflow_queue_oldest_task_age_by_workflow_seconds(
+            "centaur_workflows_slack_live",
+            "pending",
+            "slack_sync",
+            42.0,
+        );
 
         let metrics = render_metrics().unwrap();
 
@@ -698,9 +814,15 @@ mod tests {
         assert!(metrics.contains("etl_active_scopes{"));
         assert!(metrics.contains("company_context_documents_changed_total{"));
         assert!(metrics.contains("etl_backfill_jobs{"));
+        assert!(metrics.contains("workflow_queue_tasks{"));
+        assert!(metrics.contains("workflow_queue_tasks_by_workflow{"));
+        assert!(metrics.contains("workflow_queue_oldest_task_age_seconds{"));
+        assert!(metrics.contains("workflow_queue_oldest_task_age_by_workflow_seconds{"));
         assert!(metrics.contains(r#"environment="production""#));
         assert!(metrics.contains(r#"namespace="centaur-system""#));
         assert!(metrics.contains(r#"source="slack""#));
+        assert!(metrics.contains(r#"queue="centaur_workflows_slack_live""#));
+        assert!(metrics.contains(r#"workflow_name="slack_sync""#));
     }
 
     #[test]

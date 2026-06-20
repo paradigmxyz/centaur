@@ -14,12 +14,15 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "vocs": "https://pkg.pr.new/vocs@3f54829",
-    "waku": "1.0.0-alpha.6"
+    "waku": "1.0.0-alpha.6",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@resvg/resvg-wasm": "^2.6.2",
-    "gray-matter": "^4.0.3",
     "typescript": "5.9.3",
     "wrangler": "^4.14.0"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
   }
 }

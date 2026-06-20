@@ -176,7 +176,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_empty principals(:globex_user).sync_transforms
   end
 
-  test "sync_postgres emits a DSN entry per granted PgDsnSecret, keyed by foreign_id" do
+  test "sync_postgres emits a DSN entry per granted PgDsnSecret with foreign_id" do
     entries = principal_with_grants(pg_dsn_secrets(:acme_analytics_pg)).sync_postgres
     assert_equal 1, entries.length
     assert_equal pg_dsn_secrets(:acme_analytics_pg).foreign_id, entries.first["foreign_id"]
@@ -204,6 +204,29 @@ class PrincipalTest < ActiveSupport::TestCase
       ],
       entry["settings"]
     )
+  end
+
+  test "sync_postgres emits only the highest-priority route for each database" do
+    principal = principals(:globex_user)
+    low = pg_dsn_secrets(:acme_analytics_pg)
+    high = PgDsnSecret.new(
+      namespace: low.namespace,
+      foreign_id: "pg-analytics-privileged",
+      name: "analytics privileged",
+      database: low.database,
+      role: "centaur_readonly",
+      created_by: users(:acme_admin)
+    )
+    high.build_dsn_source(source_type: "env", config: { "var" => "PG_PRIVILEGED_DSN" })
+    high.save!
+
+    Grant.create!(principal: principal, pg_dsn_secret: low, created_by: users(:acme_admin), priority: 0)
+    Grant.create!(principal: principal, pg_dsn_secret: high, created_by: users(:acme_admin), priority: 100)
+
+    entries = principal.sync_postgres
+    assert_equal 1, entries.length
+    assert_equal "pg-analytics-privileged", entries.first["foreign_id"]
+    assert_equal "PG_PRIVILEGED_DSN", entries.first.dig("dsn", "var")
   end
 
   test "sync_postgres is empty without pg_dsn grants" do

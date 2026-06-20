@@ -36,7 +36,6 @@ COMPANY_CONTEXT_SOURCE_TYPES = {
 }
 COMPANY_CONTEXT_DOCUMENT_ACTIONS = ("inserted", "updated", "deleted", "noop")
 ETL_CHECKPOINT_TABLES = {
-    "slack": "slack_sync_checkpoints",
     "google_drive": "google_drive_sync_checkpoints",
     "google_calendar": "google_calendar_sync_checkpoints",
     "linear": "linear_sync_checkpoints",
@@ -171,21 +170,25 @@ def _source_enabled() -> bool:
 
 
 async def _latest_successful_watermark(pool, current_run_id: str) -> dt.datetime | None:
-    """Load the last successful projection watermark from workflow output."""
+    """Load the last successful projection watermark from the active absurd ETL queue."""
     row = await pool.fetchrow(
-        "SELECT output_json FROM workflow_runs "
-        "WHERE workflow_name = $1 "
-        "  AND run_id <> $2 "
-        "  AND status = 'completed' "
-        "  AND output_json IS NOT NULL "
-        "ORDER BY completed_at DESC NULLS LAST, updated_at DESC "
+        "SELECT t.completed_payload "
+        "FROM absurd.t_centaur_workflows_etl t "
+        "JOIN absurd.r_centaur_workflows_etl r "
+        "  ON r.run_id = t.last_attempt_run "
+        "WHERE t.task_name = 'centaur.workflow' "
+        "  AND t.params->>'workflow_name' = $1 "
+        "  AND r.run_id::text <> $2 "
+        "  AND t.state = 'completed' "
+        "  AND t.completed_payload IS NOT NULL "
+        "ORDER BY r.completed_at DESC NULLS LAST, t.enqueue_at DESC "
         "LIMIT 1",
         WORKFLOW_NAME,
         current_run_id,
     )
     if not row:
         return None
-    output = decode_jsonb(row["output_json"], {})
+    output = decode_jsonb(row["completed_payload"], {})
     return _parse_datetime(str(output.get("watermark") or ""))
 
 

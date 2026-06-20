@@ -1,5 +1,10 @@
 {{- if .Values.slackbotv2.enabled }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $slackbotV2MetricsAnnotations := dict -}}
+{{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
+{{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
+{{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations (.Values.slackbotv2.metrics.annotations | default dict) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,8 +20,12 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- with $slackbotV2MetricsAnnotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 8 }}
+        centaur.ai/metrics: slackbotv2
     spec:
       automountServiceAccountToken: false
       {{- with .Values.global.imagePullSecrets }}
@@ -47,13 +56,6 @@ spec:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACK_SIGNING_SECRET" .Values.secretManager.envPrefix }}
             - name: SLACKBOT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
-            # api-rs has no auth middleware yet, but slackbotv2 still sends the
-            # key as a header; source it from the same infra secret.
-            - name: CENTAUR_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}

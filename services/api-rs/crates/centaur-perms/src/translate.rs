@@ -30,17 +30,56 @@ pub struct Translation {
     pub inputs: Vec<SecretInput>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolLabels {
+    pub tool: String,
+    pub overlay: String,
+}
+
 fn rules_from_hosts(hosts: &[String]) -> Vec<RequestRule> {
     hosts.iter().map(RequestRule::host).collect()
 }
 
 /// Translate every secret declared by a tool into iron-control inputs to grant
 /// to the tool's role (`role_foreign_id`, e.g. `tool-github`).
+#[cfg(test)]
 pub fn translate(
     namespace: &str,
     role_foreign_id: &str,
     secrets: &[ParsedSecret],
     policy: &SourcePolicy,
+) -> Translation {
+    translate_with_labels(
+        namespace,
+        role_foreign_id,
+        secrets,
+        policy,
+        &managed_labels(),
+    )
+}
+
+pub fn translate_for_tool(
+    namespace: &str,
+    role_foreign_id: &str,
+    labels: &ToolLabels,
+    secrets: &[ParsedSecret],
+    policy: &SourcePolicy,
+) -> Translation {
+    translate_with_labels(
+        namespace,
+        role_foreign_id,
+        secrets,
+        policy,
+        &tool_labels(labels),
+    )
+}
+
+fn translate_with_labels(
+    namespace: &str,
+    role_foreign_id: &str,
+    secrets: &[ParsedSecret],
+    policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
 ) -> Translation {
     let mut out = Translation::default();
     let mut used = BTreeSet::new();
@@ -52,6 +91,7 @@ pub fn translate(
                     role_foreign_id,
                     http,
                     policy,
+                    labels,
                     &mut used,
                 )));
             }
@@ -61,6 +101,7 @@ pub fn translate(
                     role_foreign_id,
                     oauth,
                     policy,
+                    labels,
                     &mut used,
                 )));
             }
@@ -70,12 +111,14 @@ pub fn translate(
                     role_foreign_id,
                     gcp,
                     policy,
+                    labels,
                     &mut used,
                 )));
             }
             ParsedSecret::PgDsn(pg) => {
-                out.inputs
-                    .push(SecretInput::PgDsn(pg_dsn_input(namespace, pg, policy)));
+                out.inputs.push(SecretInput::PgDsn(pg_dsn_input(
+                    namespace, pg, policy, labels,
+                )));
             }
             ParsedSecret::Hmac(hmac) => {
                 out.inputs.push(SecretInput::Hmac(hmac_input(
@@ -83,6 +126,7 @@ pub fn translate(
                     role_foreign_id,
                     hmac,
                     policy,
+                    labels,
                     &mut used,
                 )));
             }
@@ -91,6 +135,7 @@ pub fn translate(
                     namespace,
                     role_foreign_id,
                     broker,
+                    labels,
                     &mut used,
                 )));
             }
@@ -100,6 +145,7 @@ pub fn translate(
                     role_foreign_id,
                     aws,
                     policy,
+                    labels,
                     &mut used,
                 )));
             }
@@ -108,11 +154,19 @@ pub fn translate(
     out
 }
 
+fn tool_labels(tool: &ToolLabels) -> BTreeMap<String, String> {
+    let mut labels = managed_labels();
+    labels.insert("centaur-tool".to_owned(), tool.tool.clone());
+    labels.insert("centaur-tool-overlay".to_owned(), tool.overlay.clone());
+    labels
+}
+
 fn static_input(
     namespace: &str,
     role: &str,
     http: &HttpSecret,
     policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
     used: &mut BTreeSet<String>,
 ) -> StaticSecretInput {
     let (inject_config, replace_config) = match http.mode {
@@ -141,7 +195,7 @@ fn static_input(
         foreign_id: unique_foreign_id(format!("{role}-{}", slugify(&http.name)), used),
         name: http.name.clone(),
         description: None,
-        labels: managed_labels(),
+        labels: labels.clone(),
         inject_config,
         replace_config,
         source: source_from_placeholder(policy, &http.secret_ref, None),
@@ -154,6 +208,7 @@ fn oauth_input(
     role: &str,
     oauth: &OAuthTokenSecret,
     policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
     used: &mut BTreeSet<String>,
 ) -> OAuthTokenSecretInput {
     let identity = oauth.token_endpoint.as_deref().unwrap_or(&oauth.name);
@@ -162,6 +217,7 @@ fn oauth_input(
         foreign_id: unique_foreign_id(format!("{role}-oauth-{}", slugify(identity)), used),
         name: format!("OAuth {}", oauth.grant),
         grant: oauth.grant.clone(),
+        labels: labels.clone(),
         token_endpoint: oauth.token_endpoint.clone(),
         scopes: oauth.scopes.clone(),
         audience: oauth.audience.clone(),
@@ -176,6 +232,7 @@ fn gcp_input(
     role: &str,
     gcp: &GcpAuthSecret,
     policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
     used: &mut BTreeSet<String>,
 ) -> GcpAuthSecretInput {
     GcpAuthSecretInput {
@@ -185,6 +242,7 @@ fn gcp_input(
             used,
         )),
         name: Some(format!("GCP Auth ({role})")),
+        labels: labels.clone(),
         scopes: gcp_auth_scopes_or_default(gcp.scopes.clone()),
         subject: None,
         keyfile: Some(source_from_placeholder(policy, &gcp.secret_ref, None)),
@@ -201,7 +259,12 @@ fn gcp_input(
 /// back to the tool's declared `name`. `pg_sandbox_env_var` appends `_DSN`, so a
 /// trailing `_dsn`/`-dsn` is stripped before slugifying — e.g. `RESHIFT_DSN`
 /// becomes `reshift`, which `pg_sandbox_env_var` turns back into `RESHIFT_DSN`.
-fn pg_dsn_input(namespace: &str, pg: &PgDsnSecret, policy: &SourcePolicy) -> PgDsnSecretInput {
+fn pg_dsn_input(
+    namespace: &str,
+    pg: &PgDsnSecret,
+    policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
+) -> PgDsnSecretInput {
     PgDsnSecretInput {
         namespace: namespace.to_owned(),
         foreign_id: pg_dsn_foreign_id(&pg.name),
@@ -209,7 +272,7 @@ fn pg_dsn_input(namespace: &str, pg: &PgDsnSecret, policy: &SourcePolicy) -> PgD
         database: pg.database.clone(),
         description: None,
         role: pg.role.clone(),
-        labels: managed_labels(),
+        labels: labels.clone(),
         settings: pg.settings.iter().map(pg_setting_input).collect(),
         dsn: source_from_placeholder(policy, &pg.secret_ref, None),
     }
@@ -255,6 +318,7 @@ fn hmac_input(
     role: &str,
     hmac: &HmacSignSecret,
     policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
     used: &mut BTreeSet<String>,
 ) -> HmacSecretInput {
     HmacSecretInput {
@@ -262,7 +326,7 @@ fn hmac_input(
         foreign_id: unique_foreign_id(format!("{role}-hmac-{}", slugify(&hmac.name)), used),
         name: hmac.name.clone(),
         description: None,
-        labels: managed_labels(),
+        labels: labels.clone(),
         timestamp_format: hmac.timestamp_format.clone(),
         signature_algorithm: hmac.algorithm.clone(),
         signature_key_encoding: hmac.key_encoding.clone(),
@@ -293,6 +357,7 @@ fn aws_input(
     role: &str,
     aws: &AwsAuthSecret,
     policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
     used: &mut BTreeSet<String>,
 ) -> AwsAuthSecretInput {
     AwsAuthSecretInput {
@@ -300,7 +365,7 @@ fn aws_input(
         foreign_id: unique_foreign_id(format!("{role}-aws-{}", slugify(&aws.name)), used),
         name: Some(format!("AWS Auth ({role})")),
         description: None,
-        labels: managed_labels(),
+        labels: labels.clone(),
         access_key_id: source_from_placeholder(policy, &aws.access_key_id_ref, None),
         secret_access_key: source_from_placeholder(policy, &aws.secret_access_key_ref, None),
         session_token: aws
@@ -323,6 +388,7 @@ fn broker_token_input(
     namespace: &str,
     role: &str,
     broker: &BrokerTokenSecret,
+    labels: &BTreeMap<String, String>,
     used: &mut BTreeSet<String>,
 ) -> StaticSecretInput {
     StaticSecretInput {
@@ -330,7 +396,7 @@ fn broker_token_input(
         foreign_id: unique_foreign_id(format!("{role}-{}", slugify(&broker.name)), used),
         name: broker.name.clone(),
         description: None,
-        labels: managed_labels(),
+        labels: labels.clone(),
         inject_config: Some(InjectConfig {
             header: Some(broker.inject_header.clone()),
             query_param: None,

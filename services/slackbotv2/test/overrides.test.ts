@@ -163,4 +163,31 @@ describe('extractMessageOverrides', () => {
       reasoning: undefined
     })
   })
+
+  test('--bedrock selects the bedrock provider and implies codex', () => {
+    expect(extractMessageOverrides('--bedrock fix it')).toEqual({
+      cleanedText: 'fix it',
+      harnessType: 'codex',
+      model: undefined,
+      provider: 'amazon-bedrock',
+      reasoning: undefined
+    })
+  })
+
+  test('--bedrock combines with an explicit --model', () => {
+    expect(
+      extractMessageOverrides('--bedrock --model anthropic.claude-sonnet-4-5 fix it')
+    ).toEqual({
+      cleanedText: 'fix it',
+      harnessType: 'codex',
+      model: 'anthropic.claude-sonnet-4-5',
+      provider: 'amazon-bedrock',
+      reasoning: undefined
+    })
+  })
+
+  test('--bedrock does not match flags embedded in words', () => {
+    expect(extractMessageOverrides('--bedrocky hi').provider).toBeUndefined()
+    expect(extractMessageOverrides('the --bedrock flag').provider).toBe('amazon-bedrock')
+  })
 })

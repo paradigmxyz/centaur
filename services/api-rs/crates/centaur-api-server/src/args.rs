@@ -13,10 +13,11 @@ use std::os::unix::fs::PermissionsExt;
 
 use centaur_api_server::SandboxRuntime;
 use centaur_iron_control::{
-    IdentityInput, IronControlClient, RoleSpec, SessionRegistrar, register_role,
+    IdentityInput, IronControlClient, IronControlError, RegisterError, RoleSpec, SessionRegistrar,
+    register_role,
 };
 use centaur_iron_proxy::{
-    ProxyFragment, SourceKind, SourcePolicy, harness_auth_fragment, infra_fragment,
+    ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, harness_auth_fragment, infra_fragment,
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
@@ -576,6 +577,13 @@ struct SandboxArgs {
     #[command(flatten)]
     iron_control: IronControlArgs,
     #[arg(
+        long = "iron-control-sync-infra-secrets",
+        env = "IRON_CONTROL_SYNC_INFRA_SECRETS",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    iron_control_sync_infra_secrets: bool,
+    #[arg(
         long = "workflow-host-sandbox",
         env = "WORKFLOW_HOST_SANDBOX",
         default_value_t = true
@@ -605,13 +613,31 @@ impl SandboxArgs {
             return Ok(None);
         };
         let namespace = self.iron_control.namespace.clone();
-        let policy = self.iron_proxy.source_policy();
-        let tool_fragment = self.discover_tool_proxy_fragment()?;
-        let roles = self.iron_proxy.roles_to_register(tool_fragment.as_ref())?;
-        let mut role_ids = Vec::with_capacity(roles.len());
-        for (spec, fragment) in &roles {
-            role_ids.push(register_role(&client, &namespace, spec, fragment, &policy).await?);
-        }
+        let role_ids = if self.iron_control_sync_infra_secrets {
+            let policy = self.iron_proxy.source_policy();
+            let tool_fragment = self.discover_tool_proxy_fragment()?;
+            let roles = self.iron_proxy.roles_to_register(tool_fragment.as_ref())?;
+            let mut role_ids = Vec::with_capacity(roles.len());
+            for (spec, fragment) in &roles {
+                role_ids.push(
+                    register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?,
+                );
+            }
+            role_ids
+        } else {
+            let spec = RoleSpec::infra();
+            vec![
+                client
+                    .upsert_role(&IdentityInput {
+                        namespace: namespace.clone(),
+                        foreign_id: spec.foreign_id,
+                        name: spec.name,
+                        labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+                    })
+                    .await?
+                    .id,
+            ]
+        };
         let bootstrap = client
             .upsert_principal(&IdentityInput {
                 namespace: namespace.clone(),
@@ -651,6 +677,9 @@ impl SandboxArgs {
     fn iron_control_tool_reconciler(
         &self,
     ) -> Result<Option<IronControlToolReconciler>, ServerError> {
+        if !self.iron_control_sync_infra_secrets {
+            return Ok(None);
+        }
         let Some(client) = self.iron_control.client() else {
             return Ok(None);
         };
@@ -923,6 +952,15 @@ impl SandboxArgs {
                 "OPENROUTER_API_KEY".to_owned(),
             ));
         }
+        // When Bedrock is enabled, codex's `amazon-bedrock` provider signs with
+        // these placeholder AWS credentials and iron-proxy re-signs (SigV4) with
+        // the real IAM keys. `aws_auth` is not a `secrets` transform, so the
+        // placeholders are injected here rather than via sandbox_placeholder_env.
+        for (name, value) in centaur_iron_proxy::bedrock_sandbox_env() {
+            if !envs.iter().any(|(existing, _)| existing == &name) {
+                envs.push((name, value));
+            }
+        }
 
         // OTLP trace wiring rides from this process into every sandbox (the
         // same hardcoded set the Python control plane forwarded). The harness
@@ -1160,6 +1198,52 @@ impl SandboxArgs {
     }
 }
 
+const IRON_CONTROL_REGISTER_MAX_ATTEMPTS: u32 = 5;
+const IRON_CONTROL_REGISTER_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+
+async fn register_role_with_retry(
+    client: &IronControlClient,
+    namespace: &str,
+    spec: &RoleSpec,
+    fragment: &ProxyFragment,
+    policy: &SourcePolicy,
+) -> Result<String, RegisterError> {
+    let mut backoff = IRON_CONTROL_REGISTER_INITIAL_BACKOFF;
+    for attempt in 1..=IRON_CONTROL_REGISTER_MAX_ATTEMPTS {
+        match register_role(client, namespace, spec, fragment, policy).await {
+            Ok(role_id) => return Ok(role_id),
+            Err(error)
+                if attempt < IRON_CONTROL_REGISTER_MAX_ATTEMPTS
+                    && should_retry_iron_control_register(&error) =>
+            {
+                warn!(
+                    %error,
+                    role = %spec.foreign_id,
+                    attempt,
+                    max_attempts = IRON_CONTROL_REGISTER_MAX_ATTEMPTS,
+                    backoff_ms = backoff.as_millis(),
+                    "iron-control role registration failed; retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("iron-control registration retry loop always returns");
+}
+
+fn should_retry_iron_control_register(error: &RegisterError) -> bool {
+    match error {
+        RegisterError::Translate(_) => false,
+        RegisterError::Control(IronControlError::Transport { .. }) => true,
+        RegisterError::Control(IronControlError::Decode { .. }) => false,
+        RegisterError::Control(IronControlError::Status { status, .. }) => {
+            *status == 429 || (500..600).contains(status)
+        }
+    }
+}
+
 #[derive(Debug, ClapArgs)]
 struct ToolDiscoveryArgs {
     #[arg(long = "tool-dirs", env = "TOOL_DIRS")]
@@ -1203,10 +1287,9 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         config.iron_proxy = args.iron_proxy.to_config()?;
         if let Some(proxy) = config.iron_proxy.as_mut() {
-            // The k8s backend derives the static sandbox PG DSN catalog from
-            // these fragments (see `pg_sandbox_dsns`); `to_config` only ships
-            // the harness fragment, so add the infra fragment and the
-            // discovered tool fragment (where `pg_dsn` secrets are declared).
+            // `to_config` only ships the harness fragment, so add infra and
+            // discovered tool fragments for any static proxy placeholder
+            // metadata the backend needs.
             let mut fragments = vec![args.iron_proxy.infra_fragment()?];
             if let Some(tool_fragment) = args.discover_tool_proxy_fragment()? {
                 fragments.push(tool_fragment.fragment);
@@ -1654,6 +1737,14 @@ impl IronProxyHarnessArgs {
         if let Some(fragment) = harness_auth_fragment("openrouter", "api_key")? {
             fragments.push(fragment);
         }
+        // Bedrock is opt-in (not the default codex provider): only register its
+        // SigV4 re-signing fragment when the operator has set CODEX_BEDROCK_REGION,
+        // since the fragment expects AWS keys in the secrets backend.
+        if bedrock_enabled()
+            && let Some(fragment) = harness_auth_fragment("amazon-bedrock", "api_key")?
+        {
+            fragments.push(fragment);
+        }
         Ok(fragments)
     }
 }
@@ -1837,6 +1928,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn iron_control_registration_retry_policy_is_transient_only() {
+        let status_error = |status| {
+            RegisterError::Control(IronControlError::Status {
+                method: "PUT".to_owned(),
+                path: "/api/v1/static_secrets/example".to_owned(),
+                status,
+                body: String::new(),
+            })
+        };
+
+        assert!(should_retry_iron_control_register(&status_error(500)));
+        assert!(should_retry_iron_control_register(&status_error(503)));
+        assert!(should_retry_iron_control_register(&status_error(429)));
+        assert!(!should_retry_iron_control_register(&status_error(400)));
+        assert!(!should_retry_iron_control_register(
+            &RegisterError::Translate(centaur_iron_control::TranslateError::Unsupported {
+                what: "unsupported transform".to_owned(),
+            })
+        ));
     }
 
     #[test]
@@ -2415,6 +2528,30 @@ mod tests {
                         == Some("TOOL_API_KEY")
             })
         }));
+    }
+
+    #[test]
+    fn iron_control_infra_secret_sync_can_be_disabled() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+            "--iron-control-sync-infra-secrets",
+            "false",
+        ])
+        .unwrap();
+
+        assert!(!args.sandbox.iron_control_sync_infra_secrets);
+        assert!(
+            args.sandbox
+                .iron_control_tool_reconciler()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

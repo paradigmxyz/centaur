@@ -179,6 +179,8 @@ pub struct OAuthTokenSecretInput {
     pub foreign_id: String,
     pub name: String,
     pub grant: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -206,6 +208,8 @@ pub struct GcpAuthSecretInput {
     pub foreign_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
     pub scopes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,

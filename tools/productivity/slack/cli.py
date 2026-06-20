@@ -472,14 +472,19 @@ def users(
 
 @app.command()
 def upload(
-    channel: str = typer.Argument(..., help="Channel name (with or without #)"),
-    files: list[str] = typer.Argument(..., help="File path(s) to upload"),
+    target_or_file: str = typer.Argument(
+        ..., help="Channel name/ID, or file path when using the current Slack thread"
+    ),
+    files: list[str] = typer.Argument(
+        None, help="File path(s) to upload; omit channel to use current Slack thread"
+    ),
     comment: str = typer.Option(None, "--comment", "-c", help="Comment to post with files"),
     thread: str = typer.Option(None, "--thread", "-t", help="Thread timestamp to reply to"),
 ):
-    """Upload file(s) to a channel.
+    """Upload file(s) to Slack.
 
     Examples:
+        slack upload screenshot.png
         slack upload "#eng-ai" screenshot.png
         slack upload eng-ai file1.png file2.jpg -c "Here are the screenshots"
         slack upload eng-ai report.pdf --thread 1234567890.123456
@@ -489,7 +494,9 @@ def upload(
 
     from .client import upload_file
 
-    for file_path in files:
+    channel, upload_paths = _upload_target_and_files(target_or_file, files or [])
+
+    for file_path in upload_paths:
         path = Path(file_path)
         if not path.exists():
             console.print(f"[red]File not found: {file_path}[/]")
@@ -511,6 +518,17 @@ def upload(
         except RuntimeError as e:
             console.print(f"[red]Error uploading {path.name}: {e}[/]")
             raise typer.Exit(1)
+
+
+def _upload_target_and_files(target_or_file: str, files: list[str]) -> tuple[str | None, list[str]]:
+    """Return (channel, files), defaulting channel when the first arg is a file."""
+    from pathlib import Path
+
+    if Path(target_or_file).exists():
+        return None, [target_or_file, *files]
+    if not files:
+        return None, [target_or_file]
+    return target_or_file, files
 
 
 @app.command()
@@ -766,7 +784,7 @@ def dump(
 
 @app.command()
 def files(
-    permalink: str = typer.Argument(..., help="Slack permalink to message with attachments"),
+    permalink: str = typer.Argument(..., help="Slack message permalink, channel:timestamp, or url_private"),
     download: bool = typer.Option(
         False, "--download", "-d", help="Download files to current directory"
     ),
@@ -776,13 +794,33 @@ def files(
 
     Examples:
         slack files "https://slack.com/archives/C01234567/p1234567890123456"
+        slack files "https://files.slack.com/files-pri/T1-F1/report.pdf" --download
         slack files "https://..." --download
         slack files "https://..." -d -o /tmp/slack-files
     """
     import re
     from pathlib import Path
+    from urllib.parse import urlparse
 
     from .client import _fetch_slack_file, get_message_files
+
+    parsed = urlparse(permalink)
+    if parsed.scheme == "https" and (parsed.hostname or "").lower() == "files.slack.com":
+        if not download:
+            console.print("[red]Pass --download to download a direct Slack file URL[/]")
+            raise typer.Exit(1)
+        output_dir = Path(output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            filename, _mime_type, body = _fetch_slack_file(permalink)
+            out_path = output_dir / filename
+            out_path.write_bytes(body)
+            console.print(f"[green]✓ Downloaded {filename}[/] ({len(body)} bytes)")
+            console.print(f"[dim]{out_path.absolute()}[/]")
+        except Exception as e:
+            console.print(f"[red]Error downloading Slack file: {e}[/]")
+            raise typer.Exit(1)
+        return
 
     if permalink.startswith("https://"):
         match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)

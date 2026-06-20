@@ -219,7 +219,7 @@ Then create a real run:
 ```bash
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $CENTAUR_API_KEY" \
+  -H "X-Api-Key: $WORKFLOW_API_KEY" \
   -d '{
     "workflow_name": "nightly_report",
     "input": {"topic": "open incidents"}

@@ -1,6 +1,7 @@
 /**
  * Inline message directives, restored from the v1 slackbot:
  *   --claude | --claude-code | --amp | --codex   pick the harness for the thread
+ *   --bedrock                                    codex via the AWS Bedrock provider
  *   --model <name> (or --model=<name>)           pick the model within that harness
  *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
@@ -12,13 +13,18 @@
  * fields; `--model` accepts either a full model id (claude-sonnet-4-6, gpt-5.2,
  * ...), an amp mode (deep/fast), or a Claude alias (fable/opus/sonnet/haiku)
  * which expands to the full id. Reasoning effort only affects the codex harness
- * (it maps to codex's `turn/start` `effort`); other harnesses ignore it.
+ * (it maps to codex's `turn/start` `effort`); other harnesses ignore it. The
+ * provider rides the blocks-protocol `provider` field and is fixed when the
+ * codex thread starts; `--bedrock` selects codex's built-in `amazon-bedrock`
+ * provider (and implies the codex harness). Pair it with `--model <bedrock-id>`
+ * to choose the Bedrock model.
  */
 
 export type MessageOverrides = {
   cleanedText: string
   harnessType?: string
   model?: string
+  provider?: string
   reasoning?: string
 }
 
@@ -29,6 +35,13 @@ const HARNESS_FLAGS: Record<string, string> = {
   'claude-code': 'claudecode',
   claudecode: 'claudecode',
   codex: 'codex'
+}
+
+// Provider flags select a model provider within the codex harness (and imply
+// it). Bedrock rides codex's built-in `amazon-bedrock` provider, whose wire
+// value is passed through as the blocks-protocol `provider` field.
+const PROVIDER_FLAGS: Record<string, { provider: string; harnessType: string }> = {
+  bedrock: { provider: 'amazon-bedrock', harnessType: 'codex' }
 }
 
 // Claude model aliases, usable both as bare flags (--opus) and as --model
@@ -73,6 +86,7 @@ export function extractMessageOverrides(text: string): MessageOverrides {
   let cleaned = text
   let harnessType: string | undefined
   let model: string | undefined
+  let provider: string | undefined
   let reasoning: string | undefined
 
   const modelMatch = MODEL_FLAG_PATTERN.exec(cleaned)
@@ -106,10 +120,19 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     cleaned = stripMatch(cleaned, match)
   }
 
+  for (const [flag, mapping] of Object.entries(PROVIDER_FLAGS)) {
+    const match = flagPattern(flag).exec(cleaned)
+    if (!match) continue
+    provider ??= mapping.provider
+    harnessType ??= mapping.harnessType
+    cleaned = stripMatch(cleaned, match)
+  }
+
   return {
     cleanedText: cleaned === text ? text : cleaned.trim(),
     harnessType,
     model,
+    provider,
     reasoning
   }
 }

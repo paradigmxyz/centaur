@@ -25,13 +25,16 @@ from workflows.slack.shared import (
     channel_ref,
     claim_backfill_jobs,
     client as shared_client,
+    emit_slack_checkpoint_metrics,
     enqueue_backfill_job,
     env_flag_enabled,
     failure_reason,
+    is_permanent_slack_backfill_error,
     load_backfill_job_metrics,
     mark_thread_refreshed,
     mark_backfill_job_completed,
     mark_backfill_job_failed,
+    mark_backfill_job_terminal_skipped,
     message_row,
     positive_int,
     record_run_finish,
@@ -200,6 +203,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     channel_pages_per_job = positive_int(
         inp.channel_pages_per_job, DEFAULT_CHANNEL_PAGES_PER_JOB
     )
+    await emit_slack_checkpoint_metrics(ctx._pool)
     await _emit_backfill_job_metrics(ctx._pool)
     jobs = await claim_backfill_jobs(ctx._pool, channel_batch_limit)
     if not jobs:
@@ -210,7 +214,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         }
     await _emit_backfill_job_metrics(ctx._pool)
 
-    client = shared_client()
+    client = shared_client(workflow_name=WORKFLOW_NAME)
     access_mode = client._etl_access_mode()
     run_id = workflow_run_id_to_sync_run_id(ctx.run_id)
     requested = [
@@ -237,6 +241,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     )
 
     synced: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
     counts = {
         "messages_fetched": 0,
@@ -437,6 +442,25 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 channel_id=channel_id,
                 error=error,
             )
+            if is_permanent_slack_backfill_error(error):
+                skipped.append(
+                    channel_ref({"id": channel_id, "name": channel_id}, error)
+                )
+                ctx.log(
+                    "slack_backfill_job_terminal_skipped",
+                    job_id=job_id,
+                    job_key=str(job["job_key"]),
+                    job_type=str(job.get("job_type") or ""),
+                    channel_id=channel_id,
+                    error=error,
+                )
+                await mark_backfill_job_terminal_skipped(
+                    ctx._pool,
+                    job_id=job_id,
+                    run_id=run_id,
+                    error=error,
+                )
+                continue
             failed.append(channel_ref({"id": channel_id, "name": channel_id}, error))
             record_etl_items_failed(
                 "slack",
@@ -465,17 +489,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         run_id=run_id,
         status=status,
         synced=synced,
-        skipped=[],
+        skipped=skipped,
         failed=failed,
         counts=counts,
         error_text=error_text,
     )
+    await emit_slack_checkpoint_metrics(ctx._pool)
     await _emit_backfill_job_metrics(ctx._pool)
 
     return {
         "status": status,
         "run_id": run_id,
         "channels_synced": len(synced),
+        "channels_skipped": len(skipped),
         "channels_failed": len(failed),
         **counts,
     }

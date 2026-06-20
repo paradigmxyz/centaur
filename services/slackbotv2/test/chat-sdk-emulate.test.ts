@@ -1313,6 +1313,85 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('swaps the streamed message for the durable final answer when the live answer diverges', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a diverging render.')
+    const mentionText = `<@${BOT_USER_ID}> answer with a late correction`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-divergence-swap',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: mentionText
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const draft = 'Draft answer from the live deltas.'
+    const finalAnswer = 'Final reconciled answer from the result.'
+    // Stream a plan + the draft answer (so the answer delta reaches Slack), then
+    // seal the answer item with a DIFFERENT canonical text. The recomposed
+    // answer no longer extends the already-streamed text, so the renderer
+    // freezes the live stream instead of interleaving, and the render swaps the
+    // message for the durable result.
+    codexApi.emitOutputLines(
+      key,
+      sampleCodexNotifications(draft).map(notification => JSON.stringify(notification))
+    )
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        method: 'item/completed',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: {
+            type: 'agentMessage',
+            id: 'answer-1',
+            text: finalAnswer,
+            phase: 'final_answer',
+            memoryCitation: null
+          }
+        }
+      })
+    )
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-divergence-swap',
+      status: 'completed',
+      result_text: finalAnswer
+    })
+
+    await Promise.all(waits)
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 3000)
+
+    const texts = await threadTexts(parent.ts)
+    // The streamed message was replaced in place with the durable final answer...
+    expect(texts.filter(text => text.includes(finalAnswer))).toHaveLength(1)
+    // ...and the diverging live draft is gone (neither interleaved nor left behind).
+    expect(texts.some(text => text.includes('Draft answer from the live deltas'))).toBe(false)
+  })
+
   it('reposts the durable final answer when the Slack stream expires mid-render', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -2298,6 +2377,8 @@ describe('slackbotv2', () => {
   })
 
   it('shows assistant status while waiting for slow session execute', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
     codexApi.autoRespond = false
     const releaseExecute = codexApi.holdNextExecute()
 
@@ -2338,10 +2419,57 @@ describe('slackbotv2', () => {
     ).toEqual(['Thinking...'])
     expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
     expect(codexApi.eventRequests).toHaveLength(0)
+    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_started'))
+    expect(logData(logs, 'slackbotv2_handoff_started')).toEqual(
+      expect.objectContaining({
+        assistant_status_requested: true,
+        message_id: mention.ts,
+        mode: 'execute',
+        thread_id: threadKey(parent.ts),
+        trigger: 'new_mention'
+      })
+    )
+    expect(logData(logs, 'slackbotv2_assistant_status_started')).toEqual(
+      expect.objectContaining({
+        message_id: mention.ts,
+        operation: 'set',
+        thread_id: threadKey(parent.ts)
+      })
+    )
+    expect(logData(logs, 'slackbotv2_assistant_status_complete')).toEqual(
+      expect.objectContaining({
+        operation: 'set',
+        visible: true
+      })
+    )
+    expect(logData(logs, 'slackbotv2_handoff_sync_starting')).toEqual(
+      expect.objectContaining({
+        initial_assistant_status_visible: true,
+        trigger: 'new_mention'
+      })
+    )
+    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_started')).toEqual(
+      expect.objectContaining({
+        slack_channel: CHANNEL_ID,
+        slack_event_id: 'Ev-slackbotv2-slow-execute',
+        slack_event_type: 'app_mention',
+        slack_message_ts: mention.ts,
+        slack_thread_ts: parent.ts,
+        task_count: expect.any(Number)
+      })
+    )
 
     releaseExecute()
     const response = await responsePromise
     expect(response.status).toBe(200)
+    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_complete'))
+    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_complete')).toEqual(
+      expect.objectContaining({
+        phase_ms: expect.any(Number),
+        retryable_error_count: 0,
+        slack_event_id: 'Ev-slackbotv2-slow-execute'
+      })
+    )
     await waitFor(() => codexApi.eventRequests.length === 1)
     await waitFor(() => codexApi.streamCount === 1)
     codexApi.closeStreams()
@@ -2924,6 +3052,34 @@ function createTestBot(
     state: createMemoryState(),
     ...overrides
   })
+}
+
+type CapturedLog = {
+  data?: unknown
+  event: string
+  level: 'debug' | 'info' | 'warn' | 'error'
+}
+
+function captureLogger(
+  logs: CapturedLog[]
+): NonNullable<Parameters<typeof createSlackbotV2>[0]['logger']> {
+  const logger: NonNullable<Parameters<typeof createSlackbotV2>[0]['logger']> = {
+    debug: (event: string, data?: unknown) => logs.push({ data, event, level: 'debug' }),
+    info: (event: string, data?: unknown) => logs.push({ data, event, level: 'info' }),
+    warn: (event: string, data?: unknown) => logs.push({ data, event, level: 'warn' }),
+    error: (event: string, data?: unknown) => logs.push({ data, event, level: 'error' }),
+    child: () => logger
+  }
+  return logger
+}
+
+function hasLog(logs: CapturedLog[], event: string): boolean {
+  return logs.some(log => log.event === event)
+}
+
+function logData(logs: CapturedLog[], event: string): Record<string, unknown> | undefined {
+  const data = logs.find(log => log.event === event)?.data
+  return isRecord(data) ? data : undefined
 }
 
 function sampleCodexNotifications(answer: string): ServerNotification[] {

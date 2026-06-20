@@ -280,6 +280,16 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
+  # When true, api-rs upserts the shared iron-control infra role and its
+  # backing secrets at startup and on tool-secret reconciliation intervals.
+  # Set false when multiple Centaur instances share one console/1Password
+  # Connect control plane and infra secrets are managed out of band.
+  syncInfraSecrets: true
+  # Workflow enablement policy. Production defaults to all workflows enabled.
+  # Set workflowEnableMode: allowlist in staging and list allowed workflow names
+  # in workflowAllowedNames as a comma/whitespace-separated string.
+  workflowEnableMode: all
+  workflowAllowedNames: ""
   # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
   # the max lifetime. 0 disables that sweep. Interval must be >= 1.
   sandboxIdleStopTtlSecs: 10800 # 3 hours
@@ -327,6 +337,12 @@ slackbotv2:
   assistantStatus: ""
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
+  metrics:
+    # slackbotv2 serves Prometheus text metrics at /metrics. This flag only
+    # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
   extraEnv: {}
   resources: {}
 
