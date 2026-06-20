@@ -1,0 +1,60 @@
+<% content_for :title, "Roles · Centaur Console" %>
+
+<div class="mb-8 flex items-start justify-between gap-4">
+  <div>
+    <h1 class="page-title">Roles</h1>
+    <p class="page-subtitle"><%= pluralize(@roles.size, "role") %> across all namespaces.</p>
+  </div>
+  <a href="<%= new_console_role_path %>" class="btn-primary">Add Role</a>
+</div>
+
+<div class="console-panel">
+  <table class="console-table">
+    <thead class="console-table-head">
+      <tr>
+        <th class="console-th">ID</th>
+        <th class="console-th">Name</th>
+        <th class="console-th">Labels</th>
+        <th class="console-th text-right"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @roles.empty? %>
+        <tr><td colspan="4" class="px-5 py-10 text-center text-zinc-600">No roles yet.</td></tr>
+      <% end %>
+      <% @roles.each do |role| %>
+        <tr class="group cursor-pointer console-row-hover"
+            onclick="window.location='<%= console_role_path(role.oid) %>'">
+          <td class="console-td-nowrap">
+            <% if role.foreign_id.present? %>
+              <div class="text-centaur-400 group-hover:glow" title="<%= role.foreign_id %>"><%= truncate_middle(role.foreign_id) %></div>
+              <%= id_meta_line(role.namespace, oid: role.oid) %>
+            <% else %>
+              <span class="text-centaur-400 group-hover:glow"><%= role.oid %></span>
+              <%= id_meta_line(role.namespace) %>
+            <% end %>
+          </td>
+          <td class="console-td-nowrap text-zinc-100">
+            <% if role.name.presence %>
+              <span title="<%= role.name %>"><%= truncate_middle(role.name) %></span>
+            <% else %>
+              <span class="text-zinc-600">unnamed</span>
+            <% end %>
+          </td>
+          <td class="console-td">
+            <% if role.labels.present? %>
+              <div class="flex flex-wrap gap-1">
+                <% role.labels.each do |k, v| %>
+                  <span class="label-chip"><%= k %>=<%= v %></span>
+                <% end %>
+              </div>
+            <% else %>
+              <span class="text-zinc-600">—</span>
+            <% end %>
+          </td>
+          <td class="console-td text-right text-zinc-600 group-hover:text-centaur-400">→</td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

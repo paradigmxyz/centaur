@@ -19,6 +19,19 @@ class GrantTest < ActiveSupport::TestCase
     assert grant.valid?
   end
 
+  test "direct principal grants can cross namespaces" do
+    grant = Grant.new(valid_attrs(principal: principals(:globex_user),
+                                  static_secret: static_secrets(:github_token_inject)))
+    assert grant.valid?
+  end
+
+  test "role grants must stay in the secret namespace" do
+    grant = Grant.new(valid_attrs(principal: nil, role: roles(:globex_infra),
+                                  static_secret: static_secrets(:github_token_inject)))
+    assert_not grant.valid?
+    assert_includes grant.errors[:role], "must be in the same namespace as the secret"
+  end
+
   test "requires exactly one grantee" do
     grant = Grant.new(valid_attrs(principal: nil))
     assert_not grant.valid?
@@ -102,7 +115,8 @@ class GrantTest < ActiveSupport::TestCase
   end
 
   test "a role grant defaults to the lower role priority" do
-    grant = Grant.create!(valid_attrs(principal: nil, role: roles(:globex_infra)))
+    grant = Grant.create!(valid_attrs(principal: nil, role: roles(:globex_infra),
+                                      static_secret: static_secrets(:globex_prod_secret)))
     assert_equal Grant::DEFAULT_ROLE_PRIORITY, grant.priority
     assert_operator Grant::DEFAULT_DIRECT_PRIORITY, :>, Grant::DEFAULT_ROLE_PRIORITY
   end

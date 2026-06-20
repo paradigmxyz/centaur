@@ -1,0 +1,8 @@
+<% content_for :title, "New Role · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_roles_path %>" class="back-link">← back to roles</a>
+  <h1 class="mt-2 page-title">New Role</h1>
+</div>
+
+<%= render "form", role: @role %>

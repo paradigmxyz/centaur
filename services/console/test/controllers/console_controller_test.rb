@@ -52,6 +52,23 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: "op://eng/gmail/refresh-token"
   end
 
+  test "secret detail page renders editable role grants" do
+    secret = static_secrets(:acme_prod_api_key)
+    grant = grants(:acme_infra_prod_api_key)
+    get console_secret_url("static", secret.oid)
+    assert_response :ok
+    assert_select "h2", text: "Roles"
+    assert_select "form[action=?]", console_secret_grant_role_path("static", secret.oid) do
+      assert_select "select[name=role_id][aria-label=?]", "Role to assign"
+      assert_select "option[value=?]", roles(:acme_admin_role).oid
+      assert_select "option[value=?]", roles(:acme_infra).oid, count: 0
+      assert_select "option[value=?]", roles(:globex_infra).oid, count: 0
+    end
+    assert_select "form[action=?]", console_secret_revoke_role_grant_path("static", secret.oid, grant.oid) do
+      assert_select "button[type=submit]", "Unassign"
+    end
+  end
+
   test "secret detail page renders for every secret kind" do
     [
       [ "static", static_secrets(:github_token_inject) ],
@@ -187,12 +204,19 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     principal = principals(:acme_channel)
     get console_principal_url(principal.oid)
     assert_response :ok
+    assert_select "h2", text: "Roles"
+    assert_select "form[action=?]", console_principal_assign_role_path(principal.oid) do
+      assert_select "select[name=role_id][aria-label=?]", "Role to assign"
+      assert_select "option[value=?]", roles(:acme_admin_role).oid
+      assert_select "option[value=?]", roles(:globex_infra).oid, count: 0
+    end
+    assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid) do
+      assert_select "button[type=submit]", "Unassign"
+    end
     assert_select "h2", text: "Direct Grants"
-    assert_select "select[name=role_id]"
     assert_select "select[name=grantable] optgroup"
-    # Each direct grant exposes a revoke form; each assigned role chip a remove (×) form.
+    # Each direct grant exposes a revoke form.
     assert_select "form[action=?]", console_principal_revoke_grant_path(principal.oid, grants(:acme_channel_github_token).oid)
-    assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid)
     # The direct grant's id links to the secret's detail page.
     assert_select "a[href=?]", console_secret_path("static", static_secrets(:github_token_inject).oid)
   end

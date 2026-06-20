@@ -26,6 +26,14 @@ Rails.application.routes.draw do
   root "console#principals"
   get "console/principals", to: "console#principals", as: :console_principals
   get "console/principals/:id", to: "console#principal", as: :console_principal
+  namespace :console do
+    resources :roles, only: %i[index show new create edit update] do
+      member do
+        post "grants", to: "roles#grant_secret", as: :grant_secret
+        delete "grants/:grant_id", to: "roles#revoke_grant", as: :revoke_grant
+      end
+    end
+  end
   # Role assignments and direct grants managed from the principal detail page. The
   # extra /roles and /grants path segments keep these clear of the show route above
   # and avoid clobbering the console_principal_path helper.
@@ -42,6 +50,8 @@ Rails.application.routes.draw do
     resources :static_secrets, only: %i[new create edit update destroy], path: "secrets/static"
     resources :pg_dsn_secrets, only: %i[new create edit update destroy], path: "secrets/pg_dsn"
     resources :gcp_auth_secrets, only: %i[new create edit update destroy], path: "secrets/gcp_auth"
+    post   "secrets/:kind/:id/roles",           to: "secrets#grant_role",        as: :secret_grant_role
+    delete "secrets/:kind/:id/roles/:grant_id", to: "secrets#revoke_role_grant", as: :secret_revoke_role_grant
   end
   get "console/secrets/:kind/:id", to: "console#secret", as: :console_secret
   get "console/credentials", to: "console#credentials", as: :console_credentials

@@ -336,5 +336,56 @@ module Console
       assert_nil secret.subject
       assert_equal({ "type" => "workload_identity" }, secret.credentials_provider)
     end
+
+    # --- role grants ------------------------------------------------------
+
+    test "POST grant_role grants the secret to a role at the default role priority" do
+      secret = static_secrets(:acme_staging_api_key)
+      role = roles(:acme_admin_role)
+
+      assert_difference -> { role.grants.count }, 1 do
+        post console_secret_grant_role_url("static", secret.oid), params: { role_id: role.oid }
+      end
+
+      assert_redirected_to console_secret_path("static", secret.oid)
+      grant = role.grants.find_by(static_secret: secret)
+      assert_not_nil grant
+      assert_equal Grant::DEFAULT_ROLE_PRIORITY, grant.priority
+    end
+
+    test "POST grant_role is idempotent" do
+      secret = static_secrets(:acme_prod_api_key)
+      role = roles(:acme_infra)
+
+      assert_no_difference -> { role.grants.count } do
+        post console_secret_grant_role_url("static", secret.oid), params: { role_id: role.oid }
+      end
+
+      assert_redirected_to console_secret_path("static", secret.oid)
+    end
+
+    test "POST grant_role rejects a role from another namespace" do
+      secret = static_secrets(:acme_staging_api_key)
+      role = roles(:globex_infra)
+
+      assert_no_difference -> { Grant.count } do
+        post console_secret_grant_role_url("static", secret.oid), params: { role_id: role.oid }
+      end
+
+      assert_redirected_to console_secret_path("static", secret.oid)
+      assert_equal "Role must be in the same namespace as the secret.", flash[:alert]
+    end
+
+    test "DELETE revoke_role_grant removes a role grant from the secret" do
+      secret = static_secrets(:acme_prod_api_key)
+      grant = grants(:acme_infra_prod_api_key)
+
+      assert_difference -> { roles(:acme_infra).grants.count }, -1 do
+        delete console_secret_revoke_role_grant_url("static", secret.oid, grant.oid)
+      end
+
+      assert_redirected_to console_secret_path("static", secret.oid)
+      assert_not Grant.exists?(grant.id)
+    end
   end
 end

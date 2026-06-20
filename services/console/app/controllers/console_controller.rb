@@ -47,11 +47,16 @@ class ConsoleController < ApplicationController
       @grant_sources[[ kind, grant.public_send("#{assoc}_id") ]] <<
         (grant.role ? { type: :role, role: grant.role } : { type: :direct })
     end
-    # Assignment options for the inline forms. Roles/secrets span all namespaces;
-    # the namespace is shown as a label on each option. Already-directly-granted
-    # secrets are filtered out of the grant dropdown (they're in the table above);
-    # a role-inherited secret stays offered, so it can be promoted to a direct grant.
-    @assignable_roles = Role.where.not(id: @principal.role_ids).order(:namespace, :id)
+    # Assignment options for the inline forms. Roles are namespace-scoped, so
+    # only same-namespace roles are assignable from this principal. Secrets span
+    # all namespaces; the namespace is shown as a label on each option.
+    # Already-directly-granted secrets are filtered out of the grant dropdown
+    # (they're in the table above); a role-inherited secret stays offered, so it
+    # can be promoted to a direct grant.
+    @assignable_roles = Role
+      .where(namespace: @principal.namespace)
+      .where.not(id: @principal.role_ids)
+      .order(:id)
     granted_ids = Hash.new { |h, k| h[k] = [] }
     @direct_grants.each do |grant|
       assoc = Grant::GRANTABLE_ASSOCIATIONS.find { |a| grant.public_send("#{a}_id") }
@@ -79,6 +84,13 @@ class ConsoleController < ApplicationController
 
     @kind = params[:kind]
     @secret = cfg[:model].includes(cfg[:includes]).find_by_oid!(params[:id])
+    grantable = @secret.class.name.underscore.to_sym
+    @role_grants = Grant.where(grantable => @secret).where.not(role_id: nil).includes(:role).order(:id)
+    granted_role_ids = @role_grants.map(&:role_id)
+    @assignable_roles = Role
+      .where(namespace: @secret.namespace)
+      .where.not(id: granted_role_ids)
+      .order(:id)
   end
 
   # Managed broker credentials and their refresh-loop status. Distinct from

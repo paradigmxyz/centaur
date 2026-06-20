@@ -31,6 +31,7 @@ class Grant < ApplicationRecord
 
   validate :exactly_one_grantee
   validate :exactly_one_grantable
+  validate :role_grant_same_namespace
   validates :priority, presence: true, numericality: { only_integer: true }
 
   # The grantee this grant attaches the secret to: a principal or a role.
@@ -71,5 +72,12 @@ class Grant < ApplicationRecord
     set = GRANTABLE_ASSOCIATIONS.count { |assoc| send(assoc).present? }
     return if set == 1
     errors.add(:base, "must reference exactly one of #{GRANTABLE_ASSOCIATIONS.join(", ")}")
+  end
+
+  def role_grant_same_namespace
+    return unless role.present?
+    secret = grantable
+    return unless secret.present?
+    errors.add(:role, "must be in the same namespace as the secret") if role.namespace != secret.namespace
   end
 end

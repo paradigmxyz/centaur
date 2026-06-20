@@ -324,8 +324,25 @@ class PrincipalTest < ActiveSupport::TestCase
     secret
   end
 
-  def grant_role_oauth(secret = oauth_token_secrets(:acme_gmail_oauth))
+  def grant_role_oauth(secret = nil)
     PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
+    unless secret
+      secret = OauthTokenSecret.new(
+        namespace: "globex",
+        foreign_id: "oauth-#{SecureRandom.hex(4)}",
+        name: "gmail",
+        grant: "refresh_token",
+        token_endpoint: "https://oauth2.googleapis.com/token",
+        scopes: [ "https://www.googleapis.com/auth/gmail.readonly" ],
+        created_by: users(:globex_admin)
+      )
+      secret.sources.build(source_type: "1password", config: { "secret_ref" => "op://eng/gmail/refresh-token" },
+                           role: "refresh_token", role_kind: "credential_field")
+      secret.sources.build(source_type: "env", config: { "var" => "GMAIL_CLIENT_ID" },
+                           role: "client_id", role_kind: "credential_field")
+      secret.rules.build(host: "gmail.googleapis.com", http_methods: [ "GET" ], paths: [], position: 0)
+      secret.save!
+    end
     Grant.create!(role: roles(:globex_infra), oauth_token_secret: secret, created_by: users(:globex_admin))
     secret
   end
