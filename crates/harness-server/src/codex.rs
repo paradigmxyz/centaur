@@ -7,6 +7,7 @@ use std::thread;
 use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
 
+use crate::otel;
 use crate::server::{BlocksCommand, BlocksState, parse_blocks_line_with_state, write_blocks_error};
 use crate::util::write_value;
 use crate::{AppServerRuntime, HarnessServerError, Result};
@@ -112,7 +113,7 @@ impl AppServerRuntime for CodexHarnessServer {
 }
 
 pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> {
-    let mut codex = CodexJsonRpcChild::spawn()?;
+    let mut codex: Option<CodexJsonRpcChild> = None;
     let mut stdout = io::stdout().lock();
     let mut request_id = 1_i64;
     let mut thread_id: Option<String> = None;
@@ -121,21 +122,6 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
     // lets a later conflicting override be surfaced rather than silently dropped.
     let mut thread_provider: Option<String> = None;
     let mut blocks_state = BlocksState::default();
-
-    let initialize_id = next_request_id(&mut request_id);
-    codex.send_request(
-        initialize_id,
-        "initialize",
-        json!({
-            "clientInfo": {
-                "name": "centaur-harness-server",
-                "title": null,
-                "version": env!("CARGO_PKG_VERSION"),
-            },
-            "capabilities": null,
-        }),
-    )?;
-    codex.read_response_or_forward(initialize_id, &mut stdout)?;
 
     let stdin = io::stdin();
     for raw in stdin.lock().lines() {
@@ -152,12 +138,25 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 model,
                 provider,
                 reasoning,
+                trace_context,
             }) => {
+                let traceparent = trace_context.effective_traceparent();
+                if codex.is_none() {
+                    otel::configure_codex_otel_for_startup(&trace_context)?;
+                    let mut child = CodexJsonRpcChild::spawn()?;
+                    initialize_codex(
+                        &mut child,
+                        &mut stdout,
+                        &mut request_id,
+                        traceparent.as_deref(),
+                    )?;
+                    codex = Some(child);
+                }
                 let model = model.or_else(|| config.default_model());
                 let model_provider =
                     config.model_provider_for(provider.as_deref(), model.as_deref());
                 if let Err(error) = run_codex_user_turn(
-                    &mut codex,
+                    codex.as_mut().expect("codex initialized"),
                     &mut stdout,
                     &mut request_id,
                     &mut thread_id,
@@ -167,6 +166,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                     (model, model_provider),
                     provider,
                     reasoning,
+                    traceparent.as_deref(),
                 ) {
                     let fallback_thread_id = thread_id.as_deref().unwrap_or("codex");
                     eprintln!("Codex blocks turn failed: {error:#}");
@@ -194,6 +194,31 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
     Ok(())
 }
 
+fn initialize_codex<W: Write>(
+    codex: &mut CodexJsonRpcChild,
+    stdout: &mut W,
+    request_id: &mut i64,
+    traceparent: Option<&str>,
+) -> Result<()> {
+    let initialize_id = next_request_id(request_id);
+    codex.send_request(
+        initialize_id,
+        "initialize",
+        json!({
+            "clientInfo": {
+                "name": "centaur-harness-server",
+                "title": null,
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "capabilities": null,
+        }),
+        traceparent,
+    )?;
+    codex
+        .read_response_or_forward(initialize_id, stdout)
+        .map(|_| ())
+}
+
 fn run_codex_user_turn<W: Write>(
     codex: &mut CodexJsonRpcChild,
     stdout: &mut W,
@@ -205,6 +230,7 @@ fn run_codex_user_turn<W: Write>(
     model_and_provider: (Option<String>, String),
     requested_provider: Option<String>,
     reasoning: Option<String>,
+    traceparent: Option<&str>,
 ) -> Result<()> {
     let (model, model_provider) = model_and_provider;
     if thread_id.is_none() {
@@ -213,6 +239,7 @@ fn run_codex_user_turn<W: Write>(
             stdout,
             request_id,
             &model_provider,
+            traceparent,
         )?);
         *thread_provider = Some(model_provider.clone());
     } else if let (Some(requested), Some(pinned)) =
@@ -253,7 +280,7 @@ fn run_codex_user_turn<W: Write>(
     }
 
     let turn_request_id = next_request_id(request_id);
-    codex.send_request(turn_request_id, "turn/start", params)?;
+    codex.send_request(turn_request_id, "turn/start", params, traceparent)?;
     let result = codex.read_response_or_forward(turn_request_id, stdout)?;
     let turn_id = result
         .pointer("/turn/id")
@@ -270,6 +297,7 @@ fn start_or_resume_thread<W: Write>(
     stdout: &mut W,
     request_id: &mut i64,
     model_provider: &str,
+    traceparent: Option<&str>,
 ) -> Result<String> {
     let cwd = env::current_dir()?.display().to_string();
     let resume = env::var("CODEX_CONTINUE_THREAD_ID")
@@ -302,7 +330,7 @@ fn start_or_resume_thread<W: Write>(
     };
 
     let id = next_request_id(request_id);
-    codex.send_request(id, method, params)?;
+    codex.send_request(id, method, params, traceparent)?;
     let result = codex.read_response_or_forward(id, stdout)?;
     result
         .pointer("/thread/id")
@@ -366,12 +394,22 @@ impl CodexJsonRpcChild {
         })
     }
 
-    fn send_request(&mut self, id: i64, method: &str, params: Value) -> Result<()> {
-        self.write_value(&json!({
+    fn send_request(
+        &mut self,
+        id: i64,
+        method: &str,
+        params: Value,
+        traceparent: Option<&str>,
+    ) -> Result<()> {
+        let mut payload = json!({
             "id": id,
             "method": method,
             "params": params,
-        }))
+        });
+        if let Some(traceparent) = traceparent {
+            payload["trace"] = json!({ "traceparent": traceparent });
+        }
+        self.write_value(&payload)
     }
 
     fn send_error_response(&mut self, request: &Value) -> Result<()> {
