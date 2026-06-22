@@ -45,11 +45,10 @@ const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
-const PERSONA_SPEC_ENV_KEYS: [&str; 6] = [
+const PERSONA_SPEC_ENV_KEYS: [&str; 5] = [
     "AGENT_PERSONA",
     "CENTAUR_PERSONA_ID",
     "CENTAUR_PERSONA_PROMPT_HASH",
-    "CENTAUR_EFFECTIVE_PROMPT_HASH",
     "CENTAUR_PERSONA_SOURCE_PATH",
     "CENTAUR_PERSONA_SOURCE_REF",
 ];
@@ -108,7 +107,6 @@ pub struct PersonaContext {
     pub source_path: String,
     pub source_ref: Option<String>,
     pub prompt_hash: String,
-    pub effective_prompt_hash: String,
     pub defaulted: bool,
     pub overlay_chain: Vec<String>,
 }
@@ -158,33 +156,21 @@ impl PersonaRegistry {
         self.personas.get(persona_id)
     }
 
-    fn context_for(
-        &self,
-        persona_id: &str,
-        harness_type: &HarnessType,
-        defaulted: bool,
-    ) -> Result<PersonaContext, String> {
+    fn context_for(&self, persona_id: &str, defaulted: bool) -> Result<PersonaContext, String> {
         let Some(persona) = self.get(persona_id) else {
             return Err(format!(
                 "persona {persona_id:?} is not available in this deployment"
             ));
         };
-        let mut context = PersonaContext {
+        Ok(PersonaContext {
             persona_id: persona.id.clone(),
             source_root: persona.source_root.clone(),
             source_path: persona.source_path.clone(),
             source_ref: persona.source_ref.clone(),
             prompt_hash: persona.prompt_hash.clone(),
-            effective_prompt_hash: String::new(),
             defaulted,
             overlay_chain: self.overlay_chain.clone(),
-        };
-        context.effective_prompt_hash = sha256_hex(format!(
-            "{}\n\n{}",
-            active_deployment_fingerprint_input(&context, harness_type),
-            persona.prompt
-        ));
-        Ok(context)
+        })
     }
 }
 
@@ -330,12 +316,11 @@ impl SessionRuntime {
     fn resolve_persona_for_create(
         &self,
         requested_persona_id: Option<&str>,
-        harness_type: &HarnessType,
     ) -> Result<PersonaResolution, SessionRuntimeError> {
         let requested = requested_persona_id.and_then(clean_persona_id);
         let selected = requested.or_else(|| self.default_persona_id());
         let defaulted = requested.is_none() && selected.is_some();
-        let context = self.resolve_persona_context(selected, harness_type, defaulted)?;
+        let context = self.resolve_persona_context(selected, defaulted)?;
         Ok(PersonaResolution {
             persona_id: selected.map(str::to_owned),
             context,
@@ -346,15 +331,14 @@ impl SessionRuntime {
     fn resolve_stored_persona(
         &self,
         persona_id: Option<&str>,
-        harness_type: &HarnessType,
+        _harness_type: &HarnessType,
     ) -> Result<Option<PersonaContext>, SessionRuntimeError> {
-        self.resolve_persona_context(persona_id.and_then(clean_persona_id), harness_type, false)
+        self.resolve_persona_context(persona_id.and_then(clean_persona_id), false)
     }
 
     fn resolve_persona_context(
         &self,
         persona_id: Option<&str>,
-        harness_type: &HarnessType,
         defaulted: bool,
     ) -> Result<Option<PersonaContext>, SessionRuntimeError> {
         let Some(persona_id) = persona_id else {
@@ -366,7 +350,7 @@ impl SessionRuntime {
             )));
         };
         registry
-            .context_for(persona_id, harness_type, defaulted)
+            .context_for(persona_id, defaulted)
             .map(Some)
             .map_err(SessionRuntimeError::BadRequest)
     }
@@ -479,7 +463,7 @@ impl SessionRuntime {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             let mut harness_switched = false;
-            let persona_resolution = self.resolve_persona_for_create(persona_id, harness_type)?;
+            let persona_resolution = self.resolve_persona_for_create(persona_id)?;
             let mut session_metadata = default_metadata(metadata);
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
@@ -3429,11 +3413,6 @@ fn apply_persona_spec_env(mut spec: SandboxSpec, persona: Option<&PersonaContext
     );
     upsert_spec_env(
         &mut spec,
-        "CENTAUR_EFFECTIVE_PROMPT_HASH",
-        persona.effective_prompt_hash.clone(),
-    );
-    upsert_spec_env(
-        &mut spec,
         "CENTAUR_PERSONA_SOURCE_PATH",
         persona.source_path.clone(),
     );
@@ -3451,32 +3430,6 @@ fn add_persona_metadata(metadata: &mut Value, context: &PersonaContext) {
     if let Value::Object(object) = metadata {
         object.insert("persona".to_owned(), json!(context));
     }
-}
-
-fn active_deployment_fingerprint_input(
-    context: &PersonaContext,
-    harness_type: &HarnessType,
-) -> String {
-    let source_ref = context.source_ref.as_deref().unwrap_or("unknown");
-    format!(
-        "harness={harness_type}\n\
-         persona_id={}\n\
-         persona_source_path={}\n\
-         persona_source_ref={source_ref}\n\
-         persona_prompt_hash={}\n\
-         persona_defaulted={}\n\
-         overlay_chain={}",
-        context.persona_id,
-        context.source_path,
-        context.prompt_hash,
-        context.defaulted,
-        context.overlay_chain.join(" -> "),
-    )
-}
-
-fn sha256_hex(value: impl AsRef<[u8]>) -> String {
-    let digest = Sha256::digest(value.as_ref());
-    format!("sha256:{digest:x}")
 }
 
 async fn record_finished_execution_metric(
@@ -5190,7 +5143,6 @@ mod tests {
             source_path: format!("/repo/tools/personas/{persona_id}"),
             source_ref: Some("abc123".to_owned()),
             prompt_hash: "sha256:prompt".to_owned(),
-            effective_prompt_hash: "sha256:effective".to_owned(),
             defaulted: false,
             overlay_chain: vec!["/repo/tools".to_owned()],
         }
