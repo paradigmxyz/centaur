@@ -24,6 +24,7 @@ use centaur_telemetry::{
     record_sandbox_warm_pool_claim, record_session_execution_finished,
     record_session_execution_started, record_session_failure, record_session_first_token_latency,
 };
+use dashmap::DashMap;
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -47,12 +48,15 @@ const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
+type SessionPipeMap = Arc<DashMap<String, SessionPipe>>;
+type SessionPipeOpenLocks = Arc<DashMap<String, Arc<Mutex<()>>>>;
 
 #[derive(Clone)]
 pub struct SessionRuntime {
     store: PgSessionStore,
     sandbox_runtime: SandboxRuntime,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    sandbox_pipes: SessionPipeMap,
+    sandbox_pipe_open_locks: SessionPipeOpenLocks,
     execution_spans: ExecutionSpanRegistry,
     iron_control: Option<SessionRegistrar>,
     warm_pool: Option<Arc<WarmPoolManager>>,
@@ -138,7 +142,7 @@ struct SessionPipe {
 struct RuntimeContext {
     store: PgSessionStore,
     manager: Arc<SandboxManager>,
-    sandbox_pipes: Arc<Mutex<HashMap<String, SessionPipe>>>,
+    sandbox_pipes: SessionPipeMap,
     execution_spans: ExecutionSpanRegistry,
 }
 
@@ -170,7 +174,8 @@ impl SessionRuntime {
         Self {
             store,
             sandbox_runtime,
-            sandbox_pipes: Arc::new(Mutex::new(HashMap::new())),
+            sandbox_pipes: Arc::new(DashMap::new()),
+            sandbox_pipe_open_locks: Arc::new(DashMap::new()),
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: None,
             warm_pool: None,
@@ -379,7 +384,7 @@ impl SessionRuntime {
     ) -> Result<Session, SessionRuntimeError> {
         let previous = self.store.get_session(thread_key).await?;
         if let Some(sandbox_id) = previous.sandbox_id.as_deref() {
-            self.sandbox_pipes.lock().await.remove(sandbox_id);
+            self.sandbox_pipes.remove(sandbox_id);
             match self
                 .sandbox_runtime
                 .manager
@@ -494,7 +499,7 @@ impl SessionRuntime {
             let id = sandbox.id.as_str().to_owned();
             match self.sandbox_runtime.manager.stop(&sandbox.id).await {
                 Ok(()) => {
-                    self.sandbox_pipes.lock().await.remove(&id);
+                    self.sandbox_pipes.remove(&id);
                     if let Err(error) = self
                         .store
                         .mark_warm_sandbox_failed(&id, "sandbox drained")
@@ -1006,7 +1011,7 @@ impl SessionRuntime {
                             return Ok(sandbox_id.to_owned());
                         }
                         ExistingSandboxAction::ResumeOrReplace => {
-                            self.sandbox_pipes.lock().await.remove(sandbox_id);
+                            self.sandbox_pipes.remove(sandbox_id);
                             match self.sandbox_runtime.manager.resume(&id).await {
                                 Ok(()) => {
                                     span.record("centaur.sandbox_id", sandbox_id);
@@ -1316,7 +1321,35 @@ impl SessionRuntime {
             sandbox_id,
         );
         let result = async {
-            if let Some(pipe) = self.sandbox_pipes.lock().await.get(sandbox_id).cloned() {
+            if let Some(pipe) = self
+                .sandbox_pipes
+                .get(sandbox_id)
+                .map(|entry| entry.clone())
+            {
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_pipe_reused",
+                    thread_key = %thread_key,
+                    sandbox_id,
+                    "reusing session pipe"
+                );
+                return Ok(pipe);
+            }
+
+            let open_lock = {
+                let entry = self
+                    .sandbox_pipe_open_locks
+                    .entry(sandbox_id.to_owned())
+                    .or_insert_with(|| Arc::new(Mutex::new(())));
+                entry.clone()
+            };
+            let _open_guard = open_lock.lock().await;
+
+            if let Some(pipe) = self
+                .sandbox_pipes
+                .get(sandbox_id)
+                .map(|entry| entry.clone())
+            {
                 info!(
                     component = COMPONENT_SESSION_RUNTIME,
                     event = "session_pipe_reused",
@@ -1338,13 +1371,12 @@ impl SessionRuntime {
             };
 
             self.sandbox_pipes
-                .lock()
-                .await
                 .insert(sandbox_id.to_owned(), pipe.clone());
             let ctx = self.context();
             let thread_key = thread_key.clone();
             let pump_thread_key = thread_key.clone();
             let pump_key = sandbox_id.to_owned();
+            let pump_pipe = pipe.clone();
             let stdout = io.stdout;
             let stderr = io.stderr;
             let guard = io.guard;
@@ -1381,7 +1413,10 @@ impl SessionRuntime {
                         )
                         .await;
                 }
-                ctx.sandbox_pipes.lock().await.remove(&pump_key);
+                ctx.sandbox_pipes
+                    .remove_if(&pump_key, |_sandbox_id, current| {
+                        Arc::ptr_eq(&current.stdin, &pump_pipe.stdin)
+                    });
             });
 
             tokio::spawn(async move {
@@ -2991,7 +3026,7 @@ async fn record_idle_pause(
         }
     }
 
-    ctx.sandbox_pipes.lock().await.remove(sandbox_id);
+    ctx.sandbox_pipes.remove(sandbox_id);
     match ctx.manager.pause(&id).await {
         Ok(()) => {
             ctx.store
@@ -4884,6 +4919,31 @@ mod adoption_tests {
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_pipe_ensure_opens_one_io_per_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:pipe-race-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (first_io, _first_stdout, _first_stdin) = mock_io();
+        let (second_io, _second_stdout, _second_stdin) = mock_io();
+        backend.push_io(first_io).await;
+        backend.push_io(second_io).await;
+
+        let runtime = runtime_with(&store, backend.clone());
+        let (first, second) = tokio::join!(
+            runtime.ensure_session_pipe(&thread_key, "sbx-pipe-race"),
+            runtime.ensure_session_pipe(&thread_key, "sbx-pipe-race"),
+        );
+
+        first.expect("first pipe ensure should succeed");
+        second.expect("second pipe ensure should reuse the first pipe");
+        assert_eq!(backend.opens(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

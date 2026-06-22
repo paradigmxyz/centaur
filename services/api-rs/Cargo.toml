@@ -56,6 +56,7 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10.4"
 cron = "0.16.0"
 crossterm = "0.28"
+dashmap = "6"
 eventsource-stream = "0.2.3"
 eyre = "0.6"
 base64 = "0.22"
