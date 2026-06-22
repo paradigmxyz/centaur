@@ -187,7 +187,6 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
-        .route("/personas", get(list_personas))
         .route("/api/personas", get(list_personas))
         .route(
             "/api/session/{thread_key}",
