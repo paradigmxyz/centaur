@@ -377,11 +377,31 @@ function recordForward(
 function recordRenderAttempt(source: string, outcome: string, startedAtMs: number): void {
   slackbotMetrics.renderAttempts.inc({ outcome, source })
   slackbotMetrics.renderAttemptDuration.observe({ outcome, source }, observeSeconds(startedAtMs))
+  slackbotMetrics.sessionDelivery.inc({ delivery_status: deliveryStatusForRenderOutcome(outcome) })
   if (outcome === 'complete' || outcome === 'fallback' || outcome === 'answer_visible') {
     slackbotMetrics.lastSuccessfulRenderTimestamp.set(
       { source },
       Math.floor(Date.now() / 1000)
     )
+  }
+}
+
+function deliveryStatusForRenderOutcome(outcome: string): string {
+  switch (outcome) {
+    case 'complete':
+      return 'streamed'
+    case 'fallback':
+      return 'fallback_sent'
+    case 'answer_visible':
+      return 'answer_visible'
+    case 'retry':
+      return 'deferred'
+    case 'stream_error_rendered':
+      return 'error_visible'
+    case 'size_limit_no_replacement':
+      return 'failed_size_limit'
+    default:
+      return 'failed'
   }
 }
 

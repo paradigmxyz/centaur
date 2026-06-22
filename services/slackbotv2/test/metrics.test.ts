@@ -11,6 +11,9 @@ describe('slackbotv2 metrics', () => {
       outcome: 'success',
       route: '/api/webhooks/slack'
     })
+    slackbotMetrics.sessionDelivery.inc({
+      delivery_status: 'streamed'
+    })
 
     const bot = createSlackbotV2({
       apiUrl: 'http://api.test',
@@ -29,6 +32,9 @@ describe('slackbotv2 metrics', () => {
     expect(body).toContain('slackbotv2_info 1')
     expect(body).toContain(
       'slackbotv2_slack_webhook_requests_total{route="/api/webhooks/slack",event_type="app_mention",outcome="success"} 1'
+    )
+    expect(body).toContain(
+      'centaur_session_delivery_total{delivery_status="streamed"} 1'
     )
   })
 })

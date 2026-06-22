@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -22,7 +22,7 @@ use centaur_session_sqlx::{
 };
 use centaur_telemetry::{
     record_sandbox_warm_pool_claim, record_session_execution_finished,
-    record_session_execution_started,
+    record_session_execution_started, record_session_failure, record_session_first_token_latency,
 };
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use serde_json::{Value, json};
@@ -37,6 +37,7 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::{Instrument, Span, error, info, info_span, warn};
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
+pub const SESSION_FIRST_TOKEN_EVENT: &str = "session.first_token";
 
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -748,7 +749,14 @@ impl SessionRuntime {
             .fail_execution(execution_id, &error_message)
             .await
         {
-            record_finished_execution_metric(&self.store, thread_key, &execution, "failed").await;
+            record_finished_execution_metric(
+                &self.store,
+                thread_key,
+                &execution,
+                "failed",
+                Some(runtime_error_failure_class(error)),
+            )
+            .await;
         }
     }
 
@@ -1967,6 +1975,16 @@ async fn run_stdout_pump(
             else {
                 continue;
             };
+            let first_token_execution = active_execution
+                .as_ref()
+                .filter(|execution| {
+                    execution.execution_id == output_execution_id
+                        && output_state.should_record_first_token(
+                            &output_execution_id,
+                            output_value.as_ref(),
+                        )
+                })
+                .cloned();
             let execution_span = ctx
                 .execution_spans
                 .lock()
@@ -1979,9 +1997,20 @@ async fn run_stdout_pump(
                 sandbox_id,
                 &output_execution_id,
             );
-            append_output_line(&ctx.store, &thread_key, Some(&output_execution_id), &line)
+            let output_event =
+                append_output_line(&ctx.store, &thread_key, Some(&output_execution_id), &line)
                 .instrument(output_span.clone())
                 .await?;
+            if let Some(execution) = first_token_execution {
+                record_first_token_observation(
+                    &ctx,
+                    &thread_key,
+                    &execution,
+                    &output_event,
+                    &mut output_state,
+                )
+                .await;
+            }
             if let Some(value) = output_value.as_ref() {
                 output_state.record_codex_app_server_spans(
                     &output_span,
@@ -2094,9 +2123,99 @@ async fn record_stdout_pump_failure(
     Ok(())
 }
 
+async fn record_first_token_observation(
+    ctx: &RuntimeContext,
+    thread_key: &ThreadKey,
+    execution: &SessionExecution,
+    output_event: &SessionEvent,
+    output_state: &mut StdoutPumpState,
+) {
+    match ctx
+        .store
+        .execution_event_exists(&execution.execution_id, SESSION_FIRST_TOKEN_EVENT)
+        .await
+    {
+        Ok(true) => {
+            output_state.mark_first_token_recorded(&execution.execution_id);
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_first_token_marker_check_failed",
+                thread_key = %thread_key,
+                execution_id = %execution.execution_id,
+                %error,
+                "failed to check existing first-token marker"
+            );
+        }
+    }
+
+    let Some(latency) = first_token_latency(execution, output_event) else {
+        output_state.mark_first_token_recorded(&execution.execution_id);
+        return;
+    };
+    let harness_label = match ctx.store.get_session(thread_key).await {
+        Ok(session) => session.harness_type.to_string(),
+        Err(error) => {
+            warn!(%thread_key, %error, "failed to load session for first-token metric labels");
+            "unknown".to_owned()
+        }
+    };
+    let latency_ms = duration_millis_u64(latency);
+    if let Err(error) = ctx
+        .store
+        .append_event(
+            thread_key,
+            Some(&execution.execution_id),
+            SESSION_FIRST_TOKEN_EVENT,
+            json!({
+                "execution_id": execution.execution_id.as_str(),
+                "thread_key": thread_key.as_str(),
+                "harness_type": harness_label.as_str(),
+                "latency_ms": latency_ms,
+                "output_event_id": output_event.event_id,
+            }),
+        )
+        .await
+    {
+        warn!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_first_token_marker_append_failed",
+            thread_key = %thread_key,
+            execution_id = %execution.execution_id,
+            output_event_id = output_event.event_id,
+            %error,
+            "failed to append first-token marker"
+        );
+    }
+    record_session_first_token_latency(&harness_label, latency);
+    output_state.mark_first_token_recorded(&execution.execution_id);
+    info!(
+        component = COMPONENT_SESSION_RUNTIME,
+        event = "session_first_token_observed",
+        thread_key = %thread_key,
+        execution_id = %execution.execution_id,
+        harness_type = %harness_label,
+        latency_ms,
+        output_event_id = output_event.event_id,
+        "session first answer token observed"
+    );
+}
+
+fn first_token_latency(
+    execution: &SessionExecution,
+    output_event: &SessionEvent,
+) -> Option<Duration> {
+    let started_at = execution.started_at.unwrap_or(execution.created_at);
+    (output_event.created_at - started_at).try_into().ok()
+}
+
 #[derive(Default)]
 struct StdoutPumpState {
     final_answer_text_by_execution: HashMap<String, String>,
+    first_token_recorded_by_execution: HashSet<String>,
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
     tool_call_by_id: HashMap<String, ToolCallLabels>,
@@ -2158,8 +2277,41 @@ impl StdoutPumpState {
         )
     }
 
+    fn should_record_first_token(&self, execution_id: &str, value: Option<&Value>) -> bool {
+        if self
+            .first_token_recorded_by_execution
+            .contains(execution_id)
+            || self
+                .final_answer_text_by_execution
+                .get(execution_id)
+                .is_some_and(|text| !text.trim().is_empty())
+        {
+            return false;
+        }
+
+        let Some(value) = value else {
+            return false;
+        };
+        if output_line_final_answer_text(value).is_some() {
+            return true;
+        }
+        matches!(
+            terminal_output(value, ""),
+            Some(TerminalOutput::Completed {
+                result_text: Some(_),
+                ..
+            })
+        )
+    }
+
+    fn mark_first_token_recorded(&mut self, execution_id: &str) {
+        self.first_token_recorded_by_execution
+            .insert(execution_id.to_owned());
+    }
+
     fn forget(&mut self, execution_id: &str) {
         self.final_answer_text_by_execution.remove(execution_id);
+        self.first_token_recorded_by_execution.remove(execution_id);
         let tool_ids_to_forget = self
             .item_execution_by_id
             .iter()
@@ -2631,6 +2783,7 @@ async fn record_terminal_output(
     execution_id: &str,
     terminal: TerminalOutput,
 ) -> Result<(), SessionRuntimeError> {
+    let mut failure_class = None;
     let (terminal_execution, terminal_status) = match terminal {
         TerminalOutput::Completed {
             reason,
@@ -2661,6 +2814,7 @@ async fn record_terminal_output(
             (execution, "completed")
         }
         TerminalOutput::Failed { error } => {
+            failure_class = Some(terminal_failure_class(&error));
             let Some(execution) = ctx
                 .store
                 .fail_execution_if_active(execution_id, &error)
@@ -2684,8 +2838,14 @@ async fn record_terminal_output(
         }
     };
     ctx.execution_spans.lock().await.remove(execution_id);
-    record_finished_execution_metric(&ctx.store, thread_key, &terminal_execution, terminal_status)
-        .await;
+    record_finished_execution_metric(
+        &ctx.store,
+        thread_key,
+        &terminal_execution,
+        terminal_status,
+        failure_class,
+    )
+    .await;
     if let Some(idle_timeout) = idle_timeout_from_execution(&terminal_execution) {
         spawn_idle_pause(
             ctx.clone(),
@@ -2752,7 +2912,14 @@ async fn record_max_duration_failure(
             }),
         )
         .await?;
-    record_finished_execution_metric(&ctx.store, thread_key, &execution, "failed").await;
+    record_finished_execution_metric(
+        &ctx.store,
+        thread_key,
+        &execution,
+        "failed",
+        Some("timeout"),
+    )
+    .await;
     if let Some(idle_timeout) = idle_timeout.or_else(|| idle_timeout_from_execution(&execution))
         && let Some(sandbox_id) = ctx.store.get_session(thread_key).await?.sandbox_id
     {
@@ -2914,6 +3081,7 @@ async fn record_finished_execution_metric(
     thread_key: &ThreadKey,
     execution: &SessionExecution,
     status: &'static str,
+    failure_class: Option<&'static str>,
 ) {
     let harness_label = match store.get_session(thread_key).await {
         Ok(session) => session.harness_type.to_string(),
@@ -2923,12 +3091,44 @@ async fn record_finished_execution_metric(
         }
     };
     record_session_execution_finished(&harness_label, status, execution_duration(execution));
+    if let Some(failure_class) = failure_class {
+        record_session_failure(&harness_label, failure_class);
+    }
 }
 
 fn execution_duration(execution: &SessionExecution) -> Option<Duration> {
     let started_at = execution.started_at.unwrap_or(execution.created_at);
     let completed_at = execution.completed_at?;
     (completed_at - started_at).try_into().ok()
+}
+
+fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
+    match error {
+        SessionRuntimeError::BadRequest(_) => "bad_request",
+        SessionRuntimeError::Store(_) => "store",
+        SessionRuntimeError::Sandbox(SandboxError::NotFound(_)) => "sandbox_not_found",
+        SessionRuntimeError::Sandbox(SandboxError::Unsupported { .. }) => "sandbox_unsupported",
+        SessionRuntimeError::Sandbox(SandboxError::NotReady(_)) => "sandbox_not_ready",
+        SessionRuntimeError::Sandbox(SandboxError::Io { .. }) => "sandbox_io",
+        SessionRuntimeError::Sandbox(SandboxError::Backend { .. }) => "sandbox_backend",
+        SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
+        SessionRuntimeError::IronControl(_) => "iron_control",
+        SessionRuntimeError::WarmPool(_) => "warm_pool",
+    }
+}
+
+fn terminal_failure_class(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("max_duration") || error.contains("timeout") || error.contains("timed out") {
+        return "timeout";
+    }
+    if error.contains("execution orphaned") {
+        return "orphaned";
+    }
+    if error.contains("sandbox stdout") || error.contains("stdout closed") {
+        return "sandbox_io";
+    }
+    "harness"
 }
 
 fn should_attach_session_pipe(status: &SandboxStatus) -> bool {
@@ -3349,9 +3549,9 @@ async fn append_output_line(
     thread_key: &ThreadKey,
     execution_id: Option<&str>,
     line: &str,
-) -> Result<(), SessionRuntimeError> {
+) -> Result<SessionEvent, SessionRuntimeError> {
     let safe_line = redact_sensitive_text(line);
-    store
+    let event = store
         .append_event(
             thread_key,
             execution_id,
@@ -3359,7 +3559,7 @@ async fn append_output_line(
             Value::String(safe_line),
         )
         .await?;
-    Ok(())
+    Ok(event)
 }
 
 fn redact_sensitive_text(input: &str) -> String {
@@ -3820,6 +4020,39 @@ mod tests {
     #[test]
     fn timeout_event_uses_millisecond_duration() {
         assert_eq!(duration_millis_u64(Duration::from_millis(3_000)), 3_000);
+    }
+
+    #[test]
+    fn stdout_state_first_token_detection_uses_answer_text() {
+        let state = StdoutPumpState::default();
+        let turn_started = json!({"type": "turn.started", "turn_id": "turn-1"});
+        let delta = json!({
+            "type": "item.agentMessage.delta",
+            "turnId": "turn-1",
+            "itemId": "msg-1",
+            "delta": "Hello"
+        });
+        let terminal_result = json!({"type": "result", "result": {"text": "Done"}});
+
+        assert!(!state.should_record_first_token("exe-1", Some(&turn_started)));
+        assert!(state.should_record_first_token("exe-1", Some(&delta)));
+        assert!(state.should_record_first_token("exe-2", Some(&terminal_result)));
+    }
+
+    #[test]
+    fn terminal_failure_class_is_low_cardinality() {
+        assert_eq!(
+            terminal_failure_class("sandbox stdout closed before terminal output"),
+            "sandbox_io"
+        );
+        assert_eq!(
+            terminal_failure_class("execution orphaned by control plane restart"),
+            "orphaned"
+        );
+        assert_eq!(
+            terminal_failure_class("turn failed: model error"),
+            "harness"
+        );
     }
 
     #[test]
