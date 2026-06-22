@@ -4,7 +4,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use centaur_iron_control::SessionRegistrar;
 use centaur_sandbox_core::{
     Mount, SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
@@ -46,10 +45,10 @@ const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
-const ACTIVE_DEPLOYMENT_ENV: &str = "CENTAUR_ACTIVE_DEPLOYMENT_BLOCK_B64";
-const PERSONA_PROMPT_ENV: &str = "CENTAUR_PERSONA_PROMPT_B64";
 
-type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync>;
+type SandboxSpecFactory = Arc<
+    dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
+>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 type SessionPipeMap = Arc<DashMap<String, SessionPipe>>;
@@ -360,42 +359,6 @@ impl SessionRuntime {
             persona.prompt
         ));
         Ok(Some(context))
-    }
-
-    fn apply_persona_to_spec(
-        &self,
-        spec: &mut SandboxSpec,
-        context: &PersonaContext,
-        harness_type: &HarnessType,
-    ) {
-        let Some(registry) = self.personas.as_ref() else {
-            return;
-        };
-        let Some(persona) = registry.get(&context.persona_id) else {
-            return;
-        };
-        upsert_spec_env(spec, "AGENT_PERSONA", context.persona_id.clone());
-        upsert_spec_env(spec, "CENTAUR_PERSONA_ID", context.persona_id.clone());
-        upsert_spec_env(
-            spec,
-            "CENTAUR_PERSONA_PROMPT_HASH",
-            context.prompt_hash.clone(),
-        );
-        upsert_spec_env(
-            spec,
-            "CENTAUR_EFFECTIVE_PROMPT_HASH",
-            context.effective_prompt_hash.clone(),
-        );
-        upsert_spec_env(
-            spec,
-            ACTIVE_DEPLOYMENT_ENV,
-            BASE64_STANDARD.encode(active_deployment_block(context, harness_type)),
-        );
-        upsert_spec_env(
-            spec,
-            PERSONA_PROMPT_ENV,
-            BASE64_STANDARD.encode(&persona.prompt),
-        );
     }
 
     fn context(&self) -> RuntimeContext {
@@ -1433,11 +1396,12 @@ impl SessionRuntime {
                 }
             }
 
-            let mut spec =
-                (self.sandbox_runtime.spec_factory)(thread_key, execution_id, harness_type);
-            if let Some(context) = persona_context.as_ref() {
-                self.apply_persona_to_spec(&mut spec, context, harness_type);
-            }
+            let mut spec = (self.sandbox_runtime.spec_factory)(
+                thread_key,
+                execution_id,
+                harness_type,
+                persona_context.as_ref(),
+            );
             if let Some(principal) = iron_control_principal {
                 spec.iron_control_principal = Some(principal.to_owned());
             }
@@ -1957,9 +1921,10 @@ impl SandboxRuntime {
     pub fn backend(backend: Arc<dyn SandboxBackend>, spec: SandboxSpec) -> Self {
         let warm_spec = spec.clone();
         let spec_factory =
-            move |_thread_key: &ThreadKey, _execution_id: &str, _harness: &HarnessType| {
-                spec.clone()
-            };
+            move |_thread_key: &ThreadKey,
+                  _execution_id: &str,
+                  _harness: &HarnessType,
+                  _persona: Option<&PersonaContext>| { spec.clone() };
         let warm_spec_factory = move || warm_spec.clone();
         Self::backend_with_warm_spec_factory(backend, spec_factory, warm_spec_factory)
     }
@@ -1972,7 +1937,9 @@ impl SandboxRuntime {
         let warm_workload = workload.clone();
         let mut runtime = Self::backend_with_warm_spec_factory(
             backend,
-            move |thread_key, _execution_id, harness| workload.spec(thread_key, harness),
+            move |thread_key, _execution_id, harness, persona| {
+                workload.spec(thread_key, harness, persona)
+            },
             move || warm_workload.warm_spec(),
         );
         runtime.warm_harness = warm_harness;
@@ -1981,7 +1948,10 @@ impl SandboxRuntime {
 
     pub fn backend_with_spec_factory<F>(backend: Arc<dyn SandboxBackend>, spec_factory: F) -> Self
     where
-        F: Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync + 'static,
+        F: Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec
+            + Send
+            + Sync
+            + 'static,
     {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
@@ -1998,7 +1968,10 @@ impl SandboxRuntime {
         warm_spec_factory: W,
     ) -> Self
     where
-        F: Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync + 'static,
+        F: Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec
+            + Send
+            + Sync
+            + 'static,
         W: Fn() -> SandboxSpec + Send + Sync + 'static,
     {
         let warm_spec_factory: WarmSandboxSpecFactory = Arc::new(warm_spec_factory);
@@ -2048,23 +2021,36 @@ impl SandboxWorkloadMode {
         }
     }
 
-    fn spec(&self, thread_key: &ThreadKey, harness: &HarnessType) -> SandboxSpec {
-        self.spec_for(Some(thread_key), harness)
+    fn spec(
+        &self,
+        thread_key: &ThreadKey,
+        harness: &HarnessType,
+        persona: Option<&PersonaContext>,
+    ) -> SandboxSpec {
+        self.spec_for(Some(thread_key), harness, persona)
     }
 
     fn warm_spec(&self) -> SandboxSpec {
         match self {
-            Self::MockAppServer { .. } => self.spec_for(None, &HarnessType::Codex),
-            Self::CodexAppServer { harness, .. } => self.spec_for(None, harness),
+            Self::MockAppServer { .. } => self.spec_for(None, &HarnessType::Codex, None),
+            Self::CodexAppServer { harness, .. } => self.spec_for(None, harness, None),
         }
     }
 
-    fn spec_for(&self, thread_key: Option<&ThreadKey>, harness: &HarnessType) -> SandboxSpec {
+    fn spec_for(
+        &self,
+        thread_key: Option<&ThreadKey>,
+        harness: &HarnessType,
+        persona: Option<&PersonaContext>,
+    ) -> SandboxSpec {
         match self {
-            Self::MockAppServer { image } => SandboxSpec::new(image)
-                .command(["/bin/sh", "-lc"])
-                .args([mock_app_server_script()])
-                .env("CENTAUR_HARNESS_TYPE", harness.as_ref()),
+            Self::MockAppServer { image } => apply_persona_spec_env(
+                SandboxSpec::new(image)
+                    .command(["/bin/sh", "-lc"])
+                    .args([mock_app_server_script()])
+                    .env("CENTAUR_HARNESS_TYPE", harness.as_ref()),
+                persona,
+            ),
             Self::CodexAppServer {
                 image, env, mounts, ..
             } => {
@@ -2091,7 +2077,7 @@ impl SandboxWorkloadMode {
                 for (name, value) in env {
                     spec = spec.env(name.clone(), value.clone());
                 }
-                spec
+                apply_persona_spec_env(spec, persona)
             }
         }
     }
@@ -3412,35 +3398,47 @@ fn upsert_spec_env(spec: &mut SandboxSpec, name: &str, value: String) {
     }
 }
 
+fn apply_persona_spec_env(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -> SandboxSpec {
+    remove_spec_env(&mut spec, "AGENT_PERSONA");
+    remove_spec_env(&mut spec, "CENTAUR_PERSONA_ID");
+    remove_spec_env(&mut spec, "CENTAUR_PERSONA_PROMPT_HASH");
+    remove_spec_env(&mut spec, "CENTAUR_EFFECTIVE_PROMPT_HASH");
+    remove_spec_env(&mut spec, "CENTAUR_PERSONA_SOURCE_PATH");
+    remove_spec_env(&mut spec, "CENTAUR_PERSONA_SOURCE_REF");
+    let Some(persona) = persona else {
+        return spec;
+    };
+    upsert_spec_env(&mut spec, "AGENT_PERSONA", persona.persona_id.clone());
+    upsert_spec_env(&mut spec, "CENTAUR_PERSONA_ID", persona.persona_id.clone());
+    upsert_spec_env(
+        &mut spec,
+        "CENTAUR_PERSONA_PROMPT_HASH",
+        persona.prompt_hash.clone(),
+    );
+    upsert_spec_env(
+        &mut spec,
+        "CENTAUR_EFFECTIVE_PROMPT_HASH",
+        persona.effective_prompt_hash.clone(),
+    );
+    upsert_spec_env(
+        &mut spec,
+        "CENTAUR_PERSONA_SOURCE_PATH",
+        persona.source_path.clone(),
+    );
+    if let Some(source_ref) = persona.source_ref.as_ref() {
+        upsert_spec_env(&mut spec, "CENTAUR_PERSONA_SOURCE_REF", source_ref.clone());
+    }
+    spec
+}
+
+fn remove_spec_env(spec: &mut SandboxSpec, name: &str) {
+    spec.env.retain(|env| env.name != name);
+}
+
 fn add_persona_metadata(metadata: &mut Value, context: &PersonaContext) {
     if let Value::Object(object) = metadata {
         object.insert("persona".to_owned(), json!(context));
     }
-}
-
-fn active_deployment_block(context: &PersonaContext, harness_type: &HarnessType) -> String {
-    let source_ref = context.source_ref.as_deref().unwrap_or("unknown");
-    let overlay_chain = if context.overlay_chain.is_empty() {
-        "[]".to_owned()
-    } else {
-        context.overlay_chain.join(" -> ")
-    };
-    format!(
-        "[Active deployment]\n\
-         harness: {harness_type}\n\
-         persona_id: {}\n\
-         persona_source_path: {}\n\
-         persona_source_ref: {source_ref}\n\
-         persona_prompt_hash: {}\n\
-         effective_prompt_hash: {}\n\
-         persona_defaulted: {}\n\
-         overlay_chain: {overlay_chain}",
-        context.persona_id,
-        context.source_path,
-        context.prompt_hash,
-        context.effective_prompt_hash,
-        context.defaulted,
-    )
 }
 
 fn active_deployment_fingerprint_input(
@@ -4886,7 +4884,7 @@ mod tests {
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let spec = workload.spec(&thread_key, &HarnessType::Codex);
+        let spec = workload.spec(&thread_key, &HarnessType::Codex, None);
 
         assert_eq!(spec.mounts.len(), 1);
         assert_eq!(spec.mounts[0].target_path, "/home/agent/github");
@@ -4900,6 +4898,31 @@ mod tests {
     }
 
     #[test]
+    fn codex_workload_reflects_resolved_persona_in_sandbox_spec() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            [("AGENT_PERSONA".to_owned(), "stale".to_owned())],
+            HarnessType::Codex,
+        );
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        let persona = test_persona_context("eng");
+
+        let spec = workload.spec(&thread_key, &HarnessType::Codex, Some(&persona));
+
+        assert_eq!(env_value(&spec, "AGENT_PERSONA"), Some("eng"));
+        assert_eq!(env_value(&spec, "CENTAUR_PERSONA_ID"), Some("eng"));
+        assert_eq!(
+            env_value(&spec, "CENTAUR_PERSONA_PROMPT_HASH"),
+            Some("sha256:prompt")
+        );
+        assert_eq!(
+            env_value(&spec, "CENTAUR_PERSONA_SOURCE_REF"),
+            Some("abc123")
+        );
+        assert_eq!(env_value(&workload.warm_spec(), "AGENT_PERSONA"), None);
+    }
+
+    #[test]
     fn codex_workload_does_not_inject_stale_continue_thread_id() {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
@@ -4908,7 +4931,7 @@ mod tests {
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let spec = workload.spec(&thread_key, &HarnessType::Codex);
+        let spec = workload.spec(&thread_key, &HarnessType::Codex, None);
 
         assert_eq!(
             spec.env
@@ -4935,7 +4958,7 @@ mod tests {
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let claimed_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode);
+        let claimed_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode, None);
         let warm_spec = workload.warm_spec();
 
         assert_eq!(
@@ -4977,8 +5000,8 @@ mod tests {
         let second_thread_key = ThreadKey::parse("chat:C456:1780000000.000001").unwrap();
 
         assert_ne!(
-            sandbox_spec_key(&workload.spec(&first_thread_key, &HarnessType::ClaudeCode)),
-            sandbox_spec_key(&workload.spec(&second_thread_key, &HarnessType::ClaudeCode))
+            sandbox_spec_key(&workload.spec(&first_thread_key, &HarnessType::ClaudeCode, None)),
+            sandbox_spec_key(&workload.spec(&second_thread_key, &HarnessType::ClaudeCode, None))
         );
         assert_eq!(
             sandbox_spec_key(&workload.warm_spec()),
@@ -4995,9 +5018,9 @@ mod tests {
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let codex_spec = workload.spec(&thread_key, &HarnessType::Codex);
-        let claude_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode);
-        let amp_spec = workload.spec(&thread_key, &HarnessType::Amp);
+        let codex_spec = workload.spec(&thread_key, &HarnessType::Codex, None);
+        let claude_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode, None);
+        let amp_spec = workload.spec(&thread_key, &HarnessType::Amp, None);
 
         assert_eq!(codex_spec.args, vec!["harness-server", "codex"]);
         assert_eq!(claude_spec.args, vec!["harness-server", "claude-code"]);
@@ -5015,7 +5038,7 @@ mod tests {
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
-        let spec = workload.spec(&thread_key, &HarnessType::ClaudeCode);
+        let spec = workload.spec(&thread_key, &HarnessType::ClaudeCode, None);
 
         assert_eq!(
             spec.labels.get("centaur.ai/component").map(String::as_str),
@@ -5044,7 +5067,9 @@ mod tests {
         // warm claim for it would hand over the wrong harness.
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
         assert_eq!(
-            workload.spec(&thread_key, &HarnessType::ClaudeCode).args,
+            workload
+                .spec(&thread_key, &HarnessType::ClaudeCode, None)
+                .args,
             vec!["harness-server", "claude-code"]
         );
     }
@@ -5144,6 +5169,19 @@ mod tests {
             .iter()
             .find(|env| env.name == name)
             .map(|env| env.value.as_str())
+    }
+
+    fn test_persona_context(persona_id: &str) -> PersonaContext {
+        PersonaContext {
+            persona_id: persona_id.to_owned(),
+            source_root: "/repo/tools".to_owned(),
+            source_path: format!("/repo/tools/personas/{persona_id}"),
+            source_ref: Some("abc123".to_owned()),
+            prompt_hash: "sha256:prompt".to_owned(),
+            effective_prompt_hash: "sha256:effective".to_owned(),
+            defaulted: false,
+            overlay_chain: vec!["/repo/tools".to_owned()],
+        }
     }
 }
 

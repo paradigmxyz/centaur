@@ -971,7 +971,6 @@ name = "centaur-session-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64",
  "centaur-iron-control",
  "centaur-sandbox-core",
  "centaur-sandbox-manager",

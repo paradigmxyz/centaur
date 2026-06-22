@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-base64.workspace = true
 centaur-iron-control.workspace = true
 centaur-sandbox-core.workspace = true
 centaur-sandbox-manager.workspace = true
