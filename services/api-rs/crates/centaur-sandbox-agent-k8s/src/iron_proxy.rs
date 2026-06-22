@@ -40,6 +40,7 @@ const PROXY_DNS_PROXY_IP: &str = "127.0.0.1";
 const PROXY_TLS_MODE: &str = "mitm";
 const PROXY_TLS_CA_CERT_PATH: &str = "/etc/iron-proxy/ca.crt";
 const PROXY_TLS_CA_KEY_PATH: &str = "/etc/iron-proxy/ca.key";
+const PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT: &str = "120s";
 const PROXY_LOG_LEVEL: &str = "info";
 // iron-control multiplexes every Postgres upstream through a single listener,
 // routing by database name; the control plane owns each upstream DSN/role/
@@ -970,6 +971,10 @@ fn iron_proxy_env_vars(
     // env instead of a config file. CA paths match the entrypoint's CA copy.
     for (name, value) in [
         ("IRON_PROXY_TUNNEL_LISTEN", format!(":{PROXY_TUNNEL_PORT}")),
+        (
+            "IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT",
+            PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT.to_owned(),
+        ),
         ("IRON_DNS_LISTEN", PROXY_DNS_LISTEN.to_owned()),
         ("IRON_DNS_PROXY_IP", PROXY_DNS_PROXY_IP.to_owned()),
         ("IRON_TLS_MODE", PROXY_TLS_MODE.to_owned()),
@@ -1575,6 +1580,24 @@ mod tests {
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
+    }
+
+    #[test]
+    fn managed_proxy_env_sets_response_header_timeout() {
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        let sync = ProxySyncEnv {
+            proxy_id: "proxy-id".to_owned(),
+            control_url: "http://iron-control".to_owned(),
+            token: "proxy-token".to_owned(),
+        };
+
+        let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
+        let timeout = env
+            .iter()
+            .find(|var| var.name == "IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT")
+            .and_then(|var| var.value.as_deref());
+
+        assert_eq!(timeout, Some("120s"));
     }
 
     #[test]
