@@ -414,7 +414,34 @@ elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
     cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
 fi
 
-# Persona prompt injection is done by the API when it writes AGENTS_BASE.md.
+# The API resolves personas against the deployment registry and passes a
+# materialized prompt bundle. Keep AGENT_PERSONA as reflective state only; the
+# prompt content below is the authoritative persona instruction for this
+# sandbox.
+if [ -n "${CENTAUR_ACTIVE_DEPLOYMENT_BLOCK_B64:-}" ] && [ -f "$TARGET_PROMPT" ]; then
+    ACTIVE_BLOCK_FILE="$(mktemp)"
+    if printf '%s' "$CENTAUR_ACTIVE_DEPLOYMENT_BLOCK_B64" | base64 -d > "$ACTIVE_BLOCK_FILE" 2>/dev/null; then
+        PROMPT_WITH_BLOCK="$(mktemp)"
+        cat "$ACTIVE_BLOCK_FILE" > "$PROMPT_WITH_BLOCK"
+        printf '\n\n---\n\n' >> "$PROMPT_WITH_BLOCK"
+        cat "$TARGET_PROMPT" >> "$PROMPT_WITH_BLOCK"
+        mv "$PROMPT_WITH_BLOCK" "$TARGET_PROMPT"
+    else
+        echo "warning: failed to decode CENTAUR_ACTIVE_DEPLOYMENT_BLOCK_B64" >&2
+    fi
+    rm -f "$ACTIVE_BLOCK_FILE" "${PROMPT_WITH_BLOCK:-}"
+fi
+
+if [ -n "${CENTAUR_PERSONA_PROMPT_B64:-}" ] && [ -f "$TARGET_PROMPT" ]; then
+    PERSONA_PROMPT_FILE="$(mktemp)"
+    if printf '%s' "$CENTAUR_PERSONA_PROMPT_B64" | base64 -d > "$PERSONA_PROMPT_FILE" 2>/dev/null; then
+        printf '\n\n---\n\n' >> "$TARGET_PROMPT"
+        cat "$PERSONA_PROMPT_FILE" >> "$TARGET_PROMPT"
+    else
+        echo "warning: failed to decode CENTAUR_PERSONA_PROMPT_B64" >&2
+    fi
+    rm -f "$PERSONA_PROMPT_FILE"
+fi
 
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
 cd "$WORKSPACE_DIR"

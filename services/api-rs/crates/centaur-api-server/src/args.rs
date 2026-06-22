@@ -27,7 +27,7 @@ use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::SandboxWorkloadMode;
+use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode};
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{error, info, warn};
@@ -35,7 +35,8 @@ use tracing::{error, info, warn};
 use crate::{
     ServerError,
     tool_discovery::{
-        DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_tool_proxy_fragment,
+        DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_persona_registry,
+        discover_tool_proxy_fragment,
     },
 };
 
@@ -76,6 +77,10 @@ impl Args {
         &self,
     ) -> Result<Option<IronControlToolReconciler>, ServerError> {
         self.sandbox.iron_control_tool_reconciler()
+    }
+
+    pub(crate) fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
+        self.sandbox.persona_registry()
     }
 
     pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
@@ -473,6 +478,8 @@ struct SandboxArgs {
         default_value = "codex"
     )]
     default_harness: HarnessType,
+    #[arg(long = "centaur-default-persona", env = "CENTAUR_DEFAULT_PERSONA")]
+    default_persona: Option<String>,
     #[arg(
         long = "session-sandbox-k8s-namespace",
         alias = "kubernetes-namespace",
@@ -700,6 +707,14 @@ impl SandboxArgs {
                 .unwrap_or_default(),
             interval: Duration::from_secs(self.tool_proxy_reconcile_interval_secs),
         }))
+    }
+
+    fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
+        let default_persona_id = clean_optional_value(self.default_persona.as_deref());
+        Ok(discover_persona_registry(
+            &self.tools.resolve_tool_dirs()?,
+            default_persona_id,
+        )?)
     }
 
     async fn runtime(&self) -> Result<SandboxRuntime, ServerError> {

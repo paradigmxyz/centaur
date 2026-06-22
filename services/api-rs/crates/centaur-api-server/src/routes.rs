@@ -29,7 +29,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::ThreadKey;
 use centaur_session_runtime::{
-    ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionRuntime,
+    ExecuteSessionInput, HarnessConflictPolicy, PersonaSummary, SandboxRuntime, SessionRuntime,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
@@ -187,6 +187,8 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .route("/personas", get(list_personas))
+        .route("/api/personas", get(list_personas))
         .route(
             "/api/session/{thread_key}",
             post(create_or_get_session).get(get_session_context),
@@ -354,6 +356,12 @@ async fn get_session_context(
         slack: slack_thread_context(&thread_key),
         thread_key,
     }))
+}
+
+async fn list_personas(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PersonaSummary>>, ApiError> {
+    Ok(Json(state.runtime()?.personas()))
 }
 
 fn slack_thread_context(thread_key: &ThreadKey) -> Option<SlackThreadContext> {

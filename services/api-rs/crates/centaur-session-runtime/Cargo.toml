@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 centaur-iron-control.workspace = true
 centaur-sandbox-core.workspace = true
 centaur-sandbox-manager.workspace = true
@@ -14,6 +15,7 @@ centaur-session-sqlx.workspace = true
 centaur-telemetry.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
