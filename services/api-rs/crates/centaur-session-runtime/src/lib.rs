@@ -45,13 +45,6 @@ const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
-const PERSONA_SPEC_ENV_KEYS: [&str; 5] = [
-    "AGENT_PERSONA",
-    "CENTAUR_PERSONA_ID",
-    "CENTAUR_PERSONA_PROMPT_HASH",
-    "CENTAUR_PERSONA_SOURCE_PATH",
-    "CENTAUR_PERSONA_SOURCE_REF",
-];
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
@@ -3398,7 +3391,13 @@ fn upsert_spec_env(spec: &mut SandboxSpec, name: &str, value: String) {
 }
 
 fn apply_persona_spec_env(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -> SandboxSpec {
-    for name in PERSONA_SPEC_ENV_KEYS {
+    for name in [
+        "AGENT_PERSONA",
+        "CENTAUR_PERSONA_ID",
+        "CENTAUR_PERSONA_PROMPT_HASH",
+        "CENTAUR_PERSONA_SOURCE_PATH",
+        "CENTAUR_PERSONA_SOURCE_REF",
+    ] {
         remove_spec_env(&mut spec, name);
     }
     let Some(persona) = persona else {

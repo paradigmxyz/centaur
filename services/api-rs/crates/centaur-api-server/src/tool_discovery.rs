@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use centaur_iron_proxy::{
@@ -116,7 +115,7 @@ impl ToolDiscoveryConfig {
 pub(crate) fn discover_tool_proxy_fragment(
     tool_dirs: &[PathBuf],
 ) -> Result<DiscoveredToolProxyFragment, ToolDiscoveryError> {
-    let tools = collect_tools(tool_dirs)?;
+    let tools = collect_plugin_metadata(tool_dirs)?.tools;
     let mut secrets = Vec::new();
     for tool in &tools {
         secrets.extend(tool.secrets.iter().cloned());
@@ -140,41 +139,8 @@ pub(crate) fn discover_persona_registry(
     tool_dirs: &[PathBuf],
     default_persona_id: Option<String>,
 ) -> Result<PersonaRegistry, ToolDiscoveryError> {
-    let mut seen = BTreeMap::<String, usize>::new();
-    let mut personas = Vec::<PersonaDefinition>::new();
-    let mut overlay_chain = Vec::new();
-
-    for (dir_idx, base_dir) in tool_dirs.iter().enumerate() {
-        overlay_chain.push(base_dir.display().to_string());
-        if !base_dir.exists() {
-            continue;
-        }
-        for persona_dir in candidate_tool_dirs(base_dir)? {
-            let pyproject_path = persona_dir.join("pyproject.toml");
-            if !pyproject_path.exists() {
-                continue;
-            }
-            let Some(persona) = load_persona_definition(base_dir, &persona_dir, &pyproject_path)?
-            else {
-                continue;
-            };
-            if let Some(prev_dir_idx) = seen.insert(persona.id.clone(), dir_idx) {
-                if let Some(prev_pos) = personas.iter().position(|item| item.id == persona.id) {
-                    warn!(
-                        persona = %persona.id,
-                        shadowed_dir = ?tool_dirs.get(prev_dir_idx),
-                        by_dir = ?base_dir,
-                        "api-rs persona metadata shadowed"
-                    );
-                    personas[prev_pos] = persona;
-                }
-            } else {
-                personas.push(persona);
-            }
-        }
-    }
-
-    PersonaRegistry::new(personas, default_persona_id, overlay_chain)
+    let plugins = collect_plugin_metadata(tool_dirs)?;
+    PersonaRegistry::new(plugins.personas, default_persona_id, plugins.overlay_chain)
         .map_err(ToolDiscoveryError::Invalid)
 }
 
@@ -311,42 +277,37 @@ fn parse_toml(path: &Path, contents: &str) -> Result<TomlValue, ToolDiscoveryErr
     })
 }
 
-fn sha256_hex(value: impl AsRef<[u8]>) -> String {
-    let digest = Sha256::digest(value.as_ref());
-    format!("sha256:{digest:x}")
-}
-
-fn git_head_for_path(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let head = String::from_utf8(output.stdout).ok()?;
-    let head = head.trim();
-    if head.is_empty() {
-        None
-    } else {
-        Some(head.to_owned())
-    }
-}
-
 #[derive(Clone, Debug)]
 struct LoadedToolMeta {
     name: String,
     secrets: Vec<ToolSecret>,
 }
 
-fn collect_tools(tool_dirs: &[PathBuf]) -> Result<Vec<LoadedToolMeta>, ToolDiscoveryError> {
-    let mut seen = BTreeMap::<String, usize>::new();
+#[derive(Clone, Debug, Default)]
+struct CollectedPluginMetadata {
+    tools: Vec<LoadedToolMeta>,
+    personas: Vec<PersonaDefinition>,
+    overlay_chain: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+enum LoadedPluginMeta {
+    Tool(LoadedToolMeta),
+    Persona(PersonaDefinition),
+}
+
+fn collect_plugin_metadata(
+    tool_dirs: &[PathBuf],
+) -> Result<CollectedPluginMetadata, ToolDiscoveryError> {
+    let mut seen_tools = BTreeMap::<String, usize>::new();
+    let mut seen_personas = BTreeMap::<String, usize>::new();
     let mut tools = Vec::<LoadedToolMeta>::new();
+    let mut personas = Vec::<PersonaDefinition>::new();
+    let mut overlay_chain = Vec::new();
     let mut existing = false;
 
     for (dir_idx, base_dir) in tool_dirs.iter().enumerate() {
+        overlay_chain.push(base_dir.display().to_string());
         if !base_dir.exists() {
             continue;
         }
@@ -356,21 +317,43 @@ fn collect_tools(tool_dirs: &[PathBuf]) -> Result<Vec<LoadedToolMeta>, ToolDisco
             if !pyproject_path.exists() {
                 continue;
             }
-            let Some(meta) = load_tool_meta(base_dir, &tool_dir, &pyproject_path)? else {
+            let Some(meta) = load_plugin_meta(base_dir, &tool_dir, &pyproject_path)? else {
                 continue;
             };
-            if let Some(prev_dir_idx) = seen.insert(meta.name.clone(), dir_idx) {
-                if let Some(prev_pos) = tools.iter().position(|tool| tool.name == meta.name) {
-                    warn!(
-                        tool = %meta.name,
-                        shadowed_dir = ?tool_dirs.get(prev_dir_idx),
-                        by_dir = ?base_dir,
-                        "api-rs tool metadata shadowed"
-                    );
-                    tools[prev_pos] = meta;
+            match meta {
+                LoadedPluginMeta::Tool(meta) => {
+                    if let Some(prev_dir_idx) = seen_tools.insert(meta.name.clone(), dir_idx) {
+                        if let Some(prev_pos) = tools.iter().position(|tool| tool.name == meta.name)
+                        {
+                            warn!(
+                                tool = %meta.name,
+                                shadowed_dir = ?tool_dirs.get(prev_dir_idx),
+                                by_dir = ?base_dir,
+                                "api-rs tool metadata shadowed"
+                            );
+                            tools[prev_pos] = meta;
+                        }
+                    } else {
+                        tools.push(meta);
+                    }
                 }
-            } else {
-                tools.push(meta);
+                LoadedPluginMeta::Persona(persona) => {
+                    if let Some(prev_dir_idx) = seen_personas.insert(persona.id.clone(), dir_idx) {
+                        if let Some(prev_pos) =
+                            personas.iter().position(|item| item.id == persona.id)
+                        {
+                            warn!(
+                                persona = %persona.id,
+                                shadowed_dir = ?tool_dirs.get(prev_dir_idx),
+                                by_dir = ?base_dir,
+                                "api-rs persona metadata shadowed"
+                            );
+                            personas[prev_pos] = persona;
+                        }
+                    } else {
+                        personas.push(persona);
+                    }
+                }
             }
         }
     }
@@ -378,7 +361,11 @@ fn collect_tools(tool_dirs: &[PathBuf]) -> Result<Vec<LoadedToolMeta>, ToolDisco
     if !existing {
         info!(tool_dirs = ?tool_dirs, "api-rs tool dirs missing");
     }
-    Ok(tools)
+    Ok(CollectedPluginMetadata {
+        tools,
+        personas,
+        overlay_chain,
+    })
 }
 
 fn candidate_tool_dirs(base_dir: &Path) -> Result<Vec<PathBuf>, ToolDiscoveryError> {
@@ -421,11 +408,11 @@ fn is_visible_dir(path: &Path) -> bool {
             .is_some_and(|name| !name.starts_with('.') && !name.starts_with('_'))
 }
 
-fn load_persona_definition(
+fn load_plugin_meta(
     source_root: &Path,
-    persona_dir: &Path,
+    plugin_dir: &Path,
     pyproject_path: &Path,
-) -> Result<Option<PersonaDefinition>, ToolDiscoveryError> {
+) -> Result<Option<LoadedPluginMeta>, ToolDiscoveryError> {
     let contents =
         fs::read_to_string(pyproject_path).map_err(|source| ToolDiscoveryError::Read {
             path: pyproject_path.to_path_buf(),
@@ -435,9 +422,9 @@ fn load_persona_definition(
         Ok(pyproject) => pyproject,
         Err(error) => {
             warn!(
-                persona_dir = ?persona_dir,
+                plugin_dir = ?plugin_dir,
                 error = %error,
-                "api-rs persona pyproject parse failed"
+                "api-rs plugin pyproject parse failed"
             );
             return Ok(None);
         }
@@ -448,13 +435,14 @@ fn load_persona_definition(
         .and_then(|value| value.get("centaur"))
         .unwrap_or(&default_tool_conf);
     if tool_conf.get("type").and_then(TomlValue::as_str) != Some("persona") {
-        return Ok(None);
+        return load_tool_meta(source_root, plugin_dir, tool_conf)
+            .map(|meta| meta.map(LoadedPluginMeta::Tool));
     }
-    let id = persona_dir
+    let id = plugin_dir
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| {
-            ToolDiscoveryError::Invalid(format!("invalid persona path {}", persona_dir.display()))
+            ToolDiscoveryError::Invalid(format!("invalid persona path {}", plugin_dir.display()))
         })?
         .to_owned();
     let prompt_file = tool_conf
@@ -462,50 +450,30 @@ fn load_persona_definition(
         .or_else(|| tool_conf.get("prompt"))
         .and_then(TomlValue::as_str)
         .unwrap_or("PROMPT.md");
-    let prompt_path = persona_dir.join(prompt_file);
+    let prompt_path = plugin_dir.join(prompt_file);
     let prompt = fs::read_to_string(&prompt_path).map_err(|source| ToolDiscoveryError::Read {
         path: prompt_path.clone(),
         source,
     })?;
-    Ok(Some(PersonaDefinition {
+    let prompt_hash = {
+        let digest = Sha256::digest(prompt.as_bytes());
+        format!("sha256:{digest:x}")
+    };
+    Ok(Some(LoadedPluginMeta::Persona(PersonaDefinition {
         id,
         source_root: source_root.display().to_string(),
-        source_path: persona_dir.display().to_string(),
-        source_ref: git_head_for_path(persona_dir),
-        prompt_hash: sha256_hex(&prompt),
+        source_path: plugin_dir.display().to_string(),
+        source_ref: None,
+        prompt_hash,
         prompt,
-    }))
+    })))
 }
 
 fn load_tool_meta(
     source_root: &Path,
     tool_dir: &Path,
-    pyproject_path: &Path,
+    tool_conf: &TomlValue,
 ) -> Result<Option<LoadedToolMeta>, ToolDiscoveryError> {
-    let contents =
-        fs::read_to_string(pyproject_path).map_err(|source| ToolDiscoveryError::Read {
-            path: pyproject_path.to_path_buf(),
-            source,
-        })?;
-    let pyproject = match parse_toml(pyproject_path, &contents) {
-        Ok(pyproject) => pyproject,
-        Err(error) => {
-            warn!(
-                tool_dir = ?tool_dir,
-                error = %error,
-                "api-rs tool pyproject parse failed"
-            );
-            return Ok(None);
-        }
-    };
-    let default_tool_conf = TomlValue::Table(Default::default());
-    let tool_conf = pyproject
-        .get("tool")
-        .and_then(|value| value.get("centaur"))
-        .unwrap_or(&default_tool_conf);
-    if tool_conf.get("type").and_then(TomlValue::as_str) == Some("persona") {
-        return Ok(None);
-    }
     let name = tool_dir
         .file_name()
         .and_then(|value| value.to_str())
@@ -1566,8 +1534,14 @@ secrets = [
             .expect("eng persona");
         assert_eq!(eng.source_root, overlay.display().to_string());
         assert!(eng.source_path.ends_with("personas/eng"));
-        assert_ne!(eng.prompt_hash, sha256_hex("base prompt"));
-        assert_eq!(eng.prompt_hash, sha256_hex("overlay prompt"));
+        assert_ne!(
+            eng.prompt_hash,
+            "sha256:c41ac32f8b086eecbd1c70d06689eb428de2a2c740d086640851985f26c4e2fc"
+        );
+        assert_eq!(
+            eng.prompt_hash,
+            "sha256:af70f573f4496a1cf92865966cb522c2c142a5789e075660a56bea66080bc738"
+        );
         assert!(
             discover_persona_registry(&[base.clone(), overlay.clone()], Some("missing".to_owned()))
                 .is_err()
