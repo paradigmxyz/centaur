@@ -13,6 +13,7 @@ import { createMemoryState } from '@chat-adapter/state-memory'
 import type { ServerNotification } from '@centaur/harness-events'
 import {
   createSlackbotV2,
+  normalizeSlackText,
   type SlackbotV2,
   type SlackbotV2AppendMessagesRequest,
   type SlackbotV2ApiMessage,
@@ -33,6 +34,14 @@ const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
+
+describe('normalizeSlackText', () => {
+  it('preserves Slack channel IDs when rendering labeled channel mentions', () => {
+    expect(normalizeSlackText('<#C0AJ07U8Z1N|eng-centaur>')).toBe(
+      '#eng-centaur (C0AJ07U8Z1N)'
+    )
+  })
+})
 
 let emulator: Emulator
 let slackApi: PatchedSlackApi

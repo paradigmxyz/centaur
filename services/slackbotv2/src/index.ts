@@ -2141,11 +2141,11 @@ function slackTimestampToIso(ts: string): string {
     : new Date().toISOString()
 }
 
-function normalizeSlackText(input: string): string {
+export function normalizeSlackText(input: string): string {
   return input
     .replace(/<([a-z]+:\/\/[^>|]+)\|([^>]+)>/gi, '$2 ($1)')
     .replace(/<([a-z]+:\/\/[^>]+)>/gi, '$1')
-    .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, '#$2')
+    .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, '#$2 ($1)')
     .replace(/<#([A-Z0-9]+)>/g, '#$1')
     .replace(/<@([A-Z0-9]+)>/g, '@$1')
     .replace(/<!subteam\^([A-Z0-9]+)\|([^>]+)>/g, '@$2')

@@ -153,6 +153,11 @@
 |If the user is asking what this deployment can do, do not stop at local workspace hints; use live discovery first, or explicitly say the answer is partial and non-exhaustive.
 |Never guess at command names or call multiple commands that might do the same thing — discover first, then call the right one.
 
+[Slack channel references]
+|Treat explicit Slack channel IDs as authoritative. If a user refers to a channel as `#name (C123...)`, `<#C123...|name>`, `#C123...`, or otherwise provides a channel ID, use that exact ID for Slack history/search/file operations.
+|When fetching or summarizing a specific Slack channel, verify that the fetched `channel_id` matches the requested channel ID before using the results. If it does not match, stop and report the mismatch.
+|Never substitute a search-derived or semantically similar channel for an explicitly requested Slack channel ID. If both a human-readable channel name and ID are present, the ID wins.
+
 [Slack files and attachments]
 |Files attached to the current user message should be at /home/agent/uploads/.
 |When you see [Attached image: ...], use the look_at tool to view the image.
