@@ -1812,6 +1812,13 @@ impl SandboxWorkloadMode {
                     .args(["harness-server", harness_server_subcommand(harness)]);
                 if let Some(thread_key) = thread_key {
                     spec = spec.env("CENTAUR_THREAD_KEY", thread_key.as_str());
+                    if let Some((channel_id, thread_ts)) =
+                        slack_destination_from_thread_key(thread_key.as_str())
+                    {
+                        spec = spec
+                            .env("SLACK_CHANNEL_ID", channel_id)
+                            .env("SLACK_THREAD_TS", thread_ts);
+                    }
                 }
                 for mount in mounts {
                     spec = spec.mount(mount.clone());
@@ -1822,6 +1829,21 @@ impl SandboxWorkloadMode {
                 spec
             }
         }
+    }
+}
+
+fn slack_destination_from_thread_key(thread_key: &str) -> Option<(&str, &str)> {
+    let parts = thread_key.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["slack", channel_id, thread_ts] if !channel_id.is_empty() && !thread_ts.is_empty() => {
+            Some((*channel_id, *thread_ts))
+        }
+        ["slack", _team_id, channel_id, thread_ts]
+            if !channel_id.is_empty() && !thread_ts.is_empty() =>
+        {
+            Some((*channel_id, *thread_ts))
+        }
+        _ => None,
     }
 }
 
@@ -4556,6 +4578,27 @@ mod tests {
             Some(thread_key.as_str())
         );
         assert_eq!(env_value(&warm_spec, "CENTAUR_THREAD_KEY"), None);
+    }
+
+    #[test]
+    fn codex_claimed_slack_spec_exports_upload_destination() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            [("CENTAUR_API_URL".to_owned(), "http://api:8000".to_owned())],
+            HarnessType::Codex,
+        );
+        let thread_key = ThreadKey::parse("slack:T123:C123:1780000000.000000").unwrap();
+
+        let claimed_spec = workload.spec(&thread_key, &HarnessType::Codex);
+        let warm_spec = workload.warm_spec();
+
+        assert_eq!(env_value(&claimed_spec, "SLACK_CHANNEL_ID"), Some("C123"));
+        assert_eq!(
+            env_value(&claimed_spec, "SLACK_THREAD_TS"),
+            Some("1780000000.000000")
+        );
+        assert_eq!(env_value(&warm_spec, "SLACK_CHANNEL_ID"), None);
+        assert_eq!(env_value(&warm_spec, "SLACK_THREAD_TS"), None);
     }
 
     #[test]
