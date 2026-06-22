@@ -6,17 +6,18 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
-use opentelemetry_proto::tonic::trace::v1::Span;
+use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
+use opentelemetry_proto::tonic::resource::v1::Resource;
+use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, span};
 use prost::Message as _;
 use serde_json::Value;
 use url::Url;
 use uuid::Uuid;
 
-use crate::{HarnessServerError, Result};
+use crate::{HarnessKind, HarnessServerError, NormalizedTokenUsage, Result};
 
 const CODEX_SPAN_PREFIX: &str = "codex.";
 const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
@@ -56,7 +57,7 @@ pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<(
     let Some(trace_id) = trace.effective_trace_id() else {
         return Ok(());
     };
-    let Some(endpoint) = codex_otel_endpoint() else {
+    let Some(endpoint) = otlp_traces_endpoint() else {
         return Ok(());
     };
     if !trace.metadata.is_empty() {
@@ -91,6 +92,46 @@ pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<(
     Ok(())
 }
 
+pub(crate) fn unix_time_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HarnessUsageSpan<'a> {
+    pub(crate) harness: HarnessKind,
+    pub(crate) model: &'a str,
+    pub(crate) model_provider: &'a str,
+    pub(crate) turn_id: &'a str,
+    pub(crate) start_unix_nano: u64,
+    pub(crate) end_unix_nano: u64,
+}
+
+pub(crate) fn export_harness_usage_span(
+    trace: &TraceContext,
+    span: HarnessUsageSpan<'_>,
+    usage: &NormalizedTokenUsage,
+) -> Result<()> {
+    if !usage.has_counts() {
+        return Ok(());
+    }
+    let Some(endpoint) = otlp_traces_endpoint() else {
+        return Ok(());
+    };
+    let request = harness_usage_trace_request(trace, span, usage)?;
+    let mut headers = otel_forward_headers();
+    if let Some(trace_id) = trace.effective_trace_id() {
+        headers.insert("x-trace-id".to_string(), trace_id);
+    }
+    if let Some(thread_key) = clean_optional(trace.thread_key.as_deref()) {
+        headers.insert("x-centaur-thread-key".to_string(), thread_key);
+    }
+    post_otlp_trace_payload(&endpoint, &headers, &request.encode_to_vec())
+}
+
 fn codex_config_path() -> Option<PathBuf> {
     env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -98,7 +139,7 @@ fn codex_config_path() -> Option<PathBuf> {
         .map(|home| home.join("config.toml"))
 }
 
-fn codex_otel_endpoint() -> Option<String> {
+fn otlp_traces_endpoint() -> Option<String> {
     let traces_endpoint = clean_optional(
         env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             .ok()
@@ -214,6 +255,13 @@ fn otel_authorization_token() -> Option<String> {
         .or(Some(authorization))
 }
 
+fn otel_forward_headers() -> BTreeMap<String, String> {
+    otel_headers()
+        .into_iter()
+        .filter(|(name, _)| name == "authorization")
+        .collect()
+}
+
 fn otel_environment() -> String {
     if let Ok(raw) = env::var("OTEL_RESOURCE_ATTRIBUTES") {
         for item in raw.split(',') {
@@ -317,6 +365,56 @@ impl OtlpTarget {
             host_header,
         })
     }
+}
+
+fn post_otlp_trace_payload(
+    endpoint: &str,
+    headers: &BTreeMap<String, String>,
+    body: &[u8],
+) -> Result<()> {
+    let target = OtlpTarget::parse(endpoint)?;
+    let mut upstream = TcpStream::connect((target.host.as_str(), target.port))?;
+    upstream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    upstream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    write!(
+        upstream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n",
+        target.path,
+        target.host_header,
+        body.len()
+    )?;
+    for (name, value) in headers {
+        if matches!(
+            name.as_str(),
+            "authorization" | "x-trace-id" | "x-centaur-thread-key"
+        ) {
+            write!(upstream, "{name}: {value}\r\n")?;
+        }
+    }
+    upstream.write_all(b"\r\n")?;
+    upstream.write_all(body)?;
+    upstream.flush()?;
+
+    let mut response = Vec::new();
+    upstream.read_to_end(&mut response)?;
+    let status = http_status_code(&response).unwrap_or(0);
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(HarnessServerError::Protocol(format!(
+            "OTLP trace export failed with HTTP status {status}"
+        )))
+    }
+}
+
+fn http_status_code(response: &[u8]) -> Option<u16> {
+    let line = String::from_utf8_lossy(response)
+        .lines()
+        .next()?
+        .to_string();
+    let mut parts = line.split_whitespace();
+    let _version = parts.next()?;
+    parts.next()?.parse().ok()
 }
 
 fn run_otlp_proxy(listener: TcpListener, target: OtlpTarget) {
@@ -468,6 +566,188 @@ fn write_http_response(
         body.len()
     )?;
     stream.write_all(body)
+}
+
+fn harness_usage_trace_request(
+    trace: &TraceContext,
+    span_context: HarnessUsageSpan<'_>,
+    usage: &NormalizedTokenUsage,
+) -> Result<ExportTraceServiceRequest> {
+    let traceparent = trace.effective_traceparent().ok_or_else(|| {
+        HarnessServerError::Protocol("missing trace id for harness usage span".to_string())
+    })?;
+    let (trace_id, parent_span_id) = trace_ids_from_traceparent(&traceparent).ok_or_else(|| {
+        HarnessServerError::Protocol("invalid traceparent for harness usage span".to_string())
+    })?;
+    let mut attributes = Vec::new();
+    let harness_name = harness_name(span_context.harness);
+    let system = gen_ai_system(span_context.harness, span_context.model_provider);
+    let model = usage
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(span_context.model);
+    let total_tokens = usage.total_tokens.or_else(|| {
+        [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.reasoning_output_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .try_fold(0_i64, |acc, value| acc.checked_add(value))
+    });
+
+    set_attribute_string(&mut attributes, "gen_ai.operation.name", "chat");
+    set_attribute_string(&mut attributes, "gen_ai.system", system);
+    set_attribute_string(&mut attributes, "gen_ai.request.model", model);
+    set_attribute_string(&mut attributes, "gen_ai.response.model", model);
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.input_tokens",
+        usage.input_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.output_tokens",
+        usage.output_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.cache_creation_input_tokens",
+        usage.cache_creation_input_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.cache_read_input_tokens",
+        usage.cache_read_input_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.reasoning_tokens",
+        usage.reasoning_output_tokens,
+    );
+    set_attribute_int(&mut attributes, "gen_ai.usage.total_tokens", total_tokens);
+    set_attribute_string(&mut attributes, "centaur.harness", harness_name);
+    set_attribute_string(
+        &mut attributes,
+        "centaur.model_provider",
+        span_context.model_provider,
+    );
+    set_attribute_string(&mut attributes, "centaur.turn_id", span_context.turn_id);
+    if let Some(thread_key) = trace.thread_key.as_deref() {
+        set_attribute_string(&mut attributes, "centaur.thread_key", thread_key);
+    }
+    apply_laminar_trace_metadata_to_attributes(&mut attributes, &trace.metadata);
+
+    let start = span_context.start_unix_nano.min(span_context.end_unix_nano);
+    let end = span_context.end_unix_nano.max(start);
+    Ok(ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![
+                    kv_string("service.name", "harness-server"),
+                    kv_string("deployment.environment", &otel_environment()),
+                ],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "centaur.harness-server".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    ..Default::default()
+                }),
+                spans: vec![Span {
+                    trace_id,
+                    span_id: random_span_id(),
+                    parent_span_id,
+                    name: format!("{harness_name}.session_task.turn"),
+                    kind: span::SpanKind::Internal as i32,
+                    start_time_unix_nano: start,
+                    end_time_unix_nano: end,
+                    attributes,
+                    flags: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    })
+}
+
+fn apply_laminar_trace_metadata_to_attributes(
+    attributes: &mut Vec<KeyValue>,
+    metadata: &BTreeMap<String, Value>,
+) {
+    for (key, value) in metadata {
+        let key = key.trim();
+        if !key.is_empty() {
+            set_attribute_json(
+                attributes,
+                &format!("{LAMINAR_METADATA_PREFIX}{key}"),
+                value,
+            );
+        }
+    }
+}
+
+fn trace_ids_from_traceparent(traceparent: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let parts = validate_traceparent(traceparent)?
+        .split('-')
+        .collect::<Vec<_>>();
+    Some((hex_bytes(parts[1])?, hex_bytes(parts[2])?))
+}
+
+fn hex_bytes(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(value.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = hex_value(pair[0])?;
+        let lo = hex_value(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn random_span_id() -> Vec<u8> {
+    Uuid::new_v4().as_bytes()[..8].to_vec()
+}
+
+fn harness_name(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::Codex => "codex",
+        HarnessKind::ClaudeCode => "claude",
+        HarnessKind::Amp => "amp",
+    }
+}
+
+fn gen_ai_system(kind: HarnessKind, model_provider: &str) -> &'static str {
+    let provider = model_provider.trim().to_ascii_lowercase();
+    if provider.contains("anthropic") || matches!(kind, HarnessKind::ClaudeCode) {
+        "anthropic"
+    } else if provider.contains("openai") || matches!(kind, HarnessKind::Codex) {
+        "openai"
+    } else if provider.contains("amp") || matches!(kind, HarnessKind::Amp) {
+        "amp"
+    } else {
+        "unknown"
+    }
+}
+
+fn kv_string(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.to_string())),
+        }),
+        ..Default::default()
+    }
 }
 
 pub(crate) fn rewrite_otlp_trace_payload(payload: &[u8]) -> std::result::Result<Vec<u8>, String> {
@@ -758,6 +1038,79 @@ trust_level = "trusted"
         assert_eq!(
             attribute_int(&span.attributes, "gen_ai.usage.cache_read_input_tokens"),
             Some(7)
+        );
+    }
+
+    #[test]
+    fn harness_usage_trace_request_builds_laminar_priced_span() {
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: None,
+            traceparent: Some(
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
+            ),
+            metadata: BTreeMap::from([(
+                "execution_id".to_string(),
+                Value::String("exe_123".to_string()),
+            )]),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("claude-fable-5".to_string()),
+            input_tokens: Some(2),
+            output_tokens: Some(7),
+            cache_creation_input_tokens: Some(3),
+            cache_read_input_tokens: Some(5),
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::ClaudeCode,
+                model: "fallback-model",
+                model_provider: "anthropic",
+                turn_id: "turn-1",
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(span.name, "claude.session_task.turn");
+        assert_eq!(span.trace_id.len(), 16);
+        assert_eq!(span.parent_span_id.len(), 8);
+        assert_eq!(
+            attribute_string(&span.attributes, "gen_ai.system"),
+            "anthropic"
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "gen_ai.response.model"),
+            "claude-fable-5"
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.input_tokens"),
+            Some(2)
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.cache_creation_input_tokens"),
+            Some(3)
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.cache_read_input_tokens"),
+            Some(5)
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.total_tokens"),
+            Some(17)
+        );
+        assert_eq!(
+            attribute_string(
+                &span.attributes,
+                "lmnr.association.properties.metadata.execution_id"
+            ),
+            "exe_123"
         );
     }
 

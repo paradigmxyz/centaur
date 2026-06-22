@@ -23,10 +23,10 @@ use uuid::Uuid;
 use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
-use crate::otel::TraceContext;
+use crate::otel::{self, HarnessUsageSpan, TraceContext};
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
-    NormalizedEvent, ThreadState,
+    NormalizedEvent, NormalizedTokenUsage, ThreadState,
 };
 use crate::turn::{BridgeConfig, CodexTurnNormalizer};
 use crate::util::{absolute_path, default_codex_home, write_value};
@@ -98,7 +98,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 // knob (its provider is fixed at thread start from session params).
                 provider: _,
                 reasoning: _,
-                trace_context: _,
+                trace_context,
             }) => {
                 if let Some(model) = model {
                     state.model = model;
@@ -108,6 +108,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     &mut state,
                     input,
                     client_user_message_id,
+                    &trace_context,
                     &mut stdout,
                     &request_rx,
                 ) {
@@ -181,6 +182,7 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
     state: &mut ThreadState,
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
+    trace_context: &TraceContext,
     stdout: &mut W,
     request_rx: &Receiver<JSONRPCRequest>,
 ) -> Result<()> {
@@ -191,6 +193,7 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
         state,
         &input,
         client_user_message_id,
+        Some(trace_context),
         &mut normalizer,
         stdout,
         request_rx,
@@ -789,6 +792,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 state,
                 &params.input,
                 params.client_user_message_id.clone(),
+                None,
                 &mut normalizer,
                 stdout,
                 request_rx,
@@ -964,6 +968,7 @@ fn run_normalized_turn<H: HarnessServer, W: Write>(
     state: &mut ThreadState,
     input: &[UserInput],
     client_user_message_id: Option<String>,
+    trace_context: Option<&TraceContext>,
     normalizer: &mut CodexTurnNormalizer,
     stdout: &mut W,
     request_rx: &Receiver<JSONRPCRequest>,
@@ -978,7 +983,15 @@ fn run_normalized_turn<H: HarnessServer, W: Write>(
         write_value(stdout, &notification_to_wire_value(&notification)?)?;
     }
 
-    match run_harness_turn(harness, state, input, normalizer, stdout, request_rx) {
+    match run_harness_turn(
+        harness,
+        state,
+        input,
+        trace_context,
+        normalizer,
+        stdout,
+        request_rx,
+    ) {
         Ok(Some(turn)) => state.completed_turns.push(turn),
         Ok(None) => {}
         Err(error) => finish_turn_with_error(state, normalizer, stdout, error)?,
@@ -1012,10 +1025,15 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     harness: &H,
     state: &mut ThreadState,
     input: &[UserInput],
+    trace_context: Option<&TraceContext>,
     normalizer: &mut CodexTurnNormalizer,
     stdout: &mut W,
     request_rx: &Receiver<JSONRPCRequest>,
 ) -> Result<Option<codex_app_server_protocol::Turn>> {
+    let usage_span_start = otel::unix_time_nanos();
+    let usage_span_model = state.model.clone();
+    let usage_span_model_provider = state.model_provider.clone();
+    let usage_span_turn_id = normalizer.turn_id().to_string();
     ensure_harness_process(harness, state)?;
     let process = state
         .process
@@ -1027,6 +1045,7 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     let mut last_session_id = state.harness_session_id.clone();
     let mut event_normalizer = H::EventNormalizer::default();
     let mut completed_turn = None;
+    let mut latest_usage = None;
     loop {
         while let Ok(request) = request_rx.try_recv() {
             handle_active_turn_request(harness, process, normalizer, request, stdout)?;
@@ -1052,6 +1071,9 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
         let mut terminal = false;
         for normalized in normalized_events {
+            if let Some(usage) = normalized.token_usage() {
+                latest_usage = Some(usage.clone());
+            }
             if let Some(session_id) = normalized.session_id() {
                 last_session_id = Some(session_id.to_string());
                 state.harness_session_id = Some(session_id.to_string());
@@ -1064,6 +1086,15 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                     && normalized.is_assistant_end_turn());
         }
         if terminal {
+            export_harness_usage_if_available(
+                trace_context,
+                harness.kind(),
+                &usage_span_model,
+                &usage_span_model_provider,
+                &usage_span_turn_id,
+                usage_span_start,
+                latest_usage.as_ref(),
+            );
             if let Some(notification) = normalizer.finish_turn(None)? {
                 if let ServerNotification::TurnCompleted(completed) = &notification {
                     completed_turn = Some(completed.turn.clone());
@@ -1084,6 +1115,31 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         write_value(stdout, &notification_to_wire_value(&notification)?)?;
     }
     Ok(completed_turn)
+}
+
+fn export_harness_usage_if_available(
+    trace_context: Option<&TraceContext>,
+    harness: HarnessKind,
+    model: &str,
+    model_provider: &str,
+    turn_id: &str,
+    start_unix_nano: u64,
+    usage: Option<&NormalizedTokenUsage>,
+) {
+    let (Some(trace_context), Some(usage)) = (trace_context, usage) else {
+        return;
+    };
+    let span = HarnessUsageSpan {
+        harness,
+        model,
+        model_provider,
+        turn_id,
+        start_unix_nano,
+        end_unix_nano: otel::unix_time_nanos(),
+    };
+    if let Err(error) = otel::export_harness_usage_span(trace_context, span, usage) {
+        eprintln!("harness usage OTLP export failed: {error:#}");
+    }
 }
 
 fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {

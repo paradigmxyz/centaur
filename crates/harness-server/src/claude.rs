@@ -44,9 +44,13 @@ impl PendingAgentMessage {
 
 impl ClaudeEventNormalizer {
     pub fn normalize(&mut self, event: AnthropicStreamEvent) -> Vec<NormalizedEvent> {
+        let token_usage = event.token_usage();
         let message_stop_reason = event.message_stop_reason().map(str::to_string);
         let normalized = self.inner.normalize(event);
         let mut out = Vec::new();
+        if let Some(usage) = token_usage {
+            out.push(NormalizedEvent::TokenUsage { usage });
+        }
         if let Some(stop_reason) = message_stop_reason {
             self.flush_pending(Some(stop_reason), &mut out);
         }
@@ -73,6 +77,7 @@ impl ClaudeEventNormalizer {
                 self.flush_pending(None, &mut out);
                 out.push(event);
             }
+            NormalizedEvent::TokenUsage { .. } => {}
             NormalizedEvent::Ignored => {}
             event => out.push(event),
         }
