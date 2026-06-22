@@ -844,6 +844,37 @@ fn real_slack_tool_parses_and_translates() {
 }
 
 #[test]
+fn real_linear_tool_replaces_authorization_placeholder() {
+    let Some(tools_dir) = repo_tools_dir() else {
+        return;
+    };
+    let manifest = tools::find_tool(&[tools_dir], "linear").unwrap();
+    let out = translate::translate(
+        "default",
+        "tool-linear",
+        &manifest.all_secrets().cloned().collect::<Vec<_>>(),
+        &SourcePolicy::env(),
+    );
+    let secret = out
+        .inputs
+        .iter()
+        .find_map(|input| match input {
+            SecretInput::Static(secret) if secret.foreign_id == "tool-linear-linear-api-key" => {
+                Some(secret)
+            }
+            _ => None,
+        })
+        .expect("expected the LINEAR_API_KEY static secret");
+    let replace = secret
+        .replace_config
+        .as_ref()
+        .expect("linear should replace the placeholder Authorization header");
+    assert!(secret.inject_config.is_none());
+    assert_eq!(replace.proxy_value, "LINEAR_API_KEY");
+    assert_eq!(replace.match_headers, vec!["Authorization".to_owned()]);
+}
+
+#[test]
 fn real_gsuite_tool_parses_oauth() {
     let Some(tools_dir) = repo_tools_dir() else {
         return;
