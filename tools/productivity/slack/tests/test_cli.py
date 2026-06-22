@@ -1,6 +1,17 @@
 from pathlib import Path
 
-from slack.cli import _upload_target_and_files
+from slack.cli import _channel_arg_is_id, _upload_target_and_files
+
+
+def test_channel_arg_is_id_accepts_channel_id_forms() -> None:
+    assert _channel_arg_is_id("C0AJ07U8Z1N")
+    assert _channel_arg_is_id("#C0AJ07U8Z1N")
+    assert _channel_arg_is_id("<#C0AJ07U8Z1N|eng-centaur>")
+
+
+def test_channel_arg_is_id_rejects_names() -> None:
+    assert not _channel_arg_is_id("eng-centaur")
+    assert not _channel_arg_is_id("#eng-centaur")
 
 
 def test_upload_target_defaults_when_first_arg_is_file(tmp_path: Path) -> None:

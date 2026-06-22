@@ -1,6 +1,7 @@
 """CLI for Slack search and analysis."""
 
 import json
+import re
 
 import typer
 from dotenv import load_dotenv
@@ -12,6 +13,17 @@ load_dotenv()
 app = typer.Typer(name="slack", help="Slack CLI for AI agents")
 console = Console()
 stderr_console = Console(stderr=True)
+
+_SLACK_CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]{8,}$")
+
+
+def _channel_arg_is_id(channel: str) -> bool:
+    value = channel.strip()
+    if value.startswith("<#") and value.endswith(">"):
+        value = value[2:-1].split("|", 1)[0]
+    elif value.startswith("#"):
+        value = value[1:]
+    return bool(_SLACK_CHANNEL_ID_RE.fullmatch(value.upper()))
 
 
 @app.command()
@@ -132,7 +144,7 @@ def search(
 
 @app.command()
 def channel(
-    name: str = typer.Argument(..., help="Channel name (without #)"),
+    name: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
     limit: int = typer.Option(50, "--limit", "-n", help="Max messages"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
     cursor: str = typer.Option(None, "--cursor", help="Slack pagination cursor for the next page"),
@@ -151,12 +163,24 @@ def channel(
         "--inclusive",
         help="Include messages exactly on the oldest/latest boundary",
     ),
+    allow_name_resolution: bool = typer.Option(
+        False,
+        "--allow-name-resolution",
+        help="Allow resolving a channel name instead of requiring an explicit Slack channel ID",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output full page metadata as JSON"),
 ):
     """Get recent messages from a channel or a bounded history window."""
     import sys
 
     from .client import get_channel_history_page
+
+    if not allow_name_resolution and not _channel_arg_is_id(name):
+        stderr_console.print(
+            "[red]Error: slack channel requires an explicit Slack channel ID like C1234567890. "
+            "Pass --allow-name-resolution to resolve a channel name intentionally.[/]"
+        )
+        raise typer.Exit(1)
 
     try:
         page = get_channel_history_page(
