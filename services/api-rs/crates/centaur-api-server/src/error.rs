@@ -34,6 +34,8 @@ pub enum ApiError {
     Workflow(#[from] WorkflowRuntimeError),
     #[error(transparent)]
     Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
 }
 
 impl From<ThreadKeyError> for ApiError {
@@ -65,9 +67,11 @@ impl IntoResponse for ApiError {
             Self::Workflow(WorkflowRuntimeError::Disabled(_)) => StatusCode::FORBIDDEN,
             Self::Workflow(WorkflowRuntimeError::NotFound(_)) => StatusCode::NOT_FOUND,
             Self::Workflow(WorkflowRuntimeError::Upstream(_)) => StatusCode::BAD_GATEWAY,
-            Self::Internal(_) | Self::Runtime(_) | Self::Workflow(_) | Self::Serialize(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::Internal(_)
+            | Self::Runtime(_)
+            | Self::Workflow(_)
+            | Self::Serialize(_)
+            | Self::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         // 5xx error details are server-side faults: log them for operators but
         // never echo internals (SQL text, hostnames, config refs) to clients.
