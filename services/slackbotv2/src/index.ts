@@ -102,6 +102,7 @@ const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
 const RENDER_LEASE_REFRESH_INTERVAL_MS = 60 * 1000
+const RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS = 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
 const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
@@ -1160,6 +1161,8 @@ async function recoverRenderObligations(
   await chat.initialize()
   const indexedThreadIds = await state.getList<string>(RENDER_OBLIGATION_INDEX_KEY)
   const threadIds = Array.from(new Set(indexedThreadIds))
+  const maxObligationAgeMs =
+    options.renderRecoveryMaxObligationAgeMs ?? RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS
   const timeoutMs = options.renderRecoveryThreadTimeoutMs ?? RENDER_RECOVERY_THREAD_TIMEOUT_MS
   let abandonedCount = 0
   let activeObligationCount = 0
@@ -1168,6 +1171,7 @@ async function recoverRenderObligations(
   let leaseSkippedCount = 0
   let resolvedCount = 0
   let retryableDeferredCount = 0
+  let staleSkippedCount = 0
   let timedOutCount = 0
   traceLog(options, 'slackbotv2_render_recovery_scan', undefined, {
     indexed_thread_count: threadIds.length,
@@ -1182,6 +1186,23 @@ async function recoverRenderObligations(
       const obligation = threadState?.renderObligation
       if (!obligation) continue
       activeObligationCount += 1
+
+      const obligationAgeMs = renderObligationAgeMs(obligation)
+      if (obligationAgeMs !== undefined && obligationAgeMs > maxObligationAgeMs) {
+        staleSkippedCount += 1
+        recordRecoveryThreadEvent('stale_skipped')
+        traceLog(options, 'slackbotv2_render_recovery_stale_obligation_skipped', undefined, {
+          ...renderObligationFields(obligation),
+          max_obligation_age_ms: maxObligationAgeMs,
+          thread_id: threadId
+        })
+        await thread.setState({
+          activeExecution: false,
+          lastEventId: threadState?.lastEventId ?? 0,
+          renderObligation: null
+        })
+        continue
+      }
 
       // An obligation that keeps failing non-retryably (for example corrupt
       // state that can never address a Slack thread) must not poison the
@@ -1311,6 +1332,7 @@ async function recoverRenderObligations(
     phaseMs: elapsedMs(startedAtMs),
     resolvedCount,
     retryableDeferredCount,
+    staleSkippedCount,
     timedOutCount
   })
   recordRecoveryScan(deferredCount > 0 ? 'deferred' : 'complete', startedAtMs, {
@@ -1547,6 +1569,7 @@ function recordRenderRecoveryScan(
     phaseMs: number
     resolvedCount: number
     retryableDeferredCount: number
+    staleSkippedCount: number
     timedOutCount: number
   }
 ): void {
@@ -1560,21 +1583,27 @@ function recordRenderRecoveryScan(
     phase_ms: observation.phaseMs,
     resolved_count: observation.resolvedCount,
     retryable_deferred_count: observation.retryableDeferredCount,
+    stale_skipped_count: observation.staleSkippedCount,
     timed_out_count: observation.timedOutCount
   }
   traceLog(options, 'slackbotv2_render_recovery_scan_complete', undefined, fields)
 }
 
-function renderObligationFields(obligation: SlackbotV2RenderObligation): JsonObject {
+function renderObligationAgeMs(obligation: SlackbotV2RenderObligation): number | undefined {
   const messageTimestampMs = Date.parse(obligation.message.timestamp)
+  return Number.isFinite(messageTimestampMs)
+    ? Math.max(0, Date.now() - messageTimestampMs)
+    : undefined
+}
+
+function renderObligationFields(obligation: SlackbotV2RenderObligation): JsonObject {
+  const obligationAgeMs = renderObligationAgeMs(obligation)
   return {
     after_event_id: obligation.afterEventId,
     execution_id: obligation.executionId,
     message_id: obligation.message.id,
     message_timestamp: obligation.message.timestamp,
-    ...(Number.isFinite(messageTimestampMs)
-      ? { obligation_age_ms: Math.max(0, Date.now() - messageTimestampMs) }
-      : {})
+    ...(obligationAgeMs !== undefined ? { obligation_age_ms: obligationAgeMs } : {})
   }
 }
 

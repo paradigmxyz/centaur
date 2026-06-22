@@ -96,6 +96,8 @@ export type SlackbotV2Options = {
   maxDurationMs?: number
   postgresUrl?: string
   recoverRenderObligationsOnStart?: boolean
+  /** Maximum Slack message age eligible for startup render recovery. */
+  renderRecoveryMaxObligationAgeMs?: number
   /** Per-thread deadline for one recovery attempt during the startup scan. */
   renderRecoveryThreadTimeoutMs?: number
   signingSecret: string

@@ -2554,6 +2554,67 @@ describe('slackbotv2', () => {
     expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)
   })
 
+  it('skips stale render obligations from Chat SDK state on startup', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+
+    const parent = await postUserMessage('Context before stale recovery.')
+    const mentionText = `<@${BOT_USER_ID}> this answer is too old to recover`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = {
+      ...apiMessageFromSlackEvent({
+        isMention: true,
+        text: mentionText,
+        threadId: key,
+        ts: mention.ts
+      }),
+      timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+    }
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [mention.ts],
+      forwardedMessageIds: [mention.ts],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-stale-recovery',
+        message
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Stale recovered request.'))
+
+    bot = createTestBot({
+      logger: captureLogger(logs),
+      renderRecoveryMaxObligationAgeMs: 60 * 60 * 1000,
+      state: sharedState
+    })
+
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
+
+    expect(codexApi.eventRequests).toHaveLength(0)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
+    expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(false)
+    const staleState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(staleState).toEqual(
+      expect.objectContaining({ activeExecution: false, renderObligation: null })
+    )
+    expect(logData(logs, 'slackbotv2_render_recovery_stale_obligation_skipped')).toEqual(
+      expect.objectContaining({
+        execution_id: 'exe-stale-recovery',
+        max_obligation_age_ms: 60 * 60 * 1000,
+        message_id: mention.ts,
+        thread_id: key
+      })
+    )
+  })
+
   it('does not let one hung recovery block the obligations queued behind it', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
