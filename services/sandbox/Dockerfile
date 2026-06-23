@@ -31,6 +31,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.27.2 mammoth==1.12.0 \
     faster-whisper \
     asyncpg==0.30.0 \
+    boto3>=1.40.0 \
     google-api-python-client>=2.100.0 \
     google-auth-httplib2>=0.2.0 \
     google-auth-oauthlib>=1.2.0 \

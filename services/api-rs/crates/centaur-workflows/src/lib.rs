@@ -846,7 +846,7 @@ enum WorkflowQueueClass {
 fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
         "slack_sync" => WorkflowQueueClass::SlackLive,
-        "slack_backfill" => WorkflowQueueClass::EtlBackfill,
+        "slack_backfill" | "slack_archive_import" => WorkflowQueueClass::EtlBackfill,
         "google_calendar_sync"
         | "google_drive_sync"
         | "linear_sync"
@@ -3453,6 +3453,10 @@ mod tests {
         }
         assert_eq!(
             workflow_queue_class("slack_backfill"),
+            WorkflowQueueClass::EtlBackfill
+        );
+        assert_eq!(
+            workflow_queue_class("slack_archive_import"),
             WorkflowQueueClass::EtlBackfill
         );
         assert_eq!(
