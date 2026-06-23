@@ -1567,6 +1567,99 @@ describe('slackbotv2', () => {
     }
   })
 
+  it('marks open tasks complete before rotating an aged progress segment', async () => {
+    process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS = '120'
+    try {
+      codexApi.autoRespond = false
+
+      const parent = await postUserMessage('Context before an aged open task.')
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> keep thinking`, parent.ts)
+      const key = threadKey(parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-open-task-age-rotation',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> keep thinking`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1)
+      await waitFor(() => codexApi.eventRequests.length === 1)
+      await waitFor(() => codexApi.streamCount === 1)
+
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.started',
+          item: {
+            id: 'cmd-aging-open',
+            type: 'commandExecution',
+            command: `sleep 1 # ${'x'.repeat(300)}`,
+            status: 'inProgress'
+          }
+        })
+      )
+      await waitFor(() =>
+        slackApi.calls.some(call =>
+          streamChunks(call.body.chunks).some(
+            chunk => chunk.id === 'cmd-aging-open' && chunk.status === 'in_progress'
+          )
+        )
+      )
+
+      await new Promise(resolve => setTimeout(resolve, 250))
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'cmd-aging-open',
+            type: 'commandExecution',
+            command: 'sleep 1',
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        })
+      )
+      codexApi.emitSessionEvent(key, 'session.execution_completed', {
+        execution_id: 'exe-open-task-age-rotation',
+        status: 'completed',
+        result_text: 'OPEN_TASK_AGE_ROTATION_OK'
+      })
+
+      await Promise.all(waits)
+      const transcripts = slackStreamTranscripts(slackApi.calls)
+      expect(transcripts.length).toBeGreaterThan(1)
+      const taskTranscripts = transcripts.filter(transcript =>
+        transcript.chunks.some(chunk => chunk.type === 'task_update' && chunk.id === 'cmd-aging-open')
+      )
+      expect(taskTranscripts.length).toBeGreaterThan(0)
+      for (const transcript of taskTranscripts) {
+        const statuses = transcript.chunks
+          .filter(chunk => chunk.type === 'task_update' && chunk.id === 'cmd-aging-open')
+          .map(chunk => stringField(chunk.status))
+        expect(statuses[statuses.length - 1]).toBe('complete')
+      }
+      const texts = await threadTexts(parent.ts)
+      expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+      expect(texts.filter(text => text.includes('OPEN_TASK_AGE_ROTATION_OK'))).toHaveLength(1)
+    } finally {
+      delete process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS
+    }
+  })
+
   it('rotates structured plan segments before they exceed the task char budget', async () => {
     process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET = '400'
     try {

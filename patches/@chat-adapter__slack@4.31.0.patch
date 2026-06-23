@@ -219,7 +219,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
  
  // src/cards.ts
  import {
-@@ -3434,26 +3644,216 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3452,26 +3662,251 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -239,6 +239,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +      stopped: false,
 +      taskChars: /* @__PURE__ */ new Map(),
 +      taskCharsTotal: 0,
++      tasks: /* @__PURE__ */ new Map(),
 +      streamer: this._client.chatStream({
 +        channel,
 +        thread_ts: threadTs,
@@ -264,12 +265,42 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
        wrapTablesForAppend: false
      });
 +    const isExpired = (segment) => Date.now() - segment.startedAt >= streamSegmentMaxAgeMs();
-+    const stopSegment = async (segment, blocks, force = false) => {
++    const taskIsOpen = (chunk) => chunk.type === "task_update" && (chunk.status === "in_progress" || chunk.status === "pending");
++    const appendSegmentTaskChunk = async (segment, chunk) => {
++      await segment.streamer.append({ chunks: [chunk], token });
++      segment.hasContent = true;
++      const key = chunk.id;
++      const size = taskChunkChars(chunk);
++      const previous = segment.taskChars.get(key) ?? 0;
++      if (size > previous) {
++        segment.taskCharsTotal += size - previous;
++        segment.taskChars.set(key, size);
++      }
++      segment.tasks.set(key, chunk);
++    };
++    const completeSegmentOpenTasks = async (segment) => {
++      if (segment.stopped) {
++        return;
++      }
++      for (const task of Array.from(segment.tasks.values())) {
++        if (!taskIsOpen(task)) {
++          continue;
++        }
++        await appendSegmentTaskChunk(segment, {
++          ...task,
++          status: "complete"
++        });
++      }
++    };
++    const stopSegment = async (segment, blocks, force = false, sealProgress = true) => {
 +      if (segment.stopped || !(segment.hasContent || force)) {
 +        return void 0;
 +      }
 +      let result;
 +      try {
++        if (sealProgress) {
++          await completeSegmentOpenTasks(segment);
++        }
 +        result = await segment.streamer.stop({
 +          token,
 +          ...blocks ? { blocks } : {}
@@ -394,6 +425,10 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
      };
      let structuredChunksSupported = true;
 +    const appendStructuredChunk = async (segment, chunk) => {
++      if (chunk.type === "task_update") {
++        await appendSegmentTaskChunk(segment, chunk);
++        return;
++      }
 +      await segment.streamer.append({ chunks: [chunk], token });
 +      segment.hasContent = true;
 +      if (chunk.type === "task_update" || chunk.type === "plan_update") {
@@ -445,7 +480,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
      const sendStructuredChunk = async (chunk) => {
        if (!structuredChunksSupported) {
          return;
-@@ -3463,8 +3863,45 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3481,8 +3916,45 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
@@ -492,7 +527,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
          structuredChunksSupported = false;
          this.logger.warn(
            "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
-@@ -3479,31 +3916,91 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3497,31 +3969,91 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };
@@ -537,7 +572,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +          continue;
 +        }
 +        try {
-+          await stopSegment(segment);
++          await stopSegment(segment, void 0, false, false);
 +        } catch (stopError) {
 +          if (segment.length > 0) {
 +            throw stopError;
