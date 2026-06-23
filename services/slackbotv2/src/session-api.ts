@@ -10,12 +10,21 @@ import type {
   SlackbotV2CreateSessionRequest,
   SlackbotV2ExecuteSessionRequest,
   SlackbotV2ExecuteSessionResponse,
+  SlackbotV2Fetch,
   SlackbotV2Options,
   SlackbotV2RendererSource,
   SlackbotV2SessionMessage
 } from './types'
 import { observeSeconds, slackbotMetrics } from './metrics'
-import { elapsedMs, isJsonObject, nowMs, stringValue, toAsyncIterable, traceLog } from './utils'
+import {
+  elapsedMs,
+  errorMessage,
+  isJsonObject,
+  nowMs,
+  stringValue,
+  toAsyncIterable,
+  traceLog
+} from './utils'
 
 export class SessionApiError extends Error {
   readonly action: string
@@ -50,14 +59,26 @@ export function isRetryableSessionApiError(error: unknown): boolean {
   return error.name === 'AbortError' || error.name === 'TypeError'
 }
 
+const DEFAULT_SESSION_API_TIMEOUT_MS = 30_000
+const DEFAULT_SLACK_API_TIMEOUT_MS = 5_000
+
+class FetchTimeoutError extends Error {
+  constructor(action: string, timeoutMs: number) {
+    super(`${action} timed out after ${timeoutMs}ms`)
+    this.name = 'AbortError'
+  }
+}
+
 async function recordSessionApiOperation<T>(
   operation: string,
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
+  timeoutMs?: number,
+  timeoutAction = operation
 ): Promise<T> {
   const startedAtMs = nowMs()
   let outcome = 'success'
   try {
-    return await fn()
+    return await withTimeout(timeoutAction, timeoutMs, fn)
   } catch (error) {
     outcome = isRetryableSessionApiError(error) ? 'retryable_error' : 'error'
     throw error
@@ -68,6 +89,56 @@ async function recordSessionApiOperation<T>(
       observeSeconds(startedAtMs)
     )
   }
+}
+
+async function withTimeout<T>(
+  action: string,
+  timeoutMs: number | undefined,
+  fn: () => Promise<T>
+): Promise<T> {
+  if (!timeoutMs) return fn()
+
+  let timer: ReturnType<typeof globalThis.setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = globalThis.setTimeout(() => {
+      reject(new FetchTimeoutError(action, timeoutMs))
+    }, timeoutMs)
+    const unref = (timer as { unref?: () => void }).unref
+    if (unref) unref.call(timer)
+  })
+
+  try {
+    return await Promise.race([fn(), timeout])
+  } finally {
+    if (timer !== undefined) globalThis.clearTimeout(timer)
+  }
+}
+
+async function fetchWithTimeout(
+  fetchFn: SlackbotV2Fetch,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutAction: string
+): Promise<Response> {
+  const controller = new AbortController()
+  return withTimeout(timeoutAction, timeoutMs, () =>
+    fetchFn(input, {
+      ...init,
+      signal: controller.signal
+    })
+  ).catch(error => {
+    controller.abort()
+    throw error
+  })
+}
+
+function sessionApiTimeoutMs(options: SlackbotV2Options): number {
+  return options.sessionApiTimeoutMs ?? DEFAULT_SESSION_API_TIMEOUT_MS
+}
+
+function slackApiTimeoutMs(options: SlackbotV2Options): number {
+  return options.slackApiTimeoutMs ?? DEFAULT_SLACK_API_TIMEOUT_MS
 }
 
 type ForwardSessionApiCallbacks = {
@@ -177,7 +248,9 @@ export async function forwardToSessionApi(
       input.threadId,
       input.harnessType,
       sessionRequesterMessage(input)
-    )
+    ),
+    sessionApiTimeoutMs(options),
+    'create session'
   )
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
     harness_switched: created.harnessSwitched,
@@ -188,8 +261,11 @@ export async function forwardToSessionApi(
   }
   if (input.messages.length > 0) {
     const appendStartedAtMs = nowMs()
-    await recordSessionApiOperation('append_messages', () =>
-      appendSessionMessages(options, input.threadId, input.messages, !input.executeMessage)
+    await recordSessionApiOperation(
+      'append_messages',
+      () => appendSessionMessages(options, input.threadId, input.messages, !input.executeMessage),
+      sessionApiTimeoutMs(options),
+      'append session messages'
     )
     traceLog(options, 'slackbotv2_session_append_complete', input.trace, {
       message_count: input.messages.length,
@@ -215,7 +291,9 @@ export async function forwardToSessionApi(
       input.contextPreamble,
       input.reasoning,
       input.provider
-    )
+    ),
+    sessionApiTimeoutMs(options),
+    'execute session'
   )
   traceLog(options, 'slackbotv2_session_execute_complete', input.trace, {
     execution_id: execution.execution_id,
@@ -239,7 +317,9 @@ export async function openSessionEventStream(
       input.afterEventId,
       input.executionId,
       input.onEventId
-    )
+    ),
+    sessionApiTimeoutMs(options),
+    'stream events'
   )
   traceLog(options, 'slackbotv2_session_events_opened', input.trace, {
     after_event_id: input.afterEventId,
@@ -452,11 +532,17 @@ async function postCreateSession(
     },
     ...(onHarnessConflict ? { on_harness_conflict: onHarnessConflict } : {})
   }
-  return fetchFn(apiSessionUrl(options.apiUrl, threadId), {
-    method: 'POST',
-    headers: apiHeaders(options),
-    body: JSON.stringify(body)
-  })
+  return fetchWithTimeout(
+    fetchFn,
+    apiSessionUrl(options.apiUrl, threadId),
+    {
+      method: 'POST',
+      headers: apiHeaders(options),
+      body: JSON.stringify(body)
+    },
+    sessionApiTimeoutMs(options),
+    'create session'
+  )
 }
 
 async function harnessSwitchedFromResponse(response: Response): Promise<boolean> {
@@ -627,7 +713,17 @@ async function fetchSlackUserProfile(
       ...(profile?.fields ? { fields: profile.fields } : {}),
       ...(profile?.custom_fields ? { custom_fields: profile.custom_fields } : {})
     }
-  } catch {
+  } catch (error) {
+    traceLog(
+      options,
+      'slackbotv2_slack_user_profile_lookup_failed',
+      undefined,
+      {
+        error: errorMessage(error),
+        slack_user_id: userId
+      },
+      'warn'
+    )
     return null
   }
 }
@@ -693,7 +789,17 @@ async function fetchSlackChannelName(
     const payload = await slackApiGet(options, 'conversations.info', { channel: channelId })
     const channel = isJsonObject(payload?.channel) ? payload.channel : undefined
     name = stringValue(channel?.name_normalized) ?? stringValue(channel?.name) ?? null
-  } catch {
+  } catch (error) {
+    traceLog(
+      options,
+      'slackbotv2_slack_channel_name_lookup_failed',
+      undefined,
+      {
+        channel_id: channelId,
+        error: errorMessage(error)
+      },
+      'warn'
+    )
     name = null
   }
   conversationNameCache.set(channelId, {
@@ -712,13 +818,21 @@ async function slackApiGet(
 ): Promise<JsonObject | null> {
   const url = slackApiMethodUrl(options.slackApiUrl, method)
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: { authorization: `Bearer ${options.botToken}` }
+  return withTimeout(`Slack API ${method}`, slackApiTimeoutMs(options), async () => {
+    const response = await fetchWithTimeout(
+      fetch,
+      url,
+      {
+        method: 'GET',
+        headers: { authorization: `Bearer ${options.botToken}` }
+      },
+      slackApiTimeoutMs(options),
+      `Slack API ${method}`
+    )
+    const payload = await response.json()
+    if (!response.ok || !isJsonObject(payload) || payload.ok === false) return null
+    return payload
   })
-  const payload = await response.json()
-  if (!response.ok || !isJsonObject(payload) || payload.ok === false) return null
-  return payload
 }
 
 function slackApiMethodUrl(slackApiUrl: string | undefined, method: string): URL {
@@ -807,11 +921,17 @@ async function appendSessionMessages(
       messages.map(message => toSessionMessage(options, message, includeRequesterContext))
     )
   }
-  const response = await fetchFn(apiSessionUrl(options.apiUrl, threadId, 'messages'), {
-    method: 'POST',
-    headers: apiHeaders(options),
-    body: JSON.stringify(body)
-  })
+  const response = await fetchWithTimeout(
+    fetchFn,
+    apiSessionUrl(options.apiUrl, threadId, 'messages'),
+    {
+      method: 'POST',
+      headers: apiHeaders(options),
+      body: JSON.stringify(body)
+    },
+    sessionApiTimeoutMs(options),
+    'append session messages'
+  )
   await ensureApiOk(response, 'append session messages')
 }
 
@@ -843,11 +963,17 @@ async function executeSession(
     ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
-  const response = await fetchFn(apiSessionUrl(options.apiUrl, threadId, 'execute'), {
-    method: 'POST',
-    headers: apiHeaders(options),
-    body: JSON.stringify(body)
-  })
+  const response = await fetchWithTimeout(
+    fetchFn,
+    apiSessionUrl(options.apiUrl, threadId, 'execute'),
+    {
+      method: 'POST',
+      headers: apiHeaders(options),
+      body: JSON.stringify(body)
+    },
+    sessionApiTimeoutMs(options),
+    'execute session'
+  )
   await ensureApiOk(response, 'execute session')
   return (await response.json()) as SlackbotV2ExecuteSessionResponse
 }
@@ -884,12 +1010,15 @@ async function streamSessionNotifications(
   const url = new URL(apiSessionUrl(options.apiUrl, threadId, 'events'))
   url.searchParams.set('after_event_id', String(afterEventId))
   if (executionId) url.searchParams.set('execution_id', executionId)
-  const response = await fetchFn(
+  const response = await fetchWithTimeout(
+    fetchFn,
     url.toString(),
     {
       method: 'GET',
       headers: apiHeaders(options, false)
-    }
+    },
+    sessionApiTimeoutMs(options),
+    'stream events'
   )
   await ensureApiOk(response, 'stream events')
   if (!response.body) return toAsyncIterable([])

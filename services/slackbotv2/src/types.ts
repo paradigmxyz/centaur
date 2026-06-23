@@ -100,8 +100,12 @@ export type SlackbotV2Options = {
   renderRecoveryMaxObligationAgeMs?: number
   /** Per-thread deadline for one recovery attempt during the startup scan. */
   renderRecoveryThreadTimeoutMs?: number
+  /** Deadline for Centaur session API HTTP calls made during Slack handoff. */
+  sessionApiTimeoutMs?: number
   signingSecret: string
   slackApiUrl?: string
+  /** Deadline for optional Slack Web API metadata lookups. */
+  slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
   streamTaskDisplayMode?: 'plan' | 'timeline'

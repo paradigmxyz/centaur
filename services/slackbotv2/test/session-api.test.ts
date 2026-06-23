@@ -204,6 +204,16 @@ describe('forwardToSessionApi overrides', () => {
       forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
     ).rejects.toThrow('create session failed: 500')
   })
+
+  test('times out when session creation never settles', async () => {
+    const fetchFn = (() => new Promise<Response>(() => undefined)) as SlackbotV2Options['fetch']
+    await expect(
+      forwardToSessionApi(
+        { ...options(fetchFn), sessionApiTimeoutMs: 25 },
+        forwardInput(apiMessage('hi'))
+      )
+    ).rejects.toThrow('create session timed out after 25ms')
+  })
 })
 
 describe('forwardToSessionApi harness restart', () => {
@@ -325,7 +335,7 @@ describe('session principal display name', () => {
   // stubbed by swapping globalThis.fetch for the duration of the run; the
   // session API itself still goes through the injected options.fetch.
   async function withSlackStub(
-    stub: (url: string) => Response,
+    stub: (url: string) => Promise<Response> | Response,
     run: () => Promise<void>
   ): Promise<void> {
     const realFetch = globalThis.fetch
@@ -352,6 +362,29 @@ describe('session principal display name', () => {
       }
     )
     expect(createBody(requests).metadata?.slack_conversation_name).toBe('eng-oncall')
+  })
+
+  test('continues creating the session when the channel lookup never settles', async () => {
+    const { fetchFn, requests } = fakeApi()
+    let slackCalls = 0
+    await withSlackStub(
+      url => {
+        if (url.includes('conversations.info')) {
+          slackCalls += 1
+          return new Promise<Response>(() => undefined)
+        }
+        return Response.json({ ok: true })
+      },
+      async () => {
+        await forwardToSessionApi(
+          { ...slackOptions(fetchFn), slackApiTimeoutMs: 25 },
+          forwardInput(apiMessage('hi'))
+        )
+      }
+    )
+    expect(slackCalls).toBe(1)
+    expect('slack_conversation_name' in (createBody(requests).metadata ?? {})).toBe(false)
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
   })
 
   test('DM sessions name the principal after the DM partner', async () => {
