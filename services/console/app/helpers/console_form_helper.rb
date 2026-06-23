@@ -35,7 +35,9 @@ module ConsoleFormHelper
   # detailed messages, prefixed by which record they came from.
   def secret_error_messages(secret)
     nested_attrs = %i[source dsn_source keyfile_source rules]
-    messages = secret.errors.reject { |e| nested_attrs.include?(e.attribute) }.map(&:full_message)
+    messages = secret.errors.reject do |e|
+      nested_attrs.include?(e.attribute) && e.message == "is invalid"
+    end.map(&:full_message)
 
     %i[source dsn_source keyfile_source].each do |assoc|
       next unless secret.respond_to?(assoc)

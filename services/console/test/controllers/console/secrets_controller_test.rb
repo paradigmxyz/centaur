@@ -378,6 +378,8 @@ module Console
         }
       end
       assert_response :unprocessable_entity
+      assert_match "Rules must include at least one rule", response.body
+      assert_match "must include at least one rule", response.body
     end
 
     test "PATCH update changes a gcp_id_token secret keyfile audience header and rules" do
