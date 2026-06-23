@@ -14,5 +14,8 @@ serde_yaml.workspace = true
 thiserror.workspace = true
 urlencoding.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
+
 [lints]
 workspace = true
