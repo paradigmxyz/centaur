@@ -1,0 +1,103 @@
+<% content_for :title, "#{@oauth_app.slug} · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_oauth_apps_path %>" class="back-link">← back to OAuth apps</a>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <h1 class="text-2xl font-bold font-mono text-zinc-100"><%= @oauth_app.slug %></h1>
+    <% if @oauth_app.enabled? %>
+      <span class="rounded px-2 py-0.5 text-xs ring-1 bg-emerald-500/10 text-emerald-300 ring-emerald-500/25">enabled</span>
+    <% else %>
+      <span class="rounded px-2 py-0.5 text-xs ring-1 bg-zinc-500/10 text-zinc-400 ring-zinc-500/25">disabled</span>
+    <% end %>
+    <a href="<%= edit_console_oauth_app_form_path(@oauth_app.oid) %>" class="btn-secondary ml-auto">Edit</a>
+  </div>
+  <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+    <span class="text-centaur-400 glow"><%= @oauth_app.oid %></span>
+    <span class="text-zinc-600">·</span>
+    <span class="rounded bg-ink-700 px-2 py-0.5 text-[11px] uppercase tracking-wide text-zinc-300"><%= @oauth_app.provider %></span>
+  </div>
+  <% if @oauth_app.description.present? %>
+    <p class="mt-3 max-w-2xl text-sm text-zinc-500"><%= @oauth_app.description %></p>
+  <% end %>
+  <% if @oauth_app.labels.present? %>
+    <div class="mt-3 flex flex-wrap gap-1">
+      <% @oauth_app.labels.each do |k, v| %>
+        <span class="label-chip"><%= k %>=<%= v %></span>
+      <% end %>
+    </div>
+  <% end %>
+</div>
+
+<%
+  def_section = ->(heading, rows) do
+    content_tag(:section, class: "mb-8") do
+      safe_join([
+        content_tag(:h2, heading, class: "mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500"),
+        content_tag(:dl, class: "console-panel divide-y divide-ink-700") do
+          safe_join(rows.map do |label, value|
+            content_tag(:div, class: "flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4") do
+              content_tag(:dt, label, class: "w-48 shrink-0 text-xs uppercase tracking-wider text-zinc-500") +
+                content_tag(:dd, value.presence || tag.span("—", class: "text-zinc-600"), class: "whitespace-pre-line break-all font-mono text-xs text-zinc-200")
+            end
+          end)
+        end
+      ])
+    end
+  end
+
+  redirect_uri = oauth_callback_redirect_uri(@oauth_app.slug)
+  start_url = "#{public_base_url}/oauth/#{@oauth_app.slug}/start"
+%>
+
+<%= def_section.call("OAuth Client", [
+  [ "Provider", @oauth_app.provider ],
+  [ "Client ID", @oauth_app.client_id ],
+  [ "Client secret", @oauth_app.client_secret.present? ? "set" : "not set" ],
+  [ "Credential namespace", @oauth_app.credential_namespace ]
+]) %>
+
+<%= def_section.call("Flow Config", [
+  [ "Allowed scopes", Array(@oauth_app.allowed_scopes).join("\n") ]
+]) %>
+
+<%= def_section.call("Consent Flow", [
+  [ "Redirect URI", redirect_uri ],
+  [ "Start URL", start_url ]
+]) %>
+<p class="-mt-6 mb-8 text-xs text-zinc-600">Register the redirect URI with the provider. Share the start URL with a team member to connect the integration.</p>
+
+<section class="mb-8">
+  <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Minted Credentials</h2>
+  <% if @minted_credentials.empty? %>
+    <p class="empty-state">No credentials minted yet.</p>
+  <% else %>
+    <div class="console-scroll-panel">
+      <table class="console-table">
+        <thead class="console-table-head">
+          <tr>
+            <th class="console-th">Credential</th>
+            <th class="console-th">Status</th>
+            <th class="console-th">Email</th>
+            <th class="console-th">User key</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-ink-700">
+          <% @minted_credentials.each do |c| %>
+            <tr class="console-row-hover">
+              <td class="console-td-nowrap">
+                <%= link_to c.foreign_id.presence || c.oid, console_credential_path(c.oid), class: "console-link" %>
+              </td>
+              <td class="console-td-nowrap">
+                <span class="rounded px-2 py-0.5 text-xs ring-1 <%= credential_status_classes(c.status) %>"><%= c.status %></span>
+              </td>
+              <td class="console-td-nowrap text-zinc-400"><%= c.provider_email.presence || "—" %></td>
+              <td class="console-td-nowrap text-zinc-400"><%= c.external_user_key.presence || "—" %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% end %>
+</section>
+
+<p class="text-xs text-zinc-600">The client secret is never shown. Credentials minted by this app inherit its client id and secret.</p>

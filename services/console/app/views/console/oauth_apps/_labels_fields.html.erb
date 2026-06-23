@@ -1,0 +1,18 @@
+<%# Reuses the shared key/value row from the secret forms; same nested-fields
+    controller and `labels[...]` field names. %>
+<section data-controller="nested-fields" class="form-section">
+  <div class="mb-2 flex items-center justify-between">
+    <h2 class="form-section-heading mb-0">Labels</h2>
+    <button type="button" data-action="nested-fields#add" class="btn-secondary">Add label</button>
+  </div>
+
+  <div class="space-y-2" data-nested-fields-target="container">
+    <% (app.labels.presence || {}).each_with_index do |(k, v), i| %>
+      <%= render "console/base_secrets/label_row", index: i, key: k, value: v %>
+    <% end %>
+  </div>
+
+  <template data-nested-fields-target="template">
+    <%= render "console/base_secrets/label_row", index: "NEW_RECORD", key: "", value: "" %>
+  </template>
+</section>

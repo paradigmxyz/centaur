@@ -26,7 +26,7 @@ permissions:
 jobs:
   build-and-deploy:
     name: Build and deploy docs
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
     timeout-minutes: 20
     strategy:
       matrix:

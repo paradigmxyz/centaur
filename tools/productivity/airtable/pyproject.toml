@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-airtable = "airtable.cli:app"
+airtable = "centaur_tool_airtable.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_airtable"
 
 [build-system]
 requires = ["hatchling"]
@@ -20,5 +26,5 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "AIRTABLE_API_KEY", match_headers = ["Authorization"], hosts = ["api.airtable.com"]},
+    {type = "http", name = "AIRTABLE_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.airtable.com"]},
 ]

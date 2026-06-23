@@ -20,7 +20,7 @@ jobs:
   release:
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -53,6 +53,12 @@ jobs:
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v4.1.1
+
+      - name: Add chart repositories
+        run: helm repo add onepassword https://1password.github.io/connect-helm-charts
+
+      - name: Build chart dependencies
+        run: helm dependency build contrib/chart
 
       - name: Lint chart
         run: helm lint contrib/chart

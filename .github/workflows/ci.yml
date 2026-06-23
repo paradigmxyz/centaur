@@ -13,49 +13,197 @@ permissions:
   contents: read
 
 jobs:
-  python-runtime:
-    name: API workflow and control-plane tests
+  ci_changes:
+    name: Detect CI changes
     runs-on: ubuntu-latest
+    outputs:
+      migration_order: ${{ steps.filter.outputs.migration_order }}
+      rust_api: ${{ steps.filter.outputs.rust_api }}
+      slackbotv2_tests: ${{ steps.filter.outputs.slackbotv2_tests }}
+      discordbot_checks: ${{ steps.filter.outputs.discordbot_checks }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: filter
+        name: Detect changed paths
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            changed_files="$(git diff --name-only "${base}...HEAD")"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            changed_files="$(git diff --name-only "${{ github.event.before }}...HEAD")"
+          else
+            git fetch --no-tags --depth=1 origin main
+            changed_files="$(git diff --name-only origin/main...HEAD)"
+          fi
+
+          matches() {
+            local pattern
+            for pattern in "$@"; do
+              if printf '%s\n' "${changed_files}" | grep -Eq "${pattern}"; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          set_output() {
+            local name="$1"
+            shift
+            if matches "$@"; then
+              echo "${name}=true" >>"${GITHUB_OUTPUT}"
+            else
+              echo "${name}=false" >>"${GITHUB_OUTPUT}"
+            fi
+          }
+
+          set_output migration_order \
+            '^services/api-rs/crates/centaur-session-sqlx/migrations/' \
+            '^services/console/db/migrate/' \
+            '^\.github/scripts/check-migration-order\.sh$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output rust_api \
+            '^services/api-rs/' \
+            '^\.github/workflows/ci\.yml$'
+          set_output slackbotv2_tests \
+            '^services/slackbotv2/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output discordbot_checks \
+            '^services/discordbot/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+
+  migration-order:
+    name: Migration order
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.migration_order == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check migration versions
+        run: .github/scripts/check-migration-order.sh "origin/${{ github.base_ref || 'main' }}"
+
+  rust-api:
+    name: Rust API fmt, clippy, and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.rust_api == 'true'
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          python-version: "3.11"
+          toolchain: stable
+          components: rustfmt, clippy
 
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          enable-cache: true
+          workspaces: services/api-rs
 
-      - name: Install Python dependencies
-        working-directory: services/api
-        run: uv sync --group dev
+      - name: Format
+        working-directory: services/api-rs
+        run: cargo fmt --all --check
 
-      - name: Lint
-        working-directory: services/api
-        run: uv run ruff check api/
+      - name: Clippy
+        working-directory: services/api-rs
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Compile
-        working-directory: services/api
-        run: uv run python -m compileall -q api/
+      - name: Test
+        working-directory: services/api-rs
+        env:
+          SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: cargo test --workspace
 
-      - name: Targeted API tests
-        working-directory: services/api
+      - name: Start API integration test dependencies
         run: |
-          uv run pytest -q \
-            tests/test_workflows.py::test_create_slack_thread_turn_workflow_eager_start \
-            tests/test_workflows.py::test_slack_thread_turn_active_assignment_does_not_backfill_stop_history \
-            tests/test_workflows.py::test_cancel_workflow_run_cancels_linked_execution \
-            tests/test_agent_control_plane.py::test_cancel_execution_stops_runtime_and_clears_inflight \
-            tests/test_agent_control_plane.py::test_steer_stdin_interrupts_amp_before_injecting \
-            tests/test_agent_control_plane.py::test_worker_stops_session_when_cancel_requested_mid_stream \
-            tests/test_agent_control_plane.py::test_worker_maps_amp_user_cancelled_error_to_cancelled
+          docker run --detach --name centaur-api-integration-test-postgres \
+            --publish 127.0.0.1:15432:5432 \
+            --env POSTGRES_USER=postgres \
+            --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=centaur \
+            paradedb/paradedb:0.23.0-pg16 \
+            -c shared_preload_libraries=pg_search,pg_cron \
+            -c max_connections=500
+          for attempt in {1..60}; do
+            if docker logs centaur-api-integration-test-postgres 2>&1 \
+              | grep -q 'PostgreSQL init process complete' \
+              && docker exec centaur-api-integration-test-postgres \
+              psql -U postgres -d centaur -tAc 'select 1' >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs centaur-api-integration-test-postgres
+          exit 1
 
-  slackbot-targeted-tests:
-    name: Slackbot interface and delivery tests
-    runs-on: ubuntu-latest
+      - name: Run API integration test
+        working-directory: services/api-rs
+        env:
+          API_INTEGRATION_WORKFLOW_DIR: ${{ runner.temp }}/api-integration-workflows
+          BIND_ADDR: 127.0.0.1:18080
+          CENTAUR_API_URL: http://127.0.0.1:18080
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:15432/centaur?sslmode=disable
+          RUN_MIGRATIONS: "true"
+          RUST_LOG: info
+          WORKFLOW_DIRS: ${{ runner.temp }}/api-integration-workflows
+          WORKFLOW_HOST_SANDBOX: "false"
+          WORKFLOW_REAP_REMOVED_AFTER_TICKS: "1"
+          WORKFLOW_RECONCILE_INTERVAL_SECS: "1"
+        run: |
+          mkdir -p "$API_INTEGRATION_WORKFLOW_DIR"
+          cargo build --locked -p centaur-api-server -p centaur-api-integration-test
+
+          ./target/debug/centaur-api-server > "$RUNNER_TEMP/centaur-api-server.log" 2>&1 &
+          api_pid="$!"
+          echo "$api_pid" > "$RUNNER_TEMP/centaur-api-server.pid"
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+
+          ./target/debug/centaur-api-integration-test
+
+      - name: Dump API integration test logs
+        if: ${{ failure() }}
+        run: |
+          cat "$RUNNER_TEMP/centaur-api-server.log" || true
+          docker logs centaur-api-integration-test-postgres || true
+
+      - name: Cleanup API integration test dependencies
+        if: ${{ always() }}
+        run: |
+          if [ -f "$RUNNER_TEMP/centaur-api-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/centaur-api-server.pid")" 2>/dev/null || true
+          fi
+          docker rm -f centaur-api-integration-test-postgres || true
+
+  slackbotv2-tests:
+    name: Slackbot v2 tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.slackbotv2_tests == 'true'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -75,10 +223,58 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Targeted Slackbot tests
-        working-directory: services/slackbot
-        run: |
-          bun test \
-            src/centaur/handoff.test.ts \
-            src/slack/normalize.test.ts \
-            src/centaur/final-delivery.test.ts
+      - name: Slackbot v2 tests
+        working-directory: services/slackbotv2
+        run: bun test test
+
+  discordbot-checks:
+    name: Discordbot typecheck and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.discordbot_checks == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.28.1
+          run_install: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      # Workspace-root install: discordbot links @centaur/* workspace packages
+      # and relies on the root pnpm patches.
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck Discordbot
+        working-directory: services/discordbot
+        run: bun run check:types
+
+      - name: Discordbot tests
+        working-directory: services/discordbot
+        run: bun run test
+
+  ci-success:
+    name: CI success
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - ci_changes
+      - migration-order
+      - rust-api
+      - slackbotv2-tests
+      - discordbot-checks
+    timeout-minutes: 30
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # release/v1
+        with:
+          allowed-skips: migration-order, rust-api, slackbotv2-tests, discordbot-checks
+          jobs: ${{ toJSON(needs) }}

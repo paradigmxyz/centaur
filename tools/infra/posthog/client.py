@@ -7,8 +7,14 @@ import httpx
 from centaur_sdk import secret
 
 
-class PostHogClient:
+def _is_placeholder_secret(value: str | None, name: str) -> bool:
+    if not value:
+        return True
+    stripped = value.strip()
+    return stripped == name or stripped.startswith(("__CENTAUR_", "CENTAUR_SECRET_"))
 
+
+class PostHogClient:
     """Client for PostHog API.
 
     Uses HogQL queries for flexible analytics. Requires a personal API key
@@ -55,12 +61,25 @@ class PostHogClient:
     @property
     def project_id(self) -> str:
         """Get project ID from instance or env var."""
-        if self._project_id:
+        if self._project_id and not _is_placeholder_secret(self._project_id, "POSTHOG_PROJECT_ID"):
             return self._project_id
         pid = secret("POSTHOG_PROJECT_ID", "")
-        if pid:
+        if not _is_placeholder_secret(pid, "POSTHOG_PROJECT_ID"):
+            self._project_id = pid
             return pid
-        raise RuntimeError("POSTHOG_PROJECT_ID not set.")
+        self._project_id = self._discover_project_id()
+        return self._project_id
+
+    def _discover_project_id(self) -> str:
+        """Use the first project visible to the API key when no project id is configured."""
+        payload = self._request("GET", "/api/projects/")
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not results:
+            raise RuntimeError("POSTHOG_PROJECT_ID not set and no PostHog projects were visible.")
+        project_id = results[0].get("id")
+        if project_id is None:
+            raise RuntimeError("POSTHOG_PROJECT_ID not set and project discovery returned no id.")
+        return str(project_id)
 
     @property
     def host(self) -> str:
@@ -104,9 +123,9 @@ class PostHogClient:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"API error: {e.response.status_code} - {e.response.text}")
+            raise RuntimeError(f"API error: {e.response.status_code} - {e.response.text}") from e
         except httpx.RequestError as e:
-            raise RuntimeError(f"Request failed: {e}")
+            raise RuntimeError(f"Request failed: {e}") from e
 
     def query(self, sql: str, name: str | None = None) -> dict:
         """Execute a HogQL query.
@@ -278,7 +297,6 @@ class PostHogClient:
 
     def __exit__(self, *args):
         self.close()
-
 
 
 def _client() -> PostHogClient:

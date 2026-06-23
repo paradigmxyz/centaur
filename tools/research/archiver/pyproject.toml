@@ -13,6 +13,15 @@ dependencies = [
     "requests>=2.32.5",
 ]
 
+[project.scripts]
+archiver = "centaur_tool_archiver.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_archiver"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -20,6 +29,6 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "REDUCTO_API_KEY", match_headers = ["Authorization"], hosts = ["platform.reducto.ai"]},
+    {type = "http", name = "REDUCTO_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["platform.reducto.ai"]},
     {type = "http", name = "BROWSER_USE_API_KEY", match_query = true, hosts = ["connect.browser-use.com"]},
 ]

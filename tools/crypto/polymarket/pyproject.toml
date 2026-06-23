@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-polymarket = "polymarket.cli:app"
+polymarket = "centaur_tool_polymarket.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_polymarket"
 
 [build-system]
 requires = ["hatchling"]

@@ -49,7 +49,9 @@ def assets(
     markdown: bool = typer.Option(False, "--markdown", "-m", help="Output as markdown table"),
 ):
     """List crypto assets."""
-    data = get_client().list_assets(limit=limit, fields=fields)
+    if fields:
+        console.print("[yellow]--fields is ignored by the current Messari metrics endpoint[/]")
+    data = get_client().list_assets(limit=limit)
 
     if json_output:
         print(json.dumps(data, indent=2))
@@ -331,7 +333,7 @@ def raw(
         print(json.dumps(data, indent=2))
     except RuntimeError as e:
         console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 if __name__ == "__main__":

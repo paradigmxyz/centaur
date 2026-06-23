@@ -1,0 +1,31 @@
+# Example overlay: expose Centaur Slackbot v2 publicly via the Tailscale
+# Kubernetes operator + Funnel, so Slack can POST events to /api/webhooks/slack.
+#
+# Layer it on top of the normal values (it keeps the shared values.dev.yaml clean):
+#   CENTAUR_EXTRA_VALUES=contrib/chart/values.tailscale-funnel.example.yaml just up
+# or with helm directly:
+#   helm upgrade --install centaur contrib/chart -n centaur \
+#     -f contrib/chart/values.dev.yaml \
+#     -f contrib/chart/values.tailscale-funnel.example.yaml
+#
+# Prereqs (see docs: /operate/tailscale-funnel): the Tailscale operator installed
+# in the `tailscale` namespace, your tailnet's HTTPS certificates + MagicDNS
+# enabled, and an ACL `funnel` nodeAttr granted to the operator's proxy tag
+# (default tag:k8s).
+
+ingress:
+  enabled: true
+  className: tailscale
+  defaultBackend: true              # the operator's Funnel Ingress expects a single backend
+  annotations:
+    tailscale.com/funnel: "true"    # public Funnel exposure; omit for tailnet-only
+  tls:
+    - hosts:
+        - centaur-slackbotv2        # -> https://centaur-slackbotv2.<your-tailnet>.ts.net
+
+networkPolicy:
+  # Allow the operator's proxy pods (in the `tailscale` namespace) to reach the
+  # Slackbot v2 on :3001. Appended to the chart default of [kube-system].
+  ingressControllerNamespaces:
+    - kube-system
+    - tailscale

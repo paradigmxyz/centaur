@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import mimetypes
+from urllib.parse import quote
 import urllib.request
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -90,6 +91,40 @@ def current_thread_key() -> str:
     return thread_key
 
 
+def current_session_context() -> dict[str, Any]:
+    """Return API-owned context for the current thread.
+
+    For Slack-originated sessions this includes ``slack.channel_id`` and
+    ``slack.thread_ts``. The API remains the source of truth so warm pooled
+    sandboxes do not need per-thread environment mutation.
+    """
+    thread_key = current_thread_key()
+    base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
+    headers: dict[str, str] = {}
+    api_key = secret("CENTAUR_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(
+        f"{base_url}/api/session/{quote(thread_key, safe='')}",
+        headers=headers,
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read())
+
+
+def current_slack_thread() -> dict[str, str]:
+    """Return ``{"channel_id": ..., "thread_ts": ...}`` for the current Slack thread."""
+    context = current_session_context()
+    slack = context.get("slack")
+    if not isinstance(slack, dict) or not slack.get("channel_id") or not slack.get("thread_ts"):
+        raise RuntimeError(f"current thread is not a Slack thread: {context.get('thread_key')!r}")
+    return {
+        "channel_id": str(slack["channel_id"]),
+        "thread_ts": str(slack["thread_ts"]),
+    }
+
+
 def save_attachment(
     *,
     name: str,
@@ -112,9 +147,6 @@ def save_attachment(
         }
     ).encode()
     headers = {"Content-Type": "application/json"}
-    api_key = secret("CENTAUR_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         f"{base_url}/agent/attachments/upload",
         data=payload,

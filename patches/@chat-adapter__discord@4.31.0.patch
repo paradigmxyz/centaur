@@ -1,0 +1,434 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 0024735d2441f1d2e3c2d5ed659fa4c4265f3922..89426551a9454df7612f0867680e8abd9ad779fd 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -20,8 +20,8 @@ import { ButtonStyle, APIEmbed, ChannelType, APIMessage, InteractionType } from
+ 
+ declare class DiscordFormatConverter extends BaseFormatConverter {
+     /**
+-     * Convert @mentions to Discord format in plain text.
+-     * @name → <@name>
++     * Pass text through unchanged. The blanket `@word` -> `<@word>` rewrite was
++     * removed because it mangled emails and npm scopes into broken mention syntax.
+      */
+     private convertMentionsToDiscord;
+     /**
+@@ -61,6 +61,44 @@ interface DiscordAdapterConfig {
+     publicKey?: string;
+     /** Override bot username (optional) */
+     userName?: string;
++    /**
++     * Pre-dispatch gate for bot mentions. Called before any thread creation or
++     * message dispatch when the bot is mentioned. Return false to skip the
++     * mention entirely (no thread is created, no handler is invoked).
++     */
++    shouldHandleMention?: (info: {
++        guildId: string;
++        channelId: string;
++        authorId: string;
++        authorIsBot: boolean;
++    }) => boolean;
++    /**
++     * Invoked (fire-and-forget) when an incoming message is dropped because of
++     * a concurrency lock conflict (LockError from the chat SDK).
++     */
++    onMessageDropped?: (info: {
++        channelId: string;
++        threadId?: string;
++        messageId: string;
++        guildId: string;
++    }) => void | Promise<void>;
++    /**
++     * Opt-in forwarding of bot-authored messages. When absent, all bot
++     * messages are dropped (default behavior). When provided and it returns
++     * true, the message is forwarded like a normal message. Messages authored
++     * by this bot itself are always dropped.
++     */
++    shouldForwardBotMessage?: (info: {
++        authorId: string;
++        guildId: string;
++        channelId: string;
++    }) => boolean;
++    /**
++     * Invoked when the Gateway connection state changes. Called with true on
++     * ready/shardReady/shardResume and false on shardDisconnect/invalidated/
++     * shardError. Repeated same-state calls are deduped.
++     */
++    onGatewayStatusChange?: (connected: boolean) => void;
+ }
+ /**
+  * Discord thread ID components.
+@@ -363,6 +401,11 @@ declare class DiscordAdapter implements Adapter<DiscordThreadId, unknown> {
+     protected readonly publicKey: string;
+     protected readonly applicationId: string;
+     protected readonly mentionRoleIds: string[];
++    protected readonly shouldHandleMention?: DiscordAdapterConfig["shouldHandleMention"];
++    protected readonly onMessageDropped?: DiscordAdapterConfig["onMessageDropped"];
++    protected readonly shouldForwardBotMessage?: DiscordAdapterConfig["shouldForwardBotMessage"];
++    protected readonly onGatewayStatusChange?: DiscordAdapterConfig["onGatewayStatusChange"];
++    private lastGatewayConnected?;
+     protected chat: ChatInstance | null;
+     protected readonly logger: Logger;
+     protected readonly formatConverter: DiscordFormatConverter;
+@@ -563,6 +606,23 @@ declare class DiscordAdapter implements Adapter<DiscordThreadId, unknown> {
+      * Handle a message received via the Gateway WebSocket.
+      */
+     protected handleGatewayMessage(message: Message$1, isMentioned: boolean): Promise<void>;
++    /**
++     * Check whether an error is a chat SDK lock-conflict drop (LockError).
++     */
++    protected isLockConflictError(error: unknown): boolean;
++    /**
++     * Invoke the onMessageDropped hook (fire-and-forget, errors swallowed).
++     */
++    protected notifyMessageDropped(info: {
++        channelId: string;
++        threadId?: string;
++        messageId: string;
++        guildId: string;
++    }): void;
++    /**
++     * Invoke the onGatewayStatusChange hook, deduping repeated same-state calls.
++     */
++    protected emitGatewayStatus(connected: boolean): void;
+     /**
+      * Handle a reaction received via the Gateway WebSocket.
+      */
+diff --git a/dist/index.js b/dist/index.js
+index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4e5ff64c9 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -272,11 +272,11 @@ import {
+ } from "chat";
+ var DiscordFormatConverter = class extends BaseFormatConverter {
+   /**
+-   * Convert @mentions to Discord format in plain text.
+-   * @name → <@name>
++   * Pass text through unchanged. The blanket `@word` -> `<@word>` rewrite was
++   * removed because it mangled emails and npm scopes into broken mention syntax.
+    */
+   convertMentionsToDiscord(text) {
+-    return text.replace(/@(\w+)/g, "<@$1>");
++    return text;
+   }
+   /**
+    * Override renderPostable to convert @mentions in plain strings.
+@@ -322,7 +322,7 @@ var DiscordFormatConverter = class extends BaseFormatConverter {
+       return getNodeChildren(node).map((child) => this.nodeToDiscordMarkdown(child)).join("");
+     }
+     if (isTextNode(node)) {
+-      return node.value.replace(/@(\w+)/g, "<@$1>");
++      return node.value;
+     }
+     if (isStrongNode(node)) {
+       const content = getNodeChildren(node).map((child) => this.nodeToDiscordMarkdown(child)).join("");
+@@ -398,6 +398,11 @@ var DiscordAdapter = class _DiscordAdapter {
+   publicKey;
+   applicationId;
+   mentionRoleIds;
++  shouldHandleMention;
++  onMessageDropped;
++  shouldForwardBotMessage;
++  onGatewayStatusChange;
++  lastGatewayConnected;
+   chat = null;
+   logger;
+   formatConverter = new DiscordFormatConverter();
+@@ -432,6 +437,10 @@ var DiscordAdapter = class _DiscordAdapter {
+     this.applicationId = applicationId;
+     this.mentionRoleIds = config.mentionRoleIds ?? (process.env.DISCORD_MENTION_ROLE_IDS ? process.env.DISCORD_MENTION_ROLE_IDS.split(",").map((id) => id.trim()) : []);
+     this.botUserId = applicationId;
++    this.shouldHandleMention = config.shouldHandleMention;
++    this.onMessageDropped = config.onMessageDropped;
++    this.shouldForwardBotMessage = config.shouldForwardBotMessage;
++    this.onGatewayStatusChange = config.onGatewayStatusChange;
+     this.logger = config.logger ?? new ConsoleLogger("info").child("discord");
+     this.userName = config.userName ?? "bot";
+     if (!HEX_64_PATTERN.test(this.publicKey)) {
+@@ -927,6 +936,19 @@ var DiscordAdapter = class _DiscordAdapter {
+       (roleId) => this.mentionRoleIds.includes(roleId)
+     );
+     const isMentioned = isUserMentioned || isRoleMentioned;
++    if (isMentioned && this.shouldHandleMention && !this.shouldHandleMention({
++      guildId,
++      channelId,
++      authorId: data.author.id,
++      authorIsBot: data.author.bot === true
++    })) {
++      this.logger.info("Skipping mention rejected by shouldHandleMention", {
++        channelId,
++        messageId: data.id,
++        authorId: data.author.id
++      });
++      return;
++    }
+     if (!discordThreadId && isMentioned) {
+       try {
+         const newThread = await this.createDiscordThread(channelId, data.id);
+@@ -978,6 +1000,19 @@ var DiscordAdapter = class _DiscordAdapter {
+     try {
+       await this.chat.handleIncomingMessage(this, threadId, chatMessage);
+     } catch (error) {
++      if (this.isLockConflictError(error)) {
++        this.logger.warn("Forwarded message dropped due to lock conflict", {
++          messageId: data.id,
++          threadId
++        });
++        this.notifyMessageDropped({
++          channelId: parentChannelId,
++          threadId: discordThreadId,
++          messageId: data.id,
++          guildId
++        });
++        return;
++      }
+       this.logger.error("Error handling forwarded message", {
+         error: String(error),
+         messageId: data.id
+@@ -1063,7 +1098,9 @@ var DiscordAdapter = class _DiscordAdapter {
+     if (discordThreadId) {
+       channelId = discordThreadId;
+     }
+-    const payload = {};
++    const payload = {
++      allowed_mentions: { parse: [] }
++    };
+     const embeds = [];
+     const components = [];
+     const card = extractCard(message);
+@@ -1318,7 +1355,9 @@ var DiscordAdapter = class _DiscordAdapter {
+   async editMessage(threadId, messageId, message) {
+     const { channelId, threadId: discordThreadId } = this.decodeThreadId(threadId);
+     const targetChannelId = discordThreadId || channelId;
+-    const payload = {};
++    const payload = {
++      allowed_mentions: { parse: [] }
++    };
+     const embeds = [];
+     const components = [];
+     const card = extractCard(message);
+@@ -1634,11 +1673,49 @@ var DiscordAdapter = class _DiscordAdapter {
+     if (body) {
+       headers["Content-Type"] = "application/json";
+     }
+-    const response = await fetch(url, {
++    const maxAttempts = 4;
++    let response = await fetch(url, {
+       method,
+       headers,
+       body: body ? JSON.stringify(body) : void 0
+     });
++    let attempt = 1;
++    while (response.status === 429 && attempt < maxAttempts) {
++      let retryAfterSeconds;
++      let isGlobal = false;
++      try {
++        const data = await response.json();
++        if (typeof data?.retry_after === "number") {
++          retryAfterSeconds = data.retry_after;
++        }
++        isGlobal = data?.global === true;
++      } catch {
++      }
++      if (retryAfterSeconds === void 0) {
++        const headerValue = Number(response.headers.get("Retry-After"));
++        if (Number.isFinite(headerValue)) {
++          retryAfterSeconds = headerValue;
++        }
++      }
++      if (retryAfterSeconds === void 0 || !Number.isFinite(retryAfterSeconds)) {
++        retryAfterSeconds = 1;
++      }
++      const delayMs = retryAfterSeconds * 1e3 + Math.floor(Math.random() * 250);
++      this.logger.warn("Discord API rate limited (429), retrying", {
++        path,
++        method,
++        attempt,
++        delayMs,
++        global: isGlobal
++      });
++      await new Promise((resolve) => setTimeout(resolve, delayMs));
++      attempt += 1;
++      response = await fetch(url, {
++        method,
++        headers,
++        body: body ? JSON.stringify(body) : void 0
++      });
++    }
+     if (!response.ok) {
+       const errorText = await response.text();
+       this.logger.error("Discord API error", {
+@@ -1737,6 +1814,27 @@ var DiscordAdapter = class _DiscordAdapter {
+         username: client.user?.username,
+         id: client.user?.id
+       });
++      this.emitGatewayStatus(true);
++    });
++    client.on(Events.ShardReady, () => {
++      this.emitGatewayStatus(true);
++    });
++    client.on(Events.ShardResume, () => {
++      this.emitGatewayStatus(true);
++    });
++    client.on(Events.ShardDisconnect, () => {
++      this.logger.warn("Discord Gateway shard disconnected");
++      this.emitGatewayStatus(false);
++    });
++    client.on(Events.Invalidated, () => {
++      this.logger.error("Discord Gateway session invalidated");
++      this.emitGatewayStatus(false);
++    });
++    client.on(Events.ShardError, (error) => {
++      this.logger.error("Discord Gateway shard error", {
++        error: String(error)
++      });
++      this.emitGatewayStatus(false);
+     });
+     client.on(Events.Error, (error) => {
+       this.logger.error("Discord Gateway error", { error: String(error) });
+@@ -1774,6 +1872,7 @@ var DiscordAdapter = class _DiscordAdapter {
+     } finally {
+       isShuttingDown = true;
+       client.destroy();
++      this.emitGatewayStatus(false);
+       this.logger.info("Discord Gateway listener stopped");
+     }
+   }
+@@ -1787,18 +1886,42 @@ var DiscordAdapter = class _DiscordAdapter {
+         return;
+       }
+       if (message.author.bot) {
+-        this.logger.debug("Ignoring message from bot", {
++        const isMe = message.author.id === client.user?.id;
++        const forwardBotMessage = !isMe && this.shouldForwardBotMessage?.({
+           authorId: message.author.id,
+-          authorName: message.author.username,
+-          isMe: message.author.id === client.user?.id
+-        });
+-        return;
++          guildId: message.guildId ?? "@me",
++          channelId: message.channelId
++        }) === true;
++        if (!forwardBotMessage) {
++          this.logger.debug("Ignoring message from bot", {
++            authorId: message.author.id,
++            authorName: message.author.username,
++            isMe
++          });
++          return;
++        }
+       }
+-      const isUserMentioned = message.mentions.has(client.user?.id ?? "");
++      const isUserMentioned = message.mentions.has(client.user?.id ?? "", {
++        ignoreEveryone: true,
++        ignoreRoles: true
++      });
+       const isRoleMentioned = this.mentionRoleIds.length > 0 && message.mentions.roles.some(
+         (role) => this.mentionRoleIds.includes(role.id)
+       );
+       const isMentioned = isUserMentioned || isRoleMentioned;
++      if (isMentioned && this.shouldHandleMention && !this.shouldHandleMention({
++        guildId: message.guildId ?? "@me",
++        channelId: message.channelId,
++        authorId: message.author.id,
++        authorIsBot: message.author.bot
++      })) {
++        this.logger.info("Skipping mention rejected by shouldHandleMention", {
++          channelId: message.channelId,
++          messageId: message.id,
++          authorId: message.author.id
++        });
++        return;
++      }
+       this.logger.info("Discord Gateway message received", {
+         channelId: message.channelId,
+         guildId: message.guildId,
+@@ -1983,9 +2106,13 @@ var DiscordAdapter = class _DiscordAdapter {
+       })),
+       raw: {
+         id: message.id,
++        type: message.type,
+         channel_id: channelId,
+         guild_id: guildId,
+         content: message.content,
++        embeds: message.embeds.map(
++          (embed) => typeof embed.toJSON === "function" ? embed.toJSON() : embed
++        ),
+         author: {
+           id: message.author.id,
+           username: message.author.username
+@@ -1998,6 +2125,19 @@ var DiscordAdapter = class _DiscordAdapter {
+     try {
+       await this.chat.handleIncomingMessage(this, threadId, chatMessage);
+     } catch (error) {
++      if (this.isLockConflictError(error)) {
++        this.logger.warn("Gateway message dropped due to lock conflict", {
++          messageId: message.id,
++          threadId
++        });
++        this.notifyMessageDropped({
++          channelId: parentChannelId,
++          threadId: discordThreadId,
++          messageId: message.id,
++          guildId
++        });
++        return;
++      }
+       this.logger.error("Error handling Gateway message", {
+         error: String(error),
+         messageId: message.id
+@@ -2262,7 +2402,9 @@ var DiscordAdapter = class _DiscordAdapter {
+         `Invalid Discord channel ID: ${channelId}`
+       );
+     }
+-    const payload = {};
++    const payload = {
++      allowed_mentions: { parse: [] }
++    };
+     const embeds = [];
+     const components = [];
+     const card = extractCard(message);
+@@ -2313,6 +2455,43 @@ var DiscordAdapter = class _DiscordAdapter {
+       raw: result
+     };
+   }
++  /**
++   * Check whether an error is a chat SDK lock-conflict drop (LockError).
++   */
++  isLockConflictError(error) {
++    return error instanceof Error && error.name === "LockError";
++  }
++  /**
++   * Invoke the onMessageDropped hook (fire-and-forget, errors swallowed).
++   */
++  notifyMessageDropped(info) {
++    if (!this.onMessageDropped) {
++      return;
++    }
++    try {
++      Promise.resolve(this.onMessageDropped(info)).catch(() => void 0);
++    } catch {
++    }
++  }
++  /**
++   * Invoke the onGatewayStatusChange hook, deduping repeated same-state calls.
++   */
++  emitGatewayStatus(connected) {
++    if (!this.onGatewayStatusChange) {
++      return;
++    }
++    if (this.lastGatewayConnected === connected) {
++      return;
++    }
++    this.lastGatewayConnected = connected;
++    try {
++      this.onGatewayStatusChange(connected);
++    } catch (error) {
++      this.logger.warn("onGatewayStatusChange hook threw", {
++        error: String(error)
++      });
++    }
++  }
+   /**
+    * Normalize a Discord emoji to our standard EmojiValue format.
+    */

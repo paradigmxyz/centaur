@@ -1,0 +1,59 @@
+<%= render "errors", role: role %>
+
+<%= form_with model: [ :console, role ], data: { turbo: false }, class: "space-y-6" do %>
+  <section class="form-section">
+    <h2 class="form-section-heading">Identity</h2>
+    <div class="grid gap-5 sm:grid-cols-2">
+      <% if role.new_record? %>
+        <div>
+          <label class="form-label" for="role_namespace">Namespace</label>
+          <%= text_field_tag "role[namespace]", role.namespace.presence || "default", id: "role_namespace", class: "form-input #{field_error_class(role, :namespace)}" %>
+          <%= field_error(role, :namespace) %>
+        </div>
+        <div>
+          <label class="form-label" for="role_foreign_id">Foreign ID</label>
+          <%= text_field_tag "role[foreign_id]", role.foreign_id, id: "role_foreign_id", class: "form-input #{field_error_class(role, :foreign_id)}", placeholder: "stable-handle" %>
+          <%= field_error(role, :foreign_id) %>
+          <p class="form-hint">Optional. A stable, URL-safe handle operators can reference.</p>
+        </div>
+      <% else %>
+        <div>
+          <label class="form-label">Namespace</label>
+          <div class="form-input bg-ink-800 text-zinc-400"><%= role.namespace %></div>
+        </div>
+        <div>
+          <label class="form-label">Foreign ID</label>
+          <div class="form-input bg-ink-800 text-zinc-400"><%= role.foreign_id.presence || "—" %></div>
+        </div>
+      <% end %>
+      <div>
+        <label class="form-label" for="role_name">Name</label>
+        <%= text_field_tag "role[name]", role.name, id: "role_name", class: "form-input #{field_error_class(role, :name)}" %>
+        <%= field_error(role, :name) %>
+      </div>
+    </div>
+    <%= field_error(role, :labels) %>
+  </section>
+
+  <section data-controller="nested-fields" class="form-section">
+    <div class="mb-2 flex items-center justify-between">
+      <h2 class="form-section-heading mb-0">Labels</h2>
+      <button type="button" data-action="nested-fields#add" class="btn-secondary">Add label</button>
+    </div>
+
+    <div class="space-y-2" data-nested-fields-target="container">
+      <% (role.labels.presence || {}).each_with_index do |(k, v), i| %>
+        <%= render "console/base_secrets/label_row", index: i, key: k, value: v %>
+      <% end %>
+    </div>
+
+    <template data-nested-fields-target="template">
+      <%= render "console/base_secrets/label_row", index: "NEW_RECORD", key: "", value: "" %>
+    </template>
+  </section>
+
+  <div class="flex items-center gap-3">
+    <%= submit_tag role.new_record? ? "Create role" : "Save role", class: "btn-primary" %>
+    <a href="<%= role.persisted? ? console_role_path(role.oid) : console_roles_path %>" class="btn-secondary">Cancel</a>
+  </div>
+<% end %>

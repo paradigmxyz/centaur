@@ -1,0 +1,7 @@
+acme_channel_infra:
+  principal: acme_channel
+  role: acme_infra
+
+acme_user_alice_infra:
+  principal: acme_user_alice
+  role: acme_infra

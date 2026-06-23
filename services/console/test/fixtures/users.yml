@@ -1,0 +1,29 @@
+acme_admin:
+  email: admin@acme.example
+  password_digest: <%= BCrypt::Password.create("password123456") %>
+  status: active
+  admin: true
+
+globex_admin:
+  email: admin@globex.example
+  password_digest: <%= BCrypt::Password.create("password123456") %>
+  status: active
+  admin: true
+
+member_user:
+  email: member@acme.example
+  password_digest: <%= BCrypt::Password.create("password123456") %>
+  status: active
+  admin: false
+
+pending_user:
+  email: pending@acme.example
+  password_digest: <%= BCrypt::Password.create("password123456") %>
+  status: pending
+  admin: false
+
+disabled_user:
+  email: disabled@acme.example
+  password_digest: <%= BCrypt::Password.create("password123456") %>
+  status: disabled
+  admin: false

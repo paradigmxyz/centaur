@@ -1,0 +1,14 @@
+[project]
+name = "centaur-workflow-python-host"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "asyncpg>=0.30.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+    "httplib2>=0.20.0",
+    "httpx>=0.28.0",
+    "pysocks>=1.7.1",
+    "slack-sdk>=3.39.0",
+]

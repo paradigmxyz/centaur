@@ -3,14 +3,12 @@ Centaur K3s chart installed.
 Important follow-ups:
 
 1. This chart deploys the trusted control plane on K3s.
-2. Agent sandboxes run as Kubernetes Pods managed by the API.
+2. Agent sandboxes run as Kubernetes Pods managed by api-rs.
 3. Infra Secrets must exist before install or upgrade; use `just bootstrap-secrets` for local dev.
-4. `api.executionWorkerEnabled` and `api.victoriaMetricsPushEnabled` are disabled by default for the control-plane-first K3s shape.
-5. Keep `runnerAccess.enabled=false` unless you have a private subnet and strict source ranges.
 {{- if .Values.agentSandbox.enabled }}
-6. Agent Sandbox controller install is enabled through the optional bundled Helm dependency.
+4. Agent Sandbox controller install is enabled through the optional bundled Helm dependency.
 {{- else }}
-6. Agent Sandbox controller install is disabled. Set `agentSandbox.enabled=true` only when this release should install the CRDs/controller.
+4. Agent Sandbox controller install is disabled. Set `agentSandbox.enabled=true` only when this release should install the CRDs/controller.
 {{- end }}
 
 Useful commands:

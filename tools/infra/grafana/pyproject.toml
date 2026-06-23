@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-grafana = "grafana.cli:app"
+grafana = "centaur_tool_grafana.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_grafana"
 
 [build-system]
 requires = ["hatchling"]
@@ -20,8 +26,20 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-hosts = []
+# Egress allowlist + the host(s) the GRAFANA_API_KEY Bearer token is scoped to.
+# Covers any Grafana Cloud stack; self-hosted deployments override this (e.g.
+# via a tool overlay). Must stay non-empty: an empty list renders the
+# iron-proxy `secrets` transform with no host rules, so the token is never
+# injected AND egress to Grafana is denied (every call 405s/401s through the
+# CONNECT-only proxy).
+hosts = ["*.grafana.net"]
 secrets = [
-    "GRAFANA_URL",
+    # NOTE: GRAFANA_URL is NOT a secret — it's the base URL the client reads
+    # in-process (os.getenv) to pick its connection target, so it can never be
+    # a wire-swapped placeholder. Provide it as a plain env var via the chart
+    # (sandbox.extraEnv for the Python api, apiRs.extraEnv + passthrough for
+    # api-rs) and keep it https:// so requests are CONNECT-tunneled, not
+    # plaintext-forwarded (the latter hits the proxy's CONNECT-only listener
+    # and returns 405).
     {type = "http", name = "GRAFANA_API_KEY", match_headers = ["Authorization"]},
 ]

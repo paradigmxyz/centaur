@@ -1,0 +1,231 @@
+---
+title: Workflows v2 Migration
+description: Migrate Centaur workflows to the api-rs Absurd workflow runtime and sandboxed Python workflow host.
+---
+
+# Workflows v2 Migration
+
+Workflows v2 moves durable workflow execution from the Python API service into
+`api-rs`. The workflow state machine is backed by Absurd queues and
+checkpoints, while Python workflow handlers run in their own sandbox through
+the Python workflow host.
+
+This keeps the workflow programming model familiar, but changes what workflow
+files can assume about their runtime.
+
+## What changes
+
+| Area | v1 | v2 |
+|------|----|----|
+| Runtime owner | Python API service | `api-rs` |
+| Durable state | Python workflow engine tables | Absurd queue/checkpoint tables |
+| Python execution | In-process with the API | Separate workflow-host sandbox |
+| Workflow discovery | Python imports all workflow files | `api-rs` asks the Python host to discover workflow metadata |
+| Agent turns | Python control plane helpers | `ctx.agent_turn(...)` delegates to the `api-rs` session runtime |
+| Webhooks | Python workflow router | `api-rs` `/api/webhooks/{slug}` |
+| Schedules | Python workflow scheduler | Absurd schedule tasks |
+
+## What keeps working
+
+Most workflow handlers can keep the same shape:
+
+```python
+from dataclasses import dataclass
+from typing import Any
+
+from api.workflow_engine import WorkflowContext
+
+
+WORKFLOW_NAME = "nightly_report"
+
+
+@dataclass
+class Input:
+    topic: str
+
+
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    facts = await ctx.step("collect", lambda: {"topic": inp.topic})
+    result = await ctx.agent_turn(f"Summarize {facts['topic']}")
+    return {"result": result}
+```
+
+Supported v2 primitives:
+
+| Primitive | Status |
+|-----------|--------|
+| `WORKFLOW_NAME` | Supported |
+| `Input` dataclass | Supported |
+| `handler(inp, ctx)` | Supported |
+| `ctx.step(name, fn)` | Supported |
+| `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
+| `ctx.call_tool(...)` | Supported through the configured tool API proxy |
+| `ctx.post_to_slack(...)` | Supported |
+| `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
+| `WEBHOOKS` | Supported |
+| `SCHEDULE` | Supported |
+
+## Required migrations
+
+### Keep imports narrow
+
+Workflow files should import only the workflow context compatibility module:
+
+```python
+from api.workflow_engine import WorkflowContext
+```
+
+Do not import Python API internals such as:
+
+```python
+from api.runtime_control import canonical_json
+from api.vm_metrics import workflow_counter
+```
+
+Those modules were implementation details of the Python API service. In v2,
+the workflow host provides a small compatibility surface instead of the whole
+Python API package.
+
+If a workflow needs a helper, move it into the workflow file, a shared overlay
+module, or a supported workflow-host compatibility shim.
+
+### Put side effects behind steps
+
+The handler may be replayed after a crash or retry. Any external write should
+be wrapped in `ctx.step(...)` so the result is checkpointed:
+
+```python
+async def handler(inp: dict, ctx: WorkflowContext) -> dict:
+    posted = await ctx.step(
+        "post_summary",
+        lambda: ctx.post_to_slack(inp["channel"], inp["summary"]),
+    )
+    return {"posted": posted}
+```
+
+### Make agent turns explicit
+
+Use `ctx.agent_turn(...)` when the workflow needs an agent sandbox:
+
+```python
+result = await ctx.agent_turn(
+    "Investigate this alert and return the next action.",
+    thread_key=f"workflow:{ctx.run_id}:agent",
+    harness="codex",
+    metadata={"workflow": WORKFLOW_NAME},
+)
+```
+
+The workflow host sandbox is separate from the agent sandbox. The workflow
+handler coordinates the run; the agent turn runs through the normal Centaur
+session runtime.
+
+### Declare webhook metadata in the workflow
+
+Expose a workflow through `WEBHOOKS`:
+
+```python
+WORKFLOW_NAME = "github_issue_triage"
+
+WEBHOOKS = [
+    {
+        "slug": "github-issue-triage",
+        "provider": "github",
+        "auth": {"type": "github_hmac", "secret_ref": "GITHUB_WEBHOOK_SECRET"},
+        "trigger_key": {"type": "header", "name": "X-GitHub-Delivery"},
+    }
+]
+```
+
+The v2 webhook endpoint is:
+
+```text
+POST /api/webhooks/{slug}
+```
+
+Webhook delivery is idempotent when `trigger_key` resolves to the same value.
+Sensitive headers are redacted before the webhook envelope is persisted.
+
+### Move schedules into workflow metadata
+
+Schedules can live beside the handler:
+
+```python
+SCHEDULE = {
+    "type": "cron",
+    "cron": "0 9 * * 1-5",
+    "timezone": "America/New_York",
+    "input": {"profile": "default"},
+}
+```
+
+`api-rs` reconciles enabled schedule metadata into Absurd schedule tasks. ETL
+workflows can be routed to a separate queue so long-running sync jobs do not
+block normal workflow runs.
+
+### Audit direct database access
+
+The middle migration path allows workflows to use the main database through
+`ctx._pool`. That keeps existing DB-heavy workflows moving, but it is not a
+hard isolation boundary.
+
+Use this only for workflows that already own their tables or are explicitly
+part of the platform data path. Prefer explicit tool calls or narrowly scoped
+SQL helpers for new workflows.
+
+## Compatibility checklist
+
+For each existing workflow:
+
+1. Confirm the file exports `WORKFLOW_NAME`.
+2. Confirm imports do not require the old Python API package, except
+   `api.workflow_engine.WorkflowContext`.
+3. Confirm third-party Python packages are installed in the workflow-host
+   sandbox image.
+4. Wrap Slack posts, database writes, external HTTP calls, and tool calls in
+   `ctx.step(...)` when they must not repeat.
+5. Replace direct agent-control-plane calls with `ctx.agent_turn(...)`.
+6. If the workflow uses `ctx._pool`, confirm the workflow-host sandbox receives
+   `DATABASE_URL`.
+7. If the workflow is scheduled, add `SCHEDULE` metadata and verify the schedule
+   queue has a sleeping tick task.
+8. If the workflow is webhook-triggered, add `WEBHOOKS` metadata and verify
+   repeated deliveries return the same run id.
+
+## Known gaps
+
+The v2 POC supports the workflow model, but it does not yet emulate the full
+Python API package. Workflows that import `api.runtime_control`, `api.vm_metrics`,
+or other Python API internals need a compatibility shim or a small local helper
+before they are v2-ready.
+
+The tool runtime is also still proxied. `ctx.call_tool(...)` works through the
+configured tool API, but a fully native `api-rs` tool runtime is a separate
+migration step.
+
+## Verify a migration
+
+Start with an import and discovery check in the same image that production will
+run:
+
+```bash
+WORKFLOW_DIRS=/opt/centaur/workflows python3 /usr/local/bin/workflow-host <<'EOF'
+{"type":"discover"}
+EOF
+```
+
+Then create a real run:
+
+```bash
+curl -s "$CENTAUR_API_URL/api/workflows/runs" \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: $WORKFLOW_API_KEY" \
+  -d '{
+    "workflow_name": "nightly_report",
+    "input": {"topic": "open incidents"}
+  }' | jq
+```
+
+Inspect the run, checkpoints, and sandbox state. A migrated workflow is not done
+until it has completed through the `api-rs` runtime in the same sandbox image
+and database configuration used by the deployment.

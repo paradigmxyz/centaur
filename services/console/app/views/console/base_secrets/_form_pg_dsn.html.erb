@@ -1,0 +1,50 @@
+<%= form_with model: [ :console, secret ], data: { turbo: false } do %>
+  <div class="space-y-6">
+    <%= render "identity_fields", secret: secret, foreign_id_required: true %>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Postgres Upstream</h2>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="secret_database">Database *</label>
+          <%= text_field_tag "secret[database]", secret.database, id: "secret_database", class: "form-input #{field_error_class(secret, :database)}", placeholder: "analytics" %>
+          <%= field_error(secret, :database) %>
+          <p class="form-hint">The routing key clients connect to. Must match the DSN's database for an inline DSN.</p>
+        </div>
+        <div>
+          <label class="form-label" for="secret_role">Role (optional)</label>
+          <%= text_field_tag "secret[role]", secret.role, id: "secret_role", class: "form-input #{field_error_class(secret, :role)}" %>
+          <%= field_error(secret, :role) %>
+          <p class="form-hint">SET ROLE applied to the upstream session.</p>
+        </div>
+      </div>
+    </section>
+
+    <section data-controller="nested-fields" class="form-section">
+      <div class="mb-2 flex items-center justify-between">
+        <h2 class="form-section-heading mb-0">Session Settings</h2>
+        <button type="button" data-action="nested-fields#add" class="btn-secondary">Add setting</button>
+      </div>
+      <p class="form-hint mb-3">Pinned session variables (GUCs) the proxy SETs at session start, in order, before SET ROLE. Clients can't override them. Names must be a bare or dotted identifier (e.g. <code>app.tenant</code>); <code>role</code> and <code>session_authorization</code> are reserved. A value is a literal, or resolved from the assigned principal at sync time: a label key, or a field (<code>id</code>, <code>namespace</code>, <code>foreign_id</code>, <code>name</code>).</p>
+
+      <div class="space-y-2" data-nested-fields-target="container">
+        <% Array(secret.settings).each_with_index do |s, i| %>
+          <%= render "setting_row", { index: i }.merge(pg_setting_row_attrs(s)) %>
+        <% end %>
+      </div>
+
+      <template data-nested-fields-target="template">
+        <%= render "setting_row", index: "NEW_RECORD", name: "", kind: "literal", value: "" %>
+      </template>
+      <%= field_error(secret, :settings) %>
+    </section>
+
+    <%= render "source_fields", secret: secret, source: secret.dsn_source, heading: "DSN Source" %>
+    <%= render "labels_fields", secret: secret %>
+
+    <div class="flex items-center gap-3">
+      <%= submit_tag(secret.new_record? ? "Create secret" : "Save changes", class: "btn-primary") %>
+      <a href="<%= console_secrets_path %>" class="btn-secondary">Cancel</a>
+    </div>
+  </div>
+<% end %>

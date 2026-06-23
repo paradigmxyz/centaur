@@ -15,6 +15,7 @@ export const sidebar = [
     text: 'Operate',
     items: [
       { text: 'Slack ETL', link: '/operate/slack-etl' },
+      { text: 'Expose Slackbot with Tailscale Funnel', link: '/operate/tailscale-funnel' },
     ],
   },
   {
@@ -25,6 +26,7 @@ export const sidebar = [
       { text: 'Creating Skills', link: '/extend/skills' },
       { text: 'Creating Tools', link: '/extend/tools' },
       { text: 'Creating Workflows', link: '/extend/workflows' },
+      { text: 'Workflows v2 Migration', link: '/extend/workflows-v2' },
       { text: '🚧 Creating Apps', link: '/extend/apps' },
     ],
   },
@@ -34,9 +36,10 @@ export const sidebar = [
       { text: 'How is Centaur securing my secrets?', link: '/security' },
       { text: '1Password', link: '/secrets/onepassword' },
       { text: 'Environment Variables', link: '/secrets/environment' },
+      { text: 'Per-User Permissions', link: '/secrets/advanced-permissioning' },
+      { text: 'OAuth Apps', link: '/secrets/oauth-apps' },
       { text: '🚧 AWS KMS', disabled: true },
       { text: '🚧 GCP Secret Manager', disabled: true },
-      { text: '🚧 Advanced Permissioning', link: '/secrets/advanced-permissioning' },
     ],
   },
   {

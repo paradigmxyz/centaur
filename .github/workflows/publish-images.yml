@@ -20,39 +20,64 @@ on:
 
 concurrency:
   group: publish-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
+  id-token: write
   packages: write
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: paradigmxyz/centaur
   IMAGE_SOURCE: https://github.com/paradigmxyz/centaur
+  # Main/tags keep optimized release images. PRs and manual branch publishes
+  # use debug builds so staging/dev iteration does not spend minutes optimizing
+  # Rust binaries that are immediately replaced by the next test build.
+  RUST_BUILD_PROFILE: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && 'debug' || 'release' }}
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  # Build each image with Depot's hosted builders, push by digest, and hand
+  # the digests to the merge job below which assembles the multi-arch manifest.
+  # arm64 is only built on pushes to main and release tags — PR and manual
+  # dispatch builds stay amd64-only to keep iteration fast.
+  build:
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm-16' || 'depot-ubuntu-24.04-16' }}
     strategy:
       fail-fast: false
       matrix:
+        service: [api-rs, slackbotv2, discordbot, agent, iron-proxy, console]
+        platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
-          - service: api
-            image: centaur-api
-            dockerfile: services/api/Dockerfile
+          - service: api-rs
+            image: centaur-api-rs
+            context: .
+            dockerfile: services/api-rs/Dockerfile
             target: ""
-          - service: slackbot
-            image: centaur-slackbot
-            dockerfile: services/slackbot/Dockerfile
+          - service: slackbotv2
+            image: centaur-slackbotv2
+            context: .
+            dockerfile: services/slackbotv2/Dockerfile
+            target: ""
+          - service: discordbot
+            image: centaur-discordbot
+            context: .
+            dockerfile: services/discordbot/Dockerfile
             target: ""
           - service: agent
             image: centaur-agent
+            context: .
             dockerfile: services/sandbox/Dockerfile
             target: sandbox
           - service: iron-proxy
             image: centaur-iron-proxy
+            context: .
             dockerfile: services/iron-proxy/Dockerfile
+            target: ""
+          - service: console
+            image: centaur-console
+            context: services/console
+            dockerfile: services/console/Dockerfile
             target: ""
 
     steps:
@@ -60,6 +85,88 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+
+      - name: Derive platform slug
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_SLUG=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Depot
+        uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata for ${{ matrix.image }}
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
+        env:
+          DOCKER_METADATA_PR_HEAD_SHA: true
+
+      - name: Build and push ${{ matrix.image }} (${{ matrix.platform }})
+        id: build
+        uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1.18.0
+        with:
+          project: d8qqlh1bmq
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Tags are applied by the merge job on the multi-arch manifest;
+          # per-arch builds are pushed by digest only. Fork PRs run with a
+          # read-only GITHUB_TOKEN, so they build without pushing.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
+          build-args: |
+            RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
+
+      - name: Export digest
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: depot-ubuntu-24.04-16
+    needs: build
+    if: ${{ !github.event.pull_request.head.repo.fork }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: centaur-api-rs
+          - image: centaur-slackbotv2
+          - image: centaur-agent
+          - image: centaur-iron-proxy
+          - image: centaur-console
+          - image: centaur-discordbot
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -92,14 +199,13 @@ jobs:
         env:
           DOCKER_METADATA_PR_HEAD_SHA: true
 
-      - name: Build and push ${{ matrix.image }}
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          push: ${{ !github.event.pull_request.head.repo.fork }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+      - name: Create multi-arch manifest for ${{ matrix.image }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}@sha256:%s ' *)
+
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}

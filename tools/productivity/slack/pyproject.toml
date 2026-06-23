@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-slack = "slack.cli:app"
+slack = "centaur_tool_slack.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -22,6 +22,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_slack"
 
 [tool.centaur]
 module = "client.py"
@@ -30,4 +32,5 @@ secrets = [
 ]
 optional_secrets = [
     {type = "http", name = "SLACK_SEARCH_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]},
+    {type = "http", name = "SLACK_ETL_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com", "files.slack.com"]},
 ]

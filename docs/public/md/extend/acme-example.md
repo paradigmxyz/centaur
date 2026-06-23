@@ -13,7 +13,8 @@ ACME example repos:
   workflows, skills, personas, or sandbox prompt guidance.
 - [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra)
   is a GitOps deployment template. Fork it when you want an Argo CD-managed
-  cluster layout that installs Centaur and mounts the ACME overlay image.
+  cluster layout that installs Centaur and syncs the ACME overlay through
+  repo-cache.
 
 Together they show the recommended split: keep reusable Centaur in this repo,
 keep organization-specific agent behavior in an overlay repo, and keep cluster
@@ -54,7 +55,6 @@ In the overlay repo, keep only the extension points you need:
 
 ```text
 centaur-acme/
-├── Dockerfile
 ├── tools/
 │   └── acme_crm/
 ├── workflows/
@@ -75,42 +75,53 @@ The included workflow demonstrates how an overlay can add durable workflows
 without changing the base Centaur API. The included skill and sandbox prompt
 show how to package organization-specific agent guidance.
 
-## 3. Build and publish the overlay image
+## 3. Configure the overlay repo
 
-The overlay `Dockerfile` copies the repo to `/overlay`:
-
-```dockerfile
-FROM alpine:3.20
-
-WORKDIR /overlay
-COPY . /overlay
-```
-
-Build and publish an image for your fork:
+Commit your overlay changes. For production deployments that require an exact
+reproducible rollout, record the revision you want Centaur to run:
 
 ```bash
-docker build -t ghcr.io/your-org/centaur-overlay:sha-$(git rev-parse --short HEAD) .
-docker push ghcr.io/your-org/centaur-overlay:sha-$(git rev-parse --short HEAD)
+git -C centaur-acme rev-parse --short HEAD
 ```
 
-The Centaur chart mounts `sourcePath: /overlay` into the API at
-`/app/overlay/org` and into sandbox pods at `/home/agent/overlay/org`.
+The Centaur chart's repo-cache DaemonSet checks out the overlay repo on each
+node, so changing tools, workflows, or skills is a Git push — no API, sandbox,
+or overlay image rebuild is required for overlay-only changes. New sandboxes see
+the latest cached checkout; existing sandboxes can run `centaur-tools refresh`
+when they need to refresh tool shims from the current repo-cache checkout.
 
-## 4. Point the infra repo at your images
+Configure the ordered overlay sources in Helm values:
+
+```yaml
+overlays:
+  sources:
+    - repo: paradigmxyz/centaur
+      ref: <centaur-commit-sha>
+    - repo: your-org/centaur-acme
+      ref: main
+```
+
+Each source defaults to the conventional `tools/`, `workflows/`, and
+`.agents/skills/` subdirectories; directories a repo does not contain are
+skipped, and a subdir set to `""` disables that surface. Private overlay repos
+should use `repoCache.githubToken` so repo-cache can clone them. Set the overlay
+`ref` to a commit SHA instead of `main` only when you want pinned overlay
+rollouts.
+
+## 4. Point the infra repo at your revisions and images
 
 In the infra repo, update
 `clusters/acme-centaur/argocd/bootstrap/centaur.yaml`.
 
-Set the overlay image repository and tag:
+Set the ordered overlay source list:
 
 ```yaml
-parameters:
-  - name: overlay.image.repository
-    value: ghcr.io/your-org/centaur-overlay
-    forceString: true
-  - name: overlay.image.tag
-    value: sha-0000000
-    forceString: true
+overlays:
+  sources:
+    - repo: paradigmxyz/centaur
+      ref: <centaur-commit-sha>
+    - repo: your-org/centaur-acme
+      ref: main
 ```
 
 The template also pins the base Centaur service images:
@@ -127,8 +138,9 @@ The template also pins the base Centaur service images:
 ```
 
 Replace those tags with images you built from `centaur`, or wire them to your
-image automation. The example includes Argo CD Image Updater annotations for
-the overlay image.
+image automation. Overlay-only changes roll out through repo-cache; if the
+overlay source tracks `main`, merging to the overlay repo is enough for new
+sandboxes to pick up the next refreshed checkout.
 
 For production, pin the Centaur chart source to a commit SHA instead of tracking
 `main`:
@@ -177,44 +189,42 @@ kubectl apply -f clusters/acme-centaur/argocd/bootstrap/centaur.yaml
 ```
 
 Argo CD installs the Centaur Helm chart, applies the values from the infra repo,
-and mounts the overlay image from your overlay repo.
+and repo-cache syncs the configured overlay repos on every node.
 
 ## 7. Verify the running overlay
 
 From the API pod, verify API-side discovery:
 
 ```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  sh -lc 'echo "$TOOL_DIRS"; echo "$WORKFLOW_DIRS"; ls -la /app/overlay/org'
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
+  sh -lc 'echo "$TOOL_DIRS"; echo "$WORKFLOW_DIRS"'
 ```
 
 Expected paths include:
 
 ```text
-/app/overlay/org/tools
-/app/overlay/org/workflows
+/var/lib/centaur/repos/your-org/centaur-acme/tools
+/var/lib/centaur/repos/your-org/centaur-acme/workflows
 ```
 
 From a sandbox, verify sandbox-side guidance:
 
 ```bash
-echo "$CENTAUR_OVERLAY_DIR"
-ls "$CENTAUR_OVERLAY_DIR"
-ls "$CENTAUR_OVERLAY_DIR/.agents/skills"
+echo "$CENTAUR_SKILL_DIRS"
+find /workspace/.agents/skills -maxdepth 2 -type f -name SKILL.md | sort
 ```
 
 Expected paths include:
 
 ```text
-/home/agent/overlay/org/.agents/skills
-/home/agent/overlay/org/services/sandbox/SYSTEM_PROMPT.md
+/home/agent/github/your-org/centaur-acme/.agents/skills
 ```
 
 You can also inspect the runtime payload for a thread:
 
 ```bash
 curl -s "$CENTAUR_API_URL/agent/runtime?key=$THREAD_KEY" \
-  -H "X-Api-Key: $CENTAUR_API_KEY" | jq '.overlay'
+  -H "X-Api-Key: $RUNTIME_API_KEY" | jq '.overlay'
 ```
 
 ## What to change first
@@ -227,8 +237,9 @@ Start small:
    team already follows.
 3. Add your organization's sandbox prompt guidance to
    `services/sandbox/SYSTEM_PROMPT.md`.
-4. Publish the overlay image and update the infra repo's `overlay.image.*`
-   values.
+4. Push the overlay repo. If the overlay source tracks `main`, repo-cache picks
+   up the merge; if it is pinned to a commit, update the infra repo's
+   `overlays.sources[].ref`.
 5. Verify discovery from the API pod and from a sandbox before adding more
    tools or workflows.
 

@@ -1,0 +1,15 @@
+acme_proxy:
+  name: acme-prod-proxy
+  principal: acme_channel
+  bearer_token_hash: <%= Digest::SHA256.hexdigest("iprx_#{'a' * 64}") %>
+
+globex_proxy:
+  name: globex-staging-proxy
+  principal: globex_user
+  bearer_token_hash: <%= Digest::SHA256.hexdigest("iprx_#{'b' * 64}") %>
+
+# Booted but not yet assigned a principal.
+unassigned_proxy:
+  name: unassigned-proxy
+  principal: null
+  bearer_token_hash: <%= Digest::SHA256.hexdigest("iprx_#{'c' * 64}") %>

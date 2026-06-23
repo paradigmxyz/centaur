@@ -207,7 +207,7 @@ This means clients and the API never need to know about harness-specific quirks.
 
 **Sandbox → API** (REST over Kubernetes services):
 
-Agents call tools via `curl $CENTAUR_API_URL/tools/<tool>/<method>` over the in-cluster service network. Auth is via `CENTAUR_API_KEY` injected when the sandbox Pod is created.
+Agents call tools through the generated `centaur-tools` catalog and direct tool CLIs. The tool runtime handles routing and credential access.
 
 ### Network Isolation
 
@@ -397,7 +397,7 @@ Runs go through: `queued → running → sleeping/waiting → running → … �
 
 - **Worker pool**: `WORKFLOW_WORKER_CONCURRENCY` workers (default 2) poll for claimable runs.
 - **Lease-based fencing**: Each worker holds a lease on its run, extended by a heartbeat. If the worker dies, the lease expires and another worker reclaims the run.
-- **Schedules**: Cron-based or interval-based schedules are configured in `workflow_schedules` table and ticked by the worker loop.
+- **Schedules**: Cron-based or interval-based schedules are discovered from workflow metadata by `api-rs`. The scheduler stores tick tasks in the Absurd `centaur_workflow_schedules` queue.
 - **External events**: `POST /workflows/events` delivers events that wake waiting runs.
 - **Child workflows**: Parent→child relationships are tracked; cancelling a parent cascels linked executions.
 
@@ -425,10 +425,13 @@ Runs go through: `queued → running → sleeping/waiting → running → … �
 
 | Table | What |
 |-------|------|
-| `workflow_runs` | Run metadata, status, input/output, parent/root hierarchy |
-| `workflow_checkpoints` | Per-step cached results, linked execution/child-run IDs |
-| `workflow_schedules` | Cron/interval schedule definitions with next_run_at tracking |
-| `workflow_events` | External events for `wait_for_event` correlation |
+| `absurd.queues` | Registered workflow queues, including standard, ETL, backfill, Slack-live, and schedule queues |
+| `absurd.t_centaur_workflows*` | Workflow task metadata, state, input params, idempotency keys, and completed payloads |
+| `absurd.r_centaur_workflows*` | Per-attempt run state, leases, timing, result payloads, and failures |
+| `absurd.c_centaur_workflows*` | Per-step checkpoint state |
+| `absurd.e_centaur_workflows*` | Emitted workflow events for event-driven resumes |
+| `absurd.w_centaur_workflows*` | Wait registrations for sleeps and external events |
+| `absurd.t_centaur_workflow_schedules` | Scheduler tick tasks for registered cron and interval schedules |
 
 ## Agent Sandbox
 
@@ -442,17 +445,15 @@ The sandbox image bakes `services/sandbox/SYSTEM_PROMPT.md` into `~/AGENTS.md` a
 
 The system prompt tells the agent:
 - **Identity**: it's running inside a Kubernetes sandbox pod, calling back to the API for tool access
-- **Tools**: three kinds — harness built-ins (Read, Bash, etc.), API tools via the `call` helper, and a headless browser
-- **`call` helper** (`/usr/local/bin/call`): a bash wrapper around `curl` that provides a concise syntax for API tool calls. `call slack get_channel_history '{"channel":"general"}'` instead of a full curl command. Returns TOON format for token efficiency.
+- **Tools**: three kinds — harness built-ins (Read, Bash, etc.), API tools exposed as shell CLI shims, and a headless browser
+- **Tool CLIs**: each tool is installed as a shell command at container startup by `services/sandbox/install_tool_shims.py`, which scans `TOOL_DIRS` for `pyproject.toml [project.scripts]` and `uvx`-installs each. Agents call tools directly (`slack get_channel_history '{"channel":"general"}'`, `<tool> --help` to discover) — there is no `call` helper.
 - **Slack messaging**: the agent's stdout IS the Slack reply — never call `send_message` on the active thread
-- **Dashboard blocks**: fenced code blocks with `dashboard` language tag render structured tables, charts, and KPI cards in compatible Centaur clients
 - **Rules**: never display secrets, show your work, lead with the answer
 
-The `call` helper (`services/sandbox/call.sh`) handles routing:
-- `call <tool> <method> [json]` → `POST /tools/<tool>/<method>`
-- `call discover <tool>` → `GET /tools/<tool>`
-
-Legacy `call search` / `call sql` shorthands were removed. Sandbox agents should call the concrete tool directly, for example `call websearch search '{"query":"..."}'` or another deployment-specific query method discovered via `call discover <tool>`.
+`centaur-tools` is the generated catalog CLI emitted by the same installer:
+- `centaur-tools list` → list available tool CLIs
+- `centaur-tools run <tool> [args]` → run a tool CLI
+- `centaur-tools call <tool> <method> [json]` → internal method bridge kept only for the Python workflow host's `ctx.call_tool(...)`; interactive agents use the direct tool CLIs above.
 
 ### Persona System
 
@@ -461,7 +462,7 @@ The entrypoint supports persona overlays via `AGENT_PERSONA`. Persona prompts ar
 ### Sandbox Pod Config
 
 - Runs under Kubernetes NetworkPolicies with API reachable through the in-cluster service URL
-- Entrypoint injects `CENTAUR_API_URL` and `CENTAUR_API_KEY` env vars
+- Entrypoint injects the runtime URLs and tool catalog environment needed by the sandbox
 - Stub API keys so harnesses init in API-key mode (not browser login)
 - `HTTPS_PROXY` routes LLM calls through the firewall
 - Resource limits: 4GB memory, 2 CPUs
@@ -476,9 +477,11 @@ Sandbox Pods never see real API keys. The firewall (`services/firewall/addon.py`
 |-------------|--------|--------|
 | `api.anthropic.com` | `x-api-key` | raw |
 | `api.openai.com` | `authorization` | bearer |
+| `openrouter.ai` | `authorization` | bearer |
 | `ampcode.com` | `authorization` | bearer |
 | `api.github.com` | `authorization` | token |
 | `github.com` | `authorization` | basic auth |
+| `bedrock-mantle.<region>.api.aws` | `authorization` + `x-amz-*` | AWS SigV4 re-sign (opt-in, codex `amazon-bedrock`) |
 
 ### Session Persistence
 
@@ -490,7 +493,7 @@ Sandbox Pods never see real API keys. The firewall (`services/firewall/addon.py`
 ## Security Model
 
 - **API auth**: All callers authenticate with DB-backed API keys (`aiv2_*` prefix, stored in `api_keys` table). Local in-cluster service calls use the configured bypass paths where applicable.
-- **Sandbox auth**: Sandbox Pods get auto-issued HMAC-signed tokens (`sbx1.*` prefix) minted by the API. These are short-lived (2h TTL) and scoped to `agent` + `tools:*`.
+- **Sandbox auth**: Sandbox Pods use the runtime's tool and workflow surfaces; agents should not depend on a user-visible Centaur API key.
 - **Slack**: HMAC-SHA256 signature verification on all webhooks
 - **Public edge**: The Helm chart exposes public routes only when configured through Ingress, HTTPRoute, or service settings.
 - **Sandbox isolation**: Pods get stub keys only; real keys injected by firewall proxy in-flight
@@ -506,12 +509,11 @@ All API authentication uses **DB-backed keys** stored in the `api_keys` Postgres
 | Type | Prefix | Issued by | Used by | Scopes |
 |------|--------|-----------|---------|--------|
 | DB keys | `aiv2_*` | Admin API | Slackbot, CLI, external callers | Per-key (e.g. `["*"]`, `["agent:execute"]`) |
-| Sandbox tokens | `sbx1.*` | API (automatic) | Sandbox containers → API tool calls | `["agent", "tools:*"]` |
 
 ### How services get their keys
 
 - **Slackbot**: `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and `SLACKBOT_API_KEY` are injected from the local infra Secret.
-- **Sandbox containers**: Auto-issued `sbx1.*` token injected as `CENTAUR_API_KEY` at container creation
+- **Sandbox containers**: Use runtime-provided tool CLIs and workflow context rather than a direct Centaur API key
 - **Local testing**: Use localhost bypass (no key needed from inside the API deployment), or create a key via admin API
 
 ## Secrets
@@ -525,6 +527,114 @@ For local development, infra secrets are stored in Kubernetes Secrets created by
 [iron-control](https://github.com/ironsh/iron-control) is an optional Rails control plane for authenticated API access and encrypted secret storage. It is off by default; enable it with `--set ironControl.enabled=true` (or set `ironControl.enabled: true` in a values file). When enabled, it runs against a dedicated `iron_control_production` database on the bundled Postgres (a separate logical DB so its Rails `schema_migrations` table never collides with the API's dbmate table), created by an idempotent init container.
 
 `just bootstrap-secrets` seeds the required keys into `centaur-infra-env`: the three ActiveRecord encryption keys, `SECRET_KEY_BASE`, and the initial admin password/API key are auto-generated (only when absent, never rotated in place). `IRON_CONTROL_DATABASE_URL` defaults to the bundled Postgres server with no database path (so Rails resolves each connection's database name from the image's `database.yml`); export it before running `just bootstrap-secrets` to point at an external server. Override the admin email with `IRON_CONTROL_INITIAL_USER_EMAIL` (default `admin@centaur.local`).
+
+### centaur-perms
+
+`centaur-perms` is the operator CLI for iron-control permissions: it controls which Slack principals (users and channels) and which roles hold which tool roles and secrets. It lives at `services/api-rs/crates/centaur-perms` and reuses iron-control's canonical mappings (`derive_principal`, `RoleSpec::tool`), so every principal and role `foreign_id` it writes matches exactly what `api-rs` registers at session start. It is the supported way to inspect and edit grants by hand; the API writes the same resources at runtime.
+
+#### Concepts
+
+- **Principal** — a Slack user or channel that an agent session runs as. `foreign_id`s are derived canonically: `slack-channel-<team>-<conv>` for a channel, `slack-user-<team>-<user>` for a DM. A channel's grants win when present; otherwise the session falls back to the requesting user's grants.
+- **Role** — a named bundle of secret grants assignable to principals. Canonical roles: `infra` (shared infra secrets), `tools` (shared harness/tool secrets), and one `tool-<slug>` per tool (e.g. `tool-github`).
+- **Secret** — a typed iron-control resource (static `ssr_`, OAuth token `ots_`, GCP auth `gas_`, Postgres DSN `pgs_`, HMAC signing `hms_`). iron-control never returns credential values, only the source each resolves from. Each `tool-<slug>` secret keeps a canonical `tool-<slug>-…` id so the same object is shared no matter which role grants it.
+- **Grant** — binds a secret to a grantee (a principal or a role). `centaur-perms` resources carry the label `managed-by=centaur`.
+
+A principal's *effective* access is the union of its directly granted secrets and the secrets carried by every role assigned to it.
+
+#### Setup
+
+The CLI talks to the iron-control admin API. Provide the connection via flags or env vars (iron-control must be enabled — see above):
+
+```bash
+export IRON_CONTROL_URL=http://localhost:3000        # admin API base URL
+export IRON_CONTROL_API_KEY=iak_…                    # admin API key
+export IRON_CONTROL_NAMESPACE=default                # optional, defaults to "default"
+```
+
+For `--tool` lookups, point the CLI at the same tool directories the API uses, via repeatable `--tools-dir` flags or the colon-separated `TOOL_DIRS` env var (explicit dirs first, then env; later dirs shadow earlier ones, matching the overlay order). Build and run from `services/api-rs`:
+
+```bash
+cd services/api-rs
+cargo run -p centaur-perms -- <args>     # or: cargo build -p centaur-perms; ./target/debug/centaur-perms <args>
+```
+
+The `--tool` flag parses a tool's `pyproject.toml` `[tool.centaur]` secrets and registers them in iron-control before granting. How each secret's `secret_ref` resolves to a source is set by `--source-policy` (`env` default, `onepassword`, or `onepassword-connect`); the 1Password policies also require `--op-vault` (and accept `--op-ttl`, default `10m`).
+
+#### Command surface
+
+Commands are resource-first — `centaur-perms <noun> <verb>`:
+
+| Command | What it does |
+|---------|--------------|
+| `principals list [--filter S] [--label k=v] [--managed]` | List principals. `--filter` is a case-insensitive substring on `foreign_id`/name; `--managed` is shorthand for `--label managed-by=centaur`. |
+| `principals show <principal> [--slack-user U]` | Show a principal's roles (with each role's grants), direct grants, and effective replace-secret placeholders. |
+| `principals grant <principal> [--tool N] [--role F] [--secret OID]` | Grant access. `--tool` registers the tool's `tool-<slug>` role + secrets then assigns it; `--role` assigns an existing role; `--secret` grants a secret OID directly. All repeatable; creates the principal if absent. |
+| `principals revoke <principal> [--tool N] [--role F] [--secret OID] [--grant-id OID]` | Reverse of grant. `--tool`/`--role` unassign the role; `--secret` deletes the direct grant for that secret; `--grant-id` deletes a grant by its `grant_…` id. |
+| `roles list / show <role>` | List roles, or show the secrets granted to one role. |
+| `roles grant <role> [--secret OID] [--tool N [--secret-name NAME]]` | Grant secrets to a role by OID, or register+grant a tool's declared secrets. `--secret-name` (repeatable, requires `--tool`) selects specific declared secrets instead of all. |
+| `roles revoke <role> --secret OID` | Revoke one or more secrets from a role (`--secret` required, repeatable). |
+| `secrets list [--filter S] [--label k=v] [--managed]` | List secrets across every type, one row per secret. |
+| `secrets show <secret>` | Show one secret's full config by OID or `foreign_id` (values are never shown — only the source). |
+| `broker create --foreign-id F --token-endpoint URL --client-id ID [--client-secret S] [--refresh-token SEED] [--scope SC]…` | Create or update an iron-control broker credential. Values are passed literally; iron-control owns the OAuth refresh loop. Re-supplying `--refresh-token` re-bootstraps it. |
+| `broker list / show <credential> / delete <credential>` | List broker credentials, show one (status/expiry; secret material is never returned), or delete one (by `bcr_` OID or `foreign_id`). |
+
+A `<principal>` argument is treated as a Slack thread key when it contains `:` (e.g. `slack:T123:C456:1700000000.0001`) and run through `derive_principal` — pass `--slack-user` so a DM thread keys to the user. Any value without a `:` is used verbatim as a `foreign_id` (e.g. `slack-channel-t123-c456`) or an OID. Grant/revoke operations are idempotent: re-granting an assigned role or revoking a missing grant is a no-op, reported as such.
+
+A tool's `brokered_token` secret registers the *consumer* side — a static secret that injects the access token from a `token_broker` source. The broker credential itself (the managed OAuth refresh loop) is provisioned out of band with `broker create`; the tool's `brokered_token` references it by `foreign_id` (its `credential`, defaulting to the secret `name`).
+
+#### Common workflows
+
+Give a channel access to a tool (registers the tool's role + secrets from its `pyproject.toml`, then assigns the role to the channel):
+
+```bash
+centaur-perms principals grant slack-channel-t123-c456 --tool github --tools-dir tools
+```
+
+Inspect what a principal can actually do (resolve a live thread key, then list roles, direct grants, and effective secrets):
+
+```bash
+centaur-perms principals show slack:T123:C456:1700000000.0001
+```
+
+Give an individual user a tool only in their DMs:
+
+```bash
+centaur-perms principals grant slack:D9999999:1700000000.0001 --slack-user U07ABC --tool github --tools-dir tools
+```
+
+Register a tool's secrets once on the shared `tools` role, then assign that role to many principals:
+
+```bash
+centaur-perms roles grant tools --tool github --tools-dir tools
+centaur-perms principals grant slack-channel-t123-c456 --role tools
+```
+
+Register only a single named secret from a tool onto a role:
+
+```bash
+centaur-perms roles grant infra --tool slackbot --secret-name SLACK_BOT_TOKEN --tools-dir tools
+```
+
+Revoke a tool from a channel (unassigns the `tool-<slug>` role; shared secrets on other roles are untouched):
+
+```bash
+centaur-perms principals revoke slack-channel-t123-c456 --tool github
+```
+
+Provision a managed broker credential a `brokered_token` secret (or a harness fragment) references — e.g. the Codex/Claude Code access-token harnesses reference `openai-codex` / `anthropic-claude`:
+
+```bash
+centaur-perms broker create --foreign-id openai-codex \
+  --token-endpoint https://auth.openai.com/oauth/token \
+  --client-id "$OPENAI_CODEX_CLIENT_ID" --refresh-token "$OPENAI_CODEX_REFRESH_TOKEN"
+```
+
+Audit Centaur-managed secrets and inspect one:
+
+```bash
+centaur-perms secrets list --managed
+centaur-perms secrets show tool-github-github_token
+```
 
 ## Observability & Audit Logs
 

@@ -23,6 +23,23 @@ Optional local-dev admin key:
                                (envFrom centaur-infra-env). Re-run with --force
                                or kubectl patch to rotate.
 
+Optional repo-cache GitHub token:
+  GITHUB_TOKEN                 added to centaur-infra-env when present; the
+                               repo-cache DaemonSet reads it (repoCache.githubToken
+                               -> existingSecretName) to clone tool/overlay repos.
+                               Updated on every run when set, so it rotates.
+
+Optional Discord ingress bootstrap (consumed when discordbot.enabled=true):
+  DISCORD_BOT_TOKEN            when set, seeds the discordbot keys; requires
+                               DISCORD_PUBLIC_KEY and DISCORD_APPLICATION_ID
+                               (the script fails fast if either is missing).
+                               DISCORD_* values are overwritten on every run so
+                               they rotate.
+  DISCORD_PUBLIC_KEY           Ed25519 public key from the Discord application
+  DISCORD_APPLICATION_ID       Discord application id (doubles as the bot user id)
+  DISCORDBOT_API_KEY           bearer the bot sends to api-rs; auto-generated
+                               once when absent (never rotated in place)
+
 Optional iron-control bootstrap (consumed when ironControl.enabled=true):
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
@@ -94,6 +111,13 @@ require_env SLACK_BOT_TOKEN
 require_env SLACK_SIGNING_SECRET
 require_env SLACKBOT_API_KEY
 
+# Discord keys are optional as a group, but partial configuration would silently
+# seed empty values and crashloop the bot at deploy time instead of failing here.
+if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
+  require_env DISCORD_PUBLIC_KEY
+  require_env DISCORD_APPLICATION_ID
+fi
+
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 delete_if_forced centaur-infra-env
@@ -122,6 +146,21 @@ if secret_exists centaur-infra-env; then
   fi
   if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
     patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
+  fi
+  # GITHUB_TOKEN for the repo-cache DaemonSet. Set whenever present so it can be
+  # rotated; harmless when repoCache is disabled.
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    patch_data+=("\"GITHUB_TOKEN\":\"$(printf '%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')\"")
+  fi
+  # Discord ingress (discordbot) keys: added when DISCORD_BOT_TOKEN is in the env. DISCORD_* are
+  # overwritten on each run (so rotation works); DISCORDBOT_API_KEY is generated once if absent.
+  if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
+    patch_data+=("\"DISCORD_BOT_TOKEN\":\"$(printf '%s' "$DISCORD_BOT_TOKEN" | base64 | tr -d '\n')\"")
+    patch_data+=("\"DISCORD_PUBLIC_KEY\":\"$(printf '%s' "$DISCORD_PUBLIC_KEY" | base64 | tr -d '\n')\"")
+    patch_data+=("\"DISCORD_APPLICATION_ID\":\"$(printf '%s' "$DISCORD_APPLICATION_ID" | base64 | tr -d '\n')\"")
+    if ! secret_key_present DISCORDBOT_API_KEY; then
+      patch_data+=("\"DISCORDBOT_API_KEY\":\"$(printf '%s' "${DISCORDBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
+    fi
   fi
   # iron-control keys: top up only when absent so we never rotate them out from
   # under a running pod (its ActiveRecord-encrypted data would become
@@ -197,11 +236,22 @@ else
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT="$(rand_hex)"
     --from-literal=IRON_CONTROL_SECRET_KEY_BASE="$(rand_hex)$(rand_hex)"
   )
+  if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
+    secret_args+=(
+      --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN"
+      --from-literal=DISCORD_PUBLIC_KEY="$DISCORD_PUBLIC_KEY"
+      --from-literal=DISCORD_APPLICATION_ID="$DISCORD_APPLICATION_ID"
+      --from-literal=DISCORDBOT_API_KEY="${DISCORDBOT_API_KEY:-$(rand_hex)}"
+    )
+  fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
   fi
   if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
     secret_args+=(--from-literal=LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY")
+  fi
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    secret_args+=(--from-literal=GITHUB_TOKEN="$GITHUB_TOKEN")
   fi
   kubectl "${secret_args[@]}" >/dev/null
   echo "Created Secret centaur-infra-env in namespace $NAMESPACE"

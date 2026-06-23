@@ -42,6 +42,30 @@ Use `secret("KEY")` to access. Never use `os.environ` — tool secrets are scope
 
 ## Available Plugins
 
-The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in the current repo, inspect the directories here or run Centaur and call `call tools` from a sandbox session.
+The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 
-Private deployments may mount additional overlay tool directories, so a running Centaur instance can expose more tools than are present in this repo.
+- `centaur_investigator`: parse Centaur Slack thread references and enrich them
+  with best-effort vlogs/vmetrics context without exposing message context.
+
+## Sandbox Tool Paths
+
+Sandbox startup accepts `TOOLS_PATH` and `TOOLS_OVERLAY_PATH` and appends them to
+`TOOL_DIRS` for `centaur-tools` discovery. Pass them from the API process with
+`SESSION_SANDBOX_PASSTHROUGH_ENV=TOOLS_PATH,TOOLS_OVERLAY_PATH`.
+
+`TOOLS_PATH` should point at the base mounted tool directory. `TOOLS_OVERLAY_PATH`
+is appended after it so overlay tools can replace base tools with the same name.
+
+For repo-cache overlays, set `REPOS_PATH` on the API process to the host path
+where the repo-cache syncs repositories. The sandbox mounts that path read-only
+at `/home/agent/github`, so overlay tools can come from the cached repo:
+
+```bash
+REPOS_PATH=/var/lib/centaur/repos
+TOOLS_PATH=/home/agent/github/paradigmxyz/centaur/tools
+TOOLS_OVERLAY_PATH=/home/agent/github/acme/centaur-overlay/tools
+SESSION_SANDBOX_PASSTHROUGH_ENV=TOOLS_PATH,TOOLS_OVERLAY_PATH
+```
+
+The repo-cache is responsible for syncing `acme/centaur-overlay`; sandbox
+startup only points `centaur-tools` at the already-mounted source tree.

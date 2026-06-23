@@ -1,0 +1,46 @@
+# centaur-console dev tasks. Run `just` to list recipes.
+
+set shell := ["bash", "-uc"]
+
+# Hardcoded dev-only bootstrap secrets. centaur-console refuses API requests until
+# a user and API key exist; these are created on first boot from these vars.
+# The API key must be `iak_` + 64 lowercase hex chars. NOT for production use.
+export CENTAUR_CONSOLE_INITIAL_USER_EMAIL := "dev@iron.local"
+export CENTAUR_CONSOLE_INITIAL_USER_PASSWORD := "dev-password-1234"
+export CENTAUR_CONSOLE_INITIAL_API_KEY := "iak_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+# List available recipes.
+default:
+    @just --list
+
+# Prepare the database, then run the web server + Tailwind CSS watcher under
+# overmind (see Procfile.dev), so console styles rebuild on change.
+dev: deps
+    @echo "== Preparing database =="
+    bin/rails db:prepare
+    @echo "== Starting overmind (web + css watch) on http://localhost:3000 =="
+    @echo "   console:  http://localhost:3000/console/principals"
+    @echo "   user:     $CENTAUR_CONSOLE_INITIAL_USER_EMAIL"
+    @echo "   password: $CENTAUR_CONSOLE_INITIAL_USER_PASSWORD"
+    @echo "   api key:  $CENTAUR_CONSOLE_INITIAL_API_KEY"
+    bin/dev
+
+# Build the Tailwind CSS bundle once (app/assets/builds/tailwind.css).
+css:
+    bin/rails tailwindcss:build
+
+# Watch and rebuild the Tailwind CSS bundle on change.
+css-watch:
+    bin/rails tailwindcss:watch
+
+# Install gem dependencies if needed.
+deps:
+    @bundle check || bundle install
+
+# Print the dev API key for use as a bearer token.
+api-key:
+    @echo "$CENTAUR_CONSOLE_INITIAL_API_KEY"
+
+# Drop, recreate, and migrate the dev database. Re-bootstraps on next `just dev`.
+db-reset:
+    bin/rails db:drop db:create db:migrate

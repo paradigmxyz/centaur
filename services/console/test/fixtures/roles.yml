@@ -1,0 +1,21 @@
+acme_infra:
+  namespace: acme
+  foreign_id: infra
+  name: Infra
+  labels:
+    kind: shared
+  created_by: acme_admin
+
+acme_admin_role:
+  namespace: acme
+  foreign_id: admin
+  name: Admin
+  labels:
+    kind: shared
+  created_by: acme_admin
+
+globex_infra:
+  namespace: globex
+  foreign_id: infra
+  name: Infra
+  created_by: globex_admin

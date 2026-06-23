@@ -4,11 +4,21 @@ description = "Ashby ATS CLI for AI agents — query candidates, jobs, applicati
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
     "typer>=0.12.0",
     "rich>=13.0.0",
     "pypdf>=6.6.0",
 ]
+
+[project.scripts]
+ashby = "centaur_tool_ashby.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_ashby"
 
 [build-system]
 requires = ["hatchling"]
@@ -17,4 +27,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "ASHBY_API_KEY", match_headers = ["Authorization"], hosts = ["api.ashbyhq.com"]}]
+secrets = [{type = "http", name = "ASHBY_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = 'Basic {{ base64 .Value ":" }}', hosts = ["api.ashbyhq.com"]}]

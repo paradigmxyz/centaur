@@ -1,0 +1,12 @@
+<% content_for :title, "New #{secret_kind_label(@kind)} secret · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_secrets_path %>" class="back-link">← back to secrets</a>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <h1 class="page-title">New secret</h1>
+    <span class="resource-badge"><%= secret_kind_label(@kind) %></span>
+  </div>
+</div>
+
+<%= render "errors", secret: @secret %>
+<%= render "form_#{@kind}", secret: @secret %>

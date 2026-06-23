@@ -51,16 +51,62 @@ app.kubernetes.io/component: {{ .component }}
 {{- required "firewall.existingCaKeySecretName is required" .Values.firewall.existingCaKeySecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "centaur.apiServiceAccountName" -}}
-{{- printf "%s-api" (include "centaur.fullname" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
 {{- define "centaur.repoCacheGithubTokenSecretName" -}}
 {{- if .Values.repoCache.githubToken.existingSecretName -}}
 {{- .Values.repoCache.githubToken.existingSecretName | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
 {{- printf "%s-repo-cache-github-token" (include "centaur.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "centaur.overlaySources" -}}
+{{- $sources := list -}}
+{{- with .Values.overlays.sources -}}
+{{- range . -}}
+{{- if .repo -}}
+{{- $source := dict "repo" .repo -}}
+{{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- /*
+Subdir defaults: an omitted key falls back to the conventional layout
+(tools, workflows, .agents/skills); a key explicitly set to "" disables
+that surface for the source. Missing directories are skipped at runtime,
+so the defaults are safe for repos that only carry some surfaces.
+*/ -}}
+{{- if hasKey . "toolsSubdir" -}}
+{{- with .toolsSubdir }}{{- $_ := set $source "toolsSubdir" . -}}{{- end -}}
+{{- else -}}
+{{- $_ := set $source "toolsSubdir" "tools" -}}
+{{- end -}}
+{{- if hasKey . "workflowsSubdir" -}}
+{{- with .workflowsSubdir }}{{- $_ := set $source "workflowsSubdir" . -}}{{- end -}}
+{{- else -}}
+{{- $_ := set $source "workflowsSubdir" "workflows" -}}
+{{- end -}}
+{{- if hasKey . "skillsSubdir" -}}
+{{- with .skillsSubdir }}{{- $_ := set $source "skillsSubdir" . -}}{{- end -}}
+{{- else -}}
+{{- $_ := set $source "skillsSubdir" ".agents/skills" -}}
+{{- end -}}
+{{- with .promptPath }}{{- $_ := set $source "promptPath" . -}}{{- end -}}
+{{- with .personasSubdir }}{{- $_ := set $source "personasSubdir" . -}}{{- end -}}
+{{- $sources = append $sources $source -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}
+{{- if and .Values.toolServer.enabled .Values.toolServer.repo -}}
+{{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "skillsSubdir" ".agents/skills" -}}
+{{- with .Values.toolServer.ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- $sources = append $sources $source -}}
+{{- range .Values.toolServer.extraSources -}}
+{{- if .repo -}}
+{{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) -}}
+{{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- $sources = append $sources $source -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $sources -}}
 {{- end -}}
 
 {{- define "centaur.httpRouteName" -}}
@@ -83,22 +129,6 @@ app.kubernetes.io/component: {{ .component }}
 {{- $caKeyName := include "centaur.trustedCaKeySecretName" . -}}
 {{- $payload := dict "env" (include "centaur.secretResourceVersion" (dict "root" . "name" $envName)) "ca" (include "centaur.secretResourceVersion" (dict "root" . "name" $caName)) "caKey" (include "centaur.secretResourceVersion" (dict "root" . "name" $caKeyName)) -}}
 {{- toJson $payload | sha256sum -}}
-{{- end -}}
-
-{{- define "centaur.firewallProxyHost" -}}
-centaur-api-proxy
-{{- end -}}
-
-{{- define "centaur.firewallProxyPort" -}}
-{{- .Values.ironProxy.service.proxyPort -}}
-{{- end -}}
-
-{{- define "centaur.firewallProxyUrl" -}}
-{{- printf "http://%s:%v" (include "centaur.firewallProxyHost" .) (include "centaur.firewallProxyPort" .) -}}
-{{- end -}}
-
-{{- define "centaur.firewallNoProxyHosts" -}}
-{{- include "centaur.firewallProxyHost" . -}}
 {{- end -}}
 
 {{- /*
@@ -124,35 +154,39 @@ namespace as this release, so a short DNS name is enough.
 {{- end -}}
 
 {{- /*
-iron-token-broker — owns OAuth refresh-token state for credentials whose IdP
-rotates refresh tokens with strict reuse detection (OpenAI Codex, Anthropic
-Claude Code OAuth). One process, ClusterIP service, config rendered from
-registered refresh_token OAuthTokenSecrets by the API server at startup.
+console — Rails control plane (formerly "iron-control") for authenticated API
+access and encrypted secret storage. Flag-gated (console.enabled), in-cluster
+ClusterIP Service.
+
+Backwards compatibility: the canonical values key is `console`; `ironControl` is
+a deprecated alias that is still honored. `centaur.consoleValues` returns the
+effective config by deep-merging the two — chart defaults live under `console`,
+and any explicitly set `ironControl.*` values are layered on top so existing
+deployments that still configure `ironControl` keep working unchanged. If a key
+is set under BOTH, the legacy `ironControl` value wins for that key. All
+templates should consume this helper rather than `.Values.console` /
+`.Values.ironControl` directly.
+
+In-cluster Service/DNS names use the "console" component (e.g.
+`<release>-centaur-console`). The api-rs-facing env vars stay IRON_CONTROL_URL /
+IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
+*value* is derived from `centaur.consoleUrl`, so it tracks the Service name.
 */ -}}
-{{- define "centaur.tokenBrokerName" -}}
-{{- include "centaur.componentName" (dict "root" . "component" "token-broker") -}}
+{{- define "centaur.consoleValues" -}}
+{{- $console := deepCopy (.Values.console | default dict) -}}
+{{- $legacy := .Values.ironControl | default dict -}}
+{{- toYaml (mergeOverwrite $console $legacy) -}}
 {{- end -}}
 
-{{- define "centaur.tokenBrokerHost" -}}
-{{- include "centaur.tokenBrokerName" . -}}
+{{- define "centaur.consoleName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "console") -}}
 {{- end -}}
 
-{{- define "centaur.tokenBrokerUrl" -}}
-{{- printf "http://%s:%v" (include "centaur.tokenBrokerHost" .) .Values.tokenBroker.service.httpPort -}}
+{{- define "centaur.consoleHost" -}}
+{{- include "centaur.consoleName" . -}}
 {{- end -}}
 
-{{- /*
-iron-control — Rails control plane for authenticated API access and encrypted
-secret storage. Flag-gated (ironControl.enabled), in-cluster ClusterIP Service.
-*/ -}}
-{{- define "centaur.ironControlName" -}}
-{{- include "centaur.componentName" (dict "root" . "component" "iron-control") -}}
-{{- end -}}
-
-{{- define "centaur.ironControlHost" -}}
-{{- include "centaur.ironControlName" . -}}
-{{- end -}}
-
-{{- define "centaur.ironControlUrl" -}}
-{{- printf "http://%s:%v" (include "centaur.ironControlHost" .) .Values.ironControl.service.httpPort -}}
+{{- define "centaur.consoleUrl" -}}
+{{- $console := include "centaur.consoleValues" . | fromYaml -}}
+{{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
 {{- end -}}

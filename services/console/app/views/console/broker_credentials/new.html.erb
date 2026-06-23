@@ -1,0 +1,12 @@
+<% content_for :title, "New credential · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_credentials_path %>" class="back-link">← back to credentials</a>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <h1 class="page-title">New credential</h1>
+    <span class="resource-badge">Broker</span>
+  </div>
+</div>
+
+<%= render "errors", credential: @credential %>
+<%= render "form", credential: @credential %>

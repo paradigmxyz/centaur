@@ -31,6 +31,9 @@ htmlcov/
 # Local-only dev scripts (not committed)
 scripts/local_invest_smoke.sh
 
+# Local-only Helm value overrides (not committed)
+contrib/chart/values.local.yaml
+
 # IDE
 .vscode/
 .idea/

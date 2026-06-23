@@ -1,6 +1,7 @@
 """CLI for Slack search and analysis."""
 
 import json
+import re
 
 import typer
 from dotenv import load_dotenv
@@ -13,10 +14,21 @@ app = typer.Typer(name="slack", help="Slack CLI for AI agents")
 console = Console()
 stderr_console = Console(stderr=True)
 
+_SLACK_CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]{8,}$")
+
+
+def _channel_arg_is_id(channel: str) -> bool:
+    value = channel.strip()
+    if value.startswith("<#") and value.endswith(">"):
+        value = value[2:-1].split("|", 1)[0]
+    elif value.startswith("#"):
+        value = value[1:]
+    return bool(_SLACK_CHANNEL_ID_RE.fullmatch(value.upper()))
+
 
 @app.command()
 def send(
-    channel: str = typer.Argument(..., help="Channel name (with or without #)"),
+    channel: str = typer.Argument(..., help="Channel name, channel ID, or Slack user ID"),
     message: str = typer.Argument(..., help="Message text to send"),
     thread: str = typer.Option(None, "--thread", "-t", help="Thread timestamp to reply to"),
     no_attribution: bool = typer.Option(
@@ -25,11 +37,12 @@ def send(
         help="Skip auto-adding requester attribution (from SLACK_REQUESTER_ID)",
     ),
 ):
-    """Send a message to a channel.
+    """Send a message to a channel or Slack user DM.
 
     Examples:
         slack send "#eng-ai" "Hello from the CLI!"
         slack send eng-ai "Reply in thread" --thread 1234567890.123456
+        slack send U12345678 "Direct follow-up"
     """
     from .client import send_message
 
@@ -38,6 +51,32 @@ def send(
         console.print("[green]✓ Message sent[/]")
         console.print(f"[dim]{result['permalink']}[/]")
     except RuntimeError as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def dm(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U12345678"),
+    message: str = typer.Argument(..., help="Message text to send"),
+    no_attribution: bool = typer.Option(
+        False,
+        "--no-attribution",
+        help="Skip auto-adding requester attribution (from SLACK_REQUESTER_ID)",
+    ),
+):
+    """Send a direct message to a Slack user.
+
+    Examples:
+        slack dm U12345678 "Remember to update the CRM"
+    """
+    from .client import send_dm
+
+    try:
+        result = send_dm(user_id, message, no_attribution=no_attribution)
+        console.print("[green]✓ DM sent[/]")
+        console.print(f"[dim]{result['permalink']}[/]")
+    except (RuntimeError, ValueError) as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
@@ -105,7 +144,7 @@ def search(
 
 @app.command()
 def channel(
-    name: str = typer.Argument(..., help="Channel name (without #)"),
+    name: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
     limit: int = typer.Option(50, "--limit", "-n", help="Max messages"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
     cursor: str = typer.Option(None, "--cursor", help="Slack pagination cursor for the next page"),
@@ -124,12 +163,24 @@ def channel(
         "--inclusive",
         help="Include messages exactly on the oldest/latest boundary",
     ),
+    allow_name_resolution: bool = typer.Option(
+        False,
+        "--allow-name-resolution",
+        help="Allow resolving a channel name instead of requiring an explicit Slack channel ID",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output full page metadata as JSON"),
 ):
     """Get recent messages from a channel or a bounded history window."""
     import sys
 
     from .client import get_channel_history_page
+
+    if not allow_name_resolution and not _channel_arg_is_id(name):
+        stderr_console.print(
+            "[red]Error: slack channel requires an explicit Slack channel ID like C1234567890. "
+            "Pass --allow-name-resolution to resolve a channel name intentionally.[/]"
+        )
+        raise typer.Exit(1)
 
     try:
         page = get_channel_history_page(
@@ -445,14 +496,19 @@ def users(
 
 @app.command()
 def upload(
-    channel: str = typer.Argument(..., help="Channel name (with or without #)"),
-    files: list[str] = typer.Argument(..., help="File path(s) to upload"),
+    target_or_file: str = typer.Argument(
+        ..., help="Channel name/ID, or file path when using the current Slack thread"
+    ),
+    files: list[str] = typer.Argument(
+        None, help="File path(s) to upload; omit channel to use current Slack thread"
+    ),
     comment: str = typer.Option(None, "--comment", "-c", help="Comment to post with files"),
     thread: str = typer.Option(None, "--thread", "-t", help="Thread timestamp to reply to"),
 ):
-    """Upload file(s) to a channel.
+    """Upload file(s) to Slack.
 
     Examples:
+        slack upload screenshot.png
         slack upload "#eng-ai" screenshot.png
         slack upload eng-ai file1.png file2.jpg -c "Here are the screenshots"
         slack upload eng-ai report.pdf --thread 1234567890.123456
@@ -462,7 +518,10 @@ def upload(
 
     from .client import upload_file
 
-    for file_path in files:
+    channel, upload_paths = _upload_target_and_files(target_or_file, files or [])
+    first_upload_path = upload_paths[0] if upload_paths else None
+
+    for file_path in upload_paths:
         path = Path(file_path)
         if not path.exists():
             console.print(f"[red]File not found: {file_path}[/]")
@@ -476,7 +535,7 @@ def upload(
                 content_base64=base64.b64encode(path.read_bytes()).decode(),
                 filename=path.name,
                 title=path.name,
-                comment=comment if file_path == files[0] else None,  # Only comment on first file
+                comment=comment if file_path == first_upload_path else None,  # Only comment on first file
                 thread_ts=thread,
             )
             console.print(f"[green]✓ Uploaded {path.name}[/]")
@@ -484,6 +543,17 @@ def upload(
         except RuntimeError as e:
             console.print(f"[red]Error uploading {path.name}: {e}[/]")
             raise typer.Exit(1)
+
+
+def _upload_target_and_files(target_or_file: str, files: list[str]) -> tuple[str | None, list[str]]:
+    """Return (channel, files), defaulting channel when the first arg is a file."""
+    from pathlib import Path
+
+    if Path(target_or_file).exists():
+        return None, [target_or_file, *files]
+    if not files:
+        return None, [target_or_file]
+    return target_or_file, files
 
 
 @app.command()
@@ -739,7 +809,7 @@ def dump(
 
 @app.command()
 def files(
-    permalink: str = typer.Argument(..., help="Slack permalink to message with attachments"),
+    permalink: str = typer.Argument(..., help="Slack message permalink, channel:timestamp, or url_private"),
     download: bool = typer.Option(
         False, "--download", "-d", help="Download files to current directory"
     ),
@@ -749,13 +819,33 @@ def files(
 
     Examples:
         slack files "https://slack.com/archives/C01234567/p1234567890123456"
+        slack files "https://files.slack.com/files-pri/T1-F1/report.pdf" --download
         slack files "https://..." --download
         slack files "https://..." -d -o /tmp/slack-files
     """
     import re
     from pathlib import Path
+    from urllib.parse import urlparse
 
     from .client import _fetch_slack_file, get_message_files
+
+    parsed = urlparse(permalink)
+    if parsed.scheme == "https" and (parsed.hostname or "").lower() == "files.slack.com":
+        if not download:
+            console.print("[red]Pass --download to download a direct Slack file URL[/]")
+            raise typer.Exit(1)
+        output_dir = Path(output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            filename, _mime_type, body = _fetch_slack_file(permalink)
+            out_path = output_dir / filename
+            out_path.write_bytes(body)
+            console.print(f"[green]✓ Downloaded {filename}[/] ({len(body)} bytes)")
+            console.print(f"[dim]{out_path.absolute()}[/]")
+        except Exception as e:
+            console.print(f"[red]Error downloading Slack file: {e}[/]")
+            raise typer.Exit(1)
+        return
 
     if permalink.startswith("https://"):
         match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)

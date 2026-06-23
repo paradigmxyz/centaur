@@ -13,6 +13,15 @@ dependencies = [
     "typer>=0.12.0",
 ]
 
+[project.scripts]
+websearch = "centaur_tool_websearch.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_websearch"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -25,7 +34,7 @@ module = "client.py"
 # Set ANTHROPIC_API_KEY to enable the Claude-backed synthesis pipeline on
 # top of search results (reviewer → writer → citation repair).
 optional_secrets = [
-    {type = "http", name = "PARALLEL_API_KEY", match_headers = ["x-api-key", "Authorization"], hosts = ["api.parallel.ai", "search.parallel.ai"]},
-    {type = "http", name = "ANTHROPIC_API_KEY", match_headers = ["x-api-key"], hosts = ["api.anthropic.com"]},
+    {type = "http", name = "PARALLEL_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.parallel.ai", "search.parallel.ai"]},
+    {type = "http", name = "ANTHROPIC_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.anthropic.com"]},
 ]
 hosts = ["api.parallel.ai", "search.parallel.ai"]

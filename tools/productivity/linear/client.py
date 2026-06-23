@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
-try:
-    from api.integrations.linear import LinearReadonlyClient
-except ModuleNotFoundError:
-    api_src = Path(__file__).resolve().parents[3] / "services" / "api"
-    if api_src.exists():
-        sys.path.insert(0, str(api_src))
-    from api.integrations.linear import LinearReadonlyClient
+from workflows.linear.readonly import LinearReadonlyClient
 
 
 class LinearClient(LinearReadonlyClient):
     """Tool-facing Linear client.
 
-    Read-only GraphQL methods live in ``api.integrations.linear`` so workflows
+    Read-only GraphQL methods live in ``workflows.linear.readonly`` so workflows
     can reuse them. Tool-only mutations stay here.
     """
 
@@ -83,6 +75,15 @@ class LinearClient(LinearReadonlyClient):
         """Search issues by text."""
         return super().search_issues(query_str=query_str, limit=limit)
 
+    @staticmethod
+    def _mutation_result(result: dict[str, Any], key: str, entity: str = "issue") -> dict[str, Any]:
+        """Flatten a {success, <entity>} mutation payload into the entity
+        fields plus a top-level ``success`` flag, so callers can both read the
+        fields directly and detect mutations that fail without a GraphQL error.
+        """
+        payload = result.get(key, {})
+        return {"success": payload.get("success", False), **(payload.get(entity) or {})}
+
     def create_issue(
         self,
         title: str,
@@ -131,7 +132,7 @@ class LinearClient(LinearReadonlyClient):
             input_data["dueDate"] = due_date
 
         result = self._query(mutation, {"input": input_data})
-        return result.get("issueCreate", {}).get("issue", {})
+        return self._mutation_result(result, "issueCreate")
 
     def update_issue(
         self,
@@ -174,7 +175,7 @@ class LinearClient(LinearReadonlyClient):
             input_data["dueDate"] = due_date
 
         result = self._query(mutation, {"id": issue_id, "input": input_data})
-        return result.get("issueUpdate", {}).get("issue", {})
+        return self._mutation_result(result, "issueUpdate")
 
     def add_comment(self, issue_id: str, body: str) -> dict[str, Any]:
         """Add a comment to an issue."""
@@ -187,7 +188,7 @@ class LinearClient(LinearReadonlyClient):
         }
         """
         result = self._query(mutation, {"input": {"issueId": issue_id, "body": body}})
-        return result.get("commentCreate", {}).get("comment", {})
+        return self._mutation_result(result, "commentCreate", "comment")
 
     def _resolve_label_ids(self, names: list[str], team_key: str | None = None) -> dict[str, str]:
         """Resolve label names to IDs, preferring a team-scoped label over a

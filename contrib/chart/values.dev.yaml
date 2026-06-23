@@ -12,27 +12,25 @@ postgres:
     existingSecretName: centaur-infra-env
     existingSecretKey: POSTGRES_PASSWORD
 
-slackbot:
-  enabled: true
+slackbotv2:
   image:
     pullPolicy: IfNotPresent
 
-api:
+discordbot:
+  # Enable once DISCORD_* secrets + a guild allowlist are configured.
+  enabled: false
   image:
     pullPolicy: IfNotPresent
-  executionWorkerEnabled: true
-  pluginWatcherEnabled: true
-  egressDiscovery:
-    enabled: false
+
+apiRs:
+  image:
+    pullPolicy: IfNotPresent
 
 ironProxy:
   image:
     pullPolicy: IfNotPresent
   manager:
     secretSource: onepassword
-
-tokenBroker:
-  enabled: true
 
 sandbox:
   image:

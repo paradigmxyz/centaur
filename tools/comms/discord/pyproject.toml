@@ -1,0 +1,29 @@
+[project]
+name = "discord"
+description = "Discord self-token CLI for AI agents - guilds, channels, search, and messages"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py-self>=2.1",
+    "httpx>=0.27.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+discord = "centaur_tool_discord.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_discord"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"
+secrets = [{type = "http", name = "DISCORD_BOT_TOKEN", mode = "inject", inject_header = "Authorization", hosts = ["discord.com"]}]

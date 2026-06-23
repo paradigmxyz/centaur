@@ -1,19 +1,64 @@
 # Version control
-.git
+.git/
+.git/**
+**/.git/
+**/.git/**
 
 # Virtual environments
-.venv
+.venv/
+.venv/**
+**/.venv/
+**/.venv/**
 
 # Node
-services/slackbot/node_modules
+node_modules/
+node_modules/**
+**/node_modules/
+**/node_modules/**
+
+# Build outputs
+target/
+target/**
+**/target/
+**/target/**
+dist/
+dist/**
+**/dist/
+**/dist/**
+build/
+build/**
+**/build/
+**/build/**
+.next/
+.next/**
+**/.next/
+**/.next/**
+coverage/
+coverage/**
+**/coverage/
+**/coverage/**
 
 # Sandbox cached repos (4GB+)
 services/sandbox/repos
 
 # Caches
-.ruff_cache
-.pytest_cache
-__pycache__
+.ruff_cache/
+.ruff_cache/**
+**/.ruff_cache/
+**/.ruff_cache/**
+.pytest_cache/
+.pytest_cache/**
+**/.pytest_cache/
+**/.pytest_cache/**
+.mypy_cache/
+.mypy_cache/**
+**/.mypy_cache/
+**/.mypy_cache/**
+__pycache__/
+__pycache__/**
+**/__pycache__/
+**/__pycache__/**
+services/api-rs/target
 
 # Logs
 logs/
@@ -25,6 +70,7 @@ logs/
 .idea
 .amp
 .windsurf
+.DS_Store
 
 # Docker
 .dockerignore

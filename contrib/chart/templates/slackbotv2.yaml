@@ -1,0 +1,120 @@
+{{- if .Values.slackbotv2.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $slackbotV2MetricsAnnotations := dict -}}
+{{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
+{{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
+{{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations (.Values.slackbotv2.metrics.annotations | default dict) -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+spec:
+  replicas: {{ .Values.slackbotv2.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- with $slackbotV2MetricsAnnotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 8 }}
+        centaur.ai/metrics: slackbotv2
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: slackbotv2
+          image: {{ printf "%s:%s" .Values.slackbotv2.image.repository .Values.slackbotv2.image.tag | quote }}
+          imagePullPolicy: {{ .Values.slackbotv2.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "3001"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # New threads without an explicit --claude/--amp/--codex flag run
+            # the deployment's default harness.
+            - name: SLACKBOTV2_DEFAULT_HARNESS
+              value: {{ .Values.sandbox.harnessEngine | quote }}
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" .Values.secretManager.envPrefix }}
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+            - name: SLACKBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: SLACKBOTV2_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: SLACKBOTV2_USER_NAME
+              value: {{ .Values.slackbotv2.userName | quote }}
+{{- if .Values.slackbotv2.assistantStatus }}
+            - name: SLACKBOTV2_ASSISTANT_STATUS
+              value: {{ .Values.slackbotv2.assistantStatus | quote }}
+{{- end }}
+{{- if .Values.slackbotv2.externalOrgAllowlist }}
+            - name: SLACKBOT_EXTERNAL_ORG_ALLOWLIST
+              value: {{ .Values.slackbotv2.externalOrgAllowlist | quote }}
+{{- end }}
+{{- if .Values.slackbotv2.triggerBotAllowlist }}
+            - name: SLACKBOT_TRIGGER_BOT_ALLOWLIST
+              value: {{ .Values.slackbotv2.triggerBotAllowlist | quote }}
+{{- end }}
+{{- range $name, $value := .Values.slackbotv2.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "centaur.secretEnvName" . }}
+          ports:
+            - containerPort: 3001
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            timeoutSeconds: 5
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+{{ toYaml .Values.slackbotv2.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+{{- end }}

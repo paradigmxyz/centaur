@@ -762,11 +762,7 @@ def _download_attachment_bytes(
     sep = "&" if urlparse(url).query else "?"
     url = f"{url}{sep}thread_key={quote(current_thread_key(), safe='')}"
 
-    headers: dict[str, str] = {}
-    api_key = secret("CENTAUR_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(url, headers=headers)
+    request = urllib.request.Request(url)
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read()
 

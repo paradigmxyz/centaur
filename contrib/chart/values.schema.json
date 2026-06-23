@@ -1,6 +1,56 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "definitions": {
+    "consoleConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer" },
+        "railsEnv": { "type": "string" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "database": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "httpPort": { "type": "integer" }
+          }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "annotations": { "type": "object" },
+            "defaultBackend": { "type": "boolean" },
+            "host": { "type": "string" },
+            "tls": { "type": "array" }
+          }
+        },
+        "worker": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "replicaCount": { "type": "integer" },
+            "resources": { "type": "object" }
+          }
+        },
+        "resources": { "type": "object" }
+      }
+    }
+  },
   "properties": {
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
@@ -33,8 +83,7 @@
             "proxyPort": { "type": "integer" },
             "managementPort": { "type": "integer" },
             "healthPort": { "type": "integer" },
-            "pgPortRangeStart": { "type": "integer" },
-            "pgPortRangeEnd": { "type": "integer" }
+            "pgPort": { "type": "integer" }
           }
         },
         "secretSource": { "type": "string" },
@@ -45,79 +94,56 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "port": { "type": "integer" }
+        "port": { "type": "integer" },
+        "repo": { "type": "string" },
+        "ref": { "type": "string" },
+        "subdir": { "type": "string" },
+        "extraSources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string" },
+              "ref": { "type": "string" },
+              "subdir": { "type": "string" }
+            },
+            "required": ["repo"]
+          }
+        }
       }
     },
-    "ironControl": {
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "replicaCount": { "type": "integer" },
-        "railsEnv": { "type": "string" },
-        "image": {
-          "type": "object",
-          "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string" }
-          }
-        },
-        "database": {
-          "type": "object",
-          "properties": {
-            "name": { "type": "string" }
-          }
-        },
-        "service": {
-          "type": "object",
-          "properties": {
-            "httpPort": { "type": "integer" }
-          }
-        },
-        "resources": { "type": "object" }
-      }
-    },
+    "console": { "$ref": "#/definitions/consoleConfig" },
+    "ironControl": { "$ref": "#/definitions/consoleConfig" },
     "secrets": {
       "type": "object",
       "properties": {
         "bootstrapSecretName": { "type": "string" }
       }
     },
-    "api": {
-      "type": "object",
-      "properties": {
-        "egressDiscovery": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "namespace": { "type": "string" },
-            "clusterDomain": { "type": "string" },
-            "tailnetFqdnAnnotation": { "type": "string" }
-          }
-        },
-        "slackEtlEnabled": { "type": "boolean" },
-        "slackSyncIntervalSeconds": { "type": "integer" },
-        "slackSyncLookbackDays": { "type": "integer" },
-        "slackSyncThreadLookbackDays": { "type": "integer" },
-        "googleDriveEtlEnabled": { "type": "boolean" },
-        "googleDriveSyncIntervalSeconds": { "type": "integer" },
-        "googleCalendarEtlEnabled": { "type": "boolean" },
-        "googleCalendarSyncIntervalSeconds": { "type": "integer" },
-        "companyContextDocumentsIntervalSeconds": { "type": "integer" }
-      }
-    },
     "overlay": {
       "type": "object",
       "properties": {
         "mountPath": { "type": "string" },
-        "systemPrompt": { "type": "string" },
-        "image": {
-          "type": "object",
-          "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string" },
-            "sourcePath": { "type": "string" }
+        "systemPrompt": { "type": "string" }
+      }
+    },
+    "overlays": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string" },
+              "ref": { "type": "string" },
+              "toolsSubdir": { "type": "string" },
+              "workflowsSubdir": { "type": "string" },
+              "skillsSubdir": { "type": "string" },
+              "promptPath": { "type": "string" },
+              "personasSubdir": { "type": "string" }
+            },
+            "required": ["repo"]
           }
         }
       }
@@ -139,6 +165,10 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "repositoryRefs": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
         "syncIntervalSeconds": { "type": "integer" },
         "image": {
           "type": "object",
@@ -159,6 +189,15 @@
         "egressPorts": {
           "type": "array",
           "items": { "type": "integer" }
+        },
+        "readinessProbe": {
+          "type": "object",
+          "properties": {
+            "initialDelaySeconds": { "type": "integer" },
+            "periodSeconds": { "type": "integer" },
+            "timeoutSeconds": { "type": "integer" },
+            "failureThreshold": { "type": "integer" }
+          }
         },
         "nodeSelector": { "type": "object" },
         "tolerations": { "type": "array" },
@@ -193,10 +232,45 @@
         }
       }
     },
-    "slackbot": {
+    "apiRs": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "syncInfraSecrets": { "type": "boolean" },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "extraEnv": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "slackbotv2": {
+      "type": "object",
+      "properties": {
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "extraEnv": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
       }
     },
     "postgres": {
@@ -207,15 +281,6 @@
           "properties": {
             "subPath": { "type": "string" }
           }
-        }
-      }
-    },
-    "runnerAccess": {
-      "type": "object",
-      "properties": {
-        "allowedCidrs": {
-          "type": "array",
-          "items": { "type": "string" }
         }
       }
     },

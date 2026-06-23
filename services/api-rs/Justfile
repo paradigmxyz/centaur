@@ -1,0 +1,99 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+kopium_version := "0.23.0"
+
+# Latest upstream Agent Sandbox release when this was pinned: v0.4.6.
+agent_sandbox_ref := "d0c124d4a1fded4ed4aecb92753696b4dd8de17b"
+agent_sandbox_crd_url := "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/" + agent_sandbox_ref + "/helm/crds/agents.x-k8s.io_sandboxes.yaml"
+agent_sandbox_crd_tmp := "target/codegen/agents.x-k8s.io_sandboxes.yaml"
+agent_sandbox_generated := "crates/centaur-sandbox-agent-k8s/src/generated/agents_x_k8s_io.rs"
+agent_sandbox_controller_image := "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.4.6"
+agent_sandbox_rbac_url := "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/" + agent_sandbox_ref + "/k8s/rbac.generated.yaml"
+agent_sandbox_controller_url := "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/" + agent_sandbox_ref + "/k8s/controller.yaml"
+kind_e2e_cluster := "centaur-api-rs-e2e"
+kind_e2e_context := "kind-" + kind_e2e_cluster
+kind_e2e_namespace := "centaur-sandbox-e2e"
+kind_e2e_tmp := "target/e2e"
+kind_e2e_agent_image := "centaur-agent:latest"
+kind_e2e_agent_dockerfile := env_var_or_default("KIND_E2E_AGENT_DOCKERFILE", "services/sandbox/Dockerfile")
+kind_e2e_agent_target := env_var_or_default("KIND_E2E_AGENT_TARGET", "sandbox")
+kind_e2e_iron_proxy_image := "centaur-iron-proxy:latest"
+
+default:
+    just --list
+
+install-codegen-tools:
+    cargo install --locked --version {{kopium_version}} kopium
+
+codegen-agent-sandbox-crd:
+    command -v kopium >/dev/null || { echo "kopium is required. Run: just install-codegen-tools" >&2; exit 127; }
+    mkdir -p "$(dirname "{{agent_sandbox_crd_tmp}}")" "$(dirname "{{agent_sandbox_generated}}")"
+    curl -fsSL "{{agent_sandbox_crd_url}}" -o "{{agent_sandbox_crd_tmp}}"
+    kopium --filename "{{agent_sandbox_crd_tmp}}" --api-version v1alpha1 --schema disabled --derive PartialEq > "{{agent_sandbox_generated}}"
+    cargo fmt --all
+
+kind-e2e-up:
+    command -v kind >/dev/null || { echo "kind is required" >&2; exit 127; }
+    command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 127; }
+    kind get clusters | grep -qx "{{kind_e2e_cluster}}" || kind create cluster --name "{{kind_e2e_cluster}}" --wait 120s
+    mkdir -p "{{kind_e2e_tmp}}"
+    curl -fsSL "{{agent_sandbox_crd_url}}" -o "{{kind_e2e_tmp}}/agents.x-k8s.io_sandboxes.yaml"
+    curl -fsSL "{{agent_sandbox_rbac_url}}" -o "{{kind_e2e_tmp}}/rbac.generated.yaml"
+    curl -fsSL "{{agent_sandbox_controller_url}}" \
+      | sed 's#ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*#{{agent_sandbox_controller_image}}#' \
+      > "{{kind_e2e_tmp}}/controller.yaml"
+    kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/agents.x-k8s.io_sandboxes.yaml"
+    kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/rbac.generated.yaml"
+    kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/controller.yaml"
+    kubectl --context "{{kind_e2e_context}}" create namespace "{{kind_e2e_namespace}}" --dry-run=client -o yaml | kubectl --context "{{kind_e2e_context}}" apply -f -
+    kubectl --context "{{kind_e2e_context}}" -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=120s
+
+kind-e2e-build-images:
+    cd ../.. && docker build --target "{{kind_e2e_agent_target}}" -t "{{kind_e2e_agent_image}}" -f "{{kind_e2e_agent_dockerfile}}" .
+    cd ../.. && docker build -t "{{kind_e2e_iron_proxy_image}}" -f services/iron-proxy/Dockerfile .
+
+kind-e2e-load-images: kind-e2e-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node="{{kind_e2e_cluster}}-control-plane"
+    force="${KIND_E2E_FORCE_IMAGE_LOAD:-0}"
+
+    image_present() {
+      local image="$1"
+      local repo="${image%:*}"
+      local tag="${image##*:}"
+      if [[ "$repo" == "$tag" ]]; then
+        tag="latest"
+      fi
+      case "$repo" in
+        */*) ;;
+        *) repo="docker.io/library/${repo}" ;;
+      esac
+      docker exec "$node" crictl images \
+        | awk -v repo="$repo" -v tag="$tag" '$1 == repo && $2 == tag { found = 1 } END { exit found ? 0 : 1 }'
+    }
+
+    load_if_missing() {
+      local image="$1"
+      if [[ "$force" =~ ^(1|true|yes)$ ]]; then
+        echo "Refreshing $image in Kind node $node"
+        kind load docker-image --name "{{kind_e2e_cluster}}" "$image"
+      elif image_present "$image"; then
+        echo "Kind node $node already has $image; skipping kind load"
+      else
+        echo "Loading $image into Kind node $node"
+        kind load docker-image --name "{{kind_e2e_cluster}}" "$image"
+      fi
+    }
+
+    load_if_missing "{{kind_e2e_agent_image}}"
+    load_if_missing "{{kind_e2e_iron_proxy_image}}"
+
+e2e-kind: kind-e2e-up
+    SANDBOX_E2E_IMPLS=all \
+    SANDBOX_E2E_K8S_CONTEXT="{{kind_e2e_context}}" \
+    SANDBOX_E2E_K8S_NAMESPACE="{{kind_e2e_namespace}}" \
+    cargo test -p centaur-sandbox-e2e --test invariants -- --ignored --nocapture
+
+kind-e2e-down:
+    kind delete cluster --name "{{kind_e2e_cluster}}"

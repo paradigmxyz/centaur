@@ -1,0 +1,22 @@
+<% title = @secret.try(:name).presence || @secret.foreign_id.presence || @secret.oid %>
+<% content_for :title, "Edit #{title} · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_secret_path(@kind, @secret.oid) %>" class="back-link">← back to secret</a>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <h1 class="page-title">Edit <%= title %></h1>
+    <span class="resource-badge"><%= secret_kind_label(@kind) %></span>
+  </div>
+</div>
+
+<% if (cred = managed_credential(@secret)) %>
+  <div class="mb-6 rounded-lg border border-amber-500/40 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200/90">
+    <span class="font-semibold">Managed secret.</span>
+    Maintained by the
+    <% if cred.oauth_app %><%= cred.oauth_app.slug %> <% end %>OAuth integration (broker credential <%= cred.oid %>).
+    You can tighten its request rules, but changing or removing the token_broker source stops token delivery, and re-consent will not repair it.
+  </div>
+<% end %>
+
+<%= render "errors", secret: @secret %>
+<%= render "form_#{@kind}", secret: @secret %>

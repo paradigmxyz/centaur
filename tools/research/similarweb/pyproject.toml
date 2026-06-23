@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-similarweb = "similarweb.cli:app"
+similarweb = "centaur_tool_similarweb.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_similarweb"
 
 [build-system]
 requires = ["hatchling"]
@@ -20,4 +26,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "SIMILARWEB_API_KEY", match_query = true, hosts = ["api.similarweb.com"]}]
+secrets = [{type = "http", name = "SIMILARWEB_API_KEY", mode = "inject", inject_query_param = "api_key", hosts = ["api.similarweb.com"]}]

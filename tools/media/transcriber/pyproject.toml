@@ -4,9 +4,19 @@ description = "Local-first voice transcription CLI using Whisper"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "python-dotenv>=1.0.0",
     "typer>=0.12.0",
     "rich>=13.0.0",
 ]
+
+[project.scripts]
+transcriber = "centaur_tool_transcriber.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_transcriber"
 
 [build-system]
 requires = ["hatchling"]

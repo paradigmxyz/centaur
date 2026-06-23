@@ -14,9 +14,12 @@ Use these as the main extension points:
 | --- | --- |
 | `secretManager.existingSecretName` | Required runtime secrets such as database, Slack, sandbox signing, and 1Password credentials. |
 | `api.extraEnv` | API feature flags, worker tuning, retention, observability, and deployment-specific overrides. |
+| `apiRs.extraEnv` | Rust API feature flags, telemetry exporter settings, and deployment-specific overrides. |
+| `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
-| `overlay.*` | Overlay mount path and overlay image passed to the API and sandboxes. |
+| `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
+| `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
 
 Tool credentials are not listed here. Tool plugins declare their own secrets in
 `tools/**/pyproject.toml`; Centaur resolves them through `secret(...)` and
@@ -35,6 +38,7 @@ These must exist for the normal Helm deployment. For local development,
 | `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot. |
 | `SANDBOX_SIGNING_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Signing key for short-lived sandbox API tokens. |
 | `IRON_MANAGEMENT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Management key for API-created iron-proxy pods. |
+| `IRON_BROKER_TOKEN` | `secretManager.existingSecretName`; required when `tokenBroker.enabled=true`. | Bearer token iron-proxy presents to iron-token-broker and the broker enforces on its HTTP API. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | Local shell, then `centaur-infra-env`; production Secret. | 1Password service-account auth when using `onepassword` secret source. |
 | `OP_VAULT` | Local shell, then `centaur-infra-env`; defaults to `ai-agents` in code. | 1Password vault used for `op://...` secret refs. |
 
@@ -59,14 +63,25 @@ Optional required-by-mode variables:
 | `WORKFLOW_WORKER_ENABLED` | `api.workflowWorkerEnabled`. | Starts the durable workflow worker. |
 | `WARM_POOL_ENABLED` | `api.warmPoolEnabled`. | Starts warm sandbox replenishment. |
 | `PLUGIN_WATCHER_ENABLED` | `api.pluginWatcherEnabled`. | Enables tool and workflow hot-reload watchers. |
-| `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from base tools and overlay; fallback to `PLUGINS_DIR`. | Tool discovery paths. |
-| `WORKFLOW_DIRS` | Chart-rendered from base workflows and overlay. | Workflow discovery paths. |
-| `CENTAUR_OVERLAY_DIR` | `overlay.mountPath`. | Mounted overlay root for tools, workflows, prompts, migrations, and skills. |
-| `CENTAUR_OVERLAY_IMAGE`, `CENTAUR_OVERLAY_IMAGE_PULL_POLICY`, `CENTAUR_OVERLAY_IMAGE_SOURCE_PATH` | `overlay.image.*`. | Overlay image copied into sandbox pods. |
+| `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from `overlays.sources[*].toolsSubdir` (default `tools`); fallback to `PLUGINS_DIR`. | Tool discovery paths. |
+| `WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`). | Workflow discovery paths. |
 | `SLACKBOT_URL` | Chart-rendered Slackbot service URL. | API callback target for Slack delivery. |
 | `FINAL_DELIVERY_MAX_ATTEMPTS`, `FINAL_DELIVERY_READY_GRACE_S` | `api.extraEnv`. | Final-delivery retry and claim timing. |
 | `CENTAUR_ENABLE_GCLOUD_BOOTSTRAP`, `GCP_GCLOUD_CREDENTIAL`, `GCLOUD_PROJECT` | `api.extraEnv` or Secret. | Optional gcloud ADC bootstrap in the API container. |
 | `CLAUDE_MODEL`, `CODEX_MODEL` | `api.extraEnv` or request model override. | Harness model selection defaults. |
+
+## API-RS
+
+| Env var or value | Set from | Controls |
+| --- | --- | --- |
+| `RUST_LOG` | Chart sets `info`; override with `apiRs.extraEnv`. | Rust tracing filter for the API-RS binary and crates. |
+| `OTEL_SERVICE_NAME` | `apiRs.extraEnv`; defaults to `centaur-api-rs`. | OpenTelemetry service name used by trace backends. |
+| `CENTAUR_ENVIRONMENT`, `DEPLOY_ENV`, `ENVIRONMENT` | `apiRs.extraEnv` or deployment env. | Deployment environment resource attribute for telemetry. |
+| `OTEL_TRACES_EXPORTER` | `apiRs.extraEnv`. | Set to `otlp` to force OTLP trace export, or `none`/`off` to disable it. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `apiRs.extraEnv`. | Enables OTLP trace export to Tempo, Jaeger, or another OTLP collector. |
+| `apiRs.metrics.scrapeAnnotations` | Helm value, default `true`. | Adds Prometheus scrape annotations to the API-RS Pod template and Service. |
+| `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
+| `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |
 
 Execution tuning:
 
@@ -92,7 +107,6 @@ Execution tuning:
 | `PORT` | Runtime env. | Slackbot HTTP port. |
 | `SLACK_API_URL` | `slackbot.extraEnv`. | Optional Slack Web API base URL override. |
 | `CENTAUR_API_URL` | Chart-rendered API service URL. | API base URL used by Slackbot. |
-| `CENTAUR_API_KEY` | Secret/env fallback. | Used only when `SLACKBOT_API_KEY` is unset. |
 | `CENTAUR_SLACK_EVENTS_PATH` | `slackbot.extraEnv`. | Slack Events API route; defaults to `/api/webhooks/slack`. |
 | `RUNTIME_ERROR_ALERT_CHANNEL` | `slackbot.runtimeErrorAlertChannel`. | Slack channel for runtime error alerts. |
 | `SLACK_EVENT_DEDUP_TTL_MS` | `slackbot.extraEnv`. | Slack event dedupe window. |
@@ -101,6 +115,7 @@ Execution tuning:
 | `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
 | `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
 | `SLACKBOT_EXTERNAL_ORG_ALLOWLIST` | `slackbot.extraEnv`. | Slack team ids allowed for external org handoff. |
+| `SLACK_TEAM_ID` | `slackbot.extraEnv`. | Workspace team ID (e.g. `T01ABCD2EFG`) used to rewrite `https://*.slack.com/archives/...` URLs in final-delivery messages into native `slack://channel?team=...` deep links that open in the Slack app. Leave unset to keep archive URLs unchanged. |
 | `COMMIT_SHA` | Build/deploy env. | Commit shown in Slackbot metadata. |
 
 ## Sandbox
@@ -111,7 +126,7 @@ API-set variables:
 | --- | --- | --- |
 | `AGENT_IMAGE` | `sandbox.image.*`. | Sandbox image used by the Kubernetes backend. |
 | `AGENT_API_URL` | Chart-rendered API service URL. | Source for sandbox `CENTAUR_API_URL`; required by Kubernetes backend. |
-| `CENTAUR_API_URL`, `CENTAUR_API_KEY`, `CENTAUR_THREAD_KEY`, `CENTAUR_TRACE_ID` | API sandbox creation. | API callback, short-lived sandbox token, thread key, and trace id. |
+| `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY`, `CENTAUR_TRACE_ID` | API sandbox creation. | API callback, thread key, and trace id. |
 | `AMP_MODE`, `AMP_THREAD_VISIBILITY`, `AMP_CONTINUE_THREAD_ID` | API env or resume path. | Amp mode and resume behavior. |
 | `FIREWALL_HOST`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase variants | API sandbox creation. | Routes sandbox egress through per-sandbox iron-proxy. |
 | `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | API sandbox creation. | Trust bundle for proxied TLS. |
@@ -127,10 +142,13 @@ Kubernetes backend:
 | `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
 | `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |
+| `KUBERNETES_WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`) using the sandbox repo-cache mount prefix. | Workflow-host sandbox discovery paths. |
 | `KUBERNETES_FIREWALL_CA_SECRET_NAME`, `KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME` | `firewall.existingCa*` or generated CA Secrets. | CA material for sandbox/proxy TLS interception. |
 | `KUBERNETES_SECRET_ENV_NAME`, `KUBERNETES_SECRET_ENV_PREFIX`, `KUBERNETES_BOOTSTRAP_SECRET_NAME` | `secretManager.*`, `secrets.bootstrapSecretName`. | Secrets read by API-created proxy/sandbox pods. |
 | `KUBERNETES_IRON_PROXY_IMAGE`, `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY`, `KUBERNETES_IRON_PROXY_PORT`, `KUBERNETES_IRON_PROXY_MANAGEMENT_PORT`, `KUBERNETES_IRON_PROXY_HEALTH_PORT` | `ironProxy.*`. | Per-sandbox iron-proxy image and ports. |
 | `FIREWALL_MANAGER_SECRET_SOURCE`, `FIREWALL_MANAGER_SECRET_TTL`, `KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE` | `ironProxy.secretSource`, `ironProxy.secretTtl`. | Secret source and cache TTL for rendered proxy config. |
+| `FIREWALL_MANAGER_TOKEN_BROKER_TTL` | `tokenBroker.ttl`. | Proxy-side cache TTL for access tokens minted by iron-token-broker. Applied to every `brokered_token` secret. |
+| `KUBERNETES_TOKEN_BROKER_NAME`, `KUBERNETES_TOKEN_BROKER_URL` | `tokenBroker.*`. | iron-token-broker Deployment name and ClusterIP URL. The chart owns the broker Deployment, Service, and NetworkPolicies; the API reconciles its ConfigMap and triggers a rolling restart when the rendered content changes. |
 | `KUBERNETES_OP_CONNECT_HOST`, `KUBERNETES_OP_CONNECT_APP_NAME`, `KUBERNETES_OP_CONNECT_PORT` | Chart helper or `api.extraEnv`. | 1Password Connect endpoint details. |
 | `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
 | `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |
@@ -141,10 +159,17 @@ Sandbox entrypoint and wrappers:
 | Env var | Set from | Controls |
 | --- | --- | --- |
 | `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
+| `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
+| `CODEX_AUTH_MODE` | `sandbox.extraEnv`. | Codex auth flow: `api_key` (default, hits `api.openai.com`) or `access_token` (hits `chatgpt.com` via the brokered ChatGPT login). See [Codex Auth Modes](/deploying-in-production#codex-auth-modes). |
+| `CODEX_MODEL_REASONING_SUMMARY` | `sandbox.extraEnv`. | Sets `model_reasoning_summary` in the Codex config (`auto`, `concise`, `detailed`, `none`). Codex >= 0.139 emits no reasoning summaries unless this is set, so renderers show no thinking trace. |
+| `CODEX_MODEL_REASONING_EFFORT` | `sandbox.extraEnv`. | Overrides the codex `model_reasoning_effort` (baked into `harness/codex/config.toml`) by patching the per-sandbox `~/.codex/config.toml` at boot, without forking the image. One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; an unknown value is ignored (the config default stands). |
+| `CODEX_BEDROCK_REGION` | `sandbox.extraEnv`. | Opt-in switch and single source of truth for the Bedrock region. When set, the control plane registers the AWS SigV4 re-signing credential (scoped to the `bedrock` service and this region, upstream `bedrock-mantle.<region>.api.aws`), injects the placeholder `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env so codex can sign requests iron-proxy re-signs with the real IAM keys, and pins codex's `amazon-bedrock` provider to this region at sandbox boot (so the in-sandbox client and the proxy agree). Unset disables Bedrock; defaults to `us-east-1`. See [Codex with Amazon Bedrock](/deploying-in-production#codex-with-amazon-bedrock). |
+| `CODEX_BEDROCK_SESSION_TOKEN` | `sandbox.extraEnv`. | Set truthy when the Bedrock IAM credentials are temporary (STS) and carry a session token, so the `AWS_SESSION_TOKEN` placeholder is declared and injected. Omit for long-term IAM user keys. |
 | `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
+| `CLAUDE_CODE_AUTH_MODE` | `sandbox.extraEnv`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
 | `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |
@@ -184,6 +209,7 @@ Google Workspace ETL workflows:
 | Env var | Set from | Controls |
 | --- | --- | --- |
 | `VICTORIAMETRICS_URL`, `VICTORIAMETRICS_PUSH_ENABLED` | `api.extraEnv`, `api.victoriaMetricsPushEnabled`. | Push-based API metrics. |
+| `apiRs.metrics.*` | Helm values. | Pull-based scrape metadata for API-RS Prometheus metrics. |
 | `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
 | `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
 | `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |
@@ -192,9 +218,8 @@ Google Workspace ETL workflows:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `CENTAUR_NAMESPACE`, `CENTAUR_RELEASE` | Local shell or `.env`. | Namespace/release used by `just`, dbmate, and debug scripts. |
+| `CENTAUR_NAMESPACE`, `CENTAUR_RELEASE` | Local shell or `.env`. | Namespace/release used by `just` and debug scripts. |
 | `JUST_BUILD_SEQUENTIAL` | Local shell. | Builds service images sequentially. |
-| `CENTAUR_MIGRATIONS_DEPLOYMENT`, `CENTAUR_MIGRATIONS_HOST_DIR`, `CENTAUR_MIGRATIONS_CONTAINER_DIR` | Local shell. | Core migration wrapper targets. |
-| `CENTAUR_OVERLAY_HOST_DIR`, `CENTAUR_OVERLAY_DIR` | Local shell. | Overlay migration wrapper targets. |
-| `CENTAUR_API_URL`, `CENTAUR_API_KEY` | Local shell. | API target/key for contrib scripts. |
+| `CENTAUR_API_URL` | Local shell. | API target for contrib scripts. |
+| `MUESLI_API_KEY` | Local shell. | API key for the Muesli meeting ingest helper. |
 | `MUESLI_CLI`, `MUESLI_HOST`, `MUESLI_PUSH_LOG`, `MUESLI_SLACK_CHANNEL` | Local shell. | Muesli meeting ingest helper behavior. |

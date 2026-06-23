@@ -4,7 +4,14 @@ import threading
 
 import pytest
 
-from centaur_sdk import ToolContext, reset_tool_context, secret, set_tool_context
+from centaur_sdk import (
+    ToolContext,
+    current_session_context,
+    current_slack_thread,
+    reset_tool_context,
+    secret,
+    set_tool_context,
+)
 from centaur_sdk.backends import registry
 from centaur_sdk.backends.base import SecretBackend
 from centaur_sdk.backends.env import EnvBackend
@@ -60,6 +67,74 @@ def test_secret_raises_key_error_with_tool_name_after_all_sources_miss(
     try:
         with pytest.raises(KeyError, match="Missing secret 'TOKEN' for tool 'fake-tool'"):
             secret("TOKEN")
+    finally:
+        reset_tool_context(token)
+
+
+def test_current_session_context_fetches_api_context(monkeypatch: pytest.MonkeyPatch):
+    requested: dict[str, str] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"thread_key":"slack:C123:123.456",'
+                b'"slack":{"channel_id":"C123","thread_ts":"123.456"}}'
+            )
+
+    def fake_urlopen(request, timeout):
+        requested["url"] = request.full_url
+        requested["timeout"] = str(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    token = set_tool_context(
+        ToolContext(
+            name="fake-tool",
+            thread_key="slack:C123:123.456",
+            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+        )
+    )
+    try:
+        context = current_session_context()
+        assert context["slack"]["channel_id"] == "C123"
+        assert requested["url"] == "http://api:8000/api/session/slack%3AC123%3A123.456"
+        assert requested["timeout"] == "30"
+    finally:
+        reset_tool_context(token)
+
+
+def test_current_slack_thread_returns_api_slack_destination(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"thread_key":"slack:C123:123.456",'
+                b'"slack":{"channel_id":"C123","thread_ts":"123.456"}}'
+            )
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda _request, timeout: FakeResponse())
+    token = set_tool_context(
+        ToolContext(
+            name="fake-tool",
+            thread_key="slack:C123:123.456",
+            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+        )
+    )
+    try:
+        assert current_slack_thread() == {"channel_id": "C123", "thread_ts": "123.456"}
     finally:
         reset_tool_context(token)
 

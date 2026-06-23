@@ -1,0 +1,19 @@
+<%# Key/value editor for the token-endpoint headers, backed by the same
+    nested-fields controller as the labels editor. Values are encrypted at rest. %>
+<section data-controller="nested-fields" class="form-section">
+  <div class="mb-2 flex items-center justify-between">
+    <h2 class="form-section-heading mb-0">Token Endpoint Headers</h2>
+    <button type="button" data-action="nested-fields#add" class="btn-secondary">Add header</button>
+  </div>
+  <p class="form-hint mt-0 mb-3">Extra headers sent on the token request (for example a Basic auth header). Values are stored encrypted.</p>
+
+  <div class="space-y-2" data-nested-fields-target="container">
+    <% (credential.token_endpoint_headers.presence || {}).each_with_index do |(k, v), i| %>
+      <%= render "header_row", index: i, key: k, value: v %>
+    <% end %>
+  </div>
+
+  <template data-nested-fields-target="template">
+    <%= render "header_row", index: "NEW_RECORD", key: "", value: "" %>
+  </template>
+</section>

@@ -1,0 +1,69 @@
+<%#
+  Reusable secret-source fields. `source` is the existing SecretSource (or nil on
+  create); `heading` defaults to "Source". `bare` (default false) drops the
+  form-section card wrapper so the fields sit inside another section, as the
+  gcp_auth keyfile credentials do. A control_plane source edits an inline value;
+  every other backend edits a single reference mapped to its primary config key.
+  The source-fields Stimulus controller reveals the right inputs per backend.
+%>
+<%
+  src = local_assigns[:source]
+  heading = local_assigns.fetch(:heading, "Source")
+  bare = local_assigns.fetch(:bare, false)
+  type = src&.source_type.presence || "env"
+  cfg = src&.config.is_a?(Hash) ? src.config : {}
+  reference = cfg[SecretKinds::SOURCE_REF_KEYS[type]]
+  region = cfg["region"]
+  json_key = cfg["json_key"]
+  inline_secret = src&.source_type == "control_plane" ? src.secret : nil
+
+  type_labels = {
+    "env" => "Env Var", "aws_sm" => "AWS Secrets Manager", "aws_ssm" => "AWS SSM Parameter Store",
+    "1password" => "1Password", "1password_connect" => "1Password Connect",
+    "control_plane" => "Inline Value", "token_broker" => "Token Broker"
+  }
+  ref_labels = {
+    "env" => "Environment variable", "aws_sm" => "Secret ID", "aws_ssm" => "Parameter name",
+    "1password" => "Secret reference", "1password_connect" => "Secret reference", "token_broker" => "Credential ID"
+  }
+  is_inline = type == "control_plane"
+  is_aws = %w[aws_sm aws_ssm].include?(type)
+%>
+<%= content_tag(bare ? :div : :section, data: { controller: "source-fields" }, class: bare ? "space-y-4" : "form-section") do %>
+  <%= content_tag(bare ? :h3 : :h2, heading, class: "form-section-heading#{' mb-0' if bare}") %>
+  <% source_errors = (src ? src.errors.full_messages : []) + secret.errors[:dsn_source] %>
+  <% if source_errors.any? %>
+    <p class="field-error mt-0 mb-3"><%= source_errors.to_sentence %></p>
+  <% end %>
+  <div class="grid gap-5 sm:grid-cols-2">
+    <div>
+      <label class="form-label">Backend</label>
+      <select name="source[source_type]" data-source-fields-target="select" data-action="source-fields#update" class="form-input">
+        <% SecretSource::SOURCE_TYPES.each do |t| %>
+          <option value="<%= t %>" <%= "selected" if t == type %>><%= type_labels[t] || t %></option>
+        <% end %>
+      </select>
+    </div>
+
+    <div data-source-fields-target="reference" <%= "hidden" if is_inline %>>
+      <label class="form-label" data-source-fields-target="referenceLabel"><%= ref_labels[type] || "Reference" %></label>
+      <%= text_field_tag "source[reference]", reference, class: "form-input" %>
+    </div>
+
+    <div data-source-fields-target="inline" <%= "hidden" unless is_inline %>>
+      <label class="form-label">Inline value</label>
+      <%= text_area_tag "source[secret]", inline_secret, rows: 3, class: "form-input", placeholder: "stored encrypted at rest" %>
+    </div>
+
+    <div data-source-fields-target="region" <%= "hidden" unless is_aws %>>
+      <label class="form-label">Region</label>
+      <%= text_field_tag "source[region]", region, class: "form-input", placeholder: "us-west-2" %>
+    </div>
+
+    <div>
+      <label class="form-label">JSON key (optional)</label>
+      <%= text_field_tag "source[json_key]", json_key, class: "form-input" %>
+      <p class="form-hint">Extract this key from the resolved value if it is JSON.</p>
+    </div>
+  </div>
+<% end %>

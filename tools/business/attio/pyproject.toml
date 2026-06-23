@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-attio = "attio.cli:app"
+attio = "centaur_tool_attio.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_attio"
 
 [build-system]
 requires = ["hatchling"]
@@ -20,4 +26,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "ATTIO_API_KEY", match_headers = ["Authorization"], hosts = ["api.attio.com"]}]
+secrets = [{type = "http", name = "ATTIO_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.attio.com"]}]

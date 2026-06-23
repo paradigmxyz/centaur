@@ -16,4 +16,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "TALLY_API_KEY", match_headers = ["Api-Key"], hosts = ["api.tally.xyz"]}]
+secrets = [{type = "http", name = "TALLY_API_KEY", mode = "inject", inject_header = "Api-Key", hosts = ["api.tally.xyz"]}]

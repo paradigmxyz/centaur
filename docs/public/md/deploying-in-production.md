@@ -65,7 +65,6 @@ Minimum keys:
 | `SLACK_BOT_TOKEN` | Slackbot | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Static service token; API bootstraps it into Postgres on startup with `agent` scope. |
-| `LOCAL_DEV_API_KEY` | Initial operator/admin access | Optional but recommended for first boot; API bootstraps it into Postgres on startup with `admin`, `agent`, `threads`, and `tools:*` scopes. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password service-account source | Needed when `ironProxy.secretSource` is `onepassword`. |
 | `OP_VAULT` | [iron-proxy](https://docs.iron.sh) 1Password source | Vault name or id used for `op://` references (either mode). |
@@ -81,6 +80,8 @@ Store one secret per enabled harness credential:
 | Harness | API value | Slack selector | Credential to store | Upstream |
 |---------|-----------|----------------|---------------------|----------|
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
+| Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
+| Codex with Bedrock provider | `codex` | `--bedrock` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `bedrock-mantle.<region>.api.aws` |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -92,12 +93,149 @@ headers the secret is bound to.
 
 When `ironProxy.secretSource` is `onepassword`, [iron-proxy](https://docs.iron.sh) resolves these values
 from `op://$OP_VAULT/<SECRET_NAME>/credential`. For example, store the default
-Codex credential in a 1Password item named `OPENAI_API_KEY`.
+Codex credential in a 1Password item named `OPENAI_API_KEY`. To run Codex
+through OpenRouter, store `OPENROUTER_API_KEY` and set `OPENROUTER_MODEL` to a
+model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
+alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
+slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
+provider even when `OPENROUTER_MODEL` is unset.
 
 Whatever source you pick, the vault is shared across the whole deployment,
 so any thread can use any configured credential. Per-user and per-channel
 scoping is on the roadmap; until then, scope tool and harness access
 accordingly. See [Security](/security) for the full threat model.
+
+### Codex with Amazon Bedrock
+
+Codex can run against [Amazon Bedrock](https://aws.amazon.com/bedrock/) through
+its built-in `amazon-bedrock` provider, which talks to the Bedrock
+OpenAI-compatible Responses endpoint (`bedrock-mantle.<region>.api.aws`). It is
+opt-in and is never the default provider.
+
+Authentication uses AWS SigV4, not a bearer token, but the sandbox never sees
+real AWS credentials. Codex signs each request with *placeholder* credentials
+and [iron-proxy](https://docs.iron.sh) re-signs it with the real read-only IAM
+keys — the same placeholder-swap model as every other harness credential, just
+for SigV4 (this is exactly how the `cloudwatch` tool works). The re-signing is
+scoped to the `bedrock` service and the configured region only.
+
+To enable it:
+
+1. Store `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the vault. Scope the
+   IAM principal to Bedrock inference only (e.g. `bedrock:InvokeModel`,
+   `bedrock:InvokeModelWithResponseStream`) — least privilege, like the
+   read-only CloudWatch user. If the keys are temporary (STS) and carry a
+   session token, also store `AWS_SESSION_TOKEN` and set
+   `CODEX_BEDROCK_SESSION_TOKEN=1` (via `sandbox.extraEnv`).
+2. Set `CODEX_BEDROCK_REGION` (via `sandbox.extraEnv`) to your Bedrock region.
+   This single setting opts the provider in and is the one source of truth for
+   the region: it registers the SigV4 re-signing credential (scoped to that
+   region), injects the placeholder AWS env into sandboxes, and pins codex's
+   `amazon-bedrock` provider to the same region at sandbox boot — so the
+   in-sandbox client and the proxy can never disagree. Defaults to `us-east-1`
+   when unset. (You can still layer further codex provider config via
+   `CODEX_CONFIG_OVERLAY`, which is applied on top.)
+3. If you have locked egress down (it is open by default), allowlist
+   `bedrock-mantle.<region>.api.aws`.
+
+Select it per thread with the `--bedrock` Slack flag (it implies the codex
+harness), and pick the Bedrock model with `--model <bedrock-model-id>` (for
+example `--model anthropic.claude-sonnet-4-...` or `--model openai.gpt-oss-120b`)
+or by setting a default `CODEX_MODEL`. The provider is fixed when the codex
+thread starts. `--bedrock` on a thread pinned to another harness restarts it onto
+codex+Bedrock; to move an existing codex thread between providers, start a new
+thread (a mid-thread provider switch is logged and ignored rather than applied
+silently).
+
+### Codex Auth Modes
+
+:::warning[Dedicate the account to Centaur]
+Do not use this ChatGPT account for `codex` outside Centaur once its
+refresh token is in the broker. OpenAI's OAuth flow uses strict refresh
+token reuse detection: if you keep running `codex` locally with the same
+account, both clients will race to rotate the refresh token. Whichever
+side rotates second is treated as a stolen credential and the entire
+token family is revoked, logging both sides out at random. Use a separate
+ChatGPT account for any non-Centaur Codex work.
+:::
+
+Codex supports two authentication modes, selected per deployment with the
+`CODEX_AUTH_MODE` env var on the sandbox (set it via `sandbox.extraEnv`):
+
+| Mode | Upstream | Secrets required |
+|------|----------|------------------|
+| `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` |
+| `access_token` | `chatgpt.com` | `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_BLOB`, `OPENAI_CODEX_ACCOUNT_ID` |
+
+`access_token` mode routes Codex through a ChatGPT account rather than a raw
+API key. [iron-token-broker](https://docs.iron.sh) holds the refresh token
+and mints short-lived access tokens, which iron-proxy injects on outbound
+requests so the sandbox never sees them.
+
+Store these three items in your secrets backend (1Password vault, Kubernetes
+Secret, etc.) when running in `access_token` mode:
+
+- `OPENAI_CODEX_CLIENT_ID`: the Codex CLI's OAuth client id. This is a
+  fixed, publicly known constant: `app_EMoamEEZ73f0CkXaXp7hrann`. It is
+  the same for every Codex install and never rotates, but the broker
+  still resolves it through your secrets backend, so store the literal
+  value as-is.
+- `OPENAI_CODEX_BLOB`: a JSON document `{"refresh_token": "..."}`. The
+  broker rotates this in place on every refresh, so the backing item must
+  be writable.
+- `OPENAI_CODEX_ACCOUNT_ID`: the ChatGPT account UUID the credential is
+  bound to. It is static, but iron-proxy injects it as the
+  `chatgpt-account-id` header so the backend can route to the right
+  workspace. Store it alongside the other two, not in code.
+
+To bootstrap, run `codex login` locally, then copy the refresh token and
+account id from `~/.codex/auth.json` into the matching secret items. Use
+the constant above for `OPENAI_CODEX_CLIENT_ID`.
+
+### Claude Auth Modes
+
+:::warning[Dedicate the account to Centaur]
+Do not use this Claude.ai account for `claude` outside Centaur once its
+refresh token is in the broker. Anthropic's OAuth flow uses strict
+refresh token reuse detection: if you keep running `claude` locally with
+the same account, both clients will race to rotate the refresh token.
+Whichever side rotates second is treated as a stolen credential and the
+entire token family is revoked, logging both sides out at random. Use a
+separate Claude.ai account for any non-Centaur Claude Code work.
+:::
+
+Claude Code supports two authentication modes, selected per deployment
+with the `CLAUDE_CODE_AUTH_MODE` env var on the sandbox (set it via
+`sandbox.extraEnv`):
+
+| Mode | Upstream | Secrets required |
+|------|----------|------------------|
+| `api_key` (default) | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| `access_token` | `api.anthropic.com` | `CLAUDE_CODE_CLIENT_ID`, `CLAUDE_CODE_BLOB` |
+
+`access_token` mode routes Claude Code through a Claude.ai Pro or Max
+subscription rather than a raw API key. [iron-token-broker](https://docs.iron.sh)
+holds the refresh token and mints short-lived access tokens, which iron-proxy
+injects on outbound requests so the sandbox never sees them. The entrypoint
+plants a dummy `~/.claude/.credentials.json` so the CLI emits OAuth-shaped
+requests; the broker overwrites the Bearer at request time.
+
+Store these two items in your secrets backend (1Password vault, Kubernetes
+Secret, etc.) when running in `access_token` mode:
+
+- `CLAUDE_CODE_CLIENT_ID`: the Claude Code CLI's OAuth client id. This
+  is a fixed, publicly known constant:
+  `9d1c250a-e61b-44d9-88ed-5944d1962f5e`. It is the same for every Claude
+  Code install and never rotates, but the broker still resolves it through
+  your secrets backend, so store the literal value as-is.
+- `CLAUDE_CODE_BLOB`: a JSON document `{"refresh_token": "..."}`. The
+  broker rotates this in place on every refresh, so the backing item must be
+  writable.
+
+To bootstrap, run `claude login` locally, then copy the refresh token from
+`~/.claude/.credentials.json` (or from the `Claude Code-credentials` keychain
+item on macOS) into `CLAUDE_CODE_BLOB`. Use the constant above for
+`CLAUDE_CODE_CLIENT_ID`.
 
 ## 4. Configure Slack
 
@@ -172,8 +310,9 @@ helm upgrade --install centaur contrib/chart \
 
 ## 6. Verify the deployment
 
-Check health from inside the API deployment first. The basic health and
-readiness endpoints do not require auth:
+Check health from inside the API deployment first. Localhost is accepted for
+operator-only routes, so this avoids needing an external admin key for the first
+smoke check:
 
 ```bash
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
@@ -181,75 +320,49 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
   curl -fsS http://localhost:8000/health/ready | jq
-```
 
-Operator routes such as `/health/tools` and `/admin/*` require an admin API key.
-There is no localhost auth bypass. Bootstrap the first admin key by setting
-`LOCAL_DEV_API_KEY` in `centaur-infra-env` before API startup, or patch it in and
-restart the API:
-
-```bash
-export ADMIN_KEY="aiv2_$(openssl rand -hex 32)"
-
-kubectl patch secret -n centaur-system centaur-infra-env \
-  --type merge \
-  -p "{\"stringData\":{\"LOCAL_DEV_API_KEY\":\"${ADMIN_KEY}\"}}"
-
-kubectl rollout restart -n centaur-system deploy/centaur-centaur-api
-kubectl rollout status -n centaur-system deploy/centaur-centaur-api
-```
-
-Then verify tool discovery with that key:
-
-```bash
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health/tools \
-    -H "X-Api-Key: ${ADMIN_KEY}" | jq
+  curl -fsS http://localhost:8000/health/tools | jq
 ```
 
-You can create a named operator key and save the returned plaintext key:
+If you need to call operator routes from outside the cluster, create an admin
+API key from inside the API deployment and save the returned plaintext key:
 
 ```bash
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
   curl -fsS -X POST http://localhost:8000/admin/api-keys \
     -H "Content-Type: application/json" \
-    -H "X-Api-Key: ${ADMIN_KEY}" \
     -d '{"name":"operator","scopes":["admin"],"created_by":"ops"}' | jq
 ```
 
-External operator calls use the same header:
+External operator calls then use:
 
 ```bash
 curl -s "$CENTAUR_API_URL/health/tools" \
   -H "X-Api-Key: $ADMIN_KEY" | jq
 ```
 
-Run one agent turn from inside the API deployment. Use either the admin key or a
-service key with `agent` scope, such as `SLACKBOT_API_KEY`:
+Run one agent turn from inside the API deployment:
 
 ```bash
 THREAD_KEY=production-smoke-codex
 
 SPAWN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/spawn \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: ${ADMIN_KEY}" \
   -d "{\"thread_key\":\"${THREAD_KEY}\"}")
 ASSIGNMENT_GENERATION=$(printf '%s' "$SPAWN" | jq -r '.assignment_generation')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/message \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: ${ADMIN_KEY}" \
   -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}"
 
 EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: ${ADMIN_KEY}" \
   -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"delivery\":{\"platform\":\"dev\"}}")
 EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s \
-  "http://localhost:8000/agent/executions/${EXECUTION_ID}" \
-  -H "X-Api-Key: ${ADMIN_KEY}" | jq
+  "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
 ```
 
 Then run the same prompt through Slack:

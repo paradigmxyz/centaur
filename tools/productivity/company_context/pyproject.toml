@@ -5,8 +5,14 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "asyncpg>=0.30.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
     "slack-sdk>=3.27.0",
+    "typer>=0.12.0",
 ]
+
+[project.scripts]
+company_context = "company_context.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -14,6 +20,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "company_context"
 
 [tool.centaur]
 module = "client.py"

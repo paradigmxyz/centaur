@@ -10,6 +10,15 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
+[project.scripts]
+youtube = "centaur_tool_youtube.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_youtube"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -18,6 +27,6 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "YOUTUBE_API_KEY", match_query = true, hosts = ["www.googleapis.com"]},
-    {type = "http", name = "GOOGLE_API_KEY", match_query = true, hosts = ["www.googleapis.com"]},
+    {type = "http", name = "YOUTUBE_API_KEY", mode = "inject", inject_query_param = "key", hosts = ["www.googleapis.com"]},
+    {type = "http", name = "GOOGLE_API_KEY", mode = "inject", inject_query_param = "key", hosts = ["www.googleapis.com"]},
 ]

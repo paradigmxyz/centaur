@@ -12,13 +12,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import urlparse
 
 import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import get_tool_context, save_attachment, secret
+from centaur_sdk.tool_sdk import (
+    current_slack_thread,
+    get_tool_context,
+    secret,
+)
 
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
@@ -92,6 +96,7 @@ class SlackClient:
     _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
     _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
+    _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
     _AUTH_ERROR_CODES: ClassVar[frozenset[str]] = frozenset(
         {
             "account_inactive",
@@ -169,6 +174,17 @@ class SlackClient:
     def _looks_like_channel_id(self, channel: str) -> bool:
         """Return whether a channel reference is already a Slack conversation ID."""
         return bool(self._CHANNEL_ID_RE.fullmatch(self._clean_channel_ref(channel).upper()))
+
+    def _clean_user_ref(self, user_id: str) -> str:
+        """Normalize plain and mention-form Slack user IDs."""
+        raw = str(user_id).strip()
+        if raw.startswith("<@") and raw.endswith(">"):
+            raw = raw[2:-1].split("|", 1)[0]
+        return raw.strip()
+
+    def _looks_like_user_id(self, user_id: str) -> bool:
+        """Return whether a value is a Slack user ID."""
+        return bool(self._USER_ID_RE.fullmatch(self._clean_user_ref(user_id).upper()))
 
     def _raise_slack_api_error(
         self,
@@ -380,6 +396,35 @@ class SlackClient:
             if ch["name"] == name:
                 return ch["id"]
         raise RuntimeError(f"Channel '{channel}' not found or bot not a member")
+
+    def _open_dm_channel(self, user_id: str) -> str:
+        """Open or reuse a one-on-one DM channel with a Slack user."""
+        normalized = self._clean_user_ref(user_id).upper()
+        if not self._looks_like_user_id(normalized):
+            raise ValueError("user_id must be a Slack user ID like U123 or <@U123>")
+        try:
+            response = self._retry_on_ratelimit(
+                self._client.conversations_open,
+                users=normalized,
+                method_key="conversations.open",
+            )
+        except SlackApiError as e:
+            self._raise_slack_api_error(
+                e,
+                slack_method="conversations.open",
+                access_path="bot_token",
+                requested_channel=normalized,
+            )
+        channel_id = response.get("channel", {}).get("id")
+        if not channel_id:
+            raise RuntimeError("Slack API error: conversations.open returned no channel id")
+        return str(channel_id)
+
+    def _resolve_message_destination(self, channel: str) -> str:
+        """Resolve a send_message destination from channel, channel ID, or user ID."""
+        if self._looks_like_user_id(channel):
+            return self._open_dm_channel(channel)
+        return self._resolve_channel(channel)
 
     def _resolve_mentions(self, text: str, user_cache: dict[str, str]) -> str:
         """Replace <@USER_ID> mentions with @username using cached lookups only."""
@@ -1370,6 +1415,11 @@ class SlackClient:
             return f"\n\n_(requested by @{requester_name})_"
         return ""
 
+    @staticmethod
+    def _normalize_message_text(text: str) -> str:
+        """Convert shell-friendly escaped line breaks into Slack line breaks."""
+        return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\r")
+
     def send_message(
         self,
         channel: str,
@@ -1380,10 +1430,10 @@ class SlackClient:
         unfurl_links: bool | None = None,
         unfurl_media: bool | None = None,
     ) -> dict:
-        """Send a message to a channel.
+        """Send a message to a channel or Slack user DM.
 
         Args:
-            channel: Channel name (with or without #) or channel ID
+            channel: Channel name (with or without #), channel ID, or Slack user ID
             text: Message text to send
             thread_ts: Optional thread timestamp to reply in thread
             no_attribution: If True, skip adding requester attribution
@@ -1394,13 +1444,13 @@ class SlackClient:
         Returns:
             Dict with channel, ts, permalink
         """
-        channel_id = self._resolve_channel(channel)
+        channel_id = self._resolve_message_destination(channel)
 
-        message_text = text
+        message_text = self._normalize_message_text(text)
         if not no_attribution:
             attribution = self._format_requester_attribution()
             if attribution:
-                message_text = text + attribution
+                message_text += attribution
 
         try:
             kwargs = {"channel": channel_id, "text": message_text}
@@ -1421,13 +1471,58 @@ class SlackClient:
         except SlackApiError as e:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e
 
-    def _current_slack_destination(self) -> tuple[str | None, str | None]:
-        """Return the active Slack channel/thread from the tool context, if any.
+    def send_dm(
+        self,
+        user_id: str,
+        text: str,
+        no_attribution: bool = False,
+        blocks: list | None = None,
+        unfurl_links: bool | None = None,
+        unfurl_media: bool | None = None,
+    ) -> dict:
+        """Send a direct message to a Slack user.
 
-        Slack thread keys are ``slack:<team>:<channel>:<thread_ts>`` (the format
-        the slackbot emits). The older ``slack:<channel>:<thread_ts>`` form is
-        still accepted for backwards compatibility.
+        Args:
+            user_id: Slack user ID, e.g. U123 or <@U123>
+            text: Message text to send
+            no_attribution: If True, skip adding requester attribution
+            blocks: Optional Slack Block Kit blocks for rich formatting
+            unfurl_links: Override Slack's link unfurl behavior for this message
+            unfurl_media: Override Slack's media unfurl behavior for this message
+
+        Returns:
+            Dict with channel, ts, permalink
         """
+        return self.send_message(
+            user_id,
+            text,
+            no_attribution=no_attribution,
+            blocks=blocks,
+            unfurl_links=unfurl_links,
+            unfurl_media=unfurl_media,
+        )
+
+    def _current_slack_destination(self) -> tuple[str | None, str | None]:
+        """Return the active Slack channel/thread, if any.
+
+        Prefer API-owned session context so warm pooled sandboxes do not depend
+        on per-thread environment mutation. Fall back to parsing the tool
+        context's thread_key for older runtimes/tests.
+        """
+        try:
+            slack = current_slack_thread()
+            channel = slack.get("channel_id")
+            thread_ts = slack.get("thread_ts")
+            if channel and thread_ts:
+                return channel, thread_ts
+        except Exception:
+            pass
+
+        env_channel = os.environ.get("SLACK_CHANNEL_ID", "").strip()
+        env_thread_ts = os.environ.get("SLACK_THREAD_TS", "").strip()
+        if env_channel and env_thread_ts:
+            return env_channel, env_thread_ts
+
         try:
             thread_key = get_tool_context().thread_key or ""
         except LookupError:
@@ -1468,70 +1563,6 @@ class SlackClient:
         return preview
 
     @staticmethod
-    def _require_thread_key() -> str:
-        """Return the thread_key the tool is running in, or raise.
-
-        Attachment reads and writes are scoped to this so an agent can only
-        touch its own conversation's files.
-        """
-        try:
-            thread_key = get_tool_context().thread_key
-        except LookupError:
-            thread_key = None
-        if not thread_key:
-            raise RuntimeError(
-                "this operation must run inside a Slack thread: no thread_key "
-                "in the tool context to scope the attachment to."
-            )
-        return thread_key
-
-    def _download_attachment_bytes(
-        self,
-        *,
-        attachment_id: str | None = None,
-        attachment_url: str | None = None,
-    ) -> bytes:
-        """Fetch artifact bytes from Centaur's attachment API.
-
-        The fetch is constrained to the tool's own thread: the request carries
-        the caller's thread_key and the API rejects an attachment that belongs
-        to a different thread, so an agent cannot read another conversation's
-        files by guessing or replaying an attachment id.
-        """
-        path = attachment_url
-        if attachment_id:
-            path = f"/agent/attachments/{attachment_id}/download"
-        if not path:
-            raise ValueError("attachment_id or attachment_url is required")
-        base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
-        base_parts = urlparse(base_url)
-        if path.startswith(("http://", "https://")):
-            url_parts = urlparse(path)
-            if (url_parts.scheme, url_parts.netloc) != (base_parts.scheme, base_parts.netloc):
-                raise ValueError("attachment_url must point at the configured Centaur API")
-            url = path
-        else:
-            if not path.startswith("/agent/attachments/"):
-                raise ValueError("attachment_url must be a Centaur attachment download path")
-            url = urljoin(f"{base_url}/", path.lstrip("/"))
-
-        # Scope the read to this tool's thread.
-        thread_key = self._require_thread_key()
-        sep = "&" if urlparse(url).query else "?"
-        url = f"{url}{sep}thread_key={quote(thread_key, safe='')}"
-
-        headers: dict[str, str] = {}
-        api_key = secret("CENTAUR_API_KEY", "").strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = response.read(self._MAX_DOWNLOAD_BYTES + 1)
-        if len(body) > self._MAX_DOWNLOAD_BYTES:
-            raise ValueError(f"Attachment exceeds the {self._MAX_DOWNLOAD_BYTES}-byte limit")
-        return body
-
-    @staticmethod
     def _file_shared_in_thread(
         shares: dict, channel: str, thread_ts: str | None
     ) -> bool:
@@ -1568,16 +1599,13 @@ class SlackClient:
         content_base64: str | None = None,
         filename: str | None = None,
         alt_text: str | None = None,
-        attachment_id: str | None = None,
-        attachment_url: str | None = None,
     ) -> dict:
         """Upload a file to Slack.
 
-        Accepts one of: content_base64, attachment_id, or attachment_url.
+        Accepts file bytes as base64 content.
         There is deliberately no local-path option: this tool runs in-process
         on the API server, so a caller-supplied path would read the API host's
-        filesystem (secrets, configs) and exfiltrate it to Slack. Sandboxes
-        pass bytes via content_base64 or a Centaur attachment handle instead.
+        filesystem (secrets, configs) and exfiltrate it to Slack.
 
         If channel/thread_ts are omitted and the tool runs in an active Slack
         thread, the destination is inferred from tool context.
@@ -1604,16 +1632,8 @@ class SlackClient:
             if content_base64:
                 upload_bytes = base64.b64decode(content_base64)
                 effective_filename = filename or "upload.png"
-            elif attachment_id or attachment_url:
-                upload_bytes = self._download_attachment_bytes(
-                    attachment_id=attachment_id,
-                    attachment_url=attachment_url,
-                )
-                effective_filename = filename or f"{attachment_id or 'attachment'}.bin"
             else:
-                raise ValueError(
-                    "One of content_base64, attachment_id, or attachment_url is required"
-                )
+                raise ValueError("content_base64 is required")
             # Pass bytes via `file=` (binary upload) rather than `content=`,
             # which slack_sdk treats as snippet text.
             kwargs["file"] = upload_bytes
@@ -1808,7 +1828,7 @@ class SlackClient:
 
         return files
 
-    # download_file buffers the file in memory before storing it, so cap the
+    # Slack file downloads buffer the file in memory before writing it, so cap the
     # size regardless of Slack's own (much larger) per-file limit.
     _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 
@@ -1840,44 +1860,6 @@ class SlackClient:
             )
 
         return Path(parsed.path).name or "slack-file", mime_type, body
-
-    def _store_attachment(self, *, name: str, mime_type: str, data: bytes, source_url: str) -> str:
-        """Persist bytes as a Centaur attachment; returns the attachment id.
-
-        The attachment is scoped to the thread the tool is running in, read
-        from the tool context.
-        """
-        return save_attachment(
-            name=name,
-            mime_type=mime_type,
-            data=data,
-            source_url=source_url,
-        )["attachment_id"]
-
-    def download_file(self, url: str) -> dict:
-        """Download a Slack file into a Centaur attachment.
-
-        ``url`` must be a file's ``url_private`` from get_message_files (an
-        ``https://files.slack.com/`` URL).
-
-        The file is stored as a Centaur attachment instead of being returned
-        inline, so it never enters the agent's context. Pass the returned
-        ``attachment_id`` to upload_file to re-share the file in Slack, or read
-        it back through the attachments API.
-
-        Returns a dict with ``attachment_id``, ``filename``, ``mime_type`` and
-        ``size_bytes``.
-        """
-        filename, mime_type, body = self._fetch_slack_file(url)
-        attachment_id = self._store_attachment(
-            name=filename, mime_type=mime_type, data=body, source_url=url
-        )
-        return {
-            "attachment_id": attachment_id,
-            "filename": filename,
-            "mime_type": mime_type,
-            "size_bytes": len(body),
-        }
 
     def search_files(
         self,
@@ -2148,6 +2130,10 @@ def send_message(*args, **kwargs):
     return _client().send_message(*args, **kwargs)
 
 
+def send_dm(*args, **kwargs):
+    return _client().send_dm(*args, **kwargs)
+
+
 def upload_file(*args, **kwargs):
     return _client().upload_file(*args, **kwargs)
 
@@ -2166,10 +2152,6 @@ def update_usergroup_users(*args, **kwargs):
 
 def get_message_files(*args, **kwargs):
     return _client().get_message_files(*args, **kwargs)
-
-
-def download_file(*args, **kwargs):
-    return _client().download_file(*args, **kwargs)
 
 
 def _fetch_slack_file(*args, **kwargs):

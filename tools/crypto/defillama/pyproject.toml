@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [project.scripts]
-defillama = "defillama.cli:app"
+defillama = "centaur_tool_defillama.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_defillama"
 
 [build-system]
 requires = ["hatchling"]
