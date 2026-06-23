@@ -23,6 +23,7 @@ use centaur_session_sqlx::{
 use centaur_telemetry::{
     record_sandbox_warm_pool_claim, record_session_execution_finished,
     record_session_execution_started, record_session_failure, record_session_first_token_latency,
+    set_span_parent_trace,
 };
 use dashmap::DashMap;
 use futures_util::{SinkExt, Stream, StreamExt, stream};
@@ -757,6 +758,11 @@ impl SessionRuntime {
             input_line_count,
             idempotency_key_present,
         );
+        set_span_parent_trace(
+            &span,
+            &thread_trace_id(thread_key),
+            &thread_trace_parent_span_id(thread_key),
+        );
         let result = async {
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
@@ -827,6 +833,11 @@ impl SessionRuntime {
                 thread_key = %thread_key,
                 execution_id = %execution.execution_id,
                 sandbox_id = tracing::field::Empty,
+            );
+            set_span_parent_trace(
+                &execution_trace_span,
+                &thread_trace_id(thread_key),
+                &thread_trace_parent_span_id(thread_key),
             );
             self.execution_spans
                 .lock()
@@ -3821,12 +3832,22 @@ impl SessionTraceContext {
 
 /// Deterministic per-thread trace id: one trace identity per thread without a
 /// `thread_traces` table (derive, don't store).
-fn thread_trace_id(thread_key: &ThreadKey) -> String {
+pub fn thread_trace_id(thread_key: &ThreadKey) -> String {
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
         format!("centaur:thread:{}", thread_key.as_str()).as_bytes(),
     )
     .to_string()
+}
+
+pub fn thread_trace_parent_span_id(thread_key: &ThreadKey) -> String {
+    let digest = Sha256::digest(format!("centaur:thread-parent:{}", thread_key.as_str()));
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    if bytes.iter().all(|byte| *byte == 0) {
+        bytes[7] = 1;
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn input_lines_with_session_context(
@@ -5089,6 +5110,16 @@ mod tests {
         assert_ne!(thread_trace_id(&thread_key), thread_trace_id(&other));
         // The wrapper parses this with uuid.UUID(...): must stay a canonical UUID.
         assert!(uuid::Uuid::parse_str(&thread_trace_id(&thread_key)).is_ok());
+        assert_eq!(
+            thread_trace_parent_span_id(&thread_key),
+            thread_trace_parent_span_id(&thread_key)
+        );
+        assert_ne!(
+            thread_trace_parent_span_id(&thread_key),
+            thread_trace_parent_span_id(&other)
+        );
+        assert_eq!(thread_trace_parent_span_id(&thread_key).len(), 16);
+        assert_ne!(thread_trace_parent_span_id(&thread_key), "0000000000000000");
     }
 
     fn session_with_sandbox(sandbox_id: &str) -> Session {

@@ -30,11 +30,12 @@ use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::ThreadKey;
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, PersonaSummary, SandboxRuntime, SessionRuntime,
+    thread_trace_id, thread_trace_parent_span_id,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
     PrometheusHandle, http_status_class, prometheus_handle, record_http_request_finished,
-    record_http_request_started,
+    record_http_request_started, set_span_parent_trace,
 };
 use centaur_workflows::{
     CreateWorkflowRunRequest, WorkflowRuntime, WorkflowWebhookAuth, WorkflowWebhookSpec,
@@ -234,14 +235,26 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
                     let route = matched_route(request);
-                    tracing::info_span!(
+                    let span = tracing::info_span!(
                         "centaur.api_rs.http_request",
                         "otel.kind" = "server",
                         "otel.status_code" = tracing::field::Empty,
                         "http.request.method" = request.method().as_str(),
                         "http.route" = route.as_str(),
                         "http.response.status_code" = tracing::field::Empty,
-                    )
+                        "centaur.thread_key" = tracing::field::Empty,
+                        thread_key = tracing::field::Empty,
+                    );
+                    if let Some(thread_key) = session_thread_key_from_request(request) {
+                        span.record("centaur.thread_key", thread_key.as_str());
+                        span.record("thread_key", thread_key.as_str());
+                        set_span_parent_trace(
+                            &span,
+                            &thread_trace_id(&thread_key),
+                            &thread_trace_parent_span_id(&thread_key),
+                        );
+                    }
+                    span
                 })
                 .on_request(())
                 .on_response(|response: &Response, latency: Duration, span: &Span| {
@@ -317,6 +330,20 @@ fn matched_route<B>(request: &Request<B>) -> String {
         .get::<MatchedPath>()
         .map(|path| path.as_str().to_owned())
         .unwrap_or_else(|| "__unmatched__".to_owned())
+}
+
+fn session_thread_key_from_request<B>(request: &Request<B>) -> Option<ThreadKey> {
+    session_thread_key_from_path(request.uri().path())
+}
+
+fn session_thread_key_from_path(path: &str) -> Option<ThreadKey> {
+    let rest = path.strip_prefix("/api/session/")?;
+    let raw_thread_key = rest.split('/').next()?;
+    if raw_thread_key.is_empty() {
+        return None;
+    }
+    let decoded = urlencoding::decode(raw_thread_key).ok()?;
+    ThreadKey::try_from(decoded.into_owned()).ok()
 }
 
 async fn create_or_get_session(
@@ -1328,6 +1355,19 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 #[cfg(test)]
 mod webhook_tests {
     use super::*;
+
+    #[test]
+    fn session_thread_key_from_path_decodes_session_routes() {
+        assert_eq!(
+            session_thread_key_from_path(
+                "/api/session/slack%3AT092R71U6QY%3AC0B1NNXKE4F%3A1782217699.671539/execute"
+            )
+            .map(|thread_key| thread_key.to_string()),
+            Some("slack:T092R71U6QY:C0B1NNXKE4F:1782217699.671539".to_owned())
+        );
+        assert!(session_thread_key_from_path("/api/workflows/runs").is_none());
+        assert!(session_thread_key_from_path("/api/session//execute").is_none());
+    }
 
     #[test]
     fn parses_form_payload_json() {

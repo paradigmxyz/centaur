@@ -8,7 +8,13 @@ use std::{
 
 pub use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
+use opentelemetry::{
+    Context,
+    trace::{
+        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
+        TracerProvider as _,
+    },
+};
 use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 use serde_json::Value;
 use thiserror::Error;
@@ -414,6 +420,44 @@ pub fn traceparent_for_span(span: &tracing::Span) -> Option<String> {
         span_context.trace_id(),
         span_context.span_id()
     ))
+}
+
+/// Assign a remote parent trace to a not-yet-entered tracing span.
+///
+/// `trace_id` may be a UUID string or 32-character W3C trace id. The parent
+/// span id is synthetic and intentionally not exported; it just gives all
+/// per-turn request spans the same thread trace identity.
+pub fn set_span_parent_trace(span: &tracing::Span, trace_id: &str, parent_span_id: &str) -> bool {
+    let Some(parent_context) = remote_parent_context(trace_id, parent_span_id) else {
+        return false;
+    };
+    span.set_parent(parent_context).is_ok()
+}
+
+fn remote_parent_context(trace_id: &str, parent_span_id: &str) -> Option<Context> {
+    let trace_id = normalize_trace_id_hex(trace_id)?;
+    let trace_id = TraceId::from_hex(&trace_id).ok()?;
+    let parent_span_id = SpanId::from_hex(parent_span_id).ok()?;
+    if trace_id == TraceId::INVALID || parent_span_id == SpanId::INVALID {
+        return None;
+    }
+    let span_context = SpanContext::new(
+        trace_id,
+        parent_span_id,
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    );
+    Some(Context::new().with_remote_span_context(span_context))
+}
+
+fn normalize_trace_id_hex(trace_id: &str) -> Option<String> {
+    let hex: String = trace_id.chars().filter(|ch| *ch != '-').collect();
+    if hex.len() == 32 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(hex)
+    } else {
+        None
+    }
 }
 
 pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
