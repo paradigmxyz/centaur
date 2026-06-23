@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
+use crate::otel::TraceContext;
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
     NormalizedEvent, ThreadState,
@@ -97,6 +98,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 // knob (its provider is fixed at thread start from session params).
                 provider: _,
                 reasoning: _,
+                trace_context: _,
             }) => {
                 if let Some(model) = model {
                     state.model = model;
@@ -203,6 +205,7 @@ pub(crate) enum BlocksCommand {
         model: Option<String>,
         provider: Option<String>,
         reasoning: Option<String>,
+        trace_context: TraceContext,
     },
     Interrupt,
     AttachmentChunk,
@@ -239,6 +242,14 @@ struct BlocksLine {
     provider: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    thread_key: Option<String>,
+    #[serde(default)]
+    trace_id: Option<String>,
+    #[serde(default)]
+    traceparent: Option<String>,
+    #[serde(default)]
+    trace_metadata: Option<Value>,
     #[serde(rename = "attachmentId", default)]
     attachment_id: Option<String>,
     #[serde(default)]
@@ -251,6 +262,27 @@ struct BlocksLine {
     final_chunk: bool,
     #[serde(rename = "dataBase64", default)]
     data_base64: Option<String>,
+}
+
+impl BlocksLine {
+    fn trace_context(&self) -> TraceContext {
+        TraceContext {
+            thread_key: clean_string(self.thread_key.as_deref()),
+            trace_id: clean_string(self.trace_id.as_deref()),
+            traceparent: clean_string(self.traceparent.as_deref()),
+            metadata: self
+                .trace_metadata
+                .as_ref()
+                .and_then(Value::as_object)
+                .map(|metadata| {
+                    metadata
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,6 +347,7 @@ pub(crate) fn parse_blocks_line_with_state(
 
     match parsed.kind.as_str() {
         "user" => {
+            let trace_context = parsed.trace_context();
             let content = parsed
                 .message
                 .as_ref()
@@ -355,6 +388,7 @@ pub(crate) fn parse_blocks_line_with_state(
                     .reasoning
                     .map(|reasoning| reasoning.trim().to_owned())
                     .filter(|reasoning| !reasoning.is_empty()),
+                trace_context,
             })
         }
         "attachment.chunk" => {
@@ -622,6 +656,10 @@ fn is_image_attachment(attachment_type: Option<&str>, mime_type: Option<&str>) -
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn clean_string(value: Option<&str>) -> Option<String> {
+    non_empty(value).map(ToOwned::to_owned)
 }
 
 fn handle_request<H: HarnessServer, W: Write>(
@@ -1173,6 +1211,32 @@ mod tests {
         };
         assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(input.len(), 1);
+    }
+
+    #[test]
+    fn parses_blocks_user_line_with_trace_context() {
+        let line = r#"{"type":"user","thread_key":"web:t1","trace_id":"01234567-89ab-cdef-0123-456789abcdef","traceparent":"00-0123456789abcdef0123456789abcdef-0123456789abcdef-01","trace_metadata":{"execution_id":"exe_123"},"text":"hi"}"#;
+        let BlocksCommand::User { trace_context, .. } = parse_blocks_line(line).expect("parses")
+        else {
+            panic!("expected user command");
+        };
+
+        assert_eq!(trace_context.thread_key.as_deref(), Some("web:t1"));
+        assert_eq!(
+            trace_context.trace_id.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert_eq!(
+            trace_context.traceparent.as_deref(),
+            Some("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
+        );
+        assert_eq!(
+            trace_context
+                .metadata
+                .get("execution_id")
+                .and_then(Value::as_str),
+            Some("exe_123")
+        );
     }
 
     #[test]

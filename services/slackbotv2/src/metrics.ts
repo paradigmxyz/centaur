@@ -306,6 +306,11 @@ export const slackbotMetrics = {
     labelNames: ['event'],
     name: 'slackbotv2_render_recovery_thread_events_total'
   }),
+  sessionDelivery: counter({
+    help: 'User-visible Slack delivery outcomes for AI session responses.',
+    labelNames: ['delivery_status'],
+    name: 'centaur_session_delivery_total'
+  }),
   sessionApiOperationDuration: histogram({
     help: 'Session API operation duration from Slackbot, in seconds.',
     labelNames: ['operation', 'outcome'],

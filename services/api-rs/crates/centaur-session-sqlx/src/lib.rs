@@ -484,6 +484,30 @@ impl PgSessionStore {
         rows.into_iter().map(TryInto::try_into).collect()
     }
 
+    pub async fn execution_event_exists(
+        &self,
+        execution_id: &str,
+        event_type: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            select exists (
+                select 1
+                from session_events
+                where execution_id = $1
+                  and event_type = $2
+                limit 1
+            )
+            "#,
+        )
+        .bind(execution_id)
+        .bind(event_type)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(exists)
+    }
+
     pub async fn update_sandbox_id(
         &self,
         thread_key: &ThreadKey,

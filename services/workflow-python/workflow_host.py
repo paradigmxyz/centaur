@@ -937,7 +937,15 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
         result = registered.handler(inp, ctx)
         if inspect.isawaitable(result):
             result = await result
-        return {"type": "workflow.result", "result": jsonable(result)}
+        return {
+            "type": "workflow.result",
+            "workflow_run_id": ctx.run_id,
+            "run_id": ctx.run_id,
+            "workflow_task_id": ctx.task_id,
+            "task_id": ctx.task_id,
+            "workflow_name": ctx.workflow_name,
+            "result": jsonable(result),
+        }
     finally:
         await rpc.drain_notifications()
         _METRIC_RPC = previous_metric_rpc

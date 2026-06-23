@@ -522,7 +522,8 @@ describe('CodexAppServerRendererEventMapper', () => {
               }
             }
           }
-        ])
+        ]),
+        { taskOutput: 'full' }
       )
     )
 
@@ -541,6 +542,74 @@ describe('CodexAppServerRendererEventMapper', () => {
       id: 'cmd-1',
       status: 'complete'
     })
+  })
+
+  it('omits command output before task updates by default', async () => {
+    const largeOutput = 'large-context-line\n'.repeat(1_000)
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'item/started',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'cmd-1',
+                type: 'commandExecution',
+                command: 'gh run view --log',
+                status: 'inProgress'
+              }
+            }
+          },
+          {
+            method: 'item/commandExecution/outputDelta',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'cmd-1',
+              delta: largeOutput.slice(0, 5_000)
+            }
+          },
+          {
+            method: 'item/commandExecution/outputDelta',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'cmd-1',
+              delta: largeOutput.slice(5_000)
+            }
+          },
+          {
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'cmd-1',
+                type: 'commandExecution',
+                command: 'gh run view --log',
+                status: 'completed',
+                aggregatedOutput: largeOutput,
+                exitCode: 0
+              }
+            }
+          }
+        ])
+      )
+    )
+
+    const taskChunks = chunks.filter(
+      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
+        chunk.type === 'task_update' && chunk.id === 'cmd-1'
+    )
+    expect(taskChunks.map(chunk => chunk.output).filter(Boolean)).toEqual([])
+    expect(taskChunks.some(chunk => chunk.details?.includes('gh run view --log'))).toBe(true)
+    expect(taskChunks.at(-1)).toMatchObject({
+      id: 'cmd-1',
+      status: 'complete'
+    })
+    expect(JSON.stringify(taskChunks)).not.toContain('large-context-line')
   })
 
   it('preserves full command output in task updates', async () => {
@@ -564,7 +633,8 @@ describe('CodexAppServerRendererEventMapper', () => {
               }
             }
           }
-        ])
+        ]),
+        { taskOutput: 'full' }
       )
     )
 
@@ -598,7 +668,8 @@ describe('CodexAppServerRendererEventMapper', () => {
               }
             }
           }
-        ])
+        ]),
+        { taskOutput: 'full' }
       )
     )
 
@@ -632,7 +703,8 @@ describe('CodexAppServerRendererEventMapper', () => {
               }
             }
           }
-        ])
+        ]),
+        { taskOutput: 'full' }
       )
     )
 

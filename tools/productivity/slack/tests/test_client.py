@@ -670,6 +670,26 @@ def test_upload_file_explicit_destination_overrides_api_context(monkeypatch) -> 
     assert fake_web_client.last_kwargs["thread_ts"] == "201.000000"
 
 
+def test_upload_file_defaults_to_slack_env_context(monkeypatch) -> None:
+    import slack.client as slack_client_module
+
+    client, fake_web_client = _make_client()
+    monkeypatch.setattr(
+        slack_client_module,
+        "current_slack_thread",
+        lambda: (_ for _ in ()).throw(RuntimeError("no tool context")),
+    )
+    monkeypatch.setenv("SLACK_CHANNEL_ID", "C-env")
+    monkeypatch.setenv("SLACK_THREAD_TS", "202.000000")
+    client._resolve_channel = lambda channel: channel  # type: ignore[method-assign]
+
+    client.upload_file(content_base64="dGVzdA==", filename="chart.png")
+
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["channel"] == "C-env"
+    assert fake_web_client.last_kwargs["thread_ts"] == "202.000000"
+
+
 def test_upload_file_infers_destination_from_team_scoped_thread_key() -> None:
     """The slackbot emits slack:<team>:<channel>:<thread_ts>; upload_file must
     infer the channel and thread from that 4-part key, not just the legacy

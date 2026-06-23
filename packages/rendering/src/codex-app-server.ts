@@ -73,6 +73,7 @@ export type CodexAppServerRendererEventMapperOptions = {
   sessionId?: string
   logInfo?: RendererLogInfo
   unknownAgentMessagePhase?: AgentMessagePhase
+  taskOutput?: 'full' | 'omit'
 }
 
 export type CodexAppServerToChatStreamOptions = CodexAppServerRendererEventMapperOptions & {
@@ -87,11 +88,13 @@ export class CodexAppServerRendererEventMapper
   private readonly sessionId: string
   private readonly logInfo?: RendererLogInfo
   private readonly unknownAgentMessagePhase: AgentMessagePhase
+  private readonly includeTaskOutput: boolean
 
   constructor(options: CodexAppServerRendererEventMapperOptions = {}) {
     this.sessionId = options.sessionId ?? ''
     this.logInfo = options.logInfo
     this.unknownAgentMessagePhase = options.unknownAgentMessagePhase ?? 'final_answer'
+    this.includeTaskOutput = options.taskOutput === 'full'
   }
 
   process(source: ServerNotification | RustSessionStreamEvent | unknown): RendererEvent[] {
@@ -199,16 +202,19 @@ export class CodexAppServerRendererEventMapper
     const command = commandExecution(event)
     if (command) {
       const id = commandId(command)
-      const aggregatedOutput = commandAggregatedOutput(command)
-      if (aggregatedOutput) this.state.commandOutputById.set(id, aggregatedOutput)
+      if (this.includeTaskOutput) {
+        const aggregatedOutput = commandAggregatedOutput(command)
+        if (aggregatedOutput) this.state.commandOutputById.set(id, aggregatedOutput)
+      }
       const existing = this.state.taskByUseId.get(id)
       const commandIndex = commandNumber(this.state, existing)
       const task = commandTask(
         command,
         String(event?.type ?? ''),
         existing,
-        this.state.commandOutputById.get(id),
-        commandIndex
+        this.includeTaskOutput ? this.state.commandOutputById.get(id) : undefined,
+        commandIndex,
+        this.includeTaskOutput
       )
       const merged = mergeTask(existing, task)
       this.state.taskByUseId.set(merged.id, merged)
@@ -225,7 +231,7 @@ export class CodexAppServerRendererEventMapper
     }
 
     const outputDelta = commandOutputDelta(event)
-    if (outputDelta) {
+    if (outputDelta && this.includeTaskOutput) {
       const current = this.state.commandOutputById.get(outputDelta.id) ?? ''
       const output = current + outputDelta.delta
       this.state.commandOutputById.set(outputDelta.id, output)
@@ -1296,7 +1302,8 @@ function commandTask(
   eventType: string,
   existing?: HarnessTask,
   accumulatedOutput?: string,
-  commandIndex?: number
+  commandIndex?: number,
+  includeOutput = true
 ): HarnessTask {
   const id = commandId(item)
   const rawCommand = String(item.command ?? 'Command')
@@ -1307,7 +1314,7 @@ function commandTask(
   const failed = isCommandFailure(item, eventType)
   const isCompletionUpdate =
     eventType === 'item.completed' || status === 'complete' || status === 'error'
-  const output = commandOutputElements(accumulatedOutput ?? '', exitCode)
+  const output = includeOutput ? commandOutputElements(accumulatedOutput ?? '', exitCode) : []
   return {
     id,
     title: commandExecutionTitle(commandIndex),

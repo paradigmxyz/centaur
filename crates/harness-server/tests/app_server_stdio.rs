@@ -427,6 +427,65 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_forwards_traceparent_to_app_server_requests() {
+    let fake_codex = temp_path("fake-codex-trace.sh");
+    let fake_codex_log = temp_path("fake-codex-trace-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01";
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+    );
+    let turn = bridge.run_blocks_user_line(
+        json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "traceparent": traceparent,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "say codex blocks"}],
+            },
+        }),
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    for method in ["initialize", "thread/start", "turn/start"] {
+        let request = requests
+            .iter()
+            .find(|value| value.get("method").and_then(Value::as_str) == Some(method))
+            .unwrap_or_else(|| panic!("missing {method}; requests={requests:?}"));
+        assert_eq!(
+            request
+                .pointer("/trace/traceparent")
+                .and_then(Value::as_str),
+            Some(traceparent),
+            "{method} request should carry traceparent"
+        );
+    }
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_codex_blocks_mode_forwards_reasoning_as_turn_start_effort() {
     let fake_codex = temp_path("fake-codex-effort.sh");
     let fake_codex_log = temp_path("fake-codex-effort-requests.jsonl");

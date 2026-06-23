@@ -12,6 +12,7 @@ centaur-sandbox-manager.workspace = true
 centaur-session-core.workspace = true
 centaur-session-sqlx.workspace = true
 centaur-telemetry.workspace = true
+dashmap.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

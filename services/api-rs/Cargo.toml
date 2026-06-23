@@ -38,6 +38,9 @@ anyhow = "1"
 async-trait = "0.1"
 absurd-sdk = { path = "crates/absurd-sdk" }
 axum = "0.8.9"
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws-smithy-types = "1"
 bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }
 centaur-iron-control = { path = "crates/centaur-iron-control" }
@@ -56,6 +59,7 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10.4"
 cron = "0.16.0"
 crossterm = "0.28"
+dashmap = "6"
 eventsource-stream = "0.2.3"
 eyre = "0.6"
 base64 = "0.22"
