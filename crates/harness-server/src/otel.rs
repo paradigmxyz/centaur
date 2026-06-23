@@ -583,12 +583,7 @@ fn harness_usage_trace_request(
     span_context: HarnessUsageSpan<'_>,
     usage: &NormalizedTokenUsage,
 ) -> Result<ExportTraceServiceRequest> {
-    let traceparent = trace.effective_traceparent().ok_or_else(|| {
-        HarnessServerError::Protocol("missing trace id for harness usage span".to_string())
-    })?;
-    let (trace_id, parent_span_id) = trace_ids_from_traceparent(&traceparent).ok_or_else(|| {
-        HarnessServerError::Protocol("invalid traceparent for harness usage span".to_string())
-    })?;
+    let (trace_id, parent_span_id) = harness_usage_span_trace_ids(trace)?;
     let mut attributes = Vec::new();
     let harness_name = harness_name(span_context.harness);
     let system = gen_ai_system(span_context.harness, span_context.model_provider);
@@ -717,6 +712,28 @@ fn harness_usage_trace_request(
     })
 }
 
+fn harness_usage_span_trace_ids(trace: &TraceContext) -> Result<(Vec<u8>, Vec<u8>)> {
+    let trace_id = trace.effective_trace_id().ok_or_else(|| {
+        HarnessServerError::Protocol("missing trace id for harness usage span".to_string())
+    })?;
+    let trace_id = trace_id_to_bytes(&trace_id).ok_or_else(|| {
+        HarnessServerError::Protocol("invalid trace id for harness usage span".to_string())
+    })?;
+    let parent_span_id = trace
+        .traceparent
+        .as_deref()
+        .and_then(trace_ids_from_traceparent)
+        .and_then(|(parent_trace_id, parent_span_id)| {
+            if parent_trace_id == trace_id {
+                Some(parent_span_id)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    Ok((trace_id, parent_span_id))
+}
+
 fn set_harness_span_io_attributes(
     attributes: &mut Vec<KeyValue>,
     input: Option<&str>,
@@ -786,6 +803,10 @@ fn trace_ids_from_traceparent(traceparent: &str) -> Option<(Vec<u8>, Vec<u8>)> {
         .split('-')
         .collect::<Vec<_>>();
     Some((hex_bytes(parts[1])?, hex_bytes(parts[2])?))
+}
+
+fn trace_id_to_bytes(trace_id: &str) -> Option<Vec<u8>> {
+    Some(Uuid::parse_str(trace_id).ok()?.as_bytes().to_vec())
 }
 
 fn hex_bytes(value: &str) -> Option<Vec<u8>> {
@@ -1468,6 +1489,56 @@ trust_level = "trusted"
                 "lmnr.association.properties.metadata.execution_id"
             ),
             "exe_123"
+        );
+    }
+
+    #[test]
+    fn harness_usage_trace_request_uses_explicit_thread_trace_id() {
+        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: Some(thread_trace_id.to_string()),
+            traceparent: Some(
+                "00-fedcba9876543210fedcba9876543210-1111111111111111-01".to_string(),
+            ),
+            metadata: BTreeMap::new(),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("claude-opus-4-8".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::ClaudeCode,
+                model: "fallback-model",
+                model_provider: "anthropic",
+                turn_id: "turn-1",
+                input: None,
+                output: None,
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(
+            span.trace_id,
+            Uuid::parse_str(thread_trace_id)
+                .expect("thread trace uuid")
+                .as_bytes()
+                .to_vec()
+        );
+        assert!(
+            span.parent_span_id.is_empty(),
+            "parent span cannot cross trace ids"
         );
     }
 
