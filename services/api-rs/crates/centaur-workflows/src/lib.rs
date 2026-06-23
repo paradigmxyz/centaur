@@ -46,7 +46,7 @@ const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
-const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
+const WORKFLOW_TASK_CLAIM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
@@ -515,6 +515,7 @@ impl WorkflowRuntime {
 
         let worker = client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-worker".to_owned()),
+            claim_timeout: WORKFLOW_TASK_CLAIM_TIMEOUT,
             concurrency: worker_concurrency(
                 WORKFLOW_WORKER_CONCURRENCY_ENV,
                 DEFAULT_WORKFLOW_WORKER_CONCURRENCY,
@@ -526,6 +527,7 @@ impl WorkflowRuntime {
         });
         let slack_live_worker = slack_live_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-slack-live-worker".to_owned()),
+            claim_timeout: WORKFLOW_TASK_CLAIM_TIMEOUT,
             concurrency: 1,
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow slack live worker error");
@@ -534,6 +536,7 @@ impl WorkflowRuntime {
         });
         let etl_worker = etl_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-worker".to_owned()),
+            claim_timeout: WORKFLOW_TASK_CLAIM_TIMEOUT,
             concurrency: worker_concurrency(
                 WORKFLOW_ETL_WORKER_CONCURRENCY_ENV,
                 DEFAULT_WORKFLOW_ETL_WORKER_CONCURRENCY,
@@ -545,6 +548,7 @@ impl WorkflowRuntime {
         });
         let etl_backfill_worker = etl_backfill_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-backfill-worker".to_owned()),
+            claim_timeout: WORKFLOW_TASK_CLAIM_TIMEOUT,
             concurrency: worker_concurrency(
                 WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY_ENV,
                 DEFAULT_WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY,
@@ -556,6 +560,7 @@ impl WorkflowRuntime {
         });
         let schedule_worker = schedule_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-schedule-worker".to_owned()),
+            claim_timeout: WORKFLOW_TASK_CLAIM_TIMEOUT,
             concurrency: worker_concurrency(
                 WORKFLOW_SCHEDULE_WORKER_CONCURRENCY_ENV,
                 DEFAULT_WORKFLOW_SCHEDULE_WORKER_CONCURRENCY,
@@ -2326,11 +2331,11 @@ async fn run_python_workflow_host(
 async fn start_workflow_task_heartbeat(
     ctx: TaskContext,
 ) -> Result<WorkflowTaskHeartbeatGuard, WorkflowRuntimeError> {
-    ctx.heartbeat(Some(WORKFLOW_HOST_CLAIM_EXTENSION)).await?;
+    ctx.heartbeat(Some(WORKFLOW_TASK_CLAIM_TIMEOUT)).await?;
     let task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(WORKFLOW_HOST_HEARTBEAT_INTERVAL).await;
-            if let Err(error) = ctx.heartbeat(Some(WORKFLOW_HOST_CLAIM_EXTENSION)).await {
+            if let Err(error) = ctx.heartbeat(Some(WORKFLOW_TASK_CLAIM_TIMEOUT)).await {
                 warn!(%error, "failed to extend workflow task claim");
             }
         }
@@ -3354,6 +3359,13 @@ mod tests {
         assert_eq!(parse_worker_concurrency(Some("lots"), 4), 4);
         assert_eq!(parse_worker_concurrency(Some("0"), 4), 4);
         assert_eq!(parse_worker_concurrency(Some("-2"), 1), 1);
+    }
+
+    #[test]
+    fn workflow_task_claim_timeout_exceeds_long_agent_turns() {
+        assert_eq!(WORKFLOW_TASK_CLAIM_TIMEOUT, Duration::from_secs(30 * 60));
+        assert!(WORKFLOW_TASK_CLAIM_TIMEOUT > Duration::from_secs(5 * 60));
+        assert!(WORKFLOW_HOST_HEARTBEAT_INTERVAL < WORKFLOW_TASK_CLAIM_TIMEOUT / 2);
     }
 
     #[test]
