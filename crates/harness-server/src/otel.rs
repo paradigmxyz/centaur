@@ -35,13 +35,10 @@ pub(crate) struct TraceContext {
 
 impl TraceContext {
     pub(crate) fn effective_trace_id(&self) -> Option<String> {
-        self.trace_id
-            .clone()
-            .or_else(|| {
-                self.traceparent
-                    .as_deref()
-                    .and_then(trace_id_from_traceparent)
-            })
+        self.traceparent
+            .as_deref()
+            .and_then(trace_id_from_traceparent)
+            .or_else(|| self.trace_id.clone())
             .or_else(|| clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref()))
     }
 
@@ -1302,7 +1299,7 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn explicit_trace_id_wins_for_otlp_grouping_but_traceparent_stays_current() {
+    fn traceparent_wins_for_otlp_parentage_when_available() {
         let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
         let execution_traceparent = "00-fedcba9876543210fedcba9876543210-0123456789abcdef-01";
         let trace = TraceContext {
@@ -1312,7 +1309,10 @@ trust_level = "trusted"
             metadata: BTreeMap::new(),
         };
 
-        assert_eq!(trace.effective_trace_id().as_deref(), Some(thread_trace_id));
+        assert_eq!(
+            trace.effective_trace_id().as_deref(),
+            Some("fedcba98-7654-3210-fedc-ba9876543210")
+        );
         assert_eq!(
             trace.effective_traceparent().as_deref(),
             Some(execution_traceparent)
@@ -1493,7 +1493,7 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn harness_usage_trace_request_uses_explicit_thread_trace_id() {
+    fn harness_usage_trace_request_uses_traceparent_for_api_parentage() {
         let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
         let trace = TraceContext {
             thread_key: Some("slack:C123:123.456".to_string()),
@@ -1531,15 +1531,60 @@ trust_level = "trusted"
 
         assert_eq!(
             span.trace_id,
+            Uuid::parse_str("fedcba98-7654-3210-fedc-ba9876543210")
+                .expect("execution trace uuid")
+                .as_bytes()
+                .to_vec()
+        );
+        assert_eq!(
+            span.parent_span_id,
+            vec![0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
+        );
+    }
+
+    #[test]
+    fn harness_usage_trace_request_falls_back_to_explicit_thread_trace_id() {
+        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: Some(thread_trace_id.to_string()),
+            traceparent: None,
+            metadata: BTreeMap::new(),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("claude-opus-4-8".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::ClaudeCode,
+                model: "fallback-model",
+                model_provider: "anthropic",
+                turn_id: "turn-1",
+                input: None,
+                output: None,
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(
+            span.trace_id,
             Uuid::parse_str(thread_trace_id)
                 .expect("thread trace uuid")
                 .as_bytes()
                 .to_vec()
         );
-        assert!(
-            span.parent_span_id.is_empty(),
-            "parent span cannot cross trace ids"
-        );
+        assert!(span.parent_span_id.is_empty());
     }
 
     #[test]
