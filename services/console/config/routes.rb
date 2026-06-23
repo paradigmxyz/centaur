@@ -42,6 +42,8 @@ Rails.application.routes.draw do
     delete "principals/:id/roles/:role_id",   to: "principals#unassign_role", as: :principal_unassign_role
     post   "principals/:id/grants",           to: "principals#grant_secret",  as: :principal_grant_secret
     delete "principals/:id/grants/:grant_id", to: "principals#revoke_grant",  as: :principal_revoke_grant
+    get    "principal_reconciliation",        to: "principal_reconciliations#index", as: :principal_reconciliation
+    post   "principal_reconciliation/apply",  to: "principal_reconciliations#apply", as: :principal_reconciliation_apply
   end
   get "console/secrets", to: "console#secrets", as: :console_secrets
   # One controller per secret kind for the create/edit forms. Declared before the
