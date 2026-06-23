@@ -82,13 +82,6 @@ module Api
         params.permit(:source_type, :secret, config: {}).to_h
       end
 
-      def build_rules(attrs)
-        Array(attrs[:rules]).each_with_index.map do |r, i|
-          permitted = ActionController::Parameters.new(r.to_unsafe_h).permit(:host, :cidr, http_methods: [], paths: [])
-          RequestRule.new(permitted.to_h.merge(position: i))
-        end
-      end
-
       def record_payload(ref)
         by_role = ref.sources.index_by(&:role)
         {

@@ -102,6 +102,22 @@ module Api
       model.find_by!(namespace: params.require(:namespace), foreign_id: params.require(:foreign_id))
     end
 
+    def build_rules(attrs)
+      request_rule_attributes(attrs).map { |rule_attrs| RequestRule.new(rule_attrs) }
+    end
+
+    def request_rule_attributes(attrs)
+      Array(attrs[:rules]).each_with_index.map do |rule, position|
+        rule_params = if rule.is_a?(ActionController::Parameters)
+          rule
+        else
+          ActionController::Parameters.new(rule || {})
+        end
+
+        rule_params.permit(:host, :cidr, http_methods: [], paths: []).to_h.merge(position: position)
+      end
+    end
+
     DEFAULT_PAGE_LIMIT = 50
     MAX_PAGE_LIMIT = 200
 

@@ -71,11 +71,7 @@ module Api
           attrs.require(:source).permit(:source_type, :secret, config: {})
         end
 
-        rules_attrs = Array(attrs[:rules]).map do |r|
-          ActionController::Parameters.new(r.to_unsafe_h).permit(
-            :host, :cidr, http_methods: [], paths: []
-          )
-        end
+        rules_attrs = request_rule_attributes(attrs)
 
         StaticSecret.transaction do
           ref.lock! unless ref.new_record?
@@ -88,8 +84,8 @@ module Api
           end
 
           ref.rules.destroy_all
-          rules_attrs.each_with_index do |r, i|
-            RequestRule.create!(r.to_h.merge(position: i, static_secret: ref))
+          rules_attrs.each do |r|
+            RequestRule.create!(r.merge(static_secret: ref))
           end
 
           ref.reload
