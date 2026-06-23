@@ -153,6 +153,16 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({ "type" => "workload_identity" }, transforms.first.dig("config", "credentials_provider"))
   end
 
+  test "sync_transforms emits a gcp_id_token transform per granted GcpIdTokenSecret" do
+    transforms = principal_with_grants(gcp_id_token_secrets(:acme_cloud_run)).sync_transforms
+    assert_equal 1, transforms.length
+    transform = transforms.first
+    assert_equal "gcp_id_token", transform["name"]
+    assert_equal({ "type" => "env", "var" => "CLOUD_RUN_SA_KEYFILE" }, transform.dig("config", "keyfile"))
+    assert_equal "https://my-service-abc123-uc.a.run.app", transform.dig("config", "audience")
+    assert_equal "x-serverless-authorization", transform.dig("config", "header")
+  end
+
   test "sync_transforms emits an aws_auth transform per granted AwsAuthSecret" do
     transforms = principal_with_grants(aws_auth_secrets(:acme_cloudwatch_aws)).sync_transforms
     aws = transforms.find { |t| t["name"] == "aws_auth" }

@@ -74,6 +74,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       [ "static", static_secrets(:github_token_inject) ],
       [ "gcp_auth", gcp_auth_secrets(:acme_gcs_keyfile) ],   # keyfile source
       [ "gcp_auth", gcp_auth_secrets(:acme_bigquery) ],      # workload_identity provider
+      [ "gcp_id_token", gcp_id_token_secrets(:acme_cloud_run) ],
       [ "oauth_token", oauth_token_secrets(:acme_gmail_oauth) ],
       [ "pg_dsn", pg_dsn_secrets(:acme_analytics_pg) ],
       [ "hmac", hmac_secrets(:acme_webhook_hmac) ]
@@ -81,6 +82,17 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       get console_secret_url(kind, secret.oid)
       assert_response :ok, "expected #{kind} detail page for #{secret.oid} to render"
     end
+  end
+
+  test "gcp_id_token detail page lists audience header and keyfile source" do
+    secret = gcp_id_token_secrets(:acme_cloud_run)
+    get console_secret_url("gcp_id_token", secret.oid)
+    assert_response :ok
+    assert_select "dt", text: "Audience"
+    assert_select "dd", text: secret.audience
+    assert_select "dt", text: "Header"
+    assert_select "dd", text: "x-serverless-authorization"
+    assert_select "td", text: "CLOUD_RUN_SA_KEYFILE"
   end
 
   test "pg_dsn detail page lists configured session settings" do
@@ -246,6 +258,8 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     # A kind with no direct grant on this principal still lists all its secrets.
     gcp = gcp_auth_secrets(:acme_bigquery)
     assert_select "select[name=grantable] option[value=?]", "gcp_auth:#{gcp.oid}"
+    gcp_id = gcp_id_token_secrets(:acme_cloud_run)
+    assert_select "select[name=grantable] option[value=?]", "gcp_id_token:#{gcp_id.oid}"
   end
 
   test "header shows the signed-in operator and a sign-out control" do

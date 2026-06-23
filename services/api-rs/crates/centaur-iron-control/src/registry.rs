@@ -24,9 +24,10 @@ use serde_yaml::Value as YamlValue;
 use crate::client::IronControlClient;
 use crate::error::IronControlError;
 use crate::models::{
-    AwsAuthSecretInput, GcpAuthSecretInput, GrantSecret, Grantee, HmacSecretInput, IdentityInput,
-    InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput, PgDsnSettingInput,
-    PgDsnSettingValueFromInput, ReplaceConfig, RequestRule, SecretSource, StaticSecretInput,
+    AwsAuthSecretInput, GcpAuthSecretInput, GcpIdTokenSecretInput, GrantSecret, Grantee,
+    HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput,
+    PgDsnSettingInput, PgDsnSettingValueFromInput, ReplaceConfig, RequestRule, SecretSource,
+    StaticSecretInput,
 };
 use crate::util::{managed_labels, slugify};
 
@@ -63,6 +64,7 @@ pub enum SecretInput {
     Static(StaticSecretInput),
     OAuthToken(OAuthTokenSecretInput),
     GcpAuth(GcpAuthSecretInput),
+    GcpIdToken(GcpIdTokenSecretInput),
     PgDsn(PgDsnSecretInput),
     Hmac(HmacSecretInput),
     AwsAuth(AwsAuthSecretInput),
@@ -149,6 +151,9 @@ pub async fn grant_inputs_to_role(
             }
             SecretInput::GcpAuth(input) => {
                 GrantSecret::GcpAuth(client.upsert_gcp_auth_secret(&input).await?.id)
+            }
+            SecretInput::GcpIdToken(input) => {
+                GrantSecret::GcpIdToken(client.upsert_gcp_id_token_secret(&input).await?.id)
             }
             SecretInput::PgDsn(input) => {
                 GrantSecret::PgDsn(client.upsert_pg_dsn_secret(&input).await?.id)

@@ -222,6 +222,32 @@ pub struct GcpAuthSecretInput {
 }
 
 // ---------------------------------------------------------------------------
+// GCP ID token secrets
+// ---------------------------------------------------------------------------
+
+/// Request body for ``POST``/``PUT /api/v1/gcp_id_token_secrets``. iron-proxy
+/// mints a Google-signed OIDC ID token for ``audience`` from the service-account
+/// ``keyfile`` and injects it into ``Authorization`` by default, or
+/// ``X-Serverless-Authorization`` when ``header`` is set accordingly.
+// Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GcpIdTokenSecretInput {
+    pub namespace: String,
+    pub foreign_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    pub audience: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub keyfile: SecretSource,
+    pub rules: Vec<RequestRule>,
+}
+
+// ---------------------------------------------------------------------------
 // AWS auth secrets
 // ---------------------------------------------------------------------------
 
@@ -501,6 +527,7 @@ pub const SECRET_TYPES: &[(&str, &str, &str)] = &[
     ("static", "static_secrets", "ssr_"),
     ("oauth_token", "oauth_token_secrets", "ots_"),
     ("gcp_auth", "gcp_auth_secrets", "gas_"),
+    ("gcp_id_token", "gcp_id_token_secrets", "gid_"),
     ("pg_dsn", "pg_dsn_secrets", "pgs_"),
     ("hmac", "hmac_secrets", "hms_"),
     ("aws_auth", "aws_auth_secrets", "aas_"),
@@ -522,6 +549,7 @@ pub enum Grantee {
 pub enum GrantSecret {
     Static(String),
     GcpAuth(String),
+    GcpIdToken(String),
     OAuthToken(String),
     PgDsn(String),
     Hmac(String),
@@ -534,6 +562,7 @@ impl GrantSecret {
         match self {
             Self::Static(id)
             | Self::GcpAuth(id)
+            | Self::GcpIdToken(id)
             | Self::OAuthToken(id)
             | Self::PgDsn(id)
             | Self::Hmac(id)
@@ -552,6 +581,7 @@ impl GrantSecret {
             "static" => Self::Static(id),
             "oauth_token" => Self::OAuthToken(id),
             "gcp_auth" => Self::GcpAuth(id),
+            "gcp_id_token" => Self::GcpIdToken(id),
             "pg_dsn" => Self::PgDsn(id),
             "hmac" => Self::Hmac(id),
             "aws_auth" => Self::AwsAuth(id),
@@ -577,6 +607,8 @@ pub struct Grant {
     #[serde(default)]
     pub gcp_auth_secret_id: Option<String>,
     #[serde(default)]
+    pub gcp_id_token_secret_id: Option<String>,
+    #[serde(default)]
     pub pg_dsn_secret_id: Option<String>,
     #[serde(default)]
     pub hmac_secret_id: Option<String>,
@@ -591,6 +623,7 @@ impl Grant {
             .as_deref()
             .or(self.oauth_token_secret_id.as_deref())
             .or(self.gcp_auth_secret_id.as_deref())
+            .or(self.gcp_id_token_secret_id.as_deref())
             .or(self.pg_dsn_secret_id.as_deref())
             .or(self.hmac_secret_id.as_deref())
             .or(self.aws_auth_secret_id.as_deref())
@@ -606,6 +639,8 @@ impl Grant {
             Some(("oauth_token", "oauth_token_secrets", id))
         } else if let Some(id) = &self.gcp_auth_secret_id {
             Some(("gcp_auth", "gcp_auth_secrets", id))
+        } else if let Some(id) = &self.gcp_id_token_secret_id {
+            Some(("gcp_id_token", "gcp_id_token_secrets", id))
         } else if let Some(id) = &self.pg_dsn_secret_id {
             Some(("pg_dsn", "pg_dsn_secrets", id))
         } else if let Some(id) = &self.hmac_secret_id {

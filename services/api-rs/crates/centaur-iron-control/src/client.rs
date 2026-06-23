@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 use crate::error::{IronControlError, Result};
 use crate::models::{
     AwsAuthSecretInput, BrokerCredentialInput, BrokerCredentialRecord, DataEnvelope,
-    EffectiveConfig, GcpAuthSecretInput, Grant, GrantSecret, Grantee, HmacSecretInput,
-    IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy, ProxyInput, Role,
-    SecretRecord, StaticSecretInput,
+    EffectiveConfig, GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee,
+    HmacSecretInput, IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy,
+    ProxyInput, Role, SecretRecord, StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -245,6 +245,19 @@ impl IronControlClient {
         }
     }
 
+    /// Upsert a GCP ID token secret by ``foreign_id``.
+    pub async fn upsert_gcp_id_token_secret(
+        &self,
+        input: &GcpIdTokenSecretInput,
+    ) -> Result<SecretRecord> {
+        self.write(
+            Method::PUT,
+            &upsert_path("gcp_id_token_secrets", &input.foreign_id),
+            input,
+        )
+        .await
+    }
+
     /// Upsert a Postgres DSN secret by ``foreign_id``.
     pub async fn upsert_pg_dsn_secret(&self, input: &PgDsnSecretInput) -> Result<SecretRecord> {
         self.write(
@@ -278,7 +291,8 @@ impl IronControlClient {
     /// Fetch a secret's identity (id, ``foreign_id``, ``name``) by OID. The
     /// ``collection`` is the resource path segment for the secret's type
     /// (``static_secrets``, ``oauth_token_secrets``, ``gcp_auth_secrets``,
-    /// ``pg_dsn_secrets``, ``hmac_secrets``, ``aws_auth_secrets``) — see
+    /// ``gcp_id_token_secrets``, ``pg_dsn_secrets``, ``hmac_secrets``,
+    /// ``aws_auth_secrets``) — see
     /// [`Grant::secret_target`].
     pub async fn get_secret(&self, collection: &str, oid: &str) -> Result<SecretRecord> {
         let path = format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(oid));
@@ -494,6 +508,7 @@ fn grant_body(grantee: &Grantee, secret: &GrantSecret) -> Value {
     let (key, id) = match secret {
         GrantSecret::Static(id) => ("static_secret_id", id),
         GrantSecret::GcpAuth(id) => ("gcp_auth_secret_id", id),
+        GrantSecret::GcpIdToken(id) => ("gcp_id_token_secret_id", id),
         GrantSecret::OAuthToken(id) => ("oauth_token_secret_id", id),
         GrantSecret::PgDsn(id) => ("pg_dsn_secret_id", id),
         GrantSecret::Hmac(id) => ("hmac_secret_id", id),
@@ -609,6 +624,18 @@ mod tests {
         assert_eq!(
             body,
             json!({ "role_id": "role_cw", "aws_auth_secret_id": "aas_cloudwatch" })
+        );
+    }
+
+    #[test]
+    fn grant_body_role_gcp_id_token() {
+        let body = grant_body(
+            &Grantee::Role("role_cloud_run".to_owned()),
+            &GrantSecret::GcpIdToken("gid_cloudrun".to_owned()),
+        );
+        assert_eq!(
+            body,
+            json!({ "role_id": "role_cloud_run", "gcp_id_token_secret_id": "gid_cloudrun" })
         );
     }
 

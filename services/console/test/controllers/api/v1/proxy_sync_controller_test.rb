@@ -150,9 +150,11 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_equal first, second
   end
 
-  test "transforms carries gcp_auth per grant and a single bundled oauth_token" do
+  test "transforms carries gcp auth transforms per grant and a single bundled oauth_token" do
     admin = users(:acme_admin)
     Grant.create!(principal: @proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery), created_by: admin)
+    Grant.create!(principal: @proxy.principal, gcp_id_token_secret: gcp_id_token_secrets(:acme_cloud_run),
+                  created_by: admin)
     Grant.create!(principal: @proxy.principal, oauth_token_secret: oauth_token_secrets(:acme_gmail_oauth), created_by: admin)
 
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
@@ -161,7 +163,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     transforms = json_body.fetch("transforms")
     names = transforms.map { |t| t["name"] }
     assert_equal 1, names.count("gcp_auth")
+    assert_equal 1, names.count("gcp_id_token")
     assert_equal 1, names.count("oauth_token")
+
+    gcp_id = transforms.find { |t| t["name"] == "gcp_id_token" }
+    assert_equal "https://my-service-abc123-uc.a.run.app", gcp_id.dig("config", "audience")
+    assert_equal "x-serverless-authorization", gcp_id.dig("config", "header")
 
     oauth = transforms.find { |t| t["name"] == "oauth_token" }
     assert_equal 1, oauth.dig("config", "tokens").length

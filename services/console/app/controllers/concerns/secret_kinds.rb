@@ -11,6 +11,7 @@ module SecretKinds
   SECRET_KINDS = {
     "static" => { model: StaticSecret, label: "Static", includes: :source, form: true },
     "gcp_auth" => { model: GcpAuthSecret, label: "GCP Auth", includes: :keyfile_source, form: true },
+    "gcp_id_token" => { model: GcpIdTokenSecret, label: "GCP ID Token", includes: :keyfile_source, form: true },
     "aws_auth" => { model: AwsAuthSecret, label: "AWS Auth", includes: :sources, form: false },
     "oauth_token" => { model: OauthTokenSecret, label: "OAuth Token", includes: :sources, form: false },
     "pg_dsn" => { model: PgDsnSecret, label: "Postgres DSN", includes: :dsn_source, form: true },

@@ -10,6 +10,7 @@
   - [Request rules](#request-rules)
 - [Static secrets](#static-secrets)
 - [GCP auth secrets](#gcp-auth-secrets)
+- [GCP ID token secrets](#gcp-id-token-secrets)
 - [AWS auth secrets](#aws-auth-secrets)
 - [OAuth token secrets](#oauth-token-secrets)
 - [PG DSN secrets](#pg-dsn-secrets)
@@ -54,14 +55,14 @@ A missing or invalid token returns `401`:
   ```
 
 - **Pagination** uses the `page` (default `1`) and `limit` (default `50`, max `200`) query parameters. Values are clamped into range; a non-integer value returns `400`.
-- **Namespaced list filtering** (static secrets, GCP auth secrets, OAuth token secrets, principals, roles) requires a `namespace` query parameter and accepts an optional `labels[key]=value` filter that matches by JSONB containment (all supplied pairs must be present). Label values must be scalars.
-- **Object IDs** are prefixed by type: `ssr_` (static secret), `gas_` (GCP auth secret), `ots_` (OAuth token secret), `prn_` (principal), `role_` (role), `grant_` (grant), `ak_` (API key), `prx_` (proxy).
+- **Namespaced list filtering** (static secrets, GCP auth secrets, GCP ID token secrets, OAuth token secrets, principals, roles) requires a `namespace` query parameter and accepts an optional `labels[key]=value` filter that matches by JSONB containment (all supplied pairs must be present). Label values must be scalars.
+- **Object IDs** are prefixed by type: `ssr_` (static secret), `gas_` (GCP auth secret), `gid_` (GCP ID token secret), `ots_` (OAuth token secret), `prn_` (principal), `role_` (role), `grant_` (grant), `ak_` (API key), `prx_` (proxy).
 - **`namespace`** defaults to `"default"` when omitted on create. Once set, `namespace` and `foreign_id` are immutable.
 - **`namespace` and `foreign_id`** must be URL-safe: only `A-Z a-z 0-9 - . _ ~`. `foreign_id` is optional and, when set, must be unique within its namespace. A `foreign_id` may not start with the resource's opaque-id prefix (e.g. `ssr_`), so it can never be mistaken for an OID.
 
 ### Upsert (`PUT` / `PATCH`)
 
-For the resources with a `foreign_id` (static secrets, GCP auth secrets, OAuth token secrets, principals, roles), `PUT`/`PATCH /api/v1/<resource>/:id` is an **upsert**, and `:id` may be either an OID or a `foreign_id`:
+For the resources with a `foreign_id` (static secrets, GCP auth secrets, GCP ID token secrets, OAuth token secrets, principals, roles), `PUT`/`PATCH /api/v1/<resource>/:id` is an **upsert**, and `:id` may be either an OID or a `foreign_id`:
 
 - **`:id` is an OID** (it starts with the resource's prefix, e.g. `ssr_…`): updates that record. `404` if it does not exist — an OID is server-assigned, so it can't be created at a chosen value.
 - **`:id` is anything else**: it is treated as a `foreign_id` within the body `namespace` (default `"default"`). The record is **updated if it exists, created if it does not**. Creation responds `201`; update responds `200`.
@@ -100,7 +101,7 @@ Errors return an `error` object with a `message` and, for validation failures, a
 
 ### Secret sources
 
-A secret source describes where a credential value is resolved from. It appears as the `source` of a static secret, the `keyfile` of a GCP auth secret, and each entry in an OAuth token secret's `credentials` and `token_endpoint_headers` maps.
+A secret source describes where a credential value is resolved from. It appears as the `source` of a static secret, the `keyfile` of a GCP auth or GCP ID token secret, and each entry in an OAuth token secret's `credentials` and `token_endpoint_headers` maps.
 
 Shape:
 
@@ -149,7 +150,7 @@ The `secret` field is encrypted at rest, is write-only, and is never returned in
 
 ### Request rules
 
-A rule scopes a credential to matching outbound requests. Rules appear as the `rules` array of static, GCP, and OAuth secrets.
+A rule scopes a credential to matching outbound requests. Rules appear as the `rules` array of static, GCP auth, GCP ID token, and OAuth secrets.
 
 ```json
 {
@@ -350,6 +351,77 @@ Returns `201`. Response shape:
 | `GET`  | `/api/v1/gcp_auth_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/gcp_auth_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. |
 | `DELETE` | `/api/v1/gcp_auth_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's sources, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
+
+## GCP ID token secrets
+
+A GCP ID token secret mints Google-signed OIDC ID tokens for an audience and injects them as a bearer header. It is used for private Cloud Run services, Cloud Run functions, IAP, API Gateway, and other Google audience-authenticated targets. It requires a service-account `keyfile` [secret source](#secret-sources) and at least one [rule](#request-rules).
+
+### Attributes
+
+| Field                 | In requests | Notes |
+| --------------------- | ----------- | ----- |
+| `namespace`           | optional    | Defaults to `"default"`. Immutable. |
+| `foreign_id`          | optional    | Unique per namespace. Immutable. |
+| `name`, `description` | optional    | |
+| `labels`              | optional    | Object; defaults to `{}`. |
+| `audience`            | required    | ID token `aud` claim. For Cloud Run, use the service URL or configured custom audience. |
+| `header`              | optional    | Omit or use `authorization` for `Authorization`; use `x-serverless-authorization` when the upstream app owns `Authorization`. |
+| `keyfile`             | required    | A [secret source](#secret-sources) resolving the service account JSON. |
+| `rules`               | required    | At least one [rule](#request-rules). |
+
+### Create
+
+`POST /api/v1/gcp_id_token_secrets`
+
+```json
+{
+  "data": {
+    "namespace": "default",
+    "foreign_id": "cloud-run-caller",
+    "name": "Cloud Run Caller",
+    "audience": "https://my-service-abc123-uc.a.run.app",
+    "header": "x-serverless-authorization",
+    "keyfile": {
+      "source_type": "1password_connect",
+      "config": { "secret_ref": "op://Engineering/Cloud-Run-Caller/credential" }
+    },
+    "rules": [ { "host": "my-service-abc123-uc.a.run.app" } ]
+  }
+}
+```
+
+Returns `201`. Response shape:
+
+```json
+{
+  "data": {
+    "id": "gid_...",
+    "namespace": "default",
+    "foreign_id": "cloud-run-caller",
+    "name": "Cloud Run Caller",
+    "description": null,
+    "labels": {},
+    "audience": "https://my-service-abc123-uc.a.run.app",
+    "header": "x-serverless-authorization",
+    "keyfile": { "source_type": "1password_connect", "config": { "secret_ref": "op://Engineering/Cloud-Run-Caller/credential" } },
+    "rules": [ { "host": "my-service-abc123-uc.a.run.app", "cidr": null, "position": 0, "http_methods": [], "paths": [] } ],
+    "created_at": "2026-06-01T10:00:00Z",
+    "updated_at": "2026-06-01T10:00:00Z"
+  }
+}
+```
+
+The `keyfile` in responses never includes a `control_plane` `secret` value.
+
+### Other operations
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET`  | `/api/v1/gcp_id_token_secrets?namespace=default` | List. |
+| `GET`  | `/api/v1/gcp_id_token_secrets/:id` | Fetch one. |
+| `GET`  | `/api/v1/gcp_id_token_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `PUT`/`PATCH` | `/api/v1/gcp_id_token_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. |
+| `DELETE` | `/api/v1/gcp_id_token_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's source, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
 ## AWS auth secrets
 

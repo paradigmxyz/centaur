@@ -1,0 +1,45 @@
+<%
+  header = secret.header.presence || ""
+%>
+<%= form_with model: [ :console, secret ], data: { turbo: false } do %>
+  <div class="space-y-6">
+    <%= render "identity_fields", secret: secret %>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Token</h2>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="gcp_id_token_audience">Audience</label>
+          <%= text_field_tag "gcp_id_token[audience]", secret.audience, id: "gcp_id_token_audience", class: "form-input #{field_error_class(secret, :audience)}", placeholder: "https://my-service-abc123-uc.a.run.app" %>
+          <%= field_error(secret, :audience) %>
+        </div>
+
+        <div>
+          <label class="form-label" for="gcp_id_token_header">Header</label>
+          <%= select_tag "gcp_id_token[header]",
+                options_for_select([
+                  [ "Authorization", "" ],
+                  [ "X-Serverless-Authorization", "x-serverless-authorization" ]
+                ], header),
+                id: "gcp_id_token_header",
+                class: "form-input #{field_error_class(secret, :header)}" %>
+          <%= field_error(secret, :header) %>
+        </div>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2 class="form-section-heading">Credentials</h2>
+      <%= render "source_fields", secret: secret, source: secret.keyfile_source, heading: "Keyfile Source", bare: true %>
+    </section>
+
+    <%= render "rules_fields", secret: secret,
+          hint: "Each rule matches by host or CIDR. GCP ID token secrets require at least one rule." %>
+    <%= render "labels_fields", secret: secret %>
+
+    <div class="flex items-center gap-3">
+      <%= submit_tag(secret.new_record? ? "Create secret" : "Save changes", class: "btn-primary") %>
+      <a href="<%= console_secrets_path %>" class="btn-secondary">Cancel</a>
+    </div>
+  </div>
+<% end %>

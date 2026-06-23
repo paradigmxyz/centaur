@@ -20,10 +20,12 @@ class SecretSource < ApplicationRecord
   # A source belongs to exactly one owner. static_secret feeds the `secrets`
   # transform; gcp_auth_secret is a gcp_auth keyfile; oauth_token_secret holds
   # one oauth_token entry's credential fields and token-endpoint headers;
+  # gcp_id_token_secret is a gcp_id_token keyfile;
   # pg_dsn_secret is a Postgres upstream's connection string; hmac_secret holds
   # one hmac_sign entry's HMAC key and any additional named credentials.
   belongs_to :static_secret, optional: true
   belongs_to :gcp_auth_secret, optional: true
+  belongs_to :gcp_id_token_secret, optional: true
   belongs_to :aws_auth_secret, optional: true
   belongs_to :oauth_token_secret, optional: true
   belongs_to :pg_dsn_secret, optional: true
@@ -78,7 +80,9 @@ class SecretSource < ApplicationRecord
     )
   end
 
-  OWNER_ASSOCIATIONS = %i[static_secret gcp_auth_secret aws_auth_secret oauth_token_secret pg_dsn_secret hmac_secret].freeze
+  OWNER_ASSOCIATIONS = %i[
+    static_secret gcp_auth_secret gcp_id_token_secret aws_auth_secret oauth_token_secret pg_dsn_secret hmac_secret
+  ].freeze
 
   # Owners whose sources fill a named role (credential field or endpoint header).
   # aws_auth's sources are credential fields (access_key_id, secret_access_key,

@@ -11,11 +11,14 @@ class RequestRule < ApplicationRecord
   # A rule hangs off exactly one credential type.
   belongs_to :static_secret, optional: true
   belongs_to :gcp_auth_secret, optional: true
+  belongs_to :gcp_id_token_secret, optional: true
   belongs_to :aws_auth_secret, optional: true
   belongs_to :oauth_token_secret, optional: true
   belongs_to :hmac_secret, optional: true
 
-  OWNER_ASSOCIATIONS = %i[static_secret gcp_auth_secret aws_auth_secret oauth_token_secret hmac_secret].freeze
+  OWNER_ASSOCIATIONS = %i[
+    static_secret gcp_auth_secret gcp_id_token_secret aws_auth_secret oauth_token_secret hmac_secret
+  ].freeze
 
   default_scope { order(:position) }
 

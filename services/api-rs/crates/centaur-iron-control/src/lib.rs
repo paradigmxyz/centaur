@@ -18,10 +18,11 @@ pub use client::IronControlClient;
 pub use error::{IronControlError, Result};
 pub use models::{
     AwsAuthSecretInput, BrokerCredentialInput, BrokerCredentialRecord, EffectiveConfig,
-    EffectivePgDsn, EffectiveReplace, EffectiveSecret, GcpAuthSecretInput, Grant, GrantSecret,
-    Grantee, HmacSecretHeader, HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput,
-    PgDsnSecretInput, PgDsnSettingInput, PgDsnSettingValueFromInput, Principal, Proxy, ProxyInput,
-    ReplaceConfig, RequestRule, Role, SECRET_TYPES, SecretRecord, SecretSource, StaticSecretInput,
+    EffectivePgDsn, EffectiveReplace, EffectiveSecret, GcpAuthSecretInput, GcpIdTokenSecretInput,
+    Grant, GrantSecret, Grantee, HmacSecretHeader, HmacSecretInput, IdentityInput, InjectConfig,
+    OAuthTokenSecretInput, PgDsnSecretInput, PgDsnSettingInput, PgDsnSettingValueFromInput,
+    Principal, Proxy, ProxyInput, ReplaceConfig, RequestRule, Role, SECRET_TYPES, SecretRecord,
+    SecretSource, StaticSecretInput,
 };
 pub use principal::{PrincipalRef, derive_principal};
 pub use registry::{

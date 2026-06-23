@@ -18,6 +18,7 @@ class Iron::BootstrapTest < ActiveSupport::TestCase
     BrokerCredential.delete_all
     OauthApp.delete_all
     GcpAuthSecret.delete_all
+    GcpIdTokenSecret.delete_all
     AwsAuthSecret.delete_all
     OauthTokenSecret.delete_all
     PgDsnSecret.delete_all

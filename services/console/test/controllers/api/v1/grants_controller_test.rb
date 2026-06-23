@@ -83,6 +83,19 @@ module Api
         assert_equal secret.oid, json_body.dig("data", "gcp_auth_secret_id")
       end
 
+      test "POST creates a Grant for a gcp_id_token secret" do
+        principal = principals(:globex_user)
+        secret = gcp_id_token_secrets(:acme_cloud_run)
+
+        body = { data: { principal_id: principal.oid, gcp_id_token_secret_id: secret.oid } }
+
+        assert_difference -> { Grant.count } => 1 do
+          post api_v1_grants_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+        assert_equal secret.oid, json_body.dig("data", "gcp_id_token_secret_id")
+      end
+
       test "POST creates a Grant for an oauth_token secret" do
         principal = principals(:globex_user)
         secret = oauth_token_secrets(:acme_gmail_oauth)

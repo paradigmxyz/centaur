@@ -31,6 +31,10 @@ fn secret_type_routes_by_oid_prefix() {
         secret_type_for_oid("gas_3").map(|t| t.1),
         Some("gcp_auth_secrets")
     );
+    assert_eq!(
+        secret_type_for_oid("gid_7").map(|t| t.1),
+        Some("gcp_id_token_secrets")
+    );
     assert_eq!(secret_type_for_oid("pgs_4").map(|t| t.0), Some("pg_dsn"));
     assert_eq!(secret_type_for_oid("hms_5").map(|t| t.0), Some("hmac"));
     assert_eq!(

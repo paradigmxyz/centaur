@@ -19,6 +19,13 @@ gcp_googleapis:
   paths: []
   gcp_auth_secret: acme_bigquery
 
+gcp_id_token_cloud_run:
+  host: my-service-abc123-uc.a.run.app
+  http_methods: []
+  paths: []
+  position: 0
+  gcp_id_token_secret: acme_cloud_run
+
 oauth_gmail_host:
   host: gmail.googleapis.com
   http_methods: ["GET"]

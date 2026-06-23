@@ -48,6 +48,11 @@ class Principal < ApplicationRecord
     granted_secrets_by_priority(GcpAuthSecret, :gcp_auth_secret_id, includes: %i[keyfile_source rules])
   end
 
+  # gcp_id_token credentials this principal resolves to, via its effective grants.
+  def granted_gcp_id_token_secrets
+    granted_secrets_by_priority(GcpIdTokenSecret, :gcp_id_token_secret_id, includes: %i[keyfile_source rules])
+  end
+
   # aws_auth credentials this principal resolves to, via its effective grants.
   def granted_aws_auth_secrets
     granted_secrets_by_priority(AwsAuthSecret, :aws_auth_secret_id, includes: %i[sources rules])
@@ -76,9 +81,8 @@ class Principal < ApplicationRecord
     proxy_secrets_for(served_credentials)
   end
 
-  # The `transforms` array delivered to iron-proxy: one gcp_auth transform per
-  # granted GcpAuthSecret, one aws_auth transform per granted AwsAuthSecret, one
-  # hmac_sign transform per granted HmacSecret, plus a single oauth_token
+  # The `transforms` array delivered to iron-proxy: one gcp_auth/gcp_id_token/
+  # aws_auth/hmac_sign transform per granted secret, plus a single oauth_token
   # transform bundling every granted OauthTokenSecret as one `tokens` entry.
   # Credentials that lost a cross-type conflict are omitted (see
   # #served_credentials).
@@ -157,15 +161,17 @@ class Principal < ApplicationRecord
   def served_credentials
     static = granted_static_secrets.select { |ss| ss.source&.deliverable? }
     gcp_auth = granted_gcp_auth_secrets.to_a
+    gcp_id_token = granted_gcp_id_token_secrets.to_a
     aws_auth = granted_aws_auth_secrets.to_a
     hmac = granted_hmac_secrets.to_a
     oauth = granted_oauth_token_secrets.to_a
 
-    suppressed = suppressed_conflict_credentials(static + gcp_auth + aws_auth + hmac + oauth)
+    suppressed = suppressed_conflict_credentials(static + gcp_auth + gcp_id_token + aws_auth + hmac + oauth)
 
     {
       static: static - suppressed,
       gcp_auth: gcp_auth - suppressed,
+      gcp_id_token: gcp_id_token - suppressed,
       aws_auth: aws_auth - suppressed,
       hmac: hmac - suppressed,
       oauth: oauth - suppressed
@@ -178,6 +184,7 @@ class Principal < ApplicationRecord
 
   def proxy_transforms_for(served)
     transforms = served[:gcp_auth].map(&:to_proxy_transform)
+    transforms += served[:gcp_id_token].map(&:to_proxy_transform)
     transforms += served[:aws_auth].map(&:to_proxy_transform)
     transforms += served[:hmac].map(&:to_proxy_transform)
 
