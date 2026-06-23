@@ -630,6 +630,37 @@ fn harness_usage_trace_request(
         usage.reasoning_output_tokens,
     );
     set_attribute_int(&mut attributes, "gen_ai.usage.total_tokens", total_tokens);
+    if let Some(cost) = estimate_usage_cost(span_context.harness, system, model, usage) {
+        set_attribute_double(
+            &mut attributes,
+            "gen_ai.usage.input_cost",
+            cost.input_cost,
+        );
+        set_attribute_double(
+            &mut attributes,
+            "gen_ai.usage.output_cost",
+            cost.output_cost,
+        );
+        set_attribute_double(&mut attributes, "gen_ai.usage.cost", cost.total_cost());
+        set_attribute_string(&mut attributes, "gen_ai.usage.cost_currency", "USD");
+        set_attribute_double(
+            &mut attributes,
+            "centaur.usage.input_cost_usd",
+            cost.input_cost,
+        );
+        set_attribute_double(
+            &mut attributes,
+            "centaur.usage.output_cost_usd",
+            cost.output_cost,
+        );
+        set_attribute_double(
+            &mut attributes,
+            "centaur.usage.estimated_cost_usd",
+            cost.total_cost(),
+        );
+        set_attribute_string(&mut attributes, "centaur.usage.cost_source", cost.source);
+        set_attribute_bool(&mut attributes, "centaur.usage.cost_estimated", true);
+    }
     set_attribute_string(&mut attributes, "centaur.harness", harness_name);
     set_attribute_string(
         &mut attributes,
@@ -738,6 +769,186 @@ fn gen_ai_system(kind: HarnessKind, model_provider: &str) -> &'static str {
     } else {
         "unknown"
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TokenPricing {
+    input_per_mtok: f64,
+    cache_creation_per_mtok: f64,
+    cache_read_per_mtok: f64,
+    output_per_mtok: f64,
+    source: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UsageCost {
+    input_cost: f64,
+    output_cost: f64,
+    source: &'static str,
+}
+
+impl UsageCost {
+    fn total_cost(self) -> f64 {
+        self.input_cost + self.output_cost
+    }
+}
+
+fn estimate_usage_cost(
+    harness: HarnessKind,
+    system: &str,
+    model: &str,
+    usage: &NormalizedTokenUsage,
+) -> Option<UsageCost> {
+    let pricing = pricing_for_usage(harness, system, model)?;
+    let input_tokens = positive_tokens(usage.input_tokens);
+    let cache_creation_tokens = positive_tokens(usage.cache_creation_input_tokens);
+    let cache_read_tokens = positive_tokens(usage.cache_read_input_tokens);
+    let output_tokens = positive_tokens(usage.output_tokens);
+    let cache_tokens = cache_creation_tokens + cache_read_tokens;
+    let non_cached_input_tokens = if input_tokens >= cache_tokens {
+        input_tokens - cache_tokens
+    } else {
+        input_tokens
+    };
+
+    let input_cost = mtok_cost(non_cached_input_tokens, pricing.input_per_mtok)
+        + mtok_cost(
+            cache_creation_tokens,
+            pricing.cache_creation_per_mtok,
+        )
+        + mtok_cost(cache_read_tokens, pricing.cache_read_per_mtok);
+    let output_cost = mtok_cost(output_tokens, pricing.output_per_mtok);
+
+    Some(UsageCost {
+        input_cost,
+        output_cost,
+        source: pricing.source,
+    })
+}
+
+fn pricing_for_usage(harness: HarnessKind, system: &str, model: &str) -> Option<TokenPricing> {
+    let normalized = normalize_model_name(model);
+    match system {
+        "anthropic" => anthropic_pricing(&normalized),
+        "openai" => openai_pricing(&normalized),
+        "amp" => amp_pricing(harness, &normalized),
+        _ => None,
+    }
+}
+
+fn normalize_model_name(model: &str) -> String {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '.'], "-")
+}
+
+fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("fable-5") || model.contains("mythos-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 1.0,
+            output_per_mtok: 50.0,
+            source: "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write",
+        });
+    }
+    if model.contains("opus-4-8")
+        || model.contains("opus-4-7")
+        || model.contains("opus-4-6")
+        || model.contains("opus-4-5")
+    {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 6.25,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 25.0,
+            source: "centaur_estimate:anthropic:opus-4.5-plus:5m-cache-write",
+        });
+    }
+    if model.contains("opus-4-1") || model.contains("opus-4") {
+        return Some(TokenPricing {
+            input_per_mtok: 15.0,
+            cache_creation_per_mtok: 18.75,
+            cache_read_per_mtok: 1.5,
+            output_per_mtok: 75.0,
+            source: "centaur_estimate:anthropic:opus-4-deprecated:5m-cache-write",
+        });
+    }
+    if model.contains("sonnet-4-6")
+        || model.contains("sonnet-4-5")
+        || model.contains("sonnet-4")
+    {
+        return Some(TokenPricing {
+            input_per_mtok: 3.0,
+            cache_creation_per_mtok: 3.75,
+            cache_read_per_mtok: 0.3,
+            output_per_mtok: 15.0,
+            source: "centaur_estimate:anthropic:sonnet-4:5m-cache-write",
+        });
+    }
+    if model.contains("haiku-4-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 1.0,
+            cache_creation_per_mtok: 1.25,
+            cache_read_per_mtok: 0.1,
+            output_per_mtok: 5.0,
+            source: "centaur_estimate:anthropic:haiku-4.5:5m-cache-write",
+        });
+    }
+    None
+}
+
+fn openai_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("gpt-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 5.0,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 30.0,
+            source: "centaur_estimate:openai:gpt-5.5",
+        });
+    }
+    if model.contains("gpt-5-4") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.5,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.25,
+            output_per_mtok: 15.0,
+            source: "centaur_estimate:openai:gpt-5.4",
+        });
+    }
+    None
+}
+
+fn amp_pricing(_harness: HarnessKind, model: &str) -> Option<TokenPricing> {
+    if model == "deep" || model.starts_with("deep-") || model == "rush" || model.starts_with("rush-") {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 5.0,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 30.0,
+            source: "centaur_estimate:amp:gpt-5.5",
+        });
+    }
+    if model == "smart" || model.starts_with("smart-") {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 6.25,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 25.0,
+            source: "centaur_estimate:amp:claude-opus-4.8:5m-cache-write",
+        });
+    }
+    openai_pricing(model).or_else(|| anthropic_pricing(model))
+}
+
+fn positive_tokens(value: Option<i64>) -> f64 {
+    value.unwrap_or_default().max(0) as f64
+}
+
+fn mtok_cost(tokens: f64, price_per_mtok: f64) -> f64 {
+    tokens * price_per_mtok / 1_000_000.0
 }
 
 fn kv_string(key: &str, value: &str) -> KeyValue {
@@ -880,6 +1091,29 @@ fn set_attribute_int(attributes: &mut Vec<KeyValue>, key: &str, value: Option<i6
         key,
         AnyValue {
             value: Some(any_value::Value::IntValue(value)),
+        },
+    );
+}
+
+fn set_attribute_double(attributes: &mut Vec<KeyValue>, key: &str, value: f64) {
+    if !value.is_finite() {
+        return;
+    }
+    set_attribute_value(
+        attributes,
+        key,
+        AnyValue {
+            value: Some(any_value::Value::DoubleValue(value)),
+        },
+    );
+}
+
+fn set_attribute_bool(attributes: &mut Vec<KeyValue>, key: &str, value: bool) {
+    set_attribute_value(
+        attributes,
+        key,
+        AnyValue {
+            value: Some(any_value::Value::BoolValue(value)),
         },
     );
 }
@@ -1106,11 +1340,96 @@ trust_level = "trusted"
             Some(17)
         );
         assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.input_cost"),
+            Some(0.0000625)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.output_cost"),
+            Some(0.00035)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.cost"),
+            Some(0.0004125)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "centaur.usage.estimated_cost_usd"),
+            Some(0.0004125)
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "gen_ai.usage.cost_currency"),
+            "USD"
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "centaur.usage.cost_source"),
+            "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write"
+        );
+        assert_eq!(
             attribute_string(
                 &span.attributes,
                 "lmnr.association.properties.metadata.execution_id"
             ),
             "exe_123"
+        );
+    }
+
+    #[test]
+    fn harness_usage_trace_request_estimates_amp_deep_cost() {
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: None,
+            traceparent: Some(
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
+            ),
+            metadata: BTreeMap::new(),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("deep".to_string()),
+            input_tokens: Some(150_681),
+            output_tokens: Some(1_456),
+            cache_creation_input_tokens: Some(27_289),
+            cache_read_input_tokens: Some(123_392),
+            reasoning_output_tokens: None,
+            total_tokens: Some(152_137),
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::Amp,
+                model: "deep",
+                model_provider: "amp",
+                turn_id: "turn-1",
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(span.name, "amp.session_task.turn");
+        assert_eq!(
+            attribute_string(&span.attributes, "gen_ai.system"),
+            "amp"
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.input_cost"),
+            Some(0.198141)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.output_cost"),
+            Some(0.04368)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.cost"),
+            Some(0.241821)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "centaur.usage.estimated_cost_usd"),
+            Some(0.241821)
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "centaur.usage.cost_source"),
+            "centaur_estimate:amp:gpt-5.5"
         );
     }
 
@@ -1132,5 +1451,18 @@ trust_level = "trusted"
             }),
             ..Default::default()
         }
+    }
+
+    fn attribute_double(attributes: &[KeyValue], key: &str) -> Option<f64> {
+        attributes
+            .iter()
+            .find(|attribute| attribute.key == key)
+            .and_then(|attribute| attribute.value.as_ref())
+            .and_then(|value| match value.value.as_ref()? {
+                any_value::Value::DoubleValue(value) => Some(*value),
+                any_value::Value::IntValue(value) => Some(*value as f64),
+                any_value::Value::StringValue(value) => value.parse().ok(),
+                _ => None,
+            })
     }
 }
