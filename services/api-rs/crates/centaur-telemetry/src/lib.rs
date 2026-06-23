@@ -1,26 +1,31 @@
 //! Shared telemetry setup for the Rust Centaur control plane.
 
 use std::{
-    borrow::Cow,
     collections::HashSet,
     env, fmt as std_fmt,
+    io::{Read, Write},
+    net::TcpStream,
     sync::{LazyLock, Mutex},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use opentelemetry::{
-    Context, InstrumentationScope, KeyValue,
+    Context, KeyValue,
     trace::{
-        SpanContext, SpanId, SpanKind, Status, TraceContextExt as _, TraceFlags, TraceId,
-        TraceState, TracerProvider as _,
+        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
+        TracerProvider as _,
     },
 };
-use opentelemetry_sdk::{
-    Resource,
-    trace::{SdkTracerProvider, SpanData, SpanEvents, SpanExporter as _, SpanLinks},
+use opentelemetry_proto::tonic::{
+    collector::trace::v1::ExportTraceServiceRequest,
+    common::v1::{AnyValue, InstrumentationScope, KeyValue as ProtoKeyValue, any_value},
+    resource::v1::Resource as ProtoResource,
+    trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan, span},
 };
+use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+use prost::Message as _;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{Event, Subscriber};
@@ -485,67 +490,301 @@ async fn export_thread_trace_root_span_inner(
     root_span_id: &str,
     thread_key: &str,
 ) -> Result<(), String> {
-    let config = TelemetryConfig::from_env();
-    let resource = otlp_resource(&config);
-    let span = thread_trace_root_span_data(trace_id, root_span_id, thread_key, SystemTime::now())?;
-    let mut exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .build()
-        .map_err(|error| error.to_string())?;
-    exporter.set_resource(&resource);
-    exporter
-        .export(vec![span])
-        .await
-        .map_err(|error| error.to_string())
+    let trace_id = trace_id.to_owned();
+    let root_span_id = root_span_id.to_owned();
+    let thread_key = thread_key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        export_thread_trace_root_span_blocking(&trace_id, &root_span_id, &thread_key)
+    })
+    .await
+    .map_err(|error| format!("thread root span export task failed: {error}"))?
 }
 
-fn thread_trace_root_span_data(
+fn export_thread_trace_root_span_blocking(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+) -> Result<(), String> {
+    let endpoint = otlp_traces_endpoint()
+        .ok_or_else(|| "OTLP traces endpoint is not configured".to_owned())?;
+    let request =
+        thread_trace_root_export_request(trace_id, root_span_id, thread_key, SystemTime::now())?;
+    let mut headers = otlp_export_headers();
+    headers.push(("x-trace-id".to_owned(), trace_id.to_owned()));
+    headers.push(("x-centaur-thread-key".to_owned(), thread_key.to_owned()));
+    post_otlp_trace_payload(&endpoint, &headers, &request.encode_to_vec())
+}
+
+fn thread_trace_root_export_request(
     trace_id: &str,
     root_span_id: &str,
     thread_key: &str,
     start_time: SystemTime,
-) -> Result<SpanData, String> {
-    let trace_hex =
-        normalize_trace_id_hex(trace_id).ok_or_else(|| "invalid thread trace id".to_owned())?;
-    let trace_id = TraceId::from_hex(&trace_hex)
-        .map_err(|error| format!("invalid thread trace id: {error}"))?;
-    let span_id = SpanId::from_hex(root_span_id)
-        .map_err(|error| format!("invalid thread root span id: {error}"))?;
-    if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
-        return Err("invalid zero thread trace id or root span id".to_owned());
-    }
+) -> Result<ExportTraceServiceRequest, String> {
+    let config = TelemetryConfig::from_env();
+    let trace_id = trace_id_bytes(trace_id)?;
+    let span_id = span_id_bytes(root_span_id)?;
     let end_time = start_time
         .checked_add(Duration::from_nanos(1))
         .unwrap_or(start_time);
+    let start_time_unix_nano = unix_time_nanos(start_time);
+    let end_time_unix_nano = unix_time_nanos(end_time).max(start_time_unix_nano + 1);
 
-    Ok(SpanData {
-        span_context: SpanContext::new(
-            trace_id,
-            span_id,
-            TraceFlags::SAMPLED,
-            false,
-            TraceState::default(),
-        ),
-        parent_span_id: SpanId::INVALID,
-        parent_span_is_remote: false,
-        span_kind: SpanKind::Internal,
-        name: Cow::Borrowed("centaur.api_rs.thread"),
-        start_time,
-        end_time,
-        attributes: vec![
-            KeyValue::new(FIELD_COMPONENT, "session_runtime"),
-            KeyValue::new(FIELD_EVENT, "thread_trace_root"),
-            KeyValue::new("centaur.thread_key", thread_key.to_owned()),
-            KeyValue::new(FIELD_THREAD_KEY, thread_key.to_owned()),
-        ],
-        dropped_attributes_count: 0,
-        events: SpanEvents::default(),
-        links: SpanLinks::default(),
-        status: Status::Unset,
-        instrumentation_scope: InstrumentationScope::builder("centaur.api-rs")
-            .with_version(env!("CARGO_PKG_VERSION"))
-            .build(),
+    Ok(ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(ProtoResource {
+                attributes: vec![
+                    proto_kv_string("service.name", &config.service_name),
+                    proto_kv_string(OTEL_SERVICE_NAMESPACE, SERVICE_NAMESPACE),
+                    proto_kv_string(OTEL_DEPLOYMENT_ENVIRONMENT_NAME, &config.environment),
+                    proto_kv_string("deployment.environment", &config.environment),
+                ],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "centaur.api-rs".to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    ..Default::default()
+                }),
+                spans: vec![ProtoSpan {
+                    trace_id,
+                    span_id,
+                    parent_span_id: Vec::new(),
+                    name: "centaur.api_rs.thread".to_owned(),
+                    kind: span::SpanKind::Internal as i32,
+                    start_time_unix_nano,
+                    end_time_unix_nano,
+                    attributes: vec![
+                        proto_kv_string(FIELD_COMPONENT, "session_runtime"),
+                        proto_kv_string(FIELD_EVENT, "thread_trace_root"),
+                        proto_kv_string("centaur.thread_key", thread_key),
+                        proto_kv_string(FIELD_THREAD_KEY, thread_key),
+                    ],
+                    flags: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
     })
+}
+
+fn post_otlp_trace_payload(
+    endpoint: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(), String> {
+    let target = OtlpHttpTarget::parse(endpoint)?;
+    let mut upstream = TcpStream::connect((target.host.as_str(), target.port))
+        .map_err(|error| format!("failed to connect to OTLP endpoint: {error}"))?;
+    upstream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("failed to set OTLP read timeout: {error}"))?;
+    upstream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("failed to set OTLP write timeout: {error}"))?;
+    write!(
+        upstream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n",
+        target.path,
+        target.host_header,
+        body.len()
+    )
+    .map_err(|error| format!("failed to write OTLP request headers: {error}"))?;
+    for (name, value) in headers {
+        if matches!(
+            name.as_str(),
+            "authorization" | "x-trace-id" | "x-centaur-thread-key"
+        ) {
+            write!(upstream, "{name}: {value}\r\n")
+                .map_err(|error| format!("failed to write OTLP header {name}: {error}"))?;
+        }
+    }
+    upstream
+        .write_all(b"\r\n")
+        .and_then(|()| upstream.write_all(body))
+        .and_then(|()| upstream.flush())
+        .map_err(|error| format!("failed to write OTLP request body: {error}"))?;
+
+    let mut response = Vec::new();
+    upstream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("failed to read OTLP response: {error}"))?;
+    let status = http_status_code(&response).unwrap_or(0);
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "OTLP trace export failed with HTTP status {status}"
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct OtlpHttpTarget {
+    host: String,
+    port: u16,
+    host_header: String,
+    path: String,
+}
+
+impl OtlpHttpTarget {
+    fn parse(endpoint: &str) -> Result<Self, String> {
+        let endpoint = endpoint.trim();
+        let rest = endpoint.strip_prefix("http://").ok_or_else(|| {
+            "only http OTLP endpoints are supported for root span export".to_owned()
+        })?;
+        let (host_port, path) = match rest.split_once('/') {
+            Some((host_port, path)) => (host_port, format!("/{path}")),
+            None => (rest, "/v1/traces".to_owned()),
+        };
+        if host_port.is_empty() {
+            return Err("OTLP endpoint host is empty".to_owned());
+        }
+        let (host, port) = match host_port.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|error| format!("invalid OTLP endpoint port: {error}"))?;
+                (host.to_owned(), port)
+            }
+            None => (host_port.to_owned(), 80),
+        };
+        if host.is_empty() {
+            return Err("OTLP endpoint host is empty".to_owned());
+        }
+        Ok(Self {
+            host,
+            port,
+            host_header: host_port.to_owned(),
+            path,
+        })
+    }
+}
+
+fn http_status_code(response: &[u8]) -> Option<u16> {
+    let line = String::from_utf8_lossy(response).lines().next()?.to_owned();
+    let mut parts = line.split_whitespace();
+    let _version = parts.next()?;
+    parts.next()?.parse().ok()
+}
+
+fn otlp_traces_endpoint() -> Option<String> {
+    first_nonempty_env(&["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]).or_else(|| {
+        first_nonempty_env(&["OTEL_EXPORTER_OTLP_ENDPOINT"]).map(|endpoint| {
+            if endpoint.ends_with("/v1/traces") {
+                endpoint
+            } else {
+                format!("{}/v1/traces", endpoint.trim_end_matches('/'))
+            }
+        })
+    })
+}
+
+fn otlp_export_headers() -> Vec<(String, String)> {
+    first_nonempty_env(&[
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+    ])
+    .map(|raw| parse_otlp_headers(&raw))
+    .unwrap_or_default()
+}
+
+fn parse_otlp_headers(raw: &str) -> Vec<(String, String)> {
+    raw.split(',')
+        .filter_map(|part| {
+            let (name, value) = part.split_once('=')?;
+            let name = name.trim().to_ascii_lowercase();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name, percent_decode(value.trim())))
+        })
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            out.push(high << 4 | low);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn proto_kv_string(key: &str, value: &str) -> ProtoKeyValue {
+    ProtoKeyValue {
+        key: key.to_owned(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.to_owned())),
+        }),
+        ..Default::default()
+    }
+}
+
+fn trace_id_bytes(trace_id: &str) -> Result<Vec<u8>, String> {
+    let trace_hex =
+        normalize_trace_id_hex(trace_id).ok_or_else(|| "invalid thread trace id".to_owned())?;
+    let bytes = hex_to_bytes(&trace_hex)?;
+    if bytes.len() != 16 || bytes.iter().all(|byte| *byte == 0) {
+        return Err("invalid zero thread trace id".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn span_id_bytes(span_id: &str) -> Result<Vec<u8>, String> {
+    let span_id = span_id.trim();
+    if span_id.len() != 16 || !span_id.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("invalid thread root span id".to_owned());
+    }
+    let bytes = hex_to_bytes(span_id)?;
+    if bytes.len() != 8 || bytes.iter().all(|byte| *byte == 0) {
+        return Err("invalid zero thread root span id".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.len() % 2 != 0 {
+        return Err("hex value must have even length".to_owned());
+    }
+    let bytes = hex.as_bytes();
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for index in (0..bytes.len()).step_by(2) {
+        let high = hex_value(bytes[index]).ok_or_else(|| "invalid hex digit".to_owned())?;
+        let low = hex_value(bytes[index + 1]).ok_or_else(|| "invalid hex digit".to_owned())?;
+        out.push(high << 4 | low);
+    }
+    Ok(out)
+}
+
+fn unix_time_nanos(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn remote_parent_context(trace_id: &str, parent_span_id: &str) -> Option<Context> {
@@ -887,28 +1126,35 @@ mod tests {
     }
 
     #[test]
-    fn thread_trace_root_span_data_uses_parentless_thread_root() {
-        let span = thread_trace_root_span_data(
+    fn thread_trace_root_export_request_uses_parentless_thread_root() {
+        let request = thread_trace_root_export_request(
             "01234567-89ab-cdef-0123-456789abcdef",
             "1111111111111111",
             "slack:T:C:1782217699.671539",
             SystemTime::UNIX_EPOCH,
         )
         .expect("thread root span");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
 
-        assert_eq!(span.name.as_ref(), "centaur.api_rs.thread");
         assert_eq!(
-            span.span_context.trace_id().to_string(),
-            "0123456789abcdef0123456789abcdef"
+            span.trace_id,
+            vec![
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ]
         );
-        assert_eq!(span.span_context.span_id().to_string(), "1111111111111111");
-        assert_eq!(span.parent_span_id, SpanId::INVALID);
-        assert_eq!(span.start_time, SystemTime::UNIX_EPOCH);
-        assert!(span.end_time > span.start_time);
+        assert_eq!(
+            span.span_id,
+            vec![0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
+        );
+        assert!(span.parent_span_id.is_empty());
+        assert_eq!(span.name, "centaur.api_rs.thread");
+        assert_eq!(span.start_time_unix_nano, 0);
+        assert!(span.end_time_unix_nano > span.start_time_unix_nano);
         assert!(
             span.attributes
                 .iter()
-                .any(|attribute| attribute.key.as_str() == "centaur.thread_key")
+                .any(|attribute| attribute.key == "centaur.thread_key")
         );
     }
 
