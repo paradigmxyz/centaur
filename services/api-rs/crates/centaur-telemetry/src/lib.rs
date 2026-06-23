@@ -1,21 +1,26 @@
 //! Shared telemetry setup for the Rust Centaur control plane.
 
 use std::{
+    borrow::Cow,
+    collections::HashSet,
     env, fmt as std_fmt,
     sync::{LazyLock, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 pub use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use opentelemetry::{
-    Context,
+    Context, InstrumentationScope, KeyValue,
     trace::{
-        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
-        TracerProvider as _,
+        SpanContext, SpanId, SpanKind, Status, TraceContextExt as _, TraceFlags, TraceId,
+        TraceState, TracerProvider as _,
     },
 };
-use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+use opentelemetry_sdk::{
+    Resource,
+    trace::{SdkTracerProvider, SpanData, SpanEvents, SpanExporter as _, SpanLinks},
+};
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{Event, Subscriber};
@@ -88,6 +93,8 @@ const COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS: &[f64] = &[
 
 static PROMETHEUS_HANDLE: LazyLock<Mutex<Option<PrometheusHandle>>> =
     LazyLock::new(|| Mutex::new(None));
+static EXPORTED_THREAD_ROOT_SPANS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TelemetryConfig {
@@ -425,13 +432,120 @@ pub fn traceparent_for_span(span: &tracing::Span) -> Option<String> {
 /// Assign a remote parent trace to a not-yet-entered tracing span.
 ///
 /// `trace_id` may be a UUID string or 32-character W3C trace id. The parent
-/// span id is synthetic and intentionally not exported; it just gives all
-/// per-turn request spans the same thread trace identity.
+/// span id is a deterministic thread-root span id; callers should export that
+/// root span so trace viewers have a parentless node to render.
 pub fn set_span_parent_trace(span: &tracing::Span, trace_id: &str, parent_span_id: &str) -> bool {
     let Some(parent_context) = remote_parent_context(trace_id, parent_span_id) else {
         return false;
     };
     span.set_parent(parent_context).is_ok()
+}
+
+pub async fn export_thread_trace_root_span(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+) -> bool {
+    if TraceExporter::from_env() != TraceExporter::Otlp {
+        return false;
+    }
+
+    let export_key = format!("{trace_id}:{root_span_id}");
+    {
+        let mut exported = EXPORTED_THREAD_ROOT_SPANS
+            .lock()
+            .expect("thread root span export lock poisoned");
+        if !exported.insert(export_key.clone()) {
+            return true;
+        }
+    }
+
+    if let Err(error) =
+        export_thread_trace_root_span_inner(trace_id, root_span_id, thread_key).await
+    {
+        EXPORTED_THREAD_ROOT_SPANS
+            .lock()
+            .expect("thread root span export lock poisoned")
+            .remove(&export_key);
+        tracing::warn!(
+            %error,
+            trace_id,
+            root_span_id,
+            thread_key,
+            "failed to export thread trace root span"
+        );
+        return false;
+    }
+
+    true
+}
+
+async fn export_thread_trace_root_span_inner(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+) -> Result<(), String> {
+    let config = TelemetryConfig::from_env();
+    let resource = otlp_resource(&config);
+    let span = thread_trace_root_span_data(trace_id, root_span_id, thread_key, SystemTime::now())?;
+    let mut exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .build()
+        .map_err(|error| error.to_string())?;
+    exporter.set_resource(&resource);
+    exporter
+        .export(vec![span])
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn thread_trace_root_span_data(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+    start_time: SystemTime,
+) -> Result<SpanData, String> {
+    let trace_hex =
+        normalize_trace_id_hex(trace_id).ok_or_else(|| "invalid thread trace id".to_owned())?;
+    let trace_id = TraceId::from_hex(&trace_hex)
+        .map_err(|error| format!("invalid thread trace id: {error}"))?;
+    let span_id = SpanId::from_hex(root_span_id)
+        .map_err(|error| format!("invalid thread root span id: {error}"))?;
+    if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
+        return Err("invalid zero thread trace id or root span id".to_owned());
+    }
+    let end_time = start_time
+        .checked_add(Duration::from_nanos(1))
+        .unwrap_or(start_time);
+
+    Ok(SpanData {
+        span_context: SpanContext::new(
+            trace_id,
+            span_id,
+            TraceFlags::SAMPLED,
+            false,
+            TraceState::default(),
+        ),
+        parent_span_id: SpanId::INVALID,
+        parent_span_is_remote: false,
+        span_kind: SpanKind::Internal,
+        name: Cow::Borrowed("centaur.api_rs.thread"),
+        start_time,
+        end_time,
+        attributes: vec![
+            KeyValue::new(FIELD_COMPONENT, "session_runtime"),
+            KeyValue::new(FIELD_EVENT, "thread_trace_root"),
+            KeyValue::new("centaur.thread_key", thread_key.to_owned()),
+            KeyValue::new(FIELD_THREAD_KEY, thread_key.to_owned()),
+        ],
+        dropped_attributes_count: 0,
+        events: SpanEvents::default(),
+        links: SpanLinks::default(),
+        status: Status::Unset,
+        instrumentation_scope: InstrumentationScope::builder("centaur.api-rs")
+            .with_version(env!("CARGO_PKG_VERSION"))
+            .build(),
+    })
 }
 
 fn remote_parent_context(trace_id: &str, parent_span_id: &str) -> Option<Context> {
@@ -623,26 +737,25 @@ fn workflow_metric_labels(labels: &[(String, String)]) -> Vec<metrics::Label> {
 fn build_otlp_tracer_provider(
     config: &TelemetryConfig,
 ) -> Result<SdkTracerProvider, TelemetryError> {
-    let resource = Resource::builder()
-        .with_service_name(config.service_name.clone())
-        .with_attribute(opentelemetry::KeyValue::new(
-            OTEL_SERVICE_NAMESPACE,
-            SERVICE_NAMESPACE,
-        ))
-        .with_attribute(opentelemetry::KeyValue::new(
-            OTEL_DEPLOYMENT_ENVIRONMENT_NAME,
-            config.environment.clone(),
-        ))
-        .build();
-
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .build()?;
 
     Ok(SdkTracerProvider::builder()
-        .with_resource(resource)
+        .with_resource(otlp_resource(config))
         .with_batch_exporter(exporter)
         .build())
+}
+
+fn otlp_resource(config: &TelemetryConfig) -> Resource {
+    Resource::builder()
+        .with_service_name(config.service_name.clone())
+        .with_attribute(KeyValue::new(OTEL_SERVICE_NAMESPACE, SERVICE_NAMESPACE))
+        .with_attribute(KeyValue::new(
+            OTEL_DEPLOYMENT_ENVIRONMENT_NAME,
+            config.environment.clone(),
+        ))
+        .build()
 }
 
 #[derive(Debug, Clone)]
@@ -770,6 +883,32 @@ mod tests {
         assert_eq!(
             TraceExporter::from_values("none", true),
             TraceExporter::None
+        );
+    }
+
+    #[test]
+    fn thread_trace_root_span_data_uses_parentless_thread_root() {
+        let span = thread_trace_root_span_data(
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "1111111111111111",
+            "slack:T:C:1782217699.671539",
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("thread root span");
+
+        assert_eq!(span.name.as_ref(), "centaur.api_rs.thread");
+        assert_eq!(
+            span.span_context.trace_id().to_string(),
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(span.span_context.span_id().to_string(), "1111111111111111");
+        assert_eq!(span.parent_span_id, SpanId::INVALID);
+        assert_eq!(span.start_time, SystemTime::UNIX_EPOCH);
+        assert!(span.end_time > span.start_time);
+        assert!(
+            span.attributes
+                .iter()
+                .any(|attribute| attribute.key.as_str() == "centaur.thread_key")
         );
     }
 

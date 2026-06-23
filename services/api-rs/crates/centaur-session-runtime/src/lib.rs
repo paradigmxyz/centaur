@@ -21,9 +21,9 @@ use centaur_session_sqlx::{
     PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
 };
 use centaur_telemetry::{
-    record_sandbox_warm_pool_claim, record_session_execution_finished,
-    record_session_execution_started, record_session_failure, record_session_first_token_latency,
-    set_span_parent_trace,
+    export_thread_trace_root_span, record_sandbox_warm_pool_claim,
+    record_session_execution_finished, record_session_execution_started, record_session_failure,
+    record_session_first_token_latency, set_span_parent_trace,
 };
 use dashmap::DashMap;
 use futures_util::{SinkExt, Stream, StreamExt, stream};
@@ -427,7 +427,13 @@ impl SessionRuntime {
             harness_type = %harness_type,
             iron_control_enabled = self.iron_control.is_some(),
         );
+        set_span_parent_trace(
+            &span,
+            &thread_trace_id(thread_key),
+            &thread_trace_parent_span_id(thread_key),
+        );
         let result = async {
+            ensure_thread_trace_root_span(thread_key);
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_create_or_get_started",
@@ -643,7 +649,13 @@ impl SessionRuntime {
             thread_key = %thread_key,
             message_count = messages.len(),
         );
+        set_span_parent_trace(
+            &span,
+            &thread_trace_id(thread_key),
+            &thread_trace_parent_span_id(thread_key),
+        );
         let result = async {
+            ensure_thread_trace_root_span(thread_key);
             if messages.is_empty() {
                 return Err(SessionRuntimeError::BadRequest(
                     "messages must not be empty".to_owned(),
@@ -764,6 +776,7 @@ impl SessionRuntime {
             &thread_trace_parent_span_id(thread_key),
         );
         let result = async {
+            ensure_thread_trace_root_span(thread_key);
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_execute_started",
@@ -2260,6 +2273,7 @@ async fn run_stdout_pump(
         &thread_trace_parent_span_id(&thread_key),
     );
     async {
+        ensure_thread_trace_root_span(&thread_key);
         let mut stdout = FramedRead::new(stdout, LinesCodec::new());
         info!(
             component = COMPONENT_SESSION_RUNTIME,
@@ -3849,6 +3863,17 @@ pub fn thread_trace_id(thread_key: &ThreadKey) -> String {
         format!("centaur:thread:{}", thread_key.as_str()).as_bytes(),
     )
     .to_string()
+}
+
+fn ensure_thread_trace_root_span(thread_key: &ThreadKey) {
+    let trace_id = thread_trace_id(thread_key);
+    let root_span_id = thread_trace_parent_span_id(thread_key);
+    let thread_key = thread_key.as_str().to_owned();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = export_thread_trace_root_span(&trace_id, &root_span_id, &thread_key).await;
+        });
+    }
 }
 
 pub fn thread_trace_parent_span_id(thread_key: &ThreadKey) -> String {
