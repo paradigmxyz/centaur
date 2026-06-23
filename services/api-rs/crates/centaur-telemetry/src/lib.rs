@@ -767,7 +767,7 @@ fn span_id_bytes(span_id: &str) -> Result<Vec<u8>, String> {
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("hex value must have even length".to_owned());
     }
     let bytes = hex.as_bytes();
