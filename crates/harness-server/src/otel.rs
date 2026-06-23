@@ -35,10 +35,13 @@ pub(crate) struct TraceContext {
 
 impl TraceContext {
     pub(crate) fn effective_trace_id(&self) -> Option<String> {
-        self.traceparent
-            .as_deref()
-            .and_then(trace_id_from_traceparent)
-            .or_else(|| self.trace_id.clone())
+        self.trace_id
+            .clone()
+            .or_else(|| {
+                self.traceparent
+                    .as_deref()
+                    .and_then(trace_id_from_traceparent)
+            })
             .or_else(|| clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref()))
     }
 
@@ -47,8 +50,13 @@ impl TraceContext {
             .as_deref()
             .and_then(|value| validate_traceparent(value).map(str::to_owned))
             .or_else(|| {
-                self.effective_trace_id()
-                    .and_then(|trace_id| traceparent_from_trace_id(&trace_id))
+                self.trace_id
+                    .as_deref()
+                    .and_then(traceparent_from_trace_id)
+                    .or_else(|| {
+                        clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref())
+                            .and_then(|trace_id| traceparent_from_trace_id(&trace_id))
+                    })
             })
     }
 }
@@ -1270,6 +1278,24 @@ trust_level = "trusted"
         assert!(config.contains("x-centaur-thread-key = \"slack:T:C:1.0\""));
         assert!(config.contains("authorization = \"Bearer secret\""));
         assert!(!config.contains("environment = \"old\""));
+    }
+
+    #[test]
+    fn explicit_trace_id_wins_for_otlp_grouping_but_traceparent_stays_current() {
+        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let execution_traceparent = "00-fedcba9876543210fedcba9876543210-0123456789abcdef-01";
+        let trace = TraceContext {
+            thread_key: Some("slack:T:C:1.0".to_string()),
+            trace_id: Some(thread_trace_id.to_string()),
+            traceparent: Some(execution_traceparent.to_string()),
+            metadata: BTreeMap::new(),
+        };
+
+        assert_eq!(trace.effective_trace_id().as_deref(), Some(thread_trace_id));
+        assert_eq!(
+            trace.effective_traceparent().as_deref(),
+            Some(execution_traceparent)
+        );
     }
 
     #[test]
