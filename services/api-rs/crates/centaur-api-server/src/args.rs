@@ -677,10 +677,11 @@ impl SandboxArgs {
         }))
     }
 
-    /// Background registration for git/volume-backed tool updates. The startup
-    /// registrar grants every principal the stable infra role; re-upserting that
-    /// role here adds newly discovered tool secrets to existing and future
-    /// principals without restarting api-rs or sandboxes.
+    /// Background registration for git/volume-backed tool updates. Startup
+    /// registration keeps the stable infra role current; re-upserting that role
+    /// here adds newly discovered tool secrets to principals that hold the role
+    /// without restarting api-rs or sandboxes. Session registration only seeds
+    /// this role onto brand-new principals, so operator revocations stay sticky.
     fn iron_control_tool_reconciler(
         &self,
     ) -> Result<Option<IronControlToolReconciler>, ServerError> {
