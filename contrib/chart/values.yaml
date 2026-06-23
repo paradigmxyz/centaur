@@ -295,6 +295,11 @@ apiRs:
   sandboxIdleStopTtlSecs: 10800 # 3 hours
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
+  # consecutive sweeps and restore idle-pauses lost across api-rs restarts.
+  # 0 disables the corresponding arm.
+  sandboxCleanupIntervalSecs: 300
+  sandboxIdleCleanupBackstopSecs: 21600 # 6 hours
   ironProxy:
     mode: enabled
   metrics:

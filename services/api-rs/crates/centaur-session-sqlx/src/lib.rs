@@ -37,6 +37,19 @@ pub struct ClaimExecutionResult {
     pub claimed: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdleSandboxCandidate {
+    pub thread_key: ThreadKey,
+    pub sandbox_id: String,
+    pub execution_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowOwnedSandbox {
+    pub thread_key: ThreadKey,
+    pub sandbox_id: String,
+}
+
 #[derive(Clone)]
 pub struct PgSessionStore {
     pool: PgPool,
@@ -509,6 +522,88 @@ impl PgSessionStore {
         Ok(exists)
     }
 
+    pub async fn list_referenced_sandbox_ids(&self) -> Result<Vec<String>, SessionStoreError> {
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"
+            select sandbox_id
+            from sessions
+            where sandbox_id is not null
+
+            union
+
+            select sandbox_id
+            from session_warm_sandboxes
+            where status in ('ready', 'claimed')
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn list_idle_sandbox_candidates(
+        &self,
+        idle_backstop: std::time::Duration,
+    ) -> Result<Vec<IdleSandboxCandidate>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, IdleSandboxCandidateRow>(
+            r#"
+            with latest as (
+                select distinct on (thread_key)
+                    execution_id,
+                    thread_key,
+                    status,
+                    completed_at
+                from session_executions
+                order by thread_key, created_at desc, execution_id desc
+            )
+            select
+                s.thread_key,
+                s.sandbox_id as sandbox_id,
+                latest.execution_id
+            from sessions s
+            join latest on latest.thread_key = s.thread_key
+            where s.sandbox_id is not null
+              and latest.status in ('completed', 'failed', 'cancelled')
+              and latest.completed_at is not null
+              and latest.completed_at <= now() - ($1::float8 * interval '1 second')
+              and not exists (
+                  select 1
+                  from session_executions active
+                  where active.thread_key = s.thread_key
+                    and active.status in ('queued', 'running')
+              )
+            order by latest.completed_at, s.thread_key
+            "#,
+        )
+        .bind(idle_backstop.as_secs_f64())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn list_workflow_owned_sandboxes(
+        &self,
+        workflow_run_id: &str,
+    ) -> Result<Vec<WorkflowOwnedSandbox>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, WorkflowOwnedSandboxRow>(
+            r#"
+            select thread_key, sandbox_id as sandbox_id
+            from sessions
+            where sandbox_id is not null
+              and metadata->>'workflow_owned_thread' = 'true'
+              and metadata->>'workflow_run_id' = $1
+            order by thread_key
+            "#,
+        )
+        .bind(workflow_run_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     pub async fn update_sandbox_id(
         &self,
         thread_key: &ThreadKey,
@@ -528,6 +623,26 @@ impl PgSessionStore {
         .await?;
 
         row.try_into()
+    }
+
+    pub async fn clear_sandbox_id_if_matches(
+        &self,
+        thread_key: &ThreadKey,
+        sandbox_id: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let result = sqlx::query(
+            r#"
+            update sessions
+            set sandbox_id = null, updated_at = now()
+            where thread_key = $1 and sandbox_id = $2
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(sandbox_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Move an existing session onto a different harness. Clears the sandbox
@@ -849,6 +964,42 @@ struct SessionExecutionRow {
     updated_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     completed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct IdleSandboxCandidateRow {
+    thread_key: String,
+    sandbox_id: String,
+    execution_id: String,
+}
+
+impl TryFrom<IdleSandboxCandidateRow> for IdleSandboxCandidate {
+    type Error = SessionStoreError;
+
+    fn try_from(row: IdleSandboxCandidateRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            thread_key: parse_persisted(row.thread_key)?,
+            sandbox_id: row.sandbox_id,
+            execution_id: row.execution_id,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct WorkflowOwnedSandboxRow {
+    thread_key: String,
+    sandbox_id: String,
+}
+
+impl TryFrom<WorkflowOwnedSandboxRow> for WorkflowOwnedSandbox {
+    type Error = SessionStoreError;
+
+    fn try_from(row: WorkflowOwnedSandboxRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            thread_key: parse_persisted(row.thread_key)?,
+            sandbox_id: row.sandbox_id,
+        })
+    }
 }
 
 impl TryFrom<SessionExecutionRow> for SessionExecution {

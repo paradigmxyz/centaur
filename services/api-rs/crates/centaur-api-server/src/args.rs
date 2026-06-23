@@ -27,7 +27,7 @@ use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode};
+use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode, SessionSandboxCleanupConfig};
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{error, info, warn};
@@ -89,6 +89,10 @@ impl Args {
 
     pub(crate) fn sandbox_reaper_config(&self) -> SandboxReaperConfig {
         self.sandbox.sandbox_reaper_config()
+    }
+
+    pub(crate) fn sandbox_cleanup_config(&self) -> SessionSandboxCleanupConfig {
+        self.sandbox.sandbox_cleanup_config()
     }
 
     pub(crate) async fn workflow_host_sandbox_runtime(
@@ -549,6 +553,18 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     sandbox_reap_interval_secs: u64,
+    #[arg(
+        long = "session-sandbox-cleanup-interval-secs",
+        env = "SESSION_SANDBOX_CLEANUP_INTERVAL_SECS",
+        default_value_t = 300
+    )]
+    sandbox_cleanup_interval_secs: u64,
+    #[arg(
+        long = "session-sandbox-idle-cleanup-backstop-secs",
+        env = "SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS",
+        default_value_t = 21_600
+    )]
+    sandbox_idle_cleanup_backstop_secs: u64,
     #[arg(
         long = "session-sandbox-k8s-context",
         alias = "kubernetes-context",
@@ -1210,6 +1226,14 @@ impl SandboxArgs {
             interval: Duration::from_secs(self.sandbox_reap_interval_secs),
             idle_ttl: ttl(self.sandbox_idle_stop_ttl_secs),
             max_lifetime: ttl(self.sandbox_max_lifetime_secs),
+        }
+    }
+
+    fn sandbox_cleanup_config(&self) -> SessionSandboxCleanupConfig {
+        let duration = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
+        SessionSandboxCleanupConfig {
+            interval: duration(self.sandbox_cleanup_interval_secs),
+            idle_backstop: duration(self.sandbox_idle_cleanup_backstop_secs),
         }
     }
 }

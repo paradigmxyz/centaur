@@ -1,3 +1,5 @@
+mod cleanup;
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
@@ -37,6 +39,8 @@ use tokio::{
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::{Instrument, Span, error, info, info_span, warn};
+
+pub use cleanup::SessionSandboxCleanupConfig;
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 pub const SESSION_FIRST_TOKEN_EVENT: &str = "session.first_token";
@@ -227,6 +231,13 @@ pub struct DrainFailure {
     pub error: String,
 }
 
+#[derive(Debug, Default)]
+pub struct WorkflowSandboxCleanupReport {
+    pub stopped: Vec<String>,
+    pub missing: Vec<String>,
+    pub failed: Vec<DrainFailure>,
+}
+
 #[derive(Debug)]
 pub struct ExecuteSessionInput {
     pub idempotency_key: Option<String>,
@@ -405,6 +416,17 @@ impl SessionRuntime {
             return self;
         }
         SandboxReaper::new(self.sandbox_runtime.manager.clone(), config).spawn();
+        self
+    }
+
+    /// Spawn the DB-aware cleanup worker that reaps backend sandboxes no durable
+    /// session/warm-pool row references and restores idle pauses lost across
+    /// control-plane restarts.
+    pub fn with_sandbox_cleanup(self, config: SessionSandboxCleanupConfig) -> Self {
+        if !config.is_enabled() {
+            return self;
+        }
+        cleanup::SessionSandboxCleanupWorker::new(self.context(), config).spawn();
         self
     }
 
@@ -703,6 +725,119 @@ impl SessionRuntime {
                 }
             }
         }
+        Ok(report)
+    }
+
+    pub async fn stop_workflow_owned_sandboxes(
+        &self,
+        workflow_run_id: &str,
+        reason: &str,
+    ) -> Result<WorkflowSandboxCleanupReport, SessionRuntimeError> {
+        let sandboxes = self
+            .store
+            .list_workflow_owned_sandboxes(workflow_run_id)
+            .await?;
+        let mut report = WorkflowSandboxCleanupReport::default();
+
+        for sandbox in sandboxes {
+            let sandbox_id = sandbox.sandbox_id;
+            let thread_key = sandbox.thread_key;
+            self.sandbox_pipes.remove(&sandbox_id);
+            let id = SandboxId::new(sandbox_id.clone());
+            let mut missing = false;
+            match self.sandbox_runtime.manager.stop(&id).await {
+                Ok(()) => report.stopped.push(sandbox_id.clone()),
+                Err(SandboxError::NotFound(_)) => {
+                    missing = true;
+                    report.missing.push(sandbox_id.clone());
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    warn!(
+                        thread_key = %thread_key,
+                        sandbox_id,
+                        workflow_run_id,
+                        reason,
+                        %error,
+                        "failed to stop workflow-owned sandbox"
+                    );
+                    report.failed.push(DrainFailure {
+                        sandbox_id: sandbox_id.clone(),
+                        error: error.clone(),
+                    });
+                    if let Err(event_error) = self
+                        .store
+                        .append_event(
+                            &thread_key,
+                            None,
+                            "session.workflow_sandbox_stop_failed",
+                            json!({
+                                "thread_key": thread_key.as_str(),
+                                "sandbox_id": sandbox_id,
+                                "workflow_run_id": workflow_run_id,
+                                "reason": reason,
+                                "error": error,
+                            }),
+                        )
+                        .await
+                    {
+                        warn!(
+                            thread_key = %thread_key,
+                            sandbox_id,
+                            workflow_run_id,
+                            %event_error,
+                            "failed to append workflow sandbox stop failure event"
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            if let Err(error) = self
+                .store
+                .mark_warm_sandbox_failed(&sandbox_id, "workflow-owned sandbox stopped")
+                .await
+            {
+                warn!(
+                    thread_key = %thread_key,
+                    sandbox_id,
+                    workflow_run_id,
+                    %error,
+                    "failed to mark workflow-owned warm sandbox failed"
+                );
+            }
+
+            let cleared = self
+                .store
+                .clear_sandbox_id_if_matches(&thread_key, &sandbox_id)
+                .await?;
+            if let Err(error) = self
+                .store
+                .append_event(
+                    &thread_key,
+                    None,
+                    "session.workflow_sandbox_stopped",
+                    json!({
+                        "thread_key": thread_key.as_str(),
+                        "sandbox_id": sandbox_id,
+                        "workflow_run_id": workflow_run_id,
+                        "reason": reason,
+                        "missing": missing,
+                        "cleared": cleared,
+                    }),
+                )
+                .await
+            {
+                warn!(
+                    thread_key = %thread_key,
+                    sandbox_id,
+                    workflow_run_id,
+                    %error,
+                    "failed to append workflow sandbox cleanup event"
+                );
+            }
+        }
+
         Ok(report)
     }
 
@@ -5181,7 +5316,10 @@ mod tests {
 /// silently otherwise, mirroring `ABSURD_TEST_DATABASE_URL` in absurd-sdk).
 #[cfg(test)]
 mod adoption_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     use centaur_sandbox_core::{ObservedSandbox, SandboxHandle, SandboxIo, SandboxResult};
     use tokio::io::{AsyncWriteExt, DuplexStream};
@@ -5198,6 +5336,10 @@ mod adoption_tests {
         recorded_output: Vec<String>,
         open_count: AtomicUsize,
         status: std::sync::Mutex<SandboxStatus>,
+        create_id: String,
+        resume_fails: AtomicBool,
+        stopped: std::sync::Mutex<Vec<String>>,
+        missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
     }
 
     impl MockBackend {
@@ -5207,6 +5349,10 @@ mod adoption_tests {
                 recorded_output,
                 open_count: AtomicUsize::new(0),
                 status: std::sync::Mutex::new(status),
+                create_id: "mock-sbx".to_owned(),
+                resume_fails: AtomicBool::new(false),
+                stopped: std::sync::Mutex::new(Vec::new()),
+                missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
             }
         }
 
@@ -5217,6 +5363,21 @@ mod adoption_tests {
         fn opens(&self) -> usize {
             self.open_count.load(Ordering::SeqCst)
         }
+
+        fn fail_resume(&self) {
+            self.resume_fails.store(true, Ordering::SeqCst);
+        }
+
+        fn mark_stop_missing(&self, sandbox_id: &str) {
+            self.missing_on_stop
+                .lock()
+                .unwrap()
+                .insert(sandbox_id.to_owned());
+        }
+
+        fn stopped(&self) -> Vec<String> {
+            self.stopped.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
@@ -5226,7 +5387,10 @@ mod adoption_tests {
         }
 
         async fn create(&self, _spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
-            Ok(SandboxHandle::new(SandboxId::new("mock-sbx"), "mock"))
+            Ok(SandboxHandle::new(
+                SandboxId::new(self.create_id.clone()),
+                "mock",
+            ))
         }
 
         async fn open_io(&self, _id: &SandboxId) -> SandboxResult<SandboxIo> {
@@ -5259,7 +5423,11 @@ mod adoption_tests {
             Ok(Vec::new())
         }
 
-        async fn stop(&self, _id: &SandboxId) -> SandboxResult<()> {
+        async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
+            if self.missing_on_stop.lock().unwrap().contains(id.as_str()) {
+                return Err(SandboxError::NotFound(id.as_str().to_owned()));
+            }
+            self.stopped.lock().unwrap().push(id.as_str().to_owned());
             Ok(())
         }
 
@@ -5268,6 +5436,9 @@ mod adoption_tests {
         }
 
         async fn resume(&self, _id: &SandboxId) -> SandboxResult<()> {
+            if self.resume_fails.load(Ordering::SeqCst) {
+                return Err(SandboxError::NotFound(_id.as_str().to_owned()));
+            }
             Ok(())
         }
     }
@@ -5356,6 +5527,218 @@ mod adoption_tests {
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_cleanup_stops_and_clears_owned_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let workflow_run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let thread_key =
+            ThreadKey::parse(format!("test:wf-cleanup-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "source": "absurd_workflow",
+                    "workflow_run_id": workflow_run_id,
+                    "workflow_owned_thread": true,
+                }),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-owned"))
+            .await
+            .expect("set sandbox id");
+        store
+            .insert_ready_warm_sandbox("sbx-owned", "test-workload")
+            .await
+            .expect("insert warm sandbox");
+        assert_eq!(
+            store
+                .claim_ready_warm_sandbox("test-workload", thread_key.as_str())
+                .await
+                .expect("claim warm sandbox"),
+            Some("sbx-owned".to_owned())
+        );
+        assert!(
+            store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&"sbx-owned".to_owned())
+        );
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        let report = runtime
+            .stop_workflow_owned_sandboxes(&workflow_run_id, "test")
+            .await
+            .expect("cleanup workflow sandboxes");
+
+        assert_eq!(report.stopped, vec!["sbx-owned".to_owned()]);
+        assert_eq!(backend.stopped(), vec!["sbx-owned".to_owned()]);
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            None
+        );
+        assert!(
+            !store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&"sbx-owned".to_owned())
+        );
+        let all = events(&store, &thread_key).await;
+        assert!(all.iter().any(|event| {
+            event.event_type == "session.workflow_sandbox_stopped"
+                && event.payload["workflow_run_id"] == json!(workflow_run_id)
+                && event.payload["cleared"] == json!(true)
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_cleanup_preserves_explicit_unowned_thread_key() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let workflow_run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let thread_key =
+            ThreadKey::parse(format!("test:wf-explicit-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "source": "absurd_workflow",
+                    "workflow_run_id": workflow_run_id,
+                }),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-explicit"))
+            .await
+            .expect("set sandbox id");
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        let report = runtime
+            .stop_workflow_owned_sandboxes(&workflow_run_id, "test")
+            .await
+            .expect("cleanup workflow sandboxes");
+
+        assert!(report.stopped.is_empty());
+        assert!(backend.stopped().is_empty());
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            Some("sbx-explicit".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_cleanup_clears_owned_sandbox_when_backend_reports_missing() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let workflow_run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let thread_key =
+            ThreadKey::parse(format!("test:wf-missing-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "source": "absurd_workflow",
+                    "workflow_run_id": workflow_run_id,
+                    "workflow_owned_thread": true,
+                }),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-missing"))
+            .await
+            .expect("set sandbox id");
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        backend.mark_stop_missing("sbx-missing");
+        let runtime = runtime_with(&store, backend);
+        let report = runtime
+            .stop_workflow_owned_sandboxes(&workflow_run_id, "test")
+            .await
+            .expect("cleanup workflow sandboxes");
+
+        assert_eq!(report.missing, vec!["sbx-missing".to_owned()]);
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resume_failure_replaces_sandbox_and_preserves_harness_thread_id() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:resume-failed-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-old"))
+            .await
+            .expect("set sandbox id");
+        store
+            .update_harness_thread_id(&thread_key, Some("harness-thread-1"))
+            .await
+            .expect("set harness thread id");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Suspended, Vec::new()));
+        backend.fail_resume();
+        let runtime = runtime_with(&store, backend);
+        let sandbox_id = runtime
+            .ensure_session_sandbox(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                Some("sbx-old"),
+                None,
+                &execution_id,
+            )
+            .await
+            .expect("resume failure should fall through to replacement");
+
+        assert_eq!(sandbox_id, "mock-sbx");
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.sandbox_id, Some("mock-sbx".to_owned()));
+        assert_eq!(
+            session.harness_thread_id,
+            Some("harness-thread-1".to_owned())
+        );
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .any(|event| event.event_type == "session.sandbox_resume_failed")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

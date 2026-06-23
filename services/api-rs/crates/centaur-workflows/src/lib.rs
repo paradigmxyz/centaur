@@ -2142,6 +2142,33 @@ async fn run_centaur_workflow(
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
 ) -> absurd::Result<WorkflowResult> {
+    let mut cleanup_guard =
+        WorkflowSandboxCleanupGuard::new(session_runtime.clone(), ctx.run_id().to_owned());
+    let result =
+        run_centaur_workflow_inner(input, ctx, session_runtime, workflow_host_sandbox).await;
+    if let Some(reason) = workflow_cleanup_reason(&result) {
+        cleanup_guard.cleanup(reason).await;
+    } else {
+        cleanup_guard.disarm();
+    }
+    result
+}
+
+fn workflow_cleanup_reason(result: &absurd::Result<WorkflowResult>) -> Option<&'static str> {
+    match result {
+        Ok(_) => Some("workflow_completed"),
+        Err(absurd::Error::Suspend) => None,
+        Err(absurd::Error::Cancelled) => Some("workflow_cancelled"),
+        Err(_) => Some("workflow_failed"),
+    }
+}
+
+async fn run_centaur_workflow_inner(
+    input: WorkflowTaskInput,
+    ctx: TaskContext,
+    session_runtime: SessionRuntime,
+    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+) -> absurd::Result<WorkflowResult> {
     let _heartbeat_guard = start_workflow_task_heartbeat(ctx.clone())
         .await
         .map_err(absurd_error)?;
@@ -2233,6 +2260,7 @@ async fn run_centaur_workflow(
                                 execution_idempotency_key: format!(
                                     "absurd-workflow-agent-turn:{client_message_id}"
                                 ),
+                                workflow_owned_thread: true,
                                 idle_timeout_ms,
                                 max_duration_ms,
                             },
@@ -2308,6 +2336,64 @@ async fn run_centaur_workflow(
                 output,
             })
         }
+    }
+}
+
+struct WorkflowSandboxCleanupGuard {
+    session_runtime: Option<SessionRuntime>,
+    workflow_run_id: String,
+}
+
+impl WorkflowSandboxCleanupGuard {
+    fn new(session_runtime: SessionRuntime, workflow_run_id: String) -> Self {
+        Self {
+            session_runtime: Some(session_runtime),
+            workflow_run_id,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.session_runtime = None;
+    }
+
+    async fn cleanup(&mut self, reason: &'static str) {
+        let Some(session_runtime) = self.session_runtime.as_ref().cloned() else {
+            return;
+        };
+        if let Err(error) = session_runtime
+            .stop_workflow_owned_sandboxes(&self.workflow_run_id, reason)
+            .await
+        {
+            warn!(
+                workflow_run_id = %self.workflow_run_id,
+                reason,
+                %error,
+                "failed to clean up workflow-owned sandboxes"
+            );
+            return;
+        }
+        self.session_runtime = None;
+    }
+}
+
+impl Drop for WorkflowSandboxCleanupGuard {
+    fn drop(&mut self) {
+        let Some(session_runtime) = self.session_runtime.take() else {
+            return;
+        };
+        let workflow_run_id = self.workflow_run_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = session_runtime
+                .stop_workflow_owned_sandboxes(&workflow_run_id, "workflow_cancelled_or_dropped")
+                .await
+            {
+                warn!(
+                    workflow_run_id,
+                    %error,
+                    "failed to clean up dropped workflow-owned sandboxes"
+                );
+            }
+        });
     }
 }
 
@@ -2813,17 +2899,18 @@ async fn run_python_agent_turn(
             "ctx.agent_turn requires text, prompt, content, or parts".to_owned(),
         ));
     }
-    let thread_key = args
+    let explicit_thread_key = args
         .get("thread_key")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            format!(
-                "wf:{}:agent:{}",
-                ctx.task_id().replace('-', ""),
-                input.workflow_name
-            )
-        });
+        .map(ToOwned::to_owned);
+    let workflow_owned_thread = explicit_thread_key.is_none();
+    let thread_key = explicit_thread_key.unwrap_or_else(|| {
+        format!(
+            "wf:{}:agent:{}",
+            ctx.task_id().replace('-', ""),
+            input.workflow_name
+        )
+    });
     let harness_type = parse_agent_harness(&args)?.unwrap_or_else(|| input.harness_type.clone());
     let persona_id = args
         .get("persona_id")
@@ -2885,6 +2972,7 @@ async fn run_python_agent_turn(
             message_metadata,
             execution_metadata,
             execution_idempotency_key,
+            workflow_owned_thread,
             idle_timeout_ms,
             max_duration_ms,
         },
@@ -3153,6 +3241,7 @@ struct AgentTurnRequest {
     message_metadata: Value,
     execution_metadata: Value,
     execution_idempotency_key: String,
+    workflow_owned_thread: bool,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
 }
@@ -3171,10 +3260,15 @@ async fn run_agent_session_turn(
         message_metadata,
         execution_metadata,
         execution_idempotency_key,
+        workflow_owned_thread,
         idle_timeout_ms,
         max_duration_ms,
     } = turn;
     let thread_key = ThreadKey::parse(thread_key)?;
+    let mut session_metadata = session_metadata;
+    if workflow_owned_thread {
+        object_insert(&mut session_metadata, "workflow_owned_thread", json!(true));
+    }
     session_runtime
         .create_or_get_session(
             &thread_key,
@@ -3654,6 +3748,33 @@ mod tests {
             .ensure_enabled("slack_sync")
             .unwrap_err();
         assert!(matches!(error, WorkflowRuntimeError::Disabled(_)));
+    }
+
+    #[test]
+    fn workflow_cleanup_reason_skips_suspended_runs() {
+        let completed: absurd::Result<WorkflowResult> = Ok(WorkflowResult {
+            workflow_name: "test".to_owned(),
+            run_id: "run-1".to_owned(),
+            task_id: "task-1".to_owned(),
+            steps: Vec::new(),
+            output: json!({}),
+        });
+        assert_eq!(
+            workflow_cleanup_reason(&completed),
+            Some("workflow_completed")
+        );
+
+        let suspended: absurd::Result<WorkflowResult> = Err(absurd::Error::Suspend);
+        assert_eq!(workflow_cleanup_reason(&suspended), None);
+
+        let cancelled: absurd::Result<WorkflowResult> = Err(absurd::Error::Cancelled);
+        assert_eq!(
+            workflow_cleanup_reason(&cancelled),
+            Some("workflow_cancelled")
+        );
+
+        let failed: absurd::Result<WorkflowResult> = Err(absurd::Error::Timeout("boom".to_owned()));
+        assert_eq!(workflow_cleanup_reason(&failed), Some("workflow_failed"));
     }
 
     #[test]
