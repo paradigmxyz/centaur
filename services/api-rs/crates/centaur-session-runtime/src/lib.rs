@@ -2254,6 +2254,11 @@ async fn run_stdout_pump(
         thread_key = %thread_key,
         sandbox_id,
     );
+    set_span_parent_trace(
+        &span,
+        &thread_trace_id(&thread_key),
+        &thread_trace_parent_span_id(&thread_key),
+    );
     async {
         let mut stdout = FramedRead::new(stdout, LinesCodec::new());
         info!(
