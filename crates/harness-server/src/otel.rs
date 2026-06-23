@@ -13,7 +13,7 @@ use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, Key
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, span};
 use prost::Message as _;
-use serde_json::Value;
+use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
@@ -106,6 +106,8 @@ pub(crate) struct HarnessUsageSpan<'a> {
     pub(crate) model: &'a str,
     pub(crate) model_provider: &'a str,
     pub(crate) turn_id: &'a str,
+    pub(crate) input: Option<&'a str>,
+    pub(crate) output: Option<&'a str>,
     pub(crate) start_unix_nano: u64,
     pub(crate) end_unix_nano: u64,
 }
@@ -601,9 +603,11 @@ fn harness_usage_trace_request(
     });
 
     set_attribute_string(&mut attributes, "gen_ai.operation.name", "chat");
+    set_attribute_string(&mut attributes, "lmnr.span.type", "LLM");
     set_attribute_string(&mut attributes, "gen_ai.system", system);
     set_attribute_string(&mut attributes, "gen_ai.request.model", model);
     set_attribute_string(&mut attributes, "gen_ai.response.model", model);
+    set_harness_span_io_attributes(&mut attributes, span_context.input, span_context.output);
     set_attribute_int(
         &mut attributes,
         "gen_ai.usage.input_tokens",
@@ -631,11 +635,7 @@ fn harness_usage_trace_request(
     );
     set_attribute_int(&mut attributes, "gen_ai.usage.total_tokens", total_tokens);
     if let Some(cost) = estimate_usage_cost(span_context.harness, system, model, usage) {
-        set_attribute_double(
-            &mut attributes,
-            "gen_ai.usage.input_cost",
-            cost.input_cost,
-        );
+        set_attribute_double(&mut attributes, "gen_ai.usage.input_cost", cost.input_cost);
         set_attribute_double(
             &mut attributes,
             "gen_ai.usage.output_cost",
@@ -707,6 +707,54 @@ fn harness_usage_trace_request(
             ..Default::default()
         }],
     })
+}
+
+fn set_harness_span_io_attributes(
+    attributes: &mut Vec<KeyValue>,
+    input: Option<&str>,
+    output: Option<&str>,
+) {
+    if let Some(input) = clean_optional(input) {
+        set_attribute_string(attributes, "input.value", &input);
+        set_attribute_string(
+            attributes,
+            "lmnr.span.input",
+            &legacy_chat_message_json("user", &input),
+        );
+        set_attribute_string(
+            attributes,
+            "gen_ai.input.messages",
+            &gen_ai_message_json("user", &input),
+        );
+    }
+    if let Some(output) = clean_optional(output) {
+        set_attribute_string(attributes, "output.value", &output);
+        set_attribute_string(
+            attributes,
+            "lmnr.span.output",
+            &legacy_chat_message_json("assistant", &output),
+        );
+        set_attribute_string(
+            attributes,
+            "gen_ai.output.messages",
+            &gen_ai_message_json("assistant", &output),
+        );
+    }
+}
+
+fn legacy_chat_message_json(role: &str, content: &str) -> String {
+    serde_json::to_string(&json!([{ "role": role, "content": content }]))
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
+fn gen_ai_message_json(role: &str, content: &str) -> String {
+    serde_json::to_string(&json!([
+        {
+            "role": role,
+            "parts": [{ "type": "text", "content": content }]
+        }
+    ]))
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 fn apply_laminar_trace_metadata_to_attributes(
@@ -812,10 +860,7 @@ fn estimate_usage_cost(
     };
 
     let input_cost = mtok_cost(non_cached_input_tokens, pricing.input_per_mtok)
-        + mtok_cost(
-            cache_creation_tokens,
-            pricing.cache_creation_per_mtok,
-        )
+        + mtok_cost(cache_creation_tokens, pricing.cache_creation_per_mtok)
         + mtok_cost(cache_read_tokens, pricing.cache_read_per_mtok);
     let output_cost = mtok_cost(output_tokens, pricing.output_per_mtok);
 
@@ -837,10 +882,7 @@ fn pricing_for_usage(harness: HarnessKind, system: &str, model: &str) -> Option<
 }
 
 fn normalize_model_name(model: &str) -> String {
-    model
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['_', '.'], "-")
+    model.trim().to_ascii_lowercase().replace(['_', '.'], "-")
 }
 
 fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
@@ -875,10 +917,7 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:anthropic:opus-4-deprecated:5m-cache-write",
         });
     }
-    if model.contains("sonnet-4-6")
-        || model.contains("sonnet-4-5")
-        || model.contains("sonnet-4")
-    {
+    if model.contains("sonnet-4-6") || model.contains("sonnet-4-5") || model.contains("sonnet-4") {
         return Some(TokenPricing {
             input_per_mtok: 3.0,
             cache_creation_per_mtok: 3.75,
@@ -922,7 +961,11 @@ fn openai_pricing(model: &str) -> Option<TokenPricing> {
 }
 
 fn amp_pricing(_harness: HarnessKind, model: &str) -> Option<TokenPricing> {
-    if model == "deep" || model.starts_with("deep-") || model == "rush" || model.starts_with("rush-") {
+    if model == "deep"
+        || model.starts_with("deep-")
+        || model == "rush"
+        || model.starts_with("rush-")
+    {
         return Some(TokenPricing {
             input_per_mtok: 5.0,
             cache_creation_per_mtok: 5.0,
@@ -1304,6 +1347,8 @@ trust_level = "trusted"
                 model: "fallback-model",
                 model_provider: "anthropic",
                 turn_id: "turn-1",
+                input: Some("say hi"),
+                output: Some("hi there"),
                 start_unix_nano: 100,
                 end_unix_nano: 200,
             },
@@ -1322,6 +1367,34 @@ trust_level = "trusted"
         assert_eq!(
             attribute_string(&span.attributes, "gen_ai.response.model"),
             "claude-fable-5"
+        );
+        assert_eq!(attribute_string(&span.attributes, "lmnr.span.type"), "LLM");
+        assert_eq!(attribute_string(&span.attributes, "input.value"), "say hi");
+        assert_eq!(
+            serde_json::from_str::<Value>(&attribute_string(
+                &span.attributes,
+                "gen_ai.input.messages"
+            ))
+            .expect("input messages JSON"),
+            json!([{
+                "role": "user",
+                "parts": [{ "type": "text", "content": "say hi" }]
+            }])
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "output.value"),
+            "hi there"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&attribute_string(
+                &span.attributes,
+                "gen_ai.output.messages"
+            ))
+            .expect("output messages JSON"),
+            json!([{
+                "role": "assistant",
+                "parts": [{ "type": "text", "content": "hi there" }]
+            }])
         );
         assert_eq!(
             attribute_int(&span.attributes, "gen_ai.usage.input_tokens"),
@@ -1398,6 +1471,8 @@ trust_level = "trusted"
                 model: "deep",
                 model_provider: "amp",
                 turn_id: "turn-1",
+                input: None,
+                output: None,
                 start_unix_nano: 100,
                 end_unix_nano: 200,
             },
@@ -1407,10 +1482,7 @@ trust_level = "trusted"
         let span = &request.resource_spans[0].scope_spans[0].spans[0];
 
         assert_eq!(span.name, "amp.session_task.turn");
-        assert_eq!(
-            attribute_string(&span.attributes, "gen_ai.system"),
-            "amp"
-        );
+        assert_eq!(attribute_string(&span.attributes, "gen_ai.system"), "amp");
         assert_eq!(
             attribute_double(&span.attributes, "gen_ai.usage.input_cost"),
             Some(0.198141)
