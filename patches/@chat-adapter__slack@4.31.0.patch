@@ -572,7 +572,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +          continue;
 +        }
 +        try {
-+          await stopSegment(segment, void 0, false, false);
++          await stopSegment(segment, void 0, false, true);
 +        } catch (stopError) {
 +          if (segment.length > 0) {
 +            throw stopError;

@@ -9,7 +9,7 @@ patchedDependencies:
     hash: 8f4fbb770159f924570fbad681297fcb9f8f7a6353a705cfcb78e39ef9e3a3ab
     path: patches/@chat-adapter__discord@4.31.0.patch
   '@chat-adapter/slack@4.31.0':
-    hash: c6d5fad9bae6bed345249a5b0af50e549afc4a5f9c4edcbe99c51d166b0185c1
+    hash: 7da250cea3e8a84e3fc21314f7be2059496de2add5724287495c3a1b5b1ef21b
     path: patches/@chat-adapter__slack@4.31.0.patch
   '@chat-adapter/state-pg@4.31.0':
     hash: 69262b03c278ca9d4af0bed7b4e05f9d7a5a36d3d79fad31df2a85da4d349274
@@ -128,7 +128,7 @@ importers:
         version: link:../../packages/rendering
       '@chat-adapter/slack':
         specifier: ^4.31.0
-        version: 4.31.0(patch_hash=c6d5fad9bae6bed345249a5b0af50e549afc4a5f9c4edcbe99c51d166b0185c1)(zod@4.4.3)
+        version: 4.31.0(patch_hash=7da250cea3e8a84e3fc21314f7be2059496de2add5724287495c3a1b5b1ef21b)(zod@4.4.3)
       '@chat-adapter/state-pg':
         specifier: ^4.31.0
         version: 4.31.0(patch_hash=69262b03c278ca9d4af0bed7b4e05f9d7a5a36d3d79fad31df2a85da4d349274)(zod@4.4.3)
@@ -1279,7 +1279,7 @@ snapshots:
       - supports-color
       - zod
 
-  '@chat-adapter/slack@4.31.0(patch_hash=c6d5fad9bae6bed345249a5b0af50e549afc4a5f9c4edcbe99c51d166b0185c1)(zod@4.4.3)':
+  '@chat-adapter/slack@4.31.0(patch_hash=7da250cea3e8a84e3fc21314f7be2059496de2add5724287495c3a1b5b1ef21b)(zod@4.4.3)':
     dependencies:
       '@chat-adapter/shared': 4.31.0(zod@4.4.3)
       '@slack/socket-mode': 2.0.7

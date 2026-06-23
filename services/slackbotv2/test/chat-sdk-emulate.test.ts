@@ -1736,6 +1736,101 @@ describe('slackbotv2', () => {
     }
   })
 
+  it('seals open tasks before stopping older structured progress segments', async () => {
+    process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET = '520'
+    try {
+      codexApi.autoRespond = false
+
+      const parent = await postUserMessage('Context before an open card spillover.')
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> keep one step open`, parent.ts)
+      const key = threadKey(parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-open-task-structured-spillover',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> keep one step open`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1)
+      await waitFor(() => codexApi.eventRequests.length === 1)
+      await waitFor(() => codexApi.streamCount === 1)
+
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.started',
+          item: {
+            id: 'cmd-open-spillover',
+            type: 'commandExecution',
+            command: `sleep 1 # ${'x'.repeat(220)}`,
+            status: 'inProgress'
+          }
+        })
+      )
+      await waitFor(() =>
+        slackApi.calls.some(call =>
+          streamChunks(call.body.chunks).some(
+            chunk => chunk.id === 'cmd-open-spillover' && chunk.status === 'in_progress'
+          )
+        )
+      )
+
+      for (let index = 1; index <= 4; index += 1) {
+        codexApi.emitOutputLine(
+          key,
+          JSON.stringify({
+            type: 'item.completed',
+            item: {
+              id: `cmd-spillover-${index}`,
+              type: 'commandExecution',
+              command: `printf spillover-${index} ${'x'.repeat(220)}`,
+              status: 'completed',
+              aggregatedOutput: ''
+            }
+          })
+        )
+      }
+      codexApi.emitSessionEvent(key, 'session.execution_completed', {
+        execution_id: 'exe-open-task-structured-spillover',
+        status: 'completed',
+        result_text: 'OPEN_TASK_STRUCTURED_SPILLOVER_OK'
+      })
+
+      await Promise.all(waits)
+      const transcripts = slackStreamTranscripts(slackApi.calls)
+      expect(transcripts.length).toBeGreaterThanOrEqual(2)
+      const taskTranscripts = transcripts.filter(transcript =>
+        transcript.chunks.some(
+          chunk => chunk.type === 'task_update' && chunk.id === 'cmd-open-spillover'
+        )
+      )
+      expect(taskTranscripts.length).toBeGreaterThan(0)
+      for (const transcript of taskTranscripts) {
+        const statuses = transcript.chunks
+          .filter(chunk => chunk.type === 'task_update' && chunk.id === 'cmd-open-spillover')
+          .map(chunk => stringField(chunk.status))
+        expect(statuses).toContain('in_progress')
+        expect(statuses[statuses.length - 1]).toBe('complete')
+      }
+      expect(await threadText(parent.ts)).toContain('OPEN_TASK_STRUCTURED_SPILLOVER_OK')
+    } finally {
+      delete process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET
+    }
+  })
+
   it('keeps card-heavy structured streams below Slack finalization payload limits', async () => {
     slackApi.failStreamStopsLongerThan(12_000)
     codexApi.autoRespond = false
