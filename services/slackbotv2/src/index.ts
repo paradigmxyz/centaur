@@ -22,6 +22,7 @@ import {
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
 import { observeSeconds, slackbotMetrics } from './metrics'
+import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import {
   collectInitialContext,
   forwardToSessionApi,
@@ -540,7 +541,7 @@ async function syncThreadMessageToSession(
   const serializeStartedAtMs = nowMs()
   const serializedMessage = await serializeMessage(message)
   const overrides = extractMessageOverrides(serializedMessage.text)
-  serializedMessage.text = overrides.cleanedText
+  setMessageText(serializedMessage, overrides.cleanedText)
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
     traceLog(input.options, 'slackbotv2_forward_overrides_parsed', trace, {
       harness_type: overrides.harnessType,
@@ -551,6 +552,10 @@ async function syncThreadMessageToSession(
   }
   traceLog(input.options, 'slackbotv2_forward_message_serialized', trace, {
     attachment_count: serializedMessage.attachments.length,
+    raw_slack_attachment_count: serializedMessage.rawSlackAttachmentCount,
+    raw_slack_block_count: serializedMessage.rawSlackBlockCount,
+    slack_display_text_chars: slackMessagePromptText(serializedMessage).length,
+    slack_text_source: serializedMessage.displayTextSource,
     phase_ms: elapsedMs(serializeStartedAtMs)
   })
   let context: SlackbotV2ApiMessage[] | undefined
@@ -563,7 +568,7 @@ async function syncThreadMessageToSession(
     // collectInitialContext re-serializes the current message; mirror the
     // flag-stripped text on that copy too.
     for (const item of context) {
-      if (item.id === serializedMessage.id) item.text = serializedMessage.text
+      if (item.id === serializedMessage.id) copyMessageTextFields(item, serializedMessage)
     }
     traceLog(input.options, 'slackbotv2_forward_context_collected', trace, {
       message_count: context.length,
@@ -813,6 +818,23 @@ function scheduleExecutionRender(
     }
   })()
   backgroundWaitUntil(promise)
+}
+
+function setMessageText(message: SlackbotV2ApiMessage, text: string): void {
+  const displayText = renderSlackDisplayText({ raw: message.raw, text })
+  message.text = text
+  message.displayText = displayText.text
+  message.displayTextSource = displayText.source
+  message.rawSlackAttachmentCount = displayText.rawAttachmentCount
+  message.rawSlackBlockCount = displayText.rawBlockCount
+}
+
+function copyMessageTextFields(target: SlackbotV2ApiMessage, source: SlackbotV2ApiMessage): void {
+  target.text = source.text
+  target.displayText = source.displayText
+  target.displayTextSource = source.displayTextSource
+  target.rawSlackAttachmentCount = source.rawSlackAttachmentCount
+  target.rawSlackBlockCount = source.rawSlackBlockCount
 }
 
 async function renderExecutionAttempt(
@@ -1649,7 +1671,8 @@ async function renderExecutionStream(
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false
 ): Promise<{ diverged: boolean; messageId?: string }> {
-  if (isPlainTextOnlyRequest(message.text)) {
+  const promptText = slackMessagePromptText(message)
+  if (isPlainTextOnlyRequest(promptText)) {
     await renderPlainTextExecutionStream(
       thread,
       stream,
@@ -1661,7 +1684,7 @@ async function renderExecutionStream(
     return { diverged: false }
   }
   const titleStartedAtMs = nowMs()
-  await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
+  await setAssistantTitle(thread, titleFromMessage(promptText, options.userName))
   if (!assistantStatusVisible) {
     await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
   }
@@ -1705,12 +1728,13 @@ async function renderRecoveredExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace
 ): Promise<{ diverged: boolean; messageId?: string }> {
-  if (isPlainTextOnlyRequest(message.text)) {
+  const promptText = slackMessagePromptText(message)
+  if (isPlainTextOnlyRequest(promptText)) {
     await renderPlainTextExecutionStream(thread, stream, message, options, trace)
     return { diverged: false }
   }
   const titleStartedAtMs = nowMs()
-  await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
+  await setAssistantTitle(thread, titleFromMessage(promptText, options.userName))
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
   traceLog(options, 'slackbotv2_render_slack_metadata_set', trace, {
     phase_ms: elapsedMs(titleStartedAtMs)
@@ -1753,7 +1777,7 @@ async function renderPlainTextExecutionStream(
 ): Promise<void> {
   const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
-  await setAssistantTitle(thread, titleFromMessage(message.text, options.userName))
+  await setAssistantTitle(thread, titleFromMessage(slackMessagePromptText(message), options.userName))
   if (!assistantStatusVisible) {
     await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
   }
@@ -2040,6 +2064,8 @@ async function slackApiMessageFromSlack(
   const id = stringField(message.ts) || randomUUID()
   const actorId = slackActorId(message)
   const isBot = Boolean(message.bot_id || message.bot_profile)
+  const text = normalizeSlackText(stringField(message.text))
+  const displayText = renderSlackDisplayText({ raw: message, text })
   return {
     attachments: await slackApiAttachmentsFromFiles(options, message, rawCurrent),
     author: {
@@ -2049,15 +2075,19 @@ async function slackApiMessageFromSlack(
       userId: actorId,
       userName: actorId
     },
+    displayText: displayText.text,
+    displayTextSource: displayText.source,
     id,
     isMention: id === currentMessage.id ? currentMessage.isMention === true : false,
     raw: message,
+    rawSlackAttachmentCount: displayText.rawAttachmentCount,
+    rawSlackBlockCount: displayText.rawBlockCount,
     teamId:
       stringField(message.team)
       || stringField(message.team_id)
       || stringField(rawCurrent.team)
       || stringField(rawCurrent.team_id),
-    text: normalizeSlackText(stringField(message.text)),
+    text,
     threadId: currentMessage.threadId,
     timestamp: slackTimestampToIso(id)
   }

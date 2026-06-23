@@ -1,5 +1,6 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { Attachment, Message } from 'chat'
+import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -127,6 +128,7 @@ export async function serializeMessage(message: Message): Promise<SlackbotV2ApiM
   for (const attachment of message.attachments) {
     attachments.push(await serializeAttachment(attachment))
   }
+  const displayText = renderSlackDisplayText({ raw: message.raw, text: message.text })
 
   return {
     attachments,
@@ -137,9 +139,13 @@ export async function serializeMessage(message: Message): Promise<SlackbotV2ApiM
       userId: message.author.userId,
       userName: message.author.userName
     },
+    displayText: displayText.text,
+    displayTextSource: displayText.source,
     id: message.id,
     isMention: message.isMention === true,
     raw: message.raw,
+    rawSlackAttachmentCount: displayText.rawAttachmentCount,
+    rawSlackBlockCount: displayText.rawBlockCount,
     teamId: slackTeamId(message.raw) as string,
     text: message.text,
     threadId: message.threadId,
@@ -264,7 +270,7 @@ export function harnessRestartPreamble(
   const lines: string[] = []
   for (const item of history) {
     if (item.id === currentMessageId) continue
-    const text = item.text.trim()
+    const text = slackMessagePromptText(item).trim()
     if (!text) continue
     const author = item.author.isMe
       ? 'assistant'
@@ -943,8 +949,9 @@ function sessionMessageParts(
   if (requesterContext) {
     parts.push({ type: 'text', text: requesterContext })
   }
-  if (message.text.trim()) {
-    parts.push({ type: 'text', text: message.text })
+  const promptText = slackMessagePromptText(message)
+  if (promptText.trim()) {
+    parts.push({ type: 'text', text: promptText })
   }
   for (const attachment of message.attachments) {
     parts.push(sessionAttachmentPart(attachment))
@@ -978,9 +985,24 @@ function sessionMetadata(
     timestamp: message.timestamp,
     user_id: message.author.userId,
     user_name: message.author.userName,
+    ...sessionSlackTextMetadata(message),
     ...sessionRequesterMetadata(message, requesterIdentity),
     ...extra
   }
+}
+
+function sessionSlackTextMetadata(message: SlackbotV2ApiMessage): JsonObject {
+  const fields: JsonObject = {}
+  if (message.displayTextSource) fields.slack_text_source = message.displayTextSource
+  const displayText = slackMessagePromptText(message)
+  if (message.displayTextSource) fields.slack_display_text_chars = displayText.length
+  if (typeof message.rawSlackBlockCount === 'number') {
+    fields.slack_raw_block_count = message.rawSlackBlockCount
+  }
+  if (typeof message.rawSlackAttachmentCount === 'number') {
+    fields.slack_raw_attachment_count = message.rawSlackAttachmentCount
+  }
+  return fields
 }
 
 function toCodexInputLines(
@@ -1179,8 +1201,9 @@ function codexInputContent(
       codexAttachmentInput(contextAttachment.attachment, staged.get(contextAttachment.attachment))
     )
   }
-  if (message.text.trim()) {
-    content.push({ type: 'text', text: message.text })
+  const promptText = slackMessagePromptText(message)
+  if (promptText.trim()) {
+    content.push({ type: 'text', text: promptText })
   }
   for (const attachment of message.attachments) {
     content.push(codexAttachmentInput(attachment, staged.get(attachment)))
@@ -1236,7 +1259,7 @@ function slackContextAuthor(message: SlackbotV2ApiMessage): string {
 }
 
 function slackContextMessageText(message: SlackbotV2ApiMessage): string {
-  const fields = [message.text.trim()]
+  const fields = [slackMessagePromptText(message).trim()]
   for (const attachment of message.attachments) {
     fields.push(attachmentDescription(attachment))
   }
