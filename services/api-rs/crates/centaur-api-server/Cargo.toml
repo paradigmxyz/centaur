@@ -7,6 +7,9 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+aws-smithy-types.workspace = true
 base64.workspace = true
 centaur-iron-control.workspace = true
 centaur-iron-proxy.workspace = true
@@ -34,11 +37,13 @@ sha2.workspace = true
 subtle.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 toml.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 urlencoding.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

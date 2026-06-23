@@ -129,6 +129,7 @@ mod tests {
                 SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
             ),
             None,
+            None,
         );
         let app = build_router_with_app_state(state);
 

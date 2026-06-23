@@ -14,6 +14,8 @@ import sys
 import tempfile
 import tomllib
 
+TOOLS_METADATA_NAME = ".centaur-tools-source.json"
+
 
 def _split_paths(value: str) -> list[Path]:
     return [Path(part) for part in value.split(":") if part]
@@ -56,33 +58,73 @@ def _git_env() -> tuple[dict[str, str], tempfile.TemporaryDirectory[str] | None]
     return env, temp_dir
 
 
+def _sorted_children(path: Path) -> list[Path]:
+    return sorted(path.iterdir(), key=lambda child: child.name)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
 def _clear_published_tools(tool_dir: Path) -> None:
-    for child in tool_dir.iterdir():
-        if child.name in {".centaur-source", ".centaur-tools-source.json"} or child.name.startswith(
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    for child in _sorted_children(tool_dir):
+        if child.name in {".centaur-source", TOOLS_METADATA_NAME} or child.name.startswith(
             ".centaur-source-"
         ):
             continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+        _remove_path(child)
 
 
 def _copy_published_tools(tool_dir: Path, published: Path) -> None:
     if not published.is_dir():
         raise RuntimeError(f"refreshed tools subdir does not exist: {published}")
 
-    for child in published.iterdir():
-        target = tool_dir / child.name
+    existing = {package_dir.name: package_dir for package_dir in _tool_package_dirs(tool_dir)}
+    for package_dir in _tool_package_dirs(published):
+        tool_name = package_dir.name
+        if tool_name in existing:
+            print(
+                f"skipping duplicate tool {tool_name}: {package_dir} conflicts with {existing[tool_name]}",
+                file=sys.stderr,
+            )
+            continue
+        relative_package_dir = package_dir.relative_to(published)
+        target = tool_dir / relative_package_dir
         if target.exists() or target.is_symlink():
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-        if child.is_dir() and not child.is_symlink():
-            shutil.copytree(child, target, symlinks=True)
-        else:
-            shutil.copy2(child, target, follow_symlinks=False)
+            _remove_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(package_dir, target, symlinks=True)
+        existing[tool_name] = target
+
+
+def _tool_package_dirs(published: Path) -> list[Path]:
+    if not published.is_dir():
+        return []
+
+    package_dirs: list[Path] = []
+    for child in _visible_dirs(published):
+        if (child / "pyproject.toml").is_file():
+            package_dirs.append(child)
+            continue
+        for grandchild in _visible_dirs(child):
+            if (grandchild / "pyproject.toml").is_file():
+                package_dirs.append(grandchild)
+    return package_dirs
+
+
+def _visible_dirs(path: Path) -> list[Path]:
+    return [
+        child
+        for child in _sorted_children(path)
+        if child.is_dir()
+        and not child.is_symlink()
+        and not child.name.startswith(".")
+        and not child.name.startswith("_")
+    ]
 
 
 def _publish_tools(tool_dir: Path, published: Path) -> None:
@@ -90,20 +132,25 @@ def _publish_tools(tool_dir: Path, published: Path) -> None:
     _copy_published_tools(tool_dir, published)
 
 
-def _refresh_source(tool_dir: Path, source_metadata: dict[str, object]) -> None:
-    subdir = str(source_metadata.get("source_subdir") or "tools")
-    if source_metadata.get("source") == "repo_cache":
-        repo_cache_repo_path = source_metadata.get("repo_cache_repo_path")
-        if not repo_cache_repo_path:
-            raise RuntimeError("repo-cache tools metadata is missing repo_cache_repo_path")
-        _copy_published_tools(tool_dir, Path(str(repo_cache_repo_path)) / subdir)
+def _source_checkout_path(tool_dir: Path, source_metadata: dict[str, object]) -> Path:
+    raw_source_path = source_metadata.get("source_path")
+    if not raw_source_path:
+        return tool_dir / ".centaur-source"
+
+    source_path = Path(str(raw_source_path))
+    if not source_path.is_absolute():
+        return tool_dir / source_path
+    return source_path
+
+
+def _copy_refreshed_source(tool_dir: Path, published: Path, label: str) -> None:
+    if not published.is_dir():
+        print(f"skipping tools source {label}: no tools tree at {published}", file=sys.stderr)
         return
+    _copy_published_tools(tool_dir, published)
 
-    source_path = Path(str(source_metadata.get("source_path") or tool_dir / ".centaur-source"))
-    if not source_path.is_dir():
-        raise RuntimeError(f"git tools source does not exist: {source_path}")
 
-    git_ref = source_metadata.get("git_ref")
+def _refresh_checkout(source_path: Path, git_ref: object | None) -> None:
     env, temp_dir = _git_env()
     try:
         if git_ref:
@@ -127,12 +174,34 @@ def _refresh_source(tool_dir: Path, source_metadata: dict[str, object]) -> None:
         if temp_dir is not None:
             temp_dir.cleanup()
 
-    _copy_published_tools(tool_dir, source_path / subdir)
+
+def _refresh_source(tool_dir: Path, source_metadata: dict[str, object]) -> None:
+    subdir = str(source_metadata.get("source_subdir") or "tools")
+    if source_metadata.get("source") == "repo_cache":
+        repo_cache_repo_path = source_metadata.get("repo_cache_repo_path")
+        if not repo_cache_repo_path:
+            raise RuntimeError("repo-cache tools metadata is missing repo_cache_repo_path")
+        _copy_refreshed_source(
+            tool_dir,
+            Path(str(repo_cache_repo_path)) / subdir,
+            f"{source_metadata.get('repo') or repo_cache_repo_path}:{subdir}",
+        )
+        return
+
+    source_path = _source_checkout_path(tool_dir, source_metadata)
+    if not source_path.is_dir():
+        raise RuntimeError(f"git tools source does not exist: {source_path}")
+
+    _refresh_checkout(source_path, source_metadata.get("git_ref"))
+    _copy_refreshed_source(
+        tool_dir,
+        source_path / subdir,
+        f"{source_metadata.get('repo') or source_path}:{subdir}",
+    )
 
 
 def _refresh_tool_dir(tool_dir: Path) -> bool:
-    source = tool_dir / ".centaur-source"
-    metadata_path = tool_dir / ".centaur-tools-source.json"
+    metadata_path = tool_dir / TOOLS_METADATA_NAME
     if not metadata_path.is_file():
         return False
 
@@ -142,7 +211,9 @@ def _refresh_tool_dir(tool_dir: Path) -> bool:
         _clear_published_tools(tool_dir)
         for source_metadata in sources:
             if not isinstance(source_metadata, dict):
-                raise RuntimeError(f"invalid tools source metadata in {metadata_path}: {source_metadata!r}")
+                raise RuntimeError(
+                    f"invalid tools source metadata in {metadata_path}: {source_metadata!r}"
+                )
             _refresh_source(tool_dir, source_metadata)
         return True
 
@@ -150,37 +221,17 @@ def _refresh_tool_dir(tool_dir: Path) -> bool:
     if metadata.get("source") == "repo_cache":
         repo_cache_repo_path = metadata.get("repo_cache_repo_path")
         if not repo_cache_repo_path:
-            raise RuntimeError(f"repo-cache tools metadata is missing repo_cache_repo_path: {metadata_path}")
+            raise RuntimeError(
+                f"repo-cache tools metadata is missing repo_cache_repo_path: {metadata_path}"
+            )
         _publish_tools(tool_dir, Path(repo_cache_repo_path) / subdir)
         return True
 
+    source = _source_checkout_path(tool_dir, metadata)
     if not source.is_dir():
         return False
 
-    git_ref = metadata.get("git_ref")
-    env, temp_dir = _git_env()
-    try:
-        if git_ref:
-            subprocess.run(
-                ["git", "-C", str(source), "-c", "gc.auto=0", "fetch", "--quiet", "origin", str(git_ref)],
-                check=True,
-                env=env,
-            )
-            subprocess.run(
-                ["git", "-C", str(source), "checkout", "--quiet", "--detach", "FETCH_HEAD"],
-                check=True,
-                env=env,
-            )
-        else:
-            subprocess.run(
-                ["git", "-C", str(source), "pull", "--ff-only", "--quiet"],
-                check=True,
-                env=env,
-            )
-    finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
-
+    _refresh_checkout(source, metadata.get("git_ref"))
     _publish_tools(tool_dir, source / subdir)
     return True
 
@@ -490,17 +541,33 @@ if __name__ == "__main__":
     _write_executable(path, content)
 
 
+def _option_values(argv: list[str], option: str, count: int) -> list[str] | None:
+    if option not in argv[1:]:
+        return None
+    index = argv.index(option)
+    if index + count >= len(argv):
+        raise RuntimeError(f"{option} requires {count} values")
+    return argv[index + 1 : index + 1 + count]
+
+
 def main(argv: list[str]) -> int:
     refresh = "--refresh" in argv[1:]
     refresh_skills_only = "--refresh-skills" in argv[1:]
+    copy_tools_args = _option_values(argv, "--copy-tools", 2)
     tool_dirs = _split_paths(os.environ.get("TOOL_DIRS", ""))
-    bin_dir = Path(os.environ.get("CENTAUR_TOOL_BIN_DIR", str(Path.home() / ".local/bin")))
-    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    if copy_tools_args:
+        source, target = copy_tools_args
+        _copy_published_tools(Path(target), Path(source))
+        return 0
 
     if refresh_skills_only:
         copied = _refresh_skill_dirs(_workspace_dir())
         print(f"reloaded {copied} Centaur skill entries", file=sys.stderr)
         return 0
+
+    bin_dir = Path(os.environ.get("CENTAUR_TOOL_BIN_DIR", str(Path.home() / ".local/bin")))
+    bin_dir.mkdir(parents=True, exist_ok=True)
 
     if refresh:
         refreshed = _refresh_tool_dirs(tool_dirs)

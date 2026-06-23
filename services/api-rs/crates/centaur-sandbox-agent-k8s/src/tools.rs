@@ -11,16 +11,16 @@
 //! trees api-rs's own `tool_discovery` scans, so the creds api-rs grants match
 //! the tools the agent installs:
 //!
-//! * a `tools-bootstrap` init container copies the tools repo's `source_subdir`
+//! * a `tools-bootstrap` init container publishes the tools repo's `source_subdir`
 //!   from the repo-cache DaemonSet's node-level cache when configured, otherwise
 //!   it git-clones the tools repo at a pinned ref into an emptyDir mounted at
 //!   `/app/tools`;
 //!
 //! `TOOL_DIRS` is set explicitly on the agent env to `/app/tools`, pointing at
-//! the path the init container populates in this pod. The copied tools tree keeps
-//! source metadata in a hidden file so `centaur-tools refresh` can either re-copy
-//! from repo-cache or fetch the configured ref, then reinstall shims without
-//! restarting the pod.
+//! the path the init container populates in this pod. The published tools tree
+//! keeps source metadata in a hidden file so `centaur-tools refresh` can either
+//! republish from repo-cache or fetch the configured ref, then reinstall shims
+//! without restarting the pod.
 
 use serde_json::{Value, json};
 
@@ -41,28 +41,30 @@ const GITHUB_TOKEN_FILE_PATH: &str = "/tools-github-token/token";
 const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
 
 /// Git source for the base tools tree. When set, every sandbox gets a
-/// `tools-bootstrap` init container that clones `repo` at `git_ref` and copies
-/// its `source_subdir` into the agent's `/app/tools` — so adding a tool is a
-/// push to the repo, not an image rebuild.
+/// `tools-bootstrap` init container that clones `repo` at `git_ref` and
+/// publishes its `source_subdir` into the agent's `/app/tools` — so adding a
+/// tool is a push to the repo, not an image rebuild.
 #[derive(Clone, Debug)]
 pub struct ToolsConfig {
     /// `owner/name` GitHub repo carrying the tools tree.
     pub repo: String,
     /// Branch, tag, or commit to check out. `None` => the repo's default branch.
     pub git_ref: Option<String>,
-    /// Subdirectory within the repo holding the tools (copied to `/app/tools`).
+    /// Subdirectory within the repo holding the tools (published to `/app/tools`).
     pub source_subdir: String,
-    /// Git-capable image the clone init container runs (e.g. the sandbox image).
+    /// Image the clone init container runs. It must include git and
+    /// `install-tool-shims` (the default sandbox image does).
     pub image: String,
     pub image_pull_policy: Option<String>,
     /// GitHub token secret for private-repo clones. `None` => unauthenticated clone.
     pub github_token: Option<GitHubTokenRef>,
     /// Optional repo-cache root path mounted from the host. When set,
-    /// tools-bootstrap copies from `<repo_cache_path>/<repo>/<source_subdir>` and
-    /// `centaur-tools refresh` re-copies from the same cache instead of fetching.
+    /// tools-bootstrap publishes from `<repo_cache_path>/<repo>/<source_subdir>`
+    /// and `centaur-tools refresh` republishes from the same cache instead of
+    /// fetching.
     pub repo_cache_path: Option<String>,
-    /// Additional tool sources copied after the base tree. Later sources shadow
-    /// earlier ones when they contain the same tool directory name.
+    /// Additional tool sources copied after the base tree. Duplicate tool names
+    /// are skipped by the copy helper.
     pub extra_sources: Vec<ToolSource>,
 }
 
@@ -158,11 +160,9 @@ pub(crate) struct CloneProxy {
     pub ca_volume_mount: Value,
 }
 
-/// The `tools-bootstrap` init container: copies `repo`'s `source_subdir` from
-/// repo-cache when configured, otherwise clones `repo` at `git_ref` (sparse, on
-/// `source_subdir`) and copies that subtree into the shared `tools-root` emptyDir
-/// the agent mounts at `/app/tools`. With a `CloneProxy`, the clone fallback
-/// rides the per-sandbox iron-proxy like all other sandbox egress.
+/// The `tools-bootstrap` init container: resolves each configured source, then
+/// delegates copying to `install-tool-shims`. With a `CloneProxy`, the clone
+/// fallback rides the per-sandbox iron-proxy like all other sandbox egress.
 pub(crate) fn tools_init_container_json(
     tools: &ToolsConfig,
     clone_proxy: Option<&CloneProxy>,
@@ -200,9 +200,7 @@ pub(crate) fn tools_init_container_json(
     // clone must retry through the connection-refused window rather than die.
     // repo/ref/subdir are operator config, but quote them anyway so a stray
     // space or metacharacter breaks loudly in git instead of in the shell.
-    let mut publish_steps = String::from(
-        "find \"$target\" -mindepth 1 -maxdepth 1 ! -name '.centaur-source*' ! -name '.centaur-tools-source.json' -exec rm -rf {} +\n",
-    );
+    let mut publish_steps = String::new();
     let mut metadata_sources = Vec::new();
     for (index, source) in sources.iter().enumerate() {
         let subdir = &source.source_subdir;
@@ -214,9 +212,7 @@ pub(crate) fn tools_init_container_json(
                 source.repo.trim_start_matches('/')
             );
             // Wait only for the repo checkout itself; a source without the
-            // tools subdir (e.g. a workflows- or skills-only overlay using the
-            // chart's defaulted subdirs) is skipped instead of failing the
-            // sandbox, because an init failure is terminal for the Sandbox.
+            // tools subdir is skipped instead of failing the sandbox init.
             publish_steps.push_str(&format!(
                 "attempt=0\n\
                  cache_repo=\"{repo_cache_repo_path}\"\n\
@@ -226,7 +222,7 @@ pub(crate) fn tools_init_container_json(
                  sleep 2\n\
                  done\n\
                  if [ -d \"$cache_repo/{subdir}\" ]; then\n\
-                 cp -R \"$cache_repo/{subdir}/.\" \"$target\"/\n\
+                 install-tool-shims --copy-tools \"$cache_repo/{subdir}\" \"$target\"\n\
                  else\n\
                  echo \"skipping tools source {repo}: no {subdir}/ in repo-cache checkout\" >&2\n\
                  fi\n"
@@ -241,10 +237,11 @@ pub(crate) fn tools_init_container_json(
         } else {
             let repo_url = format!("https://github.com/{}.git", source.repo);
             let source_path = if index == 0 {
-                "$target/.centaur-source".to_owned()
+                ".centaur-source".to_owned()
             } else {
-                format!("$target/.centaur-source-{index}")
+                format!(".centaur-source-{index}")
             };
+            let source_target_path = format!("$target/{source_path}");
             let checkout = match &source.git_ref {
                 Some(git_ref) => format!(
                     "git -C \"$source\" -c gc.auto=0 fetch --quiet origin \"{git_ref}\" && \
@@ -257,7 +254,7 @@ pub(crate) fn tools_init_container_json(
             // sandbox (sparse-checkout of a missing path succeeds, so this is
             // only detectable after checkout).
             publish_steps.push_str(&format!(
-                "source=\"{source_path}\"\n\
+                "source=\"{source_target_path}\"\n\
                  rm -rf \"$source\"\n\
                  attempt=0\n\
                  until git clone --quiet --filter=blob:none --no-checkout \"{repo_url}\" \"$source\" && \
@@ -269,7 +266,7 @@ pub(crate) fn tools_init_container_json(
                  sleep 2\n\
                  done\n\
                  if [ -d \"$source/{subdir}\" ]; then\n\
-                 cp -R \"$source/{subdir}/.\" \"$target\"/\n\
+                 install-tool-shims --copy-tools \"$source/{subdir}\" \"$target\"\n\
                  else\n\
                  echo \"skipping tools source {repo}: no {subdir}/ at the configured ref\" >&2\n\
                  fi\n"
@@ -279,7 +276,7 @@ pub(crate) fn tools_init_container_json(
                 "source_subdir": subdir,
                 "git_ref": source.git_ref.as_deref(),
                 "source": "git",
-                "source_path": source_path.replace("$target", TOOLS_BOOTSTRAP_DIR),
+                "source_path": source_path,
             }));
         }
     }
@@ -423,14 +420,14 @@ mod tests {
         assert!(script.contains("sparse-checkout set \"tools\""));
         assert!(script.contains("fetch --quiet origin \"main\""));
         assert!(script.contains("source=\"$target/.centaur-source\""));
-        // The copy is conditional so a cloned source without the tools subdir
-        // is skipped rather than failing the sandbox init.
+        assert!(script.contains("\"source_path\":\".centaur-source\""));
         assert!(script.contains("if [ -d \"$source/tools\" ]; then"));
-        assert!(script.contains("cp -R \"$source/tools/.\" \"$target\"/"));
+        assert!(script.contains("install-tool-shims --copy-tools \"$source/tools\" \"$target\""));
         assert!(script.contains(
             "skipping tools source paradigmxyz/centaur: no tools/ at the configured ref"
         ));
         assert!(script.contains(".centaur-tools-source.json"));
+        assert!(!script.contains("cp -R"));
         // No token configured => no askpass, single (tools) volume mount.
         assert!(!script.contains("GIT_ASKPASS"));
         assert_eq!(c["volumeMounts"].as_array().unwrap().len(), 1);
@@ -453,7 +450,9 @@ mod tests {
         assert!(script.contains("checkout --quiet --detach FETCH_HEAD; do"));
         assert!(script.contains("if [ \"$attempt\" -ge 30 ]"));
         assert!(script.contains("sleep 2"));
-        assert!(script.find("done").unwrap() < script.find("cp -R").unwrap());
+        assert!(
+            script.find("done").unwrap() < script.find("install-tool-shims --copy-tools").unwrap()
+        );
     }
 
     #[test]
@@ -505,8 +504,12 @@ mod tests {
         let c = tools_init_container_json(&tools, None);
         let script = c["command"][2].as_str().unwrap();
         assert!(script.contains("cache_repo=\"/var/lib/centaur/repos/paradigmxyz/centaur\""));
-        assert!(script.contains("cp -R \"$cache_repo/tools/.\" \"$target\"/"));
+        assert!(script.contains("if [ -d \"$cache_repo/tools\" ]; then"));
+        assert!(
+            script.contains("install-tool-shims --copy-tools \"$cache_repo/tools\" \"$target\"")
+        );
         assert!(script.contains("\"source\":\"repo_cache\""));
+        assert!(!script.contains("cp -R"));
         assert!(!script.contains("git clone"));
         // The wait covers only the repo checkout; a source without the tools
         // subdir is skipped instead of failing the sandbox, so the chart can
@@ -515,7 +518,6 @@ mod tests {
         assert!(
             !script.contains("until [ -d \"$cache_repo/.git\" ] && [ -d \"$cache_repo/tools\" ]")
         );
-        assert!(script.contains("if [ -d \"$cache_repo/tools\" ]; then"));
         assert!(script.contains(
             "skipping tools source paradigmxyz/centaur: no tools/ in repo-cache checkout"
         ));
