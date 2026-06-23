@@ -220,7 +220,7 @@ def _archive_channel_refs(channels: list[dict[str, Any]]) -> list[dict[str, str]
 
 async def _load_archive_import(pool, import_id: str) -> dict[str, Any]:
     row = await pool.fetchrow(
-        "SELECT import_id, workspace_id, archive_uri, object_bucket, object_key, "
+        "SELECT import_id, archive_uri, object_bucket, object_key, "
         "status, workflow_run_id, workflow_task_id FROM slack_archive_imports "
         "WHERE import_id = $1",
         import_id,

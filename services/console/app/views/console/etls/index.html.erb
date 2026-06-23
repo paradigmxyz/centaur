@@ -1,0 +1,140 @@
+<% content_for :title, "ETLs · Centaur Console" %>
+
+<div class="mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+  <div>
+    <h1 class="page-title">ETLs</h1>
+    <p class="page-subtitle">Upload Slack public-channel archive exports, start imports, and track ingestion status.</p>
+  </div>
+  <div class="text-xs text-zinc-500">
+    <span class="text-zinc-400"><%= pluralize(@archive_imports.size, "archive import") %></span>
+    <span class="text-zinc-600">shown</span>
+  </div>
+</div>
+
+<section class="mb-8 form-section"
+         data-controller="slack-archive-upload"
+         data-slack-archive-upload-create-url-value="<%= console_slack_archive_imports_path %>"
+         data-slack-archive-upload-start-url-template-value="<%= console_start_slack_archive_import_path("__IMPORT_ID__") %>">
+  <div class="mb-5 flex flex-col gap-1">
+    <h2 class="form-section-heading mb-0">Slack Archive Import</h2>
+    <p class="text-sm text-zinc-500">Public channel Slack export ZIPs only. The browser uploads directly to archive storage.</p>
+  </div>
+
+  <form class="grid gap-4 lg:grid-cols-[1fr_auto_auto]"
+        data-action="submit->slack-archive-upload#submit"
+        data-slack-archive-upload-target="form">
+    <div>
+      <label class="form-label" for="slack-archive-file">Archive ZIP</label>
+      <input id="slack-archive-file"
+             name="archive"
+             type="file"
+             accept=".zip,application/zip,application/x-zip-compressed"
+             class="form-input file:mr-3 file:rounded file:border-0 file:bg-ink-600 file:px-3 file:py-1 file:text-sm file:text-zinc-200"
+             required>
+    </div>
+
+    <label class="mt-6 flex items-center gap-2 text-sm text-zinc-400">
+      <input type="checkbox"
+             name="auto_start"
+             value="1"
+             checked
+             class="h-4 w-4 rounded border-ink-500 bg-ink-700 text-centaur-500 focus:ring-centaur-500/50">
+      Start after upload
+    </label>
+
+    <button type="submit" class="btn-primary mt-5 min-w-32" data-slack-archive-upload-target="submitButton">
+      Upload
+    </button>
+  </form>
+
+  <p class="mt-4 min-h-5 text-sm text-zinc-500" data-slack-archive-upload-target="status"></p>
+</section>
+
+<section class="console-scroll-panel">
+  <table class="console-table">
+    <thead class="console-table-head">
+      <tr>
+        <th class="console-th">Archive</th>
+        <th class="console-th">Status</th>
+        <th class="console-th">Counts</th>
+        <th class="console-th">Size</th>
+        <th class="console-th">Created</th>
+        <th class="console-th text-right">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @archive_imports.empty? %>
+        <tr><td colspan="6" class="px-5 py-10 text-center text-zinc-600">No Slack archive imports yet.</td></tr>
+      <% end %>
+
+      <% @archive_imports.each do |archive| %>
+        <% status = archive["status"].to_s %>
+        <% status_classes = case status
+          when "completed" then "border-centaur-500/30 bg-centaur-500/10 text-centaur-300"
+          when "failed" then "border-red-500/40 bg-red-500/10 text-red-300"
+          when "importing", "uploaded" then "border-sky-500/40 bg-sky-500/10 text-sky-300"
+          when "cancelled" then "border-zinc-600 bg-zinc-700/40 text-zinc-400"
+          else "border-amber-500/40 bg-amber-500/10 text-amber-300"
+        end %>
+        <tr class="console-row-hover align-top">
+          <td class="console-td">
+            <div class="font-medium text-zinc-100" title="<%= archive["original_filename"] %>">
+              <%= truncate(archive["original_filename"].presence || "archive.zip", length: 42) %>
+            </div>
+            <div class="mt-1 text-xs text-zinc-600"><%= archive["import_id"] %></div>
+            <% if archive["error_text"].present? %>
+              <div class="mt-2 max-w-md text-xs text-red-300" title="<%= archive["error_text"] %>">
+                <%= truncate(archive["error_text"], length: 120) %>
+              </div>
+            <% end %>
+          </td>
+
+          <td class="console-td-nowrap">
+            <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= status_classes %>">
+              <%= status.tr("_", " ") %>
+            </span>
+          </td>
+
+          <td class="console-td text-xs text-zinc-400">
+            <div><span class="text-zinc-600">channels</span> <%= archive["channels_imported"] || 0 %></div>
+            <div><span class="text-zinc-600">users</span> <%= archive["users_imported"] || 0 %></div>
+            <div><span class="text-zinc-600">messages</span> <%= archive["messages_imported"] || 0 %></div>
+          </td>
+
+          <td class="console-td-nowrap text-xs text-zinc-500">
+            <% if archive["file_size_bytes"].present? %>
+              <%= number_to_human_size(archive["file_size_bytes"]) %>
+            <% else %>
+              <span class="text-zinc-600">not uploaded</span>
+            <% end %>
+          </td>
+
+          <td class="console-td text-xs text-zinc-500">
+            <div><%= archive["created_at"] %></div>
+            <% if archive["created_by"].present? %>
+              <div class="mt-1 text-zinc-600"><%= archive["created_by"] %></div>
+            <% end %>
+          </td>
+
+          <td class="console-td">
+            <div class="flex justify-end gap-2">
+              <% if status == "upload_pending" %>
+                <%= button_to "Start", console_start_slack_archive_import_path(archive["import_id"]), method: :post, class: "btn-secondary" %>
+              <% end %>
+              <% if status == "failed" %>
+                <%= button_to "Retry", console_retry_slack_archive_import_path(archive["import_id"]), method: :post, class: "btn-secondary" %>
+              <% end %>
+              <% if %w[upload_pending uploaded failed cancelled].include?(status) %>
+                <%= button_to "Delete",
+                      console_delete_slack_archive_import_path(archive["import_id"]),
+                      method: :delete,
+                      form: { data: { turbo_confirm: "Delete this archive import and storage object?" } },
+                      class: "btn-secondary" %>
+              <% end %>
+            </div>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</section>

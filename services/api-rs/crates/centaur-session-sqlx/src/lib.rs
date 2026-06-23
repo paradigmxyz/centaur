@@ -16,6 +16,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+// The API binary embeds these migrations at compile time.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";

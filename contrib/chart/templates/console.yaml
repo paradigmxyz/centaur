@@ -3,6 +3,7 @@
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $dbName := $console.database.name }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 # console — Rails control plane for authenticated API access and encrypted
 # secret storage. The chart owns the Deployment shape (image, port, env,
 # security context) so operators tune it via `helm upgrade`. It runs against a
@@ -168,6 +169,10 @@ spec:
               value: "1"
             - name: RAILS_SERVE_STATIC_FILES
               value: "1"
+{{- if .Values.apiRs.enabled }}
+            - name: CENTAUR_CONSOLE_CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+{{- end }}
           ports:
             - containerPort: {{ $console.service.httpPort }}
               name: http
@@ -252,6 +257,15 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+{{- end }}
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
 {{- end }}
     # Outbound HTTPS (external DB DSNs, IdPs, etc.).
     - ports:

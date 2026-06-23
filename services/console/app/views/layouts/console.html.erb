@@ -4,6 +4,7 @@
     <title><%= content_for(:title) || "Centaur Console" %></title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta charset="utf-8">
+    <%= csrf_meta_tags %>
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
 
     <%# Tailwind is compiled by the standalone binary into app/assets/builds/tailwind.css.
@@ -37,11 +38,12 @@
               <nav class="flex items-center gap-1">
                 <% nav = [["principals", console_principals_path], ["roles", console_roles_path], ["secrets", console_secrets_path], ["credentials", console_credentials_path], ["oauth apps", console_oauth_apps_path]] %>
                 <% nav << ["users", console_users_path] if current_user&.admin? %>
+                <% nav << ["ETLs", console_etls_path] %>
                 <% nav.each do |name, path| %>
-                  <% active = request.path == path || (name == "principals" && request.path.start_with?("/console/principals")) || (name == "roles" && request.path.start_with?("/console/roles")) %>
+                  <% active = request.path == path || (name == "principals" && request.path.start_with?("/console/principals")) || (name == "roles" && request.path.start_with?("/console/roles")) || (name == "ETLs" && request.path.start_with?("/console/etls")) %>
                   <a href="<%= path %>"
                      class="px-4 py-2 transition-colors <%= active ? "text-centaur-400" : "text-zinc-400 hover:text-zinc-100" %>">
-                    <%= name.capitalize %>
+                    <%= name == "ETLs" ? name : name.capitalize %>
                   </a>
                 <% end %>
               </nav>

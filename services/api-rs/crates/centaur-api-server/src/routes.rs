@@ -490,7 +490,6 @@ async fn stream_events(
 
 #[derive(Debug, Deserialize)]
 struct PresignSlackArchiveImportRequest {
-    workspace_id: String,
     filename: String,
     #[serde(default)]
     content_type: Option<String>,
@@ -506,14 +505,11 @@ struct ListSlackArchiveImportsQuery {
     limit: Option<i64>,
     #[serde(default)]
     status: Option<String>,
-    #[serde(default)]
-    workspace_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct SlackArchiveImportResponse {
     import_id: String,
-    workspace_id: String,
     mode: String,
     archive_uri: String,
     object_bucket: String,
@@ -548,7 +544,6 @@ struct SlackArchiveImportResponse {
 #[derive(Debug, sqlx::FromRow)]
 struct SlackArchiveImportRow {
     import_id: String,
-    workspace_id: String,
     mode: String,
     archive_uri: String,
     object_bucket: String,
@@ -574,7 +569,7 @@ struct SlackArchiveImportRow {
     metadata: Value,
 }
 
-const SLACK_ARCHIVE_IMPORT_COLUMNS: &str = "import_id, workspace_id, mode, archive_uri, \
+const SLACK_ARCHIVE_IMPORT_COLUMNS: &str = "import_id, mode, archive_uri, \
 object_bucket, object_key, original_filename, content_type, file_size_bytes, sha256, status, \
 workflow_run_id, workflow_task_id, channels_imported, users_imported, messages_imported, \
 error_text, created_by, uploaded_at, started_at, finished_at, upload_url_expires_at, created_at, \
@@ -584,7 +579,6 @@ impl From<SlackArchiveImportRow> for SlackArchiveImportResponse {
     fn from(row: SlackArchiveImportRow) -> Self {
         Self {
             import_id: row.import_id,
-            workspace_id: row.workspace_id,
             mode: row.mode,
             archive_uri: row.archive_uri,
             object_bucket: row.object_bucket,
@@ -630,17 +624,10 @@ async fn list_slack_archive_imports(
     let sql = format!(
         "SELECT {SLACK_ARCHIVE_IMPORT_COLUMNS} FROM slack_archive_imports \
          WHERE ($1::text IS NULL OR status = $1) \
-         AND ($2::text IS NULL OR workspace_id = $2) \
-         ORDER BY created_at DESC LIMIT $3"
+         ORDER BY created_at DESC LIMIT $2"
     );
     let rows = sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
         .bind(query.status.as_deref().filter(|value| !value.is_empty()))
-        .bind(
-            query
-                .workspace_id
-                .as_deref()
-                .filter(|value| !value.is_empty()),
-        )
         .bind(limit)
         .fetch_all(&pool)
         .await?;
@@ -668,7 +655,6 @@ async fn presign_slack_archive_import(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let pool = db_pool(&state)?;
     let config = slack_archive_upload_config()?;
-    let workspace_id = clean_identifier(&request.workspace_id, "workspace_id")?;
     let filename = sanitize_filename(&request.filename)?;
     let content_type = request
         .content_type
@@ -686,7 +672,7 @@ async fn presign_slack_archive_import(
         ));
     }
     let import_id = prefixed_id("sai");
-    let object_key = slack_archive_object_key(&config.prefix, &workspace_id, &import_id, &filename);
+    let object_key = slack_archive_object_key(&config.prefix, &import_id, &filename);
     let archive_uri = format!("s3://{}/{}", config.bucket, object_key);
     let upload_url = presign_s3_put_url(&config, &object_key, &content_type).await?;
     let expires_at = OffsetDateTime::now_utc() + config.presign_ttl;
@@ -698,15 +684,14 @@ async fn presign_slack_archive_import(
 
     let sql = format!(
         "INSERT INTO slack_archive_imports (\
-         import_id, workspace_id, mode, archive_uri, object_bucket, object_key, \
+         import_id, mode, archive_uri, object_bucket, object_key, \
          original_filename, content_type, status, created_by, upload_url_expires_at, metadata\
-         ) VALUES ($1, $2, 'public_channels', $3, $4, $5, $6, $7, \
-         'upload_pending', $8, $9, $10::jsonb) \
+         ) VALUES ($1, 'public_channels', $2, $3, $4, $5, $6, \
+         'upload_pending', $7, $8, $9::jsonb) \
          RETURNING {SLACK_ARCHIVE_IMPORT_COLUMNS}"
     );
     let row = sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
         .bind(&import_id)
-        .bind(&workspace_id)
         .bind(&archive_uri)
         .bind(&config.bucket)
         .bind(&object_key)
@@ -1162,14 +1147,6 @@ fn prefixed_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
-fn clean_identifier(value: &str, field: &str) -> Result<String, ApiError> {
-    let cleaned = sanitize_path_segment(value);
-    if cleaned.is_empty() {
-        return Err(ApiError::BadRequest(format!("{field} must not be empty")));
-    }
-    Ok(cleaned)
-}
-
 fn sanitize_path_segment(value: &str) -> String {
     value
         .trim()
@@ -1204,13 +1181,8 @@ fn sanitize_filename(value: &str) -> Result<String, ApiError> {
     Ok(filename)
 }
 
-fn slack_archive_object_key(
-    prefix: &str,
-    workspace_id: &str,
-    import_id: &str,
-    filename: &str,
-) -> String {
-    [prefix, workspace_id, import_id, filename]
+fn slack_archive_object_key(prefix: &str, import_id: &str, filename: &str) -> String {
+    [prefix, import_id, filename]
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
@@ -1535,11 +1507,10 @@ mod slack_archive_import_tests {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         SlackArchiveImportRow {
             import_id: "sai_test".to_owned(),
-            workspace_id: "workspace".to_owned(),
             mode: "public_channels".to_owned(),
-            archive_uri: "s3://bucket/prefix/workspace/sai_test/archive.zip".to_owned(),
+            archive_uri: "s3://bucket/prefix/sai_test/archive.zip".to_owned(),
             object_bucket: "bucket".to_owned(),
-            object_key: "prefix/workspace/sai_test/archive.zip".to_owned(),
+            object_key: "prefix/sai_test/archive.zip".to_owned(),
             original_filename: "archive.zip".to_owned(),
             content_type: "application/zip".to_owned(),
             file_size_bytes: None,
@@ -1632,9 +1603,10 @@ mod slack_archive_import_tests {
         );
         assert_eq!(body["ok"], json!(true));
         assert_eq!(body["import"]["import_id"], json!("sai_test"));
+        assert!(body["import"].get("workspace_id").is_none());
         assert_eq!(
             body["upload"]["archive_uri"],
-            json!("s3://bucket/prefix/workspace/sai_test/archive.zip")
+            json!("s3://bucket/prefix/sai_test/archive.zip")
         );
         assert_eq!(
             body["upload"]["upload_url"],
