@@ -317,7 +317,7 @@ module SlackDm
       return right if left.blank?
       return left if right.blank?
 
-      slack_ts_sort_key(right) > slack_ts_sort_key(left) ? right : left
+      (slack_ts_sort_key(right) <=> slack_ts_sort_key(left)).positive? ? right : left
     end
 
     def slack_ts_sort_key(value)
