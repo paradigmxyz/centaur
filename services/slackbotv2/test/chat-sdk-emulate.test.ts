@@ -302,7 +302,7 @@ describe('slackbotv2', () => {
     expect(text).toContain('Implementation plan')
     expect(text).toContain('Inspect App Server events')
     expect(text).toContain('Checking the command output')
-    expect(text).toContain('Inspecting the event stream')
+    expect(text).not.toContain('Inspecting the event stream')
     expect(text).toContain('Command execution')
     expect(text).toContain('pnpm test')
     expect(text).not.toContain('tests passed')
@@ -4570,12 +4570,11 @@ function expectSlackPlanStreamShape(
         status: 'complete'
       })
     )
-    expect(progressChunks).toContainEqual(
+    expect(progressChunks).not.toContainEqual(
       expect.objectContaining({
         type: 'task_update',
         id: 'reasoning-1',
-        title: 'Thinking',
-        status: 'complete'
+        title: 'Thinking'
       })
     )
     expect(progressChunks).toContainEqual(
@@ -4600,7 +4599,7 @@ function expectSlackPlanStreamShape(
     expect(renderedText).toContain('Inspect App Server events')
     expect(renderedText).toContain('Stream Chat SDK chunks')
     expect(renderedText).toContain('Checking the command output')
-    expect(renderedText).toContain('Inspecting the event stream')
+    expect(renderedText).not.toContain('Inspecting the event stream')
     expect(renderedText).toContain('Command execution')
     expect(renderedText).toContain('pnpm test')
     expect(renderedText).not.toContain('tests passed')
@@ -4614,7 +4613,7 @@ function expectSlackRenderedReply(text: string, answer: string): void {
   expect(text).toContain('Stream Chat SDK chunks')
   expect(text).toContain('Thinking')
   expect(text).toContain('Checking the command output')
-  expect(text).toContain('Inspecting the event stream')
+  expect(text).not.toContain('Inspecting the event stream')
   expect(text).toContain('Command execution')
   expect(text).toContain('pnpm test')
   expect(text).not.toContain('tests passed')

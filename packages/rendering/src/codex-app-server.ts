@@ -73,6 +73,7 @@ export type CodexAppServerRendererEventMapperOptions = {
   sessionId?: string
   logInfo?: RendererLogInfo
   unknownAgentMessagePhase?: AgentMessagePhase
+  reasoningTasks?: 'visible' | 'omit'
   taskOutput?: 'full' | 'omit'
 }
 
@@ -89,12 +90,14 @@ export class CodexAppServerRendererEventMapper
   private readonly logInfo?: RendererLogInfo
   private readonly unknownAgentMessagePhase: AgentMessagePhase
   private readonly includeTaskOutput: boolean
+  private readonly includeReasoningTasks: boolean
 
   constructor(options: CodexAppServerRendererEventMapperOptions = {}) {
     this.sessionId = options.sessionId ?? ''
     this.logInfo = options.logInfo
     this.unknownAgentMessagePhase = options.unknownAgentMessagePhase ?? 'final_answer'
     this.includeTaskOutput = options.taskOutput === 'full'
+    this.includeReasoningTasks = options.reasoningTasks !== 'omit'
   }
 
   process(source: ServerNotification | RustSessionStreamEvent | unknown): RendererEvent[] {
@@ -302,7 +305,7 @@ export class CodexAppServerRendererEventMapper
     }
 
     const reasoningMessage = reasoningText(event)
-    if (reasoningMessage.trim()) {
+    if (reasoningMessage.trim() && this.includeReasoningTasks) {
       const itemId = reasoningEventItemId(event)
       if (isReasoningDeltaEvent(event) && itemId) {
         // Accumulate deltas into one task per reasoning item and keep it
@@ -343,7 +346,7 @@ export class CodexAppServerRendererEventMapper
     }
 
     const sealedReasoning = completedReasoningItem(event)
-    if (sealedReasoning) {
+    if (sealedReasoning && this.includeReasoningTasks) {
       const id = String(sealedReasoning.id ?? '')
       const accumulated = id ? this.state.reasoningTextByItemId.get(id) ?? '' : ''
       const finalText = (reasoningItemText(sealedReasoning) || accumulated).trim()

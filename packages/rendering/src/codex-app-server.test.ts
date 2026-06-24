@@ -152,6 +152,23 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('can omit reasoning Thinking tasks for Slack surfaces', () => {
+    const mapper = new CodexAppServerRendererEventMapper({ reasoningTasks: 'omit' })
+
+    const first = mapper.process({
+      type: 'item.reasoning.textDelta',
+      itemId: 'reasoning-1',
+      delta: 'Inspecting the event stream'
+    })
+    expect(first.find(event => event.type === 'renderer.task.update')).toBeUndefined()
+
+    const sealed = mapper.process({
+      type: 'item.completed',
+      item: { id: 'reasoning-1', type: 'reasoning', content: ['Inspecting the event stream'] }
+    })
+    expect(sealed.find(event => event.type === 'renderer.task.update')).toBeUndefined()
+  })
+
   it('holds the last finished task in_progress so the Slack header never claims completion mid-turn', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
@@ -470,6 +487,33 @@ describe('CodexAppServerRendererEventMapper', () => {
       title: 'Thinking',
       status: 'complete'
     })
+  })
+
+  it('omits reasoning chunks when configured for Slack', async () => {
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            method: 'item/reasoning/summaryTextDelta',
+            params: {
+              itemId: 'reasoning-1',
+              delta: 'Inspecting the event stream'
+            }
+          },
+          {
+            method: 'turn/completed',
+            params: {
+              turn: { id: 'turn-1', items: [], status: 'completed' }
+            }
+          }
+        ]),
+        { reasoningTasks: 'omit' }
+      )
+    )
+
+    expect(
+      chunks.some(chunk => chunk.type === 'task_update' && chunk.title === 'Thinking')
+    ).toBe(false)
   })
 
   it('streams command details once and command output incrementally', async () => {
