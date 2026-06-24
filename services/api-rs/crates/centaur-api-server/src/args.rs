@@ -34,7 +34,9 @@ use tracing::{error, info, warn};
 
 use crate::{
     ServerError,
-    activity_summary::ActivitySummaryConfig,
+    activity_summary::{
+        ActivitySummaryConfig, ActivitySummaryCredential, OnePasswordConnectCredential,
+    },
     tool_discovery::{
         DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_persona_registry,
         discover_tool_proxy_fragment,
@@ -181,23 +183,45 @@ impl ActivitySummaryArgs {
         if !self.enabled {
             return None;
         }
-        let api_key = clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref());
-        let Some(api_key) = api_key else {
+        let Some(credential) = self.credential() else {
             warn!(
-                "session activity summaries are enabled but no OpenAI API key is configured; \
-                 set OPENAI_API_KEY"
+                "session activity summaries are enabled but no OpenAI credential is configured; \
+                 set OPENAI_API_KEY or configure the onepassword-connect secret source"
             );
             return None;
         };
         Some(ActivitySummaryConfig {
-            api_key,
             base_url: self.openai_base_url.clone(),
+            credential,
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
             min_interval: Duration::from_secs(self.min_interval_secs),
             model: self.model.clone(),
             timeout: Duration::from_secs(self.timeout_secs),
         })
+    }
+
+    fn credential(&self) -> Option<ActivitySummaryCredential> {
+        let source = env::var("FIREWALL_MANAGER_SECRET_SOURCE").ok();
+        if source.as_deref() == Some("onepassword-connect")
+            && let (Some(host), Some(token)) = (
+                clean_optional_value(env::var("KUBERNETES_OP_CONNECT_HOST").ok().as_deref()),
+                clean_optional_value(env::var("OP_CONNECT_TOKEN").ok().as_deref()),
+            )
+        {
+            let vault = clean_optional_value(env::var("OP_VAULT").ok().as_deref())
+                .unwrap_or_else(|| "ai-agents".to_owned());
+            return Some(ActivitySummaryCredential::OnePasswordConnect(
+                OnePasswordConnectCredential {
+                    host,
+                    secret_ref: format!("op://{vault}/OPENAI_API_KEY/credential"),
+                    token,
+                },
+            ));
+        }
+
+        clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref())
+            .map(ActivitySummaryCredential::OpenAiApiKey)
     }
 }
 
@@ -2050,6 +2074,72 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
+    }
+
+    #[test]
+    fn activity_summary_uses_direct_openai_key_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("FIREWALL_MANAGER_SECRET_SOURCE", "env"),
+            ("KUBERNETES_OP_CONNECT_HOST", ""),
+            ("OP_CONNECT_TOKEN", ""),
+            ("OP_VAULT", ""),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        match config.credential {
+            ActivitySummaryCredential::OpenAiApiKey(value) => assert_eq!(value, "sk-test"),
+            ActivitySummaryCredential::OnePasswordConnect(_) => {
+                panic!("expected direct OPENAI_API_KEY credential")
+            }
+        }
+    }
+
+    #[test]
+    fn activity_summary_prefers_onepassword_connect_source() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "stale-key"),
+            ("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword-connect"),
+            (
+                "KUBERNETES_OP_CONNECT_HOST",
+                "http://onepassword-connect:8080",
+            ),
+            ("OP_CONNECT_TOKEN", "op-token"),
+            ("OP_VAULT", "centaur-agent"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        match config.credential {
+            ActivitySummaryCredential::OnePasswordConnect(credential) => {
+                assert_eq!(credential.host, "http://onepassword-connect:8080");
+                assert_eq!(
+                    credential.secret_ref,
+                    "op://centaur-agent/OPENAI_API_KEY/credential"
+                );
+                assert_eq!(credential.token, "op-token");
+            }
+            ActivitySummaryCredential::OpenAiApiKey(_) => {
+                panic!("expected onepassword-connect credential")
+            }
+        }
     }
 
     #[test]

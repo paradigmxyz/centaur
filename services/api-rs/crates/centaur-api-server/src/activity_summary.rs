@@ -19,15 +19,28 @@ You write live status text for a software agent. Use only the supplied event fac
 Write one short present-tense sentence, maximum 18 words. No markdown, no quotes, \
 no event IDs, and no speculation.";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ActivitySummaryConfig {
-    pub(crate) api_key: String,
     pub(crate) base_url: String,
+    pub(crate) credential: ActivitySummaryCredential,
     pub(crate) max_facts: usize,
     pub(crate) max_output_tokens: u16,
     pub(crate) min_interval: Duration,
     pub(crate) model: String,
     pub(crate) timeout: Duration,
+}
+
+#[derive(Clone)]
+pub(crate) enum ActivitySummaryCredential {
+    OpenAiApiKey(String),
+    OnePasswordConnect(OnePasswordConnectCredential),
+}
+
+#[derive(Clone)]
+pub(crate) struct OnePasswordConnectCredential {
+    pub(crate) host: String,
+    pub(crate) secret_ref: String,
+    pub(crate) token: String,
 }
 
 pub(crate) struct ActivitySummaryWorker {
@@ -545,8 +558,8 @@ fn is_terminal_session_event(event_type: &str) -> bool {
 
 #[derive(Clone)]
 struct ActivitySummaryClient {
-    api_key: String,
     client: reqwest::Client,
+    credential: ActivitySummaryCredential,
     max_output_tokens: u16,
     model: String,
     responses_url: String,
@@ -560,8 +573,8 @@ impl ActivitySummaryClient {
             .map_err(ActivitySummaryError::Http)?;
         let responses_url = format!("{}/responses", config.base_url.trim_end_matches('/'));
         Ok(Self {
-            api_key: config.api_key.clone(),
             client,
+            credential: config.credential.clone(),
             max_output_tokens: config.max_output_tokens,
             model: config.model.clone(),
             responses_url,
@@ -569,10 +582,11 @@ impl ActivitySummaryClient {
     }
 
     async fn summarize(&self, prompt: &str) -> Result<String, ActivitySummaryError> {
+        let api_key = self.credential.resolve(&self.client).await?;
         let response = self
             .client
             .post(&self.responses_url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(api_key)
             .json(&json!({
                 "model": self.model.as_str(),
                 "instructions": SYSTEM_PROMPT,
@@ -587,13 +601,131 @@ impl ActivitySummaryClient {
         let body = response.text().await?;
         if !status.is_success() {
             return Err(ActivitySummaryError::OpenAiStatus {
-                body: one_line(&body, 300),
+                body: redact_openai_error_body(&body),
                 status,
             });
         }
         let value = serde_json::from_str::<Value>(&body)?;
         extract_response_text(&value).ok_or(ActivitySummaryError::MissingOutputText)
     }
+}
+
+impl ActivitySummaryCredential {
+    async fn resolve(&self, client: &reqwest::Client) -> Result<String, ActivitySummaryError> {
+        match self {
+            Self::OpenAiApiKey(api_key) => Ok(api_key.clone()),
+            Self::OnePasswordConnect(credential) => credential.resolve(client).await,
+        }
+    }
+}
+
+impl OnePasswordConnectCredential {
+    async fn resolve(&self, client: &reqwest::Client) -> Result<String, ActivitySummaryError> {
+        let parsed = parse_op_secret_ref(&self.secret_ref)?;
+        let vaults = self.get_json(client, "/v1/vaults").await?;
+        let vault_id = find_named_resource_id(&vaults, &parsed.vault).ok_or_else(|| {
+            ActivitySummaryError::OnePasswordMissing {
+                kind: "vault",
+                name: parsed.vault.clone(),
+            }
+        })?;
+        let items_path = format!("/v1/vaults/{}/items", path_component(&vault_id));
+        let items = self.get_json(client, &items_path).await?;
+        let item_id = find_named_resource_id(&items, &parsed.item).ok_or_else(|| {
+            ActivitySummaryError::OnePasswordMissing {
+                kind: "item",
+                name: parsed.item.clone(),
+            }
+        })?;
+        let item_path = format!(
+            "/v1/vaults/{}/items/{}",
+            path_component(&vault_id),
+            path_component(&item_id)
+        );
+        let item = self.get_json(client, &item_path).await?;
+        field_value(&item, &parsed.field).ok_or_else(|| ActivitySummaryError::OnePasswordMissing {
+            kind: "field",
+            name: parsed.field.clone(),
+        })
+    }
+
+    async fn get_json(
+        &self,
+        client: &reqwest::Client,
+        path: &str,
+    ) -> Result<Value, ActivitySummaryError> {
+        let url = format!("{}{}", self.host.trim_end_matches('/'), path);
+        let response = client.get(&url).bearer_auth(&self.token).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ActivitySummaryError::OnePasswordStatus {
+                path: path.to_owned(),
+                status,
+            });
+        }
+        Ok(response.json().await?)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct OpSecretRef {
+    vault: String,
+    item: String,
+    field: String,
+}
+
+fn parse_op_secret_ref(secret_ref: &str) -> Result<OpSecretRef, ActivitySummaryError> {
+    let Some(rest) = secret_ref.strip_prefix("op://") else {
+        return Err(ActivitySummaryError::OnePasswordSecretRef(
+            "secret ref must start with op://".to_owned(),
+        ));
+    };
+    let parts = rest.split('/').collect::<Vec<_>>();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(ActivitySummaryError::OnePasswordSecretRef(
+            "secret ref must have vault/item/field".to_owned(),
+        ));
+    }
+    Ok(OpSecretRef {
+        vault: decode_op_component(parts[0])?,
+        item: decode_op_component(parts[1])?,
+        field: decode_op_component(parts[2])?,
+    })
+}
+
+fn decode_op_component(value: &str) -> Result<String, ActivitySummaryError> {
+    urlencoding::decode(value)
+        .map(|value| value.into_owned())
+        .map_err(|error| ActivitySummaryError::OnePasswordSecretRef(error.to_string()))
+}
+
+fn path_component(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
+fn find_named_resource_id(value: &Value, name_or_id: &str) -> Option<String> {
+    value.as_array()?.iter().find_map(|item| {
+        let id = string_at(item, &["id"])?;
+        if id == name_or_id || string_at(item, &["name"]).as_deref() == Some(name_or_id) {
+            return Some(id);
+        }
+        if string_at(item, &["title"]).as_deref() == Some(name_or_id) {
+            return Some(id);
+        }
+        None
+    })
+}
+
+fn field_value(value: &Value, field: &str) -> Option<String> {
+    value
+        .get("fields")?
+        .as_array()?
+        .iter()
+        .find(|item| {
+            string_at(item, &["id"]).as_deref() == Some(field)
+                || string_at(item, &["label"]).as_deref() == Some(field)
+        })
+        .and_then(|item| string_at(item, &["value"]))
 }
 
 fn extract_response_text(value: &Value) -> Option<String> {
@@ -615,6 +747,24 @@ fn extract_response_text(value: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
+fn redact_openai_error_body(body: &str) -> String {
+    let body = one_line(body, 300);
+    let marker = "Incorrect API key provided:";
+    let Some(marker_index) = body.find(marker) else {
+        return body;
+    };
+    let value_start = marker_index + marker.len();
+    let value_end = body[value_start..]
+        .find('.')
+        .map(|offset| value_start + offset)
+        .unwrap_or(body.len());
+    format!(
+        "{} [redacted]{}",
+        body[..value_start].trim_end(),
+        &body[value_end..]
+    )
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum ActivitySummaryError {
     #[error("activity summary HTTP error: {0}")]
@@ -623,6 +773,12 @@ pub(crate) enum ActivitySummaryError {
     OpenAiStatus { status: StatusCode, body: String },
     #[error("activity summary OpenAI response did not include output text")]
     MissingOutputText,
+    #[error("activity summary 1Password Connect request failed with {status} at {path}")]
+    OnePasswordStatus { status: StatusCode, path: String },
+    #[error("activity summary 1Password secret ref error: {0}")]
+    OnePasswordSecretRef(String),
+    #[error("activity summary 1Password {kind} not found: {name}")]
+    OnePasswordMissing { kind: &'static str, name: String },
     #[error("activity summary JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("activity summary session store error: {0}")]
@@ -707,6 +863,60 @@ mod tests {
         .unwrap();
 
         assert_eq!(text, "The agent is inspecting events.");
+    }
+
+    #[test]
+    fn parses_onepassword_secret_refs() {
+        let parsed = parse_op_secret_ref("op://centaur-agent/OPENAI_API_KEY/credential").unwrap();
+
+        assert_eq!(
+            parsed,
+            OpSecretRef {
+                vault: "centaur-agent".to_owned(),
+                item: "OPENAI_API_KEY".to_owned(),
+                field: "credential".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn extracts_onepassword_field_by_label() {
+        let value = field_value(
+            &json!({
+                "fields": [
+                    {"id": "password", "label": "password", "type": "CONCEALED"},
+                    {"id": "abc", "label": "credential", "type": "CONCEALED", "value": "sk-test"}
+                ]
+            }),
+            "credential",
+        )
+        .unwrap();
+
+        assert_eq!(value, "sk-test");
+    }
+
+    #[test]
+    fn finds_onepassword_resources_by_title_or_name() {
+        let id = find_named_resource_id(
+            &json!([
+                {"id": "vault-id", "name": "centaur-agent"},
+                {"id": "item-id", "title": "OPENAI_API_KEY"}
+            ]),
+            "OPENAI_API_KEY",
+        )
+        .unwrap();
+
+        assert_eq!(id, "item-id");
+    }
+
+    #[test]
+    fn redacts_openai_invalid_key_errors() {
+        let redacted = redact_openai_error_body(
+            r#"{"error":{"message":"Incorrect API key provided: sk-svc-secret. You can find your API key at https://platform.openai.com/account/api-keys."}}"#,
+        );
+
+        assert!(redacted.contains("Incorrect API key provided: [redacted]"));
+        assert!(!redacted.contains("sk-svc-secret"));
     }
 
     #[test]

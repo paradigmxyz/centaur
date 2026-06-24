@@ -83,7 +83,7 @@ Optional required-by-mode variables:
 | `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
 | `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |
 | `apiRs.activitySummary.*` | Helm values, default disabled. | Enables API-RS to summarize live session activity into durable `session.activity_summary` events. |
-| `OPENAI_API_KEY` | Secret or `apiRs.extraEnv`. | OpenAI credential for activity summaries; the feature stays disabled when no key is present. |
+| `OPENAI_API_KEY` | Secret or `apiRs.extraEnv`; when `ironProxy.secretSource=onepassword-connect`, api-rs resolves `op://$OP_VAULT/OPENAI_API_KEY/credential`. | OpenAI credential for activity summaries; the feature stays disabled when no key is present. |
 | `SESSION_ACTIVITY_SUMMARY_MODEL` | `apiRs.activitySummary.model`, default `gpt-5.4-nano`. | Model used for the short live activity sentence. |
 
 Execution tuning:
