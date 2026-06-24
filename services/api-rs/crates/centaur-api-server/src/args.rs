@@ -919,14 +919,7 @@ impl SandboxArgs {
     }
 
     fn codex_app_server_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let mut envs = vec![(
-            "CENTAUR_API_URL".to_owned(),
-            self.centaur_api_url_override
-                .as_deref()
-                .or(self.centaur_api_url.as_deref())
-                .unwrap_or("http://api:8000")
-                .to_owned(),
-        )];
+        let mut envs = vec![("CENTAUR_API_URL".to_owned(), self.centaur_api_url())];
 
         // Single source of truth: propagate this control plane's harness auth
         // modes into the sandbox so the agent's auth.json matches the
@@ -1109,7 +1102,7 @@ impl SandboxArgs {
     }
 
     fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let mut envs = Vec::new();
+        let mut envs = vec![("CENTAUR_API_URL".to_owned(), self.centaur_api_url())];
 
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             envs.push((name, value));
@@ -1151,6 +1144,14 @@ impl SandboxArgs {
         }
 
         Ok(envs)
+    }
+
+    fn centaur_api_url(&self) -> String {
+        self.centaur_api_url_override
+            .as_deref()
+            .or(self.centaur_api_url.as_deref())
+            .unwrap_or("http://api:8000")
+            .to_owned()
     }
 
     fn passthrough_env_names(&self) -> impl Iterator<Item = &str> {
@@ -2209,6 +2210,8 @@ mod tests {
             "postgres://postgres:postgres@localhost/centaur",
             "--session-sandbox-backend",
             "agent-k8s",
+            "--session-sandbox-centaur-api-url",
+            "http://centaur-api-rs:8080",
             "--kubernetes-sandbox-iron-proxy-mode",
             "disabled",
         ])
@@ -2216,6 +2219,13 @@ mod tests {
 
         let spec = args.sandbox.workflow_host_spec(None).unwrap();
 
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "CENTAUR_API_URL")
+                .map(|env| env.value.as_str()),
+            Some("http://centaur-api-rs:8080")
+        );
         assert_eq!(
             spec.env
                 .iter()
