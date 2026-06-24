@@ -446,14 +446,14 @@ The sandbox image bakes `services/sandbox/SYSTEM_PROMPT.md` into `~/AGENTS.md` a
 The system prompt tells the agent:
 - **Identity**: it's running inside a Kubernetes sandbox pod, calling back to the API for tool access
 - **Tools**: three kinds — harness built-ins (Read, Bash, etc.), API tools exposed as shell CLI shims, and a headless browser
-- **Tool CLIs**: each tool is installed as a shell command at container startup by `services/sandbox/install_tool_shims.py`, which scans `TOOL_DIRS` for `pyproject.toml [project.scripts]` and `uvx`-installs each. Agents call tools directly (`slack get_channel_history '{"channel":"general"}'`, `<tool> --help` to discover) — there is no `call` helper.
+- **Tool CLIs**: each tool is installed as a shell command at container startup by `services/sandbox/install_tool_shims.py`, which scans `TOOL_DIRS` for `pyproject.toml [project.scripts]` and `uvx`-installs each. Agents call tools directly (`slack get_channel_history '{"channel":"general"}'`, `<tool> --help` to discover).
 - **Slack messaging**: the agent's stdout IS the Slack reply — never call `send_message` on the active thread
 - **Rules**: never display secrets, show your work, lead with the answer
 
 `centaur-tools` is the generated catalog CLI emitted by the same installer:
 - `centaur-tools list` → list available tool CLIs
 - `centaur-tools run <tool> [args]` → run a tool CLI
-- `centaur-tools call <tool> <method> [json]` → internal method bridge kept only for the Python workflow host's `ctx.call_tool(...)`; interactive agents use the direct tool CLIs above.
+- `<tool> --help` → discover one tool's direct CLI; the internal method bridge is kept only for the Python workflow host's `ctx.call_tool(...)`.
 
 ### Persona System
 
