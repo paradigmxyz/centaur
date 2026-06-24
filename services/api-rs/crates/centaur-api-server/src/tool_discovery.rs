@@ -510,6 +510,7 @@ enum ToolSecret {
     Http(HttpSecret),
     OAuthToken(OAuthTokenSecret),
     GcpAuth(GcpAuthSecret),
+    GcpIdToken(GcpIdTokenSecret),
     PgDsn(PgDsnSecret),
     AwsAuth(AwsAuthSecret),
 }
@@ -562,6 +563,18 @@ struct GcpAuthSecret {
     labels: BTreeMap<String, String>,
     hosts: Vec<String>,
     scopes: Vec<String>,
+}
+
+/// A `type = "gcp_id_token"` secret. The proxy mints a Google-signed OIDC ID
+/// token from the service-account keyfile and injects it into Authorization by
+/// default, or into `x-serverless-authorization` when configured for Cloud Run.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GcpIdTokenSecret {
+    secret_ref: String,
+    labels: BTreeMap<String, String>,
+    hosts: Vec<String>,
+    audience: String,
+    header: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -652,6 +665,7 @@ fn parse_secret(
         "http" | "header" => parse_http_secret(table, name, secret_ref, default_hosts, labels),
         "oauth_token" => parse_oauth_token_secret(table, name, labels),
         "gcp_auth" => parse_gcp_auth_secret(table, name, secret_ref, labels),
+        "gcp_id_token" => parse_gcp_id_token_secret(table, name, secret_ref, labels),
         "pg_dsn" => parse_pg_dsn_secret(table, name, secret_ref, labels),
         "aws_auth" => parse_aws_auth_secret(table, name, labels),
         "brokered_token" | "hmac_sign" => Err(ToolDiscoveryError::Invalid(format!(
@@ -788,6 +802,32 @@ fn parse_gcp_auth_secret(
         labels: labels.clone(),
         hosts: optional_string_array(table.get("hosts"))?.unwrap_or_default(),
         scopes: optional_string_array(table.get("scopes"))?.unwrap_or_default(),
+    }))
+}
+
+fn parse_gcp_id_token_secret(
+    table: &toml::Table,
+    _name: String,
+    secret_ref: String,
+    labels: &BTreeMap<String, String>,
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    let hosts = required_string_array(table.get("hosts"), "hosts")?;
+    if hosts.is_empty() {
+        return Err(ToolDiscoveryError::Invalid(
+            "gcp_id_token hosts must be non-empty".to_owned(),
+        ));
+    }
+    let audience = required_str(table, "audience")?.to_owned();
+    let header = optional_str(table, "header")
+        .map(|value| value.to_ascii_lowercase())
+        .map(validate_gcp_id_token_header)
+        .transpose()?;
+    Ok(ToolSecret::GcpIdToken(GcpIdTokenSecret {
+        secret_ref,
+        labels: labels.clone(),
+        hosts,
+        audience,
+        header,
     }))
 }
 
@@ -936,6 +976,9 @@ fn fragment_from_secrets(secrets: Vec<ToolSecret>) -> Result<ProxyFragment, Tool
         fragment.transforms.push(transform);
     }
     fragment.transforms.extend(gcp_auth_transforms(&secrets)?);
+    fragment
+        .transforms
+        .extend(gcp_id_token_transforms(&secrets)?);
     fragment.transforms.extend(aws_auth_transforms(&secrets)?);
     if let Some(transform) = oauth_token_transform(&secrets)? {
         fragment.transforms.push(transform);
@@ -1075,6 +1118,50 @@ fn gcp_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
         config.insert("labels".to_owned(), yaml_value(labels)?);
         transforms.push(Transform {
             name: "gcp_auth".to_owned(),
+            config: TransformConfig {
+                extra: config,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    Ok(transforms)
+}
+
+fn gcp_id_token_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDiscoveryError> {
+    type GcpIdTokenKey = (String, String, Option<String>);
+    let mut by_identity =
+        BTreeMap::<GcpIdTokenKey, (BTreeSet<String>, BTreeMap<String, String>)>::new();
+    for secret in secrets {
+        let ToolSecret::GcpIdToken(secret) = secret else {
+            continue;
+        };
+        let entry = by_identity
+            .entry((
+                secret.secret_ref.clone(),
+                secret.audience.clone(),
+                secret.header.clone(),
+            ))
+            .or_default();
+        entry.0.extend(secret.hosts.iter().cloned());
+        merge_tool_labels(&mut entry.1, &secret.labels);
+    }
+
+    let mut transforms = Vec::new();
+    for ((secret_ref, audience, header), (hosts, labels)) in by_identity {
+        let mut config = BTreeMap::new();
+        config.insert(
+            "keyfile".to_owned(),
+            yaml_map([("placeholder", yaml_string(&secret_ref))])?,
+        );
+        config.insert("audience".to_owned(), yaml_string(&audience));
+        if let Some(header) = &header {
+            config.insert("header".to_owned(), yaml_string(header));
+        }
+        config.insert("rules".to_owned(), yaml_value(host_rules(hosts)?)?);
+        config.insert("labels".to_owned(), yaml_value(labels)?);
+        transforms.push(Transform {
+            name: "gcp_id_token".to_owned(),
             config: TransformConfig {
                 extra: config,
                 ..Default::default()
@@ -1373,6 +1460,15 @@ fn optional_bool(table: &toml::Table, key: &str) -> Result<Option<bool>, ToolDis
     }
 }
 
+fn validate_gcp_id_token_header(value: String) -> Result<String, ToolDiscoveryError> {
+    match value.as_str() {
+        "authorization" | "x-serverless-authorization" => Ok(value),
+        _ => Err(ToolDiscoveryError::Invalid(format!(
+            "gcp_id_token header must be one of authorization, x-serverless-authorization, got {value:?}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1605,6 +1701,56 @@ secrets = [
 
         // No sandbox env rides along: the tool embeds its own throwaway SigV4
         // credentials, so aws_auth contributes nothing to placeholder env.
+        let placeholders =
+            centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
+        assert!(placeholders.is_empty());
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn discovers_gcp_id_token_tool_as_transform() {
+        let temp = temp_dir("api-rs-tools-gcp-id-token");
+        let base = temp.join("base");
+        write_tool(
+            &base.join("infra").join("cloudrun"),
+            r#"
+[project]
+description = "cloudrun"
+
+[tool.centaur]
+secrets = [
+  { type = "gcp_id_token", name = "CLOUD_RUN_KEYFILE", audience = "https://my-service-abc123-uc.a.run.app", header = "X-Serverless-Authorization", hosts = ["my-service-abc123-uc.a.run.app"] },
+]
+"#,
+        );
+
+        let discovered = discover_tool_proxy_fragment(std::slice::from_ref(&base)).unwrap();
+
+        assert_eq!(discovered.tool_count, 1);
+        assert_eq!(discovered.secret_count, 1);
+        let transform = discovered
+            .fragment
+            .transforms
+            .iter()
+            .find(|transform| transform.name == "gcp_id_token")
+            .expect("gcp_id_token transform present");
+        let config = &transform.config.extra;
+        assert_eq!(
+            config["keyfile"]["placeholder"].as_str(),
+            Some("CLOUD_RUN_KEYFILE")
+        );
+        assert_eq!(
+            config["audience"].as_str(),
+            Some("https://my-service-abc123-uc.a.run.app")
+        );
+        assert_eq!(
+            config["header"].as_str(),
+            Some("x-serverless-authorization")
+        );
+        assert_eq!(config["rules"].as_sequence().unwrap().len(), 1);
+        assert_eq!(config["labels"]["centaur-tool"].as_str(), Some("cloudrun"));
+
         let placeholders =
             centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
         assert!(placeholders.is_empty());

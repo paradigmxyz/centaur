@@ -125,6 +125,16 @@ pub struct GcpAuthSecret {
     pub scopes: Vec<String>,
 }
 
+/// A `type = "gcp_id_token"` secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcpIdTokenSecret {
+    pub name: String,
+    pub secret_ref: String,
+    pub hosts: Vec<String>,
+    pub audience: String,
+    pub header: Option<String>,
+}
+
 /// A `type = "pg_dsn"` secret: a Postgres upstream the proxy fronts. `name` is
 /// the DSN env var the sandbox reads, `secret_ref` resolves the upstream
 /// connection string, and `database` is the database to connect to. pg_dsn
@@ -208,6 +218,7 @@ pub enum ParsedSecret {
     Http(HttpSecret),
     OAuthToken(OAuthTokenSecret),
     GcpAuth(GcpAuthSecret),
+    GcpIdToken(GcpIdTokenSecret),
     PgDsn(PgDsnSecret),
     Hmac(HmacSignSecret),
     BrokerToken(BrokerTokenSecret),
@@ -221,6 +232,7 @@ impl ParsedSecret {
             ParsedSecret::Http(s) => &s.name,
             ParsedSecret::OAuthToken(s) => &s.name,
             ParsedSecret::GcpAuth(s) => &s.name,
+            ParsedSecret::GcpIdToken(s) => &s.name,
             ParsedSecret::PgDsn(s) => &s.name,
             ParsedSecret::Hmac(s) => &s.name,
             ParsedSecret::BrokerToken(s) => &s.name,
@@ -451,6 +463,11 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
         )?)),
         "oauth_token" => Ok(ParsedSecret::OAuthToken(parse_oauth(table, &name)?)),
         "gcp_auth" => Ok(ParsedSecret::GcpAuth(parse_gcp(table, &name, &secret_ref)?)),
+        "gcp_id_token" => Ok(ParsedSecret::GcpIdToken(parse_gcp_id_token(
+            table,
+            &name,
+            &secret_ref,
+        )?)),
         "pg_dsn" => Ok(ParsedSecret::PgDsn(parse_pg_dsn(
             table,
             &name,
@@ -646,6 +663,30 @@ fn parse_gcp(table: &toml::Table, name: &str, secret_ref: &str) -> Result<GcpAut
         secret_ref: secret_ref.to_owned(),
         hosts,
         scopes,
+    })
+}
+
+fn parse_gcp_id_token(
+    table: &toml::Table,
+    name: &str,
+    secret_ref: &str,
+) -> Result<GcpIdTokenSecret> {
+    let hosts = non_empty_str_array(table.get("hosts")).ok_or_else(|| {
+        eyre!("gcp_id_token entry {name:?} 'hosts' must be a non-empty array of non-empty strings")
+    })?;
+    let audience = req_str(table, "audience")
+        .wrap_err_with(|| format!("gcp_id_token entry {name:?} requires a non-empty 'audience'"))?;
+    let header = opt_str(table, "header")
+        .map(|value| value.to_ascii_lowercase())
+        .map(validate_gcp_id_token_header)
+        .transpose()
+        .wrap_err_with(|| format!("gcp_id_token entry {name:?}"))?;
+    Ok(GcpIdTokenSecret {
+        name: name.to_owned(),
+        secret_ref: secret_ref.to_owned(),
+        hosts,
+        audience,
+        header,
     })
 }
 
@@ -1011,6 +1052,15 @@ fn non_empty_str_array(value: Option<&Value>) -> Option<Vec<String>> {
         out.push(s.to_owned());
     }
     Some(out)
+}
+
+fn validate_gcp_id_token_header(value: String) -> Result<String> {
+    match value.as_str() {
+        "authorization" | "x-serverless-authorization" => Ok(value),
+        _ => {
+            bail!("header must be one of authorization, x-serverless-authorization, got {value:?}")
+        }
+    }
 }
 
 fn reject_keys(table: &toml::Table, name: &str, mode: &str, keys: &[&str]) -> Result<()> {

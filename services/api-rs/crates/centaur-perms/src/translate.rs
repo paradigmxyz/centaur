@@ -10,18 +10,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use centaur_iron_control::{
-    AwsAuthSecretInput, GcpAuthSecretInput, HmacSecretHeader, HmacSecretInput, InjectConfig,
-    OAuthTokenSecretInput, PgDsnSecretInput, PgDsnSettingInput, PgDsnSettingValueFromInput,
-    ReplaceConfig, RequestRule, SecretInput, SecretSource, StaticSecretInput,
-    gcp_auth_scopes_or_default, managed_labels, slugify, source_from_placeholder,
-    unique_foreign_id,
+    AwsAuthSecretInput, GcpAuthSecretInput, GcpIdTokenSecretInput, HmacSecretHeader,
+    HmacSecretInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput, PgDsnSettingInput,
+    PgDsnSettingValueFromInput, ReplaceConfig, RequestRule, SecretInput, SecretSource,
+    StaticSecretInput, gcp_auth_scopes_or_default, managed_labels, slugify,
+    source_from_placeholder, unique_foreign_id,
 };
 use centaur_iron_proxy::SourcePolicy;
 use centaur_iron_proxy::{PgDsnSetting, PgDsnSettingValueFrom};
 
 use crate::tools::{
-    AwsAuthSecret, BrokerTokenSecret, FieldSource, GcpAuthSecret, HmacSignSecret, HttpSecret,
-    OAuthTokenSecret, ParsedSecret, PgDsnSecret, SecretMode,
+    AwsAuthSecret, BrokerTokenSecret, FieldSource, GcpAuthSecret, GcpIdTokenSecret, HmacSignSecret,
+    HttpSecret, OAuthTokenSecret, ParsedSecret, PgDsnSecret, SecretMode,
 };
 
 /// The result of translating a tool's secrets: the iron-control inputs to upsert.
@@ -107,6 +107,16 @@ fn translate_with_labels(
             }
             ParsedSecret::GcpAuth(gcp) => {
                 out.inputs.push(SecretInput::GcpAuth(gcp_input(
+                    namespace,
+                    role_foreign_id,
+                    gcp,
+                    policy,
+                    labels,
+                    &mut used,
+                )));
+            }
+            ParsedSecret::GcpIdToken(gcp) => {
+                out.inputs.push(SecretInput::GcpIdToken(gcp_id_token_input(
                     namespace,
                     role_foreign_id,
                     gcp,
@@ -247,6 +257,32 @@ fn gcp_input(
         subject: None,
         keyfile: Some(source_from_placeholder(policy, &gcp.secret_ref, None)),
         credentials_provider: None,
+        rules: rules_from_hosts(&gcp.hosts),
+    }
+}
+
+fn gcp_id_token_input(
+    namespace: &str,
+    role: &str,
+    gcp: &GcpIdTokenSecret,
+    policy: &SourcePolicy,
+    labels: &BTreeMap<String, String>,
+    used: &mut BTreeSet<String>,
+) -> GcpIdTokenSecretInput {
+    let mut identity = format!("{}-{}", gcp.secret_ref, gcp.audience);
+    if let Some(header) = &gcp.header {
+        identity.push('-');
+        identity.push_str(header);
+    }
+    GcpIdTokenSecretInput {
+        namespace: namespace.to_owned(),
+        foreign_id: unique_foreign_id(format!("{role}-gcp-id-token-{}", slugify(&identity)), used),
+        name: Some(format!("GCP ID Token ({role})")),
+        description: None,
+        labels: labels.clone(),
+        audience: gcp.audience.clone(),
+        header: gcp.header.clone(),
+        keyfile: source_from_placeholder(policy, &gcp.secret_ref, None),
         rules: rules_from_hosts(&gcp.hosts),
     }
 }

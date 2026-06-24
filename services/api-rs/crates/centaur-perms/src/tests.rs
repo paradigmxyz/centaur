@@ -308,6 +308,37 @@ fn parses_aws_auth_with_session_token_and_regions() {
 }
 
 #[test]
+fn parses_gcp_id_token_secret() {
+    let parsed = tools::parse_secret(
+        &entry(
+            r#"{ type = "gcp_id_token", name = "CLOUD_RUN_KEYFILE", audience = "https://my-service-abc123-uc.a.run.app", header = "X-Serverless-Authorization", hosts = ["my-service-abc123-uc.a.run.app"] }"#,
+        ),
+        &[],
+    )
+    .unwrap();
+    let ParsedSecret::GcpIdToken(gcp) = parsed else {
+        panic!("expected gcp_id_token")
+    };
+    assert_eq!(gcp.name, "CLOUD_RUN_KEYFILE");
+    assert_eq!(gcp.secret_ref, "CLOUD_RUN_KEYFILE");
+    assert_eq!(gcp.audience, "https://my-service-abc123-uc.a.run.app");
+    assert_eq!(gcp.header.as_deref(), Some("x-serverless-authorization"));
+    assert_eq!(gcp.hosts, vec!["my-service-abc123-uc.a.run.app"]);
+}
+
+#[test]
+fn gcp_id_token_requires_audience() {
+    let err = tools::parse_secret(
+        &entry(
+            r#"{ type = "gcp_id_token", name = "CLOUD_RUN_KEYFILE", hosts = ["my-service-abc123-uc.a.run.app"] }"#,
+        ),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("audience"), "{err}");
+}
+
+#[test]
 fn aws_auth_requires_access_key_id() {
     let err = tools::parse_secret(
         &entry(
@@ -438,6 +469,43 @@ fn translates_gcp_auth_defaults_scopes_when_unset() {
     assert_eq!(
         input.scopes,
         vec!["https://www.googleapis.com/auth/cloud-platform".to_owned()]
+    );
+}
+
+#[test]
+fn translates_gcp_id_token_to_input() {
+    let secrets = vec![
+        tools::parse_secret(
+            &entry(
+                r#"{ type = "gcp_id_token", name = "CLOUD_RUN_KEYFILE", audience = "https://my-service-abc123-uc.a.run.app", header = "x-serverless-authorization", hosts = ["my-service-abc123-uc.a.run.app"] }"#,
+            ),
+            &[],
+        )
+        .unwrap(),
+    ];
+    let out = translate::translate("default", "tool-cloudrun", &secrets, &SourcePolicy::env());
+    let SecretInput::GcpIdToken(input) = &out.inputs[0] else {
+        panic!("expected gcp_id_token")
+    };
+    assert_eq!(
+        input.foreign_id,
+        "tool-cloudrun-gcp-id-token-cloud-run-keyfile-https-my-service-abc123-uc-a-run-app-x-serverless-authorization"
+    );
+    assert_eq!(input.name.as_deref(), Some("GCP ID Token (tool-cloudrun)"));
+    assert_eq!(
+        input.audience,
+        "https://my-service-abc123-uc.a.run.app".to_owned()
+    );
+    assert_eq!(input.header.as_deref(), Some("x-serverless-authorization"));
+    assert_eq!(input.keyfile.source_type, "env");
+    assert_eq!(
+        input.keyfile.config,
+        serde_json::json!({ "var": "CLOUD_RUN_KEYFILE" })
+    );
+    assert_eq!(input.rules.len(), 1);
+    assert_eq!(
+        input.rules[0].host.as_deref(),
+        Some("my-service-abc123-uc.a.run.app")
     );
 }
 

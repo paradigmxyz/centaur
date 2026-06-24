@@ -125,8 +125,8 @@ enum SecretsCmd {
 
 #[derive(Args, Debug)]
 struct SecretSelector {
-    /// Secret OID (`ssr_`/`ots_`/`gas_`/`pgs_`/`hms_`/`aas_`) or `foreign_id`. A
-    /// `foreign_id` is resolved by trying each secret type in turn.
+    /// Secret OID (`ssr_`/`ots_`/`gas_`/`gid_`/`pgs_`/`hms_`/`aas_`) or
+    /// `foreign_id`. A `foreign_id` is resolved by trying each secret type in turn.
     secret: String,
 }
 
@@ -255,7 +255,8 @@ struct PrincipalGrantArgs {
     #[arg(long = "role", value_name = "FOREIGN_ID")]
     roles: Vec<String>,
 
-    /// Secret OID (`ssr_`/`ots_`/`gas_`/`hms_`) to grant/revoke directly. Repeatable.
+    /// Secret OID (`ssr_`/`ots_`/`gas_`/`gid_`/`pgs_`/`hms_`/`aas_`) to
+    /// grant/revoke directly. Repeatable.
     #[arg(long = "secret", value_name = "OID")]
     secrets: Vec<String>,
 
@@ -275,7 +276,8 @@ struct RoleSecretArgs {
     /// Role `foreign_id` (e.g. `infra`, `tools`, `tool-github`) or OID.
     role: String,
 
-    /// Secret OID (`ssr_`/`ots_`/`gas_`/`hms_`) to grant/revoke. Repeatable.
+    /// Secret OID (`ssr_`/`ots_`/`gas_`/`gid_`/`pgs_`/`hms_`/`aas_`) to
+    /// grant/revoke. Repeatable.
     #[arg(long = "secret", value_name = "OID", required = true)]
     secrets: Vec<String>,
 }
@@ -285,7 +287,8 @@ struct RoleGrantArgs {
     /// Role `foreign_id` (e.g. `infra`, `tools`, `tool-github`) or OID.
     role: String,
 
-    /// Existing secret OID (`ssr_`/`ots_`/`gas_`/`hms_`) to grant. Repeatable.
+    /// Existing secret OID (`ssr_`/`ots_`/`gas_`/`gid_`/`pgs_`/`hms_`/`aas_`) to
+    /// grant. Repeatable.
     #[arg(long = "secret", value_name = "OID")]
     secrets: Vec<String>,
 
@@ -1002,7 +1005,7 @@ fn grant_secret_from_oid(oid: &str) -> Result<GrantSecret> {
     match GrantSecret::from_oid(oid) {
         Some(secret) => Ok(secret),
         None => {
-            bail!("--secret expects a secret OID (ssr_/ots_/gas_/pgs_/hms_/aas_), got {oid:?}")
+            bail!("--secret expects a secret OID (ssr_/ots_/gas_/gid_/pgs_/hms_/aas_), got {oid:?}")
         }
     }
 }

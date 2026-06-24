@@ -184,12 +184,13 @@ pub async fn grant_inputs_to_role(
 ///
 /// Only the transform shapes Centaur uses are translated: the ``secrets``
 /// transform (replace and inject, including ``token_broker`` sources),
-/// ``oauth_token``, ``gcp_auth``, and ``aws_auth``. Postgres listeners translate
-/// to ``pg_dsn`` secrets (one per listener). ``hmac_sign`` errors out here: it
-/// is represented in iron-control (see [`HmacSecretInput`]), but only the infra
-/// and harness fragments flow through this fragment translator and none sign
-/// requests — tool ``hmac_sign`` secrets are operator-managed via the
-/// ``centaur-perms`` CLI, which parses ``pyproject.toml`` directly.
+/// ``oauth_token``, ``gcp_auth``, ``gcp_id_token``, and ``aws_auth``. Postgres
+/// listeners translate to ``pg_dsn`` secrets (one per listener). ``hmac_sign``
+/// errors out here: it is represented in iron-control (see [`HmacSecretInput`]),
+/// but only the infra and harness fragments flow through this fragment
+/// translator and none sign requests — tool ``hmac_sign`` secrets are
+/// operator-managed via the ``centaur-perms`` CLI, which parses
+/// ``pyproject.toml`` directly.
 pub fn secret_inputs_from_fragment(
     namespace: &str,
     role_foreign_id: &str,
@@ -229,6 +230,12 @@ pub fn secret_inputs_from_fragment(
                     input.foreign_id = Some(unique_foreign_id(foreign_id, &mut used_foreign_ids));
                 }
                 inputs.push(SecretInput::GcpAuth(input));
+            }
+            "gcp_id_token" => {
+                let mut input =
+                    gcp_id_token_from_transform(namespace, role_foreign_id, transform, policy)?;
+                input.foreign_id = unique_foreign_id(input.foreign_id, &mut used_foreign_ids);
+                inputs.push(SecretInput::GcpIdToken(input));
             }
             "hmac_sign" => {
                 // Representable in iron-control, but never reached: only infra/
@@ -746,6 +753,63 @@ fn gcp_auth_from_transform(
 }
 
 // ---------------------------------------------------------------------------
+// GCP ID token secrets
+// ---------------------------------------------------------------------------
+
+fn gcp_id_token_from_transform(
+    namespace: &str,
+    role: &str,
+    transform: &centaur_iron_proxy::Transform,
+    policy: &SourcePolicy,
+) -> Result<GcpIdTokenSecretInput, TranslateError> {
+    let config = &transform.config.extra;
+    let audience = config
+        .get("audience")
+        .and_then(YamlValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| malformed(role, "gcp_id_token missing audience"))?;
+    let keyfile_value = config
+        .get("keyfile")
+        .ok_or_else(|| malformed(role, "gcp_id_token missing keyfile"))?;
+    let placeholder = yaml_str(keyfile_value, "placeholder")
+        .or_else(|| keyfile_value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| malformed(role, "gcp_id_token keyfile must be a placeholder"))?;
+    let rules = rules_from_values(role, &sequence(config.get("rules")))?;
+    if rules.is_empty() {
+        return Err(malformed(
+            role,
+            "gcp_id_token must declare at least one rule",
+        ));
+    }
+    let header = config
+        .get("header")
+        .and_then(YamlValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    let mut identity = format!("{placeholder}-{audience}");
+    if let Some(header) = &header {
+        identity.push('-');
+        identity.push_str(header);
+    }
+    Ok(GcpIdTokenSecretInput {
+        namespace: namespace.to_owned(),
+        foreign_id: format!("{role}-gcp-id-token-{}", slugify(&identity)),
+        name: Some(format!("GCP ID Token ({role})")),
+        description: None,
+        labels: resource_labels(config.get("labels")),
+        audience: audience.to_owned(),
+        header,
+        keyfile: source_from_placeholder(policy, placeholder, None),
+        rules,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // AWS auth secrets
 // ---------------------------------------------------------------------------
 
@@ -1142,6 +1206,73 @@ transforms:
             input.rules[0].host.as_deref(),
             Some("logs.us-east-1.amazonaws.com")
         );
+    }
+
+    #[test]
+    fn translates_gcp_id_token_transform() {
+        let fragment = load_fragment_str(
+            r#"
+transforms:
+  - name: gcp_id_token
+    config:
+      keyfile: { placeholder: CLOUD_RUN_KEYFILE }
+      audience: https://my-service-abc123-uc.a.run.app
+      header: x-serverless-authorization
+      labels:
+        centaur-tool: cloud-run
+      rules:
+        - { host: my-service-abc123-uc.a.run.app, http_methods: [POST] }
+"#,
+        )
+        .unwrap();
+        let inputs =
+            secret_inputs_from_fragment("default", "infra", &fragment, &env_policy()).unwrap();
+        let SecretInput::GcpIdToken(input) = &inputs[0] else {
+            panic!("expected a gcp_id_token secret");
+        };
+        assert_eq!(
+            input.foreign_id,
+            "infra-gcp-id-token-cloud-run-keyfile-https-my-service-abc123-uc-a-run-app-x-serverless-authorization"
+        );
+        assert_eq!(input.name.as_deref(), Some("GCP ID Token (infra)"));
+        assert_eq!(
+            input.audience,
+            "https://my-service-abc123-uc.a.run.app".to_owned()
+        );
+        assert_eq!(input.header.as_deref(), Some("x-serverless-authorization"));
+        assert_eq!(input.keyfile.source_type, "env");
+        assert_eq!(input.keyfile.config, json!({ "var": "CLOUD_RUN_KEYFILE" }));
+        assert_eq!(
+            input.labels.get("managed-by").map(String::as_str),
+            Some("centaur")
+        );
+        assert_eq!(
+            input.labels.get("centaur-tool").map(String::as_str),
+            Some("cloud-run")
+        );
+        assert_eq!(input.rules.len(), 1);
+        assert_eq!(
+            input.rules[0].host.as_deref(),
+            Some("my-service-abc123-uc.a.run.app")
+        );
+        assert_eq!(input.rules[0].http_methods, vec!["POST".to_owned()]);
+    }
+
+    #[test]
+    fn gcp_id_token_requires_rules() {
+        let fragment = load_fragment_str(
+            r#"
+transforms:
+  - name: gcp_id_token
+    config:
+      keyfile: { placeholder: CLOUD_RUN_KEYFILE }
+      audience: https://my-service-abc123-uc.a.run.app
+"#,
+        )
+        .unwrap();
+        let err =
+            secret_inputs_from_fragment("default", "infra", &fragment, &env_policy()).unwrap_err();
+        assert!(matches!(err, TranslateError::Malformed { .. }), "{err:?}");
     }
 
     #[test]
