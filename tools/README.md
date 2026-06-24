@@ -46,6 +46,8 @@ The open-source tool inventory lives in this `tools/` tree and changes over time
 
 - `centaur_investigator`: parse Centaur Slack thread references and enrich them
   with best-effort vlogs/vmetrics context without exposing message context.
+- `preqin`: query Preqin Operational API fund and fund-manager data, with
+  redacted auth diagnostics for `PREQIN_*` credentials.
 
 ## Sandbox Tool Paths
 

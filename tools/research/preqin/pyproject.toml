@@ -1,0 +1,32 @@
+[project]
+name = "preqin"
+description = "Preqin Operational API and Feeds API client for fund and fund-manager data"
+version = "0.1.1"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+preqin = "centaur_tool_preqin.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["centaur_tool_preqin"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"
+hosts = ["api.preqin.com", "id.preqin.com", "feeds.preqin.com"]
+optional_secrets = [
+    "PREQIN_USERNAME",
+    "PREQIN_API_KEY",
+    "PREQIN_PASSWORD",
+    "PREQIN_CLIENT_ID",
+    "PREQIN_CLIENT_SECRET",
+]
