@@ -3297,7 +3297,8 @@ describe('slackbotv2', () => {
 
     bot = createTestBot({ triggerBotAllowlist: ['bot:BOTHERBOT'] })
     codexApi.reset()
-    const allowedBotChannelMessage = await postUserMessage(`<@${BOT_USER_ID}> from allowed bot message`)
+    const labeledBotMention = `<@${BOT_USER_ID}|centaur> from allowed bot message`
+    const allowedBotChannelMessage = await postUserMessage(labeledBotMention)
     slackApi.reset()
     const allowedBotChannelWaits: Promise<unknown>[] = []
     const allowedBotChannelResponse = await bot.app.request(
@@ -3316,7 +3317,7 @@ describe('slackbotv2', () => {
           channel: CHANNEL_ID,
           subtype: 'bot_message',
           team: TEAM_ID,
-          text: `<@${BOT_USER_ID}> from allowed bot message`,
+          text: labeledBotMention,
           ts: allowedBotChannelMessage.ts,
           username: 'otherbot'
         }

@@ -219,14 +219,15 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
  
  // src/cards.ts
  import {
-@@ -2004,7 +2214,9 @@ var SlackAdapter = class _SlackAdapter {
+@@ -2004,7 +2214,10 @@ var SlackAdapter = class _SlackAdapter {
        channel: event.channel,
        threadTs
      });
 -    const isMention = event.type === "app_mention";
-+    const isMention = event.type === "app_mention" || Boolean(
-+      this._botUserId && typeof event.text === "string" && event.text.includes(`<@${this._botUserId}>`) && (event.bot_id || event.subtype === "bot_message")
++    const botMentioned = Boolean(
++      this._botUserId && typeof event.text === "string" && (event.text.includes(`<@${this._botUserId}>`) || event.text.includes(`<@${this._botUserId}|`))
 +    );
++    const isMention = event.type === "app_mention" || botMentioned && (event.bot_id || event.subtype === "bot_message");
      const factory = async () => {
        const msg = await this.parseSlackMessage(event, threadId);
        if (isMention) {
