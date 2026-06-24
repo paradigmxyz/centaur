@@ -37,7 +37,7 @@ module SlackDm
     end
 
     def credential
-      BrokerCredential.create!(
+      @credential ||= BrokerCredential.create!(
         oauth_app: slack_app,
         namespace: "acme",
         foreign_id: "slack-dms-#{SecureRandom.hex(6)}",
