@@ -187,7 +187,8 @@ spec:
         - protocol: TCP
           port: 5432
 {{- end }}
-    # Per-sandbox iron-proxy listeners (HTTP proxy + postgres port).
+    # Per-sandbox iron-proxy listeners (HTTP proxy + postgres port) plus the
+    # management API api-rs uses as the warm-claim sync barrier.
     - to:
         - podSelector:
             matchLabels:
@@ -197,6 +198,8 @@ spec:
           port: {{ .Values.ironProxy.service.proxyPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.pgPort }}
+        - protocol: TCP
+          port: {{ .Values.ironProxy.service.managementPort }}
 {{- if $console.enabled }}
     # console control plane: register principals/roles/grants and per-sandbox proxies.
     - to:
