@@ -30,6 +30,7 @@ import {
   isRetryableSessionApiError,
   openSessionEventStream,
   serializeAttachment,
+  serializeMessageLinks,
   serializeMessage,
   sessionStreamError
 } from './session-api'
@@ -2079,6 +2080,7 @@ async function slackApiMessageFromSlack(
     displayTextSource: displayText.source,
     id,
     isMention: id === currentMessage.id ? currentMessage.isMention === true : false,
+    links: serializeMessageLinks(undefined, message),
     raw: message,
     rawSlackAttachmentCount: displayText.rawAttachmentCount,
     rawSlackBlockCount: displayText.rawBlockCount,

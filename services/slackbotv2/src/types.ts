@@ -30,6 +30,15 @@ export type SlackbotV2ApiAttachment = {
   width?: number
 }
 
+export type SlackbotV2ApiMessageLink = {
+  description?: string
+  imageUrl?: string
+  isSlackMessage?: boolean
+  siteName?: string
+  title?: string
+  url: string
+}
+
 export type SlackbotV2ApiMessage = {
   attachments: SlackbotV2ApiAttachment[]
   author: SlackbotV2ApiAuthor
@@ -37,6 +46,7 @@ export type SlackbotV2ApiMessage = {
   displayTextSource?: SlackDisplayTextSource
   id: string
   isMention: boolean
+  links?: SlackbotV2ApiMessageLink[]
   raw: unknown
   rawSlackAttachmentCount?: number
   rawSlackBlockCount?: number

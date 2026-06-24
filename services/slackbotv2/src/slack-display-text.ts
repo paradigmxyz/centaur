@@ -56,13 +56,68 @@ export function renderSlackDisplayText(input: { raw: unknown; text: string }): S
 export function slackMessagePromptText(message: {
   displayText?: string
   displayTextSource?: SlackDisplayTextSource
+  links?: PromptLink[]
   text: string
 }): string {
   const source = message.displayTextSource
-  if ((source === 'raw_blocks' || source === 'raw_attachments') && message.displayText) {
-    return message.displayText
+  const text =
+    (source === 'raw_blocks' || source === 'raw_attachments') && message.displayText
+      ? message.displayText
+      : message.text
+  const links = promptLinksText(message.links, text)
+  return [text, links].filter(part => part.trim()).join('\n\n')
+}
+
+type PromptLink = {
+  description?: string
+  isSlackMessage?: boolean
+  siteName?: string
+  title?: string
+  url: string
+}
+
+function promptLinksText(
+  links: readonly PromptLink[] | undefined,
+  existingText: string
+): string {
+  const normalized = normalizePromptLinks(links).filter(link => !existingText.includes(link.url))
+  if (normalized.length === 0) return ''
+
+  const hasSlackMessageLink = normalized.some(link => link.isSlackMessage)
+  const lines = ['Links included in the Slack message:']
+  if (hasSlackMessageLink) {
+    lines.push(
+      'If the request is context-dependent, inspect linked Slack message/thread links before responding.'
+    )
   }
-  return message.text
+  for (const link of normalized) {
+    lines.push(`- ${promptLinkLine(link)}`)
+  }
+  return lines.join('\n')
+}
+
+function normalizePromptLinks(
+  links: readonly PromptLink[] | undefined
+): PromptLink[] {
+  const seen = new Set<string>()
+  const normalized: PromptLink[] = []
+  for (const link of links ?? []) {
+    const url = link.url.trim()
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    normalized.push({ ...link, url })
+  }
+  return normalized
+}
+
+function promptLinkLine(link: PromptLink): string {
+  const fields = [
+    link.isSlackMessage ? `Slack message/thread: ${link.url}` : link.url,
+    link.title ? `Title: ${link.title}` : undefined,
+    link.description ? `Description: ${link.description}` : undefined,
+    link.siteName ? `Site: ${link.siteName}` : undefined
+  ].filter(Boolean)
+  return fields.join(' | ')
 }
 
 function slackMessageRecords(raw: unknown): UnknownRecord[] {

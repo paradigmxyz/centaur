@@ -262,6 +262,78 @@ describe('Slack display text fallback', () => {
     )
     expect(lineContent(line).at(-1)).toEqual({ type: 'text', text: expected })
   })
+
+  test('forwards hidden Slack message links with non-empty adapter text', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const slackUrl = 'https://acme.slack.com/archives/C1234567890/p1700000000000100'
+    const serialized = await serializeMessage({
+      attachments: [],
+      author: {
+        fullName: 'Test User',
+        isBot: false,
+        isMe: false,
+        userId: 'U1',
+        userName: 'test'
+      },
+      id: '1700000000.000100',
+      isMention: true,
+      links: [],
+      metadata: { dateSent: new Date('2026-06-10T00:00:00.000Z') },
+      raw: {
+        blocks: [
+          {
+            elements: [
+              {
+                elements: [
+                  { text: 'continue', type: 'text' },
+                  { text: 'source thread', type: 'link', url: slackUrl }
+                ],
+                type: 'rich_text_section'
+              }
+            ],
+            type: 'rich_text'
+          }
+        ],
+        team_id: 'T1'
+      },
+      text: 'continue',
+      threadId: 'slack:C1:1700000000.000100'
+    } as unknown as Parameters<typeof serializeMessage>[0])
+
+    await forwardToSessionApi(options(fetchFn), forwardInput(serialized))
+
+    expect(serialized.links).toEqual([{ isSlackMessage: true, url: slackUrl }])
+    const expected = [
+      'continue',
+      '',
+      'Links included in the Slack message:',
+      'If the request is context-dependent, inspect linked Slack message/thread links before responding.',
+      `- Slack message/thread: ${slackUrl}`
+    ].join('\n')
+    expect(appendedTextParts(requests)).toContain(expected)
+
+    const line = executeLine(requests)
+    expect(line.trace_metadata).toEqual(
+      expect.objectContaining({
+        slack_link_count: 1,
+        slack_text_source: 'text'
+      })
+    )
+    expect(lineContent(line).at(-1)).toEqual({ type: 'text', text: expected })
+  })
+
+  test('does not duplicate links already visible in Slack text', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const slackUrl = 'https://acme.slack.com/archives/C1234567890/p1700000000000100'
+    const message = apiMessage(`continue (${slackUrl})`, {
+      links: [{ isSlackMessage: true, url: slackUrl }]
+    })
+
+    await forwardToSessionApi(options(fetchFn), forwardInput(message))
+
+    expect(appendedTextParts(requests)).toContain(`continue (${slackUrl})`)
+    expect(appendedTextParts(requests).join('\n')).not.toContain('Links included in the Slack message')
+  })
 })
 
 describe('forwardToSessionApi overrides', () => {

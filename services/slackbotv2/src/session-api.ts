@@ -1,11 +1,12 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
-import type { Attachment, Message } from 'chat'
+import type { Attachment, LinkPreview, Message } from 'chat'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
   JsonObject,
   JsonValue,
   SlackbotV2ApiAttachment,
+  SlackbotV2ApiMessageLink,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
   SlackbotV2CreateSessionRequest,
@@ -214,6 +215,7 @@ export async function serializeMessage(message: Message): Promise<SlackbotV2ApiM
     displayTextSource: displayText.source,
     id: message.id,
     isMention: message.isMention === true,
+    links: serializeMessageLinks(message.links, message.raw),
     raw: message.raw,
     rawSlackAttachmentCount: displayText.rawAttachmentCount,
     rawSlackBlockCount: displayText.rawBlockCount,
@@ -222,6 +224,133 @@ export async function serializeMessage(message: Message): Promise<SlackbotV2ApiM
     threadId: message.threadId,
     timestamp: message.metadata.dateSent.toISOString()
   }
+}
+
+const SLACK_MESSAGE_URL_PATTERN = /^https:\/\/[^/\s]+\.slack\.com\/archives\/[A-Z0-9]+\/p\d+/i
+
+export function serializeMessageLinks(
+  links: readonly LinkPreview[] | undefined,
+  raw: unknown
+): SlackbotV2ApiMessageLink[] | undefined {
+  return normalizeApiLinks([
+    ...(links ?? []).map(serializeLinkPreview),
+    ...extractRawSlackLinks(raw)
+  ])
+}
+
+function serializeLinkPreview(link: LinkPreview): SlackbotV2ApiMessageLink {
+  return {
+    description: link.description,
+    imageUrl: link.imageUrl,
+    isSlackMessage: Boolean(link.fetchMessage) || isSlackMessageUrl(link.url),
+    siteName: link.siteName,
+    title: link.title,
+    url: link.url
+  }
+}
+
+function extractRawSlackLinks(raw: unknown): SlackbotV2ApiMessageLink[] {
+  const links: SlackbotV2ApiMessageLink[] = []
+  for (const record of slackRawRecords(raw)) {
+    extractRawSlackBlockLinks(record.blocks, links)
+    extractRawSlackTextLinks(record.text, links)
+    extractRawSlackAttachmentLinks(record.attachments, links)
+  }
+  return links
+}
+
+function slackRawRecords(raw: unknown): JsonObject[] {
+  const records: JsonObject[] = []
+  const seen = new Set<JsonObject>()
+  const add = (value: unknown): void => {
+    if (!isJsonObject(value) || seen.has(value)) return
+    records.push(value)
+    seen.add(value)
+  }
+
+  add(raw)
+  if (isJsonObject(raw)) {
+    add(raw.event)
+    add(raw.message)
+    if (isJsonObject(raw.event)) add(raw.event.message)
+  }
+  return records
+}
+
+function extractRawSlackBlockLinks(
+  value: JsonValue | undefined,
+  links: SlackbotV2ApiMessageLink[]
+): void {
+  if (!Array.isArray(value)) return
+  for (const block of value) extractRawSlackElementLinks(block, links)
+}
+
+function extractRawSlackElementLinks(
+  value: JsonValue | undefined,
+  links: SlackbotV2ApiMessageLink[]
+): void {
+  if (!isJsonObject(value)) return
+  if (value.type === 'link') {
+    const url = stringValue(value.url)
+    if (url) links.push({ isSlackMessage: isSlackMessageUrl(url), url })
+  }
+  for (const key of ['elements', 'fields']) {
+    const children = value[key]
+    if (Array.isArray(children)) {
+      for (const child of children) extractRawSlackElementLinks(child, links)
+    }
+  }
+  extractRawSlackElementLinks(value.text, links)
+  extractRawSlackElementLinks(value.accessory, links)
+}
+
+function extractRawSlackTextLinks(
+  value: JsonValue | undefined,
+  links: SlackbotV2ApiMessageLink[]
+): void {
+  const text = stringValue(value)
+  if (!text) return
+  for (const match of text.matchAll(/<([a-z]+:\/\/[^>|]+)(?:\|[^>]+)?>/gi)) {
+    const url = match[1]
+    if (url) links.push({ isSlackMessage: isSlackMessageUrl(url), url })
+  }
+}
+
+function extractRawSlackAttachmentLinks(
+  value: JsonValue | undefined,
+  links: SlackbotV2ApiMessageLink[]
+): void {
+  if (!Array.isArray(value)) return
+  for (const attachment of value) {
+    if (!isJsonObject(attachment)) continue
+    const url = stringValue(attachment.from_url) ?? stringValue(attachment.original_url)
+    if (!url) continue
+    links.push({
+      description: stringValue(attachment.text),
+      isSlackMessage: isSlackMessageUrl(url),
+      siteName: stringValue(attachment.service_name),
+      title: stringValue(attachment.title),
+      url
+    })
+  }
+}
+
+function normalizeApiLinks(
+  links: SlackbotV2ApiMessageLink[]
+): SlackbotV2ApiMessageLink[] | undefined {
+  const seen = new Set<string>()
+  const normalized: SlackbotV2ApiMessageLink[] = []
+  for (const link of links) {
+    const url = link.url.trim()
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    normalized.push({ ...link, url })
+  }
+  return normalized.length > 0 ? normalized : undefined
+}
+
+function isSlackMessageUrl(url: string): boolean {
+  return SLACK_MESSAGE_URL_PATTERN.test(url)
 }
 
 function slackTeamId(raw: unknown): string | undefined {
@@ -1131,6 +1260,7 @@ function sessionSlackTextMetadata(message: SlackbotV2ApiMessage): JsonObject {
   if (typeof message.rawSlackAttachmentCount === 'number') {
     fields.slack_raw_attachment_count = message.rawSlackAttachmentCount
   }
+  if (message.links?.length) fields.slack_link_count = message.links.length
   return fields
 }
 
