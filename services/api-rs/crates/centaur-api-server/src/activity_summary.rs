@@ -607,6 +607,9 @@ impl ActivitySummaryClient {
             });
         }
         let value = serde_json::from_str::<Value>(&body)?;
+        if let Some(reason) = string_at(&value, &["incomplete_details", "reason"]) {
+            return Err(ActivitySummaryError::Incomplete { reason });
+        }
         extract_response_text(&value).ok_or(ActivitySummaryError::MissingOutputText)
     }
 }
@@ -772,6 +775,8 @@ pub(crate) enum ActivitySummaryError {
     Http(#[from] reqwest::Error),
     #[error("activity summary OpenAI request failed with {status}: {body}")]
     OpenAiStatus { status: StatusCode, body: String },
+    #[error("activity summary OpenAI response incomplete: {reason}")]
+    Incomplete { reason: String },
     #[error("activity summary OpenAI response did not include output text")]
     MissingOutputText,
     #[error("activity summary 1Password Connect request failed with {status} at {path}")]
@@ -864,6 +869,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(text, "The agent is inspecting events.");
+    }
+
+    #[test]
+    fn detects_incomplete_responses_body() {
+        let reason = string_at(
+            &json!({
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [
+                    {"type": "reasoning", "content": [], "summary": []}
+                ]
+            }),
+            &["incomplete_details", "reason"],
+        )
+        .unwrap();
+
+        assert_eq!(reason, "max_output_tokens");
     }
 
     #[test]
