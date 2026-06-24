@@ -51,6 +51,8 @@ module SlackDm
         sync_history(conversation, home_team_id, checkpoints[conversation.fetch("id")], batch)
         batch[:run][:conversations_synced] += 1
       rescue StandardError => e
+        raise if Rails.env.test?
+
         batch[:run][:conversations_failed] += 1
         Rails.logger.warn do
           "slack DM sync failed for conversation #{conversation['id']}: #{e.class}: #{e.message}"
