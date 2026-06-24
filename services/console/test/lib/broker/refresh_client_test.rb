@@ -51,6 +51,28 @@ module Broker
       assert_equal "k", http.captured[:headers]["X-Api-Key"]
     end
 
+    test "form carries the password grant and optional fields" do
+      client, http = client_with(status: 200, body: { access_token: "AT", refresh_token: "RT", expires_in: 60 }.to_json)
+      client.refresh(
+        token_endpoint: "https://idp.example/token",
+        grant: "password",
+        client_id: "cid",
+        client_secret: "sec",
+        username: "user",
+        password: "pass",
+        scopes: %w[a b],
+        headers: { "X-Api-Key" => "k" }
+      )
+      form = http.captured[:form]
+      assert_equal "password", form["grant_type"]
+      assert_equal "user", form["username"]
+      assert_equal "pass", form["password"]
+      assert_equal "cid", form["client_id"]
+      assert_equal "sec", form["client_secret"]
+      assert_equal "a b", form["scope"]
+      assert_equal "k", http.captured[:headers]["X-Api-Key"]
+    end
+
     test "absent refresh_token in response means no rotation" do
       client, _ = client_with(status: 200, body: { access_token: "AT", expires_in: 60 }.to_json)
       result = client.refresh(**base_args)
@@ -107,6 +129,14 @@ module Broker
       client, _ = client_with(status: 200, body: "{}")
       assert_raises(ArgumentError) { client.refresh(**base_args(refresh_token: "")) }
       assert_raises(ArgumentError) { client.refresh(**base_args(client_id: "")) }
+      assert_raises(ArgumentError) do
+        client.refresh(token_endpoint: "https://idp.example/token", grant: "password",
+                       client_id: "cid", username: "", password: "pass")
+      end
+      assert_raises(ArgumentError) do
+        client.refresh(token_endpoint: "https://idp.example/token", grant: "device_code",
+                       client_id: "cid")
+      end
     end
   end
 end

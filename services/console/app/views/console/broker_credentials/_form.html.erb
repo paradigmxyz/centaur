@@ -1,3 +1,5 @@
+<% selected_grant = credential.grant.presence || "refresh_token" %>
+
 <%= form_with model: [ :console, credential ], data: { turbo: false } do %>
   <div class="space-y-6">
     <section class="form-section">
@@ -88,19 +90,38 @@
       </div>
     </section>
 
-    <section class="form-section">
+    <section class="form-section" data-controller="toggle">
       <h2 class="form-section-heading">Bootstrap</h2>
-      <div>
-        <label class="form-label" for="credential_refresh_token">Refresh token<%= " *".html_safe if credential.new_record? %></label>
+      <div class="mb-4 flex flex-wrap gap-3">
+        <% BrokerCredential::GRANTS.each do |grant| %>
+          <label class="inline-flex items-center gap-2 rounded border border-ink-600 px-3 py-2 text-sm text-zinc-200">
+            <%= radio_button_tag "credential[grant]", grant, selected_grant == grant,
+                  data: { action: "toggle#update" } %>
+            <span><%= grant.tr("_", " ") %></span>
+          </label>
+        <% end %>
+      </div>
+      <%= field_error(credential, :grant) %>
+
+      <div data-toggle-target="panel" data-toggle-key="refresh_token">
+        <label class="form-label" for="credential_refresh_token">Refresh token</label>
         <%= text_area_tag "credential[refresh_token]", nil, id: "credential_refresh_token", rows: 3, class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? "the initial refresh token to seed the loop" : "•••••••• (unchanged)" %>
-        <p class="form-hint">
-          Write-only seed, stored encrypted. The refresh loop rotates it from here.
-          <% if credential.new_record? %>
-            Required to leave bootstrapping.
-          <% else %>
-            Leave blank to keep the current token; entering a new one re-bootstraps the credential and clears any dead state.
-          <% end %>
-        </p>
+        <p class="form-hint">Write-only seed, stored encrypted. Leave blank to keep the current token; entering a new one re-bootstraps the credential and clears any dead state.</p>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="password" class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="credential_username">Username *</label>
+          <%= text_field_tag "credential[username]", nil, id: "credential_username", class: "form-input #{field_error_class(credential, :username)}", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
+          <%= field_error(credential, :username) %>
+          <p class="form-hint">Stored encrypted. Leave blank to keep the current username.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_password">Password *</label>
+          <%= password_field_tag "credential[password]", nil, id: "credential_password", class: "form-input #{field_error_class(credential, :password)}", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
+          <%= field_error(credential, :password) %>
+          <p class="form-hint">Stored encrypted. Leave blank to keep the current password.</p>
+        </div>
       </div>
     </section>
 

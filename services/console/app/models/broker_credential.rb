@@ -1,7 +1,7 @@
-# A managed OAuth credential whose refresh-token lifecycle centaur-console owns
-# itself: the in-control port of iron-token-broker. control drives a refresh loop
-# (Broker::PollRefreshJob -> Broker::RefreshCredentialJob -> #refresh!) that mints
-# fresh access tokens before expiry.
+# A managed OAuth credential whose token lifecycle centaur-console owns itself:
+# the in-control port of iron-token-broker. control drives a refresh loop
+# (Broker::PollRefreshJob -> Broker::RefreshCredentialJob -> #refresh!) that
+# mints fresh access tokens before expiry.
 #
 # The minted access token reaches iron-proxy through the normal /sync path: a
 # `token_broker` SecretSource on some grantable secret references this credential
@@ -9,10 +9,10 @@
 # the current access token, delivered inline like a control_plane value. A
 # BrokerCredential is itself NOT synced and NOT grantable.
 #
-# The OAuth client credentials it refreshes with -- client_id, optional
-# client_secret, and any token-endpoint headers -- are fields on the credential,
-# resolved by control itself. client_id is not secret; client_secret and the
-# header values are encrypted at rest.
+# The OAuth credentials it refreshes with -- client_id, optional client_secret,
+# optional username/password, and any token-endpoint headers -- are fields on the
+# credential, resolved by control itself. client_id is not secret; every other
+# credential value is encrypted at rest.
 class BrokerCredential < ApplicationRecord
   oid_prefix "bcr"
 
@@ -20,6 +20,9 @@ class BrokerCredential < ApplicationRecord
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
+
+  GRANTS = %w[refresh_token password].freeze
+  RefreshAttempt = Data.define(:result, :clear_refresh_token)
 
   # The access token must keep at least this much life past the scheduled
   # refresh, regardless of slack/fraction. Mirrors the 60s floor in
@@ -56,14 +59,20 @@ class BrokerCredential < ApplicationRecord
   encrypts :access_token
   encrypts :refresh_token
   encrypts :client_secret
+  encrypts :username
+  encrypts :password
   encrypts :token_endpoint_headers
 
   scope :refreshable, -> {
     where(dead: false)
-      .where("last_refresh IS NULL OR refresh_token IS NOT NULL")
+      .where("(\"broker_credentials\".\"grant\" = ? AND " \
+             "(last_refresh IS NULL OR refresh_token IS NOT NULL)) OR " \
+             "\"broker_credentials\".\"grant\" = ?",
+             "refresh_token", "password")
       .where("next_attempt_at IS NULL OR next_attempt_at <= ?", Time.current)
   }
 
+  validates :grant, inclusion: { in: GRANTS, message: "must be one of #{GRANTS.join(", ")}" }
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
@@ -79,6 +88,7 @@ class BrokerCredential < ApplicationRecord
             numericality: { only_integer: true, greater_than: 0 }
   validate :labels_is_a_hash
   validate :scopes_is_an_array
+  validate :password_grant_credentials_present
   validate :token_endpoint_headers_valid
 
   # OAuth client identity used for refresh. Flow-minted credentials delegate to
@@ -125,13 +135,9 @@ class BrokerCredential < ApplicationRecord
   def refresh!(now: Time.current)
     with_lock do
       return if dead?
-      if refresh_token.blank?
-        mark_dead!("blob_not_bootstrapped")
-        return
-      end
 
-      result = perform_refresh(now: now)
-      apply_success!(result, now: now)
+      attempt = perform_refresh
+      apply_success!(attempt, now: now) if attempt
     rescue Broker::RefreshError => e
       if e.retryable?
         record_retryable_failure(e.message, now: now)
@@ -147,23 +153,84 @@ class BrokerCredential < ApplicationRecord
     @refresh_client ||= Broker::RefreshClient.new
   end
 
-  def perform_refresh(now:)
-    refresh_client.refresh(
+  def perform_refresh
+    case grant
+    when "password"
+      perform_password_grant_refresh
+    else
+      perform_refresh_token_refresh
+    end
+  end
+
+  def perform_refresh_token_refresh
+    if refresh_token.blank?
+      mark_dead!("blob_not_bootstrapped")
+      return nil
+    end
+
+    RefreshAttempt.new(refresh_client.refresh(
       token_endpoint: token_endpoint,
+      grant: "refresh_token",
       client_id: effective_client_id,
       client_secret: effective_client_secret,
       refresh_token: refresh_token,
       scopes: refresh_scopes_for_provider,
       headers: token_endpoint_headers || {},
       timeout: refresh_timeout_seconds
+    ), false)
+  end
+
+  def perform_password_grant_refresh
+    clear_stale_refresh_token = false
+
+    if refresh_token.present?
+      begin
+        return RefreshAttempt.new(refresh_client.refresh(
+          token_endpoint: token_endpoint,
+          grant: "refresh_token",
+          client_id: effective_client_id,
+          client_secret: effective_client_secret,
+          refresh_token: refresh_token,
+          scopes: refresh_scopes_for_provider,
+          headers: token_endpoint_headers || {},
+          timeout: refresh_timeout_seconds
+        ), false)
+      rescue Broker::RefreshError => e
+        raise if e.retryable?
+
+        Rails.logger.warn do
+          "broker credential #{oid} refresh_token grant failed with #{e.reason}; " \
+            "falling back to password grant"
+        end
+        clear_stale_refresh_token = true
+      end
+    end
+
+    unless password_grant_bootstrapped?
+      mark_dead!("password_grant_not_bootstrapped")
+      return nil
+    end
+
+    result = refresh_client.refresh(
+      token_endpoint: token_endpoint,
+      grant: "password",
+      client_id: effective_client_id,
+      client_secret: effective_client_secret,
+      username: username,
+      password: password,
+      scopes: refresh_scopes_for_provider,
+      headers: token_endpoint_headers || {},
+      timeout: refresh_timeout_seconds
     )
+    RefreshAttempt.new(result, clear_stale_refresh_token && result.refresh_token.blank?)
   end
 
   def refresh_scopes_for_provider
     oauth_app&.provider_strategy&.refresh_scopes(scopes) || scopes
   end
 
-  def apply_success!(result, now:)
+  def apply_success!(attempt, now:)
+    result = attempt.result
     expires_in = result.expires_in&.positive? ? result.expires_in : DEFAULT_EXPIRES_IN_SECONDS
     attrs = {
       access_token: result.access_token,
@@ -174,7 +241,11 @@ class BrokerCredential < ApplicationRecord
       dead_reason: nil
     }
     # Carry the previous refresh_token forward when the IdP did not rotate.
-    attrs[:refresh_token] = result.refresh_token if result.refresh_token.present?
+    if result.refresh_token.present?
+      attrs[:refresh_token] = result.refresh_token
+    elsif attempt.clear_refresh_token
+      attrs[:refresh_token] = nil
+    end
     assign_attributes(attrs)
     self.next_attempt_at = compute_next_attempt_at(now: now)
     save!
@@ -189,7 +260,8 @@ class BrokerCredential < ApplicationRecord
   end
 
   def mark_dead!(reason)
-    update!(dead: true, dead_reason: reason)
+    assign_attributes(dead: true, dead_reason: reason)
+    save!(validate: false)
     Rails.logger.error { "broker credential #{oid} marked dead; human re-auth required: reason=#{reason}" }
   end
 
@@ -226,6 +298,17 @@ class BrokerCredential < ApplicationRecord
   def scopes_is_an_array
     return if scopes.is_a?(Array) && scopes.all?(String)
     errors.add(:scopes, "must be an array of strings")
+  end
+
+  def password_grant_credentials_present
+    return unless grant == "password"
+
+    errors.add(:username, "can't be blank for the password grant") if username.blank?
+    errors.add(:password, "can't be blank for the password grant") if password.blank?
+  end
+
+  def password_grant_bootstrapped?
+    username.present? && password.present?
   end
 
   def token_endpoint_headers_valid

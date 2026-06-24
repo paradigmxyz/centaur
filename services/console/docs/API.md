@@ -802,11 +802,11 @@ Returns `201`. Response shape (note that `credentials` echoes each source as `{ 
 
 ## Broker credentials
 
-A broker credential is an OAuth credential whose refresh-token lifecycle iron-control manages itself. iron-control runs the refresh loop, mints fresh access tokens before they expire, and delivers the current access token to `iron-proxy` inline through [proxy sync](#proxy-sync) wherever a [`token_broker` secret source](#secret-sources) references the credential by its `id`.
+A broker credential is an OAuth credential whose token lifecycle iron-control manages itself. iron-control runs the refresh loop, mints fresh access tokens before they expire, and delivers the current access token to `iron-proxy` inline through [proxy sync](#proxy-sync) wherever a [`token_broker` secret source](#secret-sources) references the credential by its `id`.
 
-Unlike the secret types above, a broker credential is not granted directly and is not injected on its own. It is referenced by a `token_broker` source on a grantable secret (typically a [static secret](#static-secrets)), which carries the rules and injection config. The `refresh_token` never leaves iron-control.
+Unlike the secret types above, a broker credential is not granted directly and is not injected on its own. It is referenced by a `token_broker` source on a grantable secret (typically a [static secret](#static-secrets)), which carries the rules and injection config. Refresh tokens, usernames, and passwords never leave iron-control.
 
-The OAuth client credentials it refreshes with are fields on the credential, resolved by iron-control itself. `client_id` is not secret and is returned in responses; `client_secret` and the `token_endpoint_headers` values are encrypted at rest and never returned.
+The OAuth client credentials it refreshes with are fields on the credential, resolved by iron-control itself. `client_id` is not secret and is returned in responses; `client_secret`, password-grant fields, and the `token_endpoint_headers` values are encrypted at rest and never returned.
 
 ### Attributes
 
@@ -816,12 +816,15 @@ The OAuth client credentials it refreshes with are fields on the credential, res
 | `foreign_id`                   | optional    | Unique per namespace. Immutable. |
 | `name`, `description`          | optional    | |
 | `labels`                       | optional    | |
+| `grant`                        | optional    | One of `refresh_token` or `password`. Defaults to `refresh_token`. |
 | `token_endpoint`               | required    | OAuth token endpoint the refresh request is sent to. |
 | `scopes`                       | optional    | Array of strings. |
 | `client_id`                    | required    | OAuth client id. Returned in responses. |
 | `client_secret`                | optional    | OAuth client secret. Write-only and encrypted at rest; omit for public clients. Never returned. |
 | `token_endpoint_headers`       | optional    | Object mapping header name to a string value, sent on the refresh request. Values are write-only and encrypted; only the header names are returned (as `token_endpoint_header_names`). |
-| `refresh_token`                | optional    | Write-only seed. Supplying a value (re)bootstraps the credential: it is scheduled to refresh immediately and any dead state is cleared. Never returned. |
+| `refresh_token`                | optional    | Write-only seed for `refresh_token` credentials. Also used by `password` credentials when the provider returns one. Supplying a value schedules the credential immediately and clears dead state. Never returned. |
+| `username`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
+| `password`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
 | `early_refresh_slack_seconds`  | optional    | Refresh this many seconds before expiry. Defaults to `300`. |
 | `early_refresh_fraction`       | optional    | Refresh once this fraction of the token's lifetime remains, when that is larger than the slack. In `[0, 1)`. Defaults to `0.2`. |
 | `max_refresh_interval_seconds` | optional    | Refresh at least this often, even for long-lived tokens. Defaults to `86400`. |
@@ -844,7 +847,9 @@ Read-only fields are returned but never accepted in requests:
 | `provider_email`              | The account email captured at consent time. |
 | `external_user_key`           | An opaque key generated for the credential when it is minted by the consent flow. |
 
-The minted `access_token`, the `refresh_token`, the `client_secret`, and the `token_endpoint_headers` values are never returned in any response.
+The minted `access_token`, the `refresh_token`, `username`, `password`, the `client_secret`, and the `token_endpoint_headers` values are never returned in any response.
+
+Password-grant credentials first bootstrap with `grant_type=password`. If the token endpoint returns a `refresh_token`, iron-control stores it and uses `grant_type=refresh_token` on later scheduled refreshes. If that stored refresh token is rejected with an unrecoverable OAuth error, iron-control retries once with `grant_type=password`; retryable network, 5xx, rate-limit, and parse failures keep the existing backoff behavior and do not fall back to password.
 
 Credentials minted by the [OAuth consent flow](#oauth-consent-flow) are linked to an OAuth app and delegate their `client_id` and `client_secret` to it: rotating the app's secret applies to every credential it minted. Such a credential needs no `client_id`/`client_secret` of its own, and its `scopes` reflect exactly what the IdP granted.
 
@@ -858,6 +863,7 @@ Credentials minted by the [OAuth consent flow](#oauth-consent-flow) are linked t
     "namespace": "default",
     "foreign_id": "gmail",
     "name": "Gmail",
+    "grant": "refresh_token",
     "token_endpoint": "https://oauth2.googleapis.com/token",
     "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
     "client_id": "1234.apps.googleusercontent.com",
@@ -878,6 +884,7 @@ Returns `201`. The token blob, the `refresh_token` seed, and the `client_secret`
     "name": "Gmail",
     "description": null,
     "labels": {},
+    "grant": "refresh_token",
     "token_endpoint": "https://oauth2.googleapis.com/token",
     "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
     "client_id": "1234.apps.googleusercontent.com",
@@ -899,6 +906,27 @@ Returns `201`. The token blob, the `refresh_token` seed, and the `client_secret`
 }
 ```
 
+Password-grant providers use the same endpoint with `grant: "password"`:
+
+```json
+{
+  "data": {
+    "namespace": "default",
+    "foreign_id": "alphasense",
+    "name": "AlphaSense",
+    "grant": "password",
+    "token_endpoint": "https://api.alpha-sense.com/auth",
+    "client_id": "client-id",
+    "client_secret": "client-secret",
+    "username": "user@example.com",
+    "password": "account-password",
+    "token_endpoint_headers": { "x-api-key": "api-key" }
+  }
+}
+```
+
+For AlphaSense API calls, grant static secrets alongside the broker token so the proxy also injects the required `x-api-key` and `clientid` headers on `api.alpha-sense.com`. The broker credential itself only supplies the current bearer token through a `token_broker` source.
+
 To put the credential to use, reference it from a grantable secret's `token_broker` source, then grant that secret to a principal:
 
 ```json
@@ -914,7 +942,7 @@ To put the credential to use, reference it from a grantable secret's `token_brok
 
 ### Re-authenticating a dead credential
 
-When a refresh fails unrecoverably (for example the IdP returns `invalid_grant` because the refresh token was revoked), the credential's `status` becomes `dead` and it stops minting tokens. Supply a fresh `refresh_token` via `PUT` / `PATCH` to clear the dead state and reschedule it:
+When a refresh fails unrecoverably (for example the IdP returns `invalid_grant` because the refresh token was revoked), the credential's `status` becomes `dead` and it stops minting tokens. Supply a fresh `refresh_token` for a `refresh_token` credential, or fresh `username` / `password` fields for a `password` credential, via `PUT` / `PATCH` to clear the dead state and reschedule it:
 
 ```json
 { "data": { "refresh_token": "1//0gNEW..." } }
@@ -927,7 +955,7 @@ When a refresh fails unrecoverably (for example the IdP returns `invalid_grant` 
 | `GET`  | `/api/v1/broker_credentials?namespace=default` | List. `namespace` required; `labels[k]=v` and pagination optional. |
 | `GET`  | `/api/v1/broker_credentials/:id` | Fetch one. `404` if missing. |
 | `GET`  | `/api/v1/broker_credentials/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
-| `PUT`/`PATCH` | `/api/v1/broker_credentials/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. A `refresh_token` reseeds and clears dead state. Omitted fields are preserved; `client_secret` and `token_endpoint_headers` are only changed when supplied. |
+| `PUT`/`PATCH` | `/api/v1/broker_credentials/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. Fresh bootstrap fields reseed and clear dead state. Omitted fields are preserved; write-only fields are only changed when supplied. |
 | `DELETE` | `/api/v1/broker_credentials/:id` | Delete. Returns `204`; `404` if missing. Returns `409` if any `token_broker` secret source still references the credential (remove those references first). |
 
 ## OAuth apps

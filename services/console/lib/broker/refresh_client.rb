@@ -3,10 +3,11 @@ require "json"
 require "uri"
 
 module Broker
-  # RefreshClient performs the raw RFC 6749 4.5 refresh_token grant POST against a
-  # token endpoint and returns the parsed response. It owns no retry/backoff
-  # state -- BrokerCredential drives that. Ported from iron-token-broker's
-  # internal/broker/refresh.go.
+  # RefreshClient performs raw RFC 6749 token grant POSTs against a token
+  # endpoint and returns the parsed response. It owns no retry/backoff state --
+  # BrokerCredential drives that. Ported from iron-token-broker's
+  # internal/broker/refresh.go, with password-grant support added for providers
+  # that still require it.
   #
   # SECURITY: this class never logs the refresh_token, client_secret, the
   # response body, or any decoded token. Callers must keep the same discipline.
@@ -29,20 +30,22 @@ module Broker
       @http = http
     end
 
-    # Performs one refresh. Raises Broker::RefreshError on any failure (classified
-    # retryable vs. unrecoverable). scopes is an array; headers is a name=>value
-    # hash applied verbatim to the token POST.
-    def refresh(token_endpoint:, client_id:, refresh_token:, client_secret: nil,
+    # Performs one token exchange. Raises Broker::RefreshError on any failure
+    # (classified retryable vs. unrecoverable). scopes is an array; headers is a
+    # name=>value hash applied verbatim to the token POST.
+    def refresh(token_endpoint:, client_id:, grant: "refresh_token", refresh_token: nil,
+                username: nil, password: nil, client_secret: nil,
                 scopes: [], headers: {}, timeout: DEFAULT_TIMEOUT)
       raise ArgumentError, "token endpoint is required" if token_endpoint.blank?
       raise ArgumentError, "client_id is required" if client_id.blank?
-      raise ArgumentError, "refresh_token is required" if refresh_token.blank?
 
-      form = {
-        "grant_type" => "refresh_token",
-        "refresh_token" => refresh_token,
-        "client_id" => client_id
-      }
+      form = form_for_grant(
+        grant: grant,
+        client_id: client_id,
+        refresh_token: refresh_token,
+        username: username,
+        password: password
+      )
       form["client_secret"] = client_secret if client_secret.present?
       form["scope"] = scopes.join(" ") if scopes.present?
 
@@ -54,6 +57,31 @@ module Broker
     end
 
     private
+
+    def form_for_grant(grant:, client_id:, refresh_token:, username:, password:)
+      case grant
+      when "refresh_token"
+        raise ArgumentError, "refresh_token is required" if refresh_token.blank?
+
+        {
+          "grant_type" => "refresh_token",
+          "refresh_token" => refresh_token,
+          "client_id" => client_id
+        }
+      when "password"
+        raise ArgumentError, "username is required" if username.blank?
+        raise ArgumentError, "password is required" if password.blank?
+
+        {
+          "grant_type" => "password",
+          "username" => username,
+          "password" => password,
+          "client_id" => client_id
+        }
+      else
+        raise ArgumentError, "unsupported grant #{grant.inspect}"
+      end
+    end
 
     def perform(url, form, headers, timeout)
       if @http

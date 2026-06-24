@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_23_231036) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_24_000100) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -72,6 +72,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_23_231036) do
     t.string "token_endpoint", null: false
     t.text "token_endpoint_headers"
     t.datetime "updated_at", null: false
+    t.string "grant", default: "refresh_token", null: false
+    t.text "username"
+    t.text "password"
     t.index ["created_by_id"], name: "index_broker_credentials_on_created_by_id"
     t.index ["labels"], name: "index_broker_credentials_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_broker_credentials_on_namespace_and_foreign_id", unique: true

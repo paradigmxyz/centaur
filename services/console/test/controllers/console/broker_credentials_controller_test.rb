@@ -2,8 +2,8 @@ require "test_helper"
 
 module Console
   # Covers the broker credential create/edit form controller: what gets built and
-  # persisted (identity, OAuth config, scopes, headers, refresh policy, the write-
-  # only refresh_token seed), redirects, that blank write-only fields leave the
+  # persisted (identity, OAuth config, scopes, headers, refresh policy, write-
+  # only bootstrap fields), redirects, that blank write-only fields leave the
   # stored values in place, and that invalid input is rejected (422) without writing.
   class BrokerCredentialsControllerTest < ActionDispatch::IntegrationTest
     setup do
@@ -54,6 +54,30 @@ module Console
       assert_equal 0.5, cred.early_refresh_fraction
       assert_equal 120, cred.early_refresh_slack_seconds
       assert_equal @operator, cred.created_by
+    end
+
+    test "POST create builds a password grant credential with write-only bootstrap fields" do
+      assert_difference -> { BrokerCredential.count } => 1 do
+        post console_broker_credentials_url, params: {
+          credential: {
+            namespace: "acme", foreign_id: "alphasense", name: "AlphaSense",
+            grant: "password", token_endpoint: "https://api.alpha-sense.com/auth",
+            client_id: "alpha-client", client_secret: "alpha-secret",
+            username: "alpha-user", password: "alpha-password",
+            early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
+            max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
+          },
+          headers: { "0" => { key: "x-api-key", value: "alpha-key" } }
+        }
+      end
+
+      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "alphasense")
+      assert_redirected_to console_credential_path(cred.oid)
+      assert_equal "password", cred.grant
+      assert_equal "alpha-user", cred.username
+      assert_equal "alpha-password", cred.password
+      assert_equal "alpha-secret", cred.client_secret
+      assert_equal({ "x-api-key" => "alpha-key" }, cred.token_endpoint_headers)
     end
 
     test "POST create without a token endpoint or client id is rejected without writing" do
@@ -110,6 +134,30 @@ module Console
       assert_equal "original-token", cred.refresh_token
       # A blank seed must not re-bootstrap: dead state is untouched.
       assert cred.dead?
+    end
+
+    test "PATCH update with blank password grant fields leaves them in place" do
+      cred = BrokerCredential.create!(namespace: "acme", foreign_id: "password-console",
+                                      grant: "password", token_endpoint: "https://idp.example/token",
+                                      client_id: "cid", client_secret: "secret",
+                                      username: "user", password: "pass", created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          namespace: cred.namespace, foreign_id: cred.foreign_id,
+          grant: "password", token_endpoint: cred.token_endpoint, client_id: cred.client_id,
+          client_secret: "", username: "", password: "",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "secret", cred.client_secret
+      assert_equal "user", cred.username
+      assert_equal "pass", cred.password
     end
 
     test "PATCH update with a fresh refresh_token re-bootstraps the credential" do

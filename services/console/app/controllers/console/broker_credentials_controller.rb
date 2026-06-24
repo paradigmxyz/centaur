@@ -1,10 +1,10 @@
 module Console
   # Create/edit form for managed broker credentials: identity, the OAuth client
   # config it refreshes with (token endpoint, client id/secret, scopes, token-
-  # endpoint headers), the refresh-policy knobs, and a write-only refresh_token
-  # seed. Mirrors the per-type secret form controllers, but a broker credential is
-  # not a secret (it is referenced by a token_broker source, not granted), so it
-  # lives on its own rather than under BaseSecretsController.
+  # endpoint headers), the refresh-policy knobs, and grant-specific write-only
+  # bootstrap fields. Mirrors the per-type secret form controllers, but a broker
+  # credential is not a secret (it is referenced by a token_broker source, not
+  # granted), so it lives on its own rather than under BaseSecretsController.
   class BrokerCredentialsController < ApplicationController
     include KvRowParams
 
@@ -51,14 +51,13 @@ module Console
 
     private
 
-    # Map the form params onto the credential. The encrypted write-only fields --
-    # client_secret and the refresh_token seed -- are only assigned when the field
-    # is non-blank, so editing without re-entering them leaves the stored value in
-    # place. A blank refresh_token also leaves rotation state untouched; a fresh one
-    # re-bootstraps the credential (mirrors the API controller's seed handling).
+    # Map the form params onto the credential. Encrypted write-only fields are
+    # only assigned when non-blank, so editing without re-entering them leaves the
+    # stored values in place. Fresh bootstrap material re-bootstraps the
+    # credential and mirrors the API controller's seed handling.
     def assign_form(credential)
       fields = credential_params.permit(:namespace, :foreign_id, :name, :description,
-                                        :token_endpoint, :client_id,
+                                        :grant, :token_endpoint, :client_id,
                                         :early_refresh_slack_seconds, :early_refresh_fraction,
                                         :max_refresh_interval_seconds, :refresh_timeout_seconds)
       fields[:namespace] = fields[:namespace].presence || "default"
@@ -70,12 +69,20 @@ module Console
 
       secret = credential_params[:client_secret]
       credential.client_secret = secret if secret.present?
-      apply_refresh_token_seed(credential, credential_params[:refresh_token])
+      apply_bootstrap_fields(credential)
     end
 
-    def apply_refresh_token_seed(credential, seed)
-      return if seed.blank?
-      credential.refresh_token = seed
+    def apply_bootstrap_fields(credential)
+      changed = false
+      %i[refresh_token username password].each do |field|
+        value = credential_params[field]
+        next if value.blank?
+
+        credential.public_send("#{field}=", value)
+        changed = true
+      end
+      return unless changed
+
       credential.dead = false
       credential.dead_reason = nil
       credential.failure_count = 0

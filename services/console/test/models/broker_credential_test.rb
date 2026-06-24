@@ -47,6 +47,17 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.errors[:client_id].any?
   end
 
+  test "password grant is valid with username and password" do
+    bc = build_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    assert bc.valid?, bc.errors.full_messages.to_sentence
+  end
+
+  test "password grant requires username and password" do
+    bc = build_credential(grant: "password", username: "user", password: nil, refresh_token: nil)
+    refute bc.valid?
+    assert bc.errors[:password].any? { |m| m.include?("password grant") }
+  end
+
   # --- oauth_app provenance (flow-minted credentials) -----------------------
 
   def build_app(**overrides)
@@ -118,13 +129,18 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.valid?, bc.errors.full_messages.to_sentence
   end
 
-  test "client_secret and token_endpoint_headers are encrypted at rest" do
-    bc = create_credential(client_secret: "shh", token_endpoint_headers: { "X-Api-Key" => "k" })
+  test "client_secret, password grant fields, and token_endpoint_headers are encrypted at rest" do
+    bc = create_credential(client_secret: "shh", username: "alice", password: "p4ss",
+                           token_endpoint_headers: { "X-Api-Key" => "k" })
     raw = BrokerCredential.connection.select_one(
-      "SELECT client_secret, token_endpoint_headers FROM broker_credentials WHERE id = #{bc.id}"
+      "SELECT client_secret, username, password, token_endpoint_headers FROM broker_credentials WHERE id = #{bc.id}"
     )
     refute_includes raw["client_secret"].to_s, "shh"
+    refute_includes raw["username"].to_s, "alice"
+    refute_includes raw["password"].to_s, "p4ss"
     refute_includes raw["token_endpoint_headers"].to_s, "X-Api-Key"
+    assert_equal "alice", bc.reload.username
+    assert_equal "p4ss", bc.password
     assert_equal({ "X-Api-Key" => "k" }, bc.reload.token_endpoint_headers)
   end
 
@@ -223,6 +239,76 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal({ "X-Api-Key" => "k" }, captured[:headers])
   end
 
+  test "password grant bootstraps with username and password and stores returned refresh_token" do
+    captured = {}
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: "RT-new") }
+    bc.refresh!
+    bc.reload
+    assert_equal "password", captured[:grant]
+    assert_equal "user", captured[:username]
+    assert_equal "pass", captured[:password]
+    assert_equal "RT-new", bc.refresh_token
+    assert_equal "AT", bc.access_token
+  end
+
+  test "password grant prefers a stored refresh_token" do
+    captured = {}
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-old")
+    bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: nil) }
+    bc.refresh!
+    bc.reload
+    assert_equal "refresh_token", captured[:grant]
+    assert_equal "RT-old", captured[:refresh_token]
+    assert_equal "RT-old", bc.refresh_token
+  end
+
+  test "password grant falls back to password when stored refresh_token is rejected" do
+    grants = []
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-bad")
+    bc.refresh_client = StubClient.new do |**kw|
+      grants << kw[:grant]
+      if kw[:grant] == "refresh_token"
+        raise Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false)
+      end
+      result(access_token: "AT-password", refresh_token: "RT-good")
+    end
+    bc.refresh!
+    bc.reload
+    assert_equal %w[refresh_token password], grants
+    assert_equal "AT-password", bc.access_token
+    assert_equal "RT-good", bc.refresh_token
+    refute bc.dead?
+  end
+
+  test "password grant clears stale refresh_token when password fallback succeeds without rotation" do
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-bad")
+    bc.refresh_client = StubClient.new do |**kw|
+      if kw[:grant] == "refresh_token"
+        raise Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false)
+      end
+      result(access_token: "AT-password", refresh_token: nil)
+    end
+    bc.refresh!
+    bc.reload
+    assert_nil bc.refresh_token
+    assert_equal "AT-password", bc.access_token
+  end
+
+  test "password grant does not fall back on retryable refresh_token failure" do
+    grants = []
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-old")
+    bc.refresh_client = StubClient.new do |**kw|
+      grants << kw[:grant]
+      raise Broker::RefreshError.new("net", stage: "network", retryable: true)
+    end
+    bc.refresh!
+    bc.reload
+    assert_equal [ "refresh_token" ], grants
+    refute bc.dead?
+    assert_equal 1, bc.failure_count
+  end
+
   test "refresh with no seed marks dead as not bootstrapped" do
     bc = create_credential(refresh_token: "seed")
     bc.update_columns(refresh_token: nil)
@@ -231,6 +317,16 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc.reload
     assert bc.dead?
     assert_equal "blob_not_bootstrapped", bc.dead_reason
+  end
+
+  test "password grant with missing bootstrap fields marks dead" do
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    bc.update_columns(username: nil)
+    bc.reload
+    bc.refresh!
+    bc.reload
+    assert bc.dead?
+    assert_equal "password_grant_not_bootstrapped", bc.dead_reason
   end
 
   # --- scope ----------------------------------------------------------------
@@ -249,6 +345,13 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_includes ids, never.id
     refute_includes ids, future.id
     refute_includes ids, dead.id
+  end
+
+  test "refreshable includes password grant credentials without a refresh_token" do
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+    assert_includes BrokerCredential.refreshable.pluck(:id), bc.id
   end
 
   # --- delete guard ---------------------------------------------------------
