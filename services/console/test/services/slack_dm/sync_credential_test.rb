@@ -27,7 +27,7 @@ module SlackDm
     def slack_app
       OauthApp.create!(
         provider: "slack",
-        slug: "slack-dms",
+        slug: "slack-dms-#{SecureRandom.hex(6)}",
         client_id: "slack-client-#{SecureRandom.hex(4)}",
         client_secret: "secret",
         allowed_scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
