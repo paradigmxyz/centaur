@@ -1083,7 +1083,145 @@ fn normalize_webhook(webhook: &mut RegisteredWorkflowWebhook) -> Result<(), Work
             }
         }
     }
+    if let Some(filter) = &mut webhook.spec.filter {
+        normalize_webhook_filter(&webhook.spec.slug, filter)?;
+    }
     Ok(())
+}
+
+fn normalize_webhook_filter(
+    slug: &str,
+    filter: &mut WebhookFilter,
+) -> Result<(), WorkflowRuntimeError> {
+    normalize_webhook_filter_node(slug, filter, "filter")
+}
+
+fn normalize_webhook_filter_node(
+    slug: &str,
+    filter: &mut WebhookFilter,
+    path: &str,
+) -> Result<(), WorkflowRuntimeError> {
+    let has_any = filter.any.is_some();
+    let has_all = filter.all.is_some();
+    let has_leaf = filter.source.is_some()
+        || filter.key.is_some()
+        || filter.op.is_some()
+        || filter.value.is_some()
+        || filter.values.is_some();
+    if usize::from(has_any) + usize::from(has_all) + usize::from(has_leaf) != 1 {
+        return Err(invalid_webhook_filter(
+            slug,
+            path,
+            "node must be exactly one of any, all, or a leaf predicate",
+        ));
+    }
+
+    if let Some(any) = &mut filter.any {
+        if any.is_empty() {
+            return Err(invalid_webhook_filter(slug, path, "any must not be empty"));
+        }
+        for (index, child) in any.iter_mut().enumerate() {
+            normalize_webhook_filter_node(slug, child, &format!("{path}.any[{index}]"))?;
+        }
+        return Ok(());
+    }
+    if let Some(all) = &mut filter.all {
+        if all.is_empty() {
+            return Err(invalid_webhook_filter(slug, path, "all must not be empty"));
+        }
+        for (index, child) in all.iter_mut().enumerate() {
+            normalize_webhook_filter_node(slug, child, &format!("{path}.all[{index}]"))?;
+        }
+        return Ok(());
+    }
+
+    let source = normalize_required_filter_string(&mut filter.source)
+        .ok_or_else(|| invalid_webhook_filter(slug, path, "leaf requires source"))?;
+    let key = normalize_required_filter_string(&mut filter.key)
+        .ok_or_else(|| invalid_webhook_filter(slug, path, "leaf requires key"))?;
+    let op = normalize_required_filter_string(&mut filter.op)
+        .ok_or_else(|| invalid_webhook_filter(slug, path, "leaf requires op"))?;
+    filter.source = Some(source.to_ascii_lowercase());
+    filter.op = Some(op.to_ascii_lowercase());
+    let source = filter.source.as_deref().unwrap_or_default();
+    let op = filter.op.as_deref().unwrap_or_default();
+    if !matches!(source, "header" | "body") {
+        return Err(invalid_webhook_filter(
+            slug,
+            path,
+            "source must be header or body",
+        ));
+    }
+    if source == "body" && key.split('.').any(|part| part.trim().is_empty()) {
+        return Err(invalid_webhook_filter(
+            slug,
+            path,
+            "body key must be a non-empty dot path",
+        ));
+    }
+    match op {
+        "equals" | "contains" | "prefix" => {
+            if filter.values.is_some() {
+                return Err(invalid_webhook_filter(
+                    slug,
+                    path,
+                    "values is only valid with op in",
+                ));
+            }
+            normalize_required_filter_string(&mut filter.value).ok_or_else(|| {
+                invalid_webhook_filter(slug, path, "op requires a non-empty value")
+            })?;
+        }
+        "in" => {
+            if filter.value.is_some() {
+                return Err(invalid_webhook_filter(
+                    slug,
+                    path,
+                    "value is not valid with op in",
+                ));
+            }
+            let Some(values) = &mut filter.values else {
+                return Err(invalid_webhook_filter(
+                    slug,
+                    path,
+                    "op in requires non-empty values",
+                ));
+            };
+            for value in values.iter_mut() {
+                *value = value.trim().to_owned();
+            }
+            if values.is_empty() || values.iter().any(String::is_empty) {
+                return Err(invalid_webhook_filter(
+                    slug,
+                    path,
+                    "op in requires non-empty values",
+                ));
+            }
+        }
+        _ => {
+            return Err(invalid_webhook_filter(
+                slug,
+                path,
+                "op must be equals, in, contains, or prefix",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_required_filter_string(value: &mut Option<String>) -> Option<String> {
+    let normalized = value.as_ref()?.trim().to_owned();
+    if normalized.is_empty() {
+        return None;
+    }
+    *value = Some(normalized.clone());
+    Some(normalized)
+}
+
+fn invalid_webhook_filter(slug: &str, path: &str, reason: &str) -> WorkflowRuntimeError {
+    WorkflowRuntimeError::BadRequest(format!(
+        "workflow webhook {slug:?} has invalid filter at {path}: {reason}"
+    ))
 }
 
 fn valid_webhook_slug(slug: &str) -> bool {
@@ -3748,6 +3886,84 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].source.as_deref(), Some("header"));
         assert_eq!(all[1].key.as_deref(), Some("repository.full_name"));
+    }
+
+    fn webhook_with_filter(filter: Value) -> RegisteredWorkflowWebhook {
+        RegisteredWorkflowWebhook {
+            workflow_name: "github_issue_triage".to_owned(),
+            source_path: "workflows/github_issue_triage.py".to_owned(),
+            spec: WorkflowWebhookSpec {
+                slug: "github-issue-triage".to_owned(),
+                provider: Some("github".to_owned()),
+                auth: WorkflowWebhookAuth::Github {
+                    secret_ref: "GITHUB_WEBHOOK_SECRET".to_owned(),
+                },
+                trigger_key: Some(WorkflowWebhookTriggerKey::Header {
+                    header: "X-GitHub-Delivery".to_owned(),
+                }),
+                allowed_methods: vec!["POST".to_owned()],
+                allowed_content_types: vec!["application/json".to_owned()],
+                filter: Some(serde_json::from_value(filter).unwrap()),
+            },
+        }
+    }
+
+    #[test]
+    fn normalize_webhook_accepts_and_normalizes_filter() {
+        let mut webhook = webhook_with_filter(json!({
+            "all": [
+                {
+                    "source": " Header ",
+                    "key": " x-github-event ",
+                    "op": " EQUALS ",
+                    "value": " issue_comment "
+                },
+                {
+                    "source": "body",
+                    "key": "repository.full_name",
+                    "op": "in",
+                    "values": [" ethereum-optimism/optimism "]
+                }
+            ]
+        }));
+
+        normalize_webhook(&mut webhook).unwrap();
+
+        let all = webhook.spec.filter.unwrap().all.unwrap();
+        assert_eq!(all[0].source.as_deref(), Some("header"));
+        assert_eq!(all[0].key.as_deref(), Some("x-github-event"));
+        assert_eq!(all[0].op.as_deref(), Some("equals"));
+        assert_eq!(all[0].value.as_deref(), Some("issue_comment"));
+        assert_eq!(
+            all[1].values.as_ref().unwrap(),
+            &vec!["ethereum-optimism/optimism".to_owned()]
+        );
+    }
+
+    #[test]
+    fn normalize_webhook_rejects_malformed_filters() {
+        for filter in [
+            json!({}),
+            json!({"any": []}),
+            json!({
+                "any": [{"source": "header", "key": "x-github-event", "op": "equals", "value": "issues"}],
+                "source": "header",
+                "key": "x-github-event",
+                "op": "equals",
+                "value": "issues"
+            }),
+            json!({"source": "headers", "key": "x-github-event", "op": "equals", "value": "issues"}),
+            json!({"source": "body", "key": "repository..full_name", "op": "equals", "value": "repo"}),
+            json!({"source": "body", "key": "repository.full_name", "op": "regex", "value": "repo"}),
+            json!({"source": "body", "key": "repository.full_name", "op": "equals", "values": ["repo"]}),
+            json!({"source": "body", "key": "repository.full_name", "op": "in", "value": "repo"}),
+            json!({"source": "body", "key": "repository.full_name", "op": "in", "values": []}),
+            json!({"source": "body", "key": "repository.full_name", "op": "in", "values": [""]}),
+        ] {
+            let mut webhook = webhook_with_filter(filter);
+            let error = normalize_webhook(&mut webhook).unwrap_err();
+            assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
+        }
     }
 
     #[test]

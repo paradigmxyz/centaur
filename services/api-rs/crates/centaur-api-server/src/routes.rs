@@ -993,13 +993,13 @@ async fn invoke_workflow_webhook(
 
     // Edge pre-filter: drop events no handler could match, in-process, before
     // spawning a sandbox-backed run. Keeps org-wide webhooks cheap.
-    if let Some(filter) = &spec.filter {
-        if !webhook_filter_matches(filter, &headers, &body) {
-            return Ok((
-                StatusCode::OK,
-                Json(json!({ "ok": true, "filtered": true })),
-            ));
-        }
+    if let Some(filter) = &spec.filter
+        && !webhook_filter_matches(filter, &headers, &body)
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "ok": true, "filtered": true })),
+        ));
     }
 
     let trigger_key = webhook_trigger_key(&slug, &raw_body_sha256, spec, &headers);
@@ -1598,8 +1598,9 @@ fn webhook_filter_matches(filter: &WebhookFilter, headers: &HeaderMap, body: &Va
             .as_deref()
             .and_then(|key| webhook_body_path(body, key))
             .and_then(|value| value.as_str().map(ToOwned::to_owned)),
-        // An empty node is a no-op, but unknown sources should not match.
-        None => return true,
+        // Registry validation rejects empty nodes; fail closed if one reaches
+        // the evaluator anyway.
+        None => return false,
         Some(_) => return false,
     };
     let Some(actual) = actual else {
@@ -1908,7 +1909,7 @@ mod webhook_tests {
         }));
         assert!(!webhook_filter_matches(&repo_filter, &headers, &other));
 
-        // missing field -> no match; empty node -> pass-through.
+        // missing field -> no match.
         let missing = webhook_filter(json!({
             "source": "body",
             "key": "a.b",
@@ -1934,7 +1935,7 @@ mod webhook_tests {
         assert!(!webhook_filter_matches(&unknown_op, &headers, &body));
 
         let empty = webhook_filter(json!({}));
-        assert!(webhook_filter_matches(&empty, &headers, &body));
+        assert!(!webhook_filter_matches(&empty, &headers, &body));
     }
 
     #[test]
