@@ -344,9 +344,10 @@ apiRs:
     companyContextDocuments:
       enabled: true
       intervalSeconds: 14400
-  # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
-  # the max lifetime. 0 disables that sweep. Interval must be >= 1.
-  sandboxIdleStopTtlSecs: 10800 # 3 hours
+  # Reaper: stop sandboxes older than the max lifetime. The suspended-idle
+  # deletion sweep is opt-in so pause and deletion policy stay separate.
+  # 0 disables that sweep. Interval must be >= 1.
+  sandboxIdleStopTtlSecs: 0
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
