@@ -167,19 +167,20 @@ class BrokerCredential < ApplicationRecord
       return nil
     end
 
-    [
-      refresh_client.refresh(
-        token_endpoint: token_endpoint,
-        grant: "refresh_token",
-        client_id: effective_client_id,
-        client_secret: effective_client_secret,
-        refresh_token: refresh_token,
-        scopes: refresh_scopes_for_provider,
-        headers: token_endpoint_headers || {},
-        timeout: refresh_timeout_seconds
-      ),
-      false
-    ]
+    [ refresh_with_stored_token, false ]
+  end
+
+  def refresh_with_stored_token
+    refresh_client.refresh(
+      token_endpoint: token_endpoint,
+      grant: "refresh_token",
+      client_id: effective_client_id,
+      client_secret: effective_client_secret,
+      refresh_token: refresh_token,
+      scopes: refresh_scopes_for_provider,
+      headers: token_endpoint_headers || {},
+      timeout: refresh_timeout_seconds
+    )
   end
 
   def perform_password_grant_refresh
@@ -187,19 +188,7 @@ class BrokerCredential < ApplicationRecord
 
     if refresh_token.present?
       begin
-        return [
-          refresh_client.refresh(
-            token_endpoint: token_endpoint,
-            grant: "refresh_token",
-            client_id: effective_client_id,
-            client_secret: effective_client_secret,
-            refresh_token: refresh_token,
-            scopes: refresh_scopes_for_provider,
-            headers: token_endpoint_headers || {},
-            timeout: refresh_timeout_seconds
-          ),
-          false
-        ]
+        return [ refresh_with_stored_token, false ]
       rescue Broker::RefreshError => e
         raise if e.retryable?
 
