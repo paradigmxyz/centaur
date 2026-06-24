@@ -62,8 +62,20 @@ module SlackDm
           {
             "ok" => true,
             "channels" => [
-              { "id" => "D123", "is_im" => true, "user" => "U_OTHER", "is_archived" => false }
+              {
+                "id" => "D123",
+                "is_im" => true,
+                "is_mpim" => false,
+                "user" => "U_OTHER",
+                "is_archived" => false
+              }
             ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_MEMBERS_ENDPOINT
+          {
+            "ok" => true,
+            "members" => [ "U_OTHER", "U_ME" ],
             "response_metadata" => { "next_cursor" => "" }
           }
         when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
@@ -102,8 +114,18 @@ module SlackDm
           {
             "ok" => true,
             "messages" => [
-              { "type" => "message", "ts" => "1700000000.000002", "user" => "U_OTHER", "text" => "hello" },
-              { "type" => "message", "ts" => "1700000000.000003", "user" => "U_ME", "text" => "reply" }
+              {
+                "type" => "message",
+                "ts" => "1700000000.000002",
+                "user" => "U_OTHER",
+                "text" => "hello"
+              },
+              {
+                "type" => "message",
+                "ts" => "1700000000.000003",
+                "user" => "U_ME",
+                "text" => "reply"
+              }
             ],
             "response_metadata" => { "next_cursor" => "" }
           }

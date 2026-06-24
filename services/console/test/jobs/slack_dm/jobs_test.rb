@@ -14,7 +14,12 @@ module SlackDm
       )
     end
 
-    def slack_credential(app:, scopes: SlackDm::SyncCredential::REQUIRED_SCOPES, access_token: "xoxp-live")
+    def slack_credential(
+      app:,
+      scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
+      access_token: "xoxp-live",
+      provider_subject: "U#{SecureRandom.hex(4).upcase}"
+    )
       BrokerCredential.create!(
         oauth_app: app,
         namespace: "acme",
@@ -25,7 +30,7 @@ module SlackDm
         last_refresh: Time.current,
         expires_at: 1.hour.from_now,
         scopes: scopes,
-        provider_subject: "U123"
+        provider_subject: provider_subject
       )
     end
 
