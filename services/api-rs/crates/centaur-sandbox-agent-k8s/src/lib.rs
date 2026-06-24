@@ -460,8 +460,13 @@ impl SandboxBackend for AgentSandboxBackend {
         // Resume only has the sandbox id, not the spec, so rebind the proxy to
         // the principal recorded at create rather than re-resolving from spec.
         let resolved_iron_proxy = self.resolve_iron_proxy_for_resume(id).await?;
-        self.create_iron_proxy_resources(id, resolved_iron_proxy.as_ref())
-            .await?;
+        if let Err(err) = self
+            .create_iron_proxy_resources(id, resolved_iron_proxy.as_ref())
+            .await
+        {
+            let _ = self.delete_iron_proxy_resources(id).await;
+            return Err(err);
+        }
         // The proxy resources were recreated, so re-bind them to the sandbox
         // for cascade deletion.
         if let Some(sandbox) = self.get_sandbox(id).await?
