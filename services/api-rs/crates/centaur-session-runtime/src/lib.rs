@@ -3838,7 +3838,64 @@ fn input_line_with_session_context(
         map.entry("traceparent")
             .or_insert_with(|| Value::String(traceparent.clone()));
     }
+    merge_session_context(map, session_context_for_thread(thread_key));
     serde_json::to_string(&value).unwrap_or_else(|_| line.to_owned())
+}
+
+fn merge_session_context(
+    map: &mut serde_json::Map<String, Value>,
+    context: Option<serde_json::Map<String, Value>>,
+) {
+    let Some(context) = context else {
+        return;
+    };
+    let entry = map
+        .entry("session_context")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Value::Object(existing) = entry else {
+        return;
+    };
+    for (key, value) in context {
+        existing.entry(key).or_insert(value);
+    }
+}
+
+fn session_context_for_thread(thread_key: &ThreadKey) -> Option<serde_json::Map<String, Value>> {
+    let slack = slack_context_for_thread(thread_key)?;
+    let mut context = serde_json::Map::new();
+    context.insert("platform".to_owned(), Value::String("slack".to_owned()));
+    context.insert("slack".to_owned(), Value::Object(slack));
+    Some(context)
+}
+
+fn slack_context_for_thread(thread_key: &ThreadKey) -> Option<serde_json::Map<String, Value>> {
+    let parts = thread_key.as_str().split(':').collect::<Vec<_>>();
+    let (team_id, channel_id, thread_ts) = match parts.as_slice() {
+        ["slack", channel_id, thread_ts] => (None, *channel_id, *thread_ts),
+        ["slack", team_id, channel_id, thread_ts] => (Some(*team_id), *channel_id, *thread_ts),
+        [channel_id, thread_ts] if is_slack_conversation_id(channel_id) => {
+            (None, *channel_id, *thread_ts)
+        }
+        _ => return None,
+    };
+    if channel_id.is_empty() || thread_ts.is_empty() {
+        return None;
+    }
+
+    let mut slack = serde_json::Map::new();
+    if let Some(team_id) = team_id.filter(|value| !value.is_empty()) {
+        slack.insert("team_id".to_owned(), Value::String(team_id.to_owned()));
+    }
+    slack.insert(
+        "channel_id".to_owned(),
+        Value::String(channel_id.to_owned()),
+    );
+    slack.insert("thread_ts".to_owned(), Value::String(thread_ts.to_owned()));
+    Some(slack)
+}
+
+fn is_slack_conversation_id(value: &str) -> bool {
+    matches!(value.as_bytes().first(), Some(b'C' | b'D' | b'G'))
 }
 
 fn steering_input_lines(
@@ -5009,6 +5066,44 @@ mod tests {
         assert_eq!(value["trace_id"], trace.trace_id);
         // Without an OpenTelemetry layer there is no traceparent to forward.
         assert!(value.get("traceparent").is_none());
+        assert!(value.get("session_context").is_none());
+    }
+
+    #[test]
+    fn input_line_with_session_context_adds_slack_thread_context() {
+        let thread_key = ThreadKey::parse("slack:T123:C123:1780000000.000000").unwrap();
+        let trace = SessionTraceContext::new(&thread_key, None);
+
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(value["session_context"]["platform"], "slack");
+        assert_eq!(value["session_context"]["slack"]["team_id"], "T123");
+        assert_eq!(value["session_context"]["slack"]["channel_id"], "C123");
+        assert_eq!(
+            value["session_context"]["slack"]["thread_ts"],
+            "1780000000.000000"
+        );
+    }
+
+    #[test]
+    fn input_line_with_session_context_preserves_existing_session_context() {
+        let thread_key = ThreadKey::parse("slack:T123:C123:1780000000.000000").unwrap();
+        let trace = SessionTraceContext::new(&thread_key, None);
+
+        let line = input_line_with_session_context(
+            &thread_key,
+            &trace,
+            r#"{"type":"user","session_context":{"requester":{"github_handle":"@ada"},"platform":"custom"}}"#,
+        );
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(
+            value["session_context"]["requester"]["github_handle"],
+            "@ada"
+        );
+        assert_eq!(value["session_context"]["platform"], "custom");
+        assert_eq!(value["session_context"]["slack"]["channel_id"], "C123");
     }
 
     #[test]
