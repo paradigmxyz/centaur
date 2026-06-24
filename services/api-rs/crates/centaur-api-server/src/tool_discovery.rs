@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use centaur_iron_control::{GCP_ID_TOKEN_ALLOWED_HEADERS, normalize_gcp_id_token_header};
 use centaur_iron_proxy::{
     PgDsnSetting, PgDsnSettingValueFrom, PostgresListener, PostgresUpstream, ProxyFragment,
     SandboxEnv, Secret, SecretReplace, Transform, TransformConfig,
@@ -819,7 +820,7 @@ fn parse_gcp_id_token_secret(
     }
     let audience = required_str(table, "audience")?.to_owned();
     let header = optional_str(table, "header")
-        .map(|value| value.to_ascii_lowercase())
+        .map(ToOwned::to_owned)
         .map(validate_gcp_id_token_header)
         .transpose()?;
     Ok(ToolSecret::GcpIdToken(GcpIdTokenSecret {
@@ -1461,12 +1462,12 @@ fn optional_bool(table: &toml::Table, key: &str) -> Result<Option<bool>, ToolDis
 }
 
 fn validate_gcp_id_token_header(value: String) -> Result<String, ToolDiscoveryError> {
-    match value.as_str() {
-        "authorization" | "x-serverless-authorization" => Ok(value),
-        _ => Err(ToolDiscoveryError::Invalid(format!(
-            "gcp_id_token header must be one of authorization, x-serverless-authorization, got {value:?}"
-        ))),
-    }
+    normalize_gcp_id_token_header(&value).ok_or_else(|| {
+        ToolDiscoveryError::Invalid(format!(
+            "gcp_id_token header must be one of {}, got {value:?}",
+            GCP_ID_TOKEN_ALLOWED_HEADERS.join(", ")
+        ))
+    })
 }
 
 #[cfg(test)]

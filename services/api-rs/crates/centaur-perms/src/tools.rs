@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use centaur_iron_control::{GCP_ID_TOKEN_ALLOWED_HEADERS, normalize_gcp_id_token_header};
 use centaur_iron_proxy::{PgDsnSetting, PgDsnSettingValueFrom};
 use eyre::{Context, Result, bail, eyre};
 use toml::Value;
@@ -677,7 +678,6 @@ fn parse_gcp_id_token(
     let audience = req_str(table, "audience")
         .wrap_err_with(|| format!("gcp_id_token entry {name:?} requires a non-empty 'audience'"))?;
     let header = opt_str(table, "header")
-        .map(|value| value.to_ascii_lowercase())
         .map(validate_gcp_id_token_header)
         .transpose()
         .wrap_err_with(|| format!("gcp_id_token entry {name:?}"))?;
@@ -1055,12 +1055,12 @@ fn non_empty_str_array(value: Option<&Value>) -> Option<Vec<String>> {
 }
 
 fn validate_gcp_id_token_header(value: String) -> Result<String> {
-    match value.as_str() {
-        "authorization" | "x-serverless-authorization" => Ok(value),
-        _ => {
-            bail!("header must be one of authorization, x-serverless-authorization, got {value:?}")
-        }
-    }
+    normalize_gcp_id_token_header(&value).ok_or_else(|| {
+        eyre!(
+            "header must be one of {}, got {value:?}",
+            GCP_ID_TOKEN_ALLOWED_HEADERS.join(", ")
+        )
+    })
 }
 
 fn reject_keys(table: &toml::Table, name: &str, mode: &str, keys: &[&str]) -> Result<()> {

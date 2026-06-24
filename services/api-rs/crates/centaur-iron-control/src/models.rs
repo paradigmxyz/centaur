@@ -225,6 +225,18 @@ pub struct GcpAuthSecretInput {
 // GCP ID token secrets
 // ---------------------------------------------------------------------------
 
+/// Headers supported by iron-proxy's ``gcp_id_token`` transform.
+pub const GCP_ID_TOKEN_ALLOWED_HEADERS: &[&str] = &["authorization", "x-serverless-authorization"];
+
+/// Return the canonical lower-case header name when ``value`` is a supported
+/// ``gcp_id_token`` injection header.
+pub fn normalize_gcp_id_token_header(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    GCP_ID_TOKEN_ALLOWED_HEADERS
+        .contains(&normalized.as_str())
+        .then_some(normalized)
+}
+
 /// Request body for ``POST``/``PUT /api/v1/gcp_id_token_secrets``. iron-proxy
 /// mints a Google-signed OIDC ID token for ``audience`` from the service-account
 /// ``keyfile`` and injects it into ``Authorization`` by default, or
@@ -673,4 +685,22 @@ pub struct Proxy {
     pub principal_id: String,
     #[serde(default)]
     pub token: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_gcp_id_token_header;
+
+    #[test]
+    fn normalizes_supported_gcp_id_token_headers() {
+        assert_eq!(
+            normalize_gcp_id_token_header("Authorization").as_deref(),
+            Some("authorization")
+        );
+        assert_eq!(
+            normalize_gcp_id_token_header(" X-Serverless-Authorization ").as_deref(),
+            Some("x-serverless-authorization")
+        );
+        assert_eq!(normalize_gcp_id_token_header("x-other"), None);
+    }
 }
