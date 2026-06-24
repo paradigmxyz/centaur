@@ -519,7 +519,6 @@ def upload(
     from .client import upload_file
 
     channel, upload_paths = _upload_target_and_files(target_or_file, files or [])
-    first_upload_path = upload_paths[0] if upload_paths else None
 
     for file_path in upload_paths:
         path = Path(file_path)
@@ -535,7 +534,7 @@ def upload(
                 content_base64=base64.b64encode(path.read_bytes()).decode(),
                 filename=path.name,
                 title=path.name,
-                comment=comment if file_path == first_upload_path else None,  # Only comment on first file
+                comment=comment if file_path == files[0] else None,  # Only comment on first file
                 thread_ts=thread,
             )
             console.print(f"[green]✓ Uploaded {path.name}[/]")
