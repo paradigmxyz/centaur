@@ -8,8 +8,11 @@ import json
 from typing import Any
 
 import typer
+from centaur_sdk.backends import EnvBackend, configure
 from rich.console import Console
 from rich.table import Table
+
+configure(EnvBackend())
 
 app = typer.Typer(name="preqin", help="Preqin Operational API and Feeds API CLI")
 console = Console()

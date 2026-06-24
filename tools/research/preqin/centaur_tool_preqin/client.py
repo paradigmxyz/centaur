@@ -12,6 +12,7 @@ from centaur_sdk import secret
 OPERATIONAL_BASE_URL = "https://api.preqin.com"
 IDENTITY_BASE_URL = "https://id.preqin.com"
 FEEDS_BASE_URL = "https://feeds.preqin.com"
+OPERATIONAL_TOKEN_PLACEHOLDER = "PREQIN_OPERATIONAL_TOKEN"
 
 
 def _clean_secret(value: str | None) -> str | None:
@@ -70,7 +71,7 @@ class PreqinClient:
         return self._api_key or _clean_secret(secret("PREQIN_API_KEY", ""))
 
     def _password_value(self) -> str | None:
-        return self._password or _clean_secret(secret("PREQIN_PASSWORD", "")) or self._api_key_value()
+        return self._password or _clean_secret(secret("PREQIN_PASSWORD", ""))
 
     def _client_id_value(self) -> str | None:
         return self._client_id or _clean_secret(secret("PREQIN_CLIENT_ID", ""))
@@ -84,32 +85,38 @@ class PreqinClient:
             "PREQIN_USERNAME": self._username_value(),
             "PREQIN_API_KEY": self._api_key_value(),
             "PREQIN_PASSWORD": self._password_value(),
-            "PREQIN_CLIENT_ID": self._client_id_value(),
-            "PREQIN_CLIENT_SECRET": self._client_secret_value(),
         }
         return {
             name: {
-                "present": bool(value),
+                "present": bool(value) and value != name,
                 "length": len(value or ""),
             }
             for name, value in fields.items()
         }
 
     def _operational_access_token(self, force_refresh: bool = False) -> str:
-        """Acquire a bearer token from Preqin's documented Operational API token endpoint."""
+        """Acquire a bearer token from Preqin's Operational API token endpoint."""
         if self._operational_token and not force_refresh:
             return self._operational_token
 
         username = self._username_value()
         api_key = self._api_key_value()
+        password = self._password_value()
         if not username:
             raise RuntimeError("PREQIN_USERNAME not set.")
         if not api_key:
             raise RuntimeError("PREQIN_API_KEY not set.")
+        if not password:
+            raise RuntimeError("PREQIN_PASSWORD not set.")
 
         response = self.client.post(
             f"{OPERATIONAL_BASE_URL}/connect/token",
-            files={"username": (None, username), "apikey": (None, api_key)},
+            data={
+                "grant_type": "password",
+                "username": username,
+                "password": password,
+                "client_id": api_key,
+            },
             headers={"Accept": "application/json"},
         )
         if response.status_code >= 400:
@@ -117,7 +124,7 @@ class PreqinClient:
             detail = f" - {body}" if body else ""
             raise RuntimeError(
                 "Preqin Operational API auth failed "
-                f"({response.status_code}) at /connect/token using username+apikey{detail}"
+                f"({response.status_code}) at /connect/token using password grant{detail}"
             )
 
         data = response.json()
@@ -137,20 +144,22 @@ class PreqinClient:
             return {
                 "ok": True,
                 "auth_url": f"{OPERATIONAL_BASE_URL}/connect/token",
-                "method": "multipart username+apikey",
+                "method": "password grant",
                 "token_length": len(token),
             }
         except Exception as exc:
             return {
                 "ok": False,
                 "auth_url": f"{OPERATIONAL_BASE_URL}/connect/token",
-                "method": "multipart username+apikey",
+                "method": "password grant",
                 "error": str(exc),
                 "credentials": self.credential_status(),
             }
 
     def _operational_get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        token = self._operational_access_token()
+        token = self._operational_token or _clean_secret(secret(OPERATIONAL_TOKEN_PLACEHOLDER, ""))
+        if not token:
+            token = self._operational_access_token()
         response = self.client.get(
             f"{OPERATIONAL_BASE_URL}{endpoint}",
             params={key: value for key, value in (params or {}).items() if value is not None},

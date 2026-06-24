@@ -23,10 +23,8 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 hosts = ["api.preqin.com", "id.preqin.com", "feeds.preqin.com"]
-optional_secrets = [
-    "PREQIN_USERNAME",
-    "PREQIN_API_KEY",
-    "PREQIN_PASSWORD",
-    "PREQIN_CLIENT_ID",
-    "PREQIN_CLIENT_SECRET",
+secrets = [
+    { type = "oauth_token", name = "PREQIN_OPERATIONAL_TOKEN", grant = "password", token_endpoint = "https://api.preqin.com/connect/token", hosts = [
+        "api.preqin.com",
+    ], fields = { username = "PREQIN_USERNAME", password = "PREQIN_PASSWORD", client_id = "PREQIN_API_KEY" } },
 ]
