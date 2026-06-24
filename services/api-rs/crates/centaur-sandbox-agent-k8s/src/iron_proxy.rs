@@ -184,15 +184,12 @@ impl AgentSandboxBackend {
         let pg = self.resolved_pg();
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
 
-        Ok(Some(ResolvedIronProxy {
-            proxy_host: iron_proxy_service_name(id),
-            proxy_pod_name: new_iron_proxy_pod_name(id),
-            proxy_port: PROXY_TUNNEL_PORT,
+        Ok(Some(self.resolved_iron_proxy_for_principal(
+            id,
             principal_id,
             pg,
             replace_placeholders,
-            management_api_key: new_proxy_management_api_key(),
-        }))
+        )))
     }
 
     /// Read the principal's effective config from iron-control for the
@@ -264,7 +261,22 @@ impl AgentSandboxBackend {
         };
         let pg = self.resolved_pg();
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
-        Ok(Some(ResolvedIronProxy {
+        Ok(Some(self.resolved_iron_proxy_for_principal(
+            id,
+            principal_id,
+            pg,
+            replace_placeholders,
+        )))
+    }
+
+    fn resolved_iron_proxy_for_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: String,
+        pg: Option<ResolvedPg>,
+        replace_placeholders: BTreeMap<String, String>,
+    ) -> ResolvedIronProxy {
+        ResolvedIronProxy {
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
@@ -272,7 +284,7 @@ impl AgentSandboxBackend {
             pg,
             replace_placeholders,
             management_api_key: new_proxy_management_api_key(),
-        }))
+        }
     }
 
     pub(crate) async fn create_iron_proxy_resources(
@@ -448,9 +460,21 @@ impl AgentSandboxBackend {
                 backend: crate::BACKEND_NAME,
                 operation: "assign_iron_control_proxy_principal",
             })?;
-        let proxy_id = self.proxy_id_for_sandbox(id).await?.ok_or_else(|| {
+        let mut proxy_id = self.proxy_id_for_sandbox(id).await?;
+        if proxy_id.is_none() || !self.has_usable_iron_proxy_resources(id).await? {
+            tracing::warn!(
+                sandbox_id = id.as_str(),
+                principal_id,
+                "iron-proxy resources are missing or not running; recreating before assignment"
+            );
+            proxy_id = Some(
+                self.recreate_iron_proxy_resources_for_principal(id, principal_id)
+                    .await?,
+            );
+        }
+        let proxy_id = proxy_id.ok_or_else(|| {
             SandboxError::backend(format!(
-                "iron-control proxy id for sandbox {} was not found",
+                "iron-control proxy id for sandbox {} was not found after repair",
                 id.as_str()
             ))
         })?;
@@ -468,6 +492,50 @@ impl AgentSandboxBackend {
         self.wait_for_proxy_principal_applied(id, principal_id)
             .await;
         Ok(())
+    }
+
+    async fn recreate_iron_proxy_resources_for_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<String> {
+        if self.config.iron_proxy.is_none() {
+            return Err(SandboxError::Unsupported {
+                backend: crate::BACKEND_NAME,
+                operation: "assign_iron_control_proxy_principal",
+            });
+        }
+        let pg = self.resolved_pg();
+        let principal_id = principal_id.to_owned();
+        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
+        let resolved =
+            self.resolved_iron_proxy_for_principal(id, principal_id, pg, replace_placeholders);
+        self.create_iron_proxy_resources(id, Some(&resolved))
+            .await?;
+        match self.sandboxes().get(id.as_str()).await {
+            Ok(sandbox) => {
+                if let Err(error) = self.adopt_iron_proxy_resources(id, &sandbox).await {
+                    tracing::warn!(
+                        sandbox_id = id.as_str(),
+                        %error,
+                        "failed to set ownerReferences on recreated iron-proxy resources"
+                    );
+                }
+            }
+            Err(err) if is_not_found(&err) => {}
+            Err(err) => return Err(map_kube_error("get sandbox for iron-proxy repair", err)),
+        }
+        self.proxy_ids
+            .lock()
+            .await
+            .get(id.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                SandboxError::backend(format!(
+                    "iron-control proxy id for sandbox {} was not recorded after repair",
+                    id.as_str()
+                ))
+            })
     }
 
     /// Barrier between reassigning the proxy principal in iron-control and
@@ -667,6 +735,26 @@ impl AgentSandboxBackend {
             }
         }
         Ok(None)
+    }
+
+    async fn has_usable_iron_proxy_resources(&self, id: &SandboxId) -> SandboxResult<bool> {
+        let params = ListParams::default().labels(&format!(
+            "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+            id.as_str()
+        ));
+        let pods = self
+            .pods()
+            .list(&params)
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
+        if !pods.items.iter().any(pod_running) {
+            return Ok(false);
+        }
+        match self.services().get(&iron_proxy_service_name(id)).await {
+            Ok(_) => Ok(true),
+            Err(err) if is_not_found(&err) => Ok(false),
+            Err(err) => Err(map_kube_error("get iron-proxy service", err)),
+        }
     }
 
     async fn patch_iron_control_principal_annotation(
