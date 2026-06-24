@@ -39,6 +39,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-%s" (include "centaur.fullname" .root) .component | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "centaur.centaurImageTag" -}}
+{{- default .componentTag .root.Values.global.centaurImageTag -}}
+{{- end -}}
+
 {{- define "centaur.secretEnvName" -}}
 {{- required "secretManager.existingSecretName is required" .Values.secretManager.existingSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

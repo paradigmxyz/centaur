@@ -13,7 +13,7 @@
 {{- if $repoCacheRepositories }}
 {{- $repoCacheHasGithubToken := or .Values.repoCache.githubToken.existingSecretName .Values.repoCache.githubToken.token -}}
 {{- $repoCacheImageRepository := default .Values.sandbox.image.repository .Values.repoCache.image.repository -}}
-{{- $repoCacheImageTag := default .Values.sandbox.image.tag .Values.repoCache.image.tag -}}
+{{- $repoCacheImageTag := include "centaur.centaurImageTag" (dict "root" . "componentTag" (default .Values.sandbox.image.tag .Values.repoCache.image.tag)) -}}
 {{- $repoCacheImagePullPolicy := default .Values.sandbox.image.pullPolicy .Values.repoCache.image.pullPolicy -}}
 {{- $repoCacheRepositoryRefs := list -}}
 {{- $repoCacheRepositoryRefRepos := list -}}

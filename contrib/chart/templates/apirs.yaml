@@ -1,6 +1,9 @@
 {{- if .Values.apiRs.enabled }}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $apiRsImageTag := include "centaur.centaurImageTag" (dict "root" . "componentTag" .Values.apiRs.image.tag) -}}
+{{- $sandboxImageTag := include "centaur.centaurImageTag" (dict "root" . "componentTag" .Values.sandbox.image.tag) -}}
+{{- $toolRunnerImageTag := include "centaur.centaurImageTag" (dict "root" . "componentTag" (default .Values.sandbox.image.tag .Values.toolServer.runnerImage.tag)) -}}
 {{- $reposPath := .Values.sandbox.reposPath -}}
 {{- if and .Values.repoCache.enabled (not $reposPath) -}}
 {{- $reposPath = .Values.repoCache.hostPath -}}
@@ -139,7 +142,7 @@ spec:
       {{- end }}
       containers:
         - name: api-rs
-          image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
+          image: {{ printf "%s:%s" .Values.apiRs.image.repository $apiRsImageTag | quote }}
           imagePullPolicy: {{ .Values.apiRs.image.pullPolicy }}
           env:
             - name: DATABASE_URL
@@ -202,7 +205,7 @@ spec:
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: SESSION_SANDBOX_IMAGE
-              value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
+              value: {{ printf "%s:%s" .Values.sandbox.image.repository $sandboxImageTag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
 {{- if .Values.global.imagePullSecrets }}
@@ -323,7 +326,7 @@ spec:
               value: {{ .Values.repoCache.hostPath | quote }}
 {{- end }}
             - name: KUBERNETES_TOOLS_RUNNER_IMAGE
-              value: {{ printf "%s:%s" (default .Values.sandbox.image.repository .Values.toolServer.runnerImage.repository) (default .Values.sandbox.image.tag .Values.toolServer.runnerImage.tag) | quote }}
+              value: {{ printf "%s:%s" (default .Values.sandbox.image.repository .Values.toolServer.runnerImage.repository) $toolRunnerImageTag | quote }}
             - name: KUBERNETES_TOOLS_RUNNER_IMAGE_PULL_POLICY
               value: {{ default .Values.sandbox.image.pullPolicy .Values.toolServer.runnerImage.pullPolicy | quote }}
 {{- if and .Values.toolServer.githubToken.existingSecretName (not $toolsUseRepoCache) }}

@@ -1,5 +1,6 @@
 {{- if .Values.slackbotv2.enabled }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $slackbotV2ImageTag := include "centaur.centaurImageTag" (dict "root" . "componentTag" .Values.slackbotv2.image.tag) -}}
 {{- $slackbotV2MetricsAnnotations := dict -}}
 {{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
 {{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
@@ -34,7 +35,7 @@ spec:
       {{- end }}
       containers:
         - name: slackbotv2
-          image: {{ printf "%s:%s" .Values.slackbotv2.image.repository .Values.slackbotv2.image.tag | quote }}
+          image: {{ printf "%s:%s" .Values.slackbotv2.image.repository $slackbotV2ImageTag | quote }}
           imagePullPolicy: {{ .Values.slackbotv2.image.pullPolicy }}
           env:
             - name: PORT

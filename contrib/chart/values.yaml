@@ -3,6 +3,10 @@ fullnameOverride: ""
 
 global:
   imagePullSecrets: []
+  # Optional shared tag for Centaur images that must move together. When set,
+  # this overrides apiRs, sandbox, repoCache, toolServer runner, and slackbotv2
+  # image tags while leaving separately versioned images such as ironProxy alone.
+  centaurImageTag: ""
 
 secretManager:
   envPrefix: ""
