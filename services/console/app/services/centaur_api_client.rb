@@ -46,6 +46,18 @@ class CentaurApiClient
     request(:delete, "/api/admin/slack/archive-imports/#{escape_path(import_id)}")
   end
 
+  def list_slack_dm_sync_checkpoints(broker_credential_id:, home_team_id: nil)
+    get(
+      "/api/admin/slack/dm-sync/checkpoints",
+      broker_credential_id: broker_credential_id,
+      home_team_id: home_team_id
+    )
+  end
+
+  def ingest_slack_dm_sync_batch(payload)
+    post("/api/admin/slack/dm-sync/batch", payload)
+  end
+
   private
 
   def get(path, params = {})

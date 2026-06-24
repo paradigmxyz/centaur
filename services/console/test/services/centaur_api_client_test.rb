@@ -59,4 +59,33 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     end
     assert_equal "bad archive", error.message
   end
+
+  test "lists Slack DM sync checkpoints for a broker credential" do
+    http = StubHTTP.new(status: 200, body: { checkpoints: [] }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.list_slack_dm_sync_checkpoints(
+      broker_credential_id: "bcr_123",
+      home_team_id: "T123"
+    )
+
+    request = http.requests.first
+    assert_equal :get, request[:method]
+    assert_equal(
+      "http://api.internal:8080/api/admin/slack/dm-sync/checkpoints?broker_credential_id=bcr_123&home_team_id=T123",
+      request[:url]
+    )
+  end
+
+  test "posts Slack DM sync batches" do
+    http = StubHTTP.new(status: 200, body: { ok: true }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.ingest_slack_dm_sync_batch(run: { run_id: "sdms_1" }, messages: [])
+
+    request = http.requests.first
+    assert_equal :post, request[:method]
+    assert_equal "http://api.internal:8080/api/admin/slack/dm-sync/batch", request[:url]
+    assert_equal({ "run" => { "run_id" => "sdms_1" }, "messages" => [] }, JSON.parse(request[:body]))
+  end
 end

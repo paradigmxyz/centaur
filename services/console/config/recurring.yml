@@ -19,6 +19,9 @@ production:
   broker_poll_refresh:
     class: "Broker::PollRefreshJob"
     schedule: every minute
+  slack_dm_poll_sync:
+    class: "SlackDm::PollSyncJob"
+    schedule: every 10 minutes
   prune_principal_sync_config_snapshots:
     class: "PrunePrincipalSyncConfigSnapshotsJob"
     schedule: every 10 minutes
