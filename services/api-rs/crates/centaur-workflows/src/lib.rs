@@ -3336,6 +3336,18 @@ async fn post_python_slack_message(
                 "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".to_owned(),
             )
         })?;
+    let payload = python_slack_message_payload(channel, text, &client_msg_id, &args);
+    let response = send_slack_message(&token, payload).await?;
+    serde_json::to_value(slack_post_result_from_response(channel, response))
+        .map_err(WorkflowRuntimeError::from)
+}
+
+fn python_slack_message_payload(
+    channel: &str,
+    text: &str,
+    client_msg_id: &str,
+    args: &Value,
+) -> Value {
     let mut payload = json!({
         "channel": channel,
         "text": text,
@@ -3352,15 +3364,16 @@ async fn post_python_slack_message(
     if let Some(thread_ts) = args.get("thread_ts").and_then(Value::as_str) {
         payload["thread_ts"] = json!(thread_ts);
     }
+    if let Some(reply_broadcast) = args.get("reply_broadcast").and_then(Value::as_bool) {
+        payload["reply_broadcast"] = json!(reply_broadcast);
+    }
     if let Some(blocks) = args.get("blocks") {
         payload["blocks"] = blocks.clone();
     }
     if let Some(no_attribution) = args.get("no_attribution").and_then(Value::as_bool) {
         payload["no_attribution"] = json!(no_attribution);
     }
-    let response = send_slack_message(&token, payload).await?;
-    serde_json::to_value(slack_post_result_from_response(channel, response))
-        .map_err(WorkflowRuntimeError::from)
+    payload
 }
 
 async fn send_slack_message(token: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
@@ -3725,6 +3738,29 @@ mod tests {
             workflow_queue_class("github_issue_triage"),
             WorkflowQueueClass::Standard
         );
+    }
+
+    #[test]
+    fn python_slack_payload_passes_reply_broadcast() {
+        let payload = python_slack_message_payload(
+            "C123",
+            "hello",
+            "client-1",
+            &json!({
+                "thread_ts": "1710000000.000100",
+                "reply_broadcast": true,
+                "unfurl_links": true,
+                "unfurl_media": true,
+            }),
+        );
+
+        assert_eq!(payload["channel"], json!("C123"));
+        assert_eq!(payload["text"], json!("hello"));
+        assert_eq!(payload["client_msg_id"], json!("client-1"));
+        assert_eq!(payload["thread_ts"], json!("1710000000.000100"));
+        assert_eq!(payload["reply_broadcast"], json!(true));
+        assert_eq!(payload["unfurl_links"], json!(true));
+        assert_eq!(payload["unfurl_media"], json!(true));
     }
 
     #[test]
