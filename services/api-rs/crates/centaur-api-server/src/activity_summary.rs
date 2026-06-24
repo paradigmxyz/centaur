@@ -33,6 +33,7 @@ pub(crate) struct ActivitySummaryConfig {
 #[derive(Clone)]
 pub(crate) enum ActivitySummaryCredential {
     OpenAiApiKey(String),
+    // Uses the same logical OPENAI_API_KEY item as sandbox proxy credentials.
     OnePasswordConnect(OnePasswordConnectCredential),
 }
 
