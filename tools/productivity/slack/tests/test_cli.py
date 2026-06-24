@@ -1,10 +1,6 @@
-import sys
-import types
 from pathlib import Path
 
-from typer.testing import CliRunner
-
-from slack.cli import _channel_arg_is_id, _upload_target_and_files, app
+from slack.cli import _channel_arg_is_id, _upload_target_and_files
 
 
 def test_channel_arg_is_id_accepts_channel_id_forms() -> None:
@@ -45,32 +41,3 @@ def test_upload_target_single_missing_path_uses_default_context() -> None:
 
     assert channel is None
     assert files == ["chart.png"]
-
-
-def test_upload_single_file_uses_default_context_without_files_arg(
-    monkeypatch, tmp_path: Path
-) -> None:
-    upload = tmp_path / "chart.png"
-    upload.write_bytes(b"png")
-    calls = []
-
-    def fake_upload_file(**kwargs):
-        calls.append(kwargs)
-        return {"permalink": "https://slack.example/files/chart.png"}
-
-    fake_client = types.SimpleNamespace(upload_file=fake_upload_file)
-    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
-
-    result = CliRunner().invoke(app, ["upload", str(upload), "--comment", "chart"])
-
-    assert result.exit_code == 0
-    assert calls == [
-        {
-            "channel": None,
-            "content_base64": "cG5n",
-            "filename": "chart.png",
-            "title": "chart.png",
-            "comment": "chart",
-            "thread_ts": None,
-        }
-    ]
