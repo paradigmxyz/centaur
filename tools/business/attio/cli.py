@@ -388,6 +388,198 @@ def notes(
         console.print(f"[cyan]{title}[/] [dim]({note_id[:8]}...)[/]")
 
 
+@app.command("list-threads")
+def list_threads(
+    object_slug: str = typer.Option(None, "--object", "-o", help="Filter by linked object"),
+    record_id: str = typer.Option(None, "--record", "-r", help="Filter by linked record ID"),
+    list_id: str = typer.Option(None, "--list", "-l", help="Filter by linked list"),
+    entry_id: str = typer.Option(None, "--entry", "-e", help="Filter by linked entry"),
+    limit: int = typer.Option(25, "--limit", "-n", help="Max results"),
+    offset: int = typer.Option(0, "--offset", help="Result offset"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """List comment threads for a record or list entry."""
+    client = _get_client()
+    threads = client.list_threads(
+        object_slug=object_slug,
+        record_id=record_id,
+        list_id=list_id,
+        entry_id=entry_id,
+        limit=limit,
+        offset=offset,
+    )
+
+    if json_output:
+        print(json.dumps(threads, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    if not threads:
+        console.print("[yellow]No threads found.[/]")
+        raise typer.Exit()
+
+    table = Table(title=f"Threads ({len(threads)})")
+    table.add_column("ID", style="dim", max_width=36)
+    table.add_column("Title", style="cyan", max_width=50)
+    table.add_column("Created", style="white", max_width=20)
+
+    for thread in threads:
+        thread_id = thread.get("id", {}).get("thread_id", "") or thread.get("id", "")
+        title = thread.get("title") or thread.get("subject") or ""
+        created = thread.get("created_at", "")[:19]
+        table.add_row(thread_id[:8] + "...", title, created)
+
+    console.print(table)
+
+
+@app.command("get-thread")
+def get_thread(
+    thread_id: str = typer.Argument(..., help="Thread ID"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Get a thread and its comments."""
+    client = _get_client()
+    thread = client.get_thread(thread_id)
+
+    if json_output:
+        print(json.dumps(thread, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    console.print(f"[bold]Thread[/] [cyan]{thread_id}[/]\n")
+    console.print(json.dumps(thread, indent=2, ensure_ascii=False))
+
+
+@app.command("list-meetings")
+def list_meetings(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    cursor: str = typer.Option(None, "--cursor", help="Pagination cursor"),
+    linked_object: str = typer.Option(None, "--linked-object", help="Linked object slug"),
+    linked_record_id: str = typer.Option(None, "--linked-record-id", help="Linked record ID"),
+    participants: str = typer.Option(
+        None, "--participants", help="Comma-separated participant emails or record IDs"
+    ),
+    sort: str = typer.Option(None, "--sort", help="Sort order supported by Attio"),
+    ends_from: str = typer.Option(None, "--ends-from", help="Filter by end time lower bound"),
+    starts_before: str = typer.Option(
+        None, "--starts-before", help="Filter by start time upper bound"
+    ),
+    timezone: str = typer.Option(None, "--timezone", help="Timezone for date filters"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """List meetings, optionally filtered to a linked Attio record."""
+    client = _get_client()
+    participant_values = (
+        [part.strip() for part in participants.split(",") if part.strip()]
+        if participants
+        else None
+    )
+    result = client.list_meetings(
+        limit=limit,
+        cursor=cursor,
+        linked_object=linked_object,
+        linked_record_id=linked_record_id,
+        participants=participant_values,
+        sort=sort,
+        ends_from=ends_from,
+        starts_before=starts_before,
+        timezone=timezone,
+    )
+
+    if json_output:
+        print(json.dumps(result, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    meetings = result.get("data", [])
+    if not meetings:
+        console.print("[yellow]No meetings found.[/]")
+        raise typer.Exit()
+
+    table = Table(title=f"Meetings ({len(meetings)})")
+    table.add_column("ID", style="dim", max_width=36)
+    table.add_column("Title", style="cyan", max_width=50)
+    table.add_column("Start", style="white", max_width=20)
+    table.add_column("End", style="white", max_width=20)
+
+    for meeting in meetings:
+        meeting_id = meeting.get("id", {}).get("meeting_id", "") or meeting.get("id", "")
+        title = meeting.get("title") or meeting.get("subject") or meeting.get("name") or ""
+        start = meeting.get("start_at") or meeting.get("starts_at") or meeting.get("start_time") or ""
+        end = meeting.get("end_at") or meeting.get("ends_at") or meeting.get("end_time") or ""
+        table.add_row(meeting_id[:8] + "...", title, str(start)[:19], str(end)[:19])
+
+    console.print(table)
+
+
+@app.command("get-meeting")
+def get_meeting(
+    meeting_id: str = typer.Argument(..., help="Meeting ID"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Get a single meeting by ID."""
+    client = _get_client()
+    meeting = client.get_meeting(meeting_id)
+
+    if json_output:
+        print(json.dumps(meeting, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    console.print(f"[bold]Meeting[/] [cyan]{meeting_id}[/]\n")
+    console.print(json.dumps(meeting, indent=2, ensure_ascii=False))
+
+
+@app.command("list-call-recordings")
+def list_call_recordings(
+    meeting_id: str = typer.Argument(..., help="Meeting ID"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    cursor: str = typer.Option(None, "--cursor", help="Pagination cursor"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """List call recordings for a meeting."""
+    client = _get_client()
+    result = client.list_call_recordings(meeting_id, limit=limit, cursor=cursor)
+
+    if json_output:
+        print(json.dumps(result, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    recordings = result.get("data", [])
+    if not recordings:
+        console.print("[yellow]No call recordings found.[/]")
+        raise typer.Exit()
+
+    table = Table(title=f"Call Recordings ({len(recordings)})")
+    table.add_column("ID", style="dim", max_width=36)
+    table.add_column("Title", style="cyan", max_width=50)
+    table.add_column("Created", style="white", max_width=20)
+
+    for recording in recordings:
+        recording_id = (
+            recording.get("id", {}).get("call_recording_id", "") or recording.get("id", "")
+        )
+        title = recording.get("title") or recording.get("name") or ""
+        created = recording.get("created_at", "")[:19]
+        table.add_row(recording_id[:8] + "...", title, created)
+
+    console.print(table)
+
+
+@app.command("get-call-transcript")
+def get_call_transcript(
+    meeting_id: str = typer.Argument(..., help="Meeting ID"),
+    call_recording_id: str = typer.Argument(..., help="Call recording ID"),
+    cursor: str = typer.Option(None, "--cursor", help="Pagination cursor"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Get a call recording transcript."""
+    client = _get_client()
+    transcript = client.get_call_transcript(meeting_id, call_recording_id, cursor=cursor)
+
+    if json_output:
+        print(json.dumps(transcript, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    console.print(json.dumps(transcript, indent=2, ensure_ascii=False))
+
+
 @app.command("add-note")
 def add_note(
     object_slug: str = typer.Argument(..., help="Parent object slug"),
