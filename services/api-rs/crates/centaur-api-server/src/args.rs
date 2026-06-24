@@ -34,6 +34,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     ServerError,
+    activity_summary::ActivitySummaryConfig,
     tool_discovery::{
         DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_persona_registry,
         discover_tool_proxy_fragment,
@@ -60,6 +61,8 @@ pub(crate) struct Args {
     pub(crate) server: ServerArgs,
     #[command(flatten)]
     sandbox: SandboxArgs,
+    #[command(flatten)]
+    activity_summary: ActivitySummaryArgs,
 }
 
 impl Args {
@@ -99,6 +102,10 @@ impl Args {
             .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
             .await
     }
+
+    pub(crate) fn activity_summary_config(&self) -> Option<ActivitySummaryConfig> {
+        self.activity_summary.config()
+    }
 }
 
 pub(crate) struct IronControlRuntime {
@@ -115,6 +122,83 @@ pub(crate) struct IronControlToolReconciler {
     tool_dirs: Vec<PathBuf>,
     tool_git_sources: Vec<ToolGitSource>,
     interval: Duration,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ActivitySummaryArgs {
+    /// Enable API-side model summaries of durable Codex App Server activity.
+    #[arg(
+        long = "session-activity-summary-enabled",
+        env = "SESSION_ACTIVITY_SUMMARY_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    enabled: bool,
+    #[arg(
+        long = "session-activity-summary-model",
+        env = "SESSION_ACTIVITY_SUMMARY_MODEL",
+        default_value = "gpt-5.4-nano"
+    )]
+    model: String,
+    #[arg(
+        long = "session-activity-summary-openai-base-url",
+        env = "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
+        default_value = "https://api.openai.com/v1"
+    )]
+    openai_base_url: String,
+    #[arg(
+        long = "session-activity-summary-min-interval-secs",
+        env = "SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS",
+        default_value_t = 8,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    min_interval_secs: u64,
+    #[arg(
+        long = "session-activity-summary-timeout-secs",
+        env = "SESSION_ACTIVITY_SUMMARY_TIMEOUT_SECS",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    timeout_secs: u64,
+    #[arg(
+        long = "session-activity-summary-max-facts",
+        env = "SESSION_ACTIVITY_SUMMARY_MAX_FACTS",
+        default_value_t = 12,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_facts: u64,
+    #[arg(
+        long = "session-activity-summary-max-output-tokens",
+        env = "SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS",
+        default_value_t = 48,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_output_tokens: u64,
+}
+
+impl ActivitySummaryArgs {
+    fn config(&self) -> Option<ActivitySummaryConfig> {
+        if !self.enabled {
+            return None;
+        }
+        let api_key = clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref());
+        let Some(api_key) = api_key else {
+            warn!(
+                "session activity summaries are enabled but no OpenAI API key is configured; \
+                 set OPENAI_API_KEY"
+            );
+            return None;
+        };
+        Some(ActivitySummaryConfig {
+            api_key,
+            base_url: self.openai_base_url.clone(),
+            max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
+            max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
+            min_interval: Duration::from_secs(self.min_interval_secs),
+            model: self.model.clone(),
+            timeout: Duration::from_secs(self.timeout_secs),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

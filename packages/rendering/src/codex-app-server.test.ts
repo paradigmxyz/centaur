@@ -290,6 +290,24 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('maps Rust activity summary events to renderer status updates', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const events = mapper.process({
+      eventKind: 'session.activity_summary',
+      data: {
+        execution_id: 'exe-1',
+        summary: 'The agent is inspecting App Server events.'
+      }
+    })
+
+    expect(events).toEqual([
+      {
+        type: 'renderer.status',
+        status: 'The agent is inspecting App Server events.'
+      }
+    ])
+  })
+
   it('maps app-server agent message deltas keyed by turnId', () => {
     const mapper = new CodexAppServerRendererEventMapper()
     const events = mapper.process({

@@ -195,6 +195,22 @@ spec:
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_ENABLED
+              value: {{ .Values.apiRs.activitySummary.enabled | quote }}
+{{- if .Values.apiRs.activitySummary.enabled }}
+            - name: SESSION_ACTIVITY_SUMMARY_MODEL
+              value: {{ .Values.apiRs.activitySummary.model | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL
+              value: {{ .Values.apiRs.activitySummary.openaiBaseUrl | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS
+              value: {{ .Values.apiRs.activitySummary.minIntervalSecs | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_TIMEOUT_SECS
+              value: {{ .Values.apiRs.activitySummary.timeoutSecs | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_MAX_FACTS
+              value: {{ .Values.apiRs.activitySummary.maxFacts | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS
+              value: {{ .Values.apiRs.activitySummary.maxOutputTokens | quote }}
+{{- end }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: SESSION_SANDBOX_IMAGE

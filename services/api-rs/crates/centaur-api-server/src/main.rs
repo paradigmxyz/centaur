@@ -1,3 +1,4 @@
+mod activity_summary;
 mod args;
 mod tool_discovery;
 
@@ -57,6 +58,10 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let store = PgSessionStore::connect(&args.server.database_url).await?;
     if args.server.run_migrations {
         store.run_migrations().await?;
+    }
+    if let Some(config) = args.activity_summary_config() {
+        let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;
+        tokio::spawn(worker.run());
     }
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
@@ -138,6 +143,8 @@ pub(crate) enum ServerError {
     Telemetry(#[from] centaur_telemetry::TelemetryError),
     #[error(transparent)]
     ToolDiscovery(#[from] tool_discovery::ToolDiscoveryError),
+    #[error(transparent)]
+    ActivitySummary(#[from] activity_summary::ActivitySummaryError),
     #[error("tool source error: {0}")]
     ToolSource(String),
     #[error("iron-proxy requires both firewall CA cert and key Secret names")]

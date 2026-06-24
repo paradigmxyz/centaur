@@ -295,6 +295,14 @@ apiRs:
   sandboxIdleStopTtlSecs: 10800 # 3 hours
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  activitySummary:
+    enabled: false
+    model: gpt-5.4-nano
+    openaiBaseUrl: https://api.openai.com/v1
+    minIntervalSecs: 8
+    timeoutSecs: 5
+    maxFacts: 12
+    maxOutputTokens: 48
   ironProxy:
     mode: enabled
   metrics:

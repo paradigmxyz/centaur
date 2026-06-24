@@ -103,6 +103,8 @@ export class CodexAppServerRendererEventMapper
     const rustMapped = rustSessionEventToServerNotification(source)
     if (rustMapped?.kind === 'failed') return this.fail(rustMapped.error)
     if (rustMapped?.kind === 'completed') return this.complete(rustMapped.resultText)
+    if (rustMapped?.kind === 'status')
+      return [{ type: 'renderer.status', status: rustMapped.status }]
     if (rustMapped?.kind === 'notification') return this.processNotification(rustMapped.notification)
 
     if (!isRecord(source)) return []
@@ -694,6 +696,7 @@ export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
   | { kind: 'completed'; resultText?: string }
+  | { kind: 'status'; status: string }
   | null
 
 export function rustSessionEventToServerNotification(source: unknown): RustSessionMappingResult {
@@ -719,6 +722,12 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
         status: 'completed'
       }
     }
+  }
+
+  if (eventKind === 'session.activity_summary') {
+    const data = isRecord(source.data) ? source.data : source
+    const status = String(data.summary ?? data.status ?? '').trim()
+    return status ? { kind: 'status', status } : null
   }
 
   if (
