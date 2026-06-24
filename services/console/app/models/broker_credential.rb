@@ -50,6 +50,7 @@ class BrokerCredential < ApplicationRecord
   # is no FK to cascade or nullify, so deletion would silently leave those secrets
   # undeliverable. The operator must remove the references first.
   before_destroy :ensure_not_referenced
+  after_commit :auto_grant_matching_principals, on: %i[create update], if: :oauth_app_id?
   before_commit :bump_referencing_principal_sync_config_versions, if: :sync_config_relevant_change?
 
   serialize :token_endpoint_headers, coder: JSON
@@ -142,6 +143,10 @@ class BrokerCredential < ApplicationRecord
   end
 
   private
+
+  def auto_grant_matching_principals
+    PrincipalCredentialReconciliation.new.apply_for_credential(self)
+  end
 
   def refresh_client
     @refresh_client ||= Broker::RefreshClient.new
