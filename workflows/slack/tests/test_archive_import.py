@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import json
 import sys
 import types
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -349,3 +351,76 @@ def test_archive_upsert_sql_preserves_live_fields():
     assert "content_bytes =" not in attachment_update
     assert "content_sha256 =" not in attachment_update
     assert "download_status = CASE WHEN" in attachment_update
+
+
+def test_request_archive_download_url_uses_api_presign_endpoint(monkeypatch):
+    opened_requests = []
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        opened_requests.append((request, timeout))
+        return FakeResponse(
+            json.dumps(
+                {
+                    "ok": True,
+                    "download": {
+                        "download_url": "https://r2.example/presigned-download"
+                    },
+                }
+            ).encode()
+        )
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://centaur-api-rs:8080/")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    download_url = archive_import._request_archive_download_url("sai id/with/slash")
+
+    assert download_url == "https://r2.example/presigned-download"
+    request, timeout = opened_requests[0]
+    assert timeout == 30
+    assert request.get_method() == "POST"
+    assert (
+        request.full_url
+        == "http://centaur-api-rs:8080/api/admin/slack/archive-imports/"
+        "sai%20id%2Fwith%2Fslash/download-url"
+    )
+
+
+def test_download_archive_streams_api_presigned_url(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_request_archive_download_url(import_id):
+        calls.append(("presign", import_id))
+        return "https://r2.example/presigned-download"
+
+    def fake_download_url_to_path(download_url, destination):
+        calls.append(("download", download_url, destination))
+        destination.write_bytes(b"zip bytes")
+
+    monkeypatch.setattr(
+        archive_import,
+        "_request_archive_download_url",
+        fake_request_archive_download_url,
+    )
+    monkeypatch.setattr(
+        archive_import,
+        "_download_url_to_path",
+        fake_download_url_to_path,
+    )
+
+    destination = tmp_path / "archive.zip"
+    asyncio.run(
+        archive_import._download_archive({"import_id": "sai_dummy"}, destination)
+    )
+
+    assert calls == [
+        ("presign", "sai_dummy"),
+        ("download", "https://r2.example/presigned-download", destination),
+    ]
+    assert destination.read_bytes() == b"zip bytes"

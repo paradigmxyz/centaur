@@ -6,8 +6,10 @@ import asyncio
 import datetime as dt
 import json
 import os
+import shutil
 import tempfile
 import urllib.parse
+import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -602,32 +604,49 @@ async def import_archive_path(
     return counts
 
 
-def _s3_client():
-    import boto3
-    from botocore.config import Config
+def _api_base_url() -> str:
+    value = _as_text(
+        os.environ.get("CENTAUR_API_URL")
+        or os.environ.get("SESSION_SANDBOX_CENTAUR_API_URL")
+    ).rstrip("/")
+    if not value:
+        raise RuntimeError("CENTAUR_API_URL is required to download Slack archive")
+    return value
 
-    region = os.getenv("SLACK_ARCHIVE_UPLOAD_REGION") or "auto"
-    endpoint_url = os.getenv("SLACK_ARCHIVE_UPLOAD_ENDPOINT") or None
-    return boto3.client(
-        "s3",
-        region_name=region,
-        endpoint_url=endpoint_url,
-        config=Config(s3={"addressing_style": "path"}),
+
+def _request_archive_download_url(import_id: str) -> str:
+    quoted_import_id = urllib.parse.quote(import_id, safe="")
+    request = urllib.request.Request(
+        f"{_api_base_url()}/api/admin/slack/archive-imports/{quoted_import_id}/download-url",
+        data=b"",
+        method="POST",
+        headers={"Content-Type": "application/json"},
     )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.load(response)
+    download = payload.get("download") if isinstance(payload, dict) else None
+    download_url = download.get("download_url") if isinstance(download, dict) else None
+    if not download_url:
+        raise RuntimeError(
+            "Slack archive download URL response is missing download_url"
+        )
+    return _as_text(download_url)
 
 
-def _download_s3_object(bucket: str, key: str, destination: Path) -> None:
-    with destination.open("wb") as handle:
-        _s3_client().download_fileobj(bucket, key, handle)
+def _download_url_to_path(download_url: str, destination: Path) -> None:
+    request = urllib.request.Request(
+        download_url,
+        headers={"User-Agent": "centaur-slack-archive-import/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=300) as response:
+        with destination.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
 
 
 async def _download_archive(import_row: dict[str, Any], destination: Path) -> None:
-    await asyncio.to_thread(
-        _download_s3_object,
-        _as_text(import_row.get("object_bucket")),
-        _as_text(import_row.get("object_key")),
-        destination,
-    )
+    import_id = _as_text(import_row.get("import_id"))
+    download_url = await asyncio.to_thread(_request_archive_download_url, import_id)
+    await asyncio.to_thread(_download_url_to_path, download_url, destination)
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:

@@ -230,6 +230,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             post(refresh_slack_archive_import_upload_url),
         )
         .route(
+            "/api/admin/slack/archive-imports/{import_id}/download-url",
+            post(create_slack_archive_import_download_url),
+        )
+        .route(
             "/api/admin/slack/archive-imports/{import_id}/start",
             post(start_slack_archive_import),
         )
@@ -740,6 +744,28 @@ async fn refresh_slack_archive_import_upload_url(
     ))
 }
 
+async fn create_slack_archive_import_download_url(
+    State(state): State<AppState>,
+    Path(import_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let pool = db_pool(&state)?;
+    let import = load_slack_archive_import(&pool, &import_id).await?;
+    ensure_archive_import_status(
+        &import.status,
+        &["uploaded", "importing", "failed"],
+        "archive download URL cannot be created",
+    )?;
+    let config = slack_archive_upload_config()?;
+    ensure_archive_import_bucket_matches_config(&import, &config)?;
+    let download_url = presign_s3_get_url(&config, &import.object_key).await?;
+    let expires_at = OffsetDateTime::now_utc() + config.presign_ttl;
+    Ok(Json(slack_archive_download_response(
+        import,
+        download_url,
+        expires_at,
+    )))
+}
+
 async fn delete_slack_archive_import(
     State(state): State<AppState>,
     Path(import_id): Path<String>,
@@ -1041,6 +1067,23 @@ fn slack_archive_upload_response(
     })
 }
 
+fn slack_archive_download_response(
+    row: SlackArchiveImportRow,
+    download_url: String,
+    expires_at: OffsetDateTime,
+) -> Value {
+    let archive_uri = row.archive_uri.clone();
+    json!({
+        "ok": true,
+        "import": SlackArchiveImportResponse::from(row),
+        "download": {
+            "archive_uri": archive_uri,
+            "download_url": download_url,
+            "expires_at": expires_at,
+        }
+    })
+}
+
 fn ensure_archive_import_status(
     status: &str,
     allowed: &[&str],
@@ -1218,6 +1261,23 @@ async fn presign_s3_put_url(
         .bucket(&config.bucket)
         .key(object_key)
         .content_type(content_type)
+        .presigned(presigning)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(request.uri().to_string())
+}
+
+async fn presign_s3_get_url(
+    config: &SlackArchiveUploadConfig,
+    object_key: &str,
+) -> Result<String, ApiError> {
+    let client = s3_client(config).await;
+    let presigning = PresigningConfig::expires_in(config.presign_ttl)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let request = client
+        .get_object()
+        .bucket(&config.bucket)
+        .key(object_key)
         .presigned(presigning)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
@@ -1574,6 +1634,27 @@ mod slack_archive_import_tests {
     }
 
     #[test]
+    fn archive_import_download_url_statuses_exclude_unuploaded_or_terminal_imports() {
+        for status in ["uploaded", "importing", "failed"] {
+            ensure_archive_import_status(
+                status,
+                &["uploaded", "importing", "failed"],
+                "archive download URL cannot be created",
+            )
+            .unwrap();
+        }
+        for status in ["upload_pending", "completed", "cancelled"] {
+            let error = ensure_archive_import_status(
+                status,
+                &["uploaded", "importing", "failed"],
+                "archive download URL cannot be created",
+            )
+            .unwrap_err();
+            assert!(matches!(error, ApiError::BadRequest(_)));
+        }
+    }
+
+    #[test]
     fn archive_import_bucket_must_match_current_upload_config() {
         let import = archive_row("upload_pending");
         let config = SlackArchiveUploadConfig {
@@ -1613,6 +1694,28 @@ mod slack_archive_import_tests {
             json!("https://uploads.example/presigned")
         );
         assert!(body["upload"]["expires_at"].is_array());
+    }
+
+    #[test]
+    fn archive_download_response_includes_import_and_download_contract() {
+        let expires_at = OffsetDateTime::from_unix_timestamp(1_700_000_900).unwrap();
+        let body = slack_archive_download_response(
+            archive_row("uploaded"),
+            "https://uploads.example/presigned-download".to_owned(),
+            expires_at,
+        );
+        assert_eq!(body["ok"], json!(true));
+        assert_eq!(body["import"]["import_id"], json!("sai_test"));
+        assert_eq!(
+            body["download"]["archive_uri"],
+            json!("s3://bucket/prefix/sai_test/archive.zip")
+        );
+        assert_eq!(
+            body["download"]["download_url"],
+            json!("https://uploads.example/presigned-download")
+        );
+        assert!(body["download"]["expires_at"].is_array());
+        assert!(body.get("upload").is_none());
     }
 }
 
