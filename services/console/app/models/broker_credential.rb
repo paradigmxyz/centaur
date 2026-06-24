@@ -22,7 +22,6 @@ class BrokerCredential < ApplicationRecord
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
 
   GRANTS = %w[refresh_token password].freeze
-  RefreshAttempt = Data.define(:result, :clear_refresh_token)
 
   # The access token must keep at least this much life past the scheduled
   # refresh, regardless of slack/fraction. Mirrors the 60s floor in
@@ -136,8 +135,8 @@ class BrokerCredential < ApplicationRecord
     with_lock do
       return if dead?
 
-      attempt = perform_refresh
-      apply_success!(attempt, now: now) if attempt
+      result, clear_refresh_token = perform_refresh
+      apply_success!(result, now: now, clear_refresh_token: clear_refresh_token) if result
     rescue Broker::RefreshError => e
       if e.retryable?
         record_retryable_failure(e.message, now: now)
@@ -168,16 +167,19 @@ class BrokerCredential < ApplicationRecord
       return nil
     end
 
-    RefreshAttempt.new(refresh_client.refresh(
-      token_endpoint: token_endpoint,
-      grant: "refresh_token",
-      client_id: effective_client_id,
-      client_secret: effective_client_secret,
-      refresh_token: refresh_token,
-      scopes: refresh_scopes_for_provider,
-      headers: token_endpoint_headers || {},
-      timeout: refresh_timeout_seconds
-    ), false)
+    [
+      refresh_client.refresh(
+        token_endpoint: token_endpoint,
+        grant: "refresh_token",
+        client_id: effective_client_id,
+        client_secret: effective_client_secret,
+        refresh_token: refresh_token,
+        scopes: refresh_scopes_for_provider,
+        headers: token_endpoint_headers || {},
+        timeout: refresh_timeout_seconds
+      ),
+      false
+    ]
   end
 
   def perform_password_grant_refresh
@@ -185,16 +187,19 @@ class BrokerCredential < ApplicationRecord
 
     if refresh_token.present?
       begin
-        return RefreshAttempt.new(refresh_client.refresh(
-          token_endpoint: token_endpoint,
-          grant: "refresh_token",
-          client_id: effective_client_id,
-          client_secret: effective_client_secret,
-          refresh_token: refresh_token,
-          scopes: refresh_scopes_for_provider,
-          headers: token_endpoint_headers || {},
-          timeout: refresh_timeout_seconds
-        ), false)
+        return [
+          refresh_client.refresh(
+            token_endpoint: token_endpoint,
+            grant: "refresh_token",
+            client_id: effective_client_id,
+            client_secret: effective_client_secret,
+            refresh_token: refresh_token,
+            scopes: refresh_scopes_for_provider,
+            headers: token_endpoint_headers || {},
+            timeout: refresh_timeout_seconds
+          ),
+          false
+        ]
       rescue Broker::RefreshError => e
         raise if e.retryable?
 
@@ -222,15 +227,14 @@ class BrokerCredential < ApplicationRecord
       headers: token_endpoint_headers || {},
       timeout: refresh_timeout_seconds
     )
-    RefreshAttempt.new(result, clear_stale_refresh_token && result.refresh_token.blank?)
+    [ result, clear_stale_refresh_token && result.refresh_token.blank? ]
   end
 
   def refresh_scopes_for_provider
     oauth_app&.provider_strategy&.refresh_scopes(scopes) || scopes
   end
 
-  def apply_success!(attempt, now:)
-    result = attempt.result
+  def apply_success!(result, now:, clear_refresh_token:)
     expires_in = result.expires_in&.positive? ? result.expires_in : DEFAULT_EXPIRES_IN_SECONDS
     attrs = {
       access_token: result.access_token,
@@ -243,7 +247,7 @@ class BrokerCredential < ApplicationRecord
     # Carry the previous refresh_token forward when the IdP did not rotate.
     if result.refresh_token.present?
       attrs[:refresh_token] = result.refresh_token
-    elsif attempt.clear_refresh_token
+    elsif clear_refresh_token
       attrs[:refresh_token] = nil
     end
     assign_attributes(attrs)
