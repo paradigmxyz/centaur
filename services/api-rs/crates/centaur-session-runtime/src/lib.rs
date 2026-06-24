@@ -4911,6 +4911,7 @@ mod tests {
         assert_eq!(env_value(&warm_spec, "CENTAUR_THREAD_KEY"), None);
     }
 
+    #[test]
     fn warm_workload_key_ignores_claimed_thread_key() {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
