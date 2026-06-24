@@ -303,7 +303,7 @@ apiRs:
     minIntervalSecs: 8
     timeoutSecs: 5
     maxFacts: 12
-    maxOutputTokens: 96
+    maxOutputTokens: 128
   ironProxy:
     mode: enabled
   metrics:

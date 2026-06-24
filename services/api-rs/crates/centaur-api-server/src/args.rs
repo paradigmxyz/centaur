@@ -172,7 +172,7 @@ struct ActivitySummaryArgs {
     #[arg(
         long = "session-activity-summary-max-output-tokens",
         env = "SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS",
-        default_value_t = 96,
+        default_value_t = 128,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     max_output_tokens: u64,
