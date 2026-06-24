@@ -3298,6 +3298,7 @@ describe('slackbotv2', () => {
     bot = createTestBot({ triggerBotAllowlist: ['bot:BOTHERBOT'] })
     codexApi.reset()
     const allowedBotChannelMessage = await postUserMessage(`<@${BOT_USER_ID}> from allowed bot message`)
+    slackApi.reset()
     const allowedBotChannelWaits: Promise<unknown>[] = []
     const allowedBotChannelResponse = await bot.app.request(
       '/api/webhooks/slack',
@@ -3327,6 +3328,14 @@ describe('slackbotv2', () => {
     await Promise.all(allowedBotChannelWaits)
     expect(codexApi.appends).toHaveLength(1)
     expect(codexApi.executes).toHaveLength(1)
+    const allowedBotChannelTranscripts = slackStreamTranscripts(slackApi.calls)
+    expect(allowedBotChannelTranscripts).toHaveLength(1)
+    expect(allowedBotChannelTranscripts[0]!.start.body).toEqual(
+      expect.objectContaining({
+        recipient_team_id: TEAM_ID,
+        recipient_user_id: 'UOTHERBOT'
+      })
+    )
   })
 })
 

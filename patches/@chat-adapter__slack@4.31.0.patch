@@ -230,6 +230,19 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
      const factory = async () => {
        const msg = await this.parseSlackMessage(event, threadId);
        if (isMention) {
+@@ -2520,10 +2732,10 @@ var SlackAdapter = class _SlackAdapter {
+       formatted: this.formatConverter.toAst(text),
+       raw: event,
+       author: {
+-        userId: event.user || event.bot_id || "unknown",
++        userId: event.user || event.bot_profile?.user_id || event.bot_id || "unknown",
+         userName,
+         fullName,
+-        isBot: !!event.bot_id,
++        isBot: Boolean(event.bot_id || event.bot_profile || event.subtype === "bot_message"),
+         isMe
+       },
+       metadata: {
 @@ -3452,26 +3664,251 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
@@ -649,3 +662,16 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
      };
    }
    /**
+@@ -3798,10 +4332,10 @@ var SlackAdapter = class _SlackAdapter {
+       formatted: this.formatConverter.toAst(text),
+       raw: event,
+       author: {
+-        userId: event.user || event.bot_id || "unknown",
++        userId: event.user || event.bot_profile?.user_id || event.bot_id || "unknown",
+         userName,
+         fullName,
+-        isBot: !!event.bot_id,
++        isBot: Boolean(event.bot_id || event.bot_profile || event.subtype === "bot_message"),
+         isMe
+       },
+       metadata: {
