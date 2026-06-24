@@ -164,7 +164,7 @@ class BrokerCredential < ApplicationRecord
 
   def perform_refresh_token_refresh
     if refresh_token.blank?
-      mark_dead!("blob_not_bootstrapped")
+      mark_dead!("missing_initial_refresh_token")
       return nil
     end
 
@@ -206,8 +206,8 @@ class BrokerCredential < ApplicationRecord
       end
     end
 
-    unless password_grant_bootstrapped?
-      mark_dead!("password_grant_not_bootstrapped")
+    unless password_grant_initial_values_present?
+      mark_dead!("password_grant_missing_initial_values")
       return nil
     end
 
@@ -307,7 +307,7 @@ class BrokerCredential < ApplicationRecord
     errors.add(:password, "can't be blank for the password grant") if password.blank?
   end
 
-  def password_grant_bootstrapped?
+  def password_grant_initial_values_present?
     username.present? && password.present?
   end
 

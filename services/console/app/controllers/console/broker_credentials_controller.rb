@@ -2,7 +2,7 @@ module Console
   # Create/edit form for managed broker credentials: identity, the OAuth client
   # config it refreshes with (token endpoint, client id/secret, scopes, token-
   # endpoint headers), the refresh-policy knobs, and grant-specific write-only
-  # bootstrap fields. Mirrors the per-type secret form controllers, but a broker
+  # initial values. Mirrors the per-type secret form controllers, but a broker
   # credential is not a secret (it is referenced by a token_broker source, not
   # granted), so it lives on its own rather than under BaseSecretsController.
   class BrokerCredentialsController < ApplicationController
@@ -53,8 +53,8 @@ module Console
 
     # Map the form params onto the credential. Encrypted write-only fields are
     # only assigned when non-blank, so editing without re-entering them leaves the
-    # stored values in place. Fresh bootstrap material re-bootstraps the
-    # credential and mirrors the API controller's seed handling.
+    # stored values in place. Fresh initial values reschedule the credential and
+    # mirror the API controller's handling.
     def assign_form(credential)
       fields = credential_params.permit(:namespace, :foreign_id, :name, :description,
                                         :grant, :token_endpoint, :client_id,
@@ -69,10 +69,10 @@ module Console
 
       secret = credential_params[:client_secret]
       credential.client_secret = secret if secret.present?
-      apply_bootstrap_fields(credential)
+      apply_initial_values(credential)
     end
 
-    def apply_bootstrap_fields(credential)
+    def apply_initial_values(credential)
       changed = false
       %i[refresh_token username password].each do |field|
         value = credential_params[field]

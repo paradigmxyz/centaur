@@ -97,16 +97,16 @@
           <label class="inline-flex items-center gap-2 rounded border border-ink-600 px-3 py-2 text-sm text-zinc-200">
             <%= radio_button_tag "credential[grant]", grant, selected_grant == grant,
                   data: { action: "toggle#update" } %>
-            <span><%= grant.tr("_", " ") %></span>
+            <span><%= grant.tr("_", " ").titleize %></span>
           </label>
         <% end %>
       </div>
       <%= field_error(credential, :grant) %>
 
       <div data-toggle-target="panel" data-toggle-key="refresh_token">
-        <label class="form-label" for="credential_refresh_token">Refresh token</label>
-        <%= text_area_tag "credential[refresh_token]", nil, id: "credential_refresh_token", rows: 3, class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? "the initial refresh token to seed the loop" : "•••••••• (unchanged)" %>
-        <p class="form-hint">Write-only seed, stored encrypted. Leave blank to keep the current token; entering a new one re-bootstraps the credential and clears any dead state.</p>
+        <label class="form-label" for="credential_refresh_token">Refresh Token</label>
+        <%= text_area_tag "credential[refresh_token]", nil, id: "credential_refresh_token", rows: 3, class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? "initial refresh token for the loop" : "•••••••• (unchanged)" %>
+        <p class="form-hint">Write-only initial value, stored encrypted. Leave blank to keep the current token; entering a new one reschedules the credential and clears any dead state.</p>
       </div>
 
       <div data-toggle-target="panel" data-toggle-key="password" class="grid gap-5 sm:grid-cols-2">

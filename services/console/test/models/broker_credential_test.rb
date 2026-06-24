@@ -239,7 +239,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal({ "X-Api-Key" => "k" }, captured[:headers])
   end
 
-  test "password grant bootstraps with username and password and stores returned refresh_token" do
+  test "password grant uses initial values and stores returned refresh_token" do
     captured = {}
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: "RT-new") }
@@ -309,24 +309,24 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal 1, bc.failure_count
   end
 
-  test "refresh with no seed marks dead as not bootstrapped" do
+  test "refresh with no seed marks dead as missing a seed" do
     bc = create_credential(refresh_token: "seed")
     bc.update_columns(refresh_token: nil)
     bc.reload
     bc.refresh!
     bc.reload
     assert bc.dead?
-    assert_equal "blob_not_bootstrapped", bc.dead_reason
+    assert_equal "missing_initial_refresh_token", bc.dead_reason
   end
 
-  test "password grant with missing bootstrap fields marks dead" do
+  test "password grant with missing initial values marks dead" do
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
     bc.update_columns(username: nil)
     bc.reload
     bc.refresh!
     bc.reload
     assert bc.dead?
-    assert_equal "password_grant_not_bootstrapped", bc.dead_reason
+    assert_equal "password_grant_missing_initial_values", bc.dead_reason
   end
 
   # --- scope ----------------------------------------------------------------

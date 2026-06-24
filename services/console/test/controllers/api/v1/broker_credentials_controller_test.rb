@@ -85,7 +85,7 @@ module Api
         assert_equal({ "X-Api-Key" => "k" }, created.token_endpoint_headers)
       end
 
-      test "create password grant stores bootstrap fields and redacts secrets" do
+      test "create password grant stores initial values and redacts secrets" do
         body = {
           data: {
             namespace: "acme", foreign_id: "alphasense",
@@ -180,7 +180,7 @@ module Api
         assert_equal "pass", bc.password
       end
 
-      test "password bootstrap update clears dead state and reschedules" do
+      test "password initial values update clears dead state and reschedules" do
         bc = BrokerCredential.create!(namespace: "acme", foreign_id: "password-dead",
                                       grant: "password", token_endpoint: "https://idp.example/token",
                                       client_id: "cid", username: "old", password: "old",

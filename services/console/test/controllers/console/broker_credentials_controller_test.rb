@@ -3,7 +3,7 @@ require "test_helper"
 module Console
   # Covers the broker credential create/edit form controller: what gets built and
   # persisted (identity, OAuth config, scopes, headers, refresh policy, write-
-  # only bootstrap fields), redirects, that blank write-only fields leave the
+  # only initial values), redirects, that blank write-only fields leave the
   # stored values in place, and that invalid input is rejected (422) without writing.
   class BrokerCredentialsControllerTest < ActionDispatch::IntegrationTest
     setup do
@@ -56,7 +56,7 @@ module Console
       assert_equal @operator, cred.created_by
     end
 
-    test "POST create builds a password grant credential with write-only bootstrap fields" do
+    test "POST create builds a password grant credential with write-only initial values" do
       assert_difference -> { BrokerCredential.count } => 1 do
         post console_broker_credentials_url, params: {
           credential: {
@@ -132,7 +132,7 @@ module Console
       cred.reload
       assert_equal "original-secret", cred.client_secret
       assert_equal "original-token", cred.refresh_token
-      # A blank seed must not re-bootstrap: dead state is untouched.
+      # A blank seed must not reschedule: dead state is untouched.
       assert cred.dead?
     end
 
@@ -160,7 +160,7 @@ module Console
       assert_equal "pass", cred.password
     end
 
-    test "PATCH update with a fresh refresh_token re-bootstraps the credential" do
+    test "PATCH update with a fresh refresh_token reschedules the credential" do
       cred = broker_credentials(:acme_managed_gmail)
       cred.update!(refresh_token: "old", dead: true, dead_reason: "stale", failure_count: 3)
 

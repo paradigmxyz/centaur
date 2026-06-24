@@ -2,7 +2,7 @@ module Api
   module V1
     # Operator CRUD for managed broker credentials. Mirrors the secret
     # controllers (oid/foreign_id addressing, label search, PUT-upsert), with two
-    # differences: bootstrap fields are write-only, and the rotating token blob
+    # differences: initial values are write-only, and the rotating token blob
     # (access_token/refresh_token) is NEVER serialized back.
     class BrokerCredentialsController < Api::BaseController
       def index
@@ -61,9 +61,9 @@ module Api
 
         BrokerCredential.transaction do
           ref.assign_attributes(base)
-          apply_write_only_field(ref, attrs, :client_secret)
+          apply_client_secret(ref, attrs)
           apply_token_endpoint_headers(ref, attrs)
-          apply_bootstrap_fields(ref, attrs)
+          apply_initial_values(ref, attrs)
           ref.save!
           ref.reload
         end
@@ -78,16 +78,16 @@ module Api
         ref.token_endpoint_headers = raw.respond_to?(:to_unsafe_h) ? raw.to_unsafe_h : raw
       end
 
-      def apply_write_only_field(ref, attrs, field)
-        value = attrs[field]
-        ref.public_send("#{field}=", value) if value.present?
+      def apply_client_secret(ref, attrs)
+        secret = attrs[:client_secret]
+        ref.client_secret = secret if secret.present?
       end
 
-      # These fields are write-only bootstrap/re-auth material. Supplying any
+      # These fields are write-only initial/re-auth values. Supplying any
       # fresh value resets the credential to "due now" and clears dead state, so
-      # the next poll re-bootstraps it. Blank/absent values leave stored material
+      # the next poll refreshes it. Blank/absent values leave stored material
       # and rotation state untouched.
-      def apply_bootstrap_fields(ref, attrs)
+      def apply_initial_values(ref, attrs)
         changed = false
         %i[refresh_token username password].each do |field|
           value = attrs[field]

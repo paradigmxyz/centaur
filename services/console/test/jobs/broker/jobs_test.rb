@@ -44,7 +44,7 @@ module Broker
       Broker::RefreshCredentialJob.perform_now(bc.id)
       bc.reload
       assert bc.dead?
-      assert_equal "blob_not_bootstrapped", bc.dead_reason
+      assert_equal "missing_initial_refresh_token", bc.dead_reason
     end
 
     test "RefreshCredentialJob is a no-op for a missing credential" do
