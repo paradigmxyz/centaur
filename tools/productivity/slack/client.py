@@ -1518,11 +1518,6 @@ class SlackClient:
         except Exception:
             pass
 
-        env_channel = os.environ.get("SLACK_CHANNEL_ID", "").strip()
-        env_thread_ts = os.environ.get("SLACK_THREAD_TS", "").strip()
-        if env_channel and env_thread_ts:
-            return env_channel, env_thread_ts
-
         try:
             thread_key = get_tool_context().thread_key or ""
         except LookupError:
