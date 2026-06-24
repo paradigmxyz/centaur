@@ -282,8 +282,10 @@ class BrokerCredentialTest < ActiveSupport::TestCase
   end
 
   test "password grant clears stale refresh_token when password fallback succeeds without rotation" do
+    grants = []
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-bad")
     bc.refresh_client = StubClient.new do |**kw|
+      grants << kw[:grant]
       if kw[:grant] == "refresh_token"
         raise Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false)
       end
@@ -291,6 +293,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     end
     bc.refresh!
     bc.reload
+    assert_equal %w[refresh_token password], grants
     assert_nil bc.refresh_token
     assert_equal "AT-password", bc.access_token
   end
