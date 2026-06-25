@@ -6,6 +6,7 @@ Drop tool directories here. Each tool needs:
 tools/
   my-tool/
     pyproject.toml   # [tool.centaur] section with module path
+                     # [project.scripts] entry for sandbox CLI shims
     .env.example     # Document required secrets
     __init__.py
     client.py        # API client class + _client() factory
@@ -16,7 +17,7 @@ tools/
 
 ```python
 # client.py
-from centaur.tool_sdk import secret
+from centaur_sdk.tool_sdk import secret
 
 
 class MyClient:
@@ -39,6 +40,31 @@ Secrets are resolved in this order:
 3. **Environment variables** — for Docker, k8s, sops, 1Password, etc.
 
 Use `secret("KEY")` to access. Never use `os.environ` — tool secrets are scoped.
+
+## Sandbox CLI shims
+
+Agent sandboxes install tool CLIs from `[project.scripts]` at startup through
+`services/sandbox/install_tool_shims.py`. To make a tool visible to agents,
+declare a script and verify it appears in the sandbox catalog:
+
+```toml
+[project.scripts]
+my-tool = "my_tool.cli:app"
+```
+
+```bash
+centaur-tools list
+my-tool --help
+```
+
+Tools that are intentionally library-only, workflow-only, or pending a
+credential-model change should not be presented as agent-facing. Mark them in
+metadata so the audit can distinguish them from forgotten CLI shims:
+
+```toml
+[tool.centaur]
+agent_facing = false
+```
 
 ## Available Plugins
 

@@ -88,9 +88,10 @@ From inside a sandbox, validate:
 ```bash
 command -v centaur-tools
 centaur-tools list
-call tools
-call discover <tool-name>
-call <tool-name> <method-name> '{"example":"payload"}'
+centaur-tools which <tool-name>
+<tool-name> --help
+# Run one safe command for that tool, for example: <tool-name> ...
+centaur-tools call <tool-name> <method-name> '{"example":"payload"}'
 ```
 
 ## 4. Make overlay tools installable as shims
@@ -194,9 +195,10 @@ kubectl -n centaur exec <sandbox-pod> -- sh -lc '
   set -e
   command -v centaur-tools
   centaur-tools list | head
-  call tools | head
-  call discover <tool-name> >/tmp/tool-discover.json
-  call <tool-name> <method-name> '\''{"example":"payload"}'\''
+  centaur-tools which <tool-name>
+  <tool-name> --help
+  # Run one safe command for that tool, for example: <tool-name> ...
+  centaur-tools call <tool-name> <method-name> '\''{"example":"payload"}'\''
 '
 ```
 

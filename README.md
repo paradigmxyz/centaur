@@ -45,10 +45,10 @@ Centaur is a self-hosted agent platform for teams that want one shared agent ins
 You can also drive Centaur directly through the API:
 
 ```text
-POST /agent/spawn      # assign or reuse a sandbox
-POST /agent/message    # store the user turn
-POST /agent/execute    # start the agent
-GET  /agent/threads/{thread_key}/events
+POST /api/session/{thread_key}          # create or reuse a session
+POST /api/session/{thread_key}/messages # store the user turn
+POST /api/session/{thread_key}/execute  # start the agent
+GET  /api/session/{thread_key}/events   # stream or replay output
 ```
 
 The platform handles sandbox lifecycle, durable transcript storage, tool access, credential injection, workflow execution, and final delivery.
@@ -72,7 +72,7 @@ Slack or API
 Centaur API
     |
     +-- Postgres durable state
-    +-- tool and workflow registry
+    +-- tool metadata and workflow runtime
     +-- sandbox assignment
     |
     v
@@ -80,7 +80,7 @@ Kubernetes sandbox
     |
     +-- agent harness
     +-- workspace and shell
-    +-- API-mediated tool calls
+    +-- local tool CLI shims
     |
     v
 Controlled outbound access
@@ -177,11 +177,18 @@ tools/my_tool/
 └── pyproject.toml
 ```
 
-Public methods on the client become tool endpoints. For example, `search()` becomes:
+Each runtime tool should declare a `[project.scripts]` entry so sandbox startup
+can install it as a local CLI shim. Agents discover installed tools with:
 
-```text
-POST /tools/my_tool/search
+```bash
+centaur-tools list
+my-tool --help
 ```
+
+Workflow handlers can still invoke tools through `ctx.call_tool(...)`; the
+workflow host uses the generated `centaur-tools` bridge for that compatibility
+path. api-rs does not expose legacy HTTP tool-method routes as the current
+sandbox tool registry.
 
 ## Workflows
 
@@ -203,7 +210,7 @@ Use workflows when a task should run longer than one request, wait for something
 Centaur is designed around practical isolation and auditability:
 
 - each conversation runs in a Kubernetes sandbox with a default-deny NetworkPolicy
-- sandboxes call tools through the Centaur API and reach the outside world only through a per-sandbox [iron-proxy](https://docs.iron.sh)
+- sandboxes call approved local tool CLI shims and reach the outside world only through a per-sandbox [iron-proxy](https://docs.iron.sh)
 - sandboxes only ever see placeholder strings for upstream credentials; real values are swapped in by iron-proxy only on outbound requests to the specific hosts and headers a secret is bound to
 - messages, executions, events, and delivery state are persisted
 - outbound activity can be audited
@@ -244,4 +251,7 @@ See the [Developer Guide](AGENTS.md) for code conventions and end-to-end testing
 
 ## Acknowledgements
 
-Centaur builds on excellent open-source infrastructure, including [FastAPI](https://fastapi.tiangolo.com/), [Kubernetes](https://kubernetes.io/), [mitmproxy](https://mitmproxy.org/), and the agent harnesses teams choose to run inside the sandbox.
+Centaur builds on excellent open-source infrastructure, including Rust,
+[Axum](https://github.com/tokio-rs/axum), [Kubernetes](https://kubernetes.io/),
+[iron-proxy](https://docs.iron.sh), and the agent harnesses teams choose to run
+inside the sandbox.

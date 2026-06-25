@@ -12,13 +12,13 @@ Centaur ships with a set of tool integrations under `tools/`. Deployments can en
 The repo inventory is not the same as a live deployment. To see what an agent can use in a running sandbox, ask it to run:
 
 ```bash
-call tools
+centaur-tools list
 ```
 
-To inspect a specific tool's methods and parameters:
+To inspect a specific tool's CLI:
 
 ```bash
-call discover linear
+linear --help
 ```
 
 The `API key / credential` column uses the secret names declared by each tool's `[tool.centaur]` config. `None` means the base tool declares no required tool-specific credential; optional credentials are called out separately.

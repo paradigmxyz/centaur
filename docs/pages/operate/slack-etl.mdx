@@ -194,7 +194,7 @@ kubectl exec -n centaur deploy/centaur-centaur-api-rs -- curl -s \
 Check sync health:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- \
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
   psql "$DATABASE_URL" -c \
   "SELECT channel_id, watermark_ts, last_success_at, last_error
    FROM slack_sync_checkpoints
@@ -205,7 +205,7 @@ kubectl exec -n centaur deploy/centaur-centaur-api -- \
 Check backfill pressure:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- \
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
   psql "$DATABASE_URL" -c \
   "SELECT job_type, status, count(*), min(updated_at) AS oldest_updated_at
    FROM slack_sync_backfill_jobs
@@ -216,7 +216,7 @@ kubectl exec -n centaur deploy/centaur-centaur-api -- \
 Check document projection:
 
 ```bash
-kubectl exec -n centaur deploy/centaur-centaur-api -- \
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
   psql "$DATABASE_URL" -c \
   "SELECT source_type, count(*), max(source_updated_at)
    FROM company_context_documents

@@ -18,7 +18,7 @@ an event trail clients can replay.
 | Plane | Responsibility | Main components |
 |-------|----------------|-----------------|
 | Ingress | Accept user and client input. | Slack Events API, Slackbot webhook, external API clients. |
-| Control | Persist requests and coordinate runtime state. | FastAPI, Postgres, execution worker. |
+| Control | Persist requests and coordinate runtime state. | api-rs, Postgres, session runtime, workflow runtime. |
 | Execution | Run one assigned agent session per thread. | Kubernetes sandbox pods. |
 | Capabilities | Give agents approved actions. | Tool plugins, workflow engine, overlays. |
 | Secrets and egress | Let agents call third-party APIs without receiving raw keys. | Kubernetes Secret, [iron-proxy](https://docs.iron.sh), per-sandbox proxy token mapping. |
@@ -30,11 +30,10 @@ the API and follow the event stream.
 
 | Step | Endpoint | What it saves |
 |------|----------|----------------|
-| Start or reuse a sandbox | `POST /agent/spawn` | The thread's current sandbox assignment. |
-| Persist input | `POST /agent/message` | Writes the user turn and extracts large multimodal attachments. |
-| Run the agent | `POST /agent/execute` | A run row with status and final result. |
-| Follow output | `GET /agent/threads/{thread}/events` | Tool calls, model output, status changes, and final text. |
-| Clean up | `POST /agent/threads/{thread}/release` | Releases the sandbox and can cancel running work. |
+| Start or reuse a session | `POST /api/session/{thread}` | The thread's current sandbox assignment. |
+| Persist input | `POST /api/session/{thread}/messages` | Writes one or more durable transcript messages. |
+| Run the agent | `POST /api/session/{thread}/execute` | An execution row with status and final result events. |
+| Follow output | `GET /api/session/{thread}/events` | Model output, status changes, and final text. |
 
 Because each step is stored, a Slack reconnect, browser refresh, API restart,
 pod replacement, or worker failover does not erase the run. The event stream is
@@ -80,16 +79,21 @@ third-party API keys.
 
 ## Tool and workflow layer
 
-Tools are Python plugin directories. Each public client method becomes a REST
-method at `/tools/{name}/{method}`. Agents discover tools when they start.
+Tools are Python plugin directories. api-rs discovers their metadata for
+secret grants, while sandbox startup scans `TOOL_DIRS` for
+`pyproject.toml [project.scripts]` and installs each script as a local CLI
+shim. Agents discover tools with `centaur-tools list`, inspect one with
+`<tool> --help`, and run the direct CLI.
 
 Use tools for search, Slack, GitHub, market data, calendars, internal systems,
 and deployment-specific APIs. Tool code should read credentials with
 `secret("NAME")` so the same code works locally and in production.
 
-Workflows are Python handlers that save step results. When a worker restarts,
-the handler runs again, but `ctx.step(...)` returns cached results for completed
-work.
+Workflows are Python handlers run by `services/workflow-python` under the
+api-rs Absurd workflow runtime. When a worker restarts, the handler runs again,
+but `ctx.step(...)` returns cached results for completed work. Workflow
+`ctx.call_tool(...)` remains available through the generated `centaur-tools`
+compatibility bridge.
 
 Use workflows for scheduled digests, monitoring loops, approval gates, jobs that
 sleep for minutes or days, and parent/child workflow trees.
@@ -112,7 +116,7 @@ and does not protect against.
 |---------|-------------------|
 | Client disconnects | Reconnect to the event stream with `after_event_id`. |
 | API restarts | Reload assignments, executions, and terminal state from Postgres. |
-| Sandbox pod dies | The execution becomes terminal, the event trail remains in Postgres, and operators inspect `GET /agent/executions/{execution_id}` plus API/sandbox logs before retrying the turn. |
+| Sandbox pod dies | The execution becomes terminal, the event trail remains in Postgres, and operators inspect `GET /api/session/{thread}` plus api-rs/sandbox logs before retrying the turn. |
 | Workflow worker restarts | Re-run the handler and skip completed checkpoints. |
 | Proxy restarts | Rebuild the key-injection map from the secret-manager cache. |
-| Tool changes | Discovery reloads plugin metadata; agents see the updated methods. |
+| Tool changes | api-rs reloads plugin metadata; new or refreshed sandboxes install updated CLI shims. |
