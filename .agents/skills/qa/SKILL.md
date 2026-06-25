@@ -23,9 +23,8 @@ The smoke test passes only when all core workflows work from the running agent s
 - Slack overall message search works.
 - Current thread history works.
 - Company context can connect to the Paradigm database and return indexed documents or a valid empty result.
-- AI-team critical tools load as packaged CLIs and can initialize with brokered auth.
-- AlphaSense, PitchBook, and company context connectivity checks exercise real authenticated paths.
-- PitchBook validation uses a real `/search?query=...` call, not `pitchbook health` or `GET /`; PitchBook may return a benign 404 for non-endpoint root/health probes.
+- AI-team critical tools load as packaged CLIs and pass their `health` commands through brokered auth.
+- Focused tool validation uses `<tool> health` as the canonical smoke surface. Do not invent ad hoc probes or substitute raw endpoint/search calls unless a health check fails and you are triaging that failure.
 - VictoriaLogs and VictoriaMetrics are reachable, and VictoriaMetrics proves metric existence without asserting exact metric values.
 
 Treat auth, permission, DNS, schema, and timeout errors as failures. Treat empty search results as warnings only when the tool successfully queried the backing service.
@@ -205,17 +204,26 @@ alphasense --help
 company_context --help
 ```
 
-Then exercise authenticated paths without requiring local env-only secrets:
+Then exercise each tool's focused health command without requiring local env-only secrets:
 
 ```bash
-env -u PITCHBOOK_API_KEY pitchbook raw GET /search --params-json '{"query":"Anduril Industries","perPage":3}' --json
-alphasense whoami
-alphasense search "NVIDIA data center demand" --limit 3
-company_context list --limit 3 --json
-company_context search "paradigm" --limit 3 --json
+env -u PITCHBOOK_API_KEY pitchbook health
+alphasense health
+company_context health
 ```
 
-Pass only when each command reaches the intended upstream and returns a valid success or valid empty result. For PitchBook, require the `/search` command to return structured JSON for the search request; `pitchbook health` and `pitchbook raw GET /` are not valid QA checks because the PitchBook API root/health path may return a benign 404. Fail when a CLI import/package error prevents startup, a client crashes because an env var is absent despite brokered auth being expected, an authenticated real endpoint returns `401`/`403`, or company context returns upstream/proxy errors.
+Pass only when each health command exits zero and returns valid JSON with `ok: true`. Fail when a CLI import/package error prevents startup, a client crashes because an env var is absent despite brokered auth being expected, an authenticated real endpoint returns `401`/`403`, or company context returns upstream/proxy errors.
+
+If a health command fails, triage the specific failing tool with the smallest safe read-only command that exercises the same path. Examples:
+
+```bash
+pitchbook --help
+alphasense --help
+company_context --help
+vlogs tool_calls --tool-name pitchbook --start 2h
+```
+
+Only run bespoke search or raw endpoint calls after recording the failed health result and only when needed to classify the failure.
 
 ## Extended Checks
 
@@ -308,8 +316,9 @@ responses; Slack does not render them reliably. Use this exact shape:
 - *VictoriaMetrics:* PASS - reachable, metric existence confirmed, series found
 
 *AI Tools*
-- *PitchBook:* PASS - CLI imports, brokered-auth `/search` query returned structured JSON
-- *AlphaSense:* PASS - whoami ok, search returned results
+- *PitchBook:* PASS - health ok, brokered auth path reached
+- *AlphaSense:* PASS - health ok, authenticated upstream reached
+- *Company context:* PASS - health ok, database path reached
 
 *Extended*
 - *Requested extended checks:* SKIP - not requested
@@ -351,8 +360,8 @@ one Slack message.
 | Search cannot find just-uploaded token | Slack search indexing lag | Retry up to three total attempts, then warn and run the separate overall message search |
 | `company_context` permission denied | Principal lacks DB-backed reader grant | Report principal/channel and ask owner to grant company context access |
 | `company_context` upstream connection failed | Database proxy upstream, database selection, or secret-resolution failure | Check thread logs and vlogs for upstream connect and secret fetch errors before proposing a code change |
-| Tool CLI import error | Package entrypoint or relative import packaging regression | Run `<tool> --help`, package build checks, and report the broken console script |
-| Tool crashes when an API key env var is absent | Client assumes local env auth despite brokered credentials | Re-run with the env var unset and verify client construction does not raise |
+| Tool CLI import error | Package entrypoint or relative import packaging regression | Run `<tool> health`, `<tool> --help`, package build checks, and report the broken console script |
+| Tool crashes when an API key env var is absent | Client assumes local env auth despite brokered credentials | Re-run `<tool> health` with the env var unset and verify client construction does not raise |
 | AlphaSense `/auth` or `/gql` returns 401/403 | Upstream credential or header injection problem | Compare `/auth` and GraphQL logs; verify bearer/client headers reach the expected upstream path |
 | `vlogs` or `vmetrics` DNS failure | Observability service unavailable from sandbox | Check local stack or cluster service deployment |
 | Expected tools missing | Tool catalog did not load or overlay masked base tools | Report the missing tool names and include `centaur-tools list` output |
@@ -375,7 +384,8 @@ When a flow fails, inspect runtime evidence before redesigning:
 
 | Reference | When To Read |
 |-----------|--------------|
-| [references/test-inputs.md](references/test-inputs.md) | When doing broader tool-by-tool QA beyond the smoke test |
+| [../tool-health-smoke/SKILL.md](../tool-health-smoke/SKILL.md) | When doing broad all-tool health smoke coverage |
+| [references/test-inputs.md](references/test-inputs.md) | Only for deeper read-only triage after a tool health check fails |
 
 ## Templates
 
