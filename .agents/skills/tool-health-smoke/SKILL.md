@@ -37,7 +37,7 @@ Do not invent one-off probes for each tool. The canonical smoke surface is:
 
 - Treat `returncode != 0`, invalid JSON, missing `ok`, or `ok: false` as a failed tool health check.
 - Treat a missing `health` command as a failure. Tools are expected to expose `health`.
-- Do not paste raw JSON, stack traces, credentials, or full command output into Slack.
+- Report the runner output directly. Health commands are responsible for returning compact, safe JSON.
 - Keep evidence compact: include the tool name, status, and one short detail or error.
 - Use Slack mrkdwn bullets, not Markdown tables.
 - Include all failed rows. If all tools pass, include a compact pass list or pass count.

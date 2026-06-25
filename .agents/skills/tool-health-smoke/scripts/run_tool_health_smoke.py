@@ -7,20 +7,11 @@ import argparse
 import asyncio
 from dataclasses import asdict, dataclass
 import json
-import re
 import shutil
 import subprocess
 import sys
 import time
 from typing import Any
-
-
-SECRET_PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key=)[^&\s]+"),
-    re.compile(r"(?i)(authorization:\s*bearer\s+)[^\s]+"),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
-    re.compile(r"(?i)(token[\"'=:\s]+)[A-Za-z0-9._~+/=-]{12,}"),
-)
 
 
 @dataclass
@@ -34,18 +25,6 @@ class ToolResult:
     output: dict[str, Any] | None = None
 
 
-def sanitize(text: str | None, limit: int = 240) -> str:
-    if not text:
-        return ""
-    value = text.replace("\n", " ").replace("\r", " ").strip()
-    for pattern in SECRET_PATTERNS:
-        value = pattern.sub(r"\1<redacted>", value)
-    value = re.sub(r"\s+", " ", value)
-    if len(value) > limit:
-        value = value[: limit - 3].rstrip() + "..."
-    return value
-
-
 def load_tools() -> list[str]:
     if shutil.which("centaur-tools") is None:
         raise RuntimeError("centaur-tools is not installed in PATH")
@@ -57,9 +36,8 @@ def load_tools() -> list[str]:
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            sanitize(result.stderr or result.stdout or "centaur-tools json failed")
-        )
+        message = result.stderr or result.stdout or "centaur-tools json failed"
+        raise RuntimeError(message)
 
     try:
         payload = json.loads(result.stdout)
@@ -82,7 +60,7 @@ def parse_csv(value: str | None) -> set[str]:
 def pick_detail(payload: dict[str, Any]) -> str:
     details = payload.get("details")
     if not isinstance(details, dict):
-        return sanitize(json.dumps(details, default=str) if details is not None else "")
+        return json.dumps(details, default=str) if details is not None else ""
 
     preferred: list[str] = []
     for key, value in details.items():
@@ -100,7 +78,7 @@ def pick_detail(payload: dict[str, Any]) -> str:
             preferred.append(f"{key}={value}")
             if len(preferred) >= 3:
                 break
-    return sanitize(", ".join(preferred) if preferred else "health ok")
+    return ", ".join(preferred) if preferred else "health ok"
 
 
 async def run_one(tool: str, timeout: float) -> ToolResult:
@@ -140,7 +118,7 @@ async def run_one(tool: str, timeout: float) -> ToolResult:
                 tool=tool,
                 status="FAIL",
                 seconds=seconds,
-                error=sanitize(stderr or stdout or f"exit {proc.returncode}"),
+                error=stderr or stdout or f"exit {proc.returncode}",
                 returncode=proc.returncode,
             )
         return ToolResult(
@@ -159,7 +137,7 @@ async def run_one(tool: str, timeout: float) -> ToolResult:
             tool=tool,
             status="FAIL",
             seconds=seconds,
-            error=sanitize(str(error or stderr or f"exit {proc.returncode}")),
+            error=str(error or stderr or f"exit {proc.returncode}"),
             returncode=proc.returncode,
             output=payload if isinstance(payload, dict) else None,
         )
@@ -179,9 +157,7 @@ async def run_one(tool: str, timeout: float) -> ToolResult:
         tool=tool,
         status="PASS" if ok else "FAIL",
         seconds=seconds,
-        error=None
-        if ok
-        else sanitize(str(payload.get("error") or "health returned ok=false")),
+        error=None if ok else str(payload.get("error") or "health returned ok=false"),
         detail=pick_detail(payload) if ok else None,
         returncode=proc.returncode,
         output=payload,
@@ -226,9 +202,7 @@ def render_report(results: list[ToolResult], filtered: bool) -> str:
         lines.append("")
         lines.append("*Failures*")
         for row in failures:
-            lines.append(
-                f"- *{row.tool}:* FAIL - {sanitize(row.error) or 'unknown error'}"
-            )
+            lines.append(f"- *{row.tool}:* FAIL - {row.error or 'unknown error'}")
 
     if passes:
         lines.append("")
@@ -261,11 +235,11 @@ def main(argv: list[str]) -> int:
         if args.json:
             print(
                 json.dumps(
-                    {"ok": False, "error": sanitize(str(exc)), "results": []}, indent=2
+                    {"ok": False, "error": str(exc), "results": []}, indent=2
                 )
             )
         else:
-            print(f"Overall: FAIL - {sanitize(str(exc))}")
+            print(f"Overall: FAIL - {exc}")
         return 1
 
     only = parse_csv(args.only)
