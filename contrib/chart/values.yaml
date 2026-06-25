@@ -350,7 +350,8 @@ apiRs:
   sandboxReapIntervalSecs: 300
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
   # consecutive sweeps and restore idle-pauses lost across api-rs restarts.
-  # 0 disables the corresponding arm.
+  # The idle backstop is only used when older execution rows have no persisted
+  # idle_timeout_ms. 0 disables the corresponding arm.
   sandboxCleanupIntervalSecs: 300
   sandboxIdleCleanupBackstopSecs: 21600 # 6 hours
   ironProxy:

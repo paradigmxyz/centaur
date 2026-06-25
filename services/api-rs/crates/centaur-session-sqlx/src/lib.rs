@@ -1,6 +1,6 @@
 //! SQLx-backed session repository.
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, SandboxCapabilities, Session, SessionEvent,
@@ -42,6 +42,7 @@ pub struct IdleSandboxCandidate {
     pub thread_key: ThreadKey,
     pub sandbox_id: String,
     pub execution_id: String,
+    pub idle_timeout: Duration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -616,7 +617,7 @@ impl PgSessionStore {
 
     pub async fn list_idle_sandbox_candidates(
         &self,
-        idle_backstop: std::time::Duration,
+        idle_backstop: Duration,
     ) -> Result<Vec<IdleSandboxCandidate>, SessionStoreError> {
         let rows = sqlx::query_as::<_, IdleSandboxCandidateRow>(
             r#"
@@ -625,27 +626,50 @@ impl PgSessionStore {
                     execution_id,
                     thread_key,
                     status,
-                    completed_at
+                    completed_at,
+                    metadata
                 from session_executions
                 order by thread_key, created_at desc, execution_id desc
+            ),
+            eligible as (
+                select
+                    s.thread_key,
+                    s.sandbox_id as sandbox_id,
+                    latest.execution_id,
+                    latest.completed_at,
+                    coalesce(
+                        nullif(
+                            case
+                                when latest.metadata ->> 'idle_timeout_ms' ~ '^[0-9]+$'
+                                then least(
+                                    (latest.metadata ->> 'idle_timeout_ms')::numeric,
+                                    9223372036854775807
+                                )::bigint
+                            end,
+                            0
+                        ),
+                        greatest(ceil($1::float8 * 1000.0), 1.0)::bigint
+                    ) as idle_timeout_ms
+                from sessions s
+                join latest on latest.thread_key = s.thread_key
+                where s.sandbox_id is not null
+                  and latest.status in ('completed', 'failed', 'cancelled')
+                  and latest.completed_at is not null
+                  and not exists (
+                      select 1
+                      from session_executions active
+                      where active.thread_key = s.thread_key
+                        and active.status in ('queued', 'running')
+                  )
             )
             select
-                s.thread_key,
-                s.sandbox_id as sandbox_id,
-                latest.execution_id
-            from sessions s
-            join latest on latest.thread_key = s.thread_key
-            where s.sandbox_id is not null
-              and latest.status in ('completed', 'failed', 'cancelled')
-              and latest.completed_at is not null
-              and latest.completed_at <= now() - ($1::float8 * interval '1 second')
-              and not exists (
-                  select 1
-                  from session_executions active
-                  where active.thread_key = s.thread_key
-                    and active.status in ('queued', 'running')
-              )
-            order by latest.completed_at, s.thread_key
+                thread_key,
+                sandbox_id,
+                execution_id,
+                idle_timeout_ms
+            from eligible
+            where completed_at <= now() - ((idle_timeout_ms::float8 / 1000.0) * interval '1 second')
+            order by completed_at, thread_key
             "#,
         )
         .bind(idle_backstop.as_secs_f64())
@@ -1111,16 +1135,24 @@ struct IdleSandboxCandidateRow {
     thread_key: String,
     sandbox_id: String,
     execution_id: String,
+    idle_timeout_ms: i64,
 }
 
 impl TryFrom<IdleSandboxCandidateRow> for IdleSandboxCandidate {
     type Error = SessionStoreError;
 
     fn try_from(row: IdleSandboxCandidateRow) -> Result<Self, Self::Error> {
+        let idle_timeout_ms = u64::try_from(row.idle_timeout_ms).map_err(|_| {
+            SessionStoreError::InvalidPersistedValue(format!(
+                "idle_timeout_ms must be non-negative: {}",
+                row.idle_timeout_ms
+            ))
+        })?;
         Ok(Self {
             thread_key: parse_persisted(row.thread_key)?,
             sandbox_id: row.sandbox_id,
             execution_id: row.execution_id,
+            idle_timeout: Duration::from_millis(idle_timeout_ms),
         })
     }
 }
@@ -1244,7 +1276,25 @@ pub fn default_metadata(metadata: Option<Value>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionEventNotification;
+    use std::time::Duration;
+
+    use centaur_session_core::{HarnessType, ThreadKey};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{PgSessionStore, SessionEventNotification};
+
+    async fn test_store() -> Option<PgSessionStore> {
+        let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
+            eprintln!("skipping: SESSION_RUNTIME_TEST_DATABASE_URL not set");
+            return None;
+        };
+        let store = PgSessionStore::connect(&url)
+            .await
+            .expect("connect test db");
+        store.run_migrations().await.expect("run migrations");
+        Some(store)
+    }
 
     #[test]
     fn parses_session_event_notification_payload() {
@@ -1258,5 +1308,56 @@ mod tests {
                 event_id: 42,
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_candidates_use_persisted_execution_idle_timeout() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:idle-cleanup-{}", Uuid::new_v4())).unwrap();
+        let sandbox_id = format!("sbx-idle-{}", Uuid::new_v4());
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some(&sandbox_id))
+            .await
+            .expect("set sandbox id");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({"idle_timeout_ms": 1000}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+        store
+            .complete_execution(&execution_id)
+            .await
+            .expect("complete execution");
+        sqlx::query(
+            r#"
+            update session_executions
+            set completed_at = now() - interval '2 seconds', updated_at = now()
+            where execution_id = $1
+            "#,
+        )
+        .bind(&execution_id)
+        .execute(store.pool())
+        .await
+        .expect("age execution");
+
+        let candidates = store
+            .list_idle_sandbox_candidates(Duration::from_secs(3600))
+            .await
+            .expect("list idle sandbox candidates");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.thread_key == thread_key)
+            .expect("candidate should use execution idle timeout, not backstop");
+
+        assert_eq!(candidate.sandbox_id, sandbox_id);
+        assert_eq!(candidate.execution_id, execution_id);
+        assert_eq!(candidate.idle_timeout, Duration::from_secs(1));
     }
 }
