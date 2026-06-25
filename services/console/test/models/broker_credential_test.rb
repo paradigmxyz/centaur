@@ -20,6 +20,13 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     }.merge(overrides))
   end
 
+  def request_grant(request)
+    return "preqin_refresh_token" if request[:url] == Broker::CredentialGrants::PREQIN_REFRESH_TOKEN_ENDPOINT
+    return "preqin" if request[:form].key?("apikey")
+
+    request[:form]["grant_type"]
+  end
+
   def create_credential(**kw)
     bc = build_credential(**kw)
     bc.save!
@@ -116,8 +123,8 @@ class BrokerCredentialTest < ActiveSupport::TestCase
                            provider_subject: "sub-4", created_by: nil, refresh_token: "rt")
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result }
     bc.refresh!
-    assert_equal "app-cid", captured[:client_id]
-    assert_equal "app-secret", captured[:client_secret]
+    assert_equal "app-cid", captured[:form]["client_id"]
+    assert_equal "app-secret", captured[:form]["client_secret"]
   end
 
   test "refresh lets the provider choose refresh scopes" do
@@ -129,7 +136,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
                            scopes: %w[chat:write openid])
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result }
     bc.refresh!
-    assert_equal [], captured[:scopes]
+    refute captured[:form].key?("scope")
   end
 
   test "external_user_key must be url-safe and bounded" do
@@ -250,8 +257,8 @@ class BrokerCredentialTest < ActiveSupport::TestCase
                            token_endpoint_headers: { "X-Api-Key" => "k" })
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result }
     bc.refresh!
-    assert_equal "the-id", captured[:client_id]
-    assert_equal "the-secret", captured[:client_secret]
+    assert_equal "the-id", captured[:form]["client_id"]
+    assert_equal "the-secret", captured[:form]["client_secret"]
     assert_equal({ "X-Api-Key" => "k" }, captured[:headers])
   end
 
@@ -261,9 +268,9 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: "RT-new") }
     bc.refresh!
     bc.reload
-    assert_equal "password", captured[:grant]
-    assert_equal "user", captured[:username]
-    assert_equal "pass", captured[:password]
+    assert_equal "password", request_grant(captured)
+    assert_equal "user", captured[:form]["username"]
+    assert_equal "pass", captured[:form]["password"]
     assert_equal "RT-new", bc.refresh_token
     assert_equal "AT", bc.access_token
   end
@@ -274,8 +281,8 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: nil) }
     bc.refresh!
     bc.reload
-    assert_equal "refresh_token", captured[:grant]
-    assert_equal "RT-old", captured[:refresh_token]
+    assert_equal "refresh_token", request_grant(captured)
+    assert_equal "RT-old", captured[:form]["refresh_token"]
     assert_equal "RT-old", bc.refresh_token
   end
 
@@ -283,8 +290,8 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     grants = []
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-bad")
     bc.refresh_client = StubClient.new do |**kw|
-      grants << kw[:grant]
-      if kw[:grant] == "refresh_token"
+      grants << request_grant(kw)
+      if request_grant(kw) == "refresh_token"
         raise Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false)
       end
       result(access_token: "AT-password", refresh_token: "RT-good")
@@ -301,8 +308,8 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     grants = []
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-bad")
     bc.refresh_client = StubClient.new do |**kw|
-      grants << kw[:grant]
-      if kw[:grant] == "refresh_token"
+      grants << request_grant(kw)
+      if request_grant(kw) == "refresh_token"
         raise Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false)
       end
       result(access_token: "AT-password", refresh_token: nil)
@@ -318,7 +325,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     grants = []
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-old")
     bc.refresh_client = StubClient.new do |**kw|
-      grants << kw[:grant]
+      grants << request_grant(kw)
       raise Broker::RefreshError.new("net", stage: "network", retryable: true)
     end
     bc.refresh!
@@ -335,11 +342,13 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: "RT-new") }
     bc.refresh!
     bc.reload
-    assert_equal "preqin", captured[:grant]
-    assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, captured[:token_endpoint]
-    assert_equal "user", captured[:username]
-    assert_equal "api-key", captured[:api_key]
-    assert_nil captured[:client_id]
+    assert_equal "preqin", request_grant(captured)
+    assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, captured[:url]
+    assert_equal "user", captured[:form]["username"]
+    assert_equal "api-key", captured[:form]["apikey"]
+    refute captured[:form].key?("client_id")
+    assert_equal :multipart, captured[:form_encoding]
+    assert_equal true, captured[:strict_4xx]
     assert_equal "RT-new", bc.refresh_token
     assert_equal "AT", bc.access_token
   end
@@ -351,9 +360,11 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: nil) }
     bc.refresh!
     bc.reload
-    assert_equal "preqin_refresh_token", captured[:grant]
-    assert_equal Broker::CredentialGrants::PREQIN_REFRESH_TOKEN_ENDPOINT, captured[:token_endpoint]
-    assert_equal "RT-old", captured[:refresh_token]
+    assert_equal "preqin_refresh_token", request_grant(captured)
+    assert_equal Broker::CredentialGrants::PREQIN_REFRESH_TOKEN_ENDPOINT, captured[:url]
+    assert_equal "RT-old", captured[:form]["refresh_token"]
+    assert_equal :multipart, captured[:form_encoding]
+    assert_equal true, captured[:strict_4xx]
     assert_equal "RT-old", bc.refresh_token
   end
 
@@ -362,8 +373,8 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc = create_credential(grant: "preqin", client_id: nil, username: "user",
                            api_key: "api-key", refresh_token: "RT-bad")
     bc.refresh_client = StubClient.new do |**kw|
-      grants << kw[:grant]
-      if kw[:grant] == "preqin_refresh_token"
+      grants << request_grant(kw)
+      if request_grant(kw) == "preqin_refresh_token"
         raise Broker::RefreshError.new("bad", stage: "http", code: "http_400", retryable: false)
       end
       result(access_token: "AT-preqin", refresh_token: "RT-good")

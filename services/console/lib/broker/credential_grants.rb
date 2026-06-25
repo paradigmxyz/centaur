@@ -75,17 +75,8 @@ module Broker
 
         return dead("password_grant_missing_initial_values") unless password_values_present?(credential)
 
-        result = credential.refresh_client.refresh(
-          token_endpoint: credential.token_endpoint,
-          grant: "password",
-          client_id: credential.effective_client_id,
-          client_secret: credential.effective_client_secret,
-          username: credential.username,
-          password: credential.password,
-          scopes: credential.refresh_scopes_for_provider,
-          headers: credential.token_endpoint_headers || {},
-          timeout: credential.refresh_timeout_seconds
-        )
+        result = post_token_form(credential, url: credential.token_endpoint,
+                                             form: password_form(credential))
         success(result, clear_refresh_token: clear_stale_refresh_token && result.refresh_token.blank?)
       end
 
@@ -94,12 +85,12 @@ module Broker
 
         if credential.refresh_token.present?
           begin
-            result = credential.refresh_client.refresh(
-              token_endpoint: PREQIN_REFRESH_TOKEN_ENDPOINT,
-              grant: "preqin_refresh_token",
-              refresh_token: credential.refresh_token,
-              headers: credential.token_endpoint_headers || {},
-              timeout: credential.refresh_timeout_seconds
+            result = post_token_form(
+              credential,
+              url: PREQIN_REFRESH_TOKEN_ENDPOINT,
+              form: preqin_refresh_token_form(credential),
+              form_encoding: :multipart,
+              strict_4xx: true
             )
             return success(result)
           rescue Broker::RefreshError => e
@@ -115,28 +106,87 @@ module Broker
 
         return dead("preqin_missing_initial_values") unless preqin_values_present?(credential)
 
-        result = credential.refresh_client.refresh(
-          token_endpoint: credential.token_endpoint,
-          grant: "preqin",
-          username: credential.username,
-          api_key: credential.api_key,
-          headers: credential.token_endpoint_headers || {},
-          timeout: credential.refresh_timeout_seconds
+        result = post_token_form(
+          credential,
+          url: credential.token_endpoint,
+          form: preqin_token_form(credential),
+          form_encoding: :multipart,
+          strict_4xx: true
         )
         success(result, clear_refresh_token: clear_stale_refresh_token && result.refresh_token.blank?)
       end
 
       def oauth_refresh_token(credential)
-        credential.refresh_client.refresh(
-          token_endpoint: credential.token_endpoint,
-          grant: "refresh_token",
-          client_id: credential.effective_client_id,
-          client_secret: credential.effective_client_secret,
-          refresh_token: credential.refresh_token,
-          scopes: credential.refresh_scopes_for_provider,
-          headers: credential.token_endpoint_headers || {},
-          timeout: credential.refresh_timeout_seconds
+        post_token_form(
+          credential,
+          url: credential.token_endpoint,
+          form: refresh_token_form(credential)
         )
+      end
+
+      def post_token_form(credential, url:, form:, form_encoding: :urlencoded, strict_4xx: false)
+        credential.refresh_client.refresh(
+          url: url,
+          form: form,
+          form_encoding: form_encoding,
+          headers: credential.token_endpoint_headers || {},
+          timeout: credential.refresh_timeout_seconds,
+          strict_4xx: strict_4xx
+        )
+      end
+
+      def refresh_token_form(credential)
+        require_value!("client_id", credential.effective_client_id)
+        require_value!("refresh_token", credential.refresh_token)
+
+        form = {
+          "grant_type" => "refresh_token",
+          "refresh_token" => credential.refresh_token,
+          "client_id" => credential.effective_client_id
+        }
+        add_oauth_optional_fields(form, credential)
+      end
+
+      def password_form(credential)
+        require_value!("client_id", credential.effective_client_id)
+        require_value!("username", credential.username)
+        require_value!("password", credential.password)
+
+        form = {
+          "grant_type" => "password",
+          "username" => credential.username,
+          "password" => credential.password,
+          "client_id" => credential.effective_client_id
+        }
+        add_oauth_optional_fields(form, credential)
+      end
+
+      def preqin_token_form(credential)
+        require_value!("username", credential.username)
+        require_value!("api_key", credential.api_key)
+
+        {
+          "username" => credential.username,
+          "apikey" => credential.api_key
+        }
+      end
+
+      def preqin_refresh_token_form(credential)
+        require_value!("refresh_token", credential.refresh_token)
+
+        { "refresh_token" => credential.refresh_token }
+      end
+
+      def add_oauth_optional_fields(form, credential)
+        form["client_secret"] = credential.effective_client_secret if credential.effective_client_secret.present?
+
+        scopes = credential.refresh_scopes_for_provider
+        form["scope"] = scopes.join(" ") if scopes.present?
+        form
+      end
+
+      def require_value!(name, value)
+        raise ArgumentError, "#{name} is required" if value.blank?
       end
 
       def validate_password(credential)

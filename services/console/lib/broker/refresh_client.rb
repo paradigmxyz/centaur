@@ -3,11 +3,10 @@ require "json"
 require "uri"
 
 module Broker
-  # RefreshClient performs raw RFC 6749 token grant POSTs against a token
-  # endpoint and returns the parsed response. It owns no retry/backoff state --
-  # BrokerCredential drives that. Ported from iron-token-broker's
-  # internal/broker/refresh.go, with password-grant support added for providers
-  # that still require it.
+  # RefreshClient performs raw token POSTs and returns the parsed response. It
+  # owns no grant-specific request shape and no retry/backoff state:
+  # BrokerCredential drives scheduling, while Broker::CredentialGrants builds the
+  # provider form body.
   #
   # SECURITY: this class never logs the refresh_token, client_secret, the
   # response body, or any decoded token. Callers must keep the same discipline.
@@ -31,34 +30,23 @@ module Broker
     end
 
     # Performs one token exchange. Raises Broker::RefreshError on any failure
-    # (classified retryable vs. unrecoverable). scopes is an array; headers is a
-    # name=>value hash applied verbatim to the token POST.
-    def refresh(token_endpoint:, client_id: nil, grant: "refresh_token", refresh_token: nil,
-                username: nil, password: nil, api_key: nil, client_secret: nil,
-                scopes: [], headers: {}, timeout: DEFAULT_TIMEOUT)
-      raise ArgumentError, "token endpoint is required" if token_endpoint.blank?
-      raise ArgumentError, "client_id is required" if client_id.blank? && requires_client_id?(grant)
-
-      form, form_encoding = form_for_grant(
-        grant: grant,
-        client_id: client_id,
-        refresh_token: refresh_token,
-        username: username,
-        password: password,
-        api_key: api_key
-      )
-      unless preqin_grant?(grant)
-        form["client_secret"] = client_secret if client_secret.present?
-        form["scope"] = scopes.join(" ") if scopes.present?
+    # (classified retryable vs. unrecoverable). `form` is posted exactly as
+    # supplied by the caller, encoded as either URL-encoded or multipart data.
+    def refresh(url:, form:, form_encoding: :urlencoded, headers: {},
+                timeout: DEFAULT_TIMEOUT, strict_4xx: false)
+      raise ArgumentError, "url is required" if url.blank?
+      raise ArgumentError, "form must be a hash" unless form.is_a?(Hash)
+      unless %i[urlencoded multipart].include?(form_encoding)
+        raise ArgumentError, "unsupported form encoding #{form_encoding.inspect}"
       end
 
-      response = perform(token_endpoint, form, headers, timeout, form_encoding: form_encoding)
+      response = perform(url, form, headers, timeout, form_encoding: form_encoding)
 
       if response.status / 100 != 2
         return classify_error(
           response.status,
           response.body,
-          strict_4xx: preqin_grant?(grant)
+          strict_4xx: strict_4xx
         )
       end
 
@@ -66,51 +54,6 @@ module Broker
     end
 
     private
-
-    def requires_client_id?(grant)
-      !preqin_grant?(grant)
-    end
-
-    def preqin_grant?(grant)
-      %w[preqin preqin_refresh_token].include?(grant)
-    end
-
-    def form_for_grant(grant:, client_id:, refresh_token:, username:, password:, api_key:)
-      case grant
-      when "refresh_token"
-        raise ArgumentError, "refresh_token is required" if refresh_token.blank?
-
-        [ {
-          "grant_type" => "refresh_token",
-          "refresh_token" => refresh_token,
-          "client_id" => client_id
-        }, :urlencoded ]
-      when "password"
-        raise ArgumentError, "username is required" if username.blank?
-        raise ArgumentError, "password is required" if password.blank?
-
-        [ {
-          "grant_type" => "password",
-          "username" => username,
-          "password" => password,
-          "client_id" => client_id
-        }, :urlencoded ]
-      when "preqin"
-        raise ArgumentError, "username is required" if username.blank?
-        raise ArgumentError, "api_key is required" if api_key.blank?
-
-        [ {
-          "username" => username,
-          "apikey" => api_key
-        }, :multipart ]
-      when "preqin_refresh_token"
-        raise ArgumentError, "refresh_token is required" if refresh_token.blank?
-
-        [ { "refresh_token" => refresh_token }, :multipart ]
-      else
-        raise ArgumentError, "unsupported grant #{grant.inspect}"
-      end
-    end
 
     def perform(url, form, headers, timeout, form_encoding:)
       if @http
