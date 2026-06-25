@@ -106,6 +106,10 @@ console:
   # _SECRET), which must exist or the console pods CreateContainerConfigError.
   googleOauth:
     enabled: false
+  # OAuth app slug whose user-level Slack credentials are used by the DM sync
+  # worker. Keep this aligned with the Console OAuth app users authorize.
+  slackDmSync:
+    oauthAppSlug: slack
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale

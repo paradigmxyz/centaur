@@ -135,6 +135,10 @@ spec:
 {{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
+{{- with $console.slackDmSync.oauthAppSlug }}
+            - name: SLACK_DM_SYNC_OAUTH_APP_SLUG
+              value: {{ . | quote }}
+{{- end }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
           securityContext:

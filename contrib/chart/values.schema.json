@@ -22,6 +22,12 @@
             "name": { "type": "string" }
           }
         },
+        "slackDmSync": {
+          "type": "object",
+          "properties": {
+            "oauthAppSlug": { "type": "string" }
+          }
+        },
         "service": {
           "type": "object",
           "properties": {
