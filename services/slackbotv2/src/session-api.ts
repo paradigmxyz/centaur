@@ -1437,6 +1437,10 @@ function codexInputContent(
   contextPreamble?: string
 ): JsonValue[] {
   const content: JsonValue[] = []
+  const slackSessionContext = slackUploadSessionContext(message.threadId)
+  if (slackSessionContext) {
+    content.push({ type: 'text', text: slackSessionContext })
+  }
   const requesterContext = requesterIdentityContext(requesterIdentity)
   if (requesterContext) {
     content.push({ type: 'text', text: requesterContext })
@@ -1468,6 +1472,45 @@ function codexInputContent(
     content.push(codexAttachmentInput(attachment, staged.get(attachment)))
   }
   return content.length > 0 ? content : [{ type: 'text', text: 'continue' }]
+}
+
+type SlackThreadDestination = {
+  channelId: string
+  teamId?: string
+  threadTs: string
+}
+
+function slackUploadSessionContext(threadId: string): string | undefined {
+  const destination = slackThreadDestination(threadId)
+  if (!destination) return undefined
+
+  const lines = [
+    '# Slack Session Context',
+    '',
+    'API-owned Slack upload destination for this turn:',
+    ...(destination.teamId ? [`- session_context.slack.team_id: ${destination.teamId}`] : []),
+    `- session_context.slack.channel_id: ${destination.channelId}`,
+    `- session_context.slack.thread_ts: ${destination.threadTs}`,
+    `- thread_key: ${threadId}`,
+    '',
+    'Use these exact IDs for Slack file uploads in this thread.',
+    `Example: slack upload ${destination.channelId} /path/to/file --thread ${destination.threadTs}`,
+    'Do not recover this destination with Slack search.',
+    '---'
+  ]
+  return lines.join('\n')
+}
+
+function slackThreadDestination(threadId: string): SlackThreadDestination | undefined {
+  const parts = threadId.split(':')
+  if (parts[0] !== 'slack') return undefined
+  if (parts.length === 3 && parts[1] && parts[2]) {
+    return { channelId: parts[1], threadTs: parts[2] }
+  }
+  if (parts.length === 4 && parts[1] && parts[2] && parts[3]) {
+    return { teamId: parts[1], channelId: parts[2], threadTs: parts[3] }
+  }
+  return undefined
 }
 
 function slackThreadContext(

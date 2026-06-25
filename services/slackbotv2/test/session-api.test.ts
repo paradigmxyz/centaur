@@ -122,6 +122,10 @@ function lineContent(line: JsonObject): JsonObject[] {
   return Array.isArray(message.content) ? message.content.filter(isJsonRecord) : []
 }
 
+function textPartIncludes(part: JsonObject, text: string): boolean {
+  return typeof part.text === 'string' && part.text.includes(text)
+}
+
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
@@ -199,6 +203,36 @@ describe('Slack display text fallback', () => {
       })
     )
     expect(lineContent(line).at(-1)).toEqual({ type: 'text', text: expected })
+  })
+
+  test('includes API-owned Slack upload destination in visible Codex input', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('make an image')))
+
+    const context = lineContent(executeLine(requests)).find(part =>
+      typeof part.text === 'string' && part.text.includes('# Slack Session Context')
+    )
+    expect(context?.text).toContain('session_context.slack.channel_id: C1')
+    expect(context?.text).toContain('session_context.slack.thread_ts: 1700000000.000100')
+    expect(context?.text).toContain('thread_key: slack:C1:1700000000.000100')
+    expect(context?.text).toContain('slack upload C1 /path/to/file --thread 1700000000.000100')
+    expect(context?.text).toContain('Do not recover this destination with Slack search.')
+  })
+
+  test('includes team id for team-qualified Slack thread keys', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('make an image', { threadId: 'slack:T1:C1:1700000000.000100' }))
+    )
+
+    const context = lineContent(executeLine(requests)).find(part =>
+      typeof part.text === 'string' && part.text.includes('# Slack Session Context')
+    )
+    expect(context?.text).toContain('session_context.slack.team_id: T1')
+    expect(context?.text).toContain('session_context.slack.channel_id: C1')
+    expect(context?.text).toContain('session_context.slack.thread_ts: 1700000000.000100')
+    expect(context?.text).toContain('thread_key: slack:T1:C1:1700000000.000100')
   })
 
   test('uses raw Slack block text in prior thread context instead of no text', async () => {
@@ -368,7 +402,7 @@ describe('forwardToSessionApi overrides', () => {
     expect(inputLines).toHaveLength(1)
     const line = JSON.parse(inputLines[0]!)
     expect(line.model).toBe('claude-sonnet-4-6')
-    expect(line.message.content[0].text).toContain('# Requester Context')
+    expect(lineContent(line).some(part => textPartIncludes(part, '# Requester Context'))).toBe(true)
     expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
   })
 
@@ -514,15 +548,20 @@ describe('forwardToSessionApi harness restart', () => {
     expect(restarted).toBe(true)
     const execute = requests.find(request => request.url.endsWith('/execute'))
     const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    const [requesterContext, preamble, current] = line.message.content
-    expect(requesterContext.type).toBe('text')
-    expect(requesterContext.text).toContain('# Requester Context')
-    expect(requesterContext.text).not.toContain('restarted on a different agent harness')
-    expect(preamble.type).toBe('text')
-    expect(preamble.text).toContain('restarted on a different agent harness')
-    expect(preamble.text).toContain('[test]: earlier question')
-    expect(preamble.text).toContain('[assistant]: earlier answer')
-    expect(preamble.text).not.toContain('continue with codex')
+    const content = lineContent(line)
+    const requesterContext = content.find(part => textPartIncludes(part, '# Requester Context'))
+    const preamble = content.find(part =>
+      textPartIncludes(part, 'restarted on a different agent harness')
+    )
+    const current = content.at(-1)
+    expect(requesterContext?.type).toBe('text')
+    expect(requesterContext?.text).toContain('# Requester Context')
+    expect(requesterContext?.text).not.toContain('restarted on a different agent harness')
+    expect(preamble?.type).toBe('text')
+    expect(preamble?.text).toContain('restarted on a different agent harness')
+    expect(preamble?.text).toContain('[test]: earlier question')
+    expect(preamble?.text).toContain('[assistant]: earlier answer')
+    expect(preamble?.text).not.toContain('continue with codex')
     expect(current).toEqual({ type: 'text', text: 'continue with codex' })
   })
 
@@ -538,8 +577,11 @@ describe('forwardToSessionApi harness restart', () => {
     expect(restarted).toBe(false)
     const execute = requests.find(request => request.url.endsWith('/execute'))
     const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect(line.message.content[0].text).toContain('# Requester Context')
-    expect(line.message.content[0].text).not.toContain('restarted on a different agent harness')
+    const requesterContext = lineContent(line).find(part =>
+      textPartIncludes(part, '# Requester Context')
+    )
+    expect(requesterContext?.text).toContain('# Requester Context')
+    expect(requesterContext?.text).not.toContain('restarted on a different agent harness')
     expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'plain message' })
   })
 })

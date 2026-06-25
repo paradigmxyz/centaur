@@ -35,6 +35,14 @@ const CHANNEL_ID = 'C000000001'
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
 
+function contentTextWithHeading(
+  content: Array<{ text?: string; type: string }>,
+  heading: string
+): string {
+  return content.find(part => typeof part.text === 'string' && part.text.includes(heading))?.text
+    ?? ''
+}
+
 describe('normalizeSlackText', () => {
   it('preserves Slack channel IDs when rendering labeled channel mentions', () => {
     expect(normalizeSlackText('<#C0AJ07U8Z1N|eng-centaur>')).toBe(
@@ -474,12 +482,13 @@ describe('slackbotv2', () => {
     const input = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
       message: { content: Array<{ text?: string; type: string }> }
     }
-    expect(input.message.content[0]?.text).toContain('# Requester Context')
-    expect(input.message.content[0]?.text).toContain(`Slack user ID: ${USER_ID}`)
-    expect(input.message.content[0]?.text).toContain('Slack username: akshaan')
-    expect(input.message.content[0]?.text).toContain('GitHub handle from Slack profile: @decofe')
-    expect(input.message.content[0]?.text).toContain('Prompted by: @decofe')
-    expect(input.message.content[1]?.text).toBe(`@${BOT_USER_ID} what is my name?`)
+    const requesterContext = contentTextWithHeading(input.message.content, '# Requester Context')
+    expect(requesterContext).toContain('# Requester Context')
+    expect(requesterContext).toContain(`Slack user ID: ${USER_ID}`)
+    expect(requesterContext).toContain('Slack username: akshaan')
+    expect(requesterContext).toContain('GitHub handle from Slack profile: @decofe')
+    expect(requesterContext).toContain('Prompted by: @decofe')
+    expect(input.message.content.at(-1)?.text).toBe(`@${BOT_USER_ID} what is my name?`)
   })
 
   it('caches Slack requester identity across mentions from the same user', async () => {
@@ -523,7 +532,9 @@ describe('slackbotv2', () => {
       const input = JSON.parse(execute.body.input_lines.at(-1)!) as {
         message: { content: Array<{ text?: string; type: string }> }
       }
-      expect(input.message.content[0]?.text).toContain('GitHub handle from Slack profile: @decofe')
+      expect(contentTextWithHeading(input.message.content, '# Requester Context')).toContain(
+        'GitHub handle from Slack profile: @decofe'
+      )
     }
   })
 
@@ -603,8 +614,8 @@ describe('slackbotv2', () => {
     const replyInput = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!) as {
       message: { content: Array<{ text?: string; type: string }> }
     }
-    const rootContext = rootInput.message.content[0]?.text ?? ''
-    const replyContext = replyInput.message.content[0]?.text ?? ''
+    const rootContext = contentTextWithHeading(rootInput.message.content, '# Requester Context')
+    const replyContext = contentTextWithHeading(replyInput.message.content, '# Requester Context')
 
     expect(rootContext).toContain(`Slack user ID: ${USER_ID}`)
     expect(rootContext).toContain('GitHub handle from Slack profile: @alice-gh')
