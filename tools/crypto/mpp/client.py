@@ -265,7 +265,7 @@ class MppClient:
 
         if not coin_id:
             # Resolve via search
-            price = self.get_token_price(token_name)
+            self.get_token_price(token_name)
             coin_id = COINGECKO_ID_MAP.get(normalized.upper()) or self._coingecko_id_cache.get(normalized.lower())
             if not coin_id:
                 return []
