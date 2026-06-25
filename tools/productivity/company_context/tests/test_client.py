@@ -285,6 +285,233 @@ def test_search_rejects_inverted_occurred_at_filter():
     }
 
 
+@pytest.mark.parametrize("query", ["", "   "])
+def test_search_dms_rejects_empty_query(query):
+    result = CompanyContextClient("postgresql://example").search_dms(query)
+
+    assert result == {"status": "error", "error": "query cannot be empty"}
+
+
+@pytest.mark.parametrize("query", ["", "   "])
+def test_search_dm_conversations_rejects_empty_query(query):
+    result = CompanyContextClient("postgresql://example").search_dm_conversations(query)
+
+    assert result == {"status": "error", "error": "query cannot be empty"}
+
+
+def test_search_dm_conversations_queries_projection(monkeypatch):
+    last_seen_at = dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC)
+    source_updated_at = dt.datetime(2026, 5, 8, 12, 5, tzinfo=dt.UTC)
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack_dm_conversation:T_HOME:D123",
+                "home_team_id": "T_HOME",
+                "conversation_id": "D123",
+                "conversation_type": "im",
+                "title": "Slack DM: Akshaan, Tom",
+                "body": "D123 U_SELF Akshaan U_TOM Tom tom@example.com",
+                "is_ext_shared": False,
+                "last_seen_at": last_seen_at,
+                "source_updated_at": source_updated_at,
+                "participant_user_ids": ["U_SELF", "U_TOM"],
+                "participant_labels": ["Akshaan", "Tom"],
+                "participant_count": 2,
+                "metadata": {"source": "slack_dm_conversation"},
+                "score": 3.25,
+            }
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search_dm_conversations(
+        " Tom ",
+        limit=500,
+    )
+
+    assert result == {
+        "status": "ok",
+        "query": "Tom",
+        "source": "slack_dm",
+        "count": 1,
+        "results": [
+            {
+                "document_id": "slack_dm_conversation:T_HOME:D123",
+                "source": "slack_dm",
+                "source_type": "slack_dm_conversation",
+                "home_team_id": "T_HOME",
+                "conversation_id": "D123",
+                "conversation_type": "im",
+                "title": "Slack DM: Akshaan, Tom",
+                "is_ext_shared": False,
+                "last_seen_at": "2026-05-08T12:00:00+00:00",
+                "source_updated_at": "2026-05-08T12:05:00+00:00",
+                "participant_user_ids": ["U_SELF", "U_TOM"],
+                "participant_labels": ["Akshaan", "Tom"],
+                "participant_count": 2,
+                "matched_labels": ["Tom"],
+                "metadata": {"source": "slack_dm_conversation"},
+                "score": 3.25,
+                "preview": "D123 U_SELF Akshaan U_TOM Tom tom@example.com",
+            }
+        ],
+    }
+    query, args = fake.fetch_calls[0]
+    assert "FROM slack_dm_conversation_context_documents" in query
+    assert "title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2)" in query
+    assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2::text)" in query
+    assert "LIMIT $3" in query
+    assert "centaur_search_slack_dm_conversations" not in query
+    assert args == ("Tom", "Tom", 50)
+    assert fake.closed is True
+
+
+def test_search_dms_queries_bm25_and_returns_compact_results(monkeypatch):
+    occurred_at = dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC)
+    source_updated_at = dt.datetime(2026, 5, 8, 12, 5, tzinfo=dt.UTC)
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack_dm:T_HOME:D123:1770000000.000000",
+                "home_team_id": "T_HOME",
+                "conversation_id": "D123",
+                "message_ts": "1770000000.000000",
+                "conversation_type": "im",
+                "thread_ts": None,
+                "user_id": "U123",
+                "bot_id": "",
+                "title": "Slack DM",
+                "body": "launch plan\nAlpha attachment",
+                "permalink": "https://slack.example/archives/D123/p1770000000000000",
+                "occurred_at": occurred_at,
+                "source_updated_at": source_updated_at,
+                "metadata": {"attachment_count": 1, "conversation_type": "im"},
+                "score": 2.5,
+            }
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search_dms(
+        "launch plan",
+        limit=5,
+        conversation_id=" D123 ",
+    )
+
+    assert result == {
+        "status": "ok",
+        "query": "launch plan",
+        "source": "slack_dm",
+        "conversation_id": "D123",
+        "occurred_after": None,
+        "occurred_before": None,
+        "count": 1,
+        "results": [
+            {
+                "document_id": "slack_dm:T_HOME:D123:1770000000.000000",
+                "source": "slack_dm",
+                "source_type": "slack_im",
+                "source_document_id": "D123",
+                "source_chunk_id": "1770000000.000000",
+                "parent_document_id": None,
+                "title": "Slack DM",
+                "url": "https://slack.example/archives/D123/p1770000000000000",
+                "author_name": "U123",
+                "access_scope": "slack_dm",
+                "occurred_at": "2026-05-08T12:00:00+00:00",
+                "source_updated_at": "2026-05-08T12:05:00+00:00",
+                "conversation_id": "D123",
+                "conversation_type": "im",
+                "message_ts": "1770000000.000000",
+                "thread_ts": None,
+                "user_id": "U123",
+                "bot_id": "",
+                "attachment_count": 1,
+                "metadata": {"attachment_count": 1, "conversation_type": "im"},
+                "score": 2.5,
+                "preview": "launch plan Alpha attachment",
+                "lane": "indexed",
+                "result_type": "slack_im",
+            }
+        ],
+    }
+    query, args = fake.fetch_calls[0]
+    assert "FROM slack_dm_context_documents" in query
+    assert "title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2)" in query
+    assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2::text)" in query
+    assert "OR (title ||| $3::text::pdb.boost(4) OR body ||| $3::text)" in query
+    assert "conversation_id = $4" in query
+    assert "OR occurred_at >= $5" in query
+    assert "OR occurred_at < $6" in query
+    assert "LIMIT $7" in query
+    assert "centaur.slack_user_id" not in query
+    assert "centaur.slack_team_id" not in query
+    assert args == ("launch plan", "launch", "plan", "D123", None, None, 5)
+    assert fake.closed is True
+
+
+def test_search_dms_applies_occurred_at_filters(monkeypatch):
+    fake = _FakeConnection(rows=[])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search_dms(
+        "planning",
+        limit=4,
+        occurred_after="2026-05-01",
+        occurred_before="2026-05-08T12:30:00Z",
+    )
+
+    assert result["status"] == "ok"
+    assert result["occurred_after"] == "2026-05-01T00:00:00+00:00"
+    assert result["occurred_before"] == "2026-05-08T12:30:00+00:00"
+    _, args = fake.fetch_calls[0]
+    assert args == (
+        "planning",
+        "planning",
+        None,
+        dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        dt.datetime(2026, 5, 8, 12, 30, tzinfo=dt.UTC),
+        4,
+    )
+
+
+def test_search_dms_rejects_invalid_occurred_at_filter():
+    result = CompanyContextClient("postgresql://example").search_dms(
+        "planning",
+        occurred_after="not-a-date",
+    )
+
+    assert result == {
+        "status": "error",
+        "error": "occurred_after must be an ISO 8601 date or timestamp",
+    }
+
+
+def test_search_dms_rejects_inverted_occurred_at_filter():
+    result = CompanyContextClient("postgresql://example").search_dms(
+        "planning",
+        occurred_after="2026-05-08",
+        occurred_before="2026-05-01",
+    )
+
+    assert result == {
+        "status": "error",
+        "error": "occurred_after must be earlier than occurred_before",
+    }
+
+
 def test_list_documents_returns_date_bounded_document_summaries(monkeypatch):
     fake = _FakeConnection(
         rows=[

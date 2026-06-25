@@ -23,6 +23,7 @@ THREAD_SCORE_MULTIPLIER = 1.25
 CHANNEL_DAY_SCORE_MULTIPLIER = 0.75
 DEFAULT_PREVIEW_CHARS = 280
 MAX_RELATED_CHILDREN = 25
+SLACK_DM_SOURCE = "slack_dm"
 COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
@@ -242,6 +243,59 @@ def _document_summary(row: Any) -> dict[str, Any]:
     }
 
 
+def _dm_document_summary(row: Any) -> dict[str, Any]:
+    """Return the common metadata we expose for Slack DM context records."""
+    metadata = _as_dict(_row_value(row, "metadata", {}))
+    conversation_type = str(_row_value(row, "conversation_type", ""))
+    conversation_id = str(_row_value(row, "conversation_id", ""))
+    message_ts = str(_row_value(row, "message_ts", ""))
+    user_id = str(_row_value(row, "user_id", ""))
+    bot_id = str(_row_value(row, "bot_id", ""))
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": SLACK_DM_SOURCE,
+        "source_type": f"slack_{conversation_type}" if conversation_type else SLACK_DM_SOURCE,
+        "source_document_id": conversation_id,
+        "source_chunk_id": message_ts,
+        "parent_document_id": None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "permalink", "")),
+        "author_name": user_id or bot_id,
+        "access_scope": "slack_dm",
+        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
+        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
+        "conversation_id": conversation_id,
+        "conversation_type": conversation_type,
+        "message_ts": message_ts,
+        "thread_ts": _row_value(row, "thread_ts"),
+        "user_id": user_id,
+        "bot_id": bot_id,
+        "attachment_count": int(metadata.get("attachment_count") or 0),
+        "metadata": metadata,
+    }
+
+
+def _dm_conversation_summary(row: Any) -> dict[str, Any]:
+    """Return visible metadata for a Slack DM/MPIM conversation."""
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": SLACK_DM_SOURCE,
+        "source_type": "slack_dm_conversation",
+        "home_team_id": str(_row_value(row, "home_team_id", "")),
+        "conversation_id": str(_row_value(row, "conversation_id", "")),
+        "conversation_type": str(_row_value(row, "conversation_type", "")),
+        "title": str(_row_value(row, "title", "")),
+        "is_ext_shared": bool(_row_value(row, "is_ext_shared", False)),
+        "last_seen_at": _isoformat(_row_value(row, "last_seen_at")),
+        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
+        "participant_user_ids": list(_row_value(row, "participant_user_ids", []) or []),
+        "participant_labels": list(_row_value(row, "participant_labels", []) or []),
+        "participant_count": int(_row_value(row, "participant_count", 0) or 0),
+        "matched_labels": list(_row_value(row, "matched_labels", []) or []),
+        "metadata": _as_dict(_row_value(row, "metadata", {})),
+    }
+
+
 class CompanyContextClient:
     """Query the shared company context document table."""
 
@@ -419,6 +473,208 @@ class CompanyContextClient:
                     limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
                     source=source.strip() if source else None,
                     source_type=source_type.strip() if source_type else None,
+                    occurred_after=parsed_occurred_after,
+                    occurred_before=parsed_occurred_before,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def _search_dm_conversations_async(
+        self,
+        *,
+        query: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            terms = _search_terms(query)
+            search_terms = [query, *terms]
+            limit_param = len(search_terms) + 1
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    document_id,
+                    home_team_id,
+                    conversation_id,
+                    conversation_type,
+                    title,
+                    body,
+                    is_ext_shared,
+                    last_seen_at,
+                    source_updated_at,
+                    participant_user_ids,
+                    participant_labels,
+                    participant_count,
+                    metadata,
+                    paradedb.score(document_id) AS score
+                FROM slack_dm_conversation_context_documents
+                WHERE {_search_where_clause(len(terms))}
+                ORDER BY paradedb.score(document_id) DESC,
+                         last_seen_at DESC NULLS LAST,
+                         source_updated_at DESC NULLS LAST
+                LIMIT ${limit_param}
+                """,
+                *search_terms,
+                limit,
+            )
+            results = []
+            query_terms = [term.lower() for term in _search_terms(query)]
+            for row in rows:
+                result = _dm_conversation_summary(row)
+                result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                result["preview"] = _body_preview(
+                    str(_row_value(row, "body", "") or ""),
+                    query=query,
+                )
+                result["matched_labels"] = [
+                    label
+                    for label in result["participant_labels"]
+                    if any(term in str(label).lower() for term in query_terms)
+                ]
+                results.append(result)
+            return {
+                "status": "ok",
+                "query": query,
+                "source": SLACK_DM_SOURCE,
+                "count": len(results),
+                "results": results,
+            }
+        finally:
+            await conn.close()
+
+    def search_dm_conversations(
+        self,
+        query: str,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+    ) -> dict:
+        """Find Slack DM and group DM conversations visible to the current Slack user."""
+        normalized_query = query.strip()
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        try:
+            return asyncio.run(
+                self._search_dm_conversations_async(
+                    query=normalized_query,
+                    limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def _search_dms_async(
+        self,
+        *,
+        query: str,
+        limit: int,
+        conversation_id: str | None,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            terms = _search_terms(query)
+            search_terms = [query, *terms]
+            conversation_id_param = len(search_terms) + 1
+            occurred_after_param = len(search_terms) + 2
+            occurred_before_param = len(search_terms) + 3
+            limit_param = len(search_terms) + 4
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    document_id,
+                    home_team_id,
+                    conversation_id,
+                    message_ts,
+                    conversation_type,
+                    thread_ts,
+                    parent_message_ts,
+                    is_thread_root,
+                    user_id,
+                    user_team_id,
+                    bot_id,
+                    message_type,
+                    message_subtype,
+                    title,
+                    body,
+                    permalink,
+                    occurred_at,
+                    source_updated_at,
+                    metadata,
+                    paradedb.score(document_id) AS score
+                FROM slack_dm_context_documents
+                WHERE {_search_where_clause(len(terms))}
+                  AND (${conversation_id_param}::text IS NULL
+                       OR conversation_id = ${conversation_id_param})
+                  AND (${occurred_after_param}::timestamptz IS NULL
+                       OR occurred_at >= ${occurred_after_param})
+                  AND (${occurred_before_param}::timestamptz IS NULL
+                       OR occurred_at < ${occurred_before_param})
+                ORDER BY paradedb.score(document_id) DESC,
+                         occurred_at DESC NULLS LAST,
+                         source_updated_at DESC NULLS LAST
+                LIMIT ${limit_param}
+                """,
+                *search_terms,
+                conversation_id,
+                occurred_after,
+                occurred_before,
+                limit,
+            )
+            results = []
+            for row in rows:
+                result = _dm_document_summary(row)
+                result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                result["preview"] = _body_preview(
+                    str(_row_value(row, "body", "") or ""),
+                    query=query,
+                )
+                result["lane"] = "indexed"
+                result["result_type"] = str(result["source_type"] or SLACK_DM_SOURCE)
+                results.append(result)
+
+            return {
+                "status": "ok",
+                "query": query,
+                "source": SLACK_DM_SOURCE,
+                "conversation_id": conversation_id,
+                "occurred_after": _isoformat(occurred_after),
+                "occurred_before": _isoformat(occurred_before),
+                "count": len(results),
+                "results": results,
+            }
+        finally:
+            await conn.close()
+
+    def search_dms(
+        self,
+        query: str,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+        conversation_id: str | None = None,
+        occurred_after: str | datetime | None = None,
+        occurred_before: str | datetime | None = None,
+    ) -> dict:
+        """Search Slack DM and group DM context visible to the current Slack user."""
+        normalized_query = query.strip()
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        try:
+            parsed_occurred_after = _parse_datetime_filter(
+                occurred_after,
+                name="occurred_after",
+            )
+            parsed_occurred_before = _parse_datetime_filter(
+                occurred_before,
+                name="occurred_before",
+            )
+            _validate_date_window(parsed_occurred_after, parsed_occurred_before)
+            return asyncio.run(
+                self._search_dms_async(
+                    query=normalized_query,
+                    limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
+                    conversation_id=conversation_id.strip() if conversation_id else None,
                     occurred_after=parsed_occurred_after,
                     occurred_before=parsed_occurred_before,
                 )
