@@ -18,11 +18,7 @@ import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import (
-    current_slack_thread,
-    get_tool_context,
-    secret,
-)
+from centaur_sdk.tool_sdk import secret
 
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
@@ -1502,39 +1498,6 @@ class SlackClient:
             unfurl_media=unfurl_media,
         )
 
-    def _current_slack_destination(self) -> tuple[str | None, str | None]:
-        """Return the active Slack channel/thread, if any.
-
-        Prefer API-owned session context so warm pooled sandboxes do not depend
-        on per-thread environment mutation. Fall back to parsing the tool
-        context's thread_key for older runtimes/tests.
-        """
-        try:
-            slack = current_slack_thread()
-            channel = slack.get("channel_id")
-            thread_ts = slack.get("thread_ts")
-            if channel and thread_ts:
-                return channel, thread_ts
-        except Exception:
-            pass
-
-        try:
-            thread_key = get_tool_context().thread_key or ""
-        except LookupError:
-            return None, None
-        parts = thread_key.split(":")
-        if parts[0] != "slack":
-            return None, None
-        if len(parts) == 4:
-            channel, thread_ts = parts[2], parts[3]
-        elif len(parts) == 3:
-            channel, thread_ts = parts[1], parts[2]
-        else:
-            return None, None
-        if channel and thread_ts:
-            return channel, thread_ts
-        return None, None
-
     @staticmethod
     def _preview_for_bytes(data: bytes, filename: str) -> dict[str, Any]:
         """Return cheap metadata that helps identify generated artifacts."""
@@ -1558,9 +1521,7 @@ class SlackClient:
         return preview
 
     @staticmethod
-    def _file_shared_in_thread(
-        shares: dict, channel: str, thread_ts: str | None
-    ) -> bool:
+    def _file_shared_in_thread(shares: dict, channel: str, thread_ts: str | None) -> bool:
         """Whether files.info `shares` shows the file landed in the target.
 
         Slack's schema is ``shares.{public,private}[channel_id] -> [entries]``,
@@ -1580,8 +1541,7 @@ class SlackClient:
         if thread_ts is None:
             return True
         return any(
-            isinstance(e, dict) and thread_ts in (e.get("thread_ts"), e.get("ts"))
-            for e in entries
+            isinstance(e, dict) and thread_ts in (e.get("thread_ts"), e.get("ts")) for e in entries
         )
 
     def upload_file(
@@ -1602,21 +1562,21 @@ class SlackClient:
         on the API server, so a caller-supplied path would read the API host's
         filesystem (secrets, configs) and exfiltrate it to Slack.
 
-        If channel/thread_ts are omitted and the tool runs in an active Slack
-        thread, the destination is inferred from tool context.
+        channel/channel_id and thread_ts are required. The upload tool does not
+        infer the active Slack thread; callers must pass the API-owned Slack
+        channel ID and thread timestamp explicitly.
 
         alt_text: accepted for backwards compatibility but currently NOT sent
             to Slack, because slack_sdk's files_upload_v2 mishandles alt_txt
             (https://github.com/slackapi/python-slack-sdk/issues/1818).
         """
-        inferred_channel, inferred_thread_ts = self._current_slack_destination()
-        requested_channel = channel or channel_id or inferred_channel
+        requested_channel = channel or channel_id
         if not requested_channel:
-            raise ValueError(
-                "channel is required; pass channel/channel_id or call from an active Slack thread"
-            )
+            raise ValueError("channel is required; pass channel/channel_id explicitly")
+        if not thread_ts:
+            raise ValueError("thread_ts is required; pass the Slack thread timestamp explicitly")
         resolved_channel = self._resolve_channel(requested_channel)
-        effective_thread_ts = thread_ts or inferred_thread_ts
+        effective_thread_ts = thread_ts
 
         try:
             kwargs = {

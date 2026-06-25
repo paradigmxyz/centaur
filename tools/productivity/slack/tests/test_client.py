@@ -1,12 +1,9 @@
-import base64
 import email.message
 import json
 
 import pytest
 from slack.client import SlackAuthError, SlackClient, SlackRateLimitError
 from slack_sdk.errors import SlackApiError
-
-from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 
 
 class _FakeSlackResponse(dict):
@@ -94,9 +91,7 @@ class _FakeWebClient:
             entry: dict = {"ts": "1.1", "channel_name": "paradigm-pulse"}
             if kwargs.get("thread_ts"):
                 entry["thread_ts"] = kwargs["thread_ts"]
-            self._shares_by_file[file_id] = {
-                "public": {kwargs.get("channel", "C123"): [entry]}
-            }
+            self._shares_by_file[file_id] = {"public": {kwargs.get("channel", "C123"): [entry]}}
         else:
             self._shares_by_file[file_id] = {}
         return {
@@ -563,6 +558,7 @@ def test_upload_file_surfaces_structured_auth_failure() -> None:
     with pytest.raises(SlackAuthError) as excinfo:
         client.upload_file(
             "paradigm-pulse",
+            thread_ts="1780035646.228899",
             content_base64="dGVzdA==",
             filename="chart.png",
         )
@@ -586,6 +582,7 @@ def test_upload_file_accepts_channel_id_alias_and_returns_preview() -> None:
     result = client.upload_file(
         None,
         channel_id="paradigm-pulse",
+        thread_ts="1780035646.228899",
         content_base64="YSxiCjEsMgo=",
         filename="data.csv",
     )
@@ -602,54 +599,9 @@ def test_upload_file_accepts_channel_id_alias_and_returns_preview() -> None:
     }
 
 
-def test_upload_file_infers_slack_thread_from_tool_context() -> None:
-    client, fake_web_client = _make_client()
-    token = set_tool_context(
-        ToolContext(name="slack", thread_key="slack:C-thread:1777910337.403889"),
-    )
-    try:
-        client.upload_file(
-            None,
-            content_base64="dGVzdA==",
-            filename="chart.png",
-        )
-    finally:
-        reset_tool_context(token)
-
-    assert fake_web_client.last_kwargs is not None
-    assert fake_web_client.last_kwargs["channel"] == "C123"
-    assert fake_web_client.last_kwargs["thread_ts"] == "1777910337.403889"
-    assert fake_web_client.last_kwargs["initial_comment"] == "Uploaded `chart.png`."
-
-
-def test_upload_file_defaults_to_api_slack_thread_context(monkeypatch) -> None:
-    import slack.client as slack_client_module
-
-    client, fake_web_client = _make_client()
-    monkeypatch.setattr(
-        slack_client_module,
-        "current_slack_thread",
-        lambda: {"channel_id": "C-api", "thread_ts": "200.000000"},
-    )
-    client._resolve_channel = lambda channel: channel  # type: ignore[method-assign]
-
-    client.upload_file(content_base64="dGVzdA==", filename="chart.png")
-
-    assert fake_web_client.last_kwargs is not None
-    assert fake_web_client.last_kwargs["channel"] == "C-api"
-    assert fake_web_client.last_kwargs["thread_ts"] == "200.000000"
-
-
-def test_upload_file_explicit_destination_overrides_api_context(monkeypatch) -> None:
-    import slack.client as slack_client_module
-
+def test_upload_file_uses_explicit_destination() -> None:
     resolved_channels: list[str] = []
     client, fake_web_client = _make_client()
-    monkeypatch.setattr(
-        slack_client_module,
-        "current_slack_thread",
-        lambda: {"channel_id": "C-api", "thread_ts": "200.000000"},
-    )
 
     def resolve_channel(channel: str) -> str:
         resolved_channels.append(channel)
@@ -670,26 +622,26 @@ def test_upload_file_explicit_destination_overrides_api_context(monkeypatch) -> 
     assert fake_web_client.last_kwargs["thread_ts"] == "201.000000"
 
 
-def test_upload_file_infers_destination_from_team_scoped_thread_key() -> None:
-    """The slackbot emits slack:<team>:<channel>:<thread_ts>; upload_file must
-    infer the channel and thread from that 4-part key, not just the legacy
-    3-part form. Otherwise an agent that omits channel/thread_ts gets a
-    'channel is required' error and files never land in the thread."""
-    client, fake_web_client = _make_client()
-    token = set_tool_context(
-        ToolContext(
-            name="slack",
-            thread_key="slack:T0AQQ46PL4C:C0B0XS7BLA3:1780035646.228899",
-        ),
-    )
-    try:
-        client.upload_file(content_base64="dGVzdA==", filename="random_data.csv")
-    finally:
-        reset_tool_context(token)
+def test_upload_file_requires_explicit_channel() -> None:
+    client, _ = _make_client()
 
-    assert fake_web_client.last_kwargs is not None
-    assert fake_web_client.last_kwargs["channel"] == "C123"
-    assert fake_web_client.last_kwargs["thread_ts"] == "1780035646.228899"
+    with pytest.raises(ValueError, match="channel is required"):
+        client.upload_file(
+            thread_ts="1780035646.228899",
+            content_base64="dGVzdA==",
+            filename="random_data.csv",
+        )
+
+
+def test_upload_file_requires_explicit_thread_ts() -> None:
+    client, _ = _make_client()
+
+    with pytest.raises(ValueError, match="thread_ts is required"):
+        client.upload_file(
+            channel_id="C123",
+            content_base64="dGVzdA==",
+            filename="random_data.csv",
+        )
 
 
 def test_upload_file_uploads_once_and_returns_when_share_lands(monkeypatch) -> None:
@@ -772,6 +724,7 @@ def test_upload_file_never_sends_alt_txt(monkeypatch) -> None:
     client, fake_web_client = _make_client()
     client.upload_file(
         channel_id="C123",
+        thread_ts="1780035646.228899",
         content_base64="dGVzdA==",
         filename="chart.png",
         alt_text="a bar chart",
@@ -792,22 +745,7 @@ def test_upload_file_requires_a_content_source() -> None:
     client, _ = _make_client()
 
     with pytest.raises(ValueError, match="content_base64 is required"):
-        client.upload_file("paradigm-pulse")
-
-
-def test_upload_file_can_infer_destination_without_channel_arg() -> None:
-    client, fake_web_client = _make_client()
-    token = set_tool_context(
-        ToolContext(name="slack", thread_key="slack:C-thread:1777910337.403889"),
-    )
-    try:
-        client.upload_file(content_base64="dGVzdA==", filename="chart.png")
-    finally:
-        reset_tool_context(token)
-
-    assert fake_web_client.last_kwargs is not None
-    assert fake_web_client.last_kwargs["channel"] == "C123"
-    assert fake_web_client.last_kwargs["thread_ts"] == "1777910337.403889"
+        client.upload_file("paradigm-pulse", thread_ts="1780035646.228899")
 
 
 class _FakeHTTPResponse:
