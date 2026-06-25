@@ -30,8 +30,9 @@ BROWSER_USE_PROFILE_ID = os.environ.get("BROWSER_USE_PROFILE_ID", "")  # noqa: T
 
 def _browser_use_api_key() -> str:
     # Server mode returns the stub key name; the proxy swaps it for the real
-    # key in the query string (match_query). Local mode returns the env value.
-    return secret("BROWSER_USE_API_KEY", "")
+    # key in the query string (match_query). Local mode uses .env when present
+    # and otherwise keeps the stub so sandbox runs do not fail before proxying.
+    return secret("BROWSER_USE_API_KEY", "BROWSER_USE_API_KEY")
 
 
 def _prepare_playwright_tls() -> None:
@@ -63,8 +64,6 @@ def _redact_browser_use_secret(error: Exception, api_key: str) -> str:
     return re.sub(r"apiKey=[^&\\s]+", "apiKey=<redacted>", text)
 
 
-
-
 class DocsendClient:
     """Download DocSend documents as PDF via cloud browser."""
 
@@ -94,6 +93,7 @@ class DocsendClient:
             loop = None
         if loop and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(
                     asyncio.run, self._run(url, email, passcode, verification_link)
@@ -108,8 +108,6 @@ class DocsendClient:
             url = f"https://{url}"
 
         api_key = _browser_use_api_key()
-        if not api_key:
-            return _err("BROWSER_USE_API_KEY not configured")
 
         try:
             from playwright.async_api import async_playwright
@@ -220,7 +218,9 @@ class DocsendClient:
                 # 8. Assemble PDF
                 buf = BytesIO()
                 good[0].save(
-                    buf, "PDF", save_all=True,
+                    buf,
+                    "PDF",
+                    save_all=True,
                     append_images=good[1:] if len(good) > 1 else [],
                 )
 

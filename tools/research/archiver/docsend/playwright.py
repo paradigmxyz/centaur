@@ -35,15 +35,15 @@ from centaur_sdk import secret
 
 # Configuration
 DEFAULT_EMAIL = ""
-API_KEY = secret("BROWSER_USE_API_KEY", "")
 BROWSER_USE_PROXY_COUNTRY = os.environ.get("BROWSER_USE_PROXY_COUNTRY", "")  # noqa: TID251
 BROWSER_USE_PROFILE_ID = os.environ.get("BROWSER_USE_PROFILE_ID", "")  # noqa: TID251
 
 
 def browser_use_api_key() -> str:
     # Server mode returns the stub key name; the proxy swaps it for the real
-    # key in the query string (match_query). Local mode returns the env value.
-    return secret("BROWSER_USE_API_KEY", "")
+    # key in the query string (match_query). Local mode uses .env when present
+    # and otherwise keeps the stub so sandbox runs do not fail before proxying.
+    return secret("BROWSER_USE_API_KEY", "BROWSER_USE_API_KEY")
 
 
 def prepare_playwright_tls() -> None:
@@ -104,6 +104,7 @@ async def _stop_browser_session(client: AsyncBrowserUse, session_id: str) -> Non
 
 class ScrapeStatus(Enum):
     """Possible scrape outcomes."""
+
     SUCCESS = "success"
     PARTIAL = "partial"  # Some slides failed but got most
     PASSWORD_REQUIRED = "password_required"
@@ -117,6 +118,7 @@ class ScrapeStatus(Enum):
 @dataclass
 class ScrapeConfig:
     """Configuration for scraping behavior."""
+
     # Timeouts (in ms)
     page_load_timeout: int = 45000
     auth_timeout: int = 5000  # Short timeout - email field should appear quickly
@@ -138,6 +140,7 @@ class ScrapeConfig:
 @dataclass
 class ScrapeResult:
     """Result of a scrape operation."""
+
     url: str
     company: str
     status: ScrapeStatus = ScrapeStatus.ERROR
@@ -175,7 +178,7 @@ async def retry_async(
         except exceptions as e:
             last_exception = e
             if attempt < max_retries - 1:
-                wait_time = delay * (2 ** attempt)  # Exponential backoff
+                wait_time = delay * (2**attempt)  # Exponential backoff
                 if on_retry:
                     on_retry(attempt + 1, max_retries, e, wait_time)
                 await asyncio.sleep(wait_time)
@@ -199,7 +202,7 @@ async def enter_password(page, password: str, config: ScrapeConfig = DEFAULT_CON
         # DocSend passcode fields use type="text", not type="password"
         pw_selectors = [
             'input[type="password"]',
-            '#link_auth_form_passcode',
+            "#link_auth_form_passcode",
             'input[name*="passcode"]',
         ]
 
@@ -207,7 +210,7 @@ async def enter_password(page, password: str, config: ScrapeConfig = DEFAULT_CON
         for sel in pw_selectors:
             loc = page.locator(sel).first
             try:
-                await loc.wait_for(state='visible', timeout=3000)
+                await loc.wait_for(state="visible", timeout=3000)
                 password_field = loc
                 break
             except Exception:
@@ -221,16 +224,16 @@ async def enter_password(page, password: str, config: ScrapeConfig = DEFAULT_CON
         # feedback/chat email field (#feedback_sender_email).
         # Includes folder-style ReactModal email fields.
         email_selectors = [
-            '#link_auth_form_email',
+            "#link_auth_form_email",
             '#new_link_auth_form input[type="email"]',
-            '.js-auth-form_email-field',
+            ".js-auth-form_email-field",
             '.ReactModal__Content input[type="email"]',
             '#email[type="email"]',
         ]
         for em_sel in email_selectors:
             try:
                 email_input = page.locator(em_sel).first
-                await email_input.wait_for(state='visible', timeout=2000)
+                await email_input.wait_for(state="visible", timeout=2000)
                 await email_input.fill(DEFAULT_EMAIL)
                 await asyncio.sleep(0.5)
                 break
@@ -261,10 +264,10 @@ async def enter_password(page, password: str, config: ScrapeConfig = DEFAULT_CON
                 continue
 
         if not clicked:
-            await page.keyboard.press('Enter')
+            await page.keyboard.press("Enter")
 
         # Wait for navigation/load
-        await page.wait_for_load_state('networkidle', timeout=config.network_idle_timeout)
+        await page.wait_for_load_state("networkidle", timeout=config.network_idle_timeout)
         await asyncio.sleep(2)
         # Check if still on password/passcode page (single-doc form or folder modal)
         still_on_auth = await page.query_selector(
@@ -291,13 +294,13 @@ async def enter_password(page, password: str, config: ScrapeConfig = DEFAULT_CON
 
 async def get_slide_count(page) -> int:
     """Get total slide count from page indicator."""
-    selectors = ['.toolbar-page-indicator', '.page-label', '[class*="page-indicator"]']
+    selectors = [".toolbar-page-indicator", ".page-label", '[class*="page-indicator"]']
     for selector in selectors:
         try:
             indicator = await page.query_selector(selector)
             if indicator:
                 text = await indicator.text_content()
-                match = re.search(r'(\d+)\s*/\s*(\d+)', text)
+                match = re.search(r"(\d+)\s*/\s*(\d+)", text)
                 if match:
                     return int(match.group(2))
         except Exception:
@@ -318,7 +321,7 @@ async def fetch_slide_urls(
     """
     urls = []
     failed = []
-    base_url = page.url.split('?')[0]
+    base_url = page.url.split("?")[0]
 
     for i in range(1, total_pages + 1):
         url = None
@@ -337,12 +340,12 @@ async def fetch_slide_urls(
                     }})()
                 """)
 
-                if result and result.get('url'):
-                    url = result['url']
+                if result and result.get("url"):
+                    url = result["url"]
                     break
-                elif result and result.get('error'):
-                    last_error = result['error']
-                    if 'HTTP 4' in last_error:  # 4xx errors - don't retry
+                elif result and result.get("error"):
+                    last_error = result["error"]
+                    if "HTTP 4" in last_error:  # 4xx errors - don't retry
                         break
             except Exception as e:
                 last_error = str(e)
@@ -415,12 +418,14 @@ async def create_pdf(image_paths: list[Path], output_path: Path):
         return
 
     images = [Image.open(p) for p in sorted(image_paths)]
-    rgb_images = [img.convert('RGB') if img.mode != 'RGB' else img for img in images]
+    rgb_images = [img.convert("RGB") if img.mode != "RGB" else img for img in images]
 
     if rgb_images:
         rgb_images[0].save(
-            output_path, "PDF", save_all=True,
-            append_images=rgb_images[1:] if len(rgb_images) > 1 else []
+            output_path,
+            "PDF",
+            save_all=True,
+            append_images=rgb_images[1:] if len(rgb_images) > 1 else [],
         )
 
 
@@ -453,10 +458,6 @@ async def scrape_docsend(
         company_dir.mkdir(parents=True, exist_ok=True)
 
         api_key = browser_use_api_key()
-        if not api_key:
-            result.status = ScrapeStatus.ERROR
-            result.error = "BROWSER_USE_API_KEY not configured"
-            return result
         playwright_browser = None
 
         try:
@@ -479,7 +480,7 @@ async def scrape_docsend(
                 # Step 3: Navigate to DocSend URL with retry
 
                 async def navigate():
-                    await page.goto(url, wait_until='networkidle', timeout=config.page_load_timeout)
+                    await page.goto(url, wait_until="networkidle", timeout=config.page_load_timeout)
 
                 try:
                     await retry_async(
@@ -499,7 +500,7 @@ async def scrape_docsend(
 
                 # Check for error states
                 title = await page.title()
-                if '404' in title or 'not found' in title.lower():
+                if "404" in title or "not found" in title.lower():
                     result.status = ScrapeStatus.LINK_EXPIRED
                     return result
 
@@ -530,15 +531,17 @@ async def scrape_docsend(
                 email_field = None
                 try:
                     email_field = page.locator('#prompt input[type="email"]').first
-                    await email_field.wait_for(state='visible', timeout=config.auth_timeout)
+                    await email_field.wait_for(state="visible", timeout=config.auth_timeout)
                 except Exception:
                     # Try fallback - find visible email input (not the feedback one)
                     try:
                         # Look for email input in a modal/prompt container
-                        modal_email = page.locator('.modal input[type="email"], #prompt input[type="email"], [class*="auth"] input[type="email"]').first
+                        modal_email = page.locator(
+                            '.modal input[type="email"], #prompt input[type="email"], [class*="auth"] input[type="email"]'
+                        ).first
                         if await modal_email.count() > 0:
                             box = await modal_email.bounding_box(timeout=2000)
-                            if box and box['width'] > 50:
+                            if box and box["width"] > 50:
                                 email_field = modal_email
                     except Exception:
                         pass
@@ -554,12 +557,14 @@ async def scrape_docsend(
                             if await submit_btn.is_visible(timeout=2000):
                                 await submit_btn.click(timeout=5000)
                             else:
-                                await page.keyboard.press('Enter')
+                                await page.keyboard.press("Enter")
                         except Exception:
-                            await page.keyboard.press('Enter')
+                            await page.keyboard.press("Enter")
 
                         # Wait for document to load
-                        await page.wait_for_load_state('networkidle', timeout=config.network_idle_timeout)
+                        await page.wait_for_load_state(
+                            "networkidle", timeout=config.network_idle_timeout
+                        )
                         await asyncio.sleep(2)
                     except PlaywrightTimeout:
                         pass
@@ -582,7 +587,9 @@ async def scrape_docsend(
                 result.total_pages = total_pages
 
                 # Fetch all slide URLs via API
-                slide_urls, fetch_failed = await fetch_slide_urls(page, total_pages, company, config)
+                slide_urls, fetch_failed = await fetch_slide_urls(
+                    page, total_pages, company, config
+                )
                 valid_urls = [u for u in slide_urls if u]
 
                 if len(valid_urls) == 0:
@@ -592,7 +599,9 @@ async def scrape_docsend(
                     return result
 
                 # Download images
-                downloaded, download_failed = await download_images(slide_urls, company_dir, company, config)
+                downloaded, download_failed = await download_images(
+                    slide_urls, company_dir, company, config
+                )
                 result.downloaded = len(downloaded)
                 result.failed_slides = list(set(fetch_failed + download_failed))
 
