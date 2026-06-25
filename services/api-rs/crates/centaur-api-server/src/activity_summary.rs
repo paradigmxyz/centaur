@@ -16,17 +16,17 @@ pub(crate) const SESSION_ACTIVITY_SUMMARY_EVENT: &str = "session.activity_summar
 
 const SYSTEM_PROMPT: &str = "\
 You write live status text for a software agent. Use only the supplied event facts. \
-Write one short, conversational first-person present-tense sentence, maximum 18 words, \
-as if you are the agent. Describe the goal you are working toward, not the exact \
-command, file path, ID, flag, or implementation step you are using. Avoid mechanics \
-like running tests, reading output, building images, checking logs, or watching rollouts \
-unless they are the user's explicit goal. If the facts are mostly mechanics, infer the \
-higher-level outcome and omit those mechanics. Prefer outcomes like \"I'm making sure \
-the fix works\" or \"I'm getting the preview ready\". Do not mention tests, output, \
-builds, logs, rollouts, commands, paths, IDs, or flags unless the user asked for them. \
+Write one short, conversational first-person present-tense sentence under 45 characters, \
+including spaces, as if you are the agent. Describe the goal you are working toward, \
+not the exact command, file path, ID, flag, or implementation step you are using. \
+Avoid mechanics like running tests, reading output, building images, checking logs, \
+or watching rollouts unless they are the user's explicit goal. If the facts are mostly \
+mechanics, infer the higher-level outcome and omit those mechanics. Prefer short \
+outcomes like \"I'm checking the fix\" or \"I'm getting the preview ready\". \
+Do not mention tests, output, builds, logs, rollouts, commands, paths, IDs, or flags unless the user asked for them. \
 Use user-facing words like fix, preview, update, or summary behavior instead of \
 infrastructure words like server, deployment, or rollout. Do not refer to \"the agent\". \
-No markdown, no quotes, no event IDs, and no speculation.";
+Never write more than 45 characters. No markdown, no quotes, no event IDs, and no speculation.";
 
 #[derive(Clone)]
 pub(crate) struct ActivitySummaryConfig {
@@ -737,13 +737,15 @@ mod tests {
     #[test]
     fn system_prompt_requires_conversational_goal_status() {
         assert!(SYSTEM_PROMPT.contains("first-person"));
+        assert!(SYSTEM_PROMPT.contains("under 45 characters"));
         assert!(SYSTEM_PROMPT.contains("Describe the goal"));
         assert!(SYSTEM_PROMPT.contains("not the exact"));
         assert!(SYSTEM_PROMPT.contains("Avoid mechanics"));
         assert!(SYSTEM_PROMPT.contains("infer the"));
         assert!(SYSTEM_PROMPT.contains("Do not mention tests"));
         assert!(SYSTEM_PROMPT.contains("Use user-facing words"));
-        assert!(SYSTEM_PROMPT.contains("\"I'm making sure the fix works\""));
+        assert!(SYSTEM_PROMPT.contains("\"I'm checking the fix\""));
+        assert!(SYSTEM_PROMPT.contains("Never write more than 45 characters"));
         assert!(SYSTEM_PROMPT.contains("Do not refer to \"the agent\""));
     }
 
