@@ -109,6 +109,7 @@ const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
 const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
+const ASSISTANT_STATUS_MAX_CHARS = 50
 const SLACK_TASK_DETAILS_MAX_CHARS = 500
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
@@ -2355,13 +2356,14 @@ async function setAssistantStatus(
   trace?: SlackbotV2Trace
 ): Promise<boolean> {
   const startedAtMs = nowMs()
+  const normalizedStatus = normalizeAssistantStatus(status)
   const target = slackAssistantTarget(thread)
   const adapter = thread.adapter as SlackAssistantAdapter
   const fields = {
     has_adapter: Boolean(adapter.setAssistantStatus),
     has_target: Boolean(target),
-    operation: status ? 'set' : 'clear',
-    status_empty: !status
+    operation: normalizedStatus ? 'set' : 'clear',
+    status_empty: !normalizedStatus
   }
   if (options) traceLog(options, 'slackbotv2_assistant_status_started', trace, fields)
   if (!target || !adapter.setAssistantStatus) {
@@ -2384,22 +2386,20 @@ async function setAssistantStatus(
       )
     : () => undefined
   try {
-    const visible = await ignoreAssistantError(() =>
-      adapter.setAssistantStatus!(
-        target.channel,
-        target.threadTs,
-        status,
-        status ? [status] : undefined
-      )
+    await adapter.setAssistantStatus!(
+      target.channel,
+      target.threadTs,
+      normalizedStatus,
+      normalizedStatus ? [normalizedStatus] : undefined
     )
     if (options) {
       traceLog(options, 'slackbotv2_assistant_status_complete', trace, {
         ...fields,
         phase_ms: elapsedMs(startedAtMs),
-        visible
+        visible: true
       })
     }
-    return visible
+    return true
   } catch (error) {
     if (options) {
       traceWarn(options, 'slackbotv2_assistant_status_failed', trace, {
@@ -2408,10 +2408,17 @@ async function setAssistantStatus(
         phase_ms: elapsedMs(startedAtMs)
       })
     }
-    throw error
+    return false
   } finally {
     stopPendingLog()
   }
+}
+
+function normalizeAssistantStatus(status: string): string {
+  const oneLine = status.replace(/\s+/g, ' ').trim()
+  const chars = Array.from(oneLine)
+  if (chars.length <= ASSISTANT_STATUS_MAX_CHARS) return oneLine
+  return `${chars.slice(0, ASSISTANT_STATUS_MAX_CHARS - 3).join('').trimEnd()}...`
 }
 
 async function setAssistantTitle(thread: Thread, title: string | undefined): Promise<void> {

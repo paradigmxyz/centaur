@@ -2710,7 +2710,9 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
 
     const key = threadKey(parent.ts)
-    const summary = 'The agent is checking the repository.'
+    const summary =
+      "I'm checking the benchmark page and related logs so I can explain the chart shape."
+    const clippedSummary = `${summary.slice(0, 47).trimEnd()}...`
     codexApi.emitSessionEvent(key, 'session.activity_summary', {
       execution_id: 'exe-activity-summary-status',
       summary
@@ -2739,14 +2741,16 @@ describe('slackbotv2', () => {
     const statusCalls = slackApi.calls.filter(call => call.method === 'assistant.threads.setStatus')
     expect(statusCalls.map(call => stringField(call.body.status))).toEqual([
       'Thinking...',
-      summary,
+      clippedSummary,
       ''
     ])
+    expect(Array.from(clippedSummary)).toHaveLength(50)
     expect(statusCalls[1]?.body).toEqual(
       expect.objectContaining({
         channel_id: CHANNEL_ID,
         thread_ts: parent.ts,
-        status: summary
+        loading_messages: [clippedSummary],
+        status: clippedSummary
       })
     )
     const transcripts = slackStreamTranscripts(slackApi.calls)
