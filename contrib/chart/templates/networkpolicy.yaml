@@ -178,6 +178,12 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+{{- if $console.worker.enabled }}
+        # Console background jobs call api-rs for sync ingestion/checkpoints.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
+{{- end }}
 {{- end }}
         # Sandboxes call back into the control plane. agent-k8s labels its pods
         # centaur.ai/managed-by=api-rs (MANAGED_BY_VALUE in centaur-sandbox-agent-k8s),
