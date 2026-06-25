@@ -16,8 +16,9 @@ pub(crate) const SESSION_ACTIVITY_SUMMARY_EVENT: &str = "session.activity_summar
 
 const SYSTEM_PROMPT: &str = "\
 You write live status text for a software agent. Use only the supplied event facts. \
-Write one short present-tense sentence, maximum 18 words. No markdown, no quotes, \
-no event IDs, and no speculation.";
+Write one short first-person present-tense sentence, maximum 18 words, as if you are \
+the agent. Prefer forms like \"I'm running tests\" or \"I'm reading command output\". \
+Do not refer to \"the agent\". No markdown, no quotes, no event IDs, and no speculation.";
 
 #[derive(Clone)]
 pub(crate) struct ActivitySummaryConfig {
@@ -726,20 +727,27 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_requires_first_person_status() {
+        assert!(SYSTEM_PROMPT.contains("first-person"));
+        assert!(SYSTEM_PROMPT.contains("\"I'm running tests\""));
+        assert!(SYSTEM_PROMPT.contains("Do not refer to \"the agent\""));
+    }
+
+    #[test]
     fn extracts_output_text_from_responses_body() {
         let text = extract_response_text(&json!({
             "output": [
                 {
                     "type": "message",
                     "content": [
-                        {"type": "output_text", "text": "The agent is inspecting events."}
+                        {"type": "output_text", "text": "I'm inspecting events."}
                     ]
                 }
             ]
         }))
         .unwrap();
 
-        assert_eq!(text, "The agent is inspecting events.");
+        assert_eq!(text, "I'm inspecting events.");
     }
 
     #[test]
