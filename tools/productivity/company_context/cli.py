@@ -51,7 +51,7 @@ def search(
     occurred_before: str | None = typer.Option(None, "--before", help="Only results before this time."),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
-    """Search company context documents."""
+    """Search indexed company context documents."""
     result = CompanyContextClient().search(
         query=query,
         limit=limit,
