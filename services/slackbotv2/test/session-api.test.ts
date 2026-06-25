@@ -644,6 +644,81 @@ describe('session principal display name', () => {
     }
   }
 
+  test('uses the GitHub handle from the requester Slack profile for PR attribution', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await withSlackStub(
+      url => {
+        if (url.includes('conversations.info')) {
+          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
+        }
+        if (url.includes('users.profile.get')) {
+          return Response.json({
+            ok: true,
+            profile: {
+              display_name: 'Ada Lovelace',
+              fields: {
+                XfGithub: { label: 'GitHub', value: 'https://github.com/ada-lovelace' }
+              },
+              name: 'ada'
+            }
+          })
+        }
+        if (url.includes('users.info')) {
+          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
+        }
+        return Response.json({ ok: true })
+      },
+      async () => {
+        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
+      }
+    )
+
+    const requesterContext = lineContent(executeLine(requests)).find(part =>
+      textPartIncludes(part, '# Requester Context')
+    )
+    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: @ada-lovelace')
+    expect(requesterContext?.text).toContain('Prompted by: @ada-lovelace')
+    expect(requesterContext?.text).toContain('Assign the PR to the requester when possible: `ada-lovelace`')
+  })
+
+  test('uses the requester Slack display name for PR attribution when no GitHub handle exists', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await withSlackStub(
+      url => {
+        if (url.includes('conversations.info')) {
+          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
+        }
+        if (url.includes('users.profile.get')) {
+          return Response.json({
+            ok: true,
+            profile: {
+              display_name: 'Ada Lovelace',
+              fields: {},
+              name: 'ada'
+            }
+          })
+        }
+        if (url.includes('users.info')) {
+          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
+        }
+        return Response.json({ ok: true })
+      },
+      async () => {
+        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
+      }
+    )
+
+    const requesterContext = lineContent(executeLine(requests)).find(part =>
+      textPartIncludes(part, '# Requester Context')
+    )
+    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: unavailable')
+    expect(requesterContext?.text).toContain('Prompted by: Ada Lovelace')
+    expect(requesterContext?.text).toContain(
+      'Use the requester\'s Slack display name or username because no verified GitHub handle is available.'
+    )
+    expect(requesterContext?.text).not.toContain('Omit the `Prompted by` line')
+  })
+
   test('channel sessions name the principal after the channel', async () => {
     const { fetchFn, requests } = fakeApi()
     await withSlackStub(

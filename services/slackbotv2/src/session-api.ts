@@ -1385,6 +1385,7 @@ function stagedAttachmentInputLines(
 
 function requesterIdentityContext(identity: RequesterIdentity | undefined): string | undefined {
   if (!identity?.slackUserId && !identity?.slackUserName && !identity?.githubHandle) return undefined
+  const slackAttributionName = requesterSlackAttributionName(identity)
 
   const lines = [
     '# Requester Context',
@@ -1412,6 +1413,7 @@ function requesterIdentityContext(identity: RequesterIdentity | undefined): stri
       `- Assign the PR to the requester when possible: \`${githubLogin}\``
     )
   } else {
+    const promptedBy = slackAttributionName ?? 'unknown Slack requester'
     lines.push(
       '- GitHub handle from Slack profile: unavailable',
       `- GitHub handle unavailable reason: ${identity.githubUnavailableReason ?? 'not resolved'}`,
@@ -1419,14 +1421,32 @@ function requesterIdentityContext(identity: RequesterIdentity | undefined): stri
       '',
       '## GitHub PR Attribution',
       '',
-      '- If you create a GitHub PR for this Slack request, do not infer a GitHub '
-        + 'username from Slack display name, real name, or email.',
-      '- Omit the `Prompted by` line unless a verified GitHub handle is present.'
+      '- If you create a GitHub PR for this Slack request, '
+        + `the PR body MUST contain this standalone line: \`Prompted by: ${promptedBy}\``,
+      '- Use the requester\'s Slack display name or username because no verified GitHub '
+        + 'handle is available.',
+      '- Do not infer a GitHub username from Slack display name, real name, or email.',
+      '- The credited prompter is the requester in this section, not the Slack thread OP/root author.',
+      '- This is a GitHub PR body requirement, not a Slack response mention rule.'
     )
   }
 
   lines.push('', 'The user message follows in the next content block.', '---')
   return lines.join('\n')
+}
+
+function requesterSlackAttributionName(identity: RequesterIdentity): string | undefined {
+  return (
+    nonEmptyString(identity.slackDisplayName)
+    ?? nonEmptyString(identity.slackUserName)
+    ?? nonEmptyString(identity.slackMention)
+    ?? nonEmptyString(identity.slackUserId)
+  )
+}
+
+function nonEmptyString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
 }
 
 function codexInputContent(
