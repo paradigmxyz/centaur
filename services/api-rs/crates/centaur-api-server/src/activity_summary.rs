@@ -346,16 +346,10 @@ fn item_fact(value: &Value, normalized_event_type: &str) -> Option<ActivityFact>
                 text: format!("{action} {name}"),
             })
         }
-        "agentMessage" | "agent_message" => {
-            let phase = string_at(item, &["phase"]).unwrap_or_default();
-            if phase == "final_answer" || phase == "answer" {
-                return None;
-            }
-            Some(ActivityFact {
-                kind: "thinking",
-                text: "writing commentary about progress".to_owned(),
-            })
-        }
+        // Assistant messages are the user-visible answer/commentary stream, not
+        // a useful live activity signal. Tool, plan, and command events carry
+        // the actual work in progress.
+        "agentMessage" | "agent_message" => None,
         "plan" => string_at(item, &["text"]).map(|text| ActivityFact {
             kind: "plan",
             text: format!("updated plan {}", one_line(&text, 180)),
@@ -712,6 +706,23 @@ mod tests {
                 text: "running rg session.activity".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn ignores_agent_commentary_messages_as_activity() {
+        let fact = activity_fact_from_output_event(&event(json!({
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "id": "msg-1",
+                    "phase": "commentary",
+                    "text": "",
+                    "type": "agentMessage"
+                }
+            }
+        })));
+
+        assert_eq!(fact, None);
     }
 
     #[test]
