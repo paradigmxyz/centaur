@@ -414,6 +414,16 @@ elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
     cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
 fi
 
+if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
+    cat >> "$TARGET_PROMPT" <<'EOF'
+
+---
+
+[Observability access]
+This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
+EOF
+fi
+
 # Persona prompt injection is done by the API when it writes AGENTS_BASE.md.
 
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)

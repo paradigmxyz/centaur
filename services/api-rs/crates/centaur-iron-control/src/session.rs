@@ -109,6 +109,10 @@ impl SessionRegistrar {
         }
         Ok(record)
     }
+
+    pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
+        self.client.get_principal(&self.namespace, principal).await
+    }
 }
 
 fn is_status(err: &IronControlError, code: u16) -> bool {

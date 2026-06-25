@@ -8,16 +8,16 @@ use std::{
 
 use centaur_iron_control::SessionRegistrar;
 use centaur_sandbox_core::{
-    Mount, SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
-    SandboxStatus, SandboxWrite,
+    Mount, SandboxBackend, SandboxCapabilities as BackendSandboxCapabilities, SandboxError,
+    SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
     WarmPoolManager, WarmSandboxSpecFactory,
 };
 use centaur_session_core::{
-    ExecutionStatus, HarnessType, MessageRole, Session, SessionEvent, SessionExecution,
-    SessionMessageInput, ThreadKey,
+    ExecutionStatus, HarnessType, MessageRole, SandboxCapabilities as SessionSandboxCapabilities,
+    Session, SessionEvent, SessionExecution, SessionMessageInput, ThreadKey,
 };
 use centaur_session_sqlx::{
     PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
@@ -52,6 +52,9 @@ const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_PIPE_MAX_REATTACH_ATTEMPTS: u32 = 3;
 const SESSION_PIPE_REATTACH_DELAY: Duration = Duration::from_millis(500);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
+const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
+const OBSERVABILITY_TOOL_BLOCKLIST: &str =
+    "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
@@ -286,6 +289,17 @@ struct SandboxReadyObservation<'a> {
     source: &'static str,
     ready_duration: Duration,
     startup_duration: Option<Duration>,
+}
+
+struct EnsureSessionSandboxRequest<'a> {
+    thread_key: &'a ThreadKey,
+    harness_type: &'a HarnessType,
+    persona_id: Option<&'a str>,
+    existing_sandbox_id: Option<&'a str>,
+    existing_sandbox_capabilities: Option<&'a SessionSandboxCapabilities>,
+    iron_control_principal: Option<&'a str>,
+    desired_capabilities: &'a SessionSandboxCapabilities,
+    execution_id: &'a str,
 }
 
 struct PersonaResolution {
@@ -984,16 +998,21 @@ impl SessionRuntime {
                     }),
                 )
                 .await?;
+            let desired_capabilities = self
+                .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
+                .await?;
 
             let sandbox_id = match self
-                .ensure_session_sandbox(
+                .ensure_session_sandbox(EnsureSessionSandboxRequest {
                     thread_key,
-                    &session.harness_type,
-                    session.persona_id.as_deref(),
-                    session.sandbox_id.as_deref(),
-                    session.iron_control_principal.as_deref(),
-                    &execution.execution_id,
-                )
+                    harness_type: &session.harness_type,
+                    persona_id: session.persona_id.as_deref(),
+                    existing_sandbox_id: session.sandbox_id.as_deref(),
+                    existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
+                    iron_control_principal: session.iron_control_principal.as_deref(),
+                    desired_capabilities: &desired_capabilities,
+                    execution_id: &execution.execution_id,
+                })
                 .instrument(execution_trace_span.clone())
                 .await
             {
@@ -1307,13 +1326,18 @@ impl SessionRuntime {
 
     async fn ensure_session_sandbox(
         &self,
-        thread_key: &ThreadKey,
-        harness_type: &HarnessType,
-        persona_id: Option<&str>,
-        existing_sandbox_id: Option<&str>,
-        iron_control_principal: Option<&str>,
-        execution_id: &str,
+        request: EnsureSessionSandboxRequest<'_>,
     ) -> Result<String, SessionRuntimeError> {
+        let EnsureSessionSandboxRequest {
+            thread_key,
+            harness_type,
+            persona_id,
+            existing_sandbox_id,
+            existing_sandbox_capabilities,
+            iron_control_principal,
+            desired_capabilities,
+            execution_id,
+        } = request;
         let span = info_span!(
             "centaur.api_rs.sandbox.ensure",
             component = COMPONENT_SESSION_RUNTIME,
@@ -1327,12 +1351,47 @@ impl SessionRuntime {
             existing_sandbox_id = existing_sandbox_id.unwrap_or(""),
             iron_control_principal_present = iron_control_principal.is_some(),
             persona_id = persona_id.unwrap_or(""),
+            sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled,
+            sandbox_observability_enabled = desired_capabilities.observability_enabled,
         );
         let ensure_started = Instant::now();
         let result = async {
             let persona_context = self.resolve_stored_persona(persona_id, harness_type)?;
             if let Some(sandbox_id) = existing_sandbox_id {
                 let id = SandboxId::new(sandbox_id);
+                if !sandbox_capabilities_match(existing_sandbox_capabilities, desired_capabilities)
+                {
+                    self.sandbox_pipes.remove(sandbox_id);
+                    match self.sandbox_runtime.manager.stop(&id).await {
+                        Ok(()) | Err(SandboxError::NotFound(_)) => {}
+                        Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+                    }
+                    self.store.update_sandbox_id(thread_key, None).await?;
+                    self.store
+                        .append_event(
+                            thread_key,
+                            Some(execution_id),
+                            "session.sandbox_capabilities_replaced",
+                            json!({
+                                "execution_id": execution_id,
+                                "thread_key": thread_key.as_str(),
+                                "sandbox_id": sandbox_id,
+                                "previous_capabilities": existing_sandbox_capabilities,
+                                "desired_capabilities": desired_capabilities,
+                            }),
+                        )
+                        .await?;
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "sandbox_ensure_capabilities_replaced",
+                        thread_key = %thread_key,
+                        execution_id,
+                        sandbox_id,
+                        sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled,
+                        sandbox_observability_enabled = desired_capabilities.observability_enabled,
+                        "replacing existing sandbox whose capabilities do not match"
+                    );
+                } else {
                 match self.sandbox_runtime.manager.status(&id).await {
                     Ok(status) => match existing_sandbox_action(&status) {
                         ExistingSandboxAction::Reuse => {
@@ -1460,6 +1519,7 @@ impl SessionRuntime {
                     }
                     Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
                 }
+                }
             }
 
             // Warm sandboxes are pre-booted with the workload's default
@@ -1476,10 +1536,17 @@ impl SessionRuntime {
             if !warm_persona_matches && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("persona_specific");
             }
+            if !desired_capabilities.is_default_enabled() && self.warm_pool.is_some() {
+                record_sandbox_warm_pool_claim("capabilities_non_default");
+            }
             if let Some(warm_pool) = self
                 .warm_pool
                 .as_ref()
-                .filter(|_| warm_harness_matches && warm_persona_matches)
+                .filter(|_| {
+                    warm_harness_matches
+                        && warm_persona_matches
+                        && desired_capabilities.is_default_enabled()
+                })
             {
                 match warm_pool
                     .claim(thread_key.as_str(), iron_control_principal)
@@ -1491,7 +1558,11 @@ impl SessionRuntime {
                         span.record("sandbox_id", sandbox_id.as_str());
                         let ready_duration = ensure_started.elapsed();
                         self.store
-                            .update_sandbox_id(thread_key, Some(sandbox_id.as_str()))
+                            .update_sandbox_assignment(
+                                thread_key,
+                                sandbox_id.as_str(),
+                                desired_capabilities,
+                            )
                             .await?;
                         self.store
                             .append_event(
@@ -1502,6 +1573,7 @@ impl SessionRuntime {
                                     "sandbox_id": sandbox_id.as_str(),
                                     "workload_key": warm_pool.workload_key(),
                                     "iron_control_principal": iron_control_principal,
+                                    "sandbox_capabilities": desired_capabilities,
                                 }),
                             )
                             .await?;
@@ -1546,6 +1618,7 @@ impl SessionRuntime {
             if let Some(principal) = iron_control_principal {
                 spec.iron_control_principal = Some(principal.to_owned());
             }
+            apply_sandbox_capabilities(&mut spec, desired_capabilities);
             let create_started = Instant::now();
             let handle = self.sandbox_runtime.manager.create_running(spec).await?;
             let startup_duration = create_started.elapsed();
@@ -1553,7 +1626,7 @@ impl SessionRuntime {
             span.record("centaur.sandbox_id", handle.id.as_str());
             span.record("sandbox_id", handle.id.as_str());
             self.store
-                .update_sandbox_id(thread_key, Some(handle.id.as_str()))
+                .update_sandbox_assignment(thread_key, handle.id.as_str(), desired_capabilities)
                 .await?;
             self.record_sandbox_ready(SandboxReadyObservation {
                 thread_key,
@@ -1594,6 +1667,23 @@ impl SessionRuntime {
             );
         }
         result
+    }
+
+    async fn resolve_sandbox_capabilities(
+        &self,
+        iron_control_principal: Option<&str>,
+    ) -> Result<SessionSandboxCapabilities, SessionRuntimeError> {
+        let Some(principal_id) = iron_control_principal else {
+            return Ok(SessionSandboxCapabilities::default_enabled());
+        };
+        let Some(registrar) = &self.iron_control else {
+            return Ok(SessionSandboxCapabilities::default_enabled());
+        };
+        let principal = registrar.get_principal(principal_id).await?;
+        Ok(SessionSandboxCapabilities {
+            repo_cache_enabled: principal.sandbox_repo_cache_enabled,
+            observability_enabled: principal.sandbox_observability_enabled,
+        })
     }
 
     async fn record_sandbox_ready(&self, observation: SandboxReadyObservation<'_>) {
@@ -3817,6 +3907,62 @@ fn upsert_spec_env(spec: &mut SandboxSpec, name: &str, value: String) {
     }
 }
 
+fn sandbox_capabilities_match(
+    existing: Option<&SessionSandboxCapabilities>,
+    desired: &SessionSandboxCapabilities,
+) -> bool {
+    existing.map_or_else(
+        || desired.is_default_enabled(),
+        |existing| existing == desired,
+    )
+}
+
+fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSandboxCapabilities) {
+    spec.capabilities = BackendSandboxCapabilities {
+        repo_cache_enabled: capabilities.repo_cache_enabled,
+        observability_enabled: capabilities.observability_enabled,
+    };
+    upsert_spec_env(
+        spec,
+        "CENTAUR_SANDBOX_REPO_CACHE_ENABLED",
+        capabilities.repo_cache_enabled.to_string(),
+    );
+    upsert_spec_env(
+        spec,
+        "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED",
+        capabilities.observability_enabled.to_string(),
+    );
+    if !capabilities.repo_cache_enabled {
+        spec.mounts
+            .retain(|mount| mount.target_path != SANDBOX_REPOS_MOUNT_PATH);
+    }
+    if !capabilities.observability_enabled {
+        append_spec_env_csv(spec, "TOOL_BLOCKLIST", OBSERVABILITY_TOOL_BLOCKLIST);
+    }
+}
+
+fn append_spec_env_csv(spec: &mut SandboxSpec, name: &str, values: &str) {
+    let existing = spec
+        .env
+        .iter()
+        .find(|env| env.name == name)
+        .map(|env| env.value.as_str())
+        .unwrap_or("");
+    let mut merged = existing
+        .split(',')
+        .chain(values.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .fold(Vec::<String>::new(), |mut acc, value| {
+            if !acc.iter().any(|existing| existing == value) {
+                acc.push(value.to_owned());
+            }
+            acc
+        });
+    merged.sort();
+    upsert_spec_env(spec, name, merged.join(","));
+}
+
 fn apply_persona_spec_env(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -> SandboxSpec {
     for name in [
         "AGENT_PERSONA",
@@ -5629,6 +5775,7 @@ mod tests {
         Session {
             thread_key,
             sandbox_id: Some(sandbox_id.to_owned()),
+            sandbox_capabilities: None,
             harness_type: HarnessType::Codex,
             harness_thread_id: None,
             persona_id: None,
@@ -5706,6 +5853,7 @@ mod adoption_tests {
         open_count: AtomicUsize,
         status: std::sync::Mutex<SandboxStatus>,
         create_id: String,
+        created_specs: std::sync::Mutex<Vec<SandboxSpec>>,
         resume_fails: AtomicBool,
         stopped: std::sync::Mutex<Vec<String>>,
         proxy_ensures: std::sync::Mutex<Vec<(String, String)>>,
@@ -5720,6 +5868,7 @@ mod adoption_tests {
                 open_count: AtomicUsize::new(0),
                 status: std::sync::Mutex::new(status),
                 create_id: "mock-sbx".to_owned(),
+                created_specs: std::sync::Mutex::new(Vec::new()),
                 resume_fails: AtomicBool::new(false),
                 stopped: std::sync::Mutex::new(Vec::new()),
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
@@ -5761,6 +5910,10 @@ mod adoption_tests {
         fn proxy_ensures(&self) -> Vec<(String, String)> {
             self.proxy_ensures.lock().unwrap().clone()
         }
+
+        fn created_specs(&self) -> Vec<SandboxSpec> {
+            self.created_specs.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
@@ -5769,7 +5922,8 @@ mod adoption_tests {
             "mock"
         }
 
-        async fn create(&self, _spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
+        async fn create(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
+            self.created_specs.lock().unwrap().push(spec);
             Ok(SandboxHandle::new(
                 SandboxId::new(self.create_id.clone()),
                 "mock",
@@ -5947,6 +6101,201 @@ mod adoption_tests {
         )
     }
 
+    fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
+        spec.env
+            .iter()
+            .find(|env| env.name == name)
+            .map(|env| env.value.as_str())
+    }
+
+    fn default_capabilities() -> SessionSandboxCapabilities {
+        SessionSandboxCapabilities::default_enabled()
+    }
+
+    fn restricted_capabilities() -> SessionSandboxCapabilities {
+        SessionSandboxCapabilities {
+            repo_cache_enabled: false,
+            observability_enabled: false,
+        }
+    }
+
+    fn runtime_with_warm_pool(
+        store: &PgSessionStore,
+        backend: Arc<MockBackend>,
+        workload_marker: impl Into<String>,
+    ) -> SessionRuntime {
+        let workload_marker = Arc::new(workload_marker.into());
+        let claimed_marker = workload_marker.clone();
+        let warm_marker = workload_marker.clone();
+        let mut runtime = SessionRuntime::new(
+            store.clone(),
+            SandboxRuntime::backend_with_warm_spec_factory(
+                backend,
+                move |_thread_key, _execution_id, _harness, _persona| {
+                    SandboxSpec::new("mock")
+                        .mount(Mount::new(
+                            centaur_sandbox_core::MountKind::Bind {
+                                source_path: "/var/lib/centaur/repos".to_owned(),
+                            },
+                            SANDBOX_REPOS_MOUNT_PATH,
+                        ))
+                        .env("WARM_POOL_TEST_MARKER", claimed_marker.as_str())
+                },
+                move || SandboxSpec::new("mock").env("WARM_POOL_TEST_MARKER", warm_marker.as_str()),
+            ),
+        );
+        let warm_pool = Arc::new(WarmPoolManager::new(
+            runtime.sandbox_runtime.manager.clone(),
+            store.clone(),
+            runtime.sandbox_runtime.warm_spec_factory.clone().unwrap(),
+            runtime.sandbox_runtime.workload_key.clone().unwrap(),
+            WarmPoolConfig {
+                target_size: 1,
+                replenish_interval: Duration::from_secs(60),
+                bootstrap_iron_control_principal: None,
+            },
+        ));
+        runtime.warm_pool = Some(warm_pool);
+        runtime
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capability_mismatch_replaces_existing_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:cap-replace-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_assignment(&thread_key, "sbx-full", &default_capabilities())
+            .await
+            .expect("assign default sandbox");
+        let session = store.get_session(&thread_key).await.unwrap();
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_warm_pool(&store, backend.clone(), thread_key.as_str());
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: session.sandbox_id.as_deref(),
+                existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
+                iron_control_principal: None,
+                desired_capabilities: &restricted_capabilities(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("replace sandbox");
+
+        assert_eq!(sandbox_id, "mock-sbx");
+        assert_eq!(backend.stopped(), vec!["sbx-full".to_owned()]);
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.sandbox_id.as_deref(), Some("mock-sbx"));
+        assert_eq!(
+            session.sandbox_capabilities,
+            Some(restricted_capabilities())
+        );
+        let spec = backend.created_specs().pop().expect("created cold spec");
+        assert!(!spec.capabilities.repo_cache_enabled);
+        assert!(!spec.capabilities.observability_enabled);
+        assert_eq!(
+            env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
+            Some("false")
+        );
+        let blocklist = env_value(&spec, "TOOL_BLOCKLIST").unwrap_or("");
+        for tool in OBSERVABILITY_TOOL_BLOCKLIST.split(',') {
+            assert!(blocklist.split(',').any(|blocked| blocked == tool));
+        }
+        assert!(
+            !spec
+                .mounts
+                .iter()
+                .any(|mount| mount.target_path == SANDBOX_REPOS_MOUNT_PATH)
+        );
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .any(|event| event.event_type == "session.sandbox_capabilities_replaced")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_default_capabilities_skip_warm_pool() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:cap-warm-skip-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_warm_pool(&store, backend.clone(), thread_key.as_str());
+        let workload_key = runtime
+            .warm_pool
+            .as_ref()
+            .unwrap()
+            .workload_key()
+            .to_owned();
+        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                desired_capabilities: &restricted_capabilities(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("ensure sandbox");
+
+        assert_eq!(sandbox_id, "mock-sbx");
+        assert_eq!(
+            store
+                .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
+                .await
+                .expect("warm row should remain ready"),
+            Some(warm_sandbox_id)
+        );
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(
+            session.sandbox_capabilities,
+            Some(restricted_capabilities())
+        );
+        let spec = backend.created_specs().pop().expect("created cold spec");
+        assert!(!spec.capabilities.repo_cache_enabled);
+        assert!(!spec.capabilities.observability_enabled);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn existing_running_sandbox_ensures_proxy_before_reuse() {
         let Some(store) = test_store().await else {
@@ -5969,14 +6318,16 @@ mod adoption_tests {
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let runtime = runtime_with(&store, backend.clone());
         let sandbox_id = runtime
-            .ensure_session_sandbox(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                Some("sbx-existing"),
-                Some("principal-existing"),
-                &execution_id,
-            )
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: Some("sbx-existing"),
+                existing_sandbox_capabilities: None,
+                iron_control_principal: Some("principal-existing"),
+                desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
+                execution_id: &execution_id,
+            })
             .await
             .expect("reuse existing sandbox");
 
@@ -6174,14 +6525,16 @@ mod adoption_tests {
         backend.fail_resume();
         let runtime = runtime_with(&store, backend);
         let sandbox_id = runtime
-            .ensure_session_sandbox(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                Some("sbx-old"),
-                None,
-                &execution_id,
-            )
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: Some("sbx-old"),
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
+                execution_id: &execution_id,
+            })
             .await
             .expect("resume failure should fall through to replacement");
 

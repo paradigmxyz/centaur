@@ -138,9 +138,39 @@ pub enum SessionStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SandboxCapabilities {
+    pub repo_cache_enabled: bool,
+    pub observability_enabled: bool,
+}
+
+impl SandboxCapabilities {
+    pub const fn default_enabled() -> Self {
+        Self {
+            repo_cache_enabled: true,
+            observability_enabled: true,
+        }
+    }
+
+    pub const fn is_default_enabled(&self) -> bool {
+        self.repo_cache_enabled && self.observability_enabled
+    }
+}
+
+impl Default for SandboxCapabilities {
+    fn default() -> Self {
+        Self::default_enabled()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub thread_key: ThreadKey,
     pub sandbox_id: Option<String>,
+    /// Capabilities applied to the currently assigned sandbox. `None` means the
+    /// sandbox predates capability tracking; callers may treat it as compatible
+    /// only with the default-enabled profile.
+    #[serde(default)]
+    pub sandbox_capabilities: Option<SandboxCapabilities>,
     pub harness_type: HarnessType,
     pub harness_thread_id: Option<String>,
     pub persona_id: Option<String>,

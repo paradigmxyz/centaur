@@ -1,6 +1,31 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SandboxCapabilities {
+    pub repo_cache_enabled: bool,
+    pub observability_enabled: bool,
+}
+
+impl SandboxCapabilities {
+    pub const fn default_enabled() -> Self {
+        Self {
+            repo_cache_enabled: true,
+            observability_enabled: true,
+        }
+    }
+
+    pub const fn is_default_enabled(&self) -> bool {
+        self.repo_cache_enabled && self.observability_enabled
+    }
+}
+
+impl Default for SandboxCapabilities {
+    fn default() -> Self {
+        Self::default_enabled()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SandboxSpec {
     pub image: String,
     #[serde(default)]
@@ -16,6 +41,8 @@ pub struct SandboxSpec {
     /// proxy for the sandbox instead of rendering a static proxy config.
     #[serde(default)]
     pub iron_control_principal: Option<String>,
+    #[serde(default)]
+    pub capabilities: SandboxCapabilities,
 }
 
 impl SandboxSpec {
@@ -30,11 +57,17 @@ impl SandboxSpec {
             mounts: Vec::new(),
             resources: None,
             iron_control_principal: None,
+            capabilities: SandboxCapabilities::default_enabled(),
         }
     }
 
     pub fn iron_control_principal(mut self, principal_foreign_id: impl Into<String>) -> Self {
         self.iron_control_principal = Some(principal_foreign_id.into());
+        self
+    }
+
+    pub fn capabilities(mut self, capabilities: SandboxCapabilities) -> Self {
+        self.capabilities = capabilities;
         self
     }
 

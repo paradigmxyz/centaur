@@ -79,6 +79,22 @@ class CopyPublishedToolsTest(unittest.TestCase):
             self.assertTrue((target / "research" / "websearch" / "pyproject.toml").exists())
             self.assertTrue((target / "productivity" / "linear" / "pyproject.toml").exists())
 
+    def test_tool_blocklist_skips_published_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            published = root / "published"
+            target = root / "target"
+
+            for category, name in (("infra", "vlogs"), ("infra", "vmetrics"), ("research", "websearch")):
+                (published / category / name).mkdir(parents=True)
+                (published / category / name / "pyproject.toml").write_text(f"{name}\n")
+
+            with mock.patch.dict("os.environ", {"TOOL_BLOCKLIST": "vlogs,vmetrics"}):
+                install_tool_shims._copy_published_tools(target, published)
+
+            self.assertFalse((target / "infra" / "vlogs").exists())
+            self.assertFalse((target / "infra" / "vmetrics").exists())
+            self.assertTrue((target / "research" / "websearch" / "pyproject.toml").exists())
 
     def test_discover_scripts_respects_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +115,31 @@ class CopyPublishedToolsTest(unittest.TestCase):
                 scripts_all = install_tool_shims._discover_scripts([root])
             self.assertIn("websearch", scripts_all)
             self.assertIn("linear", scripts_all)
+
+    def test_discover_scripts_respects_blocklist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "tools"
+            tools = [
+                ("infra", "vlogs", "vlogs", "vlogs"),
+                ("infra", "centaur_investigator", "centaur_investigator", "centaur-investigator"),
+                ("research", "websearch", "websearch", "websearch"),
+            ]
+            for category, dirname, project, script in tools:
+                d = root / category / dirname
+                d.mkdir(parents=True)
+                (d / "pyproject.toml").write_text(
+                    f'[project]\nname = "{project}"\n\n[project.scripts]\n{script} = "client:main"\n'
+                )
+
+            with mock.patch.dict(
+                "os.environ",
+                {"TOOL_BLOCKLIST": "vlogs,centaur_investigator,centaur-investigator"},
+            ):
+                scripts = install_tool_shims._discover_scripts([root])
+
+            self.assertNotIn("vlogs", scripts)
+            self.assertNotIn("centaur-investigator", scripts)
+            self.assertIn("websearch", scripts)
 
 
 if __name__ == "__main__":

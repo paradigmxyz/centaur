@@ -35,6 +35,14 @@ def _tool_allowlist() -> set[str] | None:
     return {name.strip() for name in raw.split(",") if name.strip()}
 
 
+def _tool_blocklist() -> set[str]:
+    """Tool package/project/script names to skip, from ``TOOL_BLOCKLIST``."""
+    raw = os.environ.get("TOOL_BLOCKLIST", "").strip()
+    if not raw:
+        return set()
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
 def _home_dir() -> Path:
     return Path.home()
 
@@ -98,12 +106,15 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
         raise RuntimeError(f"refreshed tools subdir does not exist: {published}")
 
     allowlist = _tool_allowlist()
+    blocklist = _tool_blocklist()
     existing = {package_dir.name: package_dir for package_dir in _tool_package_dirs(tool_dir)}
     for package_dir in _tool_package_dirs(published):
         tool_name = package_dir.name
         if allowlist is not None and tool_name not in allowlist:
             # Not in TOOL_ALLOWLIST -> don't install; keeps the agent's catalog
             # to configured tools (no phantom, credential-less tools).
+            continue
+        if tool_name in blocklist:
             continue
         if tool_name in existing:
             print(
@@ -337,6 +348,7 @@ def _refresh_skill_dirs(workspace_dir: Path) -> int:
 
 def _discover_scripts(tool_dirs: list[Path]) -> dict[str, dict[str, str]]:
     allowlist = _tool_allowlist()
+    blocklist = _tool_blocklist()
     scripts: dict[str, dict[str, str]] = {}
     for tool_dir in tool_dirs:
         if not tool_dir.is_dir():
@@ -363,10 +375,14 @@ def _discover_scripts(tool_dirs: list[Path]) -> dict[str, dict[str, str]]:
                 and project_name not in allowlist
             ):
                 continue
+            if package_dir in blocklist or project_name in blocklist:
+                continue
             project_scripts = project.get("scripts") or {}
             if not isinstance(project_scripts, dict):
                 continue
             for name in sorted(project_scripts):
+                if name in blocklist:
+                    continue
                 if "/" in name or "\0" in name:
                     print(f"warning: ignoring invalid script name {name!r}", file=sys.stderr)
                     continue
