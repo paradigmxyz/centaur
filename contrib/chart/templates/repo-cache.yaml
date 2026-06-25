@@ -15,6 +15,10 @@
 {{- $repoCacheImageRepository := default .Values.sandbox.image.repository .Values.repoCache.image.repository -}}
 {{- $repoCacheImageTag := default .Values.sandbox.image.tag .Values.repoCache.image.tag -}}
 {{- $repoCacheImagePullPolicy := default .Values.sandbox.image.pullPolicy .Values.repoCache.image.pullPolicy -}}
+{{- $repoCacheStorageType := include "centaur.repoCacheStorageType" . -}}
+{{- $repoCacheUsePvc := eq $repoCacheStorageType "persistentVolumeClaim" -}}
+{{- $repoCachePvcName := include "centaur.repoCachePvcName" . -}}
+{{- $repoCacheCreatePvc := and $repoCacheUsePvc .Values.repoCache.storage.persistentVolumeClaim.create (not .Values.repoCache.storage.persistentVolumeClaim.existingClaim) -}}
 {{- $repoCacheRepositoryRefs := list -}}
 {{- $repoCacheRepositoryRefRepos := list -}}
 {{- range $repo, $ref := .Values.repoCache.repositoryRefs }}
@@ -29,13 +33,34 @@
 {{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
 {{- end }}
 {{- end }}
+{{- if $repoCacheCreatePvc }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $repoCachePvcName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "repo-cache") | nindent 4 }}
+spec:
+  accessModes:
+{{ toYaml .Values.repoCache.storage.persistentVolumeClaim.accessModes | nindent 4 }}
+{{- with .Values.repoCache.storage.persistentVolumeClaim.storageClassName }}
+  storageClassName: {{ . | quote }}
+{{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.repoCache.storage.persistentVolumeClaim.size | quote }}
+---
+{{- end }}
 apiVersion: apps/v1
-kind: DaemonSet
+kind: {{ ternary "Deployment" "DaemonSet" $repoCacheUsePvc }}
 metadata:
   name: {{ include "centaur.componentName" (dict "root" . "component" "repo-cache") }}
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "repo-cache") | nindent 4 }}
 spec:
+{{- if $repoCacheUsePvc }}
+  replicas: 1
+{{- end }}
   selector:
     matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 6 }}
@@ -230,9 +255,14 @@ spec:
 {{- end }}
       volumes:
         - name: repo-cache
+{{- if $repoCacheUsePvc }}
+          persistentVolumeClaim:
+            claimName: {{ $repoCachePvcName | quote }}
+{{- else }}
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- end }}
 {{- if $repoCacheHasGithubToken }}
         - name: github-token
           secret:

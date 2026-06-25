@@ -580,6 +580,8 @@ struct SandboxArgs {
     centaur_api_url: Option<String>,
     #[arg(long = "repos-path", env = "REPOS_PATH")]
     repos_path: Option<String>,
+    #[arg(long = "repos-pvc", env = "REPOS_PVC")]
+    repos_pvc: Option<String>,
     #[arg(
         long = "session-sandbox-passthrough-env",
         env = "SESSION_SANDBOX_PASSTHROUGH_ENV",
@@ -839,13 +841,7 @@ impl SandboxArgs {
             && let Some(repos_path) = clean_optional_value(self.repos_path.as_deref())
         {
             spec = spec.mount(
-                Mount::new(
-                    MountKind::Bind {
-                        source_path: repos_path,
-                    },
-                    SANDBOX_REPOS_MOUNT_PATH,
-                )
-                .read_only(),
+                Mount::new(self.repos_mount_kind(repos_path), SANDBOX_REPOS_MOUNT_PATH).read_only(),
             );
         }
         for (name, value) in self.workflow_host_env_template()? {
@@ -920,17 +916,21 @@ impl SandboxArgs {
                 );
                 if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
                     workload = workload.mount(
-                        Mount::new(
-                            MountKind::Bind {
-                                source_path: repos_path,
-                            },
-                            SANDBOX_REPOS_MOUNT_PATH,
-                        )
-                        .read_only(),
+                        Mount::new(self.repos_mount_kind(repos_path), SANDBOX_REPOS_MOUNT_PATH)
+                            .read_only(),
                     );
                 }
                 Ok(workload)
             }
+        }
+    }
+
+    fn repos_mount_kind(&self, repos_path: String) -> MountKind {
+        if let Some(claim_name) = clean_optional_value(self.repos_pvc.as_deref()) {
+            return MountKind::NamedVolume(claim_name);
+        }
+        MountKind::Bind {
+            source_path: repos_path,
         }
     }
 
@@ -1417,6 +1417,14 @@ struct ToolsArgs {
         env = "KUBERNETES_TOOLS_REPO_CACHE_PATH"
     )]
     repo_cache_path: Option<String>,
+    // Optional PVC claim backing the repo-cache root. When set, sandbox pods mount
+    // the repo cache from this PVC instead of using a hostPath.
+    #[arg(
+        id = "tools_repo_cache_pvc",
+        long = "kubernetes-tools-repo-cache-pvc",
+        env = "KUBERNETES_TOOLS_REPO_CACHE_PVC"
+    )]
+    repo_cache_pvc: Option<String>,
     #[arg(
         id = "tools_extra_sources",
         long = "kubernetes-tools-extra-sources",
@@ -1469,6 +1477,7 @@ impl ToolsArgs {
             });
         }
         config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
+        config.repo_cache_pvc = clean_optional_value(self.repo_cache_pvc.as_deref());
         config.extra_sources = self.extra_sources();
         Some(config)
     }
@@ -2218,6 +2227,32 @@ mod tests {
     }
 
     #[test]
+    fn agent_k8s_workflow_host_mounts_repos_pvc_read_only() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+            "--repos-pvc",
+            "centaur-repo-cache",
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_REPOS_MOUNT_PATH
+                && mount.read_only
+                && mount.kind == MountKind::NamedVolume("centaur-repo-cache".to_owned())
+        }));
+    }
+
+    #[test]
     fn workflow_host_env_template_splits_passthrough_env_from_environment() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[
@@ -2633,6 +2668,33 @@ mod tests {
                     == (MountKind::Bind {
                         source_path: "/var/lib/centaur/repos".to_owned(),
                     })
+        }));
+    }
+
+    #[test]
+    fn codex_workload_mounts_repos_pvc_read_only() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-workload",
+            "codex-app-server",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+            "--repos-pvc",
+            "centaur-repo-cache",
+        ])
+        .unwrap();
+
+        let workload = args.sandbox.container_workload_mode().unwrap();
+        let SandboxWorkloadMode::CodexAppServer { mounts, .. } = workload else {
+            panic!("expected codex app server workload");
+        };
+
+        assert!(mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_REPOS_MOUNT_PATH
+                && mount.read_only
+                && mount.kind == MountKind::NamedVolume("centaur-repo-cache".to_owned())
         }));
     }
 

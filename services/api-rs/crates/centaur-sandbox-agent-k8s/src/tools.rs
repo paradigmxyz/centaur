@@ -58,11 +58,15 @@ pub struct ToolsConfig {
     pub image_pull_policy: Option<String>,
     /// GitHub token secret for private-repo clones. `None` => unauthenticated clone.
     pub github_token: Option<GitHubTokenRef>,
-    /// Optional repo-cache root path mounted from the host. When set,
+    /// Optional repo-cache root path mounted into the sandbox. When set,
     /// tools-bootstrap publishes from `<repo_cache_path>/<repo>/<source_subdir>`
     /// and `centaur-tools refresh` republishes from the same cache instead of
-    /// fetching.
+    /// fetching. By default this path is mounted from the host; set
+    /// `repo_cache_pvc` to mount the path from a PersistentVolumeClaim instead.
     pub repo_cache_path: Option<String>,
+    /// Optional PVC backing for `repo_cache_path`. This lets Autopilot clusters use
+    /// repoCache without hostPath volumes.
+    pub repo_cache_pvc: Option<String>,
     /// Additional tool sources copied after the base tree. Duplicate tool names
     /// are skipped by the copy helper.
     pub extra_sources: Vec<ToolSource>,
@@ -93,6 +97,7 @@ impl ToolsConfig {
             image_pull_policy: None,
             github_token: None,
             repo_cache_path: None,
+            repo_cache_pvc: None,
             extra_sources: Vec::new(),
         }
     }
@@ -354,13 +359,23 @@ pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
             }));
         }
         if let Some(repo_cache_path) = &tools.repo_cache_path {
-            volumes.push(json!({
-                "name": REPO_CACHE_VOLUME,
-                "hostPath": {
-                    "path": repo_cache_path,
-                    "type": "DirectoryOrCreate",
-                },
-            }));
+            if let Some(claim_name) = &tools.repo_cache_pvc {
+                volumes.push(json!({
+                    "name": REPO_CACHE_VOLUME,
+                    "persistentVolumeClaim": {
+                        "claimName": claim_name,
+                        "readOnly": true,
+                    },
+                }));
+            } else {
+                volumes.push(json!({
+                    "name": REPO_CACHE_VOLUME,
+                    "hostPath": {
+                        "path": repo_cache_path,
+                        "type": "DirectoryOrCreate",
+                    },
+                }));
+            }
         }
     }
     volumes
@@ -539,6 +554,26 @@ mod tests {
                 && mount["mountPath"] == "/var/lib/centaur/repos"
                 && mount["readOnly"] == true
         }));
+    }
+
+    #[test]
+    fn tools_init_can_mount_repo_cache_from_pvc() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        tools.repo_cache_pvc = Some("centaur-repo-cache".to_owned());
+
+        let volumes = volumes_json(Some(&tools));
+        let volume = volumes
+            .iter()
+            .find(|volume| volume["name"] == REPO_CACHE_VOLUME)
+            .expect("repo-cache volume");
+
+        assert_eq!(
+            volume["persistentVolumeClaim"]["claimName"],
+            "centaur-repo-cache"
+        );
+        assert_eq!(volume["persistentVolumeClaim"]["readOnly"], true);
+        assert!(volume.get("hostPath").is_none());
     }
 
     #[test]

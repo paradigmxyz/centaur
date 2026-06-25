@@ -227,6 +227,20 @@ sandbox:
 repoCache:
   enabled: true
   hostPath: /var/lib/centaur/repos
+  storage:
+    # hostPath preserves the existing DaemonSet/node-local behavior. Set to
+    # persistentVolumeClaim for GKE Autopilot or other clusters that disallow
+    # writable hostPath.
+    type: hostPath
+    persistentVolumeClaim:
+      # When set, use this existing claim. It must support ReadWriteMany if
+      # repo-cache, api-rs, and sandboxes can schedule on different nodes.
+      existingClaim: ""
+      create: false
+      accessModes:
+        - ReadWriteMany
+      storageClassName: ""
+      size: 20Gi
   # Additional repos to cache. toolServer.repo is cached automatically when the
   # tool server is enabled.
   repositories: []

@@ -1,6 +1,9 @@
 {{- if .Values.apiRs.enabled }}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $repoCacheStorageType := include "centaur.repoCacheStorageType" . -}}
+{{- $repoCacheUsePvc := eq $repoCacheStorageType "persistentVolumeClaim" -}}
+{{- $repoCachePvcName := include "centaur.repoCachePvcName" . -}}
 {{- $reposPath := .Values.sandbox.reposPath -}}
 {{- if and .Values.repoCache.enabled (not $reposPath) -}}
 {{- $reposPath = .Values.repoCache.hostPath -}}
@@ -215,6 +218,10 @@ spec:
 {{- if $reposPath }}
             - name: REPOS_PATH
               value: {{ $reposPath | quote }}
+{{- if $repoCacheUsePvc }}
+            - name: REPOS_PVC
+              value: {{ $repoCachePvcName | quote }}
+{{- end }}
 {{- end }}
             - name: KUBERNETES_SANDBOX_IRON_PROXY_MODE
               value: {{ .Values.apiRs.ironProxy.mode | quote }}
@@ -321,6 +328,10 @@ spec:
 {{- if $toolsUseRepoCache }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PATH
               value: {{ .Values.repoCache.hostPath | quote }}
+{{- if $repoCacheUsePvc }}
+            - name: KUBERNETES_TOOLS_REPO_CACHE_PVC
+              value: {{ $repoCachePvcName | quote }}
+{{- end }}
 {{- end }}
             - name: KUBERNETES_TOOLS_RUNNER_IMAGE
               value: {{ printf "%s:%s" (default .Values.sandbox.image.repository .Values.toolServer.runnerImage.repository) (default .Values.sandbox.image.tag .Values.toolServer.runnerImage.tag) | quote }}
@@ -381,9 +392,15 @@ spec:
 {{- if $useOverlayRepoCache }}
       volumes:
         - name: repo-cache
+{{- if $repoCacheUsePvc }}
+          persistentVolumeClaim:
+            claimName: {{ $repoCachePvcName | quote }}
+            readOnly: true
+{{- else }}
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- end }}
 {{- end }}
 ---
 apiVersion: v1
