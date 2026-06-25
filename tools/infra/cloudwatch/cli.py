@@ -21,6 +21,26 @@ app = typer.Typer(
 )
 
 
+@app.command("health")
+def health():
+    """Assert cloudwatch connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_log_groups(limit=1)
+        payload = {"ok": True, "tool": "cloudwatch", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "cloudwatch", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 def get_client():
     from .client import CloudWatchClient
 
@@ -149,11 +169,7 @@ def describe_alarms(
     limit: int = typer.Option(50, "--limit", "-n", help="Max alarms (1-100)"),
 ):
     """List metric alarms (pass --state ALARM for currently-firing alarms)."""
-    _emit(
-        get_client().describe_alarms(
-            state_value=state, alarm_name_prefix=prefix, limit=limit
-        )
-    )
+    _emit(get_client().describe_alarms(state_value=state, alarm_name_prefix=prefix, limit=limit))
 
 
 @app.command("get-alarm-history")

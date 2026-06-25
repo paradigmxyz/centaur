@@ -19,6 +19,32 @@ app = typer.Typer(
     name="centaur-investigator",
     help="Investigate Centaur threads and sessions from readonly Postgres.",
 )
+
+
+@app.command("health")
+def health():
+    """Assert centaur-investigator connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.search_sessions(limit=1)
+        if isinstance(details, dict) and details.get("status") == "error":
+            raise RuntimeError(
+                str(details.get("error") or "centaur-investigator health check failed")
+            )
+        payload = {"ok": True, "tool": "centaur-investigator", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "centaur-investigator", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

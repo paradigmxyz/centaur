@@ -10,6 +10,28 @@ from rich.console import Console
 from centaur_sdk import Table
 
 app = typer.Typer(name="linear", help="Linear CLI for AI agents")
+
+
+@app.command("health")
+def health():
+    """Assert linear connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.me()
+        payload = {"ok": True, "tool": "linear", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "linear", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -202,8 +224,7 @@ def fetch_asset(
 
         Path(output).write_bytes(base64.b64decode(result["data"]))
         console.print(
-            f"[green]Wrote {result['byte_length']} bytes[/] to {output} "
-            f"({result['mime_type']})"
+            f"[green]Wrote {result['byte_length']} bytes[/] to {output} ({result['mime_type']})"
         )
         raise typer.Exit()
 
@@ -572,16 +593,15 @@ def list_labels(
 def add_label(
     issue_id: str = typer.Argument(..., help="Issue ID or identifier (e.g., ENG-123)"),
     label: str = typer.Argument(..., help="Label name to add"),
-    team: str = typer.Option(
-        None, "--team", "-t", help="Team key, to bind a team-scoped label"
-    ),
+    team: str = typer.Option(None, "--team", "-t", help="Team key, to bind a team-scoped label"),
 ):
     """Add a single label to an issue (leaves other labels untouched)."""
     client = get_client()
     result = client.add_label(issue_id, label, team_key=team)
     ok = result.get("success")
     console.print(
-        f"[green]Added[/] '{label}' to {issue_id}." if ok
+        f"[green]Added[/] '{label}' to {issue_id}."
+        if ok
         else f"[red]Failed[/] to add '{label}' to {issue_id}."
     )
     if not ok:
@@ -592,16 +612,15 @@ def add_label(
 def remove_label(
     issue_id: str = typer.Argument(..., help="Issue ID or identifier (e.g., ENG-123)"),
     label: str = typer.Argument(..., help="Label name to remove"),
-    team: str = typer.Option(
-        None, "--team", "-t", help="Team key, to bind a team-scoped label"
-    ),
+    team: str = typer.Option(None, "--team", "-t", help="Team key, to bind a team-scoped label"),
 ):
     """Remove a single label from an issue (leaves other labels untouched)."""
     client = get_client()
     result = client.remove_label(issue_id, label, team_key=team)
     ok = result.get("success")
     console.print(
-        f"[green]Removed[/] '{label}' from {issue_id}." if ok
+        f"[green]Removed[/] '{label}' from {issue_id}."
+        if ok
         else f"[red]Failed[/] to remove '{label}' from {issue_id}."
     )
     if not ok:

@@ -22,7 +22,7 @@ def get_client():
 
 @app.command("query")
 def query_logs(
-    query: str = typer.Argument(..., help='LogsQL expression (e.g. \'_time:5m error\')'),
+    query: str = typer.Argument(..., help="LogsQL expression (e.g. '_time:5m error')"),
     start: str = typer.Option(None, "--start", "-s", help="Range start (RFC3339 or epoch)"),
     end: str = typer.Option(None, "--end", "-e", help="Range end"),
     limit: int = typer.Option(100, "--limit", "-n", help="Max log lines"),
@@ -117,12 +117,17 @@ def list_streams(
 
 @app.command()
 def health():
-    """Check VictoriaLogs readiness."""
+    """Assert VictoriaLogs readiness."""
     client = get_client()
-    if client.ready():
-        console.print("[green]VictoriaLogs is ready[/]")
-    else:
-        console.print("[red]VictoriaLogs is not ready[/]")
+    ready = client.ready()
+    payload = {
+        "ok": ready,
+        "tool": "vlogs",
+        "error": None if ready else "VictoriaLogs is not ready",
+        "details": {"ready": ready},
+    }
+    print(json.dumps(payload, indent=2, default=str))
+    if not ready:
         raise typer.Exit(1)
 
 

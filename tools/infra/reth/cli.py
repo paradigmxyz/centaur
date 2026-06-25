@@ -1,5 +1,6 @@
 """CLI for Reth execution timings and performance metrics."""
 
+import json
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -12,6 +13,28 @@ from rich.console import Console
 from centaur_sdk import Table
 
 app = typer.Typer(name="reth", help="Reth CLI for execution timings and performance metrics")
+
+
+@app.command("health")
+def health():
+    """Assert reth connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_execution_timings(hours=1, page_size=1)
+        payload = {"ok": True, "tool": "reth", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "reth", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

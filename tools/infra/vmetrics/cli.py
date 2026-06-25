@@ -93,11 +93,16 @@ def metric_names(
 
 @app.command()
 def health():
-    """Check VictoriaMetrics readiness."""
-    if get_client().ready():
-        console.print("[green]VictoriaMetrics is ready[/]")
-    else:
-        console.print("[red]VictoriaMetrics is not ready[/]")
+    """Assert VictoriaMetrics readiness."""
+    ready = get_client().ready()
+    payload = {
+        "ok": ready,
+        "tool": "vmetrics",
+        "error": None if ready else "VictoriaMetrics is not ready",
+        "details": {"ready": ready},
+    }
+    print(json.dumps(payload, indent=2, default=str))
+    if not ready:
         raise typer.Exit(1)
 
 

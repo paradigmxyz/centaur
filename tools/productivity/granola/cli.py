@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import json
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
@@ -13,6 +14,28 @@ from rich.panel import Panel
 from centaur_sdk import Table
 
 app = typer.Typer(name="granola", help="Query Granola meeting notes and transcripts")
+
+
+@app.command("health")
+def health():
+    """Assert granola connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_notes(page_size=1)
+        payload = {"ok": True, "tool": "granola", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "granola", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -79,9 +102,7 @@ def get_note(
     owner = note.get("owner", {})
     owner_name = owner.get("name") or owner.get("email", "")
     attendees = note.get("attendees", [])
-    attendee_names = ", ".join(
-        a.get("name") or a.get("email", "") for a in attendees
-    )
+    attendee_names = ", ".join(a.get("name") or a.get("email", "") for a in attendees)
     summary = note.get("summary_markdown") or note.get("summary_text") or ""
 
     if raw:

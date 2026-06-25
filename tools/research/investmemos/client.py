@@ -11,6 +11,8 @@ from typing import Any
 
 import asyncpg
 
+from centaur_sdk.tool_sdk import secret
+
 
 DEFAULT_MEMO_SOURCE = "invest_memo_corpus"
 DEFAULT_MEMO_KIND = "invest_memo_chunk"
@@ -76,7 +78,9 @@ class InvestmemosClient:
     """Search and read investment memos from Postgres-backed corpus chunks."""
 
     def __init__(self, database_url: str | None = None) -> None:
-        self._database_url = (database_url or os.getenv("DATABASE_URL") or "").strip()
+        self._database_url = (
+            database_url or os.getenv("DATABASE_URL") or secret("DATABASE_URL", "")
+        ).strip()
         self._default_source = (os.getenv("INVEST_MEMO_SOURCE") or DEFAULT_MEMO_SOURCE).strip()
         self._default_kind = (os.getenv("INVEST_MEMO_KIND") or DEFAULT_MEMO_KIND).strip()
 
@@ -126,7 +130,9 @@ class InvestmemosClient:
         finally:
             await conn.close()
 
-    def list_memos(self, query: str | None = None, limit: int = 50, source: str | None = None) -> dict:
+    def list_memos(
+        self, query: str | None = None, limit: int = 50, source: str | None = None
+    ) -> dict:
         """List memo documents from the indexed memo corpus."""
         try:
             return asyncio.run(
@@ -219,8 +225,7 @@ class InvestmemosClient:
             for row in rows:
                 metadata = _as_dict(row["metadata"])
                 document_id = str(
-                    metadata.get("document_id")
-                    or str(row["source_id"]).split(":")[0]
+                    metadata.get("document_id") or str(row["source_id"]).split(":")[0]
                 )
                 memo_name = str(metadata.get("memo_name") or document_id)
                 content = str(row["content"] or "")

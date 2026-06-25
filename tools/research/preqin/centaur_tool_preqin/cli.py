@@ -8,13 +8,34 @@ import json
 from typing import Any
 
 import typer
-from centaur_sdk.backends import EnvBackend, configure
 from rich.console import Console
 from rich.table import Table
 
-configure(EnvBackend())
-
 app = typer.Typer(name="preqin", help="Preqin Operational API and Feeds API CLI")
+
+
+@app.command("health")
+def health():
+    """Assert preqin connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.auth_health()
+        if isinstance(details, dict) and not details.get("ok", False):
+            raise RuntimeError(str(details.get("error") or "preqin health check failed"))
+        payload = {"ok": True, "tool": "preqin", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "preqin", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -66,7 +87,10 @@ def _print_records(data: dict[str, Any] | list[dict[str, Any]], title: str) -> N
     table.add_column("Strategy")
     for record in records[:25]:
         table.add_row(
-            str(_first(record, "FundId", "FundID", "fundId", "FundManagerID", "FundManagerId", "id") or ""),
+            str(
+                _first(record, "FundId", "FundID", "fundId", "FundManagerID", "FundManagerId", "id")
+                or ""
+            ),
             str(_first(record, "FundName", "name", "fundName", "FundManagerName") or ""),
             str(_first(record, "FundManagerName", "manager", "firmName") or ""),
             str(_first(record, "Status", "FundStatus", "status") or ""),
@@ -117,8 +141,12 @@ def auth_health(json_output: bool = typer.Option(False, "--json", help="Output a
 def fund_managers(
     name: str | None = typer.Option(None, "--name", help="Fund manager name search"),
     fund_manager_id: str | None = typer.Option(None, "--id", help="Fund manager ID"),
-    asset_class: str | None = typer.Option(None, "--asset-class", help="Asset class, e.g. pe,re,hf"),
-    include: str | None = typer.Option(None, "--include", help="Asset-class-specific data to include"),
+    asset_class: str | None = typer.Option(
+        None, "--asset-class", help="Asset class, e.g. pe,re,hf"
+    ),
+    include: str | None = typer.Option(
+        None, "--include", help="Asset-class-specific data to include"
+    ),
     size: int = typer.Option(20, "--size", help="Records per page, max 200"),
     page: int = typer.Option(1, "--page", help="Page number"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
@@ -147,10 +175,14 @@ def funds(
     fund_id: str | None = typer.Option(None, "--id", help="Fund ID"),
     manager: str | None = typer.Option(None, "--manager", help="Fund manager name search"),
     manager_id: str | None = typer.Option(None, "--manager-id", help="Fund manager ID"),
-    asset_class: str | None = typer.Option(None, "--asset-class", help="Asset class, e.g. pe,re,hf"),
+    asset_class: str | None = typer.Option(
+        None, "--asset-class", help="Asset class, e.g. pe,re,hf"
+    ),
     strategy: str | None = typer.Option(None, "--strategy", help="Fund strategy"),
     status: str | None = typer.Option(None, "--status", help="Fund status"),
-    include: str | None = typer.Option(None, "--include", help="Asset-class-specific data to include"),
+    include: str | None = typer.Option(
+        None, "--include", help="Asset-class-specific data to include"
+    ),
     size: int = typer.Option(20, "--size", help="Records per page, max 200"),
     page: int = typer.Option(1, "--page", help="Page number"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),

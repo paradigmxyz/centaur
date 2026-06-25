@@ -14,6 +14,28 @@ from centaur_sdk import Table
 from .client import CoinDeskClient
 
 app = typer.Typer(name="coindesk", help="CoinDesk CLI for crypto news")
+
+
+@app.command("health")
+def health():
+    """Assert coindesk connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.news(limit=1)
+        payload = {"ok": True, "tool": "coindesk", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "coindesk", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

@@ -8,6 +8,28 @@ from centaur_sdk.cli_tables import Table
 from rich.console import Console
 
 app = typer.Typer(name="legistorm", help="LegiStorm CLI for congressional data")
+
+
+@app.command("health")
+def health():
+    """Assert legistorm connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_staff_retired_ids()
+        payload = {"ok": True, "tool": "legistorm", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "legistorm", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -63,9 +85,17 @@ def member_fields(row: dict) -> tuple[str, str, str, str, str]:
         f"{profile.get('preferred_last_name') or profile.get('last_name') or member.get('last_name', '')}"
     ).strip()
 
-    office = next((office for office in row.get("member_offices", []) if office.get("status") == "In Office"), {})
+    office = next(
+        (office for office in row.get("member_offices", []) if office.get("status") == "In Office"),
+        {},
+    )
     state = office.get("state_id") or row.get("state") or ""
-    party = office.get("party") or row.get("party") or profile.get("bio_details", {}).get("party_name") or ""
+    party = (
+        office.get("party")
+        or row.get("party")
+        or profile.get("bio_details", {}).get("party_name")
+        or ""
+    )
     chamber = office.get("office_type_id") or row.get("chamber") or ""
     member_id = member.get("member_id") or row.get("id") or ""
     return str(member_id), name, state, party, chamber
@@ -78,7 +108,11 @@ def staff_fields(row: dict) -> tuple[str, str, str, str]:
         f"{staff.get('preferred_first_name') or staff.get('first_name', '')} "
         f"{staff.get('preferred_last_name') or staff.get('last_name', '')}"
     ).strip()
-    current_titles = [position.get("position_title", "") for position in row.get("positions", []) if position.get("is_current")]
+    current_titles = [
+        position.get("position_title", "")
+        for position in row.get("positions", [])
+        if position.get("is_current")
+    ]
     title = " | ".join(title for title in current_titles if title) or row.get("title", "") or ""
     emails = row.get("staff_emails", [])
     email = emails[0].get("contact_string", "") if emails else row.get("email", "") or ""

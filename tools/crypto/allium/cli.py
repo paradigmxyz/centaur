@@ -15,6 +15,28 @@ from centaur_sdk import Table
 from .client import AlliumClient, get_example_queries
 
 app = typer.Typer(name="allium", help="Allium CLI for on-chain stablecoin and DeFi analytics")
+
+
+@app.command("health")
+def health():
+    """Assert allium connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.search_schemas("ethereum")
+        payload = {"ok": True, "tool": "allium", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "allium", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

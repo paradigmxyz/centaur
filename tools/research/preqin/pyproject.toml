@@ -16,6 +16,9 @@ preqin = "centaur_tool_preqin.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["centaur_tool_preqin"]
 
+[tool.hatch.build.targets.wheel.sources]
+"centaur_tool_preqin" = "centaur_tool_preqin"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

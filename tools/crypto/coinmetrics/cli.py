@@ -12,6 +12,28 @@ from rich.console import Console
 from centaur_sdk import Table
 
 app = typer.Typer(name="coinmetrics", help="Coin Metrics CLI for crypto market and on-chain data")
+
+
+@app.command("health")
+def health():
+    """Assert coinmetrics connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_assets()
+        payload = {"ok": True, "tool": "coinmetrics", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "coinmetrics", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

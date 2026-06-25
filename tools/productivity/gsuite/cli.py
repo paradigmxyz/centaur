@@ -1,5 +1,6 @@
 """CLI for GSuite operations - Gmail, Calendar, Drive."""
 
+import json
 from pathlib import Path
 
 import typer
@@ -7,6 +8,28 @@ from centaur_sdk import Table
 from rich.console import Console
 
 app = typer.Typer(name="gsuite", help="GSuite CLI for AI agents - Gmail, Calendar, Drive")
+
+
+@app.command("health")
+def health():
+    """Assert gsuite connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.gmail_labels()
+        payload = {"ok": True, "tool": "gsuite", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "gsuite", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 # Sub-apps for each service

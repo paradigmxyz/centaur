@@ -273,10 +273,20 @@ def thread_debug_url(
 
 @app.command()
 def health():
-    """Check Grafana health."""
-    client = get_client()
-    result = client.health()
-    console.print(f"[green]Grafana: {result.get('version', '?')} — {result.get('database', '?')}[/]")
+    """Assert Grafana API connectivity and auth."""
+    try:
+        details = get_client().health()
+    except Exception as exc:
+        print(
+            json.dumps(
+                {"ok": False, "tool": "grafana", "error": str(exc), "details": {}},
+                indent=2,
+                default=str,
+            )
+        )
+        raise typer.Exit(1) from exc
+    payload = {"ok": True, "tool": "grafana", "error": None, "details": details}
+    print(json.dumps(payload, indent=2, default=str))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import json
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -21,6 +22,28 @@ from rich.panel import Panel
 from .client import DEFAULT_MODEL, END_PHRASE, IS_MACOS, TranscriberClient
 
 app = typer.Typer(help="Local-first voice transcription with live streaming")
+
+
+@app.command("health")
+def health():
+    """Assert transcriber connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = {"models": client.list_models(), "recorder": client.find_recorder()}
+        payload = {"ok": True, "tool": "transcriber", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "transcriber", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 _client = TranscriberClient()
@@ -355,9 +378,7 @@ def _copy_to_clipboard(text: str):
         if IS_MACOS:
             subprocess.run(["pbcopy"], input=text.encode(), check=True)
         else:
-            subprocess.run(
-                ["xclip", "-selection", "clipboard"], input=text.encode(), check=True
-            )
+            subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=True)
         console.print("[dim]Copied to clipboard[/]")
     except Exception:
         pass

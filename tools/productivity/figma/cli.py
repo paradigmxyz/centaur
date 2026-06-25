@@ -1,5 +1,7 @@
 """CLI entrypoint for Figma tool."""
 
+import json
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,6 +12,28 @@ from rich.console import Console
 from centaur_sdk import Table
 
 app = typer.Typer(name="figma", help="Figma design system extraction")
+
+
+@app.command("health")
+def health():
+    """Assert figma connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client._request("/me")
+        payload = {"ok": True, "tool": "figma", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "figma", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

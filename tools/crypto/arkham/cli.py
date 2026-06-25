@@ -65,10 +65,20 @@ def print_markdown_table(headers: list[str], rows: list[list[str]]) -> None:
 
 @app.command()
 def health():
-    """Check API health status."""
-    client = get_client()
-    data = client.health()
-    print(json.dumps(data, indent=2))
+    """Assert Arkham API connectivity and auth."""
+    try:
+        details = get_client().health()
+    except Exception as exc:
+        print(
+            json.dumps(
+                {"ok": False, "tool": "arkham", "error": str(exc), "details": {}},
+                indent=2,
+                default=str,
+            )
+        )
+        raise typer.Exit(1) from exc
+    payload = {"ok": True, "tool": "arkham", "error": None, "details": details}
+    print(json.dumps(payload, indent=2, default=str))
 
 
 @app.command()

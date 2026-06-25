@@ -16,6 +16,30 @@ from .client import CompanyContextClient
 load_dotenv()
 
 app = typer.Typer(name="company_context", help="Search indexed company history.")
+
+
+@app.command("health")
+def health():
+    """Assert company-context connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.latest_date()
+        if isinstance(details, dict) and details.get("status") == "error":
+            raise RuntimeError(str(details.get("error") or "company-context health check failed"))
+        payload = {"ok": True, "tool": "company-context", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "company-context", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

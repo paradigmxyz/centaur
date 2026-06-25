@@ -8,6 +8,28 @@ from rich.console import Console
 from centaur_sdk import Table
 
 app = typer.Typer(name="polymarket", help="Polymarket CLI for prediction market data")
+
+
+@app.command("health")
+def health():
+    """Assert polymarket connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_markets(limit=1)
+        payload = {"ok": True, "tool": "polymarket", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "polymarket", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

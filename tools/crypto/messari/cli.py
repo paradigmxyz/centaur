@@ -13,6 +13,28 @@ from .client import MessariClient
 load_dotenv()
 
 app = typer.Typer(name="messari", help="Messari CLI for crypto asset data and analytics")
+
+
+@app.command("health")
+def health():
+    """Assert messari connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_assets(limit=1)
+        payload = {"ok": True, "tool": "messari", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "messari", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

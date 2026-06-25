@@ -15,6 +15,28 @@ from .client import _client
 app = typer.Typer(
     name="opentable", help="Search OpenTable for available reservations (search only, cannot book)"
 )
+
+
+@app.command("health")
+def health():
+    """Assert opentable connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.search(term="", limit=1)
+        payload = {"ok": True, "tool": "opentable", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "opentable", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
