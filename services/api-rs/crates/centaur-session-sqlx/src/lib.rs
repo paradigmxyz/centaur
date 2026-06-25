@@ -843,6 +843,24 @@ impl PgSessionStore {
         Ok(count)
     }
 
+    pub async fn list_ready_warm_sandbox_ids(
+        &self,
+        workload_key: &str,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        let sandbox_ids = sqlx::query_scalar::<_, String>(
+            r#"
+            select sandbox_id
+            from session_warm_sandboxes
+            where workload_key = $1 and status = 'ready'
+            order by created_at, sandbox_id
+            "#,
+        )
+        .bind(workload_key)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(sandbox_ids)
+    }
+
     pub async fn claim_ready_warm_sandbox(
         &self,
         workload_key: &str,
