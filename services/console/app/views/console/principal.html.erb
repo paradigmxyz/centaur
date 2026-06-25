@@ -23,6 +23,46 @@
   <% end %>
 </div>
 
+<!-- Sandbox access -->
+<section class="mb-8">
+  <div class="mb-4">
+    <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Sandbox Access</h2>
+  </div>
+  <div class="console-panel p-5">
+    <% checkbox_class = "mt-1 h-4 w-4 rounded border-ink-500 bg-ink-800 text-centaur-500 focus:ring-centaur-500" %>
+    <%= form_with url: console_principal_sandbox_access_path(@principal.oid),
+                  method: :patch,
+                  data: { turbo: false },
+                  class: "space-y-4" do %>
+      <label class="flex items-start gap-3">
+        <%= hidden_field_tag :sandbox_repo_cache_enabled, "0" %>
+        <%= check_box_tag :sandbox_repo_cache_enabled,
+                          "1",
+                          @principal.sandbox_repo_cache_enabled,
+                          class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Repo cache</span>
+          <span class="block text-xs text-zinc-500">Mount repo-cache backed workspace and tool sources.</span>
+        </span>
+      </label>
+      <label class="flex items-start gap-3">
+        <%= hidden_field_tag :sandbox_observability_enabled, "0" %>
+        <%= check_box_tag :sandbox_observability_enabled,
+                          "1",
+                          @principal.sandbox_observability_enabled,
+                          class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Observability</span>
+          <span class="block text-xs text-zinc-500">Allow sandbox access to logs and metrics surfaces.</span>
+        </span>
+      </label>
+      <div>
+        <%= submit_tag "Save sandbox access", class: "btn-primary" %>
+      </div>
+    <% end %>
+  </div>
+</section>
+
 <!-- Roles -->
 <section class="mb-8">
   <div class="mb-4 flex flex-wrap items-end justify-between gap-3">

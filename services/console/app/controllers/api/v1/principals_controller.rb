@@ -24,7 +24,7 @@ module Api
       def create
         principal = Principal.new(namespace: upsert_namespace, foreign_id: data_params[:foreign_id],
                                   created_by: current_user)
-        principal.assign_attributes(data_params.permit(:name, labels: {}))
+        principal.assign_attributes(principal_params)
         principal.save!
         render status: :created, json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
@@ -37,7 +37,7 @@ module Api
       def update
         principal = resolve_for_upsert(Principal)
         was_new = principal.new_record?
-        principal.assign_attributes(data_params.permit(:name, labels: {}))
+        principal.assign_attributes(principal_params)
         principal.save!
         render status: (was_new ? :created : :ok), json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
@@ -74,9 +74,20 @@ module Api
           foreign_id: principal.foreign_id,
           name: principal.name,
           labels: principal.labels,
+          sandbox_repo_cache_enabled: principal.sandbox_repo_cache_enabled,
+          sandbox_observability_enabled: principal.sandbox_observability_enabled,
           created_at: principal.created_at,
           updated_at: principal.updated_at
         }
+      end
+
+      def principal_params
+        data_params.permit(
+          :name,
+          :sandbox_repo_cache_enabled,
+          :sandbox_observability_enabled,
+          labels: {}
+        )
       end
     end
   end

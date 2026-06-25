@@ -10,6 +10,16 @@ module Console
 
     before_action :set_principal
 
+    def update_sandbox_access
+      @principal.update!(
+        sandbox_repo_cache_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_repo_cache_enabled]),
+        sandbox_observability_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_observability_enabled])
+      )
+      redirect_to console_principal_path(@principal.oid), notice: "Updated sandbox access."
+    rescue ActiveRecord::RecordInvalid => e
+      redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
+    end
+
     def assign_role
       role = Role.find_by_oid!(params[:role_id])
       @principal.principal_roles.find_or_create_by!(role: role)
