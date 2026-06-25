@@ -210,17 +210,6 @@ spec:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
 {{- end }}
-{{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
-    # api-rs resolves the activity-summary OPENAI_API_KEY through the same
-    # 1Password Connect source that backs managed sandbox proxies.
-    - to:
-        - podSelector:
-            matchLabels:
-              app: {{ include "centaur.onepasswordConnectAppName" . | quote }}
-      ports:
-        - protocol: TCP
-          port: {{ include "centaur.onepasswordConnectPort" . }}
-{{- end }}
 {{- if .Values.networkPolicy.otlpEgress.enabled }}
     # OTLP trace export (e.g. Laminar). The collector lives in another
     # namespace; without this rule api-rs's own spans die with
@@ -414,9 +403,6 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
       ports:
         - protocol: TCP
           port: {{ include "centaur.onepasswordConnectPort" . }}

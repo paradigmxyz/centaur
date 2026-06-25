@@ -1700,7 +1700,7 @@ async function renderExecutionStream(
         slackSafeChatSdkStream(
           codexAppServerToChatSdkStream(
             stream,
-            rendererOptions(thread, options, capture)
+            rendererOptions(thread, options, capture, trace)
           )
         )
       )
@@ -1747,7 +1747,7 @@ async function renderRecoveredExecutionStream(
         slackSafeChatSdkStream(
           codexAppServerToChatSdkStream(
             stream,
-            rendererOptions(thread, options, capture)
+            rendererOptions(thread, options, capture, trace)
           )
         )
       )
@@ -1791,7 +1791,7 @@ async function renderPlainTextExecutionStream(
       slackSafeChatSdkStream(
         codexAppServerToChatSdkStream(
           fallback.collectSource(stream),
-          rendererOptions(thread, options)
+          rendererOptions(thread, options, undefined, trace)
         )
       )
     )
@@ -2258,7 +2258,8 @@ function rendererLogInfo(
 function rendererOptions(
   thread: Thread,
   options: SlackbotV2Options,
-  capture?: { diverged: boolean }
+  capture?: { diverged: boolean },
+  trace?: SlackbotV2Trace
 ): CodexAppServerToChatStreamOptions {
   const mapper = options.mapper
   return {
@@ -2268,6 +2269,9 @@ function rendererOptions(
       await mapper?.onRendererEvent?.(event)
       if (event.type === 'renderer.title.update') {
         await setAssistantTitle(thread, event.title)
+      }
+      if (event.type === 'renderer.status') {
+        await setAssistantStatus(thread, event.status, options, trace)
       }
     }
   }

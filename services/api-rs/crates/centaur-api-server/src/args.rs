@@ -34,9 +34,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     ServerError,
-    activity_summary::{
-        ActivitySummaryConfig, ActivitySummaryCredential, OnePasswordConnectCredential,
-    },
+    activity_summary::ActivitySummaryConfig,
     tool_discovery::{
         DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_persona_registry,
         discover_tool_proxy_fragment,
@@ -183,45 +181,22 @@ impl ActivitySummaryArgs {
         if !self.enabled {
             return None;
         }
-        let Some(credential) = self.credential() else {
+        let Some(api_key) = clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref()) else {
             warn!(
                 "session activity summaries are enabled but no OpenAI credential is configured; \
-                 set OPENAI_API_KEY or configure the onepassword-connect secret source"
+                 set OPENAI_API_KEY in the api-rs environment"
             );
             return None;
         };
         Some(ActivitySummaryConfig {
             base_url: self.openai_base_url.clone(),
-            credential,
+            api_key,
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
             min_interval: Duration::from_secs(self.min_interval_secs),
             model: self.model.clone(),
             timeout: Duration::from_secs(self.timeout_secs),
         })
-    }
-
-    fn credential(&self) -> Option<ActivitySummaryCredential> {
-        let source = env::var("FIREWALL_MANAGER_SECRET_SOURCE").ok();
-        if source.as_deref() == Some("onepassword-connect")
-            && let (Some(host), Some(token)) = (
-                clean_optional_value(env::var("KUBERNETES_OP_CONNECT_HOST").ok().as_deref()),
-                clean_optional_value(env::var("OP_CONNECT_TOKEN").ok().as_deref()),
-            )
-        {
-            let vault = clean_optional_value(env::var("OP_VAULT").ok().as_deref())
-                .unwrap_or_else(|| "ai-agents".to_owned());
-            return Some(ActivitySummaryCredential::OnePasswordConnect(
-                OnePasswordConnectCredential {
-                    host,
-                    secret_ref: format!("op://{vault}/OPENAI_API_KEY/credential"),
-                    token,
-                },
-            ));
-        }
-
-        clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref())
-            .map(ActivitySummaryCredential::OpenAiApiKey)
     }
 }
 
@@ -2096,19 +2071,14 @@ mod tests {
         .unwrap();
 
         let config = args.activity_summary_config().unwrap();
-        match config.credential {
-            ActivitySummaryCredential::OpenAiApiKey(value) => assert_eq!(value, "sk-test"),
-            ActivitySummaryCredential::OnePasswordConnect(_) => {
-                panic!("expected direct OPENAI_API_KEY credential")
-            }
-        }
+        assert_eq!(config.api_key, "sk-test");
     }
 
     #[test]
-    fn activity_summary_prefers_onepassword_connect_source() {
+    fn activity_summary_uses_mounted_openai_key_even_with_onepassword_connect_source() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[
-            ("OPENAI_API_KEY", "stale-key"),
+            ("OPENAI_API_KEY", "sk-mounted"),
             ("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword-connect"),
             (
                 "KUBERNETES_OP_CONNECT_HOST",
@@ -2127,19 +2097,7 @@ mod tests {
         .unwrap();
 
         let config = args.activity_summary_config().unwrap();
-        match config.credential {
-            ActivitySummaryCredential::OnePasswordConnect(credential) => {
-                assert_eq!(credential.host, "http://onepassword-connect:8080");
-                assert_eq!(
-                    credential.secret_ref,
-                    "op://centaur-agent/OPENAI_API_KEY/credential"
-                );
-                assert_eq!(credential.token, "op-token");
-            }
-            ActivitySummaryCredential::OpenAiApiKey(_) => {
-                panic!("expected onepassword-connect credential")
-            }
-        }
+        assert_eq!(config.api_key, "sk-mounted");
     }
 
     #[test]

@@ -61,6 +61,17 @@ describe('ChatSDKRenderer', () => {
     ])
   })
 
+  it('treats status updates as renderer side effects only', () => {
+    const renderer = new ChatSDKRenderer()
+
+    expect(
+      renderer.render('session-1', {
+        type: 'renderer.status',
+        status: 'The agent is inspecting events.'
+      })
+    ).toEqual([])
+  })
+
   it('bounds large task details while preserving full task output', () => {
     const renderer = new ChatSDKRenderer()
     const largeDetails = 'd'.repeat(10000)
