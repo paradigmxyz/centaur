@@ -529,14 +529,6 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
-    /// Stop sandboxes that have been idle-paused longer than this. Defaults to
-    /// disabled so pause and deletion policy stay separate.
-    #[arg(
-        long = "session-sandbox-idle-stop-ttl-secs",
-        env = "SESSION_SANDBOX_IDLE_STOP_TTL_SECS",
-        default_value_t = 0
-    )]
-    sandbox_idle_stop_ttl_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
@@ -1225,7 +1217,6 @@ impl SandboxArgs {
         let ttl = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
         SandboxReaperConfig {
             interval: Duration::from_secs(self.sandbox_reap_interval_secs),
-            idle_ttl: ttl(self.sandbox_idle_stop_ttl_secs),
             max_lifetime: ttl(self.sandbox_max_lifetime_secs),
         }
     }
@@ -2042,7 +2033,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_reaper_defaults_pause_after_execution_and_delete_after_max_lifetime() {
+    fn sandbox_reaper_defaults_delete_after_max_lifetime() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2051,7 +2042,6 @@ mod tests {
         .unwrap();
 
         let config = args.sandbox_reaper_config();
-        assert_eq!(config.idle_ttl, None);
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(259_200)));
     }
 

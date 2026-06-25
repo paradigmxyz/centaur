@@ -463,6 +463,16 @@ describe('forwardToSessionApi overrides', () => {
     expect(executeBody(requests).idle_timeout_ms).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
   })
 
+  test('caps default idle timeout to max duration on execute requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), maxDurationMs: 60_000 },
+      forwardInput(apiMessage('hi'))
+    )
+    expect(executeBody(requests).idle_timeout_ms).toBe(60_000)
+    expect(executeBody(requests).max_duration_ms).toBe(60_000)
+  })
+
   test('allows idle timeout override on execute requests', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
