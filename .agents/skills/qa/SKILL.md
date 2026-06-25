@@ -25,6 +25,7 @@ The smoke test passes only when all core workflows work from the running agent s
 - Company context can connect to the Paradigm database and return indexed documents or a valid empty result.
 - AI-team critical tools load as packaged CLIs and can initialize with brokered auth.
 - AlphaSense, PitchBook, and company context connectivity checks exercise real authenticated paths.
+- PitchBook validation uses a real `/search?query=...` call, not `pitchbook health` or `GET /`; PitchBook may return a benign 404 for non-endpoint root/health probes.
 - VictoriaLogs and VictoriaMetrics are reachable, and VictoriaMetrics proves metric existence without asserting exact metric values.
 
 Treat auth, permission, DNS, schema, and timeout errors as failures. Treat empty search results as warnings only when the tool successfully queried the backing service.
@@ -178,6 +179,8 @@ vlogs query "centaur.thread_key:\"${CENTAUR_THREAD_KEY}\"" --limit 10 --json
 
 Pass when VictoriaLogs is reachable and returns JSON log entries or a valid empty list for the current-thread query. Fail on DNS, HTTP, or LogsQL errors. Keep this check scoped to the current deployment state visible from the current thread.
 
+Do not run broad error searches such as `level:error`, `vlogs errors`, or `error OR ERROR` as part of the default QA pass/fail decision. The goal of this step is to prove the vlogs connection works, not to audit whether unrelated services currently have errors. Only query error logs when a preceding check failed and you need runtime evidence to classify that specific failure.
+
 ### 10. Metrics Via VictoriaMetrics
 
 `vmetrics` may not have a direct CLI, so use the tool bridge:
@@ -205,15 +208,14 @@ company_context --help
 Then exercise authenticated paths without requiring local env-only secrets:
 
 ```bash
-env -u PITCHBOOK_API_KEY pitchbook health --json
-env -u PITCHBOOK_API_KEY pitchbook raw GET / --json
+env -u PITCHBOOK_API_KEY pitchbook raw GET /search --params-json '{"query":"Anduril Industries","perPage":3}' --json
 alphasense whoami
 alphasense search "NVIDIA data center demand" --limit 3
 company_context list --limit 3 --json
 company_context search "paradigm" --limit 3 --json
 ```
 
-Pass only when each command reaches the intended upstream and returns a valid success or valid empty result. Fail when a CLI import/package error prevents startup, a client crashes because an env var is absent despite brokered auth being expected, `/auth` or GraphQL returns `401`/`403`, or company context returns upstream/proxy errors.
+Pass only when each command reaches the intended upstream and returns a valid success or valid empty result. For PitchBook, require the `/search` command to return structured JSON for the search request; `pitchbook health` and `pitchbook raw GET /` are not valid QA checks because the PitchBook API root/health path may return a benign 404. Fail when a CLI import/package error prevents startup, a client crashes because an env var is absent despite brokered auth being expected, an authenticated real endpoint returns `401`/`403`, or company context returns upstream/proxy errors.
 
 ## Extended Checks
 
@@ -225,7 +227,7 @@ Record the target environment, namespace or URL, commit/build if visible, curren
 
 - The target is serving traffic.
 - `centaur-tools list` succeeds from the running session.
-- Recent `vlogs errors --start 1h` or equivalent log query has no new critical errors for the QA run.
+- VictoriaLogs connectivity succeeds with `vlogs health` and a small valid query. Do not fail deployment health on broad recent error volume unless those errors are tied to a failed QA step or to the current QA thread.
 - The user-visible Slack thread receives the final QA report.
 - Use tool CLIs, runtime-owned state, logs, metrics, and the user-visible Slack surface for verification. Do not require direct cluster control-plane access for this skill.
 
@@ -306,7 +308,7 @@ responses; Slack does not render them reliably. Use this exact shape:
 - *VictoriaMetrics:* PASS - reachable, metric existence confirmed, series found
 
 *AI Tools*
-- *PitchBook:* PASS - CLI imports, brokered-auth health ok
+- *PitchBook:* PASS - CLI imports, brokered-auth `/search` query returned structured JSON
 - *AlphaSense:* PASS - whoami ok, search returned results
 
 *Extended*
