@@ -144,11 +144,7 @@ impl WarmPoolManager {
     }
 
     async fn prune_stale_ready_sandboxes(&self) -> Result<(), WarmPoolError> {
-        for sandbox_id in self
-            .store
-            .list_ready_warm_sandbox_ids(self.workload_key.as_str())
-            .await?
-        {
+        for sandbox_id in self.store.list_ready_warm_sandbox_ids().await? {
             let id = SandboxId::new(sandbox_id.as_str());
             let failure = match self.manager.status(&id).await {
                 Ok(SandboxStatus::Running) => continue,
@@ -200,18 +196,31 @@ mod tests {
         };
         let suffix = unique_suffix();
         let workload_key = format!("test-prune-{suffix}");
+        let old_workload_key = format!("test-prune-old-{suffix}");
         let stale_sandbox = format!("stale-{suffix}");
+        let old_stale_sandbox = format!("old-stale-{suffix}");
         let fresh_sandbox = format!("fresh-{suffix}");
 
         store
             .insert_ready_warm_sandbox(&stale_sandbox, &workload_key)
             .await
             .expect("insert stale warm sandbox row");
+        store
+            .insert_ready_warm_sandbox(&old_stale_sandbox, &old_workload_key)
+            .await
+            .expect("insert stale warm sandbox row for old workload");
         assert_eq!(
             store
                 .count_ready_warm_sandboxes(&workload_key)
                 .await
                 .expect("count ready warm sandboxes"),
+            1
+        );
+        assert_eq!(
+            store
+                .count_ready_warm_sandboxes(&old_workload_key)
+                .await
+                .expect("count ready warm sandboxes for old workload"),
             1
         );
 
@@ -244,6 +253,13 @@ mod tests {
                 .await
                 .expect("claim ready warm sandbox"),
             Some(fresh_sandbox)
+        );
+        assert_eq!(
+            store
+                .count_ready_warm_sandboxes(&old_workload_key)
+                .await
+                .expect("count ready warm sandboxes for old workload"),
+            0
         );
     }
 
