@@ -204,6 +204,28 @@ module Console
       assert_equal "api-key", cred.api_key
     end
 
+    test "PATCH preqin uses preqin username over hidden password username" do
+      cred = BrokerCredential.create!(namespace: "acme", foreign_id: "preqin-username",
+                                      grant: "preqin", username: "old-user", api_key: "api-key",
+                                      created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          namespace: cred.namespace, foreign_id: cred.foreign_id,
+          grant: "preqin", token_endpoint: cred.token_endpoint,
+          username: "password-panel-user", preqin_username: "preqin-panel-user", api_key: "",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "preqin-panel-user", cred.username
+      assert_equal "api-key", cred.api_key
+    end
+
     test "PATCH update with a fresh refresh_token reschedules the credential" do
       cred = broker_credentials(:acme_managed_gmail)
       cred.update!(refresh_token: "old", dead: true, dead_reason: "stale", failure_count: 3)
