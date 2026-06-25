@@ -25,4 +25,3 @@ packages = ["."]
 
 [tool.centaur]
 module = "client.py"
-secrets = ["DATABASE_URL"]

@@ -8,8 +8,6 @@ from typing import Any
 
 import httpx
 
-from centaur_sdk.tool_sdk import secret
-
 DEFAULT_BASE_URL = "http://laminar-app-server.laminar.svc.cluster.local:8000"
 DEFAULT_EXTERNAL_URL = "http://prd-centaur-na-laminar.tail388b2e.ts.net"
 DEFAULT_PROJECT_ID = "202e8d91-1311-40f8-9217-ad375d3ab4df"
@@ -95,7 +93,7 @@ class LaminarClient:
 
     @property
     def api_key(self) -> str:
-        return (self._api_key or secret("LAMINAR_API_KEY", "")).strip()
+        return (self._api_key or os.getenv("LAMINAR_API_KEY", "")).strip()  # noqa: TID251
 
     @property
     def project_id(self) -> str:

@@ -11,8 +11,6 @@ from typing import Any
 
 import asyncpg
 
-from centaur_sdk.tool_sdk import secret
-
 
 DEFAULT_MEMO_SOURCE = "invest_memo_corpus"
 DEFAULT_MEMO_KIND = "invest_memo_chunk"
@@ -78,9 +76,7 @@ class InvestmemosClient:
     """Search and read investment memos from Postgres-backed corpus chunks."""
 
     def __init__(self, database_url: str | None = None) -> None:
-        self._database_url = (
-            database_url or os.getenv("DATABASE_URL") or secret("DATABASE_URL", "")
-        ).strip()
+        self._database_url = (database_url or os.getenv("DATABASE_URL") or "").strip()
         self._default_source = (os.getenv("INVEST_MEMO_SOURCE") or DEFAULT_MEMO_SOURCE).strip()
         self._default_kind = (os.getenv("INVEST_MEMO_KIND") or DEFAULT_MEMO_KIND).strip()
 

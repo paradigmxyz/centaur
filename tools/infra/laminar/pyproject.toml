@@ -25,4 +25,4 @@ packages = ["."]
 
 [tool.centaur]
 module = "client.py"
-secrets = ["LAMINAR_API_KEY"]
+secrets = []
