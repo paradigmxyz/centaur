@@ -23,8 +23,3 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 hosts = ["api.preqin.com", "id.preqin.com", "feeds.preqin.com"]
-secrets = [
-    { type = "brokered_token", name = "PREQIN_OPERATIONAL_TOKEN", credential = "preqin-operational", hosts = [
-        "api.preqin.com",
-    ] },
-]
