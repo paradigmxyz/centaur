@@ -18,7 +18,7 @@ module SlackDm
       attr_accessor :slack_api_http
 
       def oauth_app_slug
-        ConsoleEnv["SLACK_DM_SYNC_OAUTH_APP_SLUG"].presence || "slack-dms"
+        ConsoleEnv["SLACK_DM_SYNC_OAUTH_APP_SLUG"].presence || "slack"
       end
 
       def required_scopes_granted?(scopes)

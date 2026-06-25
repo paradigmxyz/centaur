@@ -51,6 +51,30 @@ module SlackDm
       )
     end
 
+    test "oauth_app_slug defaults to slack and honors console env prefix" do
+      env_key = "CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG"
+      legacy_env_key = "IRON_CONTROL_SLACK_DM_SYNC_OAUTH_APP_SLUG"
+      previous = {
+        env_key => ENV[env_key],
+        legacy_env_key => ENV[legacy_env_key]
+      }
+      ENV.delete(env_key)
+      ENV.delete(legacy_env_key)
+
+      assert_equal "slack", SlackDm::SyncCredential.oauth_app_slug
+
+      ENV[env_key] = "custom-slack"
+      assert_equal "custom-slack", SlackDm::SyncCredential.oauth_app_slug
+    ensure
+      previous.each do |key, value|
+        if value.nil?
+          ENV.delete(key)
+        else
+          ENV[key] = value
+        end
+      end
+    end
+
     test "sync normalizes conversations members messages files and checkpoints" do
       api_client = FakeApiClient.new
       slack_http = lambda do |endpoint:, params:, access_token:|
