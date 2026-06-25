@@ -1695,12 +1695,16 @@ async function renderExecutionStream(
   })
   const capture = { diverged: false }
   try {
+    const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
-          codexAppServerToChatSdkStream(
-            stream,
-            rendererOptions(thread, options, capture, trace)
+          slackVisibleChatSdkStream(
+            codexAppServerToChatSdkStream(
+              stream,
+              rendererOptions(thread, options, capture, trace)
+            ),
+            taskDisplayMode
           )
         )
       )
@@ -1714,7 +1718,7 @@ async function renderExecutionStream(
     const sent = await thread.adapter.stream!(thread.id, visibleStream, {
       recipientTeamId: message.teamId,
       recipientUserId: message.author.userId,
-      taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
+      ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
     })
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
@@ -1742,12 +1746,16 @@ async function renderRecoveredExecutionStream(
   })
   const capture = { diverged: false }
   try {
+    const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
-          codexAppServerToChatSdkStream(
-            stream,
-            rendererOptions(thread, options, capture, trace)
+          slackVisibleChatSdkStream(
+            codexAppServerToChatSdkStream(
+              stream,
+              rendererOptions(thread, options, capture, trace)
+            ),
+            taskDisplayMode
           )
         )
       )
@@ -1759,7 +1767,7 @@ async function renderRecoveredExecutionStream(
       {
         recipientTeamId: message.teamId,
         recipientUserId: message.author.userId,
-        taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
+        ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
       }
     )
     return { diverged: capture.diverged, messageId: sent?.id }
@@ -1863,6 +1871,22 @@ async function* slackSafeChatSdkStream(
 ): AsyncIterable<ChatSDKStreamChunk> {
   for await (const chunk of stream) {
     yield slackSafeChatSdkChunk(chunk)
+  }
+}
+
+type SlackStreamTaskDisplayMode = NonNullable<SlackbotV2Options['streamTaskDisplayMode']>
+
+function slackStreamTaskDisplayMode(options: SlackbotV2Options): SlackStreamTaskDisplayMode {
+  return options.streamTaskDisplayMode ?? 'none'
+}
+
+async function* slackVisibleChatSdkStream(
+  stream: AsyncIterable<ChatSDKStreamChunk>,
+  taskDisplayMode: SlackStreamTaskDisplayMode
+): AsyncIterable<ChatSDKStreamChunk> {
+  for await (const chunk of stream) {
+    if (taskDisplayMode === 'none' && chunk.type !== 'markdown_text') continue
+    yield chunk
   }
 }
 

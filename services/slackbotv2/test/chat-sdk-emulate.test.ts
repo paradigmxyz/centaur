@@ -2680,6 +2680,7 @@ describe('slackbotv2', () => {
   })
 
   it('uses session activity summaries as assistant status instead of visible text', async () => {
+    bot = createProductionDefaultTestBot()
     codexApi.autoRespond = false
 
     const parent = await postUserMessage('Context before status update.')
@@ -2748,9 +2749,15 @@ describe('slackbotv2', () => {
         status: summary
       })
     )
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    expect(transcripts[0]!.start.body.task_display_mode).toBeUndefined()
+    expect(transcripts[0]!.chunks.every(chunk => chunk.type === 'markdown_text')).toBe(true)
     const text = await threadText(parent.ts)
     expect(text).toContain('Done with status.')
     expect(text).not.toContain(summary)
+    expect(text).not.toContain('Command execution')
+    expect(text).not.toContain('Thinking')
   })
 
   it('recovers unfinished render obligations from Chat SDK state on startup', async () => {
@@ -3373,6 +3380,17 @@ describe('slackbotv2', () => {
 })
 
 function createTestBot(
+  overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
+): SlackbotV2 {
+  return createProductionDefaultTestBot({
+    // Most tests in this file exercise the legacy structured-card renderer.
+    // Production omits this option and uses assistant status for live activity.
+    streamTaskDisplayMode: 'plan',
+    ...overrides
+  })
+}
+
+function createProductionDefaultTestBot(
   overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
 ): SlackbotV2 {
   return createSlackbotV2({

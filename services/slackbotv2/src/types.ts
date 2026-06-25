@@ -123,7 +123,7 @@ export type SlackbotV2Options = {
   slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
-  streamTaskDisplayMode?: 'plan' | 'timeline'
+  streamTaskDisplayMode?: 'none' | 'plan' | 'timeline'
   triggerBotAllowlist?: readonly string[]
   userName?: string
   mapper?: CodexAppServerToChatStreamOptions
