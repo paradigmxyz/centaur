@@ -74,7 +74,13 @@ module Console
 
     def apply_initial_values(credential)
       changed = false
-      %i[refresh_token username password].each do |field|
+      preqin_username = credential_params[:preqin_username]
+      if preqin_username.present?
+        credential.username = preqin_username
+        changed = true
+      end
+
+      %i[refresh_token username password api_key].each do |field|
         value = credential_params[field]
         next if value.blank?
 

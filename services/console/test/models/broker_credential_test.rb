@@ -58,6 +58,20 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.errors[:password].any? { |m| m.include?("password grant") }
   end
 
+  test "preqin grant is valid with username and API key and defaults endpoint" do
+    bc = build_credential(grant: "preqin", token_endpoint: nil, client_id: nil,
+                          username: "user", api_key: "api-key", refresh_token: nil)
+    assert bc.valid?, bc.errors.full_messages.to_sentence
+    assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, bc.token_endpoint
+  end
+
+  test "preqin grant requires username and API key" do
+    bc = build_credential(grant: "preqin", client_id: nil, username: "user",
+                          api_key: nil, refresh_token: nil)
+    refute bc.valid?
+    assert bc.errors[:api_key].any? { |m| m.include?("Preqin broker grant") }
+  end
+
   # --- oauth_app provenance (flow-minted credentials) -----------------------
 
   def build_app(**overrides)
@@ -129,18 +143,20 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.valid?, bc.errors.full_messages.to_sentence
   end
 
-  test "client_secret, password grant fields, and token_endpoint_headers are encrypted at rest" do
-    bc = create_credential(client_secret: "shh", username: "alice", password: "p4ss",
+  test "client_secret, grant fields, and token_endpoint_headers are encrypted at rest" do
+    bc = create_credential(client_secret: "shh", username: "alice", password: "p4ss", api_key: "api-key",
                            token_endpoint_headers: { "X-Api-Key" => "k" })
     raw = BrokerCredential.connection.select_one(
-      "SELECT client_secret, username, password, token_endpoint_headers FROM broker_credentials WHERE id = #{bc.id}"
+      "SELECT client_secret, username, password, api_key, token_endpoint_headers FROM broker_credentials WHERE id = #{bc.id}"
     )
     refute_includes raw["client_secret"].to_s, "shh"
     refute_includes raw["username"].to_s, "alice"
     refute_includes raw["password"].to_s, "p4ss"
+    refute_includes raw["api_key"].to_s, "api-key"
     refute_includes raw["token_endpoint_headers"].to_s, "X-Api-Key"
     assert_equal "alice", bc.reload.username
     assert_equal "p4ss", bc.password
+    assert_equal "api-key", bc.api_key
     assert_equal({ "X-Api-Key" => "k" }, bc.reload.token_endpoint_headers)
   end
 
@@ -312,6 +328,54 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal 1, bc.failure_count
   end
 
+  test "preqin grant uses username and API key when no refresh token exists" do
+    captured = {}
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: nil)
+    bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: "RT-new") }
+    bc.refresh!
+    bc.reload
+    assert_equal "preqin", captured[:grant]
+    assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, captured[:token_endpoint]
+    assert_equal "user", captured[:username]
+    assert_equal "api-key", captured[:api_key]
+    assert_nil captured[:client_id]
+    assert_equal "RT-new", bc.refresh_token
+    assert_equal "AT", bc.access_token
+  end
+
+  test "preqin grant prefers the Preqin refresh endpoint when it has a refresh token" do
+    captured = {}
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: "RT-old")
+    bc.refresh_client = StubClient.new { |**kw| captured = kw; result(access_token: "AT", refresh_token: nil) }
+    bc.refresh!
+    bc.reload
+    assert_equal "preqin_refresh_token", captured[:grant]
+    assert_equal Broker::CredentialGrants::PREQIN_REFRESH_TOKEN_ENDPOINT, captured[:token_endpoint]
+    assert_equal "RT-old", captured[:refresh_token]
+    assert_equal "RT-old", bc.refresh_token
+  end
+
+  test "preqin grant falls back to username and API key when stored refresh token is rejected" do
+    grants = []
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: "RT-bad")
+    bc.refresh_client = StubClient.new do |**kw|
+      grants << kw[:grant]
+      if kw[:grant] == "preqin_refresh_token"
+        raise Broker::RefreshError.new("bad", stage: "http", code: "http_400", retryable: false)
+      end
+      result(access_token: "AT-preqin", refresh_token: "RT-good")
+    end
+    bc.refresh!
+    bc.reload
+    assert_equal %w[preqin_refresh_token preqin], grants
+    assert_equal "AT-preqin", bc.access_token
+    assert_equal "RT-good", bc.refresh_token
+    refute bc.dead?
+  end
+
   test "refresh with no seed marks dead as missing a seed" do
     bc = create_credential(refresh_token: "seed")
     bc.update_columns(refresh_token: nil)
@@ -330,6 +394,17 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc.reload
     assert bc.dead?
     assert_equal "password_grant_missing_initial_values", bc.dead_reason
+  end
+
+  test "preqin grant with missing initial values marks dead" do
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: nil)
+    bc.update_columns(api_key: nil)
+    bc.reload
+    bc.refresh!
+    bc.reload
+    assert bc.dead?
+    assert_equal "preqin_missing_initial_values", bc.dead_reason
   end
 
   # --- scope ----------------------------------------------------------------
@@ -352,6 +427,14 @@ class BrokerCredentialTest < ActiveSupport::TestCase
 
   test "refreshable includes password grant credentials without a refresh_token" do
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+    assert_includes BrokerCredential.refreshable.pluck(:id), bc.id
+  end
+
+  test "refreshable includes preqin credentials without a refresh_token" do
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: nil)
     bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
 
     assert_includes BrokerCredential.refreshable.pluck(:id), bc.id

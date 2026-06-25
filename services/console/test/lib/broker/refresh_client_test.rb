@@ -12,8 +12,8 @@ module Broker
         @body = body
       end
 
-      def call(url:, form:, headers:, timeout:)
-        @captured = { url: url, form: form, headers: headers, timeout: timeout }
+      def call(url:, form:, headers:, timeout:, form_encoding:)
+        @captured = { url: url, form: form, headers: headers, timeout: timeout, form_encoding: form_encoding }
         Broker::RefreshClient::Response.new(status: @status, body: @body)
       end
     end
@@ -49,6 +49,7 @@ module Broker
       assert_equal "sec", form["client_secret"]
       assert_equal "a b", form["scope"]
       assert_equal "k", http.captured[:headers]["X-Api-Key"]
+      assert_equal :urlencoded, http.captured[:form_encoding]
     end
 
     test "form carries the password grant and optional fields" do
@@ -71,6 +72,34 @@ module Broker
       assert_equal "sec", form["client_secret"]
       assert_equal "a b", form["scope"]
       assert_equal "k", http.captured[:headers]["X-Api-Key"]
+      assert_equal :urlencoded, http.captured[:form_encoding]
+    end
+
+    test "form carries the Preqin username and API key as multipart" do
+      client, http = client_with(status: 200, body: { access_token: "AT", refresh_token: "RT", expires_in: 60 }.to_json)
+      client.refresh(
+        token_endpoint: "https://api.preqin.com/connect/token",
+        grant: "preqin",
+        username: "preqin-user",
+        api_key: "preqin-key"
+      )
+      form = http.captured[:form]
+      assert_equal "preqin-user", form["username"]
+      assert_equal "preqin-key", form["apikey"]
+      refute form.key?("grant_type")
+      refute form.key?("client_id")
+      assert_equal :multipart, http.captured[:form_encoding]
+    end
+
+    test "form carries the Preqin refresh token as multipart" do
+      client, http = client_with(status: 200, body: { access_token: "AT", refresh_token: "RT", expires_in: 60 }.to_json)
+      client.refresh(
+        token_endpoint: "https://api.preqin.com/connect/refresh_token",
+        grant: "preqin_refresh_token",
+        refresh_token: "rt-old"
+      )
+      assert_equal({ "refresh_token" => "rt-old" }, http.captured[:form])
+      assert_equal :multipart, http.captured[:form_encoding]
     end
 
     test "absent refresh_token in response means no rotation" do
@@ -137,6 +166,20 @@ module Broker
         client.refresh(token_endpoint: "https://idp.example/token", grant: "device_code",
                        client_id: "cid")
       end
+      assert_raises(ArgumentError) do
+        client.refresh(token_endpoint: "https://api.preqin.com/connect/token", grant: "preqin",
+                       username: "user", api_key: "")
+      end
+    end
+
+    test "bodyless Preqin 400 is unrecoverable so broker can fall back or die" do
+      client, _ = client_with(status: 400, body: "")
+      err = assert_raises(Broker::RefreshError) do
+        client.refresh(token_endpoint: "https://api.preqin.com/connect/token", grant: "preqin",
+                       username: "user", api_key: "key")
+      end
+      refute err.retryable?
+      assert_equal "http_400", err.code
     end
   end
 end

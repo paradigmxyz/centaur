@@ -37,6 +37,10 @@ def _redact_token_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _credential_present(name: str, value: str | None) -> bool:
+    return bool(value) and value != name
+
+
 class PreqinClient:
     """Client for Preqin Operational API and Feeds API."""
 
@@ -44,16 +48,10 @@ class PreqinClient:
         self,
         username: str | None = None,
         api_key: str | None = None,
-        password: str | None = None,
-        client_id: str | None = None,
-        client_secret: str | None = None,
         timeout: float = 30.0,
     ):
         self._username = _clean_secret(username)
         self._api_key = _clean_secret(api_key)
-        self._password = _clean_secret(password)
-        self._client_id = _clean_secret(client_id)
-        self._client_secret = _clean_secret(client_secret)
         self.timeout = timeout
         self._client: httpx.Client | None = None
         self._operational_token: str | None = None
@@ -70,25 +68,15 @@ class PreqinClient:
     def _api_key_value(self) -> str | None:
         return self._api_key or _clean_secret(secret("PREQIN_API_KEY", ""))
 
-    def _password_value(self) -> str | None:
-        return self._password or _clean_secret(secret("PREQIN_PASSWORD", ""))
-
-    def _client_id_value(self) -> str | None:
-        return self._client_id or _clean_secret(secret("PREQIN_CLIENT_ID", ""))
-
-    def _client_secret_value(self) -> str | None:
-        return self._client_secret or _clean_secret(secret("PREQIN_CLIENT_SECRET", ""))
-
     def credential_status(self) -> dict[str, Any]:
         """Report whether required Preqin secret names resolve, without exposing values."""
         fields = {
             "PREQIN_USERNAME": self._username_value(),
             "PREQIN_API_KEY": self._api_key_value(),
-            "PREQIN_PASSWORD": self._password_value(),
         }
         return {
             name: {
-                "present": bool(value) and value != name,
+                "present": _credential_present(name, value),
                 "length": len(value or ""),
             }
             for name, value in fields.items()
@@ -101,21 +89,16 @@ class PreqinClient:
 
         username = self._username_value()
         api_key = self._api_key_value()
-        password = self._password_value()
         if not username:
             raise RuntimeError("PREQIN_USERNAME not set.")
         if not api_key:
             raise RuntimeError("PREQIN_API_KEY not set.")
-        if not password:
-            raise RuntimeError("PREQIN_PASSWORD not set.")
 
         response = self.client.post(
             f"{OPERATIONAL_BASE_URL}/connect/token",
-            data={
-                "grant_type": "password",
-                "username": username,
-                "password": password,
-                "client_id": api_key,
+            files={
+                "username": (None, username),
+                "apikey": (None, api_key),
             },
             headers={"Accept": "application/json"},
         )
@@ -124,7 +107,7 @@ class PreqinClient:
             detail = f" - {body}" if body else ""
             raise RuntimeError(
                 "Preqin Operational API auth failed "
-                f"({response.status_code}) at /connect/token using password grant{detail}"
+                f"({response.status_code}) at /connect/token using username/api key{detail}"
             )
 
         data = response.json()
@@ -144,26 +127,33 @@ class PreqinClient:
             return {
                 "ok": True,
                 "auth_url": f"{OPERATIONAL_BASE_URL}/connect/token",
-                "method": "password grant",
+                "method": "username_api_key",
                 "token_length": len(token),
             }
         except Exception as exc:
             return {
                 "ok": False,
                 "auth_url": f"{OPERATIONAL_BASE_URL}/connect/token",
-                "method": "password grant",
+                "method": "username_api_key",
                 "error": str(exc),
                 "credentials": self.credential_status(),
             }
 
     def _operational_get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         token = self._operational_token or _clean_secret(secret(OPERATIONAL_TOKEN_PLACEHOLDER, ""))
-        if not token:
+        username = self._username_value()
+        api_key = self._api_key_value()
+        if not token and _credential_present("PREQIN_USERNAME", username) and _credential_present(
+            "PREQIN_API_KEY", api_key
+        ):
             token = self._operational_access_token()
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         response = self.client.get(
             f"{OPERATIONAL_BASE_URL}{endpoint}",
             params={key: value for key, value in (params or {}).items() if value is not None},
-            headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+            headers=headers,
         )
         if response.status_code >= 400:
             body = response.text.strip()

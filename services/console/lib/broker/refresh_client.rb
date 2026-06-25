@@ -24,7 +24,7 @@ module Broker
     MAX_BODY_BYTES = 64 * 1024
 
     # http: an optional callable for testing, invoked as
-    #   http.call(url:, form:, headers:, timeout:) -> Response
+    #   http.call(url:, form:, headers:, timeout:, form_encoding:) -> Response
     # When nil, a Net::HTTP-backed implementation is used.
     def initialize(http: nil)
       @http = http
@@ -33,65 +33,99 @@ module Broker
     # Performs one token exchange. Raises Broker::RefreshError on any failure
     # (classified retryable vs. unrecoverable). scopes is an array; headers is a
     # name=>value hash applied verbatim to the token POST.
-    def refresh(token_endpoint:, client_id:, grant: "refresh_token", refresh_token: nil,
-                username: nil, password: nil, client_secret: nil,
+    def refresh(token_endpoint:, client_id: nil, grant: "refresh_token", refresh_token: nil,
+                username: nil, password: nil, api_key: nil, client_secret: nil,
                 scopes: [], headers: {}, timeout: DEFAULT_TIMEOUT)
       raise ArgumentError, "token endpoint is required" if token_endpoint.blank?
-      raise ArgumentError, "client_id is required" if client_id.blank?
+      raise ArgumentError, "client_id is required" if client_id.blank? && requires_client_id?(grant)
 
-      form = form_for_grant(
+      form, form_encoding = form_for_grant(
         grant: grant,
         client_id: client_id,
         refresh_token: refresh_token,
         username: username,
-        password: password
+        password: password,
+        api_key: api_key
       )
-      form["client_secret"] = client_secret if client_secret.present?
-      form["scope"] = scopes.join(" ") if scopes.present?
+      unless preqin_grant?(grant)
+        form["client_secret"] = client_secret if client_secret.present?
+        form["scope"] = scopes.join(" ") if scopes.present?
+      end
 
-      response = perform(token_endpoint, form, headers, timeout)
+      response = perform(token_endpoint, form, headers, timeout, form_encoding: form_encoding)
 
-      return classify_error(response.status, response.body) if response.status / 100 != 2
+      if response.status / 100 != 2
+        return classify_error(
+          response.status,
+          response.body,
+          strict_4xx: preqin_grant?(grant)
+        )
+      end
 
       parse_success(response)
     end
 
     private
 
-    def form_for_grant(grant:, client_id:, refresh_token:, username:, password:)
+    def requires_client_id?(grant)
+      !preqin_grant?(grant)
+    end
+
+    def preqin_grant?(grant)
+      %w[preqin preqin_refresh_token].include?(grant)
+    end
+
+    def form_for_grant(grant:, client_id:, refresh_token:, username:, password:, api_key:)
       case grant
       when "refresh_token"
         raise ArgumentError, "refresh_token is required" if refresh_token.blank?
 
-        {
+        [ {
           "grant_type" => "refresh_token",
           "refresh_token" => refresh_token,
           "client_id" => client_id
-        }
+        }, :urlencoded ]
       when "password"
         raise ArgumentError, "username is required" if username.blank?
         raise ArgumentError, "password is required" if password.blank?
 
-        {
+        [ {
           "grant_type" => "password",
           "username" => username,
           "password" => password,
           "client_id" => client_id
-        }
+        }, :urlencoded ]
+      when "preqin"
+        raise ArgumentError, "username is required" if username.blank?
+        raise ArgumentError, "api_key is required" if api_key.blank?
+
+        [ {
+          "username" => username,
+          "apikey" => api_key
+        }, :multipart ]
+      when "preqin_refresh_token"
+        raise ArgumentError, "refresh_token is required" if refresh_token.blank?
+
+        [ { "refresh_token" => refresh_token }, :multipart ]
       else
         raise ArgumentError, "unsupported grant #{grant.inspect}"
       end
     end
 
-    def perform(url, form, headers, timeout)
+    def perform(url, form, headers, timeout, form_encoding:)
       if @http
-        return @http.call(url: url, form: form, headers: headers, timeout: timeout)
+        return @http.call(url: url, form: form, headers: headers, timeout: timeout,
+                          form_encoding: form_encoding)
       end
 
       uri = URI.parse(url)
       req = Net::HTTP::Post.new(uri)
-      req.set_form_data(form)
-      req["Content-Type"] = "application/x-www-form-urlencoded"
+      if form_encoding == :multipart
+        req.set_form(form.to_a, "multipart/form-data")
+      else
+        req.set_form_data(form)
+        req["Content-Type"] = "application/x-www-form-urlencoded"
+      end
       req["Accept"] = "application/json"
       headers.each { |name, value| req[name] = value }
 
@@ -140,19 +174,24 @@ module Broker
     # side: any RFC 6749 5.2 error code is structural and means the credential is
     # dead until a human acts. Transport-shaped failures (5xx, bodyless 4xx) are
     # retryable.
-    def classify_error(status, body)
+    def classify_error(status, body, strict_4xx: false)
       oauth_error = begin
         JSON.parse(body.to_s)["error"]
       rescue JSON::ParserError, TypeError
         nil
       end
 
-      if status / 100 == 5
+      if status / 100 == 5 || status == 429
         raise RefreshError.new("token endpoint http #{status}",
                                stage: "http", code: oauth_error.presence, status: status, retryable: true)
       end
 
       if oauth_error.blank?
+        if strict_4xx
+          raise RefreshError.new("token endpoint http #{status}",
+                                 stage: "http", code: "http_#{status}",
+                                 status: status, retryable: false)
+        end
         # 4xx with no OAuth body: most likely a gateway/rate-limiter, not the IdP.
         raise RefreshError.new("token endpoint http #{status}",
                                stage: "http", status: status, retryable: true)

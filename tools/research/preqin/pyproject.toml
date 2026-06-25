@@ -24,7 +24,7 @@ build-backend = "hatchling.build"
 module = "client.py"
 hosts = ["api.preqin.com", "id.preqin.com", "feeds.preqin.com"]
 secrets = [
-    { type = "oauth_token", name = "PREQIN_OPERATIONAL_TOKEN", grant = "password", token_endpoint = "https://api.preqin.com/connect/token", hosts = [
+    { type = "brokered_token", name = "PREQIN_OPERATIONAL_TOKEN", credential = "preqin-operational", hosts = [
         "api.preqin.com",
-    ], fields = { username = "PREQIN_USERNAME", password = "PREQIN_PASSWORD", client_id = "PREQIN_API_KEY" } },
+    ] },
 ]

@@ -804,9 +804,9 @@ Returns `201`. Response shape (note that `credentials` echoes each source as `{ 
 
 A broker credential is an OAuth credential whose token lifecycle iron-control manages itself. iron-control runs the refresh loop, mints fresh access tokens before they expire, and delivers the current access token to `iron-proxy` inline through [proxy sync](#proxy-sync) wherever a [`token_broker` secret source](#secret-sources) references the credential by its `id`.
 
-Unlike the secret types above, a broker credential is not granted directly and is not injected on its own. It is referenced by a `token_broker` source on a grantable secret (typically a [static secret](#static-secrets)), which carries the rules and injection config. Refresh tokens, usernames, and passwords never leave iron-control.
+Unlike the secret types above, a broker credential is not granted directly and is not injected on its own. It is referenced by a `token_broker` source on a grantable secret (typically a [static secret](#static-secrets)), which carries the rules and injection config. Refresh tokens, usernames, passwords, and API keys never leave iron-control.
 
-The OAuth client credentials it refreshes with are fields on the credential, resolved by iron-control itself. `client_id` is not secret and is returned in responses; `client_secret`, password-grant fields, and the `token_endpoint_headers` values are encrypted at rest and never returned.
+The token credentials it refreshes with are fields on the credential, resolved by iron-control itself. `client_id` is not secret and is returned in responses; `client_secret`, password-grant fields, Preqin API keys, and the `token_endpoint_headers` values are encrypted at rest and never returned.
 
 ### Attributes
 
@@ -816,15 +816,16 @@ The OAuth client credentials it refreshes with are fields on the credential, res
 | `foreign_id`                   | optional    | Unique per namespace. Immutable. |
 | `name`, `description`          | optional    | |
 | `labels`                       | optional    | |
-| `grant`                        | optional    | One of `refresh_token` or `password`. Defaults to `refresh_token`. |
-| `token_endpoint`               | required    | OAuth token endpoint the refresh request is sent to. |
+| `grant`                        | optional    | One of `refresh_token`, `password`, or `preqin`. Defaults to `refresh_token`. |
+| `token_endpoint`               | conditional | Token endpoint the refresh request is sent to. Required except `preqin`, which uses the fixed `https://api.preqin.com/connect/token` endpoint. |
 | `scopes`                       | optional    | Array of strings. |
-| `client_id`                    | required    | OAuth client id. Returned in responses. |
+| `client_id`                    | conditional | OAuth client id. Required for standalone `refresh_token` and `password` credentials. Returned in responses. Not used for `preqin`. |
 | `client_secret`                | optional    | OAuth client secret. Write-only and encrypted at rest; omit for public clients. Never returned. |
 | `token_endpoint_headers`       | optional    | Object mapping header name to a string value, sent on the refresh request. Values are write-only and encrypted; only the header names are returned (as `token_endpoint_header_names`). |
 | `refresh_token`                | optional    | Write-only initial value for `refresh_token` credentials. Also used by `password` credentials when the provider returns one. Supplying a value schedules the credential immediately and clears dead state. Never returned. |
 | `username`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
 | `password`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
+| `api_key`                      | conditional | Required for `preqin` credentials. Write-only and encrypted at rest. Never returned. |
 | `early_refresh_slack_seconds`  | optional    | Refresh this many seconds before expiry. Defaults to `300`. |
 | `early_refresh_fraction`       | optional    | Refresh once this fraction of the token's lifetime remains, when that is larger than the slack. In `[0, 1)`. Defaults to `0.2`. |
 | `max_refresh_interval_seconds` | optional    | Refresh at least this often, even for long-lived tokens. Defaults to `86400`. |
@@ -834,7 +835,7 @@ Read-only fields are returned but never accepted in requests:
 
 | Field                         | Notes |
 | ----------------------------- | ----- |
-| `status`                      | `bootstrapping` (no token minted yet), `live`, or `dead` (an unrecoverable refresh failure; needs a new `refresh_token`). |
+| `status`                      | `bootstrapping` (no token minted yet), `live`, or `dead` (an unrecoverable refresh failure; needs fresh initial values). |
 | `token_endpoint_header_names` | The configured header names (values are not returned). |
 | `expires_at`                  | When the current access token expires. |
 | `last_refresh`                | When the last successful refresh completed. |
@@ -847,7 +848,7 @@ Read-only fields are returned but never accepted in requests:
 | `provider_email`              | The account email captured at consent time. |
 | `external_user_key`           | An opaque key generated for the credential when it is minted by the consent flow. |
 
-The minted `access_token`, the `refresh_token`, `username`, `password`, the `client_secret`, and the `token_endpoint_headers` values are never returned in any response.
+The minted `access_token`, the `refresh_token`, `username`, `password`, `api_key`, the `client_secret`, and the `token_endpoint_headers` values are never returned in any response.
 
 Password-grant credentials first use the stored initial values with `grant_type=password`. If the token endpoint returns a `refresh_token`, iron-control stores it and uses `grant_type=refresh_token` on later scheduled refreshes. If that stored refresh token is rejected with an unrecoverable OAuth error, iron-control retries once with `grant_type=password`; retryable network, 5xx, rate-limit, and parse failures keep the existing backoff behavior and do not fall back to password.
 
@@ -927,6 +928,37 @@ Password-grant providers use the same endpoint with `grant: "password"`:
 
 For AlphaSense API calls, grant static secrets alongside the broker token so the proxy also injects the required `x-api-key` and `clientid` headers on `api.alpha-sense.com`. The broker credential itself only supplies the current bearer token through a `token_broker` source.
 
+Preqin Operational API credentials use the provider-specific `preqin` grant. iron-control submits Preqin's multipart `username` and `apikey` form, stores any returned `refresh_token`, and later uses Preqin's refresh endpoint when possible:
+
+```json
+{
+  "data": {
+    "namespace": "default",
+    "foreign_id": "preqin-operational",
+    "name": "Preqin Operational",
+    "grant": "preqin",
+    "username": "preqinapiuser@example.com",
+    "api_key": "preqin-api-key"
+  }
+}
+```
+
+The token is still consumed like any other broker token:
+
+```json
+{
+  "data": {
+    "foreign_id": "preqin-operational-auth",
+    "inject_config": { "header": "Authorization", "formatter": "Bearer {{ .Value }}" },
+    "source": {
+      "source_type": "token_broker",
+      "config": { "credential_id": "preqin-operational", "credential_namespace": "default" }
+    },
+    "rules": [ { "host": "api.preqin.com" } ]
+  }
+}
+```
+
 To put the credential to use, reference it from a grantable secret's `token_broker` source, then grant that secret to a principal:
 
 ```json
@@ -942,7 +974,7 @@ To put the credential to use, reference it from a grantable secret's `token_brok
 
 ### Re-authenticating a dead credential
 
-When a refresh fails unrecoverably (for example the IdP returns `invalid_grant` because the refresh token was revoked), the credential's `status` becomes `dead` and it stops minting tokens. Supply a fresh `refresh_token` for a `refresh_token` credential, or fresh `username` / `password` fields for a `password` credential, via `PUT` / `PATCH` to clear the dead state and reschedule it:
+When a refresh fails unrecoverably (for example the IdP returns `invalid_grant` because the refresh token was revoked), the credential's `status` becomes `dead` and it stops minting tokens. Supply a fresh `refresh_token` for a `refresh_token` credential, fresh `username` / `password` fields for a `password` credential, or fresh `username` / `api_key` fields for a `preqin` credential, via `PUT` / `PATCH` to clear the dead state and reschedule it:
 
 ```json
 { "data": { "refresh_token": "1//0gNEW..." } }

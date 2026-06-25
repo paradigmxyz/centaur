@@ -36,6 +36,7 @@ module Api
         refute data.key?("client_secret")
         refute data.key?("username")
         refute data.key?("password")
+        refute data.key?("api_key")
         refute data.key?("access_token")
         refute data.key?("refresh_token")
       end
@@ -118,6 +119,33 @@ module Api
         assert created.next_attempt_at.present?
       end
 
+      test "create preqin grant stores username and API key and redacts secrets" do
+        body = {
+          data: {
+            namespace: "acme", foreign_id: "preqin",
+            grant: "preqin",
+            username: "preqin-user",
+            api_key: "preqin-api-key"
+          }
+        }
+
+        assert_difference -> { BrokerCredential.count } => 1 do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+        data = json_body.fetch("data")
+        assert_equal "preqin", data["grant"]
+        assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, data["token_endpoint"]
+        assert_nil data["client_id"]
+        refute data.key?("username")
+        refute data.key?("api_key")
+
+        created = BrokerCredential.find_by_oid(data["id"])
+        assert_equal "preqin-user", created.username
+        assert_equal "preqin-api-key", created.api_key
+        assert created.next_attempt_at.present?
+      end
+
       test "create rejects a missing client_id" do
         body = {
           data: {
@@ -147,6 +175,21 @@ module Api
         end
         assert_response :unprocessable_entity
         assert json_body.dig("error", "details", "password").present?
+      end
+
+      test "create preqin grant rejects missing API key" do
+        body = {
+          data: {
+            namespace: "acme", foreign_id: "preqin-incomplete",
+            grant: "preqin",
+            username: "preqin-user"
+          }
+        }
+        assert_no_difference -> { BrokerCredential.count } do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :unprocessable_entity
+        assert json_body.dig("error", "details", "api_key").present?
       end
 
       test "re-auth via PUT clears dead state and reschedules" do
@@ -194,6 +237,24 @@ module Api
         bc.reload
         assert_equal "new-user", bc.username
         assert_equal "new-pass", bc.password
+        refute bc.dead?
+        assert_nil bc.dead_reason
+        assert_equal 0, bc.failure_count
+        assert bc.next_attempt_at.present?
+      end
+
+      test "preqin API key update clears dead state and reschedules" do
+        bc = BrokerCredential.create!(namespace: "acme", foreign_id: "preqin-dead",
+                                      grant: "preqin", username: "old", api_key: "old",
+                                      dead: true, dead_reason: "http_400", failure_count: 3,
+                                      created_by: users(:acme_admin))
+
+        body = { data: { api_key: "new-key" } }
+        patch api_v1_broker_credential_url(id: bc.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        bc.reload
+        assert_equal "new-key", bc.api_key
         refute bc.dead?
         assert_nil bc.dead_reason
         assert_equal 0, bc.failure_count

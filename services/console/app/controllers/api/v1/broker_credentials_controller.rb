@@ -89,7 +89,7 @@ module Api
       # and rotation state untouched.
       def apply_initial_values(ref, attrs)
         changed = false
-        %i[refresh_token username password].each do |field|
+        %i[refresh_token username password api_key].each do |field|
           value = attrs[field]
           next if value.blank?
 
@@ -104,7 +104,7 @@ module Api
         ref.next_attempt_at = Time.current
       end
 
-      # Observability only. The client_secret, username/password, the
+      # Observability only. The client_secret, username/password/api_key, the
       # token_endpoint_headers values, the minted access_token, and the
       # refresh_token are deliberately never included; only the header names are
       # surfaced.
