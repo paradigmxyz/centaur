@@ -85,6 +85,18 @@ Optional required-by-mode variables:
 | `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
 | `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |
 
+Sandbox lifecycle:
+
+| Env var or value | Set from | Controls |
+| --- | --- | --- |
+| `SESSION_IDLE_TIMEOUT_MS` | `slackbotv2.extraEnv`; default is up to 3 hours. | Slackbot v2 execute idle timeout. After an execution reaches a terminal state, api-rs pauses the sandbox if no newer execution has used that sandbox. If `SESSION_MAX_DURATION_MS` is lower than 3 hours and this value is unset, Slackbot v2 caps the default idle timeout to the max duration. |
+| `SESSION_MAX_DURATION_MS` | `slackbotv2.extraEnv`. | Optional per-execution max duration forwarded to api-rs. api-rs rejects requests where `idle_timeout_ms` is greater than `max_duration_ms`. |
+| `apiRs.sandboxMaxLifetimeSecs` / `SESSION_SANDBOX_MAX_LIFETIME_SECS` | Helm value, default `259200` (72 hours). | Restart-surviving sandbox deletion backstop. The reaper stops any non-terminal sandbox older than this, regardless of whether it is running or suspended. Set `0` to disable max-lifetime reaping. |
+| `apiRs.sandboxReapIntervalSecs` / `SESSION_SANDBOX_REAP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs sweeps observed sandboxes for max-lifetime expiry. |
+
+There is no separate suspended-only delete timer. Pausing is controlled by the
+per-execution idle timeout; deletion is controlled by sandbox max lifetime.
+
 Execution tuning:
 
 | Env var | Set from | Controls |
