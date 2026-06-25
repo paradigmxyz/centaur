@@ -77,3 +77,36 @@ def test_operational_get_without_proxy_token_or_direct_credentials_leaves_auth_t
 
     assert not fake.posts
     assert fake.gets[0]["headers"] == {"Accept": "application/json"}
+
+
+def test_auth_health_uses_injected_auth_without_direct_credentials(monkeypatch):
+    monkeypatch.setenv(OPERATIONAL_TOKEN_PLACEHOLDER, "")
+    configure(StubBackend())
+    fake = FakeHttpClient()
+    client = PreqinClient()
+    client._client = fake
+
+    result = client.auth_health()
+
+    assert result["ok"] is True
+    assert result["method"] == "operational_get"
+    assert not fake.posts
+    assert fake.gets[0]["url"] == "https://api.preqin.com/api/FundManager"
+    assert fake.gets[0]["params"] == {"Size": 1, "Page": 1}
+    assert fake.gets[0]["headers"] == {"Accept": "application/json"}
+
+
+def test_auth_health_uses_direct_credentials_for_local_runs(monkeypatch):
+    monkeypatch.setenv(OPERATIONAL_TOKEN_PLACEHOLDER, "")
+    fake = FakeHttpClient()
+    client = PreqinClient(username="user", api_key="api-key")
+    client._client = fake
+
+    result = client.auth_health()
+
+    assert result["ok"] is True
+    assert result["method"] == "operational_get"
+    assert fake.posts[0]["url"] == "https://api.preqin.com/connect/token"
+    assert fake.posts[0]["files"] == {"username": (None, "user"), "apikey": (None, "api-key")}
+    assert fake.gets[0]["url"] == "https://api.preqin.com/api/FundManager"
+    assert fake.gets[0]["headers"]["Authorization"] == "Bearer token-123"

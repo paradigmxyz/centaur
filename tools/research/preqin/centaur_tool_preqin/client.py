@@ -122,19 +122,20 @@ class PreqinClient:
 
     def auth_health(self) -> dict[str, Any]:
         """Check Preqin auth and return a redacted diagnostic result."""
+        url = f"{OPERATIONAL_BASE_URL}/api/FundManager"
         try:
-            token = self._operational_access_token(force_refresh=True)
+            data = self._operational_get("/api/FundManager", {"Size": 1, "Page": 1})
             return {
                 "ok": True,
-                "auth_url": f"{OPERATIONAL_BASE_URL}/connect/token",
-                "method": "username_api_key",
-                "token_length": len(token),
+                "url": url,
+                "method": "operational_get",
+                "records_seen": len(data) if isinstance(data, list) else None,
             }
         except Exception as exc:
             return {
                 "ok": False,
-                "auth_url": f"{OPERATIONAL_BASE_URL}/connect/token",
-                "method": "username_api_key",
+                "url": url,
+                "method": "operational_get",
                 "error": str(exc),
                 "credentials": self.credential_status(),
             }
