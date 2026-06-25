@@ -57,14 +57,6 @@ centaur-tools list
 my-tool --help
 ```
 
-Tools that are intentionally library-only, workflow-only, or pending a
-credential-model change should not be presented as agent-facing. Mark them in
-metadata so the audit can distinguish them from forgotten CLI shims:
-
-```toml
-[tool.centaur]
-agent_facing = false
-```
 
 ## Available Plugins
 

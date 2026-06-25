@@ -145,17 +145,6 @@ def query(sql: str) -> None:
     print(json.dumps(_client().query(sql)))
 ```
 
-If a tool is intentionally not callable by agents, for example because it is
-only used by workflows or is waiting on a credential model that cannot be
-represented by current proxy metadata, mark it explicitly:
-
-```toml
-[tool.centaur]
-agent_facing = false
-```
-
-Unmarked tools are expected to publish at least one `[project.scripts]` entry so
-they appear in `centaur-tools list`.
 
 ## Verify
 
