@@ -81,18 +81,18 @@ module Api
         body = {
           data: {
             namespace: "acme",
-            foreign_id: "alphasense",
+            foreign_id: "password-provider",
             grant: "password",
-            token_endpoint: "https://api.alpha-sense.com/token",
+            token_endpoint: "https://auth.example.com/token",
             credentials: {
-              username: { source_type: "env", config: { var: "AS_USER" } },
-              password: { source_type: "env", config: { var: "AS_PASS" } },
-              client_id: { source_type: "env", config: { var: "AS_CID" } }
+              username: { source_type: "env", config: { var: "PROVIDER_USER" } },
+              password: { source_type: "env", config: { var: "PROVIDER_PASS" } },
+              client_id: { source_type: "env", config: { var: "PROVIDER_CID" } }
             },
             token_endpoint_headers: {
-              "x-api-key": { source_type: "env", config: { var: "AS_KEY" } }
+              "x-api-key": { source_type: "env", config: { var: "PROVIDER_KEY" } }
             },
-            rules: [ { host: "api.alpha-sense.com" } ]
+            rules: [ { host: "api.example.com" } ]
           }
         }
 
@@ -102,7 +102,7 @@ module Api
         secret = OauthTokenSecret.find_by_oid(json_body.dig("data", "id"))
         header = secret.sources.find(&:endpoint_header?)
         assert_equal "x-api-key", header.role
-        assert_equal({ "x-api-key" => { "source_type" => "env", "config" => { "var" => "AS_KEY" } } },
+        assert_equal({ "x-api-key" => { "source_type" => "env", "config" => { "var" => "PROVIDER_KEY" } } },
                      json_body.dig("data", "token_endpoint_headers"))
       end
 

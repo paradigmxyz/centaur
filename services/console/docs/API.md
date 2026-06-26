@@ -913,10 +913,10 @@ Password-grant providers use the same endpoint with `grant: "password"`:
 {
   "data": {
     "namespace": "default",
-    "foreign_id": "alphasense",
-    "name": "AlphaSense",
+    "foreign_id": "password-provider",
+    "name": "Password Provider",
     "grant": "password",
-    "token_endpoint": "https://api.alpha-sense.com/auth",
+    "token_endpoint": "https://auth.example.com/token",
     "client_id": "client-id",
     "client_secret": "client-secret",
     "username": "user@example.com",
@@ -926,7 +926,7 @@ Password-grant providers use the same endpoint with `grant: "password"`:
 }
 ```
 
-For AlphaSense API calls, grant static secrets alongside the broker token so the proxy also injects the required `x-api-key` and `clientid` headers on `api.alpha-sense.com`. The broker credential itself only supplies the current bearer token through a `token_broker` source.
+For API calls that require static headers alongside the broker token, grant static secrets with the broker credential so the proxy also injects headers such as `x-api-key` and `clientid`. The broker credential itself only supplies the current bearer token through a `token_broker` source.
 
 Preqin Operational API credentials use the provider-specific `preqin` grant. iron-control submits Preqin's multipart `username` and `apikey` form, stores any returned `refresh_token`, and later uses Preqin's refresh endpoint when possible:
 

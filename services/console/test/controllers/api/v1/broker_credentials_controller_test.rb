@@ -89,14 +89,14 @@ module Api
       test "create password grant stores initial values and redacts secrets" do
         body = {
           data: {
-            namespace: "acme", foreign_id: "alphasense",
+            namespace: "acme", foreign_id: "password-provider",
             grant: "password",
-            token_endpoint: "https://api.alpha-sense.com/auth",
-            client_id: "alpha-client",
-            client_secret: "alpha-secret",
-            username: "alpha-user",
-            password: "alpha-password",
-            token_endpoint_headers: { "x-api-key" => "alpha-key" }
+            token_endpoint: "https://auth.example.com/token",
+            client_id: "password-client",
+            client_secret: "password-secret",
+            username: "password-user",
+            password: "password-value",
+            token_endpoint_headers: { "x-api-key" => "password-key" }
           }
         }
 
@@ -112,10 +112,10 @@ module Api
         assert_equal [ "x-api-key" ], data["token_endpoint_header_names"]
 
         created = BrokerCredential.find_by_oid(data["id"])
-        assert_equal "alpha-user", created.username
-        assert_equal "alpha-password", created.password
-        assert_equal "alpha-secret", created.client_secret
-        assert_equal({ "x-api-key" => "alpha-key" }, created.token_endpoint_headers)
+        assert_equal "password-user", created.username
+        assert_equal "password-value", created.password
+        assert_equal "password-secret", created.client_secret
+        assert_equal({ "x-api-key" => "password-key" }, created.token_endpoint_headers)
         assert created.next_attempt_at.present?
       end
 

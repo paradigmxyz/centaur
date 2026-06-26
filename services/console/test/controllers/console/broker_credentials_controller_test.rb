@@ -60,24 +60,24 @@ module Console
       assert_difference -> { BrokerCredential.count } => 1 do
         post console_broker_credentials_url, params: {
           credential: {
-            namespace: "acme", foreign_id: "alphasense", name: "AlphaSense",
-            grant: "password", token_endpoint: "https://api.alpha-sense.com/auth",
-            client_id: "alpha-client", client_secret: "alpha-secret",
-            username: "alpha-user", password: "alpha-password",
+            namespace: "acme", foreign_id: "password-provider", name: "Password Provider",
+            grant: "password", token_endpoint: "https://auth.example.com/token",
+            client_id: "password-client", client_secret: "password-secret",
+            username: "password-user", password: "password-value",
             early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
             max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
           },
-          headers: { "0" => { key: "x-api-key", value: "alpha-key" } }
+          headers: { "0" => { key: "x-api-key", value: "password-key" } }
         }
       end
 
-      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "alphasense")
+      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "password-provider")
       assert_redirected_to console_credential_path(cred.oid)
       assert_equal "password", cred.grant
-      assert_equal "alpha-user", cred.username
-      assert_equal "alpha-password", cred.password
-      assert_equal "alpha-secret", cred.client_secret
-      assert_equal({ "x-api-key" => "alpha-key" }, cred.token_endpoint_headers)
+      assert_equal "password-user", cred.username
+      assert_equal "password-value", cred.password
+      assert_equal "password-secret", cred.client_secret
+      assert_equal({ "x-api-key" => "password-key" }, cred.token_endpoint_headers)
     end
 
     test "POST create builds a preqin credential with write-only API key" do
