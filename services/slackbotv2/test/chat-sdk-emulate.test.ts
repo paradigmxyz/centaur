@@ -2633,14 +2633,24 @@ describe('slackbotv2', () => {
         assistant_status_requested: true,
         message_id: mention.ts,
         mode: 'execute',
+        slack_user_id: USER_ID,
         thread_id: threadKey(parent.ts),
         trigger: 'new_mention'
+      })
+    )
+    expect(logData(logs, 'slackbotv2_forward_started')).toEqual(
+      expect.objectContaining({
+        message_id: mention.ts,
+        mode: 'execute',
+        slack_user_id: USER_ID,
+        thread_id: threadKey(parent.ts)
       })
     )
     expect(logData(logs, 'slackbotv2_assistant_status_started')).toEqual(
       expect.objectContaining({
         message_id: mention.ts,
         operation: 'set',
+        slack_user_id: USER_ID,
         thread_id: threadKey(parent.ts)
       })
     )

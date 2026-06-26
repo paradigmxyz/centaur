@@ -351,9 +351,27 @@ function createHandoffTrace(
     messageId: message.id,
     mode,
     openStream: mode === 'execute',
+    slackUserId: slackUserIdForMessage(message),
     startedAtMs: nowMs(),
     threadId: thread.id
   }
+}
+
+function slackUserIdForMessage(message: ChatMessage): string | undefined {
+  return stringValue(message.author.userId) ?? rawSlackUserId(message.raw)
+}
+
+function rawSlackUserId(raw: unknown): string | undefined {
+  if (!isJsonObject(raw)) return undefined
+  const directUser = stringValue(raw.user)
+  if (directUser) return directUser
+  const user = raw.user
+  if (isJsonObject(user)) {
+    return stringValue(user.id) ?? stringValue(user.user_id)
+  }
+  const botProfile = raw.bot_profile
+  if (isJsonObject(botProfile)) return stringValue(botProfile.user_id)
+  return undefined
 }
 
 function slackWebhookEventType(rawBody: string): string {
@@ -516,6 +534,7 @@ async function syncThreadMessageToSession(
     messageId: message.id,
     mode: input.mode,
     openStream: shouldStartExecution,
+    slackUserId: slackUserIdForMessage(message),
     startedAtMs: traceStartedAtMs,
     threadId: thread.id
   }

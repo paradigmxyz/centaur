@@ -158,6 +158,7 @@ export type SlackbotV2Trace = {
   messageId: string
   mode: SlackbotV2MessageMode
   openStream: boolean
+  slackUserId?: string
   startedAtMs: number
   threadId: string
 }
