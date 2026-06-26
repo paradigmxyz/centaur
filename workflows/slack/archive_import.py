@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import os
 import shutil
+import time
 import tempfile
 import urllib.parse
 import urllib.request
@@ -16,6 +17,22 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from api.runtime_control import canonical_json
+from api.vm_metrics import (
+    observe_slack_archive_import_batch_duration,
+    observe_slack_archive_import_duration,
+    record_slack_archive_import_attachments,
+    record_slack_archive_import_batch_failure,
+    record_slack_archive_import_batch_size,
+    record_slack_archive_import_bytes,
+    record_slack_archive_import_channels,
+    record_slack_archive_import_failure,
+    record_slack_archive_import_message_files,
+    record_slack_archive_import_messages,
+    record_slack_archive_import_run,
+    record_slack_archive_import_skipped_items,
+    record_slack_archive_import_users,
+    set_slack_archive_import_last_failure_timestamp,
+)
 from api.workflow_engine import WorkflowContext
 from workflows.slack.shared import record_run_finish, record_run_start
 
@@ -49,6 +66,38 @@ def _safe_int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed >= 0 else default
+
+
+def _archive_failure_reason(error: BaseException | str) -> str:
+    known_reasons = {
+        "download_error",
+        "invalid_archive",
+        "invalid_payload",
+        "timeout",
+        "unknown_error",
+        "write_error",
+    }
+    if isinstance(error, str) and error in known_reasons:
+        return error
+    lowered = str(error).lower()
+    if "missing required" in lowered or "must be a list" in lowered:
+        return "invalid_archive"
+    if "download" in lowered or "s3" in lowered or "object" in lowered:
+        return "download_error"
+    if "zip" in lowered or "bad magic" in lowered:
+        return "invalid_archive"
+    if "write" in lowered or "database" in lowered or "postgres" in lowered:
+        return "write_error"
+    if "timeout" in lowered:
+        return "timeout"
+    return "unknown_error"
+
+
+def _record_archive_failure(stage: str, error: BaseException | str) -> None:
+    record_slack_archive_import_failure(stage, _archive_failure_reason(error))
+    set_slack_archive_import_last_failure_timestamp(
+        dt.datetime.now(dt.timezone.utc).timestamp()
+    )
 
 
 def _slack_ts_to_datetime(ts: str | None) -> dt.datetime | None:
@@ -481,20 +530,34 @@ def _attachment_params(row: dict[str, Any]) -> tuple[Any, ...]:
 async def _flush_message_batch(pool, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
+    started_at = time.monotonic()
     attachment_rows = [
         attachment for row in rows for attachment in _attachment_rows(row)
     ]
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.executemany(
-                _MESSAGE_UPSERT_SQL, [_message_params(row) for row in rows]
-            )
-            for start in range(0, len(attachment_rows), ATTACHMENT_BATCH_SIZE):
-                batch = attachment_rows[start : start + ATTACHMENT_BATCH_SIZE]
+    record_slack_archive_import_attachments("seen", len(attachment_rows))
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
                 await conn.executemany(
-                    _ATTACHMENT_UPSERT_SQL,
-                    [_attachment_params(row) for row in batch],
+                    _MESSAGE_UPSERT_SQL, [_message_params(row) for row in rows]
                 )
+                record_slack_archive_import_batch_size("message", len(rows))
+                for start in range(0, len(attachment_rows), ATTACHMENT_BATCH_SIZE):
+                    batch = attachment_rows[start : start + ATTACHMENT_BATCH_SIZE]
+                    await conn.executemany(
+                        _ATTACHMENT_UPSERT_SQL,
+                        [_attachment_params(row) for row in batch],
+                    )
+                    record_slack_archive_import_batch_size("attachment", len(batch))
+        record_slack_archive_import_attachments("upserted", len(attachment_rows))
+        observe_slack_archive_import_batch_duration(
+            "message", time.monotonic() - started_at
+        )
+    except Exception as exc:
+        reason = _archive_failure_reason(exc)
+        record_slack_archive_import_batch_failure("message", reason)
+        _record_archive_failure("upsert_messages", exc)
+        raise
     return len(rows)
 
 
@@ -550,10 +613,12 @@ async def import_archive_path(
             pool,
             [c for c in channels if isinstance(c, dict)],
         )
+        record_slack_archive_import_channels("upserted", counts["channels_imported"])
         counts["users_imported"] = await _upsert_archive_users(
             pool,
             [u for u in users if isinstance(u, dict)],
         )
+        record_slack_archive_import_users("upserted", counts["users_imported"])
 
         message_batch: list[dict[str, Any]] = []
         for archive_file in _message_files(zip_file):
@@ -561,14 +626,25 @@ async def import_archive_path(
             channel_id = channel_id_by_name.get(channel_name)
             if not channel_id:
                 counts["message_files_skipped"] += 1
+                record_slack_archive_import_message_files("skipped", 1)
+                record_slack_archive_import_skipped_items(
+                    "message_file", "missing_channel"
+                )
                 continue
             messages = _json_member(zip_file, archive_file)
             if not isinstance(messages, list):
                 counts["message_files_skipped"] += 1
+                record_slack_archive_import_message_files("skipped", 1)
+                record_slack_archive_import_skipped_items(
+                    "message_file", "invalid_json"
+                )
                 continue
+            record_slack_archive_import_message_files("seen", 1)
             for message in messages:
                 if not isinstance(message, dict):
                     counts["messages_skipped"] += 1
+                    record_slack_archive_import_messages("skipped", 1)
+                    record_slack_archive_import_skipped_items("message", "non_object")
                     continue
                 row = _archive_message_row(
                     channel_id,
@@ -578,6 +654,13 @@ async def import_archive_path(
                 )
                 if row is None:
                     counts["messages_skipped"] += 1
+                    reason = (
+                        "deleted_message"
+                        if _as_text(message.get("subtype")) == "message_deleted"
+                        else "missing_ts"
+                    )
+                    record_slack_archive_import_messages("skipped", 1)
+                    record_slack_archive_import_skipped_items("message", reason)
                     continue
                 message_batch.append(row)
                 if len(message_batch) >= MESSAGE_BATCH_SIZE:
@@ -587,6 +670,7 @@ async def import_archive_path(
                     )
                     message_batch = []
         counts["messages_imported"] += await _flush_message_batch(pool, message_batch)
+        record_slack_archive_import_messages("upserted", counts["messages_imported"])
 
     await record_run_finish(
         pool,
@@ -650,20 +734,50 @@ async def _download_archive(import_row: dict[str, Any], destination: Path) -> No
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    started_at = time.monotonic()
+    record_slack_archive_import_run("started")
     if not inp.import_id:
+        record_slack_archive_import_run("failed", "invalid_payload")
+        _record_archive_failure("load_import", "import_id is required")
+        observe_slack_archive_import_duration(
+            "failed", time.monotonic() - started_at
+        )
         raise RuntimeError("import_id is required")
-    import_row = await _load_archive_import(ctx._pool, inp.import_id)
+    try:
+        import_row = await _load_archive_import(ctx._pool, inp.import_id)
+    except Exception as exc:
+        record_slack_archive_import_run("failed", _archive_failure_reason(exc))
+        _record_archive_failure("load_import", exc)
+        observe_slack_archive_import_duration(
+            "failed", time.monotonic() - started_at
+        )
+        raise
     if import_row.get("status") not in {"uploaded", "importing"}:
+        reason = "invalid_payload"
+        record_slack_archive_import_run("failed", reason)
+        _record_archive_failure("load_import", reason)
+        observe_slack_archive_import_duration(
+            "failed", time.monotonic() - started_at
+        )
         raise RuntimeError(
             f"archive import {inp.import_id} must be uploaded before ingestion; "
             f"got {import_row.get('status')}"
         )
 
-    await _mark_import_running(ctx._pool, import_id=inp.import_id, run_id=ctx.run_id)
+    try:
+        await _mark_import_running(ctx._pool, import_id=inp.import_id, run_id=ctx.run_id)
+    except Exception as exc:
+        record_slack_archive_import_run("failed", _archive_failure_reason(exc))
+        _record_archive_failure("mark_running", exc)
+        observe_slack_archive_import_duration(
+            "failed", time.monotonic() - started_at
+        )
+        raise
     with tempfile.TemporaryDirectory(prefix="slack-archive-import-") as temp_dir:
         archive_path = Path(temp_dir) / "archive.zip"
         try:
             await _download_archive(import_row, archive_path)
+            record_slack_archive_import_bytes(archive_path.stat().st_size)
             counts = await import_archive_path(
                 ctx._pool,
                 archive_path,
@@ -676,9 +790,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 counts=counts,
             )
         except Exception as exc:
+            reason = _archive_failure_reason(exc)
             await _mark_import_failed(
                 ctx._pool, import_id=inp.import_id, error_text=str(exc)
             )
+            record_slack_archive_import_run("failed", reason)
+            _record_archive_failure("import_archive", exc)
+            observe_slack_archive_import_duration(
+                "failed", time.monotonic() - started_at
+            )
             raise
 
+    record_slack_archive_import_run("completed")
+    observe_slack_archive_import_duration(
+        "completed", time.monotonic() - started_at
+    )
     return {"status": "completed", "import_id": inp.import_id, "counts": counts}

@@ -44,12 +44,23 @@ def _load_backfill():
 
     vm_metrics = types.ModuleType("api.vm_metrics")
     for name in (
+        "observe_slack_retention_run_duration",
         "record_etl_items_deleted",
         "record_etl_items_enqueued",
         "record_etl_items_failed",
         "record_etl_items_seen",
         "record_etl_items_upserted",
         "record_slack_etl_rate_limit",
+        "record_slack_retention_api_rate_limited",
+        "record_slack_retention_api_request",
+        "record_slack_retention_backfill_job",
+        "record_slack_retention_backfill_job_failure",
+        "record_slack_retention_backfill_terminal_skip",
+        "record_slack_retention_failure",
+        "record_slack_retention_messages_processed",
+        "record_slack_retention_run",
+        "set_slack_retention_last_failure_timestamp",
+        "set_slack_retention_watermark_lag_seconds",
         "set_etl_active_scopes",
         "set_etl_backfill_job_age_seconds",
         "set_etl_backfill_jobs",

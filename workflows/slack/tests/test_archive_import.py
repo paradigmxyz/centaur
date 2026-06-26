@@ -30,7 +30,21 @@ def _load_archive_import():
 
     vm_metrics = types.ModuleType("api.vm_metrics")
     for name in (
+        "observe_slack_archive_import_batch_duration",
+        "observe_slack_archive_import_duration",
+        "record_slack_archive_import_attachments",
+        "record_slack_archive_import_batch_failure",
+        "record_slack_archive_import_batch_size",
+        "record_slack_archive_import_bytes",
+        "record_slack_archive_import_channels",
+        "record_slack_archive_import_failure",
+        "record_slack_archive_import_message_files",
+        "record_slack_archive_import_messages",
+        "record_slack_archive_import_run",
+        "record_slack_archive_import_skipped_items",
+        "record_slack_archive_import_users",
         "record_slack_etl_rate_limit",
+        "set_slack_archive_import_last_failure_timestamp",
         "set_etl_active_scopes",
         "set_etl_failed_scopes",
         "set_etl_scope_sync_freshness_seconds",

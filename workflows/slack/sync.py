@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import fnmatch
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,15 @@ from api.vm_metrics import (
     record_etl_items_failed,
     record_etl_items_seen,
     record_etl_items_upserted,
+    observe_slack_retention_run_duration,
+    record_slack_retention_api_rate_limited,
+    record_slack_retention_api_request,
+    record_slack_retention_channel_failure,
+    record_slack_retention_failure,
+    record_slack_retention_messages_processed,
+    record_slack_retention_run,
+    set_slack_retention_last_failure_timestamp,
+    set_slack_retention_watermark_lag_seconds,
 )
 from api.workflow_engine import WorkflowContext
 from workflows.slack.shared import (
@@ -170,6 +180,16 @@ def _ts_within_days(ts: str | None, days: int, *, now: dt.datetime) -> bool:
     return occurred_at >= now - dt.timedelta(days=days)
 
 
+def _watermark_lag_seconds(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        occurred_at = dt.datetime.fromtimestamp(float(ts), tz=dt.timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+    return max((dt.datetime.now(dt.timezone.utc) - occurred_at).total_seconds(), 0.0)
+
+
 async def _upsert_channels(pool, channels: list[dict[str, Any]]) -> None:
     """Refresh public Slack sync channel rows and mark absent channels out of scope."""
     async with pool.acquire() as conn:
@@ -311,8 +331,17 @@ async def _update_checkpoint_failure(
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     """Sync public Slack channels visible through the configured ETL user token."""
+    started_at = time.monotonic()
+    mode = "incremental"
+    record_slack_retention_run(WORKFLOW_NAME, "started", mode)
     if not _env_flag_enabled("SLACK_ETL_ENABLED"):
         ctx.log("slack_sync_skipped_disabled")
+        record_slack_retention_run(
+            WORKFLOW_NAME, "skipped", mode, "slack_etl_disabled"
+        )
+        observe_slack_retention_run_duration(
+            WORKFLOW_NAME, mode, "skipped", time.monotonic() - started_at
+        )
         return {
             "status": "skipped",
             "reason": "slack_etl_disabled",
@@ -330,7 +359,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     limit = positive_int(inp.limit, DEFAULT_CHANNEL_PAGE_LIMIT)
     client = _client()
     access_mode = client._etl_access_mode()
-    public_channels = client._list_etl_channels(limit=10_000, force_refresh=True)
+    try:
+        public_channels = client._list_etl_channels(limit=10_000, force_refresh=True)
+        record_slack_retention_api_request("list_channels", "success")
+    except Exception as exc:
+        reason = failure_reason(str(exc))
+        record_slack_retention_api_request("list_channels", "failed", reason)
+        if reason == "rate_limited":
+            record_slack_retention_api_rate_limited("list_channels")
+        record_slack_retention_failure(WORKFLOW_NAME, "list_channels", reason)
+        set_slack_retention_last_failure_timestamp(
+            WORKFLOW_NAME, dt.datetime.now(dt.timezone.utc).timestamp()
+        )
+        raise
     record_etl_items_seen("slack", "channel", "channel", len(public_channels))
     exclusion_patterns = _channel_exclusion_patterns(os.getenv(EXCLUDED_CHANNELS_ENV))
     channels_to_sync, excluded_channels = _filter_excluded_channels(
@@ -355,6 +396,10 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             reason=reason,
         )
         await emit_slack_checkpoint_metrics(ctx._pool)
+        record_slack_retention_run(WORKFLOW_NAME, "skipped", mode, reason)
+        observe_slack_retention_run_duration(
+            WORKFLOW_NAME, mode, "skipped", time.monotonic() - started_at
+        )
         return {
             "status": "skipped",
             "reason": reason,
@@ -370,13 +415,29 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             channels_skipped=excluded_channels,
         )
         await emit_slack_checkpoint_metrics(ctx._pool)
+        record_slack_retention_run(WORKFLOW_NAME, "skipped", mode, reason)
+        observe_slack_retention_run_duration(
+            WORKFLOW_NAME, mode, "skipped", time.monotonic() - started_at
+        )
         return {
             "status": "skipped",
             "reason": reason,
             "channels_skipped": excluded_channels,
         }
 
-    users = client._list_etl_users(limit=10_000)
+    try:
+        users = client._list_etl_users(limit=10_000)
+        record_slack_retention_api_request("list_users", "success")
+    except Exception as exc:
+        reason = failure_reason(str(exc))
+        record_slack_retention_api_request("list_users", "failed", reason)
+        if reason == "rate_limited":
+            record_slack_retention_api_rate_limited("list_users")
+        record_slack_retention_failure(WORKFLOW_NAME, "list_users", reason)
+        set_slack_retention_last_failure_timestamp(
+            WORKFLOW_NAME, dt.datetime.now(dt.timezone.utc).timestamp()
+        )
+        raise
     record_etl_items_seen("slack", "user", "user", len(users))
     users_upserted = await _upsert_users(ctx._pool, users)
     record_etl_items_upserted("slack", "user", "user", users_upserted)
@@ -439,12 +500,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 oldest=oldest,
                 latest=inp.latest,
             )
+            record_slack_retention_api_request("fetch_history", "success")
             messages = page.get("messages") or []
             message_rows = [message_row(msg, run_id) for msg in messages]
             counts["messages_fetched"] += len(message_rows)
+            record_slack_retention_messages_processed(
+                WORKFLOW_NAME, mode, "seen", len(message_rows)
+            )
             record_etl_items_seen("slack", "channel", "root_message", len(message_rows))
             messages_upserted = await _upsert_messages(ctx._pool, message_rows)
             counts["messages_upserted"] += messages_upserted
+            record_slack_retention_messages_processed(
+                WORKFLOW_NAME, mode, "upserted", messages_upserted
+            )
             record_etl_items_upserted(
                 "slack",
                 "channel",
@@ -568,6 +636,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 watermark_ts=next_state.get("watermark"),
                 run_id=run_id,
             )
+            lag_s = _watermark_lag_seconds(next_state.get("watermark"))
+            if lag_s is not None:
+                set_slack_retention_watermark_lag_seconds(mode, lag_s)
             synced.append(channel_ref(channel))
             ctx.log(
                 "slack_sync_channel_completed",
@@ -588,11 +659,20 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 error=error,
             )
             failed.append(channel_ref(channel, error))
+            reason = failure_reason(error)
+            record_slack_retention_api_request("fetch_history", "failed", reason)
+            if reason == "rate_limited":
+                record_slack_retention_api_rate_limited("fetch_history")
+            record_slack_retention_failure(WORKFLOW_NAME, "sync_channel", reason)
+            record_slack_retention_channel_failure(WORKFLOW_NAME, reason)
+            set_slack_retention_last_failure_timestamp(
+                WORKFLOW_NAME, dt.datetime.now(dt.timezone.utc).timestamp()
+            )
             record_etl_items_failed(
                 "slack",
                 "channel",
                 "channel",
-                failure_reason(error),
+                reason,
             )
             await _update_checkpoint_failure(
                 ctx._pool,
@@ -621,6 +701,11 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         error_text=error_text,
     )
     await emit_slack_checkpoint_metrics(ctx._pool)
+    run_reason = "channel_failed" if failed else "none"
+    record_slack_retention_run(WORKFLOW_NAME, status, mode, run_reason)
+    observe_slack_retention_run_duration(
+        WORKFLOW_NAME, mode, status, time.monotonic() - started_at
+    )
 
     return {
         "status": status,

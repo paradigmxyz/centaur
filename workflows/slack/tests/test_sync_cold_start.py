@@ -22,11 +22,20 @@ def _load_sync():
 
     vm_metrics = types.ModuleType("api.vm_metrics")
     for name in (
+        "observe_slack_retention_run_duration",
         "record_etl_items_enqueued",
         "record_etl_items_failed",
         "record_etl_items_seen",
         "record_etl_items_upserted",
         "record_slack_etl_rate_limit",
+        "record_slack_retention_api_rate_limited",
+        "record_slack_retention_api_request",
+        "record_slack_retention_channel_failure",
+        "record_slack_retention_failure",
+        "record_slack_retention_messages_processed",
+        "record_slack_retention_run",
+        "set_slack_retention_last_failure_timestamp",
+        "set_slack_retention_watermark_lag_seconds",
         "set_etl_active_scopes",
         "set_etl_failed_scopes",
         "set_etl_scope_sync_freshness_seconds",
