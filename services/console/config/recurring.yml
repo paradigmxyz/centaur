@@ -22,6 +22,9 @@ production:
   slack_dm_poll_sync:
     class: "SlackDm::PollSyncJob"
     schedule: every 10 minutes
+  google_docs_poll_sync:
+    class: "GoogleDocs::PollSyncJob"
+    schedule: every 30 minutes
   prune_principal_sync_config_snapshots:
     class: "PrunePrincipalSyncConfigSnapshotsJob"
     schedule: every 10 minutes

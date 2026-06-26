@@ -58,6 +58,17 @@ class CentaurApiClient
     post("/api/admin/slack/dm-sync/batch", payload)
   end
 
+  def get_google_docs_sync_checkpoint(broker_credential_id:)
+    get(
+      "/api/admin/google/docs-sync/checkpoint",
+      broker_credential_id: broker_credential_id
+    )
+  end
+
+  def ingest_google_docs_sync_batch(payload)
+    post("/api/admin/google/docs-sync/batch", payload)
+  end
+
   private
 
   def get(path, params = {})

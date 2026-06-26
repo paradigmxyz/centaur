@@ -250,6 +250,14 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             "/api/admin/slack/dm-sync/batch",
             post(ingest_slack_dm_sync_batch).layer(DefaultBodyLimit::disable()),
         )
+        .route(
+            "/api/admin/google/docs-sync/checkpoint",
+            get(get_google_docs_sync_checkpoint),
+        )
+        .route(
+            "/api/admin/google/docs-sync/batch",
+            post(ingest_google_docs_sync_batch).layer(DefaultBodyLimit::disable()),
+        )
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         .layer(
             TraceLayer::new_for_http()
@@ -790,6 +798,218 @@ struct SlackDmSyncCheckpointPayload {
     last_run_id: Option<String>,
     #[serde(default)]
     last_error: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsSyncCheckpointQuery {
+    broker_credential_id: String,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct GoogleDocsSyncCheckpointResponse {
+    broker_credential_id: String,
+    provider_subject: String,
+    provider_email: String,
+    start_page_token: String,
+    changes_page_token: String,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_full_sync_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_incremental_sync_at: Option<OffsetDateTime>,
+    last_run_id: Option<String>,
+    last_error: String,
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsSyncBatchRequest {
+    #[serde(default)]
+    run: Option<GoogleDocsSyncRunPayload>,
+    #[serde(default)]
+    files: Vec<GoogleDocsSyncFilePayload>,
+    #[serde(default)]
+    observations: Vec<GoogleDocsSyncObservationPayload>,
+    #[serde(default)]
+    contents: Vec<GoogleDocsSyncContentPayload>,
+    #[serde(default)]
+    context_documents: Vec<GoogleDocsContextDocumentPayload>,
+    #[serde(default)]
+    checkpoint: Option<GoogleDocsSyncCheckpointPayload>,
+    #[serde(default = "default_true")]
+    replace_context_documents: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsSyncRunPayload {
+    run_id: String,
+    #[serde(default)]
+    workflow_run_id: Option<String>,
+    #[serde(default = "default_google_docs_sync_mode")]
+    mode: String,
+    status: String,
+    broker_credential_id: String,
+    #[serde(default)]
+    provider_subject: String,
+    #[serde(default)]
+    provider_email: String,
+    #[serde(default)]
+    files_seen: i32,
+    #[serde(default)]
+    files_upserted: i32,
+    #[serde(default)]
+    docs_fetched: i32,
+    #[serde(default)]
+    docs_upserted: i32,
+    #[serde(default)]
+    chunks_upserted: i32,
+    #[serde(default)]
+    finished: bool,
+    #[serde(default)]
+    error_text: String,
+    #[serde(default = "empty_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsSyncFilePayload {
+    file_id: String,
+    #[serde(default)]
+    drive_id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    mime_type: String,
+    #[serde(default)]
+    web_view_link: String,
+    #[serde(default = "empty_array")]
+    owners: Value,
+    #[serde(default = "empty_object")]
+    last_modifying_user: Value,
+    #[serde(default = "empty_object")]
+    capabilities: Value,
+    #[serde(default = "empty_object")]
+    labels: Value,
+    #[serde(default)]
+    trashed: bool,
+    #[serde(default)]
+    explicitly_trashed: bool,
+    #[serde(default)]
+    source_created_at: Option<String>,
+    #[serde(default)]
+    source_modified_at: Option<String>,
+    #[serde(default)]
+    source_version: String,
+    #[serde(default = "empty_object")]
+    raw_payload: Value,
+    #[serde(default)]
+    source_run_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsSyncObservationPayload {
+    broker_credential_id: String,
+    observed_file_id: String,
+    file_id: String,
+    #[serde(default)]
+    provider_subject: String,
+    #[serde(default)]
+    provider_email: String,
+    #[serde(default)]
+    observed_name: String,
+    #[serde(default)]
+    observed_mime_type: String,
+    #[serde(default)]
+    observed_web_view_link: String,
+    #[serde(default)]
+    shortcut_target_file_id: String,
+    #[serde(default)]
+    role_hint: String,
+    #[serde(default = "empty_array")]
+    permission_ids: Value,
+    #[serde(default = "default_true")]
+    active: bool,
+    #[serde(default = "empty_object")]
+    raw_payload: Value,
+    #[serde(default)]
+    source_run_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsSyncContentPayload {
+    file_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    text_content: String,
+    #[serde(default)]
+    text_hash: String,
+    #[serde(default)]
+    export_mime_type: String,
+    #[serde(default)]
+    exported_at: Option<String>,
+    #[serde(default)]
+    source_modified_at: Option<String>,
+    #[serde(default)]
+    source_version: String,
+    #[serde(default)]
+    source_run_id: Option<String>,
+    #[serde(default)]
+    last_error: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsContextDocumentPayload {
+    document_id: String,
+    file_id: String,
+    #[serde(default)]
+    chunk_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    provider_author_id: String,
+    #[serde(default)]
+    provider_author_name: String,
+    #[serde(default)]
+    mime_type: String,
+    #[serde(default)]
+    drive_id: String,
+    #[serde(default)]
+    source_created_at: Option<String>,
+    #[serde(default)]
+    source_modified_at: Option<String>,
+    #[serde(default)]
+    source_version: String,
+    #[serde(default)]
+    content_hash: String,
+    #[serde(default = "empty_object")]
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsSyncCheckpointPayload {
+    broker_credential_id: String,
+    #[serde(default)]
+    provider_subject: String,
+    #[serde(default)]
+    provider_email: String,
+    #[serde(default)]
+    start_page_token: String,
+    #[serde(default)]
+    changes_page_token: String,
+    #[serde(default)]
+    last_full_sync_at: Option<String>,
+    #[serde(default)]
+    last_incremental_sync_at: Option<String>,
+    #[serde(default)]
+    last_run_id: Option<String>,
+    #[serde(default)]
+    last_error: String,
+    #[serde(default = "empty_object")]
+    metadata: Value,
 }
 
 impl From<SlackArchiveImportRow> for SlackArchiveImportResponse {
@@ -1364,6 +1584,291 @@ async fn ingest_slack_dm_sync_batch(
     })))
 }
 
+async fn get_google_docs_sync_checkpoint(
+    State(state): State<AppState>,
+    Query(query): Query<GoogleDocsSyncCheckpointQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let pool = db_pool(&state)?;
+    require_non_empty("broker_credential_id", &query.broker_credential_id)?;
+    let checkpoint = sqlx::query_as::<_, GoogleDocsSyncCheckpointResponse>(
+        "SELECT broker_credential_id, provider_subject, provider_email, \
+         start_page_token, changes_page_token, last_full_sync_at, \
+         last_incremental_sync_at, last_run_id, last_error, metadata \
+         FROM google_docs_sync_checkpoints WHERE broker_credential_id = $1",
+    )
+    .bind(&query.broker_credential_id)
+    .fetch_optional(&pool)
+    .await?;
+
+    Ok(Json(json!({ "ok": true, "checkpoint": checkpoint })))
+}
+
+async fn ingest_google_docs_sync_batch(
+    State(state): State<AppState>,
+    Json(request): Json<GoogleDocsSyncBatchRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_google_docs_sync_batch(&request)?;
+    let pool = db_pool(&state)?;
+    let mut tx = pool.begin().await?;
+
+    if let Some(run) = &request.run {
+        upsert_google_docs_sync_run(&mut tx, run).await?;
+    }
+
+    for file in &request.files {
+        sqlx::query(
+            "INSERT INTO google_docs_sync_files (\
+             file_id, drive_id, name, mime_type, web_view_link, owners, \
+             last_modifying_user, capabilities, labels, trashed, explicitly_trashed, \
+             source_created_at, source_modified_at, source_version, raw_payload, \
+             source_run_id, last_seen_at, updated_at\
+             ) VALUES (\
+             $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, \
+             $10, $11, $12, $13, $14, $15::jsonb, $16, NOW(), NOW()) \
+             ON CONFLICT (file_id) DO UPDATE SET \
+             drive_id = EXCLUDED.drive_id, \
+             name = EXCLUDED.name, \
+             mime_type = EXCLUDED.mime_type, \
+             web_view_link = EXCLUDED.web_view_link, \
+             owners = EXCLUDED.owners, \
+             last_modifying_user = EXCLUDED.last_modifying_user, \
+             capabilities = EXCLUDED.capabilities, \
+             labels = EXCLUDED.labels, \
+             trashed = EXCLUDED.trashed, \
+             explicitly_trashed = EXCLUDED.explicitly_trashed, \
+             source_created_at = EXCLUDED.source_created_at, \
+             source_modified_at = EXCLUDED.source_modified_at, \
+             source_version = EXCLUDED.source_version, \
+             raw_payload = EXCLUDED.raw_payload, \
+             source_run_id = COALESCE(EXCLUDED.source_run_id, google_docs_sync_files.source_run_id), \
+             last_seen_at = NOW(), \
+             updated_at = NOW()",
+        )
+        .bind(&file.file_id)
+        .bind(&file.drive_id)
+        .bind(&file.name)
+        .bind(&file.mime_type)
+        .bind(&file.web_view_link)
+        .bind(&file.owners)
+        .bind(&file.last_modifying_user)
+        .bind(&file.capabilities)
+        .bind(&file.labels)
+        .bind(file.trashed)
+        .bind(file.explicitly_trashed)
+        .bind(parse_rfc3339_option("file.source_created_at", file.source_created_at.as_deref())?)
+        .bind(parse_rfc3339_option("file.source_modified_at", file.source_modified_at.as_deref())?)
+        .bind(&file.source_version)
+        .bind(&file.raw_payload)
+        .bind(empty_to_none(file.source_run_id.as_deref()))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for observation in &request.observations {
+        sqlx::query(
+            "INSERT INTO google_docs_sync_file_observations (\
+             broker_credential_id, observed_file_id, file_id, provider_subject, \
+             provider_email, observed_name, observed_mime_type, observed_web_view_link, \
+             shortcut_target_file_id, role_hint, permission_ids, active, raw_payload, \
+             source_run_id, last_seen_at, updated_at\
+             ) VALUES (\
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13::jsonb, \
+             $14, NOW(), NOW()) \
+             ON CONFLICT (broker_credential_id, observed_file_id) DO UPDATE SET \
+             file_id = EXCLUDED.file_id, \
+             provider_subject = EXCLUDED.provider_subject, \
+             provider_email = EXCLUDED.provider_email, \
+             observed_name = EXCLUDED.observed_name, \
+             observed_mime_type = EXCLUDED.observed_mime_type, \
+             observed_web_view_link = EXCLUDED.observed_web_view_link, \
+             shortcut_target_file_id = EXCLUDED.shortcut_target_file_id, \
+             role_hint = EXCLUDED.role_hint, \
+             permission_ids = EXCLUDED.permission_ids, \
+             active = EXCLUDED.active, \
+             raw_payload = EXCLUDED.raw_payload, \
+             source_run_id = COALESCE(EXCLUDED.source_run_id, google_docs_sync_file_observations.source_run_id), \
+             last_seen_at = NOW(), \
+             updated_at = NOW()",
+        )
+        .bind(&observation.broker_credential_id)
+        .bind(&observation.observed_file_id)
+        .bind(&observation.file_id)
+        .bind(&observation.provider_subject)
+        .bind(&observation.provider_email)
+        .bind(&observation.observed_name)
+        .bind(&observation.observed_mime_type)
+        .bind(&observation.observed_web_view_link)
+        .bind(&observation.shortcut_target_file_id)
+        .bind(&observation.role_hint)
+        .bind(&observation.permission_ids)
+        .bind(observation.active)
+        .bind(&observation.raw_payload)
+        .bind(empty_to_none(observation.source_run_id.as_deref()))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for content in &request.contents {
+        sqlx::query(
+            "INSERT INTO google_docs_sync_document_contents (\
+             file_id, title, text_content, text_hash, export_mime_type, exported_at, \
+             source_modified_at, source_version, source_run_id, last_error, updated_at\
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) \
+             ON CONFLICT (file_id) DO UPDATE SET \
+             title = EXCLUDED.title, \
+             text_content = EXCLUDED.text_content, \
+             text_hash = EXCLUDED.text_hash, \
+             export_mime_type = EXCLUDED.export_mime_type, \
+             exported_at = EXCLUDED.exported_at, \
+             source_modified_at = EXCLUDED.source_modified_at, \
+             source_version = EXCLUDED.source_version, \
+             source_run_id = COALESCE(EXCLUDED.source_run_id, google_docs_sync_document_contents.source_run_id), \
+             last_error = EXCLUDED.last_error, \
+             updated_at = NOW()",
+        )
+        .bind(&content.file_id)
+        .bind(&content.title)
+        .bind(&content.text_content)
+        .bind(&content.text_hash)
+        .bind(&content.export_mime_type)
+        .bind(parse_rfc3339_option("content.exported_at", content.exported_at.as_deref())?)
+        .bind(parse_rfc3339_option(
+            "content.source_modified_at",
+            content.source_modified_at.as_deref(),
+        )?)
+        .bind(&content.source_version)
+        .bind(empty_to_none(content.source_run_id.as_deref()))
+        .bind(&content.last_error)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for document in &request.context_documents {
+        sqlx::query(
+            "INSERT INTO google_docs_context_documents (\
+             document_id, file_id, chunk_id, title, body, url, provider_author_id, \
+             provider_author_name, mime_type, drive_id, source_created_at, source_modified_at, \
+             source_version, content_hash, metadata, updated_at\
+             ) VALUES (\
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, NOW()) \
+             ON CONFLICT (document_id) DO UPDATE SET \
+             file_id = EXCLUDED.file_id, \
+             chunk_id = EXCLUDED.chunk_id, \
+             title = EXCLUDED.title, \
+             body = EXCLUDED.body, \
+             url = EXCLUDED.url, \
+             provider_author_id = EXCLUDED.provider_author_id, \
+             provider_author_name = EXCLUDED.provider_author_name, \
+             mime_type = EXCLUDED.mime_type, \
+             drive_id = EXCLUDED.drive_id, \
+             source_created_at = EXCLUDED.source_created_at, \
+             source_modified_at = EXCLUDED.source_modified_at, \
+             source_version = EXCLUDED.source_version, \
+             content_hash = EXCLUDED.content_hash, \
+             metadata = EXCLUDED.metadata, \
+             updated_at = NOW()",
+        )
+        .bind(&document.document_id)
+        .bind(&document.file_id)
+        .bind(&document.chunk_id)
+        .bind(&document.title)
+        .bind(&document.body)
+        .bind(&document.url)
+        .bind(&document.provider_author_id)
+        .bind(&document.provider_author_name)
+        .bind(&document.mime_type)
+        .bind(&document.drive_id)
+        .bind(parse_rfc3339_option(
+            "context_document.source_created_at",
+            document.source_created_at.as_deref(),
+        )?)
+        .bind(parse_rfc3339_option(
+            "context_document.source_modified_at",
+            document.source_modified_at.as_deref(),
+        )?)
+        .bind(&document.source_version)
+        .bind(&document.content_hash)
+        .bind(&document.metadata)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if request.replace_context_documents {
+        let mut chunks_by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for document in &request.context_documents {
+            chunks_by_file
+                .entry(document.file_id.clone())
+                .or_default()
+                .push(document.chunk_id.clone());
+        }
+        for content in &request.contents {
+            chunks_by_file.entry(content.file_id.clone()).or_default();
+        }
+        for (file_id, chunk_ids) in chunks_by_file {
+            sqlx::query(
+                "DELETE FROM google_docs_context_documents \
+                 WHERE file_id = $1 AND NOT (chunk_id = ANY($2::text[]))",
+            )
+            .bind(file_id)
+            .bind(chunk_ids)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    if let Some(checkpoint) = &request.checkpoint {
+        sqlx::query(
+            "INSERT INTO google_docs_sync_checkpoints (\
+             broker_credential_id, provider_subject, provider_email, start_page_token, \
+             changes_page_token, last_full_sync_at, last_incremental_sync_at, last_run_id, \
+             last_error, metadata, updated_at\
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NOW()) \
+             ON CONFLICT (broker_credential_id) DO UPDATE SET \
+             provider_subject = EXCLUDED.provider_subject, \
+             provider_email = EXCLUDED.provider_email, \
+             start_page_token = COALESCE(NULLIF(EXCLUDED.start_page_token, ''), google_docs_sync_checkpoints.start_page_token), \
+             changes_page_token = COALESCE(NULLIF(EXCLUDED.changes_page_token, ''), google_docs_sync_checkpoints.changes_page_token), \
+             last_full_sync_at = COALESCE(EXCLUDED.last_full_sync_at, google_docs_sync_checkpoints.last_full_sync_at), \
+             last_incremental_sync_at = COALESCE(EXCLUDED.last_incremental_sync_at, google_docs_sync_checkpoints.last_incremental_sync_at), \
+             last_run_id = EXCLUDED.last_run_id, \
+             last_error = EXCLUDED.last_error, \
+             metadata = EXCLUDED.metadata, \
+             updated_at = NOW()",
+        )
+        .bind(&checkpoint.broker_credential_id)
+        .bind(&checkpoint.provider_subject)
+        .bind(&checkpoint.provider_email)
+        .bind(&checkpoint.start_page_token)
+        .bind(&checkpoint.changes_page_token)
+        .bind(parse_rfc3339_option(
+            "checkpoint.last_full_sync_at",
+            checkpoint.last_full_sync_at.as_deref(),
+        )?)
+        .bind(parse_rfc3339_option(
+            "checkpoint.last_incremental_sync_at",
+            checkpoint.last_incremental_sync_at.as_deref(),
+        )?)
+        .bind(empty_to_none(checkpoint.last_run_id.as_deref()))
+        .bind(&checkpoint.last_error)
+        .bind(&checkpoint.metadata)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "counts": {
+            "files": request.files.len(),
+            "observations": request.observations.len(),
+            "contents": request.contents.len(),
+            "context_documents": request.context_documents.len(),
+            "checkpoint": request.checkpoint.is_some(),
+        }
+    })))
+}
+
 async fn create_workflow_run(
     State(state): State<AppState>,
     Json(request): Json<CreateWorkflowRunRequest>,
@@ -1687,6 +2192,58 @@ async fn upsert_slack_dm_sync_run(
     Ok(())
 }
 
+async fn upsert_google_docs_sync_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run: &GoogleDocsSyncRunPayload,
+) -> Result<(), ApiError> {
+    let finished_at = if run.finished {
+        Some(OffsetDateTime::now_utc())
+    } else {
+        None
+    };
+    sqlx::query(
+        "INSERT INTO google_docs_sync_runs (\
+         run_id, workflow_run_id, mode, status, broker_credential_id, provider_subject, \
+         provider_email, files_seen, files_upserted, docs_fetched, docs_upserted, \
+         chunks_upserted, finished_at, error_text, metadata\
+         ) VALUES (\
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb) \
+         ON CONFLICT (run_id) DO UPDATE SET \
+         workflow_run_id = EXCLUDED.workflow_run_id, \
+         mode = EXCLUDED.mode, \
+         status = EXCLUDED.status, \
+         broker_credential_id = EXCLUDED.broker_credential_id, \
+         provider_subject = EXCLUDED.provider_subject, \
+         provider_email = EXCLUDED.provider_email, \
+         files_seen = EXCLUDED.files_seen, \
+         files_upserted = EXCLUDED.files_upserted, \
+         docs_fetched = EXCLUDED.docs_fetched, \
+         docs_upserted = EXCLUDED.docs_upserted, \
+         chunks_upserted = EXCLUDED.chunks_upserted, \
+         finished_at = COALESCE(EXCLUDED.finished_at, google_docs_sync_runs.finished_at), \
+         error_text = EXCLUDED.error_text, \
+         metadata = EXCLUDED.metadata",
+    )
+    .bind(&run.run_id)
+    .bind(&run.workflow_run_id)
+    .bind(&run.mode)
+    .bind(&run.status)
+    .bind(&run.broker_credential_id)
+    .bind(&run.provider_subject)
+    .bind(&run.provider_email)
+    .bind(run.files_seen)
+    .bind(run.files_upserted)
+    .bind(run.docs_fetched)
+    .bind(run.docs_upserted)
+    .bind(run.chunks_upserted)
+    .bind(finished_at)
+    .bind(&run.error_text)
+    .bind(&run.metadata)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn slack_archive_upload_config() -> Result<SlackArchiveUploadConfig, ApiError> {
     let bucket = env::var("SLACK_ARCHIVE_UPLOAD_BUCKET")
         .unwrap_or_default()
@@ -1733,6 +2290,10 @@ fn prefixed_id(prefix: &str) -> String {
 }
 
 fn default_slack_dm_sync_mode() -> String {
+    "incremental".to_owned()
+}
+
+fn default_google_docs_sync_mode() -> String {
     "incremental".to_owned()
 }
 
@@ -1784,6 +2345,18 @@ fn slack_ts_to_datetime(value: Option<&str>) -> Result<Option<OffsetDateTime>, A
         .checked_add(TimeDuration::microseconds(micros))
         .ok_or_else(|| ApiError::BadRequest(format!("invalid Slack timestamp {value}")))?;
     Ok(Some(timestamp))
+}
+
+fn parse_rfc3339_option(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<OffsetDateTime>, ApiError> {
+    let Some(value) = empty_to_none(value) else {
+        return Ok(None);
+    };
+    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map(Some)
+        .map_err(|_| ApiError::BadRequest(format!("{field} must be RFC3339")))
 }
 
 fn validate_json_shape(field: &str, value: &Value, object: bool) -> Result<(), ApiError> {
@@ -1851,6 +2424,83 @@ fn validate_slack_dm_sync_batch(request: &SlackDmSyncBatchRequest) -> Result<(),
         )?;
         require_non_empty("checkpoint.home_team_id", &checkpoint.home_team_id)?;
         require_non_empty("checkpoint.conversation_id", &checkpoint.conversation_id)?;
+    }
+    Ok(())
+}
+
+fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Result<(), ApiError> {
+    if let Some(run) = &request.run {
+        require_non_empty("run.run_id", &run.run_id)?;
+        require_non_empty("run.status", &run.status)?;
+        require_non_empty("run.broker_credential_id", &run.broker_credential_id)?;
+        validate_json_shape("run.metadata", &run.metadata, true)?;
+    }
+    for file in &request.files {
+        require_non_empty("file.file_id", &file.file_id)?;
+        validate_json_shape("file.owners", &file.owners, false)?;
+        validate_json_shape("file.last_modifying_user", &file.last_modifying_user, true)?;
+        validate_json_shape("file.capabilities", &file.capabilities, true)?;
+        validate_json_shape("file.labels", &file.labels, true)?;
+        validate_json_shape("file.raw_payload", &file.raw_payload, true)?;
+        parse_rfc3339_option("file.source_created_at", file.source_created_at.as_deref())?;
+        parse_rfc3339_option(
+            "file.source_modified_at",
+            file.source_modified_at.as_deref(),
+        )?;
+    }
+    for observation in &request.observations {
+        require_non_empty(
+            "observation.broker_credential_id",
+            &observation.broker_credential_id,
+        )?;
+        require_non_empty(
+            "observation.observed_file_id",
+            &observation.observed_file_id,
+        )?;
+        require_non_empty("observation.file_id", &observation.file_id)?;
+        validate_json_shape(
+            "observation.permission_ids",
+            &observation.permission_ids,
+            false,
+        )?;
+        validate_json_shape("observation.raw_payload", &observation.raw_payload, true)?;
+    }
+    for content in &request.contents {
+        require_non_empty("content.file_id", &content.file_id)?;
+        parse_rfc3339_option("content.exported_at", content.exported_at.as_deref())?;
+        parse_rfc3339_option(
+            "content.source_modified_at",
+            content.source_modified_at.as_deref(),
+        )?;
+    }
+    for document in &request.context_documents {
+        require_non_empty("context_document.document_id", &document.document_id)?;
+        require_non_empty("context_document.file_id", &document.file_id)?;
+        require_non_empty("context_document.chunk_id", &document.chunk_id)?;
+        validate_json_shape("context_document.metadata", &document.metadata, true)?;
+        parse_rfc3339_option(
+            "context_document.source_created_at",
+            document.source_created_at.as_deref(),
+        )?;
+        parse_rfc3339_option(
+            "context_document.source_modified_at",
+            document.source_modified_at.as_deref(),
+        )?;
+    }
+    if let Some(checkpoint) = &request.checkpoint {
+        require_non_empty(
+            "checkpoint.broker_credential_id",
+            &checkpoint.broker_credential_id,
+        )?;
+        validate_json_shape("checkpoint.metadata", &checkpoint.metadata, true)?;
+        parse_rfc3339_option(
+            "checkpoint.last_full_sync_at",
+            checkpoint.last_full_sync_at.as_deref(),
+        )?;
+        parse_rfc3339_option(
+            "checkpoint.last_incremental_sync_at",
+            checkpoint.last_incremental_sync_at.as_deref(),
+        )?;
     }
     Ok(())
 }
