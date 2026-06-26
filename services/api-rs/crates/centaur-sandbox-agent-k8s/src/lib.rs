@@ -606,8 +606,13 @@ fn build_agent_sandbox(
         .iter()
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
-    if config.tools.is_some() {
-        for (name, value) in tools::agent_env(config.tools.as_ref()) {
+    let effective_tools = config
+        .tools
+        .as_ref()
+        .filter(|_| spec.capabilities.repo_cache_enabled);
+
+    if effective_tools.is_some() {
+        for (name, value) in tools::agent_env(effective_tools) {
             upsert_env(&mut agent_env, &name, value);
         }
     }
@@ -624,15 +629,6 @@ fn build_agent_sandbox(
     insert_optional(&mut container, "workingDir", spec.working_dir.clone());
     insert_optional(&mut container, "resources", resources_json(spec));
 
-    let effective_tools = config.tools.as_ref().map(|tools| {
-        let mut tools = tools.clone();
-        if !spec.capabilities.repo_cache_enabled {
-            tools.repo_cache_path = None;
-        }
-        tools
-    });
-    let effective_tools_ref = effective_tools.as_ref();
-
     let (mut volumes, mut volume_mounts) = mount_json(spec);
     let mut init_containers = Vec::new();
     if let Some(state_volume) = &config.state_volume {
@@ -648,9 +644,9 @@ fn build_agent_sandbox(
     // Tool sources are bootstrapped into an emptyDir by an init container and
     // mounted into the agent at the same path `TOOL_DIRS` points at. The mount is
     // writable so `centaur-tools refresh` can fetch and republish the tree.
-    if effective_tools_ref.is_some() {
-        volume_mounts.extend(tools::agent_volume_mounts_json(effective_tools_ref));
-        volumes.extend(tools::volumes_json(effective_tools_ref));
+    if effective_tools.is_some() {
+        volume_mounts.extend(tools::agent_volume_mounts_json(effective_tools));
+        volumes.extend(tools::volumes_json(effective_tools));
     }
     insert_optional(
         &mut container,
@@ -659,7 +655,7 @@ fn build_agent_sandbox(
     );
 
     // tools-bootstrap publishes the tools repo into /app/tools.
-    if let Some(tools) = effective_tools_ref {
+    if let Some(tools) = effective_tools {
         // The sandbox NetworkPolicy only allows egress to the per-sandbox proxy
         // (plus api-rs and DNS), so when iron-proxy is on the clone must ride it.
         // `apply_proxy_env` ran before this builder, so the resolved proxy URL is
@@ -686,7 +682,7 @@ fn build_agent_sandbox(
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
     });
-    if config.tools.is_some() {
+    if effective_tools.is_some() {
         pod_spec["securityContext"] = tools::pod_security_context_json();
     }
     insert_optional(
@@ -955,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_repo_cache_uses_tools_clone_without_repo_cache_hostpath() {
+    fn disabled_repo_cache_disables_tools_bootstrap() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
             repo_cache_enabled: false,
             observability_enabled: true,
@@ -966,30 +962,25 @@ mod tests {
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
         let pod_spec = &sandbox.spec.pod_template.spec;
-        let bootstrap = &pod_spec.init_containers.as_ref().unwrap()[0];
-        let script = &bootstrap.command.as_ref().unwrap()[2];
-
-        assert!(script.contains("git clone"));
-        assert!(!script.contains("cache_repo="));
-        assert!(!script.contains("/var/lib/centaur/repos/paradigmxyz/centaur"));
+        assert!(pod_spec.init_containers.as_ref().is_none_or(Vec::is_empty));
         assert!(
-            !bootstrap
+            pod_spec.containers[0]
                 .volume_mounts
                 .as_ref()
-                .unwrap()
-                .iter()
-                .any(|mount| {
-                    mount.name == "tools-repo-cache" || mount.mount_path == "/var/lib/centaur/repos"
+                .is_none_or(|mounts| {
+                    !mounts.iter().any(|mount| {
+                        mount.name == "tools-root"
+                            || mount.name == "tools-repo-cache"
+                            || mount.mount_path == "/app/tools"
+                            || mount.mount_path == "/var/lib/centaur/repos"
+                    })
                 })
         );
-        assert!(
-            !pod_spec
-                .volumes
-                .as_ref()
-                .unwrap()
+        assert!(pod_spec.volumes.as_ref().is_none_or(|volumes| {
+            !volumes
                 .iter()
-                .any(|volume| volume.name == "tools-repo-cache")
-        );
+                .any(|volume| volume.name == "tools-root" || volume.name == "tools-repo-cache")
+        }));
     }
 
     #[test]
