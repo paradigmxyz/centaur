@@ -71,6 +71,11 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "linearbot") | nindent 14 }}
 {{- end }}
+{{- if .Values.githubbot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "githubbot") | nindent 14 }}
+{{- end }}
 {{- if .Values.discordbot.enabled }}
         - podSelector:
             matchLabels:
@@ -161,6 +166,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "linearbot") | nindent 14 }}
+{{- end }}
+{{- if .Values.githubbot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "githubbot") | nindent 14 }}
 {{- end }}
 {{- if .Values.discordbot.enabled }}
         - podSelector:
@@ -425,6 +435,55 @@ spec:
           port: 5432
 {{- end }}
     # Linear GraphQL API egress (direct HTTPS; linearbot does not use the firewall proxy).
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
+{{- if .Values.githubbot.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "githubbot") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "githubbot") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- end }}
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    # GitHub REST API egress (direct HTTPS; githubbot does not use the firewall proxy).
     - ports:
         - protocol: TCP
           port: 443

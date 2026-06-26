@@ -485,6 +485,48 @@ linearbot:
   extraEnv: {}
   resources: {}
 
+# Chat SDK GitHub bot — GitHub teammate (PAT) ingress. Receives issue/PR comment
+# webhooks on /api/webhooks/github (the @chat-adapter/github adapter), answers in
+# the comment thread, and runs a review when the bot account is requested as a
+# reviewer. Forwards sessions to the api-rs control plane (:8080). Disabled by
+# default: requires the GITHUBBOT_TOKEN (PAT) and GITHUBBOT_WEBHOOK_SECRET secrets
+# (see contrib/scripts/bootstrap-k8s-secrets.sh). userName must be the bot
+# account's GitHub login so @-mention and review-request matching work.
+githubbot:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: centaur-githubbot
+    tag: latest
+    pullPolicy: Always
+  userName: ""
+  # v2 PR self-management (only acts on PRs assigned to the bot account).
+  # Auto-merge respects branch protection and is paused per-PR by the hold label
+  # / draft status.
+  autoMerge: true
+  mergeMethod: squash
+  # Fallback @handle (no leading @) the bot tags when it gives up; empty = none.
+  escalationHandle: ""
+  # Optional review / issue-work methodology overrides. When set, the chart writes
+  # each into a ConfigMap, mounts it as a file, and points the bot at it via
+  # GITHUBBOT_REVIEW_PROMPT_FILE / GITHUBBOT_ISSUE_PROMPT_FILE. Empty = the bot's
+  # bundled default is used. Supply the whole methodology; it's used verbatim.
+  reviewPrompt: ""
+  issuePrompt: ""
+  # Extra guidance prepended to owned-PR management turns (CI-fix / conflict /
+  # address-review) — the riskiest autonomous surface. Same delivery as the
+  # review/issue prompts (ConfigMap + mounted file). Empty = built-in preamble only.
+  managementPrompt: ""
+  # GitHub author_association values allowed to drive the comment-mention path.
+  # Empty = the bot's safe default (OWNER, MEMBER, COLLABORATOR). Use "*" to allow
+  # everyone (e.g. a fully-private repo). Comma-separated.
+  allowedAuthorAssociations: ""
+  # How long (seconds) to let in-flight turns finish on shutdown before the pod is
+  # killed, so a deploy doesn't drop running CI fixes / reviews / issue work.
+  terminationGracePeriodSeconds: 120
+  extraEnv: {}
+  resources: {}
+
 # Discord chat ingress — mirrors slackbotv2, forwards to the api-rs control plane (:8080) over a
 # persistent Discord Gateway connection. Off by default; needs a Discord app + Message Content
 # Intent + a guild allowlist. Always exactly one replica (singleton Gateway session).

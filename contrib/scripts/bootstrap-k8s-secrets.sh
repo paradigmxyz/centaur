@@ -42,6 +42,16 @@ Optional Linear bot bootstrap (consumed when linearbot.enabled=true):
   LINEARBOT_API_KEY            bearer the bot sends to api-rs; auto-generated
                                when absent
 
+Optional GitHub ingress bootstrap (consumed when githubbot.enabled=true):
+  GITHUBBOT_TOKEN              personal access token for the bot's GitHub
+                               teammate account; required together with the
+                               webhook secret (partial config fails fast). Kept
+                               distinct from GITHUB_TOKEN (the repo-cache /
+                               sandbox tool token) so the bot acts as its own user.
+  GITHUBBOT_WEBHOOK_SECRET     signing secret from the GitHub repo/org webhook
+  GITHUBBOT_API_KEY            bearer the bot sends to api-rs; auto-generated
+                               when absent
+
 Optional Discord ingress bootstrap (consumed when discordbot.enabled=true):
   DISCORD_BOT_TOKEN            when set, seeds the discordbot keys; requires
                                DISCORD_PUBLIC_KEY and DISCORD_APPLICATION_ID
@@ -136,6 +146,14 @@ require_cmd openssl
 if [[ -n "${LINEAR_ACCESS_TOKEN:-}" || -n "${LINEARBOT_WEBHOOK_SECRET:-}" ]]; then
   require_env LINEAR_ACCESS_TOKEN
   require_env LINEARBOT_WEBHOOK_SECRET
+fi
+
+# GitHub bot config is optional but must be complete: a PAT without the webhook
+# secret (or vice versa) deploys a githubbot that boots and then rejects every
+# delivery, which reads as silence.
+if [[ -n "${GITHUBBOT_TOKEN:-}" || -n "${GITHUBBOT_WEBHOOK_SECRET:-}" ]]; then
+  require_env GITHUBBOT_TOKEN
+  require_env GITHUBBOT_WEBHOOK_SECRET
 fi
 
 # Discord keys are optional as a group, but partial configuration would silently
@@ -268,6 +286,17 @@ if secret_exists centaur-infra-env; then
       patch_data+=("\"LINEARBOT_API_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
     fi
   fi
+  # GitHub bot credentials. The PAT + webhook secret are set whenever present so
+  # they can be rotated; the api-rs bearer is generated once and kept stable.
+  if [[ -n "${GITHUBBOT_TOKEN:-}" ]]; then
+    patch_data+=("\"GITHUBBOT_TOKEN\":\"$(printf '%s' "$GITHUBBOT_TOKEN" | base64 | tr -d '\n')\"")
+    patch_data+=("\"GITHUBBOT_WEBHOOK_SECRET\":\"$(printf '%s' "$GITHUBBOT_WEBHOOK_SECRET" | base64 | tr -d '\n')\"")
+    if [[ -n "${GITHUBBOT_API_KEY:-}" ]]; then
+      patch_data+=("\"GITHUBBOT_API_KEY\":\"$(printf '%s' "$GITHUBBOT_API_KEY" | base64 | tr -d '\n')\"")
+    elif ! secret_key_present GITHUBBOT_API_KEY; then
+      patch_data+=("\"GITHUBBOT_API_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
+    fi
+  fi
   if [[ "${#patch_data[@]}" -gt 0 ]]; then
     patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
     kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p "$patch_json" >/dev/null
@@ -334,6 +363,11 @@ else
     secret_args+=(--from-literal=LINEAR_ACCESS_TOKEN="$LINEAR_ACCESS_TOKEN")
     secret_args+=(--from-literal=LINEARBOT_WEBHOOK_SECRET="$LINEARBOT_WEBHOOK_SECRET")
     secret_args+=(--from-literal=LINEARBOT_API_KEY="${LINEARBOT_API_KEY:-$(rand_hex)}")
+  fi
+  if [[ -n "${GITHUBBOT_TOKEN:-}" ]]; then
+    secret_args+=(--from-literal=GITHUBBOT_TOKEN="$GITHUBBOT_TOKEN")
+    secret_args+=(--from-literal=GITHUBBOT_WEBHOOK_SECRET="$GITHUBBOT_WEBHOOK_SECRET")
+    secret_args+=(--from-literal=GITHUBBOT_API_KEY="${GITHUBBOT_API_KEY:-$(rand_hex)}")
   fi
   kubectl "${secret_args[@]}" >/dev/null
   echo "Created Secret centaur-infra-env in namespace $NAMESPACE"
