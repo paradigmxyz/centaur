@@ -28,6 +28,10 @@ const AGENT_UID: i64 = 1001;
 
 /// Base tools path inside both the api-rs pod and the agent sandbox.
 pub(crate) const BASE_TOOL_DIR: &str = "/app/tools";
+/// Base Centaur tools baked into the sandbox image. Restricted sandboxes use
+/// this path so they keep first-party tool shims without mounting repo-cache or
+/// publishing overlay sources.
+pub(crate) const BAKED_BASE_TOOL_DIR: &str = "/opt/centaur/tools";
 /// emptyDir the `tools-bootstrap` init container publishes the tools tree into.
 const TOOLS_VOLUME: &str = "tools-root";
 /// Staging path where `tools-bootstrap` mounts the tools emptyDir. The agent
@@ -136,6 +140,12 @@ pub(crate) fn agent_tool_dirs() -> String {
     BASE_TOOL_DIR.to_owned()
 }
 
+/// `TOOL_DIRS` for restricted sandboxes that should not receive repo-cache or
+/// overlay-derived tool sources.
+pub(crate) fn baked_base_tool_dirs() -> String {
+    BAKED_BASE_TOOL_DIR.to_owned()
+}
+
 /// Agent env added for tools wiring.
 pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
     let mut env = vec![("TOOL_DIRS".to_owned(), agent_tool_dirs())];
@@ -149,6 +159,12 @@ pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
         ));
     }
     env
+}
+
+/// Agent env for baked base tools only. No GitHub token is exposed because
+/// restricted sandboxes do not refresh from git or repo-cache.
+pub(crate) fn baked_base_agent_env() -> Vec<(String, String)> {
+    vec![("TOOL_DIRS".to_owned(), baked_base_tool_dirs())]
 }
 
 /// Routes the tools clone through the per-sandbox egress proxy. The sandbox
@@ -416,9 +432,22 @@ mod tests {
     }
 
     #[test]
+    fn baked_base_tool_dirs_point_at_image_tools() {
+        assert_eq!(baked_base_tool_dirs(), "/opt/centaur/tools");
+    }
+
+    #[test]
     fn agent_env_sets_tool_dirs() {
         let env = agent_env(None);
         assert_eq!(env, vec![("TOOL_DIRS".to_owned(), "/app/tools".to_owned())]);
+    }
+
+    #[test]
+    fn baked_base_agent_env_sets_baked_tool_dirs() {
+        assert_eq!(
+            baked_base_agent_env(),
+            vec![("TOOL_DIRS".to_owned(), "/opt/centaur/tools".to_owned())]
+        );
     }
 
     #[test]
