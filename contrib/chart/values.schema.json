@@ -287,6 +287,13 @@
           "properties": {
             "subPath": { "type": "string" }
           }
+        },
+        "sharedMemory": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "sizeLimit": { "type": "string" }
+          }
         }
       }
     },

@@ -450,6 +450,11 @@ postgres:
     size: 20Gi
     storageClassName: ""
     subPath: ""
+  # PostgreSQL uses /dev/shm for dynamic shared memory during parallel queries.
+  # This memory-backed volume counts against the pod's memory limit.
+  sharedMemory:
+    enabled: true
+    sizeLimit: 1Gi
   resources: {}
 
 ingress:
