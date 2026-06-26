@@ -1336,6 +1336,12 @@ impl SessionRuntime {
                 match self.sandbox_runtime.manager.status(&id).await {
                     Ok(status) => match existing_sandbox_action(&status) {
                         ExistingSandboxAction::Reuse => {
+                            if let Some(principal_id) = iron_control_principal {
+                                self.sandbox_runtime
+                                    .manager
+                                    .ensure_iron_control_proxy_resources(&id, principal_id)
+                                    .await?;
+                            }
                             span.record("centaur.sandbox_id", sandbox_id);
                             span.record("sandbox_id", sandbox_id);
                             let ready_duration = ensure_started.elapsed();
@@ -5702,6 +5708,7 @@ mod adoption_tests {
         create_id: String,
         resume_fails: AtomicBool,
         stopped: std::sync::Mutex<Vec<String>>,
+        proxy_ensures: std::sync::Mutex<Vec<(String, String)>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
     }
 
@@ -5715,6 +5722,7 @@ mod adoption_tests {
                 create_id: "mock-sbx".to_owned(),
                 resume_fails: AtomicBool::new(false),
                 stopped: std::sync::Mutex::new(Vec::new()),
+                proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
             }
         }
@@ -5748,6 +5756,10 @@ mod adoption_tests {
 
         fn stopped(&self) -> Vec<String> {
             self.stopped.lock().unwrap().clone()
+        }
+
+        fn proxy_ensures(&self) -> Vec<(String, String)> {
+            self.proxy_ensures.lock().unwrap().clone()
         }
     }
 
@@ -5799,6 +5811,18 @@ mod adoption_tests {
                 return Err(SandboxError::NotFound(id.as_str().to_owned()));
             }
             self.stopped.lock().unwrap().push(id.as_str().to_owned());
+            Ok(())
+        }
+
+        async fn ensure_iron_control_proxy_resources(
+            &self,
+            id: &SandboxId,
+            principal_id: &str,
+        ) -> SandboxResult<()> {
+            self.proxy_ensures
+                .lock()
+                .unwrap()
+                .push((id.as_str().to_owned(), principal_id.to_owned()));
             Ok(())
         }
 
@@ -5921,6 +5945,46 @@ mod adoption_tests {
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn existing_running_sandbox_ensures_proxy_before_reuse() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:proxy-reuse-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        let sandbox_id = runtime
+            .ensure_session_sandbox(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                Some("sbx-existing"),
+                Some("principal-existing"),
+                &execution_id,
+            )
+            .await
+            .expect("reuse existing sandbox");
+
+        assert_eq!(sandbox_id, "sbx-existing");
+        assert_eq!(
+            backend.proxy_ensures(),
+            vec![("sbx-existing".to_owned(), "principal-existing".to_owned())]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

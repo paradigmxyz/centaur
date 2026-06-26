@@ -451,6 +451,15 @@ impl SandboxBackend for AgentSandboxBackend {
         self.assign_proxy_principal(id, principal_id).await
     }
 
+    async fn ensure_iron_control_proxy_resources(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<()> {
+        self.ensure_proxy_resources_for_principal(id, principal_id)
+            .await
+    }
+
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
         self.patch_sandbox_merge(id, sandbox_pause_patch(jiff::Timestamp::now()))
             .await

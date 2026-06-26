@@ -66,6 +66,17 @@ pub trait SandboxBackend: Send + Sync {
         })
     }
 
+    /// Ensure a running sandbox's managed iron-proxy resources are present and
+    /// usable for the supplied iron-control principal without otherwise
+    /// changing the sandbox lifecycle.
+    async fn ensure_iron_control_proxy_resources(
+        &self,
+        _id: &SandboxId,
+        _principal_id: &str,
+    ) -> SandboxResult<()> {
+        Ok(())
+    }
+
     /// Suspend the sandbox while preserving any backend-supported runtime state.
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()>;
 
