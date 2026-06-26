@@ -74,6 +74,7 @@ class PrincipalCredentialReconciliation
 
       requested += 1
       created += 1 if grant_credential(principal, credential)
+      sync_principal_provider_labels(principal, [ credential ])
     end
     { requested: requested, created: created }
   end
@@ -95,7 +96,26 @@ class PrincipalCredentialReconciliation
     created = entry.actionable_credentials.count do |credential|
       grant_credential(entry.principal, credential)
     end
+    sync_principal_provider_labels(entry.principal, entry.google_credentials)
     { requested: requested, created: created }
+  end
+
+  def sync_principal_provider_labels(principal, credentials)
+    google_credentials = credentials.select do |credential|
+      credential.oauth_app&.provider == GOOGLE_PROVIDER
+    end
+    return if google_credentials.empty?
+
+    labels = principal.labels || {}
+    updates = {}
+    subject = unique_present_value(google_credentials.map(&:provider_subject))
+    email = unique_present_value(google_credentials.map(&:provider_email))
+
+    updates["google_subject"] = subject if subject && labels["google_subject"].blank?
+    updates["google_email"] = email if email && labels["google_email"].blank?
+    return if updates.empty?
+
+    principal.update!(labels: labels.merge(updates))
   end
 
   def grant_credential(principal, credential)
@@ -281,5 +301,14 @@ class PrincipalCredentialReconciliation
 
   def normalize_email(value)
     value.to_s.strip.downcase.presence
+  end
+
+  def unique_present_value(values)
+    present = values.filter_map do |value|
+      stripped = value.to_s.strip
+      stripped.presence
+    end.uniq { |value| value.downcase }
+
+    present.one? ? present.first : nil
   end
 end

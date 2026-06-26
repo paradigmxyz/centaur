@@ -19,6 +19,8 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
 
     assert principal.grants.exists?(static_secret: @slack_secret)
     assert principal.grants.exists?(static_secret: @google_secret)
+    assert_equal "google-sub-alice", principal.reload.labels["google_subject"]
+    assert_equal "alice@example.com", principal.labels["google_email"]
 
     entry = PrincipalCredentialReconciliation.new.entries.find do |candidate|
       candidate.principal == principal
@@ -76,6 +78,8 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     assert_equal [ google ], entry.google_credentials
     assert principal.grants.exists?(static_secret: slack.static_secret)
     assert principal.grants.exists?(static_secret: google.static_secret)
+    assert_equal "google-sub-alice", principal.reload.labels["google_subject"]
+    assert_equal "wrong-google@example.com", principal.labels["google_email"]
     refute principal.grants.exists?(static_secret: email_only_slack.static_secret)
     refute principal.grants.exists?(static_secret: email_only_google.static_secret)
   end
@@ -114,6 +118,32 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
       credential.update!(provider_email: "alice@example.com")
     end
     assert principal.grants.exists?(static_secret: secret)
+    assert_equal "google-sub-alice", principal.reload.labels["google_subject"]
+    assert_equal "alice@example.com", principal.labels["google_email"]
+  end
+
+  test "does not overwrite an existing Google subject label" do
+    principal = principals(:acme_user_alice)
+    principal.update!(
+      labels: principal.labels.merge(
+        "google_subject" => "google-sub-existing",
+        "email" => "alice@example.com"
+      )
+    )
+    credential = create_credential(
+      oauth_apps(:acme_google),
+      "google-sub-other",
+      "alice@example.com"
+    )
+    secret = wrap(credential)
+
+    entry = PrincipalCredentialReconciliation.new.entries.find do |candidate|
+      candidate.principal == principal
+    end
+    assert_nil entry
+    refute principal.grants.exists?(static_secret: secret)
+    assert_equal "google-sub-existing", principal.reload.labels["google_subject"]
+    assert_nil principal.labels["google_email"]
   end
 
   test "automatic grant is idempotent" do
