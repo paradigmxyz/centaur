@@ -23,6 +23,7 @@ import {
 import { conflateChatSdkStream } from './conflate'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
+import { slackUserIdForMessage } from './slack-user'
 import {
   collectInitialContext,
   forwardToSessionApi,
@@ -355,23 +356,6 @@ function createHandoffTrace(
     startedAtMs: nowMs(),
     threadId: thread.id
   }
-}
-
-function slackUserIdForMessage(message: ChatMessage): string | undefined {
-  return stringValue(message.author.userId) ?? rawSlackUserId(message.raw)
-}
-
-function rawSlackUserId(raw: unknown): string | undefined {
-  if (!isJsonObject(raw)) return undefined
-  const directUser = stringValue(raw.user)
-  if (directUser) return directUser
-  const user = raw.user
-  if (isJsonObject(user)) {
-    return stringValue(user.id) ?? stringValue(user.user_id)
-  }
-  const botProfile = raw.bot_profile
-  if (isJsonObject(botProfile)) return stringValue(botProfile.user_id)
-  return undefined
 }
 
 function slackWebhookEventType(rawBody: string): string {

@@ -18,6 +18,7 @@ import type {
   SlackbotV2SessionMessage
 } from './types'
 import { observeSeconds, slackbotMetrics } from './metrics'
+import { rawSlackUserId } from './slack-user'
 import {
   elapsedMs,
   errorMessage,
@@ -726,19 +727,6 @@ function messageRequesterUserId(message: SlackbotV2ApiMessage | undefined): stri
   const rawUserId = rawSlackUserId(message.raw)
   const authorUserId = stringValue(message.author.userId)
   return authorUserId ?? rawUserId
-}
-
-function rawSlackUserId(raw: unknown): string | undefined {
-  if (!isJsonObject(raw)) return undefined
-  const directUser = stringValue(raw.user)
-  if (directUser) return directUser
-  const user = raw.user
-  if (isJsonObject(user)) {
-    return stringValue(user.id) ?? stringValue(user.user_id)
-  }
-  const botProfile = raw.bot_profile
-  if (isJsonObject(botProfile)) return stringValue(botProfile.user_id)
-  return undefined
 }
 
 async function resolveRequesterIdentity(
