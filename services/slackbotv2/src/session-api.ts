@@ -213,6 +213,11 @@ export async function serializeMessage(
   for (const attachment of message.attachments) {
     attachments.push(await serializeAttachment(attachment, options))
   }
+  if (attachments.length === 0) {
+    for (const attachment of slackRawFileAttachments(message.raw, options)) {
+      attachments.push(await serializeAttachment(attachment, options))
+    }
+  }
   const displayText = renderSlackDisplayText({ raw: message.raw, text: message.text })
 
   return {
@@ -237,6 +242,71 @@ export async function serializeMessage(
     threadId: message.threadId,
     timestamp: message.metadata.dateSent.toISOString()
   }
+}
+
+function slackRawFileAttachments(raw: unknown, options?: SlackbotV2Options): Attachment[] {
+  const files = slackRawFiles(raw)
+  if (files.length === 0) return []
+  return files.map(file => slackRawFileAttachment(file, raw, options))
+}
+
+function slackRawFiles(raw: unknown): JsonObject[] {
+  const records = slackRawRecords(raw)
+  const files: JsonObject[] = []
+  for (const record of records) {
+    const rawFiles = record.files
+    if (!Array.isArray(rawFiles)) continue
+    for (const file of rawFiles) {
+      if (isJsonObject(file)) files.push(file)
+    }
+  }
+  return files
+}
+
+function slackRawFileAttachment(
+  file: JsonObject,
+  raw: unknown,
+  options?: SlackbotV2Options
+): Attachment {
+  const url = stringValue(file.url_private_download) ?? stringValue(file.url_private)
+  const mimeType = stringValue(file.mimetype)
+  const fetchMetadata: Record<string, string> = {}
+  const teamId = slackTeamId(raw)
+  if (url) fetchMetadata.url = url
+  if (teamId) fetchMetadata.teamId = teamId
+  return {
+    fetchData: url && options ? () => fetchSlackRawFile(options, url) : undefined,
+    fetchMetadata: Object.keys(fetchMetadata).length > 0 ? fetchMetadata : undefined,
+    height: numberValue(file.original_h),
+    mimeType,
+    name: stringValue(file.name) ?? stringValue(file.title) ?? stringValue(file.id),
+    size: numberValue(file.size),
+    type: slackRawFileAttachmentType(mimeType),
+    url,
+    width: numberValue(file.original_w)
+  }
+}
+
+async function fetchSlackRawFile(options: SlackbotV2Options, url: string): Promise<Buffer> {
+  const fetchFn = options.fetch ?? fetch
+  const response = await fetchFn(url, {
+    headers: { authorization: `Bearer ${options.botToken}` }
+  })
+  if (!response.ok) {
+    throw new Error(`failed to fetch Slack file: ${response.status} ${response.statusText}`)
+  }
+  return Buffer.from(await response.arrayBuffer())
+}
+
+function slackRawFileAttachmentType(mimeType: string | undefined): Attachment['type'] {
+  if (mimeType?.startsWith('image/')) return 'image'
+  if (mimeType?.startsWith('video/')) return 'video'
+  if (mimeType?.startsWith('audio/')) return 'audio'
+  return 'file'
+}
+
+function numberValue(value: JsonValue | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 const SLACK_MESSAGE_URL_PATTERN = /^https:\/\/[^/\s]+\.slack\.com\/archives\/[A-Z0-9]+\/p\d+/i
