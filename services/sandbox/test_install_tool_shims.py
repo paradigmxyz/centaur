@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -140,6 +143,99 @@ class CopyPublishedToolsTest(unittest.TestCase):
             self.assertNotIn("vlogs", scripts)
             self.assertNotIn("centaur-investigator", scripts)
             self.assertIn("websearch", scripts)
+
+
+class GeneratedShimTest(unittest.TestCase):
+    def test_tool_shim_delegates_to_centaur_tools_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            script = {
+                "name": "websearch",
+                "project_dir": "/app/tools/research/websearch",
+                "package": "websearch",
+                "entrypoint": "websearch.cli:app",
+                "client_module": "client.py",
+            }
+
+            install_tool_shims._write_tool_shim(bin_dir / "websearch", script, "/opt/centaur")
+
+            content = (bin_dir / "websearch").read_text()
+            self.assertIn(f"exec {bin_dir / 'centaur-tools'} exec websearch", content)
+            self.assertNotIn("uvx --from", content)
+            self.assertNotIn("/app/tools/research/websearch", content)
+
+    def test_centaur_tools_exec_and_run_use_catalog_entry_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            fake_bin = root / "fake-bin"
+            project_dir = root / "tools" / "research" / "websearch"
+            bin_dir.mkdir()
+            fake_bin.mkdir()
+            project_dir.mkdir(parents=True)
+
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "websearch",
+                            "project_dir": str(project_dir),
+                            "package": "websearch",
+                            "entrypoint": "websearch.cli:app",
+                            "client_module": "client.py",
+                        }
+                    ]
+                )
+                + "\n"
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools",
+                index_path,
+                os.pathsep.join(["/opt/centaur", "/opt/extra"]),
+            )
+
+            uvx_log = root / "uvx.log"
+            pythonpath_log = root / "pythonpath.log"
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "Path(os.environ['UVX_LOG']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n"
+                "Path(os.environ['PYTHONPATH_LOG']).write_text(os.environ.get('PYTHONPATH', ''))\n"
+            )
+            fake_uvx.chmod(0o755)
+
+            path_websearch = fake_bin / "websearch"
+            path_websearch.write_text("#!/bin/sh\nexit 42\n")
+            path_websearch.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+            env["UVX_LOG"] = str(uvx_log)
+            env["PYTHONPATH_LOG"] = str(pythonpath_log)
+            env["PYTHONPATH"] = "existing"
+
+            for command in ("exec", "run"):
+                result = subprocess.run(
+                    [str(bin_dir / "centaur-tools"), command, "websearch", "search", "hello"],
+                    check=False,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    uvx_log.read_text().splitlines(),
+                    ["--from", str(project_dir), "websearch", "search", "hello"],
+                )
+                self.assertEqual(
+                    pythonpath_log.read_text(),
+                    f"/opt/centaur{os.pathsep}/opt/extra{os.pathsep}existing",
+                )
 
 
 if __name__ == "__main__":

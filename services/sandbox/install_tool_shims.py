@@ -404,18 +404,11 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _write_tool_shim(path: Path, script: dict[str, str], pythonpath: str) -> None:
+def _write_tool_shim(path: Path, script: dict[str, str], _pythonpath: str) -> None:
+    catalog = path.parent / "centaur-tools"
     content = f"""#!/bin/sh
 set -e
-_centaur_tool_pythonpath={shlex.quote(pythonpath)}
-if [ -n "$_centaur_tool_pythonpath" ]; then
-  if [ -n "${{PYTHONPATH:-}}" ]; then
-    export PYTHONPATH="$_centaur_tool_pythonpath:$PYTHONPATH"
-  else
-    export PYTHONPATH="$_centaur_tool_pythonpath"
-  fi
-fi
-exec uvx --from {shlex.quote(script["project_dir"])} {shlex.quote(script["name"])} "$@"
+exec {shlex.quote(str(catalog))} exec {shlex.quote(script["name"])} "$@"
 """
     _write_executable(path, content)
 
@@ -440,7 +433,7 @@ def load():
 
 
 def usage():
-    print("usage: centaur-tools [list|json|refresh|which <name>|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
+    print("usage: centaur-tools [list|json|refresh|which <name>|exec <name> [args...]|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
     return 2
 
 
@@ -502,15 +495,27 @@ print(json.dumps(result, default=str, separators=(",", ":")))
 '''
 
 
-def call_tool(tool, method, payload):
-    project_dir = Path(tool["project_dir"])
-    client_module = tool.get("client_module", "client.py")
+def tool_env():
     env = os.environ.copy()
     if PYTHONPATH_VALUE:
         if env.get("PYTHONPATH"):
             env["PYTHONPATH"] = f"{{PYTHONPATH_VALUE}}:{{env['PYTHONPATH']}}"
         else:
             env["PYTHONPATH"] = PYTHONPATH_VALUE
+    return env
+
+
+def exec_tool(tool, args):
+    project_dir = Path(tool["project_dir"])
+    return subprocess.call(
+        ["uvx", "--from", str(project_dir), tool["name"], *args],
+        env=tool_env(),
+    )
+
+
+def call_tool(tool, method, payload):
+    project_dir = Path(tool["project_dir"])
+    client_module = tool.get("client_module", "client.py")
     return subprocess.run(
         [
             "uvx",
@@ -527,7 +532,7 @@ def call_tool(tool, method, payload):
         check=False,
         text=True,
         capture_output=True,
-        env=env,
+        env=tool_env(),
     )
 
 
@@ -551,12 +556,12 @@ def main(argv):
             return 1
         print(tool["project_dir"])
         return 0
-    if command == "run" and len(argv) >= 3:
+    if command in {{"exec", "run"}} and len(argv) >= 3:
         name = argv[2]
         if name not in by_name:
             print(f"unknown tool: {{name}}", file=sys.stderr)
             return 1
-        return subprocess.call([name, *argv[3:]])
+        return exec_tool(by_name[name], argv[3:])
     if command == "call" and len(argv) >= 4:
         # Internal compatibility for Python workflow ctx.call_tool(...). Agents
         # should use direct tool CLIs (`<tool> --help`, `<tool> ...`) instead.
