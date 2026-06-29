@@ -299,6 +299,11 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
+  # Capacity manager: when nonzero, api-rs keeps observed running-like
+  # sandboxes at or below this limit by discarding ready warm sandboxes first,
+  # then pausing least-recently-active idle session sandboxes. 0 disables.
+  sandboxRunningLimit: 0
+  sandboxHotIdleGraceSecs: 300
   # When true, api-rs upserts the shared iron-control infra role and its
   # backing secrets at startup and on tool-secret reconciliation intervals.
   # Set false when multiple Centaur instances share one console/1Password

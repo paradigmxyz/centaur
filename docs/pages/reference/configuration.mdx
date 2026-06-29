@@ -175,6 +175,7 @@ Kubernetes backend:
 | `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
 | `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
+| `SESSION_SANDBOX_RUNNING_LIMIT`, `SESSION_SANDBOX_HOT_IDLE_GRACE_SECS` | `apiRs.sandboxRunningLimit`, `apiRs.sandboxHotIdleGraceSecs`. | Capacity admission for running-like sandboxes; discards ready warm sandboxes first, then pauses least-recently-active idle sessions outside the grace window. |
 | `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and restart recovery for idle pauses. Persisted `idle_timeout_ms` is honored after restart; the backstop is the fallback for older execution rows without that metadata. |
 | `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |
 | `KUBERNETES_WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`) using the sandbox repo-cache mount prefix. | Workflow-host sandbox discovery paths. |

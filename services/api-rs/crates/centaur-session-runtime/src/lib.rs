@@ -22,7 +22,8 @@ use centaur_session_core::{
     Session, SessionEvent, SessionExecution, SessionMessageInput, ThreadKey,
 };
 use centaur_session_sqlx::{
-    PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
+    PgSessionStore, SandboxCapacityCandidate, SessionEventListener, SessionStoreError,
+    default_metadata,
 };
 use centaur_telemetry::{
     export_thread_trace_root_span, record_sandbox_warm_pool_claim,
@@ -87,6 +88,19 @@ pub struct SessionRuntime {
     session_title_generator: Option<SessionTitleGenerator>,
     session_title_in_flight: SessionTitleThreadSet,
     session_title_rerun_requested: SessionTitleThreadSet,
+    capacity: Option<Arc<SandboxCapacityController>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SandboxCapacityConfig {
+    pub max_running: usize,
+    pub hot_idle_grace: Duration,
+}
+
+impl SandboxCapacityConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.max_running > 0
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -281,6 +295,328 @@ struct RuntimeContext {
     execution_spans: ExecutionSpanRegistry,
 }
 
+struct SandboxCapacityController {
+    store: PgSessionStore,
+    manager: Arc<SandboxManager>,
+    sandbox_pipes: SessionPipeMap,
+    lock: Mutex<()>,
+    config: SandboxCapacityConfig,
+}
+
+impl SandboxCapacityController {
+    fn new(
+        store: PgSessionStore,
+        manager: Arc<SandboxManager>,
+        sandbox_pipes: SessionPipeMap,
+        config: SandboxCapacityConfig,
+    ) -> Self {
+        Self {
+            store,
+            manager,
+            sandbox_pipes,
+            lock: Mutex::new(()),
+            config,
+        }
+    }
+
+    async fn run_with_capacity<T, F, Fut>(
+        &self,
+        protected_thread_key: &ThreadKey,
+        trigger_execution_id: &str,
+        operation: &'static str,
+        action: F,
+    ) -> Result<T, SessionRuntimeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, SessionRuntimeError>>,
+    {
+        let _guard = self.lock.lock().await;
+        self.ensure_running_slot(protected_thread_key, trigger_execution_id, operation)
+            .await?;
+        action().await
+    }
+
+    async fn ensure_running_slot(
+        &self,
+        protected_thread_key: &ThreadKey,
+        trigger_execution_id: &str,
+        operation: &'static str,
+    ) -> Result<(), SessionRuntimeError> {
+        let running = self.running_slot_count().await?;
+        if running < self.config.max_running {
+            return Ok(());
+        }
+
+        let mut slots_needed = running.saturating_sub(self.config.max_running) + 1;
+        let mut stopped_warm = 0usize;
+        let mut paused_idle = 0usize;
+        let mut stale_candidates_reconciled = 0usize;
+
+        for sandbox_id in self
+            .store
+            .reserve_ready_warm_sandboxes_for_eviction(candidate_fetch_limit(slots_needed))
+            .await?
+        {
+            if slots_needed == 0 {
+                break;
+            }
+            let id = SandboxId::new(sandbox_id.as_str());
+            match self.manager.status(&id).await {
+                Ok(status) if status_consumes_running_slot(&status) => {}
+                Ok(_) | Err(SandboxError::NotFound(_)) => {
+                    let _ = self
+                        .store
+                        .mark_warm_sandbox_failed(
+                            sandbox_id.as_str(),
+                            "not running during sandbox capacity admission",
+                        )
+                        .await;
+                    continue;
+                }
+                Err(error) => {
+                    let failure =
+                        format!("status failed during sandbox capacity admission: {error}");
+                    let _ = self
+                        .store
+                        .mark_warm_sandbox_failed(sandbox_id.as_str(), &failure)
+                        .await;
+                    return Err(SessionRuntimeError::Sandbox(error));
+                }
+            }
+
+            match self.manager.stop(&id).await {
+                Ok(()) | Err(SandboxError::NotFound(_)) => {
+                    stopped_warm += 1;
+                    slots_needed -= 1;
+                    let _ = self
+                        .store
+                        .mark_warm_sandbox_failed(
+                            sandbox_id.as_str(),
+                            "stopped for sandbox capacity pressure",
+                        )
+                        .await;
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "sandbox_capacity_warm_stopped",
+                        sandbox_id,
+                        trigger_thread_key = %protected_thread_key,
+                        trigger_execution_id,
+                        operation,
+                        max_running = self.config.max_running,
+                        "stopped warm sandbox for capacity"
+                    );
+                }
+                Err(error) => {
+                    let failure = format!("stop failed during sandbox capacity admission: {error}");
+                    let _ = self
+                        .store
+                        .mark_warm_sandbox_failed(sandbox_id.as_str(), &failure)
+                        .await;
+                    return Err(SessionRuntimeError::Sandbox(error));
+                }
+            }
+        }
+
+        if slots_needed > 0 {
+            loop {
+                let candidates = self
+                    .store
+                    .list_sandbox_capacity_candidates(
+                        Some(protected_thread_key),
+                        self.config.hot_idle_grace,
+                        candidate_fetch_limit(slots_needed),
+                    )
+                    .await?;
+                if candidates.is_empty() {
+                    break;
+                }
+
+                let mut made_progress = false;
+                for candidate in candidates {
+                    if slots_needed == 0 {
+                        break;
+                    }
+                    match self
+                        .pause_capacity_candidate(
+                            &candidate,
+                            protected_thread_key,
+                            trigger_execution_id,
+                            operation,
+                        )
+                        .await?
+                    {
+                        CapacityCandidateAction::Paused => {
+                            paused_idle += 1;
+                            slots_needed -= 1;
+                            made_progress = true;
+                        }
+                        CapacityCandidateAction::ReconciledStale => {
+                            stale_candidates_reconciled += 1;
+                            made_progress = true;
+                        }
+                        CapacityCandidateAction::Skipped => {}
+                    }
+                }
+
+                if slots_needed == 0 || !made_progress {
+                    break;
+                }
+            }
+        }
+
+        if slots_needed == 0 {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "sandbox_capacity_admitted",
+                trigger_thread_key = %protected_thread_key,
+                trigger_execution_id,
+                operation,
+                running_before = running,
+                max_running = self.config.max_running,
+                stopped_warm,
+                paused_idle,
+                stale_candidates_reconciled,
+                "admitted sandbox operation under capacity pressure"
+            );
+            return Ok(());
+        }
+
+        Err(SessionRuntimeError::CapacityExceeded {
+            max_running: self.config.max_running,
+            running,
+            operation,
+        })
+    }
+
+    async fn pause_capacity_candidate(
+        &self,
+        candidate: &SandboxCapacityCandidate,
+        protected_thread_key: &ThreadKey,
+        trigger_execution_id: &str,
+        operation: &'static str,
+    ) -> Result<CapacityCandidateAction, SessionRuntimeError> {
+        let id = SandboxId::new(candidate.sandbox_id.as_str());
+        match self.manager.status(&id).await {
+            Ok(SandboxStatus::Running | SandboxStatus::Created | SandboxStatus::Unknown(_)) => {}
+            Ok(SandboxStatus::Suspended) => {
+                return Ok(CapacityCandidateAction::Skipped);
+            }
+            Ok(SandboxStatus::Stopped | SandboxStatus::Gone) => {
+                return self.reconcile_stale_capacity_candidate(candidate).await;
+            }
+            Err(SandboxError::NotFound(_)) => {
+                return self.reconcile_stale_capacity_candidate(candidate).await;
+            }
+            Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
+        }
+
+        self.sandbox_pipes.remove(candidate.sandbox_id.as_str());
+        match self.manager.pause(&id).await {
+            Ok(()) => {
+                self.store
+                    .append_event(
+                        &candidate.thread_key,
+                        candidate.latest_execution_id.as_deref(),
+                        "session.sandbox_paused",
+                        json!({
+                            "thread_key": candidate.thread_key.as_str(),
+                            "sandbox_id": candidate.sandbox_id.as_str(),
+                            "reason": "capacity_pressure",
+                            "trigger_thread_key": protected_thread_key.as_str(),
+                            "trigger_execution_id": trigger_execution_id,
+                            "operation": operation,
+                            "last_active_at": candidate.last_active_at,
+                            "hot_idle_grace_ms": duration_millis_u64(self.config.hot_idle_grace),
+                            "max_running": self.config.max_running,
+                        }),
+                    )
+                    .await?;
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "sandbox_capacity_idle_paused",
+                    thread_key = %candidate.thread_key,
+                    sandbox_id = %candidate.sandbox_id,
+                    trigger_thread_key = %protected_thread_key,
+                    trigger_execution_id,
+                    operation,
+                    last_active_at = %candidate.last_active_at,
+                    max_running = self.config.max_running,
+                    "paused idle sandbox for capacity"
+                );
+                Ok(CapacityCandidateAction::Paused)
+            }
+            Err(error) => {
+                self.store
+                    .append_event(
+                        &candidate.thread_key,
+                        candidate.latest_execution_id.as_deref(),
+                        "session.sandbox_pause_failed",
+                        json!({
+                            "thread_key": candidate.thread_key.as_str(),
+                            "sandbox_id": candidate.sandbox_id.as_str(),
+                            "reason": "capacity_pressure",
+                            "trigger_thread_key": protected_thread_key.as_str(),
+                            "trigger_execution_id": trigger_execution_id,
+                            "operation": operation,
+                            "error": error.to_string(),
+                        }),
+                    )
+                    .await?;
+                Err(SessionRuntimeError::Sandbox(error))
+            }
+        }
+    }
+
+    async fn reconcile_stale_capacity_candidate(
+        &self,
+        candidate: &SandboxCapacityCandidate,
+    ) -> Result<CapacityCandidateAction, SessionRuntimeError> {
+        let cleared = self
+            .store
+            .clear_sandbox_id_if_matches(&candidate.thread_key, candidate.sandbox_id.as_str())
+            .await?;
+        if cleared {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "sandbox_capacity_stale_reconciled",
+                thread_key = %candidate.thread_key,
+                sandbox_id = %candidate.sandbox_id,
+                "cleared stale sandbox assignment during capacity admission"
+            );
+            Ok(CapacityCandidateAction::ReconciledStale)
+        } else {
+            Ok(CapacityCandidateAction::Skipped)
+        }
+    }
+
+    async fn running_slot_count(&self) -> Result<usize, SessionRuntimeError> {
+        Ok(self
+            .manager
+            .list_observed()
+            .await?
+            .into_iter()
+            .filter(|observed| status_consumes_running_slot(&observed.status))
+            .count())
+    }
+}
+
+enum CapacityCandidateAction {
+    Paused,
+    ReconciledStale,
+    Skipped,
+}
+
+fn candidate_fetch_limit(slots_needed: usize) -> i64 {
+    slots_needed.saturating_mul(4).clamp(16, 1000) as i64
+}
+
+fn status_consumes_running_slot(status: &SandboxStatus) -> bool {
+    matches!(
+        status,
+        SandboxStatus::Created | SandboxStatus::Running | SandboxStatus::Unknown(_)
+    )
+}
+
 struct EventStreamState {
     store: PgSessionStore,
     thread_key: ThreadKey,
@@ -335,6 +671,7 @@ impl SessionRuntime {
             session_title_generator: None,
             session_title_in_flight: Arc::new(DashSet::new()),
             session_title_rerun_requested: Arc::new(DashSet::new()),
+            capacity: None,
         }
     }
 
@@ -467,6 +804,39 @@ impl SessionRuntime {
         pool.clone().spawn_replenisher();
         self.warm_pool = Some(pool);
         self
+    }
+
+    pub fn with_sandbox_capacity(mut self, config: SandboxCapacityConfig) -> Self {
+        if !config.is_enabled() {
+            return self;
+        }
+        self.capacity = Some(Arc::new(SandboxCapacityController::new(
+            self.store.clone(),
+            self.sandbox_runtime.manager.clone(),
+            self.sandbox_pipes.clone(),
+            config,
+        )));
+        self
+    }
+
+    async fn run_with_running_capacity<T, F, Fut>(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        operation: &'static str,
+        action: F,
+    ) -> Result<T, SessionRuntimeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, SessionRuntimeError>>,
+    {
+        if let Some(capacity) = self.capacity.as_ref() {
+            capacity
+                .run_with_capacity(thread_key, execution_id, operation, action)
+                .await
+        } else {
+            action().await
+        }
     }
 
     /// Spawn the background reaper that stops sandboxes whose total lifetime
@@ -726,6 +1096,15 @@ impl SessionRuntime {
                 "appending session messages"
             );
             let message_ids = self.store.append_messages(thread_key, messages).await?;
+            if let Err(error) = self.store.touch_session_sandbox_activity(thread_key).await {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_sandbox_activity_touch_failed",
+                    thread_key = %thread_key,
+                    %error,
+                    "failed to touch sandbox activity after message append"
+                );
+            }
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_messages_append_completed",
@@ -1508,7 +1887,22 @@ impl SessionRuntime {
                         }
                         ExistingSandboxAction::ResumeOrReplace => {
                             self.sandbox_pipes.remove(sandbox_id);
-                            match self.sandbox_runtime.manager.resume(&id).await {
+                            let resume_id = id.clone();
+                            match self
+                                .run_with_running_capacity(
+                                    thread_key,
+                                    execution_id,
+                                    "resume",
+                                    || async {
+                                        self.sandbox_runtime
+                                            .manager
+                                            .resume(&resume_id)
+                                            .await
+                                            .map_err(SessionRuntimeError::Sandbox)
+                                    },
+                                )
+                                .await
+                            {
                                 Ok(()) => {
                                     span.record("centaur.sandbox_id", sandbox_id);
                                     span.record("sandbox_id", sandbox_id);
@@ -1548,7 +1942,7 @@ impl SessionRuntime {
                                     );
                                     return Ok(sandbox_id.to_owned());
                                 }
-                                Err(error) => {
+                                Err(SessionRuntimeError::Sandbox(error)) => {
                                     warn!(
                                         component = COMPONENT_SESSION_RUNTIME,
                                         event = "sandbox_ensure_resume_failed",
@@ -1572,6 +1966,7 @@ impl SessionRuntime {
                                         )
                                         .await?;
                                 }
+                                Err(error) => return Err(error),
                             }
                         }
                         ExistingSandboxAction::Replace => {
@@ -1699,7 +2094,15 @@ impl SessionRuntime {
             }
             apply_sandbox_capabilities(&mut spec, desired_capabilities);
             let create_started = Instant::now();
-            let handle = self.sandbox_runtime.manager.create_running(spec).await?;
+            let handle = self
+                .run_with_running_capacity(thread_key, execution_id, "cold_create", || async {
+                    self.sandbox_runtime
+                        .manager
+                        .create_running(spec)
+                        .await
+                        .map_err(SessionRuntimeError::Sandbox)
+                })
+                .await?;
             let startup_duration = create_started.elapsed();
             let ready_duration = ensure_started.elapsed();
             span.record("centaur.sandbox_id", handle.id.as_str());
@@ -1778,6 +2181,22 @@ impl SessionRuntime {
         let ready_duration_ms = duration_millis_u64(ready_duration);
         let startup_duration_ms = startup_duration.map(duration_millis_u64).unwrap_or(0);
         let sandbox_started_for_request = startup_duration.is_some();
+
+        if let Err(error) = self
+            .store
+            .touch_sandbox_activity(thread_key, sandbox_id)
+            .await
+        {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_sandbox_activity_touch_failed",
+                thread_key = %thread_key,
+                execution_id,
+                sandbox_id,
+                %error,
+                "failed to touch sandbox activity after sandbox ready"
+            );
+        }
 
         if let Err(error) = self
             .store
@@ -3801,6 +4220,21 @@ async fn record_terminal_output(
         }
     };
     ctx.execution_spans.lock().await.remove(execution_id);
+    if let Err(error) = ctx
+        .store
+        .touch_sandbox_activity(thread_key, sandbox_id)
+        .await
+    {
+        warn!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_sandbox_activity_touch_failed",
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id,
+            %error,
+            "failed to touch sandbox activity after terminal output"
+        );
+    }
     record_finished_execution_metric(
         &ctx.store,
         thread_key,
@@ -3861,6 +4295,16 @@ async fn record_max_duration_failure(
         return Ok(());
     };
     ctx.execution_spans.lock().await.remove(execution_id);
+    if let Err(error) = ctx.store.touch_session_sandbox_activity(thread_key).await {
+        warn!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_sandbox_activity_touch_failed",
+            thread_key = %thread_key,
+            execution_id,
+            %error,
+            "failed to touch sandbox activity after max duration"
+        );
+    }
     ctx.store
         .append_event(
             thread_key,
@@ -4188,6 +4632,7 @@ fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
         SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
         SessionRuntimeError::IronControl(_) => "iron_control",
         SessionRuntimeError::WarmPool(_) => "warm_pool",
+        SessionRuntimeError::CapacityExceeded { .. } => "capacity",
     }
 }
 
@@ -4998,6 +5443,14 @@ pub enum SessionRuntimeError {
     IronControl(#[from] centaur_iron_control::IronControlError),
     #[error(transparent)]
     WarmPool(#[from] WarmPoolError),
+    #[error(
+        "sandbox running capacity exceeded during {operation}: running={running}, max_running={max_running}"
+    )]
+    CapacityExceeded {
+        max_running: usize,
+        running: usize,
+        operation: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -5928,6 +6381,7 @@ mod tests {
             persona_id: None,
             status: SessionStatus::Idle,
             iron_control_principal: None,
+            sandbox_last_active_at: Some(now),
             created_at: now,
             updated_at: now,
         }
@@ -5980,7 +6434,7 @@ mod tests {
 #[cfg(test)]
 mod adoption_tests {
     use std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
@@ -5999,6 +6453,7 @@ mod adoption_tests {
         recorded_output: std::sync::Mutex<Vec<String>>,
         open_count: AtomicUsize,
         status: std::sync::Mutex<SandboxStatus>,
+        observed_statuses: std::sync::Mutex<BTreeMap<String, SandboxStatus>>,
         create_id: String,
         created_specs: std::sync::Mutex<Vec<SandboxSpec>>,
         resume_fails: AtomicBool,
@@ -6014,6 +6469,7 @@ mod adoption_tests {
                 recorded_output: std::sync::Mutex::new(recorded_output),
                 open_count: AtomicUsize::new(0),
                 status: std::sync::Mutex::new(status),
+                observed_statuses: std::sync::Mutex::new(BTreeMap::new()),
                 create_id: "mock-sbx".to_owned(),
                 created_specs: std::sync::Mutex::new(Vec::new()),
                 resume_fails: AtomicBool::new(false),
@@ -6037,6 +6493,21 @@ mod adoption_tests {
 
         fn set_status(&self, status: SandboxStatus) {
             *self.status.lock().unwrap() = status;
+        }
+
+        fn set_observed_status(&self, sandbox_id: &str, status: SandboxStatus) {
+            self.observed_statuses
+                .lock()
+                .unwrap()
+                .insert(sandbox_id.to_owned(), status);
+        }
+
+        fn status_of(&self, sandbox_id: &str) -> Option<SandboxStatus> {
+            self.observed_statuses
+                .lock()
+                .unwrap()
+                .get(sandbox_id)
+                .cloned()
         }
 
         fn fail_resume(&self) {
@@ -6071,6 +6542,7 @@ mod adoption_tests {
 
         async fn create(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
             self.created_specs.lock().unwrap().push(spec);
+            self.set_observed_status(&self.create_id, SandboxStatus::Running);
             Ok(SandboxHandle::new(
                 SandboxId::new(self.create_id.clone()),
                 "mock",
@@ -6095,6 +6567,9 @@ mod adoption_tests {
         }
 
         async fn status(&self, _id: &SandboxId) -> SandboxResult<SandboxStatus> {
+            if let Some(status) = self.status_of(_id.as_str()) {
+                return Ok(status);
+            }
             Ok(self.status.lock().unwrap().clone())
         }
 
@@ -6104,7 +6579,13 @@ mod adoption_tests {
         }
 
         async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
-            Ok(Vec::new())
+            Ok(self
+                .observed_statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, status)| ObservedSandbox::new(id.as_str(), "mock", status.clone()))
+                .collect())
         }
 
         async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
@@ -6112,6 +6593,7 @@ mod adoption_tests {
                 return Err(SandboxError::NotFound(id.as_str().to_owned()));
             }
             self.stopped.lock().unwrap().push(id.as_str().to_owned());
+            self.set_observed_status(id.as_str(), SandboxStatus::Stopped);
             Ok(())
         }
 
@@ -6128,6 +6610,7 @@ mod adoption_tests {
         }
 
         async fn pause(&self, _id: &SandboxId) -> SandboxResult<()> {
+            self.set_observed_status(_id.as_str(), SandboxStatus::Suspended);
             Ok(())
         }
 
@@ -6135,6 +6618,7 @@ mod adoption_tests {
             if self.resume_fails.load(Ordering::SeqCst) {
                 return Err(SandboxError::NotFound(_id.as_str().to_owned()));
             }
+            self.set_observed_status(_id.as_str(), SandboxStatus::Running);
             Ok(())
         }
     }
@@ -6426,6 +6910,7 @@ mod adoption_tests {
                 target_size: 1,
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: None,
+                max_running_sandboxes: None,
             },
         ));
         runtime.warm_pool = Some(warm_pool);
@@ -6609,6 +7094,142 @@ mod adoption_tests {
             backend.proxy_ensures(),
             vec![("sbx-existing".to_owned(), "principal-existing".to_owned())]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capacity_pressure_pauses_oldest_idle_assigned_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        backend.set_observed_status(
+            "sbx-old",
+            SandboxStatus::Unknown("status temporarily unavailable".to_owned()),
+        );
+        backend.set_observed_status("sbx-hot", SandboxStatus::Running);
+        backend.set_observed_status("sbx-stale", SandboxStatus::Gone);
+        backend.set_observed_status("sbx-paused", SandboxStatus::Suspended);
+
+        let stale_thread =
+            ThreadKey::parse(format!("test:capacity-stale-{}", uuid::Uuid::new_v4())).unwrap();
+        let paused_thread =
+            ThreadKey::parse(format!("test:capacity-paused-{}", uuid::Uuid::new_v4())).unwrap();
+        let old_thread =
+            ThreadKey::parse(format!("test:capacity-old-{}", uuid::Uuid::new_v4())).unwrap();
+        let hot_thread =
+            ThreadKey::parse(format!("test:capacity-hot-{}", uuid::Uuid::new_v4())).unwrap();
+        let trigger_thread =
+            ThreadKey::parse(format!("test:capacity-trigger-{}", uuid::Uuid::new_v4())).unwrap();
+
+        store
+            .create_or_get_session(&stale_thread, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create stale session");
+        store
+            .update_sandbox_id(&stale_thread, Some("sbx-stale"))
+            .await
+            .expect("assign stale sandbox");
+        store
+            .create_or_get_session(&paused_thread, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create paused session");
+        store
+            .update_sandbox_id(&paused_thread, Some("sbx-paused"))
+            .await
+            .expect("assign paused sandbox");
+        store
+            .append_event(
+                &paused_thread,
+                None,
+                "session.sandbox_paused",
+                json!({
+                    "thread_key": paused_thread.as_str(),
+                    "sandbox_id": "sbx-paused",
+                    "reason": "capacity_pressure",
+                }),
+            )
+            .await
+            .expect("append paused event");
+        store
+            .create_or_get_session(&old_thread, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create old session");
+        store
+            .update_sandbox_id(&old_thread, Some("sbx-old"))
+            .await
+            .expect("assign old sandbox");
+        store
+            .create_or_get_session(&hot_thread, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create hot session");
+        store
+            .update_sandbox_id(&hot_thread, Some("sbx-hot"))
+            .await
+            .expect("assign hot sandbox");
+        sqlx::query(
+            r#"
+            update sessions
+            set sandbox_last_active_at = case
+                    when thread_key = $1 then now() - interval '3 hours'
+                    when thread_key = $2 then now() - interval '2 hours'
+                    when thread_key = $3 then now() - interval '1 hour'
+                end
+            where thread_key in ($1, $2, $3)
+            "#,
+        )
+        .bind(stale_thread.as_str())
+        .bind(paused_thread.as_str())
+        .bind(old_thread.as_str())
+        .execute(store.pool())
+        .await
+        .expect("age capacity candidates");
+
+        let controller = SandboxCapacityController::new(
+            store.clone(),
+            Arc::new(SandboxManager::new(backend.clone())),
+            Arc::new(DashMap::new()),
+            SandboxCapacityConfig {
+                max_running: 2,
+                hot_idle_grace: Duration::from_secs(300),
+            },
+        );
+
+        controller
+            .run_with_capacity(&trigger_thread, "exe-trigger", "cold_create", || async {
+                Ok(())
+            })
+            .await
+            .expect("admit under capacity");
+
+        assert_eq!(backend.status_of("sbx-old"), Some(SandboxStatus::Suspended));
+        assert_eq!(backend.status_of("sbx-hot"), Some(SandboxStatus::Running));
+        assert_eq!(
+            store
+                .get_session(&stale_thread)
+                .await
+                .expect("get stale session")
+                .sandbox_id,
+            None
+        );
+        assert_eq!(
+            store
+                .get_session(&paused_thread)
+                .await
+                .expect("get paused session")
+                .sandbox_id
+                .as_deref(),
+            Some("sbx-paused")
+        );
+        let old_events = store
+            .list_events_after(&old_thread, 0, None, 100)
+            .await
+            .expect("list old events");
+        assert!(old_events.iter().any(|event| {
+            event.event_type == "session.sandbox_paused"
+                && event.payload.get("reason").and_then(Value::as_str) == Some("capacity_pressure")
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

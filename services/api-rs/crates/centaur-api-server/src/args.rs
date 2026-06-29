@@ -27,7 +27,9 @@ use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode, SessionSandboxCleanupConfig};
+use centaur_session_runtime::{
+    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
+};
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{error, info, warn};
@@ -85,6 +87,10 @@ impl Args {
 
     pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
         self.sandbox.warm_pool_config()
+    }
+
+    pub(crate) fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
+        self.sandbox.sandbox_capacity_config()
     }
 
     pub(crate) fn sandbox_reaper_config(&self) -> SandboxReaperConfig {
@@ -529,6 +535,22 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
+    /// Hard cap on observed running-like sandboxes. 0 disables capacity
+    /// admission.
+    #[arg(
+        long = "session-sandbox-running-limit",
+        env = "SESSION_SANDBOX_RUNNING_LIMIT",
+        default_value_t = 0
+    )]
+    sandbox_running_limit: usize,
+    /// Do not evict assigned idle sandboxes that were active within this
+    /// window. Warm sandboxes can still be discarded first.
+    #[arg(
+        long = "session-sandbox-hot-idle-grace-secs",
+        env = "SESSION_SANDBOX_HOT_IDLE_GRACE_SECS",
+        default_value_t = 300
+    )]
+    sandbox_hot_idle_grace_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
@@ -1210,6 +1232,15 @@ impl SandboxArgs {
             target_size: self.warm_pool_size,
             replenish_interval: Duration::from_secs(self.warm_pool_replenish_interval_secs),
             bootstrap_iron_control_principal: None,
+            max_running_sandboxes: (self.sandbox_running_limit > 0)
+                .then_some(self.sandbox_running_limit),
+        })
+    }
+
+    fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
+        (self.sandbox_running_limit > 0).then(|| SandboxCapacityConfig {
+            max_running: self.sandbox_running_limit,
+            hot_idle_grace: Duration::from_secs(self.sandbox_hot_idle_grace_secs),
         })
     }
 

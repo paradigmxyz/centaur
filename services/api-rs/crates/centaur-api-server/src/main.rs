@@ -75,6 +75,10 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         tokio::spawn(reconciler.run());
     }
     runtime = runtime.with_personas(args.persona_registry()?);
+    let sandbox_capacity_config = args.sandbox_capacity_config();
+    if let Some(config) = sandbox_capacity_config {
+        runtime = runtime.with_sandbox_capacity(config);
+    }
     if let Some(mut config) = args.warm_pool_config() {
         config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
         runtime = runtime.with_warm_pool(config);

@@ -26,6 +26,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+sqlx.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 uuid.workspace = true
