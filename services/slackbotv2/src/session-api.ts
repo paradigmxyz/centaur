@@ -140,7 +140,7 @@ function sessionApiTimeoutMs(options: SlackbotV2Options): number {
   return options.sessionApiTimeoutMs ?? DEFAULT_SESSION_API_TIMEOUT_MS
 }
 
-function slackApiTimeoutMs(options: SlackbotV2Options): number {
+export function slackApiTimeoutMs(options: SlackbotV2Options): number {
   return options.slackApiTimeoutMs ?? DEFAULT_SLACK_API_TIMEOUT_MS
 }
 

@@ -33,6 +33,7 @@ import {
   serializeAttachment,
   serializeMessageLinks,
   serializeMessage,
+  slackApiTimeoutMs,
   sessionStreamError
 } from './session-api'
 import { extractMessageOverrides } from './overrides'
@@ -93,7 +94,6 @@ type SlackAssistantAdapter = {
 }
 
 const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
-const DEFAULT_SLACK_BEST_EFFORT_TIMEOUT_MS = 5_000
 
 type SlackbotV2RequestContext = {
   retryableErrors: unknown[]
@@ -2042,7 +2042,7 @@ class SlackBestEffortTimeoutError extends Error {
 }
 
 function slackBestEffortTimeoutMs(options?: SlackbotV2Options): number | undefined {
-  return options ? options.slackApiTimeoutMs ?? DEFAULT_SLACK_BEST_EFFORT_TIMEOUT_MS : undefined
+  return options ? slackApiTimeoutMs(options) : undefined
 }
 
 async function withBestEffortTimeout<T>(
