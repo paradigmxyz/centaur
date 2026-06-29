@@ -296,8 +296,7 @@ apiRs:
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   activitySummary:
-    # TODO: Disable before merging; enabled temporarily so PR previews exercise it.
-    enabled: true
+    enabled: false
     model: gpt-5.4-nano
     openaiBaseUrl: https://api.openai.com/v1
     minIntervalSecs: 8
