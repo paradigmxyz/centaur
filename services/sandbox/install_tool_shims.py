@@ -422,6 +422,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
+import time
 
 INDEX = {str(index_path)!r}
 PYTHONPATH_VALUE = {pythonpath!r}
@@ -505,35 +507,89 @@ def tool_env():
     return env
 
 
+def analytics_log_path():
+    configured = os.environ.get("CENTAUR_TOOL_ANALYTICS_LOG_PATH")
+    if configured is not None:
+        return configured.strip()
+    return "/proc/1/fd/2"
+
+
+def emit_tool_call_event(event, tool, method, started_at=None, returncode=None):
+    path = analytics_log_path()
+    if path.lower() in {{"", "0", "false", "none", "off"}}:
+        return
+
+    payload = {{
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": "info",
+        "service": "sandbox",
+        "component": "tool_shim",
+        "event": event,
+        "msg": f"Centaur tool shim {{event}}",
+        "tool_name": str(tool.get("name") or "unknown"),
+        "tool_method": method,
+    }}
+    thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
+    if thread_key:
+        payload["thread_key"] = thread_key
+    if started_at is not None:
+        payload["duration_ms"] = round((time.monotonic() - started_at) * 1000, 3)
+    if returncode is not None:
+        payload["exit_code"] = returncode
+        payload["success"] = "true" if returncode == 0 else "false"
+
+    try:
+        with open(path, "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(payload, separators=(",", ":"), default=str) + "\\n")
+    except Exception:
+        pass
+
+
 def run_tool(tool, args):
     project_dir = Path(tool["project_dir"])
-    return subprocess.call(
-        ["uvx", "--from", str(project_dir), tool["name"], *args],
-        env=tool_env(),
-    )
+    started_at = time.monotonic()
+    emit_tool_call_event("tool_call_started", tool, "cli")
+    try:
+        returncode = subprocess.call(
+            ["uvx", "--from", str(project_dir), tool["name"], *args],
+            env=tool_env(),
+        )
+    except Exception:
+        emit_tool_call_event("tool_call_completed", tool, "cli", started_at, 1)
+        raise
+    emit_tool_call_event("tool_call_completed", tool, "cli", started_at, returncode)
+    return returncode
 
 
 def call_tool(tool, method, payload):
     project_dir = Path(tool["project_dir"])
     client_module = tool.get("client_module", "client.py")
-    return subprocess.run(
-        [
-            "uvx",
-            "--from",
-            str(project_dir),
-            "python",
-            "-c",
-            CALL_RUNNER,
-            str(project_dir),
-            client_module,
-            method,
-            json.dumps(payload, separators=(",", ":")),
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-        env=tool_env(),
-    )
+    started_at = time.monotonic()
+    emit_tool_call_event("tool_call_started", tool, method)
+    try:
+        result = subprocess.run(
+            [
+                "uvx",
+                "--from",
+                str(project_dir),
+                "python",
+                "-c",
+                CALL_RUNNER,
+                str(project_dir),
+                client_module,
+                method,
+                json.dumps(payload, separators=(",", ":")),
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+            env=tool_env(),
+        )
+    except Exception:
+        emit_tool_call_event("tool_call_completed", tool, method, started_at, 1)
+        raise
+    emit_tool_call_event("tool_call_completed", tool, method, started_at, result.returncode)
+    return result
 
 
 def main(argv):

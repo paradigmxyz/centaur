@@ -197,6 +197,7 @@ class GeneratedShimTest(unittest.TestCase):
 
             uvx_log = root / "uvx.log"
             pythonpath_log = root / "pythonpath.log"
+            analytics_log = root / "tool-analytics.log"
             fake_uvx = fake_bin / "uvx"
             fake_uvx.write_text(
                 "#!/usr/bin/env python3\n"
@@ -217,9 +218,17 @@ class GeneratedShimTest(unittest.TestCase):
             env["UVX_LOG"] = str(uvx_log)
             env["PYTHONPATH_LOG"] = str(pythonpath_log)
             env["PYTHONPATH"] = "existing"
+            env["CENTAUR_THREAD_KEY"] = "cli:test-thread"
+            env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = str(analytics_log)
 
             result = subprocess.run(
-                [str(bin_dir / "centaur-tools"), "run", "websearch", "search", "hello"],
+                [
+                    str(bin_dir / "centaur-tools"),
+                    "run",
+                    "websearch",
+                    "lookup",
+                    "sensitive-payload",
+                ],
                 check=False,
                 env=env,
                 text=True,
@@ -229,12 +238,37 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 uvx_log.read_text().splitlines(),
-                ["--from", str(project_dir), "websearch", "search", "hello"],
+                [
+                    "--from",
+                    str(project_dir),
+                    "websearch",
+                    "lookup",
+                    "sensitive-payload",
+                ],
             )
             self.assertEqual(
                 pythonpath_log.read_text(),
                 f"/opt/centaur{os.pathsep}/opt/extra{os.pathsep}existing",
             )
+            analytics_events = [
+                json.loads(line) for line in analytics_log.read_text().splitlines()
+            ]
+            self.assertEqual(
+                [event["event"] for event in analytics_events],
+                ["tool_call_started", "tool_call_completed"],
+            )
+            for event in analytics_events:
+                self.assertEqual(event["service"], "sandbox")
+                self.assertEqual(event["component"], "tool_shim")
+                self.assertEqual(event["tool_name"], "websearch")
+                self.assertEqual(event["tool_method"], "cli")
+                self.assertEqual(event["thread_key"], "cli:test-thread")
+            self.assertEqual(analytics_events[1]["exit_code"], 0)
+            self.assertEqual(analytics_events[1]["success"], "true")
+            self.assertIn("duration_ms", analytics_events[1])
+            serialized_analytics = json.dumps(analytics_events, sort_keys=True)
+            self.assertNotIn("lookup", serialized_analytics)
+            self.assertNotIn("sensitive-payload", serialized_analytics)
 
             result = subprocess.run(
                 [str(bin_dir / "centaur-tools"), "exec", "websearch"],
