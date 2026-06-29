@@ -242,6 +242,74 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "etl": {
+          "type": "object",
+          "properties": {
+            "slack": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" },
+                "syncBackfillLookbackDays": { "type": "integer" },
+                "syncThreadLookbackDays": { "type": "integer" },
+                "excludedChannelPatterns": { "type": "string" },
+                "attachments": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "maxBytes": { "type": "integer" }
+                  }
+                },
+                "backfill": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "intervalSeconds": { "type": "integer" },
+                    "channelBatchLimit": { "type": "integer" },
+                    "channelPagesPerJob": { "type": "integer" }
+                  }
+                },
+                "retention": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "intervalMinutes": { "type": "integer" },
+                    "etlDays": { "type": "integer" },
+                    "dmDays": { "type": "integer" }
+                  }
+                }
+              }
+            },
+            "linear": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" }
+              }
+            },
+            "googleDrive": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" }
+              }
+            },
+            "googleCalendar": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" }
+              }
+            },
+            "companyContextDocuments": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "intervalSeconds": { "type": "integer" }
+              }
+            }
+          }
+        },
         "metrics": {
           "type": "object",
           "properties": {
