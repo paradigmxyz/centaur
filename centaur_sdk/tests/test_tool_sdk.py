@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import threading
 
 import pytest
@@ -183,3 +188,52 @@ async def test_get_sync_uses_background_thread_inside_running_loop():
     assert backend.get_sync("TOKEN") == "inside-loop"
     assert len(backend.get_thread_ids) == 1
     assert backend.get_thread_ids[0] != caller_thread_id
+
+
+def test_tool_sdk_submodule_import_does_not_require_rich() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    code = textwrap.dedent(
+        """
+        import builtins
+        import importlib
+
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "rich" or name.startswith("rich."):
+                raise ModuleNotFoundError("No module named 'rich'")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = guarded_import
+
+        tool_sdk = importlib.import_module("centaur_sdk.tool_sdk")
+        package = importlib.import_module("centaur_sdk")
+
+        assert package.secret is tool_sdk.secret
+        assert package.ToolContext is tool_sdk.ToolContext
+        """
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root)
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(repo_root),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_table_helpers_stay_available_from_top_level_package() -> None:
+    from centaur_sdk import Table, render_text_table
+
+    table = Table(title="Results")
+    table.add_column("Name")
+    table.add_row("ok")
+
+    assert table.title == "Results"
+    assert render_text_table(["Name"], [["ok"]]) == "Name\n----\nok  "

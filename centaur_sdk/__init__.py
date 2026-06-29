@@ -8,7 +8,6 @@ Public API:
 
 from __future__ import annotations
 
-from centaur_sdk.cli_tables import Table, render_text_table
 from centaur_sdk.tool_sdk import (
     ToolContext,
     current_session_context,
@@ -21,6 +20,17 @@ from centaur_sdk.tool_sdk import (
     secret,
     set_tool_context,
 )
+
+
+def __getattr__(name: str):
+    if name in {"Table", "render_text_table"}:
+        from centaur_sdk.cli_tables import Table, render_text_table
+
+        globals()["Table"] = Table
+        globals()["render_text_table"] = render_text_table
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "Table",
