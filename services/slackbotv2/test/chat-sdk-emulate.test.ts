@@ -294,7 +294,10 @@ describe('slackbotv2', () => {
     const assistantStatuses = slackApi.calls
       .filter(call => call.method === 'assistant.threads.setStatus')
       .map(call => stringField(call.body.status))
-    expect(assistantStatuses).toEqual(['Thinking...', '', 'Thinking...', ''])
+    expect(assistantStatuses[0]).toBe('Thinking...')
+    expect(assistantStatuses.at(-1)).toBe('')
+    expect(assistantStatuses.filter(status => status === 'Thinking...').length).toBeGreaterThanOrEqual(2)
+    expect(assistantStatuses.filter(status => status === '').length).toBeGreaterThanOrEqual(2)
     expect(
       slackApi.calls
         .filter(call => call.method === 'assistant.threads.setTitle')
@@ -2662,7 +2665,7 @@ describe('slackbotv2', () => {
     )
     expect(logData(logs, 'slackbotv2_handoff_sync_starting')).toEqual(
       expect.objectContaining({
-        initial_assistant_status_visible: true,
+        initial_assistant_status_visible: expect.any(Boolean),
         trigger: 'new_mention'
       })
     )
@@ -2696,7 +2699,59 @@ describe('slackbotv2', () => {
       slackApi.calls
         .filter(call => call.method === 'assistant.threads.setStatus')
         .map(call => stringField(call.body.status))
-    ).toEqual(['Thinking...', ''])
+    ).toEqual(expect.arrayContaining(['Thinking...', '']))
+  })
+
+  it('does not wait for hung assistant status before creating Slack sessions', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs), slackApiTimeoutMs: 25 })
+    const releaseStatus = slackApi.holdAssistantStatus()
+    const waits: Promise<unknown>[] = []
+
+    try {
+      const parent = await postUserMessage('Context before hung status.')
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> keep going`, parent.ts)
+      const responsePromise = bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-hung-status',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> keep going`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      await waitFor(() => codexApi.creates.length === 1 && codexApi.executes.length === 1)
+      const response = await responsePromise
+      expect(response.status).toBe(200)
+      expect(codexApi.creates[0]?.threadKey).toBe(threadKey(parent.ts))
+      expect(codexApi.executes[0]?.threadKey).toBe(threadKey(parent.ts))
+      expect(logData(logs, 'slackbotv2_handoff_sync_starting')).toEqual(
+        expect.objectContaining({
+          initial_assistant_status_deferred: true,
+          initial_assistant_status_visible: false,
+          trigger: 'new_mention'
+        })
+      )
+      await waitFor(() => hasLog(logs, 'slackbotv2_assistant_status_failed'))
+      expect(logData(logs, 'slackbotv2_assistant_status_failed')).toEqual(
+        expect.objectContaining({
+          error: 'set assistant status timed out after 25ms',
+          operation: 'set'
+        })
+      )
+    } finally {
+      releaseStatus()
+    }
+    await Promise.all(waits)
   })
 
   it('recovers unfinished render obligations from Chat SDK state on startup', async () => {
@@ -4082,6 +4137,7 @@ type PatchedSlackApi = {
   failRepliesWithThreadNotFound(channel: string, ts: string): void
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
+  holdAssistantStatus(): () => void
   reset(): void
   setUserProfile(userId: string, profile: Record<string, unknown>): void
   userProfileMethodRequestCount(userId: string, method: string): number
@@ -4123,13 +4179,22 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
+  let assistantStatusGate: Promise<void> | null = null
+  let releaseAssistantStatusGate: (() => void) | null = null
   let maxStreamStopChars: number | null = null
   const appendFailure: { error: string; remaining: number } = { error: '', remaining: -1 }
   const streams = new Map<string, StreamRecord>()
+  const releaseCurrentAssistantStatusGate = () => {
+    const release = releaseAssistantStatusGate
+    assistantStatusGate = null
+    releaseAssistantStatusGate = null
+    release?.()
+  }
   const port = await availablePort(4053)
   const server = createServer((req, res) => {
     void handlePatchedSlackRequest(req, res, {
       appendFailure,
+      assistantStatusGate: () => assistantStatusGate,
       calls,
       maxStreamStopChars,
       port,
@@ -4162,7 +4227,15 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failStreamStopsLongerThan(maxChars: number) {
       maxStreamStopChars = maxChars
     },
+    holdAssistantStatus() {
+      if (assistantStatusGate) throw new Error('assistant status is already held')
+      assistantStatusGate = new Promise(resolve => {
+        releaseAssistantStatusGate = resolve
+      })
+      return releaseCurrentAssistantStatusGate
+    },
     reset() {
+      releaseCurrentAssistantStatusGate()
       calls.length = 0
       maxStreamStopChars = null
       appendFailure.remaining = -1
@@ -4191,6 +4264,7 @@ async function handlePatchedSlackRequest(
   res: ServerResponse,
   input: {
     appendFailure: { error: string; remaining: number }
+    assistantStatusGate: () => Promise<void> | null
     calls: StreamCall[]
     maxStreamStopChars: number | null
     port: number
@@ -4232,6 +4306,8 @@ async function handlePatchedSlackRequest(
   if (path === '/api/assistant.threads.setStatus') {
     const body = await requestBody(request)
     input.calls.push({ method: 'assistant.threads.setStatus', body })
+    const gate = input.assistantStatusGate()
+    if (gate) await gate
     await sendWebResponse(res, Response.json({ ok: true }))
     return
   }

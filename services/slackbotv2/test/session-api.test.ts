@@ -4,6 +4,7 @@ import {
   clearRequesterIdentityCacheForTests,
   forwardToSessionApi,
   harnessRestartPreamble,
+  serializeAttachment,
   serializeMessage
 } from '../src/session-api'
 import { renderSlackDisplayText } from '../src/slack-display-text'
@@ -367,6 +368,24 @@ describe('Slack display text fallback', () => {
 
     expect(appendedTextParts(requests)).toContain(`continue (${slackUrl})`)
     expect(appendedTextParts(requests).join('\n')).not.toContain('Links included in the Slack message')
+  })
+})
+
+describe('Slack attachment serialization', () => {
+  test('records timeout errors when attachment fetchData hangs', async () => {
+    const fetchFn = (async () => Response.json({ ok: true })) as SlackbotV2Options['fetch']
+    const startedAt = Date.now()
+    const attachment = await serializeAttachment(
+      {
+        fetchData: () => new Promise<Buffer>(() => undefined),
+        name: 'hung.txt',
+        type: 'file'
+      } as Parameters<typeof serializeAttachment>[0],
+      { ...options(fetchFn), slackApiTimeoutMs: 25 }
+    )
+
+    expect(Date.now() - startedAt).toBeLessThan(500)
+    expect(attachment.fetchError).toBe('fetch Slack attachment timed out after 25ms')
   })
 })
 
