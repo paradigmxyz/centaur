@@ -408,7 +408,7 @@ def _write_tool_shim(path: Path, script: dict[str, str], _pythonpath: str) -> No
     catalog = path.parent / "centaur-tools"
     content = f"""#!/bin/sh
 set -e
-exec {shlex.quote(str(catalog))} exec {shlex.quote(script["name"])} "$@"
+exec {shlex.quote(str(catalog))} run {shlex.quote(script["name"])} "$@"
 """
     _write_executable(path, content)
 
@@ -433,7 +433,7 @@ def load():
 
 
 def usage():
-    print("usage: centaur-tools [list|json|refresh|which <name>|exec <name> [args...]|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
+    print("usage: centaur-tools [list|json|refresh|which <name>|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
     return 2
 
 
@@ -505,7 +505,7 @@ def tool_env():
     return env
 
 
-def exec_tool(tool, args):
+def run_tool(tool, args):
     project_dir = Path(tool["project_dir"])
     return subprocess.call(
         ["uvx", "--from", str(project_dir), tool["name"], *args],
@@ -556,12 +556,12 @@ def main(argv):
             return 1
         print(tool["project_dir"])
         return 0
-    if command in {{"exec", "run"}} and len(argv) >= 3:
+    if command == "run" and len(argv) >= 3:
         name = argv[2]
         if name not in by_name:
             print(f"unknown tool: {{name}}", file=sys.stderr)
             return 1
-        return exec_tool(by_name[name], argv[3:])
+        return run_tool(by_name[name], argv[3:])
     if command == "call" and len(argv) >= 4:
         # Internal compatibility for Python workflow ctx.call_tool(...). Agents
         # should use direct tool CLIs (`<tool> --help`, `<tool> ...`) instead.

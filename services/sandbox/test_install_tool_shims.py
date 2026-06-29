@@ -160,11 +160,11 @@ class GeneratedShimTest(unittest.TestCase):
             install_tool_shims._write_tool_shim(bin_dir / "websearch", script, "/opt/centaur")
 
             content = (bin_dir / "websearch").read_text()
-            self.assertIn(f"exec {bin_dir / 'centaur-tools'} exec websearch", content)
+            self.assertIn(f"exec {bin_dir / 'centaur-tools'} run websearch", content)
             self.assertNotIn("uvx --from", content)
             self.assertNotIn("/app/tools/research/websearch", content)
 
-    def test_centaur_tools_exec_and_run_use_catalog_entry_directly(self) -> None:
+    def test_centaur_tools_run_uses_catalog_entry_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
@@ -218,24 +218,34 @@ class GeneratedShimTest(unittest.TestCase):
             env["PYTHONPATH_LOG"] = str(pythonpath_log)
             env["PYTHONPATH"] = "existing"
 
-            for command in ("exec", "run"):
-                result = subprocess.run(
-                    [str(bin_dir / "centaur-tools"), command, "websearch", "search", "hello"],
-                    check=False,
-                    env=env,
-                    text=True,
-                    capture_output=True,
-                )
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "run", "websearch", "search", "hello"],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
 
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(
-                    uvx_log.read_text().splitlines(),
-                    ["--from", str(project_dir), "websearch", "search", "hello"],
-                )
-                self.assertEqual(
-                    pythonpath_log.read_text(),
-                    f"/opt/centaur{os.pathsep}/opt/extra{os.pathsep}existing",
-                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                uvx_log.read_text().splitlines(),
+                ["--from", str(project_dir), "websearch", "search", "hello"],
+            )
+            self.assertEqual(
+                pythonpath_log.read_text(),
+                f"/opt/centaur{os.pathsep}/opt/extra{os.pathsep}existing",
+            )
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "exec", "websearch"],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("usage: centaur-tools", result.stderr)
 
 
 if __name__ == "__main__":
