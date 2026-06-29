@@ -28,7 +28,7 @@ def _load_archive_import():
     api_module.workflow_engine = workflow_engine
     sys.modules["api.workflow_engine"] = workflow_engine
 
-    vm_metrics = types.ModuleType("api.vm_metrics")
+    slack_metrics = types.ModuleType("workflows.slack.metrics")
     for name in (
         "observe_slack_archive_import_batch_duration",
         "observe_slack_archive_import_duration",
@@ -45,13 +45,18 @@ def _load_archive_import():
         "record_slack_archive_import_users",
         "record_slack_etl_rate_limit",
         "set_slack_archive_import_last_failure_timestamp",
+    ):
+        setattr(slack_metrics, name, lambda *_args, **_kwargs: None)
+    sys.modules["workflows.slack.metrics"] = slack_metrics
+
+    etl_metrics = types.ModuleType("workflows.etl_metrics")
+    for name in (
         "set_etl_active_scopes",
         "set_etl_failed_scopes",
         "set_etl_scope_sync_freshness_seconds",
     ):
-        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
-    api_module.vm_metrics = vm_metrics
-    sys.modules["api.vm_metrics"] = vm_metrics
+        setattr(etl_metrics, name, lambda *_args, **_kwargs: None)
+    sys.modules["workflows.etl_metrics"] = etl_metrics
 
     centaur_sdk = sys.modules.setdefault("centaur_sdk", types.ModuleType("centaur_sdk"))
     centaur_sdk.secret = lambda _name, default=None: default

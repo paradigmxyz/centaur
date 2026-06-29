@@ -21,16 +21,18 @@ def _load_shared():
     sys.modules.setdefault("api", api_module)
     sys.modules.setdefault("api.runtime_control", runtime_control)
 
-    vm_metrics = types.ModuleType("api.vm_metrics")
+    slack_metrics = types.ModuleType("workflows.slack.metrics")
+    slack_metrics.record_slack_etl_rate_limit = lambda *_args, **_kwargs: None
+    sys.modules["workflows.slack.metrics"] = slack_metrics
+
+    etl_metrics = types.ModuleType("workflows.etl_metrics")
     for name in (
-        "record_slack_etl_rate_limit",
         "set_etl_active_scopes",
         "set_etl_failed_scopes",
         "set_etl_scope_sync_freshness_seconds",
     ):
-        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
-    api_module.vm_metrics = vm_metrics
-    sys.modules["api.vm_metrics"] = vm_metrics
+        setattr(etl_metrics, name, lambda *_args, **_kwargs: None)
+    sys.modules["workflows.etl_metrics"] = etl_metrics
 
     centaur_sdk = types.ModuleType("centaur_sdk")
     centaur_sdk.secret = lambda _name, default=None: default
@@ -42,14 +44,25 @@ def _load_shared():
 def _load_backfill():
     api_module = sys.modules.setdefault("api", types.ModuleType("api"))
 
-    vm_metrics = types.ModuleType("api.vm_metrics")
+    etl_metrics = types.ModuleType("workflows.etl_metrics")
     for name in (
-        "observe_slack_retention_run_duration",
         "record_etl_items_deleted",
         "record_etl_items_enqueued",
         "record_etl_items_failed",
         "record_etl_items_seen",
         "record_etl_items_upserted",
+        "set_etl_active_scopes",
+        "set_etl_backfill_job_age_seconds",
+        "set_etl_backfill_jobs",
+        "set_etl_failed_scopes",
+        "set_etl_scope_sync_freshness_seconds",
+    ):
+        setattr(etl_metrics, name, lambda *_args, **_kwargs: None)
+    sys.modules["workflows.etl_metrics"] = etl_metrics
+
+    slack_metrics = types.ModuleType("workflows.slack.metrics")
+    for name in (
+        "observe_slack_retention_run_duration",
         "record_slack_etl_rate_limit",
         "record_slack_retention_api_rate_limited",
         "record_slack_retention_api_request",
@@ -61,15 +74,9 @@ def _load_backfill():
         "record_slack_retention_run",
         "set_slack_retention_last_failure_timestamp",
         "set_slack_retention_watermark_lag_seconds",
-        "set_etl_active_scopes",
-        "set_etl_backfill_job_age_seconds",
-        "set_etl_backfill_jobs",
-        "set_etl_failed_scopes",
-        "set_etl_scope_sync_freshness_seconds",
     ):
-        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
-    api_module.vm_metrics = vm_metrics
-    sys.modules["api.vm_metrics"] = vm_metrics
+        setattr(slack_metrics, name, lambda *_args, **_kwargs: None)
+    sys.modules["workflows.slack.metrics"] = slack_metrics
 
     workflow_engine = types.ModuleType("api.workflow_engine")
 

@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from api.vm_metrics import record_etl_items_deleted
+from workflows.etl_metrics import record_etl_items_deleted
 from api.workflow_engine import WorkflowContext
 from workflows.slack.shared import env_flag_enabled, positive_int
 

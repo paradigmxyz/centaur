@@ -10,10 +10,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from api.runtime_control import canonical_json, decode_jsonb
-from api.vm_metrics import (
+from workflows.company_context_metrics import (
     observe_company_context_document_size,
     record_company_context_documents_changed,
     set_company_context_projection_lag,
+)
+from workflows.etl_metrics import (
     set_etl_active_scopes,
     set_etl_failed_scopes,
     set_etl_scope_sync_freshness_seconds,

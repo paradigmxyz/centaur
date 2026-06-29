@@ -35,10 +35,12 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     google-api-python-client>=2.100.0 \
     google-auth-httplib2>=0.2.0 \
     google-auth-oauthlib>=1.2.0 \
+    feedparser>=6.0.0 \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
     opentelemetry-proto==1.42.1 \
     pysocks>=1.7.1 \
+    rich>=13.0.0 \
     slack-sdk==3.39.0 \
     tomli-w==1.2.0 \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
@@ -220,6 +222,7 @@ COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth
 COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/claude-credentials.default.json
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
 COPY --link --chmod=755 services/workflow-python/workflow_host.py /usr/local/bin/workflow-host
+COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
