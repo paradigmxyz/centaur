@@ -99,6 +99,12 @@ module GoogleDocs
         case endpoint
         when GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT
           assert_includes params["q"], "modifiedTime > '2026-06-01T00:00:00Z'"
+          assert_equal(
+            "nextPageToken,files(id,name,mimeType,webViewLink,driveId,owners," \
+              "lastModifyingUser,capabilities,labelInfo,trashed,explicitlyTrashed," \
+              "createdTime,modifiedTime,version)",
+            params["fields"]
+          )
           {
             "files" => [
               {

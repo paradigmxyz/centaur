@@ -154,7 +154,7 @@ module GoogleDocs
         "q" => query.join(" and "),
         "pageSize" => self.class.page_size,
         "fields" => [
-          "nextPageToken",
+          "nextPageToken,",
           "files(id,name,mimeType,webViewLink,driveId,owners,lastModifyingUser,",
           "capabilities,labelInfo,trashed,explicitlyTrashed,createdTime,modifiedTime,version)"
         ].join,
