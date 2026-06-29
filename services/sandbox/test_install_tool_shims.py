@@ -262,13 +262,43 @@ class GeneratedShimTest(unittest.TestCase):
                 self.assertEqual(event["component"], "tool_shim")
                 self.assertEqual(event["tool_name"], "websearch")
                 self.assertEqual(event["tool_method"], "cli")
+                self.assertEqual(event["tool_args"], ["lookup", "sensitive-payload"])
+                self.assertEqual(event["tool_args_count"], 2)
                 self.assertEqual(event["thread_key"], "cli:test-thread")
             self.assertEqual(analytics_events[1]["exit_code"], 0)
             self.assertEqual(analytics_events[1]["success"], "true")
             self.assertIn("duration_ms", analytics_events[1])
             serialized_analytics = json.dumps(analytics_events, sort_keys=True)
-            self.assertNotIn("lookup", serialized_analytics)
-            self.assertNotIn("sensitive-payload", serialized_analytics)
+            self.assertIn("lookup", serialized_analytics)
+            self.assertIn("sensitive-payload", serialized_analytics)
+
+            analytics_log.write_text("")
+            first_arg = "a" * 400
+            second_arg = "b" * 400
+            result = subprocess.run(
+                [
+                    str(bin_dir / "centaur-tools"),
+                    "run",
+                    "websearch",
+                    first_arg,
+                    second_arg,
+                ],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            analytics_events = [
+                json.loads(line) for line in analytics_log.read_text().splitlines()
+            ]
+            for event in analytics_events:
+                self.assertEqual(event["tool_args_count"], 2)
+                self.assertEqual(event["tool_args"][0], first_arg)
+                self.assertEqual(event["tool_args"][1], ("b" * 109) + "...")
+                self.assertEqual(sum(len(arg) for arg in event["tool_args"]), 512)
+                self.assertEqual(event["tool_args_truncated"], "true")
 
             result = subprocess.run(
                 [str(bin_dir / "centaur-tools"), "exec", "websearch"],

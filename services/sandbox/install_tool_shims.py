@@ -427,6 +427,9 @@ import time
 
 INDEX = {str(index_path)!r}
 PYTHONPATH_VALUE = {pythonpath!r}
+MAX_ANALYTICS_ARGS = 32
+MAX_ANALYTICS_ARGS_LENGTH = 512
+TRUNCATION_SUFFIX = "..."
 
 
 def load():
@@ -514,7 +517,35 @@ def analytics_log_path():
     return "/proc/1/fd/2"
 
 
-def emit_tool_call_event(event, tool, method, started_at=None, returncode=None):
+def analytics_tool_args(args):
+    normalized = []
+    truncated = False
+    raw_args = list(args or [])
+    remaining_length = MAX_ANALYTICS_ARGS_LENGTH
+    for arg in raw_args[:MAX_ANALYTICS_ARGS]:
+        if remaining_length <= 0:
+            truncated = True
+            break
+        value = str(arg)
+        if len(value) > remaining_length:
+            truncated = True
+            if remaining_length <= len(TRUNCATION_SUFFIX):
+                value = TRUNCATION_SUFFIX[:remaining_length]
+            else:
+                value = value[: remaining_length - len(TRUNCATION_SUFFIX)] + TRUNCATION_SUFFIX
+            normalized.append(value)
+            remaining_length = 0
+            break
+        normalized.append(value)
+        remaining_length -= len(value)
+    if len(raw_args) > MAX_ANALYTICS_ARGS:
+        truncated = True
+    if len(normalized) < len(raw_args):
+        truncated = True
+    return normalized, len(raw_args), truncated
+
+
+def emit_tool_call_event(event, tool, method, tool_args=None, started_at=None, returncode=None):
     path = analytics_log_path()
     if path.lower() in {{"", "0", "false", "none", "off"}}:
         return
@@ -529,6 +560,12 @@ def emit_tool_call_event(event, tool, method, started_at=None, returncode=None):
         "tool_name": str(tool.get("name") or "unknown"),
         "tool_method": method,
     }}
+    if tool_args is not None:
+        normalized_args, arg_count, args_truncated = analytics_tool_args(tool_args)
+        payload["tool_args"] = normalized_args
+        payload["tool_args_count"] = arg_count
+        if args_truncated:
+            payload["tool_args_truncated"] = "true"
     thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
     if thread_key:
         payload["thread_key"] = thread_key
@@ -548,16 +585,30 @@ def emit_tool_call_event(event, tool, method, started_at=None, returncode=None):
 def run_tool(tool, args):
     project_dir = Path(tool["project_dir"])
     started_at = time.monotonic()
-    emit_tool_call_event("tool_call_started", tool, "cli")
+    emit_tool_call_event("tool_call_started", tool, "cli", tool_args=args)
     try:
         returncode = subprocess.call(
             ["uvx", "--from", str(project_dir), tool["name"], *args],
             env=tool_env(),
         )
     except Exception:
-        emit_tool_call_event("tool_call_completed", tool, "cli", started_at, 1)
+        emit_tool_call_event(
+            "tool_call_completed",
+            tool,
+            "cli",
+            tool_args=args,
+            started_at=started_at,
+            returncode=1,
+        )
         raise
-    emit_tool_call_event("tool_call_completed", tool, "cli", started_at, returncode)
+    emit_tool_call_event(
+        "tool_call_completed",
+        tool,
+        "cli",
+        tool_args=args,
+        started_at=started_at,
+        returncode=returncode,
+    )
     return returncode
 
 
@@ -586,9 +637,21 @@ def call_tool(tool, method, payload):
             env=tool_env(),
         )
     except Exception:
-        emit_tool_call_event("tool_call_completed", tool, method, started_at, 1)
+        emit_tool_call_event(
+            "tool_call_completed",
+            tool,
+            method,
+            started_at=started_at,
+            returncode=1,
+        )
         raise
-    emit_tool_call_event("tool_call_completed", tool, method, started_at, result.returncode)
+    emit_tool_call_event(
+        "tool_call_completed",
+        tool,
+        method,
+        started_at=started_at,
+        returncode=result.returncode,
+    )
     return result
 
 
