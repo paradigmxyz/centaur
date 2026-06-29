@@ -1623,18 +1623,6 @@ function codexAttachmentInput(
       size: attachment.size
     }
   }
-  const dataUrl =
-    attachment.dataBase64 && attachment.mimeType
-      ? `data:${attachment.mimeType};base64,${attachment.dataBase64}`
-      : undefined
-  if (attachment.type === 'image' && (dataUrl || attachment.url)) {
-    return {
-      type: 'image',
-      url: dataUrl ?? attachment.url,
-      detail: 'auto',
-      name: attachment.name
-    }
-  }
   if (attachment.dataBase64) {
     return {
       type: 'attachment',

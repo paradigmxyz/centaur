@@ -268,7 +268,22 @@ describe('slackbotv2', () => {
         thread_key: threadKey(parent.ts)
       })
     )
-    expect(JSON.stringify(firstInputLine)).toContain('data:image/png;base64')
+    expect(firstInputLine).toEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              attachment_type: 'image',
+              dataBase64: Buffer.from('captured-image').toString('base64'),
+              mimeType: 'image/png',
+              name: 'captured.png',
+              type: 'attachment'
+            })
+          ])
+        })
+      })
+    )
+    expect(JSON.stringify(firstInputLine)).not.toContain('data:image/png;base64')
 
     const followUpAppend = codexApi.appends[1]!
     expect(followUpAppend.threadKey).toBe(threadKey(parent.ts))
@@ -430,9 +445,10 @@ describe('slackbotv2', () => {
     const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
     expect(executeInput).toContain('Screenshot is attached here.')
     expect(executeInput).toContain('Earlier Slack thread attachment')
-    expect(executeInput).toContain(
-      `data:image/png;base64,${Buffer.from('captured-image').toString('base64')}`
-    )
+    expect(executeInput).toContain('"attachment_type":"image"')
+    expect(executeInput).toContain('"type":"attachment"')
+    expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
+    expect(executeInput).not.toContain('data:image/png;base64')
   })
 
   it('injects Slack requester identity and verified GitHub handle into Codex input', async () => {

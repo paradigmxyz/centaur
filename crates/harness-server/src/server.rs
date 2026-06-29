@@ -1546,4 +1546,32 @@ mod tests {
         assert!(text.starts_with("[Attached file saved to "));
         assert!(text.ends_with("notes.txt]"));
     }
+
+    #[test]
+    fn inline_image_attachment_block_becomes_local_image_input() {
+        let _upload_dir = temp_upload_dir();
+        let mut state = BlocksState::default();
+        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"attachment","attachment_type":"image","dataBase64":"aGVsbG8=","name":"image.png","mimeType":"image/png","size":5}]}}"#;
+        let BlocksCommand::User { input, .. } =
+            parse_blocks_line_with_state(user, &mut state).expect("user parses")
+        else {
+            panic!("expected user command");
+        };
+
+        assert_eq!(input.len(), 2);
+        let UserInput::Text { text, .. } = &input[0] else {
+            panic!("expected image attachment notice");
+        };
+        assert!(text.starts_with("[Attached image saved to "));
+        assert!(text.ends_with("image.png]"));
+
+        let UserInput::LocalImage { path, .. } = &input[1] else {
+            panic!("expected inline image attachment to become a local image");
+        };
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("image.png")
+        );
+        assert_eq!(std::fs::read(path).expect("read image bytes"), b"hello");
+    }
 }
