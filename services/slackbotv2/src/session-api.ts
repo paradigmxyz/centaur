@@ -144,6 +144,14 @@ export function slackApiTimeoutMs(options: SlackbotV2Options): number {
   return options.slackApiTimeoutMs ?? DEFAULT_SLACK_API_TIMEOUT_MS
 }
 
+export async function withSlackApiTimeout<T>(
+  options: SlackbotV2Options | undefined,
+  action: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  return options ? withTimeout(action, slackApiTimeoutMs(options), fn) : fn()
+}
+
 type ForwardSessionApiCallbacks = {
   onExecutionStarted?(execution: SlackbotV2ExecuteSessionResponse): Promise<void>
   onMessagesAppended?(): Promise<void>
@@ -560,7 +568,7 @@ async function fetchAttachmentData(
 ): Promise<Buffer | Blob | undefined> {
   if (!attachment.fetchData) return undefined
   if (!options) return attachment.fetchData()
-  return withTimeout('fetch Slack attachment', slackApiTimeoutMs(options), () =>
+  return withSlackApiTimeout(options, 'fetch Slack attachment', () =>
     attachment.fetchData?.() ?? Promise.resolve(undefined)
   )
 }
@@ -959,7 +967,7 @@ async function slackApiGet(
 ): Promise<JsonObject | null> {
   const url = slackApiMethodUrl(options.slackApiUrl, method)
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
-  return withTimeout(`Slack API ${method}`, slackApiTimeoutMs(options), async () => {
+  return withSlackApiTimeout(options, `Slack API ${method}`, async () => {
     const response = await fetchWithTimeout(
       fetch,
       url,

@@ -33,8 +33,8 @@ import {
   serializeAttachment,
   serializeMessageLinks,
   serializeMessage,
-  slackApiTimeoutMs,
-  sessionStreamError
+  sessionStreamError,
+  withSlackApiTimeout
 } from './session-api'
 import { extractMessageOverrides } from './overrides'
 import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
@@ -592,10 +592,10 @@ async function syncThreadMessageToSession(
     const contextStartedAtMs = nowMs()
     try {
       context = shouldRefreshThreadContext
-        ? await withBestEffortTimeout(input.options, 'collect Slack thread context', () =>
+        ? await withSlackApiTimeout(input.options, 'collect Slack thread context', () =>
             collectSlackThreadContext(input.options, message)
           )
-        : await withBestEffortTimeout(input.options, 'collect initial thread context', () =>
+        : await withSlackApiTimeout(input.options, 'collect initial thread context', () =>
             collectInitialContext(thread, message, input.options)
           )
     } catch (error) {
@@ -655,7 +655,7 @@ async function syncThreadMessageToSession(
     if (!history) {
       const restartContextStartedAtMs = nowMs()
       try {
-        history = await withBestEffortTimeout(
+        history = await withSlackApiTimeout(
           input.options,
           'collect restart thread context',
           () => collectInitialContext(thread, message, input.options)
@@ -2034,41 +2034,6 @@ function backgroundWaitUntil(promise: Promise<unknown>): void {
   void promise.catch(() => undefined)
 }
 
-class SlackBestEffortTimeoutError extends Error {
-  constructor(action: string, timeoutMs: number) {
-    super(`${action} timed out after ${timeoutMs}ms`)
-    this.name = 'AbortError'
-  }
-}
-
-function slackBestEffortTimeoutMs(options?: SlackbotV2Options): number | undefined {
-  return options ? slackApiTimeoutMs(options) : undefined
-}
-
-async function withBestEffortTimeout<T>(
-  options: SlackbotV2Options | undefined,
-  action: string,
-  fn: () => Promise<T>
-): Promise<T> {
-  const timeoutMs = slackBestEffortTimeoutMs(options)
-  if (!timeoutMs) return fn()
-
-  let timer: ReturnType<typeof globalThis.setTimeout> | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = globalThis.setTimeout(() => {
-      reject(new SlackBestEffortTimeoutError(action, timeoutMs))
-    }, timeoutMs)
-    const unref = (timer as { unref?: () => void }).unref
-    if (unref) unref.call(timer)
-  })
-
-  try {
-    return await Promise.race([fn(), timeout])
-  } finally {
-    if (timer !== undefined) globalThis.clearTimeout(timer)
-  }
-}
-
 function shouldAwaitSlackHandoff(rawBody: string): boolean {
   try {
     const payload = JSON.parse(rawBody) as { event?: { type?: unknown }; type?: unknown }
@@ -2127,7 +2092,7 @@ async function collectSlackThreadContext(
   const messages: SlackbotV2ApiMessage[] = []
   let cursor: string | undefined
   do {
-    const response = await withBestEffortTimeout(options, 'fetch Slack thread replies', () =>
+    const response = await withSlackApiTimeout(options, 'fetch Slack thread replies', () =>
       fetchSlackThreadReplies({
         apiUrl: options.slackApiUrl,
         channel,
@@ -2259,7 +2224,7 @@ async function fetchSlackFile(options: SlackbotV2Options, url: string): Promise<
   const fetchFn = options.fetch ?? fetch
   const controller = new AbortController()
   try {
-    const response = await withBestEffortTimeout(options, 'fetch Slack file', () =>
+    const response = await withSlackApiTimeout(options, 'fetch Slack file', () =>
       fetchFn(url, {
         headers: { authorization: `Bearer ${options.botToken}` },
         signal: controller.signal
@@ -2268,7 +2233,7 @@ async function fetchSlackFile(options: SlackbotV2Options, url: string): Promise<
     if (!response.ok) {
       throw new Error(`failed to fetch Slack file: ${response.status} ${response.statusText}`)
     }
-    const body = await withBestEffortTimeout(options, 'read Slack file', () =>
+    const body = await withSlackApiTimeout(options, 'read Slack file', () =>
       response.arrayBuffer()
     )
     return Buffer.from(body)
@@ -2470,7 +2435,7 @@ async function setAssistantStatus(
       )
     : () => undefined
   try {
-    const visible = await withBestEffortTimeout(options, 'set assistant status', () =>
+    const visible = await withSlackApiTimeout(options, 'set assistant status', () =>
       ignoreAssistantError(() =>
         adapter.setAssistantStatus!(
           target.channel,
@@ -2515,7 +2480,7 @@ async function setAssistantTitle(
   const adapter = thread.adapter as SlackAssistantAdapter
   if (!target || !adapter.setAssistantTitle) return
   try {
-    await withBestEffortTimeout(options, 'set assistant title', () =>
+    await withSlackApiTimeout(options, 'set assistant title', () =>
       ignoreAssistantError(() =>
         adapter.setAssistantTitle!(target.channel, target.threadTs, clipOneLine(normalized, 80))
       )
