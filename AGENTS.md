@@ -520,7 +520,8 @@ The entrypoint supports persona overlays via `AGENT_PERSONA`. Persona prompts ar
 - Entrypoint injects the runtime URLs and tool catalog environment needed by the sandbox
 - Stub API keys so harnesses init in API-key mode (not browser login)
 - `HTTPS_PROXY` routes LLM and tool egress through iron-proxy
-- Resource limits: 4GB memory, 2 CPUs
+- Resources: configurable via `sandbox.resources` (requests + limits, applied to the agent container); the per-sandbox iron-proxy via `ironProxy.resources`. Empty leaves cluster defaults.
+- Node placement: `sandbox.nodeSelector` / `sandbox.tolerations` (chart) → `SESSION_SANDBOX_NODE_SELECTOR` / `SESSION_SANDBOX_TOLERATIONS` (JSON env) pin each sandbox and its paired iron-proxy onto a dedicated node pool; baseline workloads are unaffected
 - Image tagged `centaur-agent:latest`
 - Labels identify Centaur-managed sandboxes and carry thread/harness metadata for discovery/recovery
 

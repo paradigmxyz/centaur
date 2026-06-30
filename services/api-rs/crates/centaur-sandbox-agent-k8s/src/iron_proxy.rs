@@ -6,7 +6,7 @@ use centaur_sandbox_core::{SandboxError, SandboxId, SandboxResult, SandboxSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
     EnvVar as K8sEnvVar, HTTPGetAction, Pod, PodSpec, Probe, SecretEnvSource, SecretVolumeSource,
-    SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
+    SecurityContext, Service, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
     NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
@@ -83,6 +83,7 @@ pub struct IronProxyConfig {
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
+    pub resources: crate::ContainerResources,
 }
 
 impl IronProxyConfig {
@@ -106,6 +107,7 @@ impl IronProxyConfig {
                 "app.kubernetes.io/component".to_owned(),
                 "api".to_owned(),
             )]),
+            resources: crate::ContainerResources::default(),
         }
     }
 }
@@ -320,7 +322,14 @@ impl AgentSandboxBackend {
         self.pods()
             .create(
                 &PostParams::default(),
-                &build_iron_proxy_pod(id, iron_proxy, resolved, &sync),
+                &build_iron_proxy_pod(
+                    id,
+                    iron_proxy,
+                    resolved,
+                    &sync,
+                    &self.config.node_selector,
+                    &self.config.tolerations,
+                ),
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy pod", err))?;
@@ -1069,6 +1078,8 @@ fn build_iron_proxy_pod(
     iron_proxy: &IronProxyConfig,
     resolved: &ResolvedIronProxy,
     sync: &ProxySyncEnv,
+    node_selector: &BTreeMap<String, String>,
+    tolerations: &[Toleration],
 ) -> Pod {
     let annotations = BTreeMap::from([
         (
@@ -1091,6 +1102,10 @@ fn build_iron_proxy_pod(
             restart_policy: Some("Never".to_owned()),
             containers: vec![iron_proxy_container(iron_proxy, resolved, sync)],
             volumes: Some(iron_proxy_volumes(iron_proxy)),
+            // Co-locate the per-sandbox proxy with its sandbox: it scales 1:1
+            // with sandboxes, so it follows the same node placement.
+            node_selector: (!node_selector.is_empty()).then(|| node_selector.clone()),
+            tolerations: (!tolerations.is_empty()).then(|| tolerations.to_vec()),
             ..Default::default()
         }),
         ..Default::default()
@@ -1108,6 +1123,7 @@ fn iron_proxy_container(
         image_pull_policy: iron_proxy.image_pull_policy.clone(),
         env: Some(iron_proxy_env_vars(iron_proxy, resolved, sync)),
         env_from: iron_proxy_env_from(iron_proxy),
+        resources: crate::container_resource_requirements(&iron_proxy.resources),
         ports: Some(container_ports(resolved)),
         readiness_probe: Some(health_probe(Some(5), Some(30))),
         liveness_probe: Some(health_probe(None, None)),
@@ -1759,6 +1775,71 @@ mod tests {
             replace_placeholders: BTreeMap::new(),
             management_api_key: "test-management-key".to_owned(),
         }
+    }
+
+    fn sync_env() -> ProxySyncEnv {
+        ProxySyncEnv {
+            proxy_id: "prx".to_owned(),
+            control_url: "https://iron-control".to_owned(),
+            token: "iprx_token".to_owned(),
+        }
+    }
+
+    #[test]
+    fn iron_proxy_pod_inherits_node_placement_and_resources() {
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.resources = crate::ContainerResources {
+            requests_cpu: Some("50m".to_owned()),
+            limits_memory: Some("128Mi".to_owned()),
+            ..crate::ContainerResources::default()
+        };
+        let node_selector = BTreeMap::from([("centaur.ai/pool".to_owned(), "sandbox".to_owned())]);
+        let tolerations = vec![Toleration {
+            key: Some("centaur.ai/sandbox".to_owned()),
+            operator: Some("Exists".to_owned()),
+            effect: Some("NoSchedule".to_owned()),
+            ..Default::default()
+        }];
+
+        let pod = build_iron_proxy_pod(
+            &SandboxId::new("asbx-test"),
+            &iron_proxy,
+            &resolved(),
+            &sync_env(),
+            &node_selector,
+            &tolerations,
+        );
+
+        let pod_spec = pod.spec.unwrap();
+        assert_eq!(
+            pod_spec
+                .node_selector
+                .as_ref()
+                .and_then(|sel| sel.get("centaur.ai/pool"))
+                .map(String::as_str),
+            Some("sandbox"),
+        );
+        assert_eq!(pod_spec.tolerations.as_ref().unwrap().len(), 1);
+        let resources = pod_spec.containers[0].resources.as_ref().unwrap();
+        assert!(resources.requests.as_ref().unwrap().contains_key("cpu"));
+        assert!(resources.limits.as_ref().unwrap().contains_key("memory"));
+    }
+
+    #[test]
+    fn iron_proxy_pod_omits_placement_and_resources_when_unset() {
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        let pod = build_iron_proxy_pod(
+            &SandboxId::new("asbx-test"),
+            &iron_proxy,
+            &resolved(),
+            &sync_env(),
+            &BTreeMap::new(),
+            &[],
+        );
+        let pod_spec = pod.spec.unwrap();
+        assert!(pod_spec.node_selector.is_none());
+        assert!(pod_spec.tolerations.is_none());
+        assert!(pod_spec.containers[0].resources.is_none());
     }
 
     fn rule_allows_namespace_port(

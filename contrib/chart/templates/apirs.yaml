@@ -262,6 +262,33 @@ spec:
             - name: SESSION_SANDBOX_IMAGE_PULL_SECRETS
               value: "{{- range $index, $secret := .Values.global.imagePullSecrets }}{{- if $index }},{{ end -}}{{ $secret.name }}{{- end }}"
 {{- end }}
+            # Node placement + resources for the sandbox Pods (and their paired
+            # iron-proxy Pods) api-rs spawns. Empty values are omitted so the
+            # cluster default scheduling/resources apply.
+{{- with .Values.sandbox.nodeSelector }}
+            - name: SESSION_SANDBOX_NODE_SELECTOR
+              value: {{ . | toJson | quote }}
+{{- end }}
+{{- with .Values.sandbox.tolerations }}
+            - name: SESSION_SANDBOX_TOLERATIONS
+              value: {{ . | toJson | quote }}
+{{- end }}
+{{- with (dig "requests" "cpu" "" (.Values.sandbox.resources | default dict)) }}
+            - name: SESSION_SANDBOX_CPU_REQUEST
+              value: {{ . | quote }}
+{{- end }}
+{{- with (dig "requests" "memory" "" (.Values.sandbox.resources | default dict)) }}
+            - name: SESSION_SANDBOX_MEMORY_REQUEST
+              value: {{ . | quote }}
+{{- end }}
+{{- with (dig "limits" "cpu" "" (.Values.sandbox.resources | default dict)) }}
+            - name: SESSION_SANDBOX_CPU_LIMIT
+              value: {{ . | quote }}
+{{- end }}
+{{- with (dig "limits" "memory" "" (.Values.sandbox.resources | default dict)) }}
+            - name: SESSION_SANDBOX_MEMORY_LIMIT
+              value: {{ . | quote }}
+{{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
@@ -279,6 +306,23 @@ spec:
               value: {{ printf "%s:%s" .Values.ironProxy.image.repository .Values.ironProxy.image.tag | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
+            # Resources for each per-sandbox iron-proxy container. Empty omitted.
+{{- with (dig "requests" "cpu" "" (.Values.ironProxy.resources | default dict)) }}
+            - name: KUBERNETES_IRON_PROXY_CPU_REQUEST
+              value: {{ . | quote }}
+{{- end }}
+{{- with (dig "requests" "memory" "" (.Values.ironProxy.resources | default dict)) }}
+            - name: KUBERNETES_IRON_PROXY_MEMORY_REQUEST
+              value: {{ . | quote }}
+{{- end }}
+{{- with (dig "limits" "cpu" "" (.Values.ironProxy.resources | default dict)) }}
+            - name: KUBERNETES_IRON_PROXY_CPU_LIMIT
+              value: {{ . | quote }}
+{{- end }}
+{{- with (dig "limits" "memory" "" (.Values.ironProxy.resources | default dict)) }}
+            - name: KUBERNETES_IRON_PROXY_MEMORY_LIMIT
+              value: {{ . | quote }}
+{{- end }}
             - name: KUBERNETES_FIREWALL_CA_SECRET_NAME
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME

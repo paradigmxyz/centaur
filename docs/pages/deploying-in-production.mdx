@@ -265,6 +265,58 @@ helm upgrade --install centaur contrib/chart \
   -f values.production.yaml
 ```
 
+### Schedule sandboxes onto a dedicated node pool
+
+Agent sandboxes are bursty, untrusted compute; the control plane (api-rs,
+console, the bots, Postgres) is long-lived and trusted. To let them scale on
+separate hardware, give the cluster a dedicated, independently-scaled node pool
+and pin the Pods `api-rs` spawns at runtime — each agent sandbox **and** its
+paired per-sandbox [iron-proxy](https://docs.iron.sh) — onto it with
+`sandbox.nodeSelector` and `sandbox.tolerations`:
+
+```yaml
+sandbox:
+  nodeSelector:
+    centaur.ai/pool: sandbox
+  tolerations:
+    - key: centaur.ai/sandbox
+      operator: Exists
+      effect: NoSchedule
+```
+
+Label and taint the pool so only sandboxes land there:
+
+```bash
+kubectl label  node <node> centaur.ai/pool=sandbox
+kubectl taint  node <node> centaur.ai/sandbox=:NoSchedule
+```
+
+This placement applies **only** to the runtime-spawned sandbox and iron-proxy
+Pods — the baseline workloads (api-rs, console, bots, Postgres) keep their own
+scheduling. Leaving the fields empty preserves default scheduling.
+
+### Sandbox and iron-proxy resources
+
+Set CPU/memory requests and limits for the spawned containers so they get
+governed resources instead of cluster defaults:
+
+```yaml
+sandbox:
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "2",  memory: 4Gi }
+
+ironProxy:
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+```
+
+`sandbox.resources` applies to the agent container in every sandbox; only
+`requests`/`limits` `cpu` and `memory` are wired through. `ironProxy.resources`
+applies to each per-sandbox iron-proxy container (empty leaves it without a
+resources block).
+
 ## 6. Verify the deployment
 
 Check health from inside the api-rs deployment first:

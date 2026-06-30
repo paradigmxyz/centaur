@@ -30,6 +30,16 @@ ironProxy:
     pgPort: 5432
   secretSource: onepassword
   secretTtl: 10m
+  # Resource requests/limits for each per-sandbox iron-proxy container that
+  # api-rs spawns alongside a sandbox. Empty leaves the container without a
+  # resources block (cluster default). Quantities are standard Kubernetes
+  # strings.
+  #   resources:
+  #     requests: { cpu: 50m, memory: 64Mi }
+  #     limits:   { cpu: 500m, memory: 256Mi }
+  resources:
+    requests: {}
+    limits: {}
 
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`
 # fresh on each node and a tools-bootstrap init container copies `subdir` into
@@ -194,6 +204,18 @@ sandbox:
     tag: latest
     pullPolicy: Always
   runtimeClassName: ""
+  # Node placement for the Pods api-rs spawns at runtime — each agent sandbox
+  # and its paired per-sandbox iron-proxy. Set these to pin agent workloads onto
+  # a dedicated node pool (e.g. a tainted, autoscaled "sandbox" pool) so they
+  # scale independently of the baseline control-plane Pods (api-rs, console,
+  # bots, postgres), which are unaffected. Empty preserves default scheduling.
+  #   nodeSelector: { centaur.ai/pool: sandbox }
+  #   tolerations:
+  #     - key: centaur.ai/sandbox
+  #       operator: Exists
+  #       effect: NoSchedule
+  nodeSelector: {}
+  tolerations: []
   reposPath: ""
   # How the in-sandbox harness authenticates upstream. Single source of truth:
   # the control plane reads it to register the matching iron-proxy credential
@@ -218,6 +240,10 @@ sandbox:
     enabled: false
     size: 10Gi
     storageClassName: ""
+  # Resource requests/limits applied to every agent sandbox container api-rs
+  # spawns. cpu/memory under requests/limits are wired into the spawner; other
+  # keys are ignored. Empty requests + limits leave the container without a
+  # resources block (cluster default).
   resources:
     limits: {}
     requests:

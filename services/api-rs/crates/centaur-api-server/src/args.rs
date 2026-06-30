@@ -20,8 +20,8 @@ use centaur_iron_proxy::{
     ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, harness_auth_fragment, infra_fragment,
 };
 use centaur_sandbox_agent_k8s::{
-    AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    OtlpEgressTarget, ToolSource, ToolsConfig,
+    AgentSandboxBackend, AgentSandboxConfig, ContainerResources, GitHubTokenRef,
+    IronControlSettings, IronProxyConfig, OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -509,6 +509,43 @@ struct SandboxArgs {
         value_delimiter = ','
     )]
     image_pull_secrets: Vec<String>,
+    #[arg(
+        long = "session-sandbox-node-selector",
+        alias = "kubernetes-sandbox-node-selector",
+        env = "SESSION_SANDBOX_NODE_SELECTOR"
+    )]
+    node_selector: Option<String>,
+    #[arg(
+        long = "session-sandbox-tolerations",
+        alias = "kubernetes-sandbox-tolerations",
+        env = "SESSION_SANDBOX_TOLERATIONS"
+    )]
+    tolerations: Option<String>,
+    #[arg(
+        id = "session_sandbox_cpu_request",
+        long = "session-sandbox-cpu-request",
+        env = "SESSION_SANDBOX_CPU_REQUEST"
+    )]
+    cpu_request: Option<String>,
+    #[arg(
+        id = "session_sandbox_memory_request",
+        long = "session-sandbox-memory-request",
+        env = "SESSION_SANDBOX_MEMORY_REQUEST"
+    )]
+    memory_request: Option<String>,
+    #[arg(
+        id = "session_sandbox_cpu_limit",
+        long = "session-sandbox-cpu-limit",
+        env = "SESSION_SANDBOX_CPU_LIMIT"
+    )]
+    cpu_limit: Option<String>,
+    /// Memory limit for the agent sandbox container (e.g. `4Gi`).
+    #[arg(
+        id = "session_sandbox_memory_limit",
+        long = "session-sandbox-memory-limit",
+        env = "SESSION_SANDBOX_MEMORY_LIMIT"
+    )]
+    memory_limit: Option<String>,
     #[arg(
         long = "session-sandbox-ready-timeout-secs",
         alias = "kubernetes-sandbox-ready-timeout-s",
@@ -1325,6 +1362,14 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
             .filter(|secret| !secret.is_empty())
             .map(str::to_owned)
             .collect();
+        config.node_selector = parse_sandbox_node_selector(args.node_selector.as_deref())?;
+        config.tolerations = parse_sandbox_tolerations(args.tolerations.as_deref())?;
+        config.sandbox_resources = ContainerResources {
+            requests_cpu: clean_optional_value(args.cpu_request.as_deref()),
+            requests_memory: clean_optional_value(args.memory_request.as_deref()),
+            limits_cpu: clean_optional_value(args.cpu_limit.as_deref()),
+            limits_memory: clean_optional_value(args.memory_limit.as_deref()),
+        };
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         config.iron_proxy = args.iron_proxy.to_config()?;
         if let Some(proxy) = config.iron_proxy.as_mut() {
@@ -1547,6 +1592,30 @@ struct IronProxyArgs {
     bootstrap_secret_name: Option<String>,
     #[arg(long = "kubernetes-api-pod-label-selector", env = "KUBERNETES_API_POD_LABEL_SELECTOR", value_parser = parse_label_selector_arg)]
     api_pod_label_selector: Option<BTreeMap<String, String>>,
+    #[arg(
+        id = "iron_proxy_cpu_request",
+        long = "kubernetes-iron-proxy-cpu-request",
+        env = "KUBERNETES_IRON_PROXY_CPU_REQUEST"
+    )]
+    cpu_request: Option<String>,
+    #[arg(
+        id = "iron_proxy_memory_request",
+        long = "kubernetes-iron-proxy-memory-request",
+        env = "KUBERNETES_IRON_PROXY_MEMORY_REQUEST"
+    )]
+    memory_request: Option<String>,
+    #[arg(
+        id = "iron_proxy_cpu_limit",
+        long = "kubernetes-iron-proxy-cpu-limit",
+        env = "KUBERNETES_IRON_PROXY_CPU_LIMIT"
+    )]
+    cpu_limit: Option<String>,
+    #[arg(
+        id = "iron_proxy_memory_limit",
+        long = "kubernetes-iron-proxy-memory-limit",
+        env = "KUBERNETES_IRON_PROXY_MEMORY_LIMIT"
+    )]
+    memory_limit: Option<String>,
 }
 
 impl IronProxyArgs {
@@ -1575,6 +1644,12 @@ impl IronProxyArgs {
         {
             config.api_pod_labels = labels.clone();
         }
+        config.resources = ContainerResources {
+            requests_cpu: clean_optional_value(self.cpu_request.as_deref()),
+            requests_memory: clean_optional_value(self.memory_request.as_deref()),
+            limits_cpu: clean_optional_value(self.cpu_limit.as_deref()),
+            limits_memory: clean_optional_value(self.memory_limit.as_deref()),
+        };
         Ok(Some(config))
     }
 
@@ -1905,6 +1980,28 @@ fn parse_otlp_egress_target(endpoint: &str) -> Option<OtlpEgressTarget> {
 
 fn clean_optional_value(value: Option<&str>) -> Option<String> {
     non_empty(value).map(ToOwned::to_owned)
+}
+
+fn parse_sandbox_node_selector(raw: Option<&str>) -> Result<BTreeMap<String, String>, ServerError> {
+    let Some(raw) = non_empty(raw) else {
+        return Ok(BTreeMap::new());
+    };
+    serde_json::from_str(raw).map_err(|err| {
+        ServerError::UnsupportedConfig(format!(
+            "SESSION_SANDBOX_NODE_SELECTOR must be a JSON object of string keys and values: {err}"
+        ))
+    })
+}
+
+fn parse_sandbox_tolerations(raw: Option<&str>) -> Result<Vec<Toleration>, ServerError> {
+    let Some(raw) = non_empty(raw) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(raw).map_err(|err| {
+        ServerError::UnsupportedConfig(format!(
+            "SESSION_SANDBOX_TOLERATIONS must be a JSON array of Kubernetes tolerations: {err}"
+        ))
+    })
 }
 
 fn upsert_spec_env(spec: &mut SandboxSpec, name: String, value: String) {
@@ -2337,6 +2434,89 @@ mod tests {
             env.iter()
                 .any(|(name, value)| name == "OPENROUTER_API_KEY" && value == "OPENROUTER_API_KEY")
         );
+    }
+
+    #[test]
+    fn sandbox_node_placement_and_resources_flow_into_config() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-node-selector",
+            r#"{"centaur.ai/pool":"sandbox"}"#,
+            "--session-sandbox-tolerations",
+            r#"[{"key":"centaur.ai/sandbox","operator":"Exists","effect":"NoSchedule"}]"#,
+            "--session-sandbox-cpu-request",
+            "250m",
+            "--session-sandbox-memory-limit",
+            "4Gi",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+        ])
+        .unwrap();
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        assert_eq!(
+            config
+                .node_selector
+                .get("centaur.ai/pool")
+                .map(String::as_str),
+            Some("sandbox")
+        );
+        assert_eq!(config.tolerations.len(), 1);
+        assert_eq!(
+            config.tolerations[0].key.as_deref(),
+            Some("centaur.ai/sandbox")
+        );
+        assert_eq!(
+            config.sandbox_resources.requests_cpu.as_deref(),
+            Some("250m")
+        );
+        assert_eq!(
+            config.sandbox_resources.limits_memory.as_deref(),
+            Some("4Gi")
+        );
+    }
+
+    #[test]
+    fn invalid_sandbox_node_selector_is_rejected() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-node-selector",
+            "not-json",
+        ])
+        .unwrap();
+        assert!(AgentSandboxConfig::try_from(&args.sandbox).is_err());
+    }
+
+    #[test]
+    fn invalid_sandbox_tolerations_are_rejected() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-tolerations",
+            r#"{"not":"an array"}"#,
+        ])
+        .unwrap();
+        assert!(AgentSandboxConfig::try_from(&args.sandbox).is_err());
+    }
+
+    #[test]
+    fn empty_sandbox_node_placement_leaves_defaults() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+        ])
+        .unwrap();
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        assert!(config.node_selector.is_empty());
+        assert!(config.tolerations.is_empty());
+        assert_eq!(config.sandbox_resources, ContainerResources::default());
     }
 
     #[test]

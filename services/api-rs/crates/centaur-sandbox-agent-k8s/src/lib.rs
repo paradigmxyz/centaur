@@ -15,7 +15,8 @@ use centaur_sandbox_core::{
     MountKind, ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
     SandboxResult, SandboxSpec, SandboxStatus,
 };
-use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, ResourceRequirements};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{
     AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams,
 };
@@ -27,7 +28,41 @@ use tokio::time::{Instant, sleep};
 
 pub use generated::agents_x_k8s_io as crd;
 pub use iron_proxy::IronProxyConfig;
+pub use k8s_openapi::api::core::v1::Toleration;
 pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ContainerResources {
+    pub requests_cpu: Option<String>,
+    pub requests_memory: Option<String>,
+    pub limits_cpu: Option<String>,
+    pub limits_memory: Option<String>,
+}
+
+pub(crate) fn container_resource_requirements(
+    res: &ContainerResources,
+) -> Option<ResourceRequirements> {
+    let quantities = |cpu: &Option<String>, memory: &Option<String>| {
+        let mut map = BTreeMap::new();
+        if let Some(cpu) = cpu {
+            map.insert("cpu".to_owned(), Quantity(cpu.clone()));
+        }
+        if let Some(memory) = memory {
+            map.insert("memory".to_owned(), Quantity(memory.clone()));
+        }
+        map
+    };
+    let requests = quantities(&res.requests_cpu, &res.requests_memory);
+    let limits = quantities(&res.limits_cpu, &res.limits_memory);
+    if requests.is_empty() && limits.is_empty() {
+        return None;
+    }
+    Some(ResourceRequirements {
+        requests: (!requests.is_empty()).then_some(requests),
+        limits: (!limits.is_empty()).then_some(limits),
+        ..Default::default()
+    })
+}
 
 pub mod generated;
 mod iron_proxy;
@@ -71,6 +106,18 @@ pub struct AgentSandboxConfig {
     /// destinations except the proxy/control plane, so without this rule the
     /// harness's usage/cost spans never leave the pod.
     pub otlp_egress: Option<OtlpEgressTarget>,
+    /// nodeSelector applied to every spawned sandbox Pod and its paired
+    /// per-sandbox iron-proxy Pod, so agent workloads land on a dedicated node
+    /// pool that scales independently of the baseline control-plane Pods. Empty
+    /// leaves default scheduling untouched.
+    pub node_selector: BTreeMap<String, String>,
+    /// Tolerations applied alongside `node_selector` so sandboxes can schedule
+    /// onto tainted agent nodes. Empty leaves default scheduling untouched.
+    pub tolerations: Vec<Toleration>,
+    /// Resource requests/limits for the agent sandbox container. Empty leaves
+    /// the container without a resources block (cluster default). A per-spawn
+    /// `SandboxSpec.resources` still wins when set.
+    pub sandbox_resources: ContainerResources,
     pub ready_timeout: Duration,
 }
 
@@ -112,6 +159,9 @@ impl AgentSandboxConfig {
             iron_control: None,
             tools: None,
             otlp_egress: None,
+            node_selector: BTreeMap::new(),
+            tolerations: Vec::new(),
+            sandbox_resources: ContainerResources::default(),
             ready_timeout: Duration::from_secs(60),
         }
     }
@@ -632,7 +682,15 @@ fn build_agent_sandbox(
         }),
     );
     insert_optional(&mut container, "workingDir", spec.working_dir.clone());
+    // Per-spawn spec resources are the fallback; the deployment-wide config
+    // resources (requests + limits) win when set, so sandboxes get governed
+    // resources without every caller having to populate the spec.
     insert_optional(&mut container, "resources", resources_json(spec));
+    insert_optional(
+        &mut container,
+        "resources",
+        container_resource_requirements(&config.sandbox_resources),
+    );
 
     let (mut volumes, mut volume_mounts) = mount_json(spec);
     let mut init_containers = Vec::new();
@@ -710,6 +768,16 @@ fn build_agent_sandbox(
                 .map(|name| json!({ "name": name }))
                 .collect::<Vec<_>>()
         }),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "nodeSelector",
+        (!config.node_selector.is_empty()).then(|| config.node_selector.clone()),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "tolerations",
+        (!config.tolerations.is_empty()).then(|| config.tolerations.clone()),
     );
 
     let mut agent_spec = json!({
@@ -903,6 +971,124 @@ mod tests {
         assert_eq!(container.stdin, Some(true));
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);
         assert!(container.resources.as_ref().unwrap().limits.is_some());
+    }
+
+    #[test]
+    fn applies_node_placement_and_resources_to_sandbox() {
+        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur");
+        config.node_selector =
+            BTreeMap::from([("centaur.ai/pool".to_owned(), "sandbox".to_owned())]);
+        config.tolerations = vec![Toleration {
+            key: Some("centaur.ai/sandbox".to_owned()),
+            operator: Some("Exists".to_owned()),
+            effect: Some("NoSchedule".to_owned()),
+            ..Default::default()
+        }];
+        config.sandbox_resources = ContainerResources {
+            requests_cpu: Some("250m".to_owned()),
+            requests_memory: Some("512Mi".to_owned()),
+            limits_cpu: Some("2".to_owned()),
+            limits_memory: Some("4Gi".to_owned()),
+        };
+
+        // from_value into the typed CRD succeeding proves these are real fields
+        // in the vendored Sandbox schema, not silently dropped extras.
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+        assert_eq!(
+            pod_spec
+                .node_selector
+                .as_ref()
+                .and_then(|sel| sel.get("centaur.ai/pool"))
+                .map(String::as_str),
+            Some("sandbox"),
+        );
+        let tolerations = pod_spec.tolerations.as_ref().unwrap();
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key.as_deref(), Some("centaur.ai/sandbox"));
+        assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
+
+        let resources = pod_spec.containers[0].resources.as_ref().unwrap();
+        let requests = resources.requests.as_ref().unwrap();
+        assert_eq!(
+            requests.get("cpu"),
+            Some(&IntOrString::String("250m".to_owned()))
+        );
+        assert_eq!(
+            requests.get("memory"),
+            Some(&IntOrString::String("512Mi".to_owned()))
+        );
+        let limits = resources.limits.as_ref().unwrap();
+        assert_eq!(
+            limits.get("cpu"),
+            Some(&IntOrString::String("2".to_owned()))
+        );
+        assert_eq!(
+            limits.get("memory"),
+            Some(&IntOrString::String("4Gi".to_owned()))
+        );
+    }
+
+    #[test]
+    fn omits_node_placement_and_resources_when_unset() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let config = AgentSandboxConfig::new("centaur");
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+        assert!(pod_spec.node_selector.is_none());
+        assert!(pod_spec.tolerations.is_none());
+        assert!(pod_spec.containers[0].resources.is_none());
+    }
+
+    #[test]
+    fn config_resources_override_spec_resources() {
+        use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+
+        // Per-spawn spec sets only limits; the deployment-wide config provides
+        // requests + limits and must win.
+        let spec = SandboxSpec::new("centaur-agent:latest")
+            .resources(ResourceLimits::new().cpu_millis(500));
+        let mut config = AgentSandboxConfig::new("centaur");
+        config.sandbox_resources = ContainerResources {
+            requests_cpu: Some("250m".to_owned()),
+            limits_cpu: Some("1".to_owned()),
+            ..ContainerResources::default()
+        };
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let resources = sandbox.spec.pod_template.spec.containers[0]
+            .resources
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            resources.requests.as_ref().unwrap().get("cpu"),
+            Some(&IntOrString::String("250m".to_owned()))
+        );
+        // Full override, not merge: the spec's 500m limit is replaced by 1.
+        assert_eq!(
+            resources.limits.as_ref().unwrap().get("cpu"),
+            Some(&IntOrString::String("1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn container_resource_requirements_empty_is_none() {
+        assert!(container_resource_requirements(&ContainerResources::default()).is_none());
+    }
+
+    #[test]
+    fn container_resource_requirements_builds_requests_and_limits() {
+        let res = ContainerResources {
+            requests_cpu: Some("100m".to_owned()),
+            limits_memory: Some("256Mi".to_owned()),
+            ..ContainerResources::default()
+        };
+        let req = container_resource_requirements(&res).unwrap();
+        assert_eq!(req.requests.as_ref().unwrap()["cpu"].0, "100m");
+        assert_eq!(req.limits.as_ref().unwrap()["memory"].0, "256Mi");
+        assert!(!req.requests.as_ref().unwrap().contains_key("memory"));
     }
 
     #[test]
