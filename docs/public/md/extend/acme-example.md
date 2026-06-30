@@ -220,11 +220,11 @@ Expected paths include:
 /home/agent/github/your-org/centaur-acme/.agents/skills
 ```
 
-You can also inspect the runtime payload for a thread:
+You can also inspect the api-rs session context for a thread:
 
 ```bash
-curl -s "$CENTAUR_API_URL/agent/runtime?key=$THREAD_KEY" \
-  -H "X-Api-Key: $RUNTIME_API_KEY" | jq '.overlay'
+THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
+curl -s "$CENTAUR_API_URL/api/session/${THREAD_PATH}" | jq
 ```
 
 ## What to change first
