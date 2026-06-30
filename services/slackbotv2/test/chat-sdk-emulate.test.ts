@@ -268,7 +268,22 @@ describe('slackbotv2', () => {
         thread_key: threadKey(parent.ts)
       })
     )
-    expect(JSON.stringify(firstInputLine)).toContain('data:image/png;base64')
+    expect(firstInputLine).toEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              attachment_type: 'image',
+              dataBase64: Buffer.from('captured-image').toString('base64'),
+              mimeType: 'image/png',
+              name: 'captured.png',
+              type: 'attachment'
+            })
+          ])
+        })
+      })
+    )
+    expect(JSON.stringify(firstInputLine)).not.toContain('data:image/png;base64')
 
     const followUpAppend = codexApi.appends[1]!
     expect(followUpAppend.threadKey).toBe(threadKey(parent.ts))
@@ -377,6 +392,60 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('summarize the thread so far')
   })
 
+  it('materializes Slack event files on root mentions without fetching thread replies', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this root screenshot`)
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-file-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> inspect this root screenshot`,
+          files: [
+            {
+              id: 'F-root-captured',
+              mimetype: 'image/png',
+              name: 'captured.png',
+              original_h: 600,
+              original_w: 800,
+              size: 16,
+              url_private: fileUrl
+            }
+          ]
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const appendedAttachment = codexApi.appends[0]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        attachment_type: 'image',
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'captured.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+
+    const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines[0]!))
+    expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
+    expect(executeInput).toContain('"attachment_type":"image"')
+  })
+
   it('fetches attachments from preceding Slack thread messages for a mid-thread mention', async () => {
     const parent = await postUserMessage('Root context before an attachment.')
     const priorReply = await postUserMessage('Screenshot is attached here.', parent.ts)
@@ -430,9 +499,10 @@ describe('slackbotv2', () => {
     const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
     expect(executeInput).toContain('Screenshot is attached here.')
     expect(executeInput).toContain('Earlier Slack thread attachment')
-    expect(executeInput).toContain(
-      `data:image/png;base64,${Buffer.from('captured-image').toString('base64')}`
-    )
+    expect(executeInput).toContain('"attachment_type":"image"')
+    expect(executeInput).toContain('"type":"attachment"')
+    expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
+    expect(executeInput).not.toContain('data:image/png;base64')
   })
 
   it('injects Slack requester identity and verified GitHub handle into Codex input', async () => {

@@ -9,12 +9,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from api.vm_metrics import (
+from workflows.etl_metrics import (
     record_etl_items_deleted,
     record_etl_items_enqueued,
     record_etl_items_failed,
     record_etl_items_seen,
     record_etl_items_upserted,
+    set_etl_backfill_job_age_seconds,
+    set_etl_backfill_jobs,
+)
+from workflows.slack.metrics import (
     observe_slack_retention_run_duration,
     record_slack_retention_api_rate_limited,
     record_slack_retention_api_request,
@@ -26,8 +30,6 @@ from api.vm_metrics import (
     record_slack_retention_run,
     set_slack_retention_last_failure_timestamp,
     set_slack_retention_watermark_lag_seconds,
-    set_etl_backfill_job_age_seconds,
-    set_etl_backfill_jobs,
 )
 from api.workflow_engine import WorkflowContext
 from workflows.slack.shared import (

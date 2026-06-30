@@ -6,7 +6,7 @@ description: Sync Slack channel history into Postgres, drain historical backfill
 # Slack ETL
 
 :::warning[Off by default in production]
-Slack ETL is disabled unless the API service has `SLACK_ETL_ENABLED=true`.
+Slack ETL is disabled unless Helm values set `apiRs.etl.slack.enabled=true`.
 Production deployments should enable it deliberately after choosing the Slack
 token, channel scope, exclusion patterns, and data boundary they want agents to
 use.
@@ -58,8 +58,17 @@ events.
 
 ## Enable the schedules
 
-Set `SLACK_ETL_ENABLED=true` on the API service. The other schedules default on
-once Slack ETL is enabled, but can be tuned independently.
+Set `apiRs.etl.slack.enabled=true` in Helm values. The chart renders the
+corresponding API and workflow-host env automatically; do not set
+`SESSION_SANDBOX_PASSTHROUGH_ENV` by hand for these ETLs. The other schedules
+default on once Slack ETL is enabled, but can be tuned independently.
+
+```yaml
+apiRs:
+  etl:
+    slack:
+      enabled: true
+```
 
 | Environment variable | Default | Effect |
 |----------------------|---------|--------|
@@ -244,7 +253,7 @@ setting alerts.
 | Symptom | What to check |
 |---------|---------------|
 | Schedules are missing | Confirm `WORKFLOW_DIRS` includes `/app/workflows` and the API restarted after the workflow files were deployed. |
-| Schedules exist but are disabled | Confirm `SLACK_ETL_ENABLED=true` is present in the API environment. |
+| Schedules exist but are disabled | Confirm Helm values set `apiRs.etl.slack.enabled=true` and the API pod was restarted. |
 | `slack_sync` skips with `no_public_channels` | Confirm the ETL user token can see the expected public channels. |
 | Channels are all skipped | Check `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` for broad globs. |
 | Checkpoints show `missing_scope` or `not_allowed_token_type` | Add the missing Slack OAuth scope or use the expected user-token class. |

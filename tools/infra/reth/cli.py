@@ -9,8 +9,7 @@ load_dotenv()
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="reth", help="Reth CLI for execution timings and performance metrics")
 

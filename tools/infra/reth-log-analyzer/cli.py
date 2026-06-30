@@ -10,8 +10,7 @@ from typing import Optional
 import json
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 from .client import _client
 

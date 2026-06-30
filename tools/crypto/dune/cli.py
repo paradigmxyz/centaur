@@ -7,8 +7,7 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.status import Status
-
-from centaur_sdk import Table
+from rich.table import Table
 
 from .client import DuneClient
 

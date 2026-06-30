@@ -308,6 +308,41 @@ apiRs:
   # in workflowAllowedNames as a comma/whitespace-separated string.
   workflowEnableMode: all
   workflowAllowedNames: ""
+  # Scheduled ETL workflow configuration. The chart renders these into api-rs
+  # env so workflow discovery sees the right schedules, then derives the
+  # workflow-host passthrough list from the same non-secret config.
+  etl:
+    slack:
+      enabled: false
+      syncIntervalSeconds: 3600
+      syncBackfillLookbackDays: 30
+      syncThreadLookbackDays: 3
+      excludedChannelPatterns: ""
+      attachments:
+        enabled: true
+        maxBytes: 10485760
+      backfill:
+        enabled: true
+        intervalSeconds: 600
+        channelBatchLimit: 50
+        channelPagesPerJob: 5
+      retention:
+        enabled: true
+        intervalMinutes: 60
+        etlDays: 0
+        dmDays: 0
+    linear:
+      enabled: false
+      syncIntervalSeconds: 14400
+    googleDrive:
+      enabled: false
+      syncIntervalSeconds: 14400
+    googleCalendar:
+      enabled: false
+      syncIntervalSeconds: 14400
+    companyContextDocuments:
+      enabled: true
+      intervalSeconds: 14400
   # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
   # the max lifetime. 0 disables that sweep. Interval must be >= 1.
   sandboxIdleStopTtlSecs: 10800 # 3 hours

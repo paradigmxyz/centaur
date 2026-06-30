@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from api.runtime_control import canonical_json
-from api.vm_metrics import (
+from workflows.slack.metrics import (
     observe_slack_archive_import_batch_duration,
     observe_slack_archive_import_duration,
     record_slack_archive_import_attachments,

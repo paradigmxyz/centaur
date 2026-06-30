@@ -2692,7 +2692,17 @@ async fn run_python_workflow_host_local(
             }
             Some(message_type) if message_type.starts_with("ctx.") => {
                 let response =
-                    handle_python_context_request(&message, &ctx, &session_runtime, &input).await;
+                    match handle_python_context_request(&message, &ctx, &session_runtime, &input)
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => {
+                            drop(stdin);
+                            let _ = child.start_kill();
+                            let _ = child.wait().await;
+                            return Err(error);
+                        }
+                    };
                 write_host_message(&mut stdin, &response).await?;
             }
             other => {
@@ -2824,7 +2834,7 @@ where
             }
             Some(message_type) if message_type.starts_with("ctx.") => {
                 let response =
-                    handle_python_context_request(&message, &ctx, &session_runtime, &input).await;
+                    handle_python_context_request(&message, &ctx, &session_runtime, &input).await?;
                 write_host_message(stdin, &response).await?;
             }
             other => {
@@ -2954,7 +2964,7 @@ async fn handle_python_context_request(
     ctx: &TaskContext,
     session_runtime: &SessionRuntime,
     input: &WorkflowTaskInput,
-) -> Value {
+) -> Result<Value, WorkflowRuntimeError> {
     let request_id = message
         .get("request_id")
         .and_then(Value::as_str)
@@ -3001,6 +3011,34 @@ async fn handle_python_context_request(
                 }
             }
         }
+        Some("ctx.sleep") => {
+            let step = message
+                .get("step")
+                .and_then(Value::as_str)
+                .unwrap_or("sleep");
+            match parse_python_duration_seconds(message) {
+                Ok(duration) => match ctx.sleep_for(step, duration).await {
+                    Ok(()) => Ok(json!({"slept": true})),
+                    Err(absurd::Error::Suspend) => return Err(WorkflowRuntimeError::Suspend),
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) => Err(error),
+            }
+        }
+        Some("ctx.sleep_until") => {
+            let step = message
+                .get("step")
+                .and_then(Value::as_str)
+                .unwrap_or("sleep_until");
+            match parse_python_wake_at(message) {
+                Ok(wake_at) => match ctx.sleep_until(step, wake_at).await {
+                    Ok(()) => Ok(json!({"slept": true})),
+                    Err(absurd::Error::Suspend) => return Err(WorkflowRuntimeError::Suspend),
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) => Err(error),
+            }
+        }
         Some("ctx.agent_turn") => {
             let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
             match run_python_agent_turn(session_runtime.clone(), ctx, input, args, &request_id)
@@ -3022,7 +3060,7 @@ async fn handle_python_context_request(
         }
         other => Err(format!("unsupported context request type {other:?}")),
     };
-    match result {
+    Ok(match result {
         Ok(value) => json!({
             "type": "ctx.response",
             "request_id": request_id,
@@ -3035,7 +3073,28 @@ async fn handle_python_context_request(
             "ok": false,
             "error": error,
         }),
+    })
+}
+
+fn parse_python_duration_seconds(message: &Value) -> Result<Duration, String> {
+    let seconds = message
+        .get("duration_seconds")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "ctx.sleep missing numeric duration_seconds".to_owned())?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err("ctx.sleep duration_seconds must be a finite non-negative number".to_owned());
     }
+    Ok(Duration::from_secs_f64(seconds))
+}
+
+fn parse_python_wake_at(message: &Value) -> Result<DateTime<Utc>, String> {
+    let raw = message
+        .get("wake_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ctx.sleep_until missing wake_at".to_owned())?;
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| format!("ctx.sleep_until invalid wake_at: {error}"))
 }
 
 async fn run_python_agent_turn(
@@ -3573,11 +3632,16 @@ fn workflow_run_from_row(row: sqlx::postgres::PgRow) -> Result<WorkflowRun, Work
 }
 
 fn absurd_error(error: WorkflowRuntimeError) -> absurd::Error {
-    absurd::Error::TaskFailed(Box::new(error))
+    match error {
+        WorkflowRuntimeError::Suspend => absurd::Error::Suspend,
+        other => absurd::Error::TaskFailed(Box::new(other)),
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum WorkflowRuntimeError {
+    #[error("workflow suspended")]
+    Suspend,
     /// The caller supplied an invalid request or workflow configuration.
     /// Maps to HTTP 400.
     #[error("{0}")]

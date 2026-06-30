@@ -20,22 +20,24 @@ def _load_retention():
     sys.modules["api"] = api_module
     sys.modules["api.runtime_control"] = runtime_control
 
-    vm_metrics = types.ModuleType("api.vm_metrics")
-    vm_metrics.metric_calls = []
+    etl_metrics = types.ModuleType("workflows.etl_metrics")
+    etl_metrics.metric_calls = []
 
     def record_etl_items_deleted(*args):
-        vm_metrics.metric_calls.append(args)
+        etl_metrics.metric_calls.append(args)
 
     for name in (
-        "record_slack_etl_rate_limit",
         "set_etl_active_scopes",
         "set_etl_failed_scopes",
         "set_etl_scope_sync_freshness_seconds",
     ):
-        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
-    vm_metrics.record_etl_items_deleted = record_etl_items_deleted
-    api_module.vm_metrics = vm_metrics
-    sys.modules["api.vm_metrics"] = vm_metrics
+        setattr(etl_metrics, name, lambda *_args, **_kwargs: None)
+    etl_metrics.record_etl_items_deleted = record_etl_items_deleted
+    sys.modules["workflows.etl_metrics"] = etl_metrics
+
+    slack_metrics = types.ModuleType("workflows.slack.metrics")
+    slack_metrics.record_slack_etl_rate_limit = lambda *_args, **_kwargs: None
+    sys.modules["workflows.slack.metrics"] = slack_metrics
 
     workflow_engine = types.ModuleType("api.workflow_engine")
 
@@ -142,7 +144,7 @@ def test_handler_records_metrics_for_non_dry_run():
 
     assert result["slack_etl"]["company_context_documents"] == 1
     assert result["slack_dm"]["conversations"] == 3
-    metric_calls = sys.modules["api.vm_metrics"].metric_calls
+    metric_calls = sys.modules["workflows.etl_metrics"].metric_calls
     assert ("slack", "retention", "company_context_documents", 1) in metric_calls
     assert ("slack", "retention", "backfill_jobs", 2) in metric_calls
     assert ("slack_dm", "retention", "conversations", 3) in metric_calls

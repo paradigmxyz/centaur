@@ -10,11 +10,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from api.runtime_control import canonical_json
-from api.vm_metrics import (
+from workflows.etl_metrics import (
     record_etl_items_enqueued,
     record_etl_items_failed,
     record_etl_items_seen,
     record_etl_items_upserted,
+)
+from workflows.slack.metrics import (
     observe_slack_retention_run_duration,
     record_slack_retention_api_rate_limited,
     record_slack_retention_api_request,

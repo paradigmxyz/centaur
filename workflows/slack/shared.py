@@ -16,12 +16,12 @@ from urllib import request as urllib_request
 
 from centaur_sdk import secret
 from api.runtime_control import canonical_json
-from api.vm_metrics import (
-    record_slack_etl_rate_limit,
+from workflows.etl_metrics import (
     set_etl_active_scopes,
     set_etl_failed_scopes,
     set_etl_scope_sync_freshness_seconds,
 )
+from workflows.slack.metrics import record_slack_etl_rate_limit
 
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 DEFAULT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024

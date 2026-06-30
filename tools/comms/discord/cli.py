@@ -8,8 +8,7 @@ load_dotenv()
 
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
-
-from centaur_sdk import Table  # noqa: E402
+from rich.table import Table  # noqa: E402
 
 app = typer.Typer(name="discord", help="Discord self-token CLI for AI agents")
 

@@ -9,8 +9,7 @@ from datetime import datetime
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="arkham", help="Arkham Intelligence CLI for blockchain analytics")
 console = Console()
