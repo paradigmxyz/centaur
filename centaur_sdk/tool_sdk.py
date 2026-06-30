@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import mimetypes
+import os
 import urllib.request
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -36,8 +37,23 @@ def reset_tool_context(token: Any) -> None:
     _tool_ctx.reset(token)
 
 
+def _context_from_env() -> ToolContext | None:
+    name = os.environ.get("CENTAUR_TOOL_NAME", "").strip()
+    thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip() or None
+    container_id = os.environ.get("CENTAUR_CONTAINER_ID", "").strip() or None
+    if not name and thread_key is None and container_id is None:
+        return None
+    return ToolContext(name=name or "tool", thread_key=thread_key, container_id=container_id)
+
+
 def get_tool_context() -> ToolContext:
-    return _tool_ctx.get()
+    try:
+        return _tool_ctx.get()
+    except LookupError:
+        ctx = _context_from_env()
+        if ctx is None:
+            raise
+        return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +68,9 @@ def secret(key: str, default: str | None = None) -> str:
     - **Pluggable backend**: Configured via ``centaur_sdk.backends.registry``
       (env vars, HTTP sidecar, etc.).
     """
-    # 1. Check tool context if available (server mode)
+    # 1. Check tool context if available (server mode or env-derived)
     try:
-        ctx = _tool_ctx.get()
+        ctx = get_tool_context()
         val = ctx.secrets.get(key)
         if val is not None:
             return val
@@ -73,14 +89,14 @@ def secret(key: str, default: str | None = None) -> str:
 
     ctx_name = ""
     with contextlib.suppress(LookupError):
-        ctx_name = f" for tool '{_tool_ctx.get().name}'"
+        ctx_name = f" for tool '{get_tool_context().name}'"
     raise KeyError(f"Missing secret '{key}'{ctx_name}")
 
 
 def current_thread_key() -> str:
     """Return the active thread key for a tool call."""
     try:
-        thread_key = _tool_ctx.get().thread_key
+        thread_key = get_tool_context().thread_key
     except LookupError:
         thread_key = None
     if not thread_key:

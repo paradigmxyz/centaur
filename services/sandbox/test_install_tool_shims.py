@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -310,6 +311,27 @@ class GeneratedShimTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("usage: centaur-tools", result.stderr)
+
+
+class CatalogRunnerTest(unittest.TestCase):
+    def _render_catalog(self) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = Path(tmp) / "centaur-tools"
+            index = Path(tmp) / ".centaur-tools.json"
+            index.write_text("[]")
+            install_tool_shims._write_catalog(catalog, index, "/opt/centaur")
+            return catalog.read_text()
+
+    def test_generated_catalog_is_valid_python(self) -> None:
+        ast.parse(self._render_catalog())
+
+    def test_call_runner_does_not_import_centaur_sdk(self) -> None:
+        content = self._render_catalog()
+        self.assertNotIn("centaur_sdk", content)
+        self.assertNotIn("set_tool_context", content)
+
+    def test_tool_env_exports_tool_name(self) -> None:
+        self.assertIn("CENTAUR_TOOL_NAME", self._render_catalog())
 
 
 if __name__ == "__main__":

@@ -448,11 +448,8 @@ import importlib
 import importlib.util
 import inspect
 import json
-import os
 from pathlib import Path
 import sys
-
-from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
 
 project_dir = Path(sys.argv[1])
 client_module = sys.argv[2]
@@ -480,33 +477,29 @@ if target is None and hasattr(module, "_client"):
 if target is None:
     raise RuntimeError(f"tool has no method {{method}}")
 
-ctx_token = None
-thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
-if thread_key:
-    ctx_token = set_tool_context(ToolContext(name=project_dir.name, thread_key=thread_key))
-try:
-    if isinstance(payload, dict):
-        result = target(**payload)
-    elif payload is None:
-        result = target()
-    else:
-        result = target(payload)
-    if inspect.isawaitable(result):
-        result = asyncio.run(result)
-finally:
-    if ctx_token is not None:
-        reset_tool_context(ctx_token)
+if isinstance(payload, dict):
+    result = target(**payload)
+elif payload is None:
+    result = target()
+else:
+    result = target(payload)
+if inspect.isawaitable(result):
+    result = asyncio.run(result)
 print(json.dumps(result, default=str, separators=(",", ":")))
 '''
 
 
-def tool_env():
+def tool_env(tool=None):
     env = os.environ.copy()
     if PYTHONPATH_VALUE:
         if env.get("PYTHONPATH"):
             env["PYTHONPATH"] = f"{{PYTHONPATH_VALUE}}:{{env['PYTHONPATH']}}"
         else:
             env["PYTHONPATH"] = PYTHONPATH_VALUE
+    if tool is not None:
+        name = Path(tool["project_dir"]).name
+        if name:
+            env["CENTAUR_TOOL_NAME"] = name
     return env
 
 
@@ -589,7 +582,7 @@ def run_tool(tool, args):
     try:
         returncode = subprocess.call(
             ["uvx", "--from", str(project_dir), tool["name"], *args],
-            env=tool_env(),
+            env=tool_env(tool),
         )
     except Exception:
         emit_tool_call_event(
@@ -634,7 +627,7 @@ def call_tool(tool, method, payload):
             check=False,
             text=True,
             capture_output=True,
-            env=tool_env(),
+            env=tool_env(tool),
         )
     except Exception:
         emit_tool_call_event(
