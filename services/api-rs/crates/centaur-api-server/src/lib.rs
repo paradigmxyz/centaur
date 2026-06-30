@@ -1,6 +1,8 @@
 pub mod client;
 mod error;
+mod mcp;
 mod routes;
+mod tool_discovery;
 pub mod types;
 
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
@@ -8,6 +10,10 @@ pub use error::ApiError;
 pub use routes::{
     AppState, build_router_with_app_state, build_router_with_runtime,
     build_router_with_session_and_workflow_runtime, build_router_with_session_runtime,
+};
+pub use tool_discovery::{
+    DiscoveredToolProxyFragment, ToolDiscoveryConfig, ToolDiscoveryError,
+    discover_persona_registry, discover_tool_proxy_fragment,
 };
 
 #[cfg(test)]
@@ -223,6 +229,35 @@ mod tests {
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_is_available_without_auth_before_runtime_is_ready() {
+        let app = build_router_with_app_state(AppState::unready());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::HOST, "centaur.local")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["result"]["serverInfo"]["name"], "centaur");
+        assert_eq!(
+            body["result"]["capabilities"]["tools"]["listChanged"],
+            false
+        );
     }
 
     #[tokio::test]

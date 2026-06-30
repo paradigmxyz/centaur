@@ -11,7 +11,10 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use centaur_api_server::SandboxRuntime;
+use centaur_api_server::{
+    DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig, discover_persona_registry,
+    discover_tool_proxy_fragment,
+};
 use centaur_iron_control::{
     IdentityInput, IronControlClient, IronControlError, RegisterError, RoleSpec, SessionRegistrar,
     register_role,
@@ -32,13 +35,7 @@ use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{error, info, warn};
 
-use crate::{
-    ServerError,
-    tool_discovery::{
-        DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_persona_registry,
-        discover_tool_proxy_fragment,
-    },
-};
+use crate::ServerError;
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 
