@@ -9,8 +9,7 @@ load_dotenv()
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="harmonic", help="Harmonic.AI API CLI for startup discovery and enrichment")
 

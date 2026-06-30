@@ -30,17 +30,3 @@ from centaur_sdk.backends import configure, DotEnvBackend
 
 configure(DotEnvBackend(".env"))
 ```
-
-### CLI tables
-
-```python
-from centaur_sdk import Table, render_text_table
-
-# Rich table (interactive)
-table = Table(title="Results")
-table.add_column("Name")
-table.add_row("example")
-
-# Plain-text table (for piping)
-print(render_text_table(["Name", "Value"], [["a", "1"], ["b", "2"]]))
-```

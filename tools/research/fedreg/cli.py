@@ -8,7 +8,7 @@ import json
 
 import typer
 from rich.console import Console
-from centaur_sdk.cli_tables import Table
+from rich.table import Table
 
 app = typer.Typer(name="fedreg", help="Federal Register CLI for regulatory data")
 

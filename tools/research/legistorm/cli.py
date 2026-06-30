@@ -4,8 +4,8 @@ import json
 from datetime import datetime, timedelta
 
 import typer
-from centaur_sdk.cli_tables import Table
 from rich.console import Console
+from rich.table import Table
 
 app = typer.Typer(name="legistorm", help="LegiStorm CLI for congressional data")
 
