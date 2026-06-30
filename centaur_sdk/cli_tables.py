@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from rich.table import Table as RichTable
+from typing import Any
 
-Table = RichTable
+
+def __getattr__(name: str) -> Any:
+    if name == "Table":
+        from rich.table import Table as RichTable
+
+        return RichTable
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def render_text_table(headers: list[str], rows: list[list[str]]) -> str:

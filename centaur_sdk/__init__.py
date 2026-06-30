@@ -8,7 +8,8 @@ Public API:
 
 from __future__ import annotations
 
-from centaur_sdk.cli_tables import Table, render_text_table
+from typing import Any
+
 from centaur_sdk.tool_sdk import (
     ToolContext,
     current_session_context,
@@ -36,3 +37,11 @@ __all__ = [
     "secret",
     "set_tool_context",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("Table", "render_text_table"):
+        from centaur_sdk import cli_tables
+
+        return getattr(cli_tables, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

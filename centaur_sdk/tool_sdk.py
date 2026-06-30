@@ -7,12 +7,12 @@ import contextlib
 import json
 import logging
 import mimetypes
-from urllib.parse import quote
 import urllib.request
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
