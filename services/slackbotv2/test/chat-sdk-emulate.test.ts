@@ -446,6 +446,231 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('"attachment_type":"image"')
   })
 
+  it('repairs delayed Slack Connect file-only messages as a follow-up turn', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> what's in this image`)
+    const mentionWaits: Promise<unknown>[] = []
+    const mentionResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-late-file-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> what's in this image`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    expect(mentionResponse.status).toBe(200)
+    await Promise.all(mentionWaits)
+
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    const fileTs = incrementSlackTs(mention.ts, 2)
+    const fileWaits: Promise<unknown>[] = []
+    const fileResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-late-file-message',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: fileTs,
+          text: '',
+          files: [
+            {
+              id: 'F-late-captured',
+              mimetype: 'image/png',
+              name: 'late-captured.png',
+              original_h: 600,
+              original_w: 800,
+              size: 16,
+              url_private: fileUrl
+            }
+          ]
+        }
+      }),
+      {},
+      waitUntilContext(fileWaits)
+    )
+
+    expect(fileResponse.status).toBe(200)
+    await Promise.all(fileWaits)
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.executes.map(execute => execute.threadKey)).toEqual([
+      threadKey(mention.ts),
+      threadKey(mention.ts)
+    ])
+    expect(codexApi.executes[1]!.body.idempotency_key).toBe(fileTs)
+    const appendedAttachment = codexApi.appends[1]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        attachment_type: 'image',
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'late-captured.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+    const secondExecuteInput = JSON.stringify(
+      JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!)
+    )
+    expect(secondExecuteInput).toContain('Late Slack file attachment')
+    expect(secondExecuteInput).toContain('"attachment_type":"image"')
+  })
+
+  it('hydrates Slack Connect check_file_info placeholders before late-file repair', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect the delayed file`)
+    const mentionWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-check-file-info-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> inspect the delayed file`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    await Promise.all(mentionWaits)
+
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    slackApi.setFileInfo('F-check-file-info', {
+      id: 'F-check-file-info',
+      mimetype: 'image/png',
+      name: 'hydrated.png',
+      original_h: 600,
+      original_w: 800,
+      size: 16,
+      url_private: fileUrl
+    })
+
+    const fileWaits: Promise<unknown>[] = []
+    const fileTs = incrementSlackTs(mention.ts, 2)
+    const fileResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-check-file-info-message',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: fileTs,
+          text: '',
+          files: [{ id: 'F-check-file-info', file_access: 'check_file_info' }]
+        }
+      }),
+      {},
+      waitUntilContext(fileWaits)
+    )
+
+    expect(fileResponse.status).toBe(200)
+    await Promise.all(fileWaits)
+
+    expect(slackApi.fileInfoRequestCount('F-check-file-info')).toBe(1)
+    expect(codexApi.executes).toHaveLength(2)
+    const appendedAttachment = codexApi.appends[1]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'hydrated.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+  })
+
+  it('ignores unmatched and duplicate delayed file-only messages', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> maybe an image follows`)
+    const mentionWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-dedupe-late-file-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> maybe an image follows`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    await Promise.all(mentionWaits)
+
+    const unrelatedWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-unmatched-late-file',
+        event: {
+          type: 'message',
+          user: USER_B_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: incrementSlackTs(mention.ts, 2),
+          text: '',
+          files: [{ id: 'F-unmatched', mimetype: 'image/png', name: 'unmatched.png' }]
+        }
+      }),
+      {},
+      waitUntilContext(unrelatedWaits)
+    )
+    await Promise.all(unrelatedWaits)
+    expect(codexApi.executes).toHaveLength(1)
+
+    const fileEvent = signedSlackEvent({
+      event_id: 'Ev-slackbotv2-duplicate-late-file',
+      event: {
+        type: 'message',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: incrementSlackTs(mention.ts, 3),
+        text: '',
+        files: [
+          {
+            id: 'F-dedupe-late',
+            mimetype: 'image/png',
+            name: 'dedupe.png',
+            url_private: `${slackApi.url}/files/captured.png`
+          }
+        ]
+      }
+    })
+    const firstWaits: Promise<unknown>[] = []
+    await bot.app.request('/api/webhooks/slack', fileEvent, {}, waitUntilContext(firstWaits))
+    await Promise.all(firstWaits)
+    const duplicateWaits: Promise<unknown>[] = []
+    await bot.app.request('/api/webhooks/slack', fileEvent, {}, waitUntilContext(duplicateWaits))
+    await Promise.all(duplicateWaits)
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.executes[1]!.body.idempotency_key).toBe(incrementSlackTs(mention.ts, 3))
+  })
+
   it('fetches attachments from preceding Slack thread messages for a mid-thread mention', async () => {
     const parent = await postUserMessage('Root context before an attachment.')
     const priorReply = await postUserMessage('Screenshot is attached here.', parent.ts)
@@ -4207,8 +4432,10 @@ type PatchedSlackApi = {
   failRepliesWithThreadNotFound(channel: string, ts: string): void
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
+  fileInfoRequestCount(fileId: string): number
   holdAssistantStatus(): () => void
   reset(): void
+  setFileInfo(fileId: string, file: Record<string, unknown>): void
   setUserProfile(userId: string, profile: Record<string, unknown>): void
   userProfileMethodRequestCount(userId: string, method: string): number
   userProfileRequestCount(userId: string): number
@@ -4245,6 +4472,8 @@ type SlackStreamTranscript = {
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
+  const fileInfo = new Map<string, Record<string, unknown>>()
+  const fileInfoRequests = new Map<string, number>()
   const threadMessageFiles = new Map<string, Record<string, unknown>[]>()
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
@@ -4266,6 +4495,8 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure,
       assistantStatusGate: () => assistantStatusGate,
       calls,
+      fileInfo,
+      fileInfoRequests,
       maxStreamStopChars,
       port,
       streams,
@@ -4297,6 +4528,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failStreamStopsLongerThan(maxChars: number) {
       maxStreamStopChars = maxChars
     },
+    fileInfoRequestCount(fileId: string) {
+      return fileInfoRequests.get(fileId) ?? 0
+    },
     holdAssistantStatus() {
       if (assistantStatusGate) throw new Error('assistant status is already held')
       assistantStatusGate = new Promise(resolve => {
@@ -4312,9 +4546,14 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure.error = ''
       threadNotFoundReplies.clear()
       threadMessageFiles.clear()
+      fileInfo.clear()
+      fileInfoRequests.clear()
       streams.clear()
       userProfiles.clear()
       userProfileRequests.clear()
+    },
+    setFileInfo(fileId: string, file: Record<string, unknown>) {
+      fileInfo.set(fileId, file)
     },
     setUserProfile(userId: string, profile: Record<string, unknown>) {
       userProfiles.set(userId, profile)
@@ -4336,6 +4575,8 @@ async function handlePatchedSlackRequest(
     appendFailure: { error: string; remaining: number }
     assistantStatusGate: () => Promise<void> | null
     calls: StreamCall[]
+    fileInfo: Map<string, Record<string, unknown>>
+    fileInfoRequests: Map<string, number>
     maxStreamStopChars: number | null
     port: number
     streams: Map<string, StreamRecord>
@@ -4413,6 +4654,19 @@ async function handlePatchedSlackRequest(
       return
     }
     await sendWebResponse(res, Response.json({ ok: true, profile }))
+    return
+  }
+  if (path === '/api/files.info') {
+    const body = await requestBody(request.clone())
+    const fileId = url.searchParams.get('file') ?? stringField(body.file)
+    input.fileInfoRequests.set(fileId, (input.fileInfoRequests.get(fileId) ?? 0) + 1)
+    const file = input.fileInfo.get(fileId)
+    await sendWebResponse(
+      res,
+      file
+        ? Response.json({ ok: true, file })
+        : Response.json({ ok: false, error: 'file_not_found' })
+    )
     return
   }
   if (path === '/api/chat.startStream') {
@@ -4894,6 +5148,11 @@ function streamKey(channel: string, ts: string): string {
 
 function slackReplyKey(channel: string, ts: string): string {
   return `${channel}:${ts}`
+}
+
+function incrementSlackTs(ts: string, seconds: number): string {
+  const [whole = '0', fractional = '000000'] = ts.split('.')
+  return `${Number.parseInt(whole, 10) + seconds}.${fractional.padEnd(6, '0').slice(0, 6)}`
 }
 
 function stringField(value: unknown): string {
