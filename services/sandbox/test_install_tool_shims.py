@@ -330,9 +330,6 @@ class CatalogRunnerTest(unittest.TestCase):
         self.assertNotIn("centaur_sdk", content)
         self.assertNotIn("set_tool_context", content)
 
-    def test_tool_env_exports_tool_name(self) -> None:
-        self.assertIn("CENTAUR_TOOL_NAME", self._render_catalog())
-
 
 if __name__ == "__main__":
     unittest.main()

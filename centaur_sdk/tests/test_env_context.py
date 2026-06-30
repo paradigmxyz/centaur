@@ -1,8 +1,10 @@
-"""The sandbox tool runner no longer sets ToolContext; the SDK derives it from env.
+"""The sandbox tool runner no longer binds a ToolContext; current_thread_key()
+falls back to the CENTAUR_THREAD_KEY the sandbox sets in the environment.
 
-When no context is set via ``set_tool_context`` (the in-process server path), the
-tool subprocess reads ``CENTAUR_TOOL_NAME`` / ``CENTAUR_THREAD_KEY`` from the
-environment so ``secret()`` / ``current_thread_key()`` keep working.
+get_tool_context() must keep raising LookupError when nothing is bound: tools
+use "a context is bound" as the signal that ctx.secrets is authoritative, so an
+env-derived context with empty secrets would wrongly suppress the secret()
+backend fallback (e.g. tools/research/websearch/client.py).
 """
 
 from __future__ import annotations
@@ -13,34 +15,33 @@ from centaur_sdk.tool_sdk import (
     ToolContext,
     current_thread_key,
     get_tool_context,
+    reset_tool_context,
     set_tool_context,
 )
 
 
-def test_get_tool_context_falls_back_to_env(monkeypatch: pytest.MonkeyPatch):
+def test_get_tool_context_raises_without_binding_even_with_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CENTAUR_TOOL_NAME", "cl_dapp_api")
     monkeypatch.setenv("CENTAUR_THREAD_KEY", "thread-123")
+    with pytest.raises(LookupError):
+        get_tool_context()
 
-    ctx = get_tool_context()
-    assert ctx.name == "cl_dapp_api"
-    assert ctx.thread_key == "thread-123"
+
+def test_current_thread_key_falls_back_to_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CENTAUR_THREAD_KEY", "thread-123")
     assert current_thread_key() == "thread-123"
 
 
-def test_set_context_takes_precedence_over_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("CENTAUR_TOOL_NAME", "from-env")
-    token = set_tool_context(ToolContext(name="from-context"))
+def test_bound_context_thread_key_takes_precedence_over_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CENTAUR_THREAD_KEY", "from-env")
+    token = set_tool_context(ToolContext(name="t", thread_key="from-context"))
     try:
-        assert get_tool_context().name == "from-context"
+        assert current_thread_key() == "from-context"
     finally:
-        from centaur_sdk.tool_sdk import reset_tool_context
-
         reset_tool_context(token)
 
 
-def test_no_context_and_no_env_raises(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("CENTAUR_TOOL_NAME", raising=False)
+def test_current_thread_key_raises_without_context_or_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("CENTAUR_THREAD_KEY", raising=False)
-    monkeypatch.delenv("CENTAUR_CONTAINER_ID", raising=False)
-    with pytest.raises(LookupError):
-        get_tool_context()
+    with pytest.raises(RuntimeError):
+        current_thread_key()

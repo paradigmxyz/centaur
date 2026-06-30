@@ -489,17 +489,13 @@ print(json.dumps(result, default=str, separators=(",", ":")))
 '''
 
 
-def tool_env(tool=None):
+def tool_env():
     env = os.environ.copy()
     if PYTHONPATH_VALUE:
         if env.get("PYTHONPATH"):
             env["PYTHONPATH"] = f"{{PYTHONPATH_VALUE}}:{{env['PYTHONPATH']}}"
         else:
             env["PYTHONPATH"] = PYTHONPATH_VALUE
-    if tool is not None:
-        name = Path(tool["project_dir"]).name
-        if name:
-            env["CENTAUR_TOOL_NAME"] = name
     return env
 
 
@@ -582,7 +578,7 @@ def run_tool(tool, args):
     try:
         returncode = subprocess.call(
             ["uvx", "--from", str(project_dir), tool["name"], *args],
-            env=tool_env(tool),
+            env=tool_env(),
         )
     except Exception:
         emit_tool_call_event(
@@ -627,7 +623,7 @@ def call_tool(tool, method, payload):
             check=False,
             text=True,
             capture_output=True,
-            env=tool_env(tool),
+            env=tool_env(),
         )
     except Exception:
         emit_tool_call_event(
