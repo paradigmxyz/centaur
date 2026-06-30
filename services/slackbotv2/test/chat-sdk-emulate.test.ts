@@ -343,6 +343,92 @@ describe('slackbotv2', () => {
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
+  it('keeps harness and model flags sticky within a Slack thread', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+
+    const parent = await postUserMessage('Thread default context.')
+    const firstMention = await postUserMessage(
+      `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 first pass`,
+      parent.ts
+    )
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-sticky-overrides-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 first pass`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+
+    const secondMention = await postUserMessage(
+      `<@${BOT_USER_ID}> continue without flags`,
+      parent.ts
+    )
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-sticky-overrides-second',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> continue without flags`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+
+    expect(codexApi.creates.map(create => create.body.harness_type)).toEqual([
+      'claudecode',
+      'claudecode'
+    ])
+    expect(codexApi.executes).toHaveLength(2)
+    const firstInput = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as Record<
+      string,
+      unknown
+    >
+    const secondInput = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!) as Record<
+      string,
+      unknown
+    >
+    expect(firstInput.model).toBe('claude-opus-4-8')
+    expect(secondInput.model).toBe('claude-opus-4-8')
+    expect(JSON.stringify(firstInput)).not.toContain('--claude')
+    expect(JSON.stringify(firstInput)).not.toContain('--model')
+    expect(JSON.stringify(secondInput)).toContain('continue without flags')
+
+    const state = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${threadKey(parent.ts)}`
+    )
+    expect(state).toEqual(
+      expect.objectContaining({
+        harnessType: 'claudecode',
+        model: 'claude-opus-4-8'
+      })
+    )
+  })
+
   it('includes all preceding Slack thread messages for a first mid-thread mention', async () => {
     const parent = await postUserMessage('Root context for the thread.')
     const firstReply = await postUserMessage('First preceding reply.', parent.ts)

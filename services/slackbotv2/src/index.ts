@@ -116,6 +116,49 @@ const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
 const POSTGRES_CONNECT_MAX_DELAY_MS = 10_000
 
+type StickyThreadOverrides = Pick<SlackbotV2ThreadState, 'harnessType' | 'model' | 'provider'>
+
+function stickyThreadOverrideUpdate(
+  overrides: StickyThreadOverrides
+): StickyThreadOverrides | undefined {
+  const update: StickyThreadOverrides = {}
+  if (overrides.harnessType) {
+    update.harnessType = overrides.harnessType
+    if (!overrides.model) update.model = null
+    if (!overrides.provider) update.provider = null
+  }
+  if (overrides.model) update.model = overrides.model
+  if (overrides.provider) {
+    update.provider = overrides.provider
+    if (!overrides.model) update.model = null
+  }
+  return Object.keys(update).length > 0 ? update : undefined
+}
+
+function resolveStickyThreadOverrides(
+  state: SlackbotV2ThreadState,
+  update: StickyThreadOverrides | undefined
+): {
+  harnessType?: string
+  model?: string
+  provider?: string
+} {
+  return {
+    harnessType: stickyOverrideValue(state, update, 'harnessType'),
+    model: stickyOverrideValue(state, update, 'model'),
+    provider: stickyOverrideValue(state, update, 'provider')
+  }
+}
+
+function stickyOverrideValue(
+  state: SlackbotV2ThreadState,
+  update: StickyThreadOverrides | undefined,
+  key: keyof StickyThreadOverrides
+): string | undefined {
+  if (update && Object.prototype.hasOwnProperty.call(update, key)) return stringValue(update[key])
+  return stringValue(state[key])
+}
+
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
   const logger = options.logger ?? noopLogger
@@ -569,6 +612,8 @@ async function syncThreadMessageToSession(
   const serializedMessage = await serializeMessage(message, input.options)
   const overrides = extractMessageOverrides(serializedMessage.text)
   setMessageText(serializedMessage, overrides.cleanedText)
+  const stickyOverridesUpdate = stickyThreadOverrideUpdate(overrides)
+  const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
     traceLog(input.options, 'slackbotv2_forward_overrides_parsed', trace, {
       harness_type: overrides.harnessType,
@@ -632,12 +677,12 @@ async function syncThreadMessageToSession(
     executeContextMessages:
       shouldStartExecution && shouldIncludeContext ? candidateMessages : undefined,
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
-    // A harness override only applies when this message starts an execution;
+    // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
-    harnessType: shouldStartExecution ? overrides.harnessType : undefined,
+    harnessType: shouldStartExecution ? effectiveOverrides.harnessType : undefined,
     messages: messagesToAppend,
-    model: overrides.model,
-    provider: overrides.provider,
+    model: shouldStartExecution ? effectiveOverrides.model : undefined,
+    provider: shouldStartExecution ? effectiveOverrides.provider : undefined,
     reasoning: overrides.reasoning,
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)
@@ -682,6 +727,7 @@ async function syncThreadMessageToSession(
     const latestMessageIds = new Set(latest.forwardedMessageIds ?? [])
     for (const item of messagesToAppend) latestMessageIds.add(item.id)
     await thread.setState({
+      ...(stickyOverridesUpdate ?? {}),
       forwardedMessageIds: Array.from(latestMessageIds).slice(-1000),
       historyForwarded: latest.historyForwarded || (shouldIncludeContext && !contextDegraded),
       lastEventId
@@ -710,6 +756,7 @@ async function syncThreadMessageToSession(
       })
     }
     await thread.setState({
+      ...(stickyOverridesUpdate ?? {}),
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
       lastEventId,

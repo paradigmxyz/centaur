@@ -157,7 +157,7 @@ type ForwardSessionApiCallbacks = {
   onMessagesAppended?(): Promise<void>
   /**
    * Fires when session creation restarted the thread onto a new harness
-   * (explicit --claude/--amp/--codex on a thread pinned to another harness).
+   * (sticky --claude/--amp/--codex state on a thread pinned to another harness).
    * Runs before append/execute, so the callback may set
    * `input.contextPreamble` to re-feed thread history to the fresh harness.
    */
@@ -703,8 +703,8 @@ async function createSession(
   message?: SlackbotV2ApiMessage
 ): Promise<CreateSessionOutcome> {
   const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
-  // An explicit --claude/--amp/--codex restarts a thread pinned to another
-  // harness; the implicit default never forces a switch.
+  // A sticky --claude/--amp/--codex selection restarts a thread pinned to
+  // another harness; the implicit default never forces a switch.
   const response = await postCreateSession(
     options,
     threadId,
