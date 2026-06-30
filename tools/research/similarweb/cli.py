@@ -5,8 +5,7 @@ from datetime import date, timedelta
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="similarweb", help="SimilarWeb CLI for web traffic and market intelligence")
 

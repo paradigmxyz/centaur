@@ -8,8 +8,7 @@ load_dotenv()
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="figma", help="Figma design system extraction")
 

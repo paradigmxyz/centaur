@@ -6,7 +6,7 @@ import re
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
-from centaur_sdk import Table
+from rich.table import Table
 
 load_dotenv()
 

@@ -9,8 +9,7 @@ import sys
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 from .client import AlliumClient, get_example_queries
 

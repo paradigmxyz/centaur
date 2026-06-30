@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 import typer
-from centaur_sdk import Table
 from rich.console import Console
+from rich.table import Table
 
 app = typer.Typer(name="gsuite", help="GSuite CLI for AI agents - Gmail, Calendar, Drive")
 

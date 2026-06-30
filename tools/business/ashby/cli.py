@@ -10,8 +10,8 @@ import sys
 from datetime import datetime, timezone
 
 import typer
-from centaur_sdk import Table
 from rich.console import Console
+from rich.table import Table
 
 app = typer.Typer(name="ashby", help="Ashby ATS CLI for AI agents")
 

@@ -9,8 +9,7 @@ from datetime import datetime  # noqa: E402
 
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
-
-from centaur_sdk import Table  # noqa: E402
+from rich.table import Table  # noqa: E402
 
 from .client import _client  # noqa: E402
 

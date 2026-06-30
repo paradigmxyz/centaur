@@ -8,8 +8,7 @@ import json
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="coinmetrics", help="Coin Metrics CLI for crypto market and on-chain data")
 
