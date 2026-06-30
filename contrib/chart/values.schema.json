@@ -215,6 +215,7 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "installCRDs": { "type": "boolean" },
         "namespace": {
           "type": "object",
           "properties": {

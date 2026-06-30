@@ -1,0 +1,14 @@
+{{- /*
+agent-sandbox CRDs, rendered as ordinary templated manifests so `helm upgrade`
+keeps them current. Helm's special `crds/` directory is install-only and is
+never re-applied on upgrade, which forced consumers to `kubectl apply` the CRDs
+out-of-band before every chart bump. The source documents carry
+`helm.sh/resource-policy: keep`, so a `helm uninstall` leaves them (and the
+sandboxes they back) in place. Set `installCRDs: false` to manage them yourself.
+*/ -}}
+{{- if .Values.installCRDs }}
+{{- range $path, $_ := .Files.Glob "crd-files/*.yaml" }}
+---
+{{ $.Files.Get $path }}
+{{- end }}
+{{- end }}

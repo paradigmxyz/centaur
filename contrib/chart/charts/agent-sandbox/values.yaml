@@ -1,3 +1,8 @@
+# installCRDs renders the agents.x-k8s.io CRDs as templated manifests so they
+# are applied on install AND kept current on `helm upgrade` (Helm's special
+# crds/ directory is install-only). Set to false to manage the CRDs yourself.
+installCRDs: true
+
 namespace:
   # create controls whether the namespace is created by this chart.
   create: true

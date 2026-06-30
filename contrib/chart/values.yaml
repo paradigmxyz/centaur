@@ -271,6 +271,9 @@ repoCache:
 # apiRs when apiRs.sandboxBackend is agent-k8s, which is the default.
 agentSandbox:
   enabled: true
+  # Manage the CRDs via templates so `helm upgrade` keeps them current; set
+  # false to manage them out-of-band.
+  installCRDs: true
   namespace:
     create: true
     name: agent-sandbox-system
