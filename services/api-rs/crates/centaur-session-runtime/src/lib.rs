@@ -58,6 +58,8 @@ const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_PIPE_MAX_REATTACH_ATTEMPTS: u32 = 3;
 const SESSION_PIPE_REATTACH_DELAY: Duration = Duration::from_millis(500);
+const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
+const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
@@ -89,6 +91,7 @@ pub struct SessionRuntime {
     session_title_in_flight: SessionTitleThreadSet,
     session_title_rerun_requested: SessionTitleThreadSet,
     capacity: Option<Arc<SandboxCapacityController>>,
+    stdout_owner_id: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,6 +296,7 @@ struct RuntimeContext {
     manager: Arc<SandboxManager>,
     sandbox_pipes: SessionPipeMap,
     execution_spans: ExecutionSpanRegistry,
+    stdout_owner_id: String,
 }
 
 struct SandboxCapacityController {
@@ -672,6 +676,7 @@ impl SessionRuntime {
             session_title_in_flight: Arc::new(DashSet::new()),
             session_title_rerun_requested: Arc::new(DashSet::new()),
             capacity: None,
+            stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
         }
     }
 
@@ -768,7 +773,36 @@ impl SessionRuntime {
             manager: self.sandbox_runtime.manager.clone(),
             sandbox_pipes: self.sandbox_pipes.clone(),
             execution_spans: self.execution_spans.clone(),
+            stdout_owner_id: self.stdout_owner_id.clone(),
         }
+    }
+
+    async fn claim_stdout_owner(&self, execution_id: &str) -> Result<(), SessionRuntimeError> {
+        let claimed = self
+            .store
+            .claim_stdout_owner(execution_id, &self.stdout_owner_id, STDOUT_OWNER_LEASE)
+            .await?;
+        if !claimed {
+            return Err(SessionRuntimeError::BadRequest(format!(
+                "execution {execution_id} stdout is owned by another control plane process"
+            )));
+        }
+        spawn_stdout_owner_renewer(self.context(), execution_id.to_owned());
+        Ok(())
+    }
+
+    async fn claim_expired_stdout_owner(
+        &self,
+        execution_id: &str,
+    ) -> Result<bool, SessionRuntimeError> {
+        let claimed = self
+            .store
+            .claim_expired_stdout_owner(execution_id, &self.stdout_owner_id, STDOUT_OWNER_LEASE)
+            .await?;
+        if claimed {
+            spawn_stdout_owner_renewer(self.context(), execution_id.to_owned());
+        }
+        Ok(claimed)
     }
 
     /// Attach an iron-control registrar so each new session upserts its
@@ -1421,6 +1455,11 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
+            if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
+                self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                    .await;
+                return Err(error);
+            }
             let execution_trace_span = info_span!(
                 "centaur.api_rs.session.execution",
                 component = COMPONENT_SESSION_RUNTIME,
@@ -1562,6 +1601,19 @@ impl SessionRuntime {
     ) {
         self.execution_spans.lock().await.remove(execution_id);
         let error_message = error.to_string();
+        let execution = match self
+            .store
+            .fail_execution_if_active_and_stdout_owner(
+                execution_id,
+                &self.stdout_owner_id,
+                &error_message,
+            )
+            .await
+        {
+            Ok(Some(execution)) => execution,
+            Ok(None) => return,
+            Err(_) => return,
+        };
         let _ = self
             .store
             .append_event(
@@ -1575,20 +1627,14 @@ impl SessionRuntime {
                 }),
             )
             .await;
-        if let Ok(execution) = self
-            .store
-            .fail_execution(execution_id, &error_message)
-            .await
-        {
-            record_finished_execution_metric(
-                &self.store,
-                thread_key,
-                &execution,
-                "failed",
-                Some(runtime_error_failure_class(error)),
-            )
-            .await;
-        }
+        record_finished_execution_metric(
+            &self.store,
+            thread_key,
+            &execution,
+            "failed",
+            Some(runtime_error_failure_class(error)),
+        )
+        .await;
     }
 
     async fn forward_messages_to_active_execution(
@@ -2472,6 +2518,26 @@ impl SessionRuntime {
             .await;
             return Ok(());
         }
+        if !self.claim_expired_stdout_owner(execution_id).await? {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_adoption_deferred",
+                thread_key = %thread_key,
+                execution_id,
+                sandbox_id,
+                "active stdout owner lease still exists; deferring adoption"
+            );
+            let _ = self
+                .store
+                .append_event(
+                    thread_key,
+                    Some(execution_id),
+                    "session.execution_adoption_deferred",
+                    json!({ "sandbox_id": sandbox_id, "reason": "stdout_owner_lease_active" }),
+                )
+                .await;
+            return Ok(());
+        }
 
         // The turn may have finished while no control plane was attached. An
         // attach stream cannot replay that output, but the backend's recorded
@@ -2531,7 +2597,13 @@ impl SessionRuntime {
         // No terminal in the recorded output: treat the turn as still in
         // flight. Re-attach the stdout pump and re-arm the remaining
         // max-duration budget so an adopted-but-silent turn stays bounded.
-        self.ensure_session_pipe(thread_key, sandbox_id).await?;
+        if let Err(error) = self.ensure_session_pipe(thread_key, sandbox_id).await {
+            let _ = self
+                .store
+                .release_stdout_owner(execution_id, &self.stdout_owner_id)
+                .await;
+            return Err(error);
+        }
         info!(
             component = COMPONENT_SESSION_RUNTIME,
             event = "execution_adopted",
@@ -2572,6 +2644,10 @@ impl SessionRuntime {
         sandbox_id: &str,
         detail: &str,
     ) {
+        let _ = self
+            .store
+            .claim_stdout_owner(execution_id, &self.stdout_owner_id, STDOUT_OWNER_LEASE)
+            .await;
         let error = format!("execution orphaned by control plane restart; {detail}");
         if let Err(record_error) = record_terminal_output(
             &self.context(),
@@ -3349,6 +3425,7 @@ async fn run_stdout_pump(
             "session stdout pump started"
         );
         let mut output_state = StdoutPumpState::default();
+        let mut lost_stdout_ownership = HashSet::new();
         let mut line_count = 0_u64;
         while let Some(line) = stdout.next().await {
             let line = match line {
@@ -3377,6 +3454,9 @@ async fn run_stdout_pump(
             else {
                 continue;
             };
+            if lost_stdout_ownership.contains(&output_execution_id) {
+                continue;
+            }
             let first_token_execution = active_execution
                 .as_ref()
                 .filter(|execution| {
@@ -3399,10 +3479,24 @@ async fn run_stdout_pump(
                 sandbox_id,
                 &output_execution_id,
             );
-            let output_event =
-                append_output_line(&ctx.store, &thread_key, Some(&output_execution_id), &line)
-                .instrument(output_span.clone())
-                .await?;
+            let Some(output_event) =
+                append_output_line(&ctx, &thread_key, &output_execution_id, &line)
+                    .instrument(output_span.clone())
+                    .await?
+            else {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_stdout_owner_lost",
+                    thread_key = %thread_key,
+                    execution_id = %output_execution_id,
+                    sandbox_id,
+                    stdout_owner_id = %ctx.stdout_owner_id,
+                    "stdout pump no longer owns execution output; suppressing further rows"
+                );
+                lost_stdout_ownership.insert(output_execution_id.clone());
+                output_state.forget(&output_execution_id);
+                continue;
+            };
             if let Some(execution) = first_token_execution {
                 record_first_token_observation(
                     &ctx,
@@ -4171,7 +4265,10 @@ async fn record_terminal_output(
             reason,
             result_text,
         } => {
-            let Some(execution) = ctx.store.complete_execution_if_active(execution_id).await?
+            let Some(execution) = ctx
+                .store
+                .complete_execution_if_active_and_stdout_owner(execution_id, &ctx.stdout_owner_id)
+                .await?
             else {
                 return Ok(());
             };
@@ -4199,7 +4296,11 @@ async fn record_terminal_output(
             failure_class = Some(terminal_failure_class(&error));
             let Some(execution) = ctx
                 .store
-                .fail_execution_if_active(execution_id, &error)
+                .fail_execution_if_active_and_stdout_owner(
+                    execution_id,
+                    &ctx.stdout_owner_id,
+                    &error,
+                )
                 .await?
             else {
                 return Ok(());
@@ -4278,6 +4379,33 @@ fn spawn_max_duration_failure(
     });
 }
 
+fn spawn_stdout_owner_renewer(ctx: RuntimeContext, execution_id: String) {
+    tokio::spawn(async move {
+        loop {
+            sleep(STDOUT_OWNER_RENEW_INTERVAL).await;
+            match ctx
+                .store
+                .renew_stdout_owner(&execution_id, &ctx.stdout_owner_id, STDOUT_OWNER_LEASE)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_stdout_owner_renew_failed",
+                        execution_id,
+                        stdout_owner_id = %ctx.stdout_owner_id,
+                        %error,
+                        "failed to renew stdout owner lease"
+                    );
+                    break;
+                }
+            }
+        }
+    });
+}
+
 async fn record_max_duration_failure(
     ctx: &RuntimeContext,
     thread_key: &ThreadKey,
@@ -4289,7 +4417,7 @@ async fn record_max_duration_failure(
     let error = format!("execution exceeded max_duration_ms={max_duration_ms}");
     let Some(execution) = ctx
         .store
-        .fail_execution_if_active(execution_id, &error)
+        .fail_execution_if_active_and_stdout_owner(execution_id, &ctx.stdout_owner_id, &error)
         .await?
     else {
         return Ok(());
@@ -5142,16 +5270,19 @@ fn steering_input_line(
 }
 
 async fn append_output_line(
-    store: &PgSessionStore,
+    ctx: &RuntimeContext,
     thread_key: &ThreadKey,
-    execution_id: Option<&str>,
+    execution_id: &str,
     line: &str,
-) -> Result<SessionEvent, SessionRuntimeError> {
+) -> Result<Option<SessionEvent>, SessionRuntimeError> {
     let safe_line = redact_sensitive_text(line);
-    let event = store
-        .append_event(
+    let event = ctx
+        .store
+        .append_event_if_stdout_owner(
             thread_key,
             execution_id,
+            &ctx.stdout_owner_id,
+            STDOUT_OWNER_LEASE,
             SESSION_OUTPUT_LINE_EVENT,
             Value::String(safe_line),
         )
