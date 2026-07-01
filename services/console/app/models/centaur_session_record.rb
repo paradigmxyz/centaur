@@ -19,6 +19,24 @@ class CentaurSessionRecord < ActiveRecord::Base
       end
 
       config = primary_database_configuration.deep_symbolize_keys
+
+      # When the primary config carries a :url (the common single-URL dev setup
+      # where database.yml's default block sets url: <DATABASE_URL>), Rails'
+      # UrlConfig merges the URL-derived keys OVER sibling hash keys. That means
+      # a database path inside the primary URL would override any :database we
+      # set here, silently pointing the session models at the console's own DB.
+      # Resolve the URL into discrete connection params and drop :url so the
+      # ai_v2 database name below is authoritative.
+      if config[:url].present?
+        resolved = ActiveRecord::DatabaseConfigurations::ConnectionUrlResolver
+          .new(config.delete(:url))
+          .to_hash
+          .symbolize_keys
+        config = config.merge(resolved)
+      else
+        config.delete(:url)
+      end
+
       config[:database] = session_database_name(config)
       config
     end
