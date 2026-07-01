@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, env, fs, path::PathBuf, sync::OnceLock, time::Duration};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json,
@@ -223,18 +229,31 @@ fn mcp_tool_method_names(tool: &DiscoveredTool) -> Vec<String> {
     methods.into_iter().collect()
 }
 
-fn mcp_tool_help_result(tool: &DiscoveredTool) -> Result<Value, ApiError> {
+fn mcp_tool_help_result(tool: &DiscoveredTool, methods: &[String]) -> Result<Value, ApiError> {
     Ok(mcp_text_result(
         serde_json::to_string_pretty(&json!({
             "tool": tool.name,
             "description": tool.description,
-            "methods": mcp_tool_method_names(tool),
+            "methods": methods,
         }))?,
         false,
     ))
 }
 
 fn mcp_centaur_tool_catalog() -> Result<Vec<DiscoveredTool>, ApiError> {
+    // Discovery scans the tool dirs and parses package metadata on every
+    // call; reuse a recent result so each MCP request does not redo that
+    // I/O while still picking up newly synced tools quickly. Tests point
+    // the discovery env vars at per-case temp dirs, so they read live.
+    const CATALOG_TTL: Duration = Duration::from_secs(10);
+    static CATALOG_CACHE: Mutex<Option<(Instant, Vec<DiscoveredTool>)>> = Mutex::new(None);
+    if !cfg!(test)
+        && let Some((discovered_at, tools)) = CATALOG_CACHE.lock().unwrap().as_ref()
+        && discovered_at.elapsed() < CATALOG_TTL
+    {
+        return Ok(tools.clone());
+    }
+
     let dirs = ToolDiscoveryConfig {
         tool_dirs: env::var("TOOL_DIRS").ok(),
         tools_path: env::var("TOOLS_PATH").ok().map(PathBuf::from),
@@ -244,9 +263,13 @@ fn mcp_centaur_tool_catalog() -> Result<Vec<DiscoveredTool>, ApiError> {
     }
     .resolve_tool_dirs()
     .map_err(|error| ApiError::Internal(error.to_string()))?;
-    Ok(discover_tool_catalog(&dirs)
+    let tools = discover_tool_catalog(&dirs)
         .map_err(|error| ApiError::Internal(error.to_string()))?
-        .tools)
+        .tools;
+    if !cfg!(test) {
+        *CATALOG_CACHE.lock().unwrap() = Some((Instant::now(), tools.clone()));
+    }
+    Ok(tools)
 }
 
 fn mcp_find_centaur_tool(name: &str) -> Result<Option<DiscoveredTool>, ApiError> {
@@ -291,9 +314,9 @@ async fn mcp_centaur_tool_result(
     let method = params.method.trim().to_owned();
     let methods = mcp_tool_method_names(&tool);
     if method == "help" {
-        return mcp_tool_help_result(&tool);
+        return mcp_tool_help_result(&tool, &methods);
     }
-    if methods.len() > 1 && !methods.iter().any(|candidate| candidate == &method) {
+    if !methods.iter().any(|candidate| candidate == &method) {
         return Ok(mcp_text_result(
             format!(
                 "centaur tool {} has no method {method}. Available methods: {}",
@@ -867,6 +890,34 @@ def search(query, limit=20):
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("has no method missing"));
         assert!(text.contains("search"));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn mcp_unknown_method_is_rejected_when_tool_has_no_public_methods() {
+        let temp = temp_dir("centaur-api-rs-mcp-no-methods");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("client.py"), "def _hidden():\n    return None\n").unwrap();
+
+        let result = mcp_centaur_tool_result(
+            &AppState::unready(),
+            &McpPrincipal {
+                principal_id: "mcp:test".to_owned(),
+                token_id: "mcp_tok_test".to_owned(),
+                name: "test".to_owned(),
+                scopes: vec!["mcp:tools".to_owned()],
+                expires_at: None,
+            },
+            test_tool(temp.clone()),
+            json!({"method": "missing", "arguments": {}}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("has no method missing"));
 
         let _ = fs::remove_dir_all(temp);
     }
