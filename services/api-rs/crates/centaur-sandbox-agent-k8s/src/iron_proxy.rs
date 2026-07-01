@@ -1374,6 +1374,10 @@ fn proxy_egress_rules(
             vec![network_port(control_target.port)],
         ));
     }
+    rules.push(egress_to(
+        vec![all_namespaces_peer()],
+        vec![network_port(PG_LISTENER_PORT)],
+    ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
     if observability_enabled {
         rules.push(egress_to(
@@ -1415,6 +1419,13 @@ fn namespace_peer(namespace: &str) -> NetworkPolicyPeer {
             "kubernetes.io/metadata.name".to_owned(),
             namespace.to_owned(),
         )]))),
+        ..Default::default()
+    }
+}
+
+fn all_namespaces_peer() -> NetworkPolicyPeer {
+    NetworkPolicyPeer {
+        namespace_selector: Some(LabelSelector::default()),
         ..Default::default()
     }
 }
@@ -1915,6 +1926,20 @@ mod tests {
         })
     }
 
+    fn rule_allows_all_namespaces_port(rule: &NetworkPolicyEgressRule, port: u16) -> bool {
+        rule.to.as_ref().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer.namespace_selector
+                    .as_ref()
+                    .is_some_and(|selector| selector.match_labels.is_none())
+            })
+        }) && rule.ports.as_ref().is_some_and(|ports| {
+            ports
+                .iter()
+                .any(|policy_port| policy_port.port == Some(IntOrString::Int(i32::from(port))))
+        })
+    }
+
     #[test]
     fn sandbox_egress_policy_allows_otlp_collector_when_configured() {
         let id = SandboxId::new("asbx-test");
@@ -2044,6 +2069,11 @@ mod tests {
             proxy_egress
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "centaur", 3000))
+        );
+        assert!(
+            proxy_egress
+                .iter()
+                .any(|rule| rule_allows_all_namespaces_port(rule, 5432))
         );
     }
 
