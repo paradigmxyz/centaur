@@ -54,9 +54,8 @@ The script exports recent `sessions`, `session_messages`,
 `session_executions`, terminal `session_events`, and referenced
 `slack_sync_users` rows with the source connection forced read-only, then
 imports them into the local `ai_v2` database used by the Console dev container.
-Start the local Console with
-`CENTAUR_CONSOLE_THREADS_READ_ONLY=1` while browsing mirrored production data;
-the Threads composer is disabled and POSTs are rejected server-side.
+The Threads surface is read-only: it does not render a composer and rejects
+POSTs server-side.
 
 ## First Boot
 

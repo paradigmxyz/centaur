@@ -1,29 +1,6 @@
 require "test_helper"
 
 class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
-  class RecordingClient
-    attr_reader :calls
-
-    def initialize
-      @calls = []
-    end
-
-    def create_session(**kwargs)
-      @calls << [ :create_session, kwargs ]
-      { "thread_key" => kwargs[:thread_key] }
-    end
-
-    def append_session_messages(**kwargs)
-      @calls << [ :append_session_messages, kwargs ]
-      { "ok" => true }
-    end
-
-    def execute_session(**kwargs)
-      @calls << [ :execute_session, kwargs ]
-      { "ok" => true, "execution_id" => "exe_test" }
-    end
-  end
-
   TranscriptMessage = Struct.new(:role, :parts_array, :metadata_hash, :created_at, keyword_init: true)
   TranscriptSession = Struct.new(:metadata_hash, :harness_type, keyword_init: true)
   TranscriptEvent = Struct.new(:event_type, :payload_hash, :created_at, keyword_init: true)
@@ -34,7 +11,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: @operator.email, password: "password123456" }
   end
 
-  test "threads page renders composer when session database is unavailable" do
+  test "threads page does not render composer when session database is unavailable" do
     with_recent_first_error do
       get console_threads_url
     end
@@ -45,24 +22,23 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select ".console-thread-detail-header .console-page-header"
     assert_select "a[aria-label=?]", "New thread", count: 0
     assert_select "span[aria-label=?]", "New thread disabled", count: 0
-    assert_select "textarea[name=prompt][placeholder=?]", "Start a new Centaur thread"
-    assert_select "select[name=harness_type] option[value=codex]"
+    assert_select "textarea[name=prompt]", count: 0
+    assert_select "select[name=harness_type]", count: 0
+    assert_select "form[action=?]", console_threads_path, count: 0
     assert_select "body", text: /No threads yet/
     assert_select "body", text: /Thread database is unavailable/
   end
 
-  test "blank prompt redirects without calling the session api" do
+  test "blank prompt is blocked by read only mode" do
     post console_threads_url, params: { prompt: " " }
 
     assert_redirected_to console_threads_path
-    assert_equal "Enter a message to start a thread.", flash[:alert]
+    assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
-  test "read only mode hides composer controls" do
-    with_threads_read_only do
-      with_recent_first_error do
-        get console_threads_url
-      end
+  test "threads page hides composer controls" do
+    with_recent_first_error do
+      get console_threads_url
     end
 
     assert_response :ok
@@ -73,17 +49,11 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[aria-label=?]", "New thread", count: 0
   end
 
-  test "read only mode blocks posts without calling the session api" do
-    client = RecordingClient.new
-    with_thread_client(client) do
-      with_threads_read_only do
-        post console_threads_url, params: { prompt: "Do not run this." }
-      end
-    end
+  test "posts are blocked without calling the session api" do
+    post console_threads_url, params: { prompt: "Do not run this." }
 
     assert_redirected_to console_threads_path
     assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
-    assert_empty client.calls
   end
 
   test "plain threads page redirects to first visible thread" do
@@ -414,71 +384,26 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_nil controller.send(:direct_selected_session, "console:someone-else")
   end
 
-  test "starting a thread creates appends and executes through the session api" do
-    client = RecordingClient.new
-    with_thread_client(client) do
-      post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "amp" }
-    end
+  test "starting a thread is blocked without calling the session api" do
+    post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "amp" }
 
-    assert_response :redirect
-    assert_match %r{/console/threads\?thread=console%3A}, response.location
-    assert_equal [ :create_session, :append_session_messages, :execute_session ],
-                 client.calls.map(&:first)
-
-    create_args = client.calls[0].last
-    assert_match(/\Aconsole:/, create_args[:thread_key])
-    assert_equal "amp", create_args[:harness_type]
-    assert_equal "console", create_args[:metadata][:platform]
-    assert_equal @operator.email, create_args[:metadata][:actor_email]
-
-    append_args = client.calls[1].last
-    assert_equal create_args[:thread_key], append_args[:thread_key]
-    message = append_args[:messages].first
-    assert_equal "user", message[:role]
-    assert_equal [ { type: "text", text: "Reply with PONG." } ], message[:parts]
-
-    execute_args = client.calls[2].last
-    assert_equal create_args[:thread_key], execute_args[:thread_key]
-    line = JSON.parse(execute_args[:input_lines].first)
-    assert_equal "user", line["type"]
-    assert_equal create_args[:thread_key], line["thread_key"]
-    assert_equal "Reply with PONG.", line.dig("message", "content", 0, "text")
+    assert_redirected_to console_threads_path
+    assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
-  test "posting to an existing thread appends and executes without creating a session" do
-    client = RecordingClient.new
-    with_thread_client(client) do
-      post console_threads_url,
-           params: {
-             prompt: "Continue from here.",
-             thread_key: "console:existing",
-             harness_type: "codex"
-           }
-    end
+  test "posting to an existing thread is blocked without calling the session api" do
+    post console_threads_url,
+         params: {
+           prompt: "Continue from here.",
+           thread_key: "console:existing",
+           harness_type: "codex"
+         }
 
     assert_redirected_to console_threads_path(thread: "console:existing")
-    assert_equal [ :append_session_messages, :execute_session ],
-                 client.calls.map(&:first)
-
-    append_args = client.calls[0].last
-    assert_equal "console:existing", append_args[:thread_key]
-    assert_equal "reply", append_args[:messages].first[:metadata][:action]
-
-    execute_args = client.calls[1].last
-    assert_equal "console:existing", execute_args[:thread_key]
-    line = JSON.parse(execute_args[:input_lines].first)
-    assert_equal "Continue from here.", line.dig("message", "content", 0, "text")
+    assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
   private
-
-  def with_thread_client(client)
-    original = Console::ThreadsController.client_factory
-    Console::ThreadsController.client_factory = -> { client }
-    yield
-  ensure
-    Console::ThreadsController.client_factory = original
-  end
 
   def with_recent_first_error
     singleton = class << CentaurSession; self; end
@@ -487,14 +412,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     yield
   ensure
     singleton.define_method(:recent_first, original)
-  end
-
-  def with_threads_read_only
-    original = Console::ThreadsController.read_only_override
-    Console::ThreadsController.read_only_override = true
-    yield
-  ensure
-    Console::ThreadsController.read_only_override = original
   end
 
   def threads_controller_for(user)
