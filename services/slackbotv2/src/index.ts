@@ -366,6 +366,7 @@ async function handleSlackMessageHandoff(
       trigger: input.trigger
     })
     await syncThreadMessageToSession(thread, message, {
+      initialAssistantStatusRequested: input.assistantStatusRequested,
       initialAssistantStatusVisible,
       mode: input.mode,
       options: input.options,
@@ -579,6 +580,7 @@ async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   input: {
+    initialAssistantStatusRequested?: boolean
     initialAssistantStatusVisible?: boolean
     mode: SlackbotV2MessageMode
     options: SlackbotV2Options
@@ -618,7 +620,8 @@ async function syncThreadMessageToSession(
     history_forwarded: state.historyForwarded === true
   })
   const assistantStatusVisible = shouldStartExecution
-    ? input.initialAssistantStatusVisible === true
+    ? input.initialAssistantStatusVisible === true ||
+      input.initialAssistantStatusRequested === true
     : false
   if (shouldStartExecution && input.initialAssistantStatusVisible === undefined) {
     backgroundWaitUntil(
