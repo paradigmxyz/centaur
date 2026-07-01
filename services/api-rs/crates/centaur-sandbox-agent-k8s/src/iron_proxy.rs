@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::IpAddr;
 use std::time::Duration;
 
 use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy};
@@ -84,6 +83,7 @@ pub struct IronProxyConfig {
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
+    pub control_plane_pod_labels: BTreeMap<String, String>,
 }
 
 impl IronProxyConfig {
@@ -106,6 +106,10 @@ impl IronProxyConfig {
             api_pod_labels: BTreeMap::from([(
                 "app.kubernetes.io/component".to_owned(),
                 "api".to_owned(),
+            )]),
+            control_plane_pod_labels: BTreeMap::from([(
+                "app.kubernetes.io/component".to_owned(),
+                "console".to_owned(),
             )]),
         }
     }
@@ -161,7 +165,7 @@ struct ProxySyncEnv {
 }
 
 struct ControlPlaneEgressTarget {
-    peer: Option<NetworkPolicyPeer>,
+    peer: NetworkPolicyPeer,
     port: u16,
 }
 
@@ -324,7 +328,11 @@ impl AgentSandboxBackend {
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy service", err))?;
-        let control_target = control_plane_egress_target(&sync.control_url, &self.config.namespace);
+        let control_target = control_plane_egress_target(
+            &sync.control_url,
+            &self.config.namespace,
+            iron_proxy.control_plane_pod_labels.clone(),
+        );
         for policy in build_iron_proxy_network_policies(
             id,
             resolved,
@@ -1378,17 +1386,12 @@ fn proxy_egress_rules(
     // (deduped) so a sync-mode proxy can reach the control plane. Public
     // upstreams are always constrained away from private/cluster CIDRs; any
     // intra-cluster destination must be added as an explicit rule below.
-    let mut upstream_ports = vec![network_port(443), network_port(5432)];
-    if control_target.peer.is_none() && control_target.port != 443 && control_target.port != 5432 {
-        upstream_ports.push(network_port(control_target.port));
-    }
+    let upstream_ports = vec![network_port(443), network_port(5432)];
     let mut rules = vec![dns_egress_rule()];
-    if let Some(peer) = &control_target.peer {
-        rules.push(egress_to(
-            vec![peer.clone()],
-            vec![network_port(control_target.port)],
-        ));
-    }
+    rules.push(egress_to(
+        vec![control_target.peer.clone()],
+        vec![network_port(control_target.port)],
+    ));
     rules.push(egress_to(
         vec![all_namespaces_peer()],
         vec![network_port(PG_LISTENER_PORT)],
@@ -1438,24 +1441,15 @@ fn namespace_peer(namespace: &str) -> NetworkPolicyPeer {
     }
 }
 
-fn namespace_service_peer(namespace: &str, service: &str) -> NetworkPolicyPeer {
+fn namespace_pod_peer(namespace: &str, labels: BTreeMap<String, String>) -> NetworkPolicyPeer {
     NetworkPolicyPeer {
         namespace_selector: Some(label_selector(BTreeMap::from([(
             "kubernetes.io/metadata.name".to_owned(),
             namespace.to_owned(),
         )]))),
-        pod_selector: control_plane_component_label(service).map(|component| {
-            label_selector(BTreeMap::from([(
-                "app.kubernetes.io/component".to_owned(),
-                component.to_owned(),
-            )]))
-        }),
+        pod_selector: Some(label_selector(labels)),
         ..Default::default()
     }
-}
-
-fn control_plane_component_label(service: &str) -> Option<&'static str> {
-    (service == "console" || service.ends_with("-console")).then_some("console")
 }
 
 fn all_namespaces_peer() -> NetworkPolicyPeer {
@@ -1493,44 +1487,12 @@ fn public_ipv4_peer() -> NetworkPolicyPeer {
 fn control_plane_egress_target(
     control_url: &str,
     default_namespace: &str,
+    control_plane_pod_labels: BTreeMap<String, String>,
 ) -> ControlPlaneEgressTarget {
-    let port = url_port(control_url).unwrap_or(443);
-    let peer = authority(control_url).and_then(|authority| {
-        let host_port = authority
-            .rsplit_once('@')
-            .map(|(_, host_port)| host_port)
-            .unwrap_or(authority);
-        let host = host_port
-            .split_once(':')
-            .map_or(host_port, |(host, _)| host);
-        if let Ok(addr) = host.parse::<IpAddr>() {
-            let cidr = match addr {
-                IpAddr::V4(addr) => format!("{addr}/32"),
-                IpAddr::V6(addr) => format!("{addr}/128"),
-            };
-            return Some(NetworkPolicyPeer {
-                ip_block: Some(IPBlock { cidr, except: None }),
-                ..Default::default()
-            });
-        }
-        let labels = host.split('.').collect::<Vec<_>>();
-        if labels.len() == 1 && !labels[0].is_empty() {
-            return Some(namespace_service_peer(default_namespace, labels[0]));
-        }
-        if labels.len() == 2 && !labels[0].is_empty() && !labels[1].is_empty() {
-            return Some(namespace_service_peer(labels[1], labels[0]));
-        }
-        (labels.len() >= 3 && labels[2] == "svc" && !labels[0].is_empty() && !labels[1].is_empty())
-            .then(|| namespace_service_peer(labels[1], labels[0]))
-    });
-    if peer.is_none() {
-        tracing::warn!(
-            control_url,
-            "iron-control URL did not map to an in-cluster NetworkPolicy peer; \
-             proxy sync will rely on public egress"
-        );
+    ControlPlaneEgressTarget {
+        peer: namespace_pod_peer(default_namespace, control_plane_pod_labels),
+        port: url_port(control_url).unwrap_or(443),
     }
-    ControlPlaneEgressTarget { peer, port }
 }
 
 fn proxy_env(
@@ -1953,7 +1915,13 @@ mod tests {
 
     fn control_target() -> ControlPlaneEgressTarget {
         ControlPlaneEgressTarget {
-            peer: Some(namespace_peer("centaur")),
+            peer: namespace_pod_peer(
+                "centaur",
+                BTreeMap::from([(
+                    "app.kubernetes.io/component".to_owned(),
+                    "console".to_owned(),
+                )]),
+            ),
             port: 3000,
         }
     }
@@ -1977,7 +1945,7 @@ mod tests {
     }
 
     fn control_peer(target: &ControlPlaneEgressTarget) -> &NetworkPolicyPeer {
-        target.peer.as_ref().expect("control target peer")
+        &target.peer
     }
 
     fn rule_allows_namespace_port(
@@ -2032,41 +2000,18 @@ mod tests {
     }
 
     #[test]
-    fn control_plane_egress_target_maps_in_cluster_service_hosts() {
-        let bare = control_plane_egress_target("http://console:3000", "centaur");
-        assert_eq!(bare.port, 3000);
-        assert_eq!(peer_namespace(control_peer(&bare)), Some("centaur"));
-        assert_eq!(peer_component(control_peer(&bare)), Some("console"));
-
-        let two_label = control_plane_egress_target("http://iron-control.centaur:3000", "default");
-        assert_eq!(two_label.port, 3000);
-        assert_eq!(peer_namespace(control_peer(&two_label)), Some("centaur"));
-        assert_eq!(peer_component(control_peer(&two_label)), None);
-
-        let fqdn = control_plane_egress_target(
-            "http://prod-centaur-console.centaur.svc.cluster.local:3000",
-            "default",
+    fn control_plane_egress_target_uses_configured_namespace_and_labels() {
+        let target = control_plane_egress_target(
+            "http://prod-centaur-console:3000",
+            "centaur",
+            BTreeMap::from([(
+                "app.kubernetes.io/component".to_owned(),
+                "console".to_owned(),
+            )]),
         );
-        assert_eq!(fqdn.port, 3000);
-        assert_eq!(peer_namespace(control_peer(&fqdn)), Some("centaur"));
-        assert_eq!(peer_component(control_peer(&fqdn)), Some("console"));
-    }
-
-    #[test]
-    fn control_plane_egress_target_maps_ip_and_external_hosts() {
-        let cluster_ip = control_plane_egress_target("http://10.96.12.34:3000", "centaur");
-        assert_eq!(cluster_ip.port, 3000);
-        assert_eq!(
-            control_peer(&cluster_ip)
-                .ip_block
-                .as_ref()
-                .map(|block| block.cidr.as_str()),
-            Some("10.96.12.34/32")
-        );
-
-        let external = control_plane_egress_target("https://control.example.com:8443", "centaur");
-        assert_eq!(external.port, 8443);
-        assert!(external.peer.is_none());
+        assert_eq!(target.port, 3000);
+        assert_eq!(peer_namespace(control_peer(&target)), Some("centaur"));
+        assert_eq!(peer_component(control_peer(&target)), Some("console"));
     }
 
     #[test]
