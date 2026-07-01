@@ -87,17 +87,19 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "plain threads page redirects to first visible thread" do
+    skip_unless_session_table
+
     thread_key = "console:auto-select-#{SecureRandom.hex(8)}"
     insert_console_session(thread_key)
 
     get console_threads_url
 
     assert_redirected_to console_threads_path(thread: thread_key)
-  ensure
-    delete_console_session(thread_key) if thread_key
   end
 
   test "direct selected thread appears in sidebar when outside owner filtered list" do
+    skip_unless_session_table
+
     thread_key = "slack:C0DIRECT:#{SecureRandom.hex(6)}"
     insert_slack_session(
       thread_key,
@@ -111,8 +113,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select ".console-thread-list a.console-thread-link-active[href=?]",
                   console_threads_path(thread: thread_key),
                   count: 1
-  ensure
-    delete_console_session(thread_key) if thread_key
   end
 
   test "slack assistant-role messages from the current Slack user render as user authored" do
@@ -525,6 +525,10 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     insert_session(thread_key, metadata)
   end
 
+  def skip_unless_session_table
+    skip("api-rs session tables are unavailable") unless CentaurSession.connection.data_source_exists?("sessions")
+  end
+
   def insert_slack_session(thread_key, slack_user_id:, slack_user_name:)
     metadata = {
       source: "slackbotv2",
@@ -549,11 +553,5 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         now() + interval '1 day'
       )
     SQL
-  end
-
-  def delete_console_session(thread_key)
-    CentaurSession.connection.execute(
-      "delete from sessions where thread_key = #{CentaurSession.connection.quote(thread_key)}"
-    )
   end
 end

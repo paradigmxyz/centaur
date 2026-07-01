@@ -178,15 +178,12 @@ class ApplicationController < ActionController::Base
 
   def local_auth_param_user
     users = User.active.order(admin: :desc, id: :asc)
-    email = local_auth_param_email ||
-      ConsoleEnv["LOCAL_AUTH_EMAIL"].presence ||
-      ConsoleEnv["INITIAL_USER_EMAIL"].presence
+    email = local_auth_param_email
+    return users.find_by(email: email) if email.present?
 
-    if email.present?
-      users.find_by(email: email.to_s.strip.downcase)
-    else
-      users.first
-    end
+    configured_email = ConsoleEnv["LOCAL_AUTH_EMAIL"].presence ||
+      ConsoleEnv["INITIAL_USER_EMAIL"].presence
+    users.find_by(email: configured_email.to_s.strip.downcase) || users.first
   end
 
   def local_auth_param_email
