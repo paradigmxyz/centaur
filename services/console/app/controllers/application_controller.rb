@@ -37,7 +37,15 @@ class ApplicationController < ActionController::Base
   # and pending controllers skip this so pending users can reach the holding page
   # and sign out.
   before_action :require_active_account
-  before_action :load_console_sidebar_threads
+  # The sidebar thread list is global chrome (rendered by layouts/console.html.erb
+  # on every page), but populating it issues several queries against the api-rs
+  # ai_v2 sessions DB, including an unindexed sequential scan + sort of the
+  # sessions table. Running that in every console request blocked pages that only
+  # render the empty-state list (principals, roles, secrets, ...). Instead we
+  # initialize the ivars empty here and load the real list lazily via a Turbo
+  # Frame (Console::ThreadsController#sidebar), so the cross-database work happens
+  # once, out of band, and never blocks the primary page render.
+  before_action :init_console_sidebar_threads
 
   CONSOLE_SIDEBAR_THREAD_LIMIT = 30
   CONSOLE_SIDEBAR_SLACK_PROVIDER = Oauth::Providers::Slack::KEY
@@ -78,6 +86,14 @@ class ApplicationController < ActionController::Base
   # Guard for admin-only controllers (e.g. user management). Not a global gate.
   def require_admin
     redirect_to root_path, alert: "That page is restricted to admins." unless current_user&.admin?
+  end
+
+  # Cheap default so every page renders the empty sidebar list without touching
+  # the sessions DB. The real list is filled in by #load_console_sidebar_threads,
+  # invoked only from the lazy sidebar Turbo Frame.
+  def init_console_sidebar_threads
+    @console_sidebar_threads = []
+    @console_sidebar_latest_messages = {}
   end
 
   def load_console_sidebar_threads
