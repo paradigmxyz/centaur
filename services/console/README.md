@@ -35,12 +35,10 @@ The Threads tab reads api-rs session rows from the Centaur API database. Set
 the console's primary database. In the Helm chart this is sourced from the
 shared `DATABASE_URL` secret key.
 
-For local-only browser sessions, `CENTAUR_CONSOLE_LOCAL_AUTH_PARAM_ENABLED=1`
-enables a passwordless query-param shortcut on localhost hosts. Use
-`http://localhost:3000/console/threads?auth=1` to sign in as
-`CENTAUR_CONSOLE_LOCAL_AUTH_EMAIL`, `CENTAUR_CONSOLE_INITIAL_USER_EMAIL`, or the
-first active admin user. Use `?auth=user@example.com` to choose a specific
-active user. The shortcut is ignored on non-local hosts.
+For local development, sign in through the normal login form at
+`http://localhost:3000/login` with the seeded initial user's
+`CENTAUR_CONSOLE_INITIAL_USER_EMAIL` / `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`
+credentials, the same as every other environment.
 
 To build the Threads UX against production-shaped data without connecting the
 Console to production, create a bounded local snapshot:
