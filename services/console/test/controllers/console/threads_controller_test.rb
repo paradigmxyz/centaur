@@ -322,6 +322,30 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Investigate rollout failure", controller.send(:thread_title, session)
   end
 
+  test "thread title tolerates a plain string summary without raising" do
+    controller = Console::ThreadsController.new
+    session = TranscriptSession.new(
+      metadata_hash: { "summary" => "a plain string" },
+      harness_type: "codex"
+    )
+
+    assert_nothing_raised do
+      assert_equal "a plain string", controller.send(:thread_title, session)
+    end
+  end
+
+  test "thread title tolerates a string thread metadata without raising" do
+    controller = Console::ThreadsController.new
+    session = TranscriptSession.new(
+      metadata_hash: { "thread" => "x", "subject" => "Fallback subject" },
+      harness_type: "codex"
+    )
+
+    assert_nothing_raised do
+      assert_equal "Fallback subject", controller.send(:thread_title, session)
+    end
+  end
+
   test "thread source and harness labels are display cased" do
     controller = Console::ThreadsController.new
     session = TranscriptSession.new(
