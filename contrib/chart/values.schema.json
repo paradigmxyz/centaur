@@ -244,6 +244,7 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "mcpPublicUrl": { "type": "string" },
         "etl": {
           "type": "object",
           "properties": {
@@ -332,6 +333,7 @@
     "slackbotv2": {
       "type": "object",
       "properties": {
+        "mcpPublicUrl": { "type": "string" },
         "metrics": {
           "type": "object",
           "properties": {

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, env, fs, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, env, fs, path::PathBuf, sync::OnceLock, time::Duration};
 
 use axum::{
     Json,
@@ -16,7 +16,7 @@ use time::OffsetDateTime;
 
 use crate::{
     ApiError,
-    routes::AppState,
+    routes::{AppState, header_value},
     tool_discovery::{DiscoveredTool, ToolDiscoveryConfig, discover_tool_catalog},
 };
 
@@ -400,6 +400,8 @@ struct McpJwtHeader {
 struct McpJwtClaims {
     aud: Value,
     exp: i64,
+    #[serde(default)]
+    iat: Option<i64>,
     iss: String,
     #[serde(default)]
     jti: Option<String>,
@@ -419,14 +421,11 @@ struct McpJwtClaims {
 }
 
 fn verify_mcp_jwt(token: &str, headers: &HeaderMap) -> Result<Option<McpPrincipal>, ApiError> {
-    let secret = env::var("CENTAUR_JWT_SIGNING_SECRET").map_err(|_| {
-        ApiError::ServiceUnavailable("CENTAUR_JWT_SIGNING_SECRET is not configured".to_owned())
-    })?;
-    if secret.trim().is_empty() {
-        return Err(ApiError::ServiceUnavailable(
-            "CENTAUR_JWT_SIGNING_SECRET is not configured".to_owned(),
-        ));
-    }
+    let secret = jwt_signing_secret()
+        .filter(|secret| !secret.trim().is_empty())
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable("CENTAUR_JWT_SIGNING_SECRET is not configured".to_owned())
+        })?;
 
     let parts = token.split('.').collect::<Vec<_>>();
     if parts.len() != 3 {
@@ -460,6 +459,9 @@ fn verify_mcp_jwt(token: &str, headers: &HeaderMap) -> Result<Option<McpPrincipa
         return Ok(None);
     }
     if claims.nbf.is_some_and(|nbf| nbf > now + 30) {
+        return Ok(None);
+    }
+    if claims.iat.is_some_and(|iat| iat > now + 30) {
         return Ok(None);
     }
     let Some(issuer) = mcp_authorization_server_url() else {
@@ -622,32 +624,58 @@ fn mcp_unauthorized(headers: &HeaderMap) -> Response {
 }
 
 fn mcp_resource_url(headers: &HeaderMap) -> String {
-    if let Ok(public_url) = env::var("CENTAUR_MCP_PUBLIC_URL") {
-        if let Some(url) = normalize_mcp_endpoint_url(&public_url) {
-            return url;
-        }
+    if let Some(url) = mcp_public_url_env()
+        .as_deref()
+        .and_then(normalize_mcp_endpoint_url)
+    {
+        return url;
     }
     format!("{}/mcp", request_base_url(headers))
 }
 
 fn mcp_authorization_server_url() -> Option<String> {
-    for env_name in ["CENTAUR_CONSOLE_PUBLIC_URL", "IRON_CONTROL_PUBLIC_URL"] {
-        if let Ok(url) = env::var(env_name) {
-            if let Some(url) = normalize_public_url(&url) {
-                return Some(url);
-            }
-        }
-    }
-    None
+    [console_public_url_env(), iron_control_public_url_env()]
+        .into_iter()
+        .find_map(|url| url.as_deref().and_then(normalize_public_url))
 }
 
 fn mcp_public_base_url(headers: &HeaderMap) -> String {
-    if let Ok(public_url) = env::var("CENTAUR_MCP_PUBLIC_URL") {
-        if let Some(url) = normalize_public_url(&public_url) {
-            return url.strip_suffix("/mcp").unwrap_or(&url).to_owned();
-        }
+    if let Some(url) = mcp_public_url_env()
+        .as_deref()
+        .and_then(normalize_public_url)
+    {
+        return url.strip_suffix("/mcp").unwrap_or(&url).to_owned();
     }
     request_base_url(headers)
+}
+
+// The variables below are static deployment configuration, so each is resolved
+// once per process. Tests mutate them per-case, so cfg!(test) reads live.
+fn static_env(cell: &'static OnceLock<Option<String>>, name: &str) -> Option<String> {
+    if cfg!(test) {
+        return env::var(name).ok();
+    }
+    cell.get_or_init(|| env::var(name).ok()).clone()
+}
+
+fn jwt_signing_secret() -> Option<String> {
+    static CELL: OnceLock<Option<String>> = OnceLock::new();
+    static_env(&CELL, "CENTAUR_JWT_SIGNING_SECRET")
+}
+
+fn mcp_public_url_env() -> Option<String> {
+    static CELL: OnceLock<Option<String>> = OnceLock::new();
+    static_env(&CELL, "CENTAUR_MCP_PUBLIC_URL")
+}
+
+fn console_public_url_env() -> Option<String> {
+    static CELL: OnceLock<Option<String>> = OnceLock::new();
+    static_env(&CELL, "CENTAUR_CONSOLE_PUBLIC_URL")
+}
+
+fn iron_control_public_url_env() -> Option<String> {
+    static CELL: OnceLock<Option<String>> = OnceLock::new();
+    static_env(&CELL, "IRON_CONTROL_PUBLIC_URL")
 }
 
 fn normalize_mcp_endpoint_url(value: &str) -> Option<String> {
@@ -672,13 +700,6 @@ fn request_base_url(headers: &HeaderMap) -> String {
         .or_else(|| header_value(headers, "Host"))
         .unwrap_or_else(|| "127.0.0.1:8080".to_owned());
     format!("{}://{}", proto.trim(), host.trim())
-}
-
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
 }
 
 /// Compare two byte strings in constant time (modulo length, which is not
@@ -898,6 +919,33 @@ def search(query, limit=20):
                 "iss": "http://localhost:3001",
                 "aud": "http://other.example/mcp",
                 "exp": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+                "principal_id": "prn_test",
+                "scope": "mcp:tools",
+            }),
+        );
+
+        assert!(
+            authenticate_mcp_bearer(&mcp_auth_headers(&token))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mcp_jwt_rejects_issued_at_in_the_future() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CENTAUR_JWT_SIGNING_SECRET", "test-secret"),
+            ("CENTAUR_MCP_PUBLIC_URL", "http://localhost:3000/mcp"),
+            ("CENTAUR_CONSOLE_PUBLIC_URL", "http://localhost:3001"),
+        ]);
+        let token = test_jwt(
+            "test-secret",
+            json!({
+                "iss": "http://localhost:3001",
+                "aud": "http://localhost:3000/mcp",
+                "exp": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+                "iat": OffsetDateTime::now_utc().unix_timestamp() + 600,
                 "principal_id": "prn_test",
                 "scope": "mcp:tools",
             }),

@@ -1,7 +1,8 @@
-require "digest"
-
 class McpOauthAuthorizationCode < ApplicationRecord
+  include HashedTokenLookup
+
   oid_prefix "moa"
+  token_hash_attribute :code_hash
 
   CODE_TTL = 10.minutes
   TOKEN_PREFIX = "mcpauth_".freeze
@@ -19,14 +20,6 @@ class McpOauthAuthorizationCode < ApplicationRecord
   validates :scopes, presence: true
 
   scope :usable, -> { where(consumed_at: nil).where("expires_at > ?", Time.current) }
-
-  def self.hash_token(value)
-    Digest::SHA256.hexdigest(value.to_s)
-  end
-
-  def self.find_usable(value)
-    usable.find_by(code_hash: hash_token(value))
-  end
 
   def consume!
     update!(consumed_at: Time.current)

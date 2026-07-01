@@ -1,7 +1,8 @@
-require "digest"
-
 class McpOauthRefreshToken < ApplicationRecord
+  include HashedTokenLookup
+
   oid_prefix "mor"
+  token_hash_attribute :token_hash
 
   DEFAULT_TTL = 90.days
   TOKEN_PREFIX = "mcprt_".freeze
@@ -19,14 +20,6 @@ class McpOauthRefreshToken < ApplicationRecord
   validates :scopes, presence: true
 
   scope :usable, -> { where(revoked_at: nil).where("expires_at > ?", Time.current) }
-
-  def self.hash_token(value)
-    Digest::SHA256.hexdigest(value.to_s)
-  end
-
-  def self.find_usable(value)
-    usable.find_by(token_hash: hash_token(value))
-  end
 
   def revoke!
     update!(revoked_at: Time.current)

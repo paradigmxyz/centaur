@@ -409,14 +409,13 @@ module Mcp
     end
 
     def resolve_requested_resource
-      resource = params[:resource].presence || configured_mcp_resource_url
-      return nil unless resource.present?
-      configured = configured_mcp_resource_url
-      if configured.present? &&
-          normalize_mcp_resource_url(resource) != normalize_mcp_resource_url(configured)
-        return nil
-      end
-      normalize_mcp_resource_url(resource)
+      # Fail closed: without a configured canonical resource URL we would
+      # otherwise mint tokens bound to any caller-supplied audience.
+      configured = normalize_mcp_resource_url(configured_mcp_resource_url)
+      return nil if configured.blank?
+      requested = params[:resource].presence
+      return nil if requested.present? && normalize_mcp_resource_url(requested) != configured
+      configured
     end
 
     def configured_mcp_resource_url

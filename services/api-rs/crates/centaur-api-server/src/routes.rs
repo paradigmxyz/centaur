@@ -2889,7 +2889,7 @@ fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
     }
 }
 
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
