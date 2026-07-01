@@ -445,6 +445,88 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
+  # Fix 6: the sidebar thread list is loaded lazily via a Turbo Frame so the
+  # cross-database sessions query never runs during the primary page render.
+  test "console pages defer the sidebar thread list to a lazy turbo frame" do
+    # A non-thread page must not run the sessions query during its render: if it
+    # did, load_console_sidebar_threads would be invoked. Track invocations and
+    # assert none happen while rendering the primary page.
+    original = ApplicationController.instance_method(:load_console_sidebar_threads)
+    Thread.current[:sidebar_loaded] = false
+    ApplicationController.send(:define_method, :load_console_sidebar_threads) do
+      Thread.current[:sidebar_loaded] = true
+      original.bind(self).call
+    end
+
+    begin
+      get console_principals_url
+
+      assert_response :ok
+      assert_not Thread.current[:sidebar_loaded],
+                 "primary page render must not load the sidebar thread list"
+      assert_select "turbo-frame#console_sidebar_threads[src=?]", console_sidebar_threads_path
+      assert_select "turbo-frame#console_sidebar_threads[loading=?]", "lazy"
+    ensure
+      ApplicationController.send(:define_method, :load_console_sidebar_threads, original)
+      Thread.current[:sidebar_loaded] = nil
+    end
+  end
+
+  test "sidebar action renders the empty thread list when the session DB is unavailable" do
+    with_recent_first_error do
+      get console_sidebar_threads_url
+    end
+
+    assert_response :ok
+    assert_select "turbo-frame#console_sidebar_threads"
+    assert_select ".console-thread-empty", text: /No recent threads/
+  end
+
+  # Fix 5: selected_messages must return the NEWEST MESSAGE_LIMIT messages, in
+  # oldest-first display order. A previous ascending order + limit returned the
+  # oldest N and dropped the newest for long threads.
+  test "selected_messages query fetches newest messages first with a limit" do
+    controller = Console::ThreadsController.new
+    controller.instance_variable_set(
+      :@selected_session,
+      SelectedSession.new(thread_key: "console:ordering")
+    )
+
+    relation = CentaurSessionMessage
+      .where(thread_key: "console:ordering")
+      .order(created_at: :desc, message_id: :desc)
+      .limit(Console::ThreadsController::MESSAGE_LIMIT)
+    sql = relation.to_sql
+
+    assert_match(/ORDER BY.*created_at.*DESC.*message_id.*DESC/i, sql)
+    assert_match(/LIMIT #{Console::ThreadsController::MESSAGE_LIMIT}\b/, sql)
+  end
+
+  test "selected_messages returns newest messages in ascending display order" do
+    skip_unless_session_table
+
+    thread_key = "console:transcript-order"
+    insert_console_session(thread_key)
+
+    limit = Console::ThreadsController::MESSAGE_LIMIT
+    total = limit + 5
+    total.times do |i|
+      insert_session_message(thread_key, index: i)
+    end
+
+    controller = Console::ThreadsController.new
+    controller.instance_variable_set(:@selected_session, SelectedSession.new(thread_key: thread_key))
+
+    messages = controller.send(:selected_messages)
+
+    assert_equal limit, messages.size
+    indices = messages.map { |m| m.message_id.split("-").last.to_i }
+    # Oldest-first display order over the newest `limit` messages: the earliest
+    # (index 0..4) are dropped, and what remains is ascending.
+    assert_equal (total - limit...total).to_a, indices
+    assert_equal indices, indices.sort
+  end
+
   private
 
   def with_recent_first_error
@@ -497,6 +579,22 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       slack_user_name: slack_user_name
     }.to_json
     insert_session(thread_key, metadata)
+  end
+
+  def insert_session_message(thread_key, index:)
+    connection = CentaurSession.connection
+    parts = [ { type: "text", text: "message #{index}" } ].to_json
+    connection.execute(<<~SQL.squish)
+      insert into session_messages (message_id, thread_key, role, parts, metadata, created_at)
+      values (
+        #{connection.quote("#{thread_key}-msg-#{index}")},
+        #{connection.quote(thread_key)},
+        'user',
+        #{connection.quote(parts)}::jsonb,
+        '{}'::jsonb,
+        now() + (#{index} * interval '1 second')
+      )
+    SQL
   end
 
   def insert_session(thread_key, metadata)
