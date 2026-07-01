@@ -486,11 +486,9 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   # oldest-first display order. A previous ascending order + limit returned the
   # oldest N and dropped the newest for long threads.
   test "selected_messages query fetches newest messages first with a limit" do
-    controller = Console::ThreadsController.new
-    controller.instance_variable_set(
-      :@selected_session,
-      SelectedSession.new(thread_key: "console:ordering")
-    )
+    # Building the SQL type-casts against the session_messages schema, which
+    # only exists where the api-rs session tables are present.
+    skip_unless_session_table
 
     relation = CentaurSessionMessage
       .where(thread_key: "console:ordering")

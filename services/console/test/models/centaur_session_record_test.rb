@@ -10,9 +10,9 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
   # session_database_configuration is environment-sensitive and the class body
   # calls establish_connection with its result the first time the constant is
   # referenced. Force that (clean, real-test-env) load here, at file-require
-  # time, so the tests below can stub Rails.env / the primary config to exercise
-  # the production path WITHOUT repointing the process-wide session connection
-  # at a database that does not exist in CI (ai_v2).
+  # time, so the tests below can override the primary config / database name
+  # WITHOUT repointing the process-wide session connection at a database that
+  # does not exist in CI (ai_v2).
   CentaurSessionRecord
 
   def build_config
@@ -34,14 +34,15 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
     originals.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 
-  def stub_primary(config)
-    CentaurSessionRecord.stub(:primary_database_configuration, config) { yield }
-  end
-
-  # Stub the production (non-test) branch of session_database_name without
-  # mutating ENV, so building the config here never rebinds the live connection.
-  def as_production
-    Rails.env.stub(:test?, false) { yield }
+  # Override the (private) primary-config source without touching the live
+  # connection, matching the define_singleton_method pattern used elsewhere in
+  # the suite.
+  def with_primary(config)
+    original = CentaurSessionRecord.method(:primary_database_configuration)
+    CentaurSessionRecord.define_singleton_method(:primary_database_configuration) { config }
+    yield
+  ensure
+    CentaurSessionRecord.define_singleton_method(:primary_database_configuration, original)
   end
 
   test "fallback targets ai_v2 even when the primary url has another database path" do
@@ -52,8 +53,8 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
       "url" => "postgres://console_user:secret@db-host:6543/iron_control_development"
     }
 
-    stub_primary(primary) do
-      as_production do
+    with_primary(primary) do
+      with_env("CENTAUR_DATABASE_NAME" => "ai_v2") do
         config = build_config
 
         assert_equal "ai_v2", config[:database]
@@ -74,8 +75,8 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
       "database" => "iron_control_development"
     }
 
-    stub_primary(primary) do
-      as_production do
+    with_primary(primary) do
+      with_env("CENTAUR_DATABASE_NAME" => "ai_v2") do
         config = build_config
 
         assert_equal "ai_v2", config[:database]
@@ -94,13 +95,16 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
       "database" => "iron_control_test"
     }
 
-    stub_primary(primary) do
-      # Real (test) env: the session connection must resolve to the console's
-      # own test database, which exists in CI, so session-table-dependent tests
-      # can skip rather than error on a missing ai_v2 database.
-      config = build_config
+    with_primary(primary) do
+      with_env("CENTAUR_DATABASE_NAME" => nil, "CENTAUR_CONSOLE_CENTAUR_DATABASE_NAME" => nil) do
+        # No explicit name override: in the test environment the session
+        # connection must resolve to the console's own test database, which
+        # exists in CI, so session-table-dependent tests can skip rather than
+        # error on a missing ai_v2 database.
+        config = build_config
 
-      assert_equal "iron_control_test", config[:database]
+        assert_equal "iron_control_test", config[:database]
+      end
     end
   end
 
