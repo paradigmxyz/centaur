@@ -27,6 +27,9 @@ Rails.application.routes.draw do
   get "console/principals", to: "console#principals", as: :console_principals
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
+    resources :threads, only: %i[index create]
+  end
+  namespace :console do
     resources :roles, only: %i[index show new create edit update] do
       member do
         post "grants", to: "roles#grant_secret", as: :grant_secret

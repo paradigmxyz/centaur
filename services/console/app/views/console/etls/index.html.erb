@@ -1,15 +1,16 @@
-<% content_for :title, "ETLs · Centaur Console" %>
+<% content_for :title, "Data Sync · Centaur Console" %>
 
-<div class="mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-  <div>
-    <h1 class="page-title">ETLs</h1>
-    <p class="page-subtitle">Upload Slack public-channel archive exports, start imports, and track ingestion status.</p>
-  </div>
-  <div class="text-xs text-zinc-500">
+<% sync_meta = capture do %>
+  <div class="console-page-meta">
     <span class="text-zinc-400"><%= pluralize(@archive_imports.size, "archive import") %></span>
     <span class="text-zinc-600">shown</span>
   </div>
-</div>
+<% end %>
+
+<%= render "console/page_header",
+           title: "Data Sync",
+           subtitle: "Upload Slack public-channel archive exports, start imports, and track ingestion status.",
+           actions: sync_meta %>
 
 <section class="mb-8 form-section"
          data-controller="slack-archive-upload"

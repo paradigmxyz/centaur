@@ -1,9 +1,10 @@
 <% content_for :title, "Users · Centaur Console" %>
 
-<div class="mb-8">
-  <h1 class="page-title">Users</h1>
-  <p class="page-subtitle">Operator accounts. Approve pending sign-ins, promote admins, or disable access.</p>
-</div>
+<%= render "console/control_tabs" %>
+
+<%= render "console/page_header",
+           title: "Users",
+           subtitle: "Operator accounts. Approve pending sign-ins, promote admins, or disable access." %>
 
 <% if @pending.any? %>
   <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-amber-300/80"><%= pluralize(@pending.size, "pending approval") %></h2>

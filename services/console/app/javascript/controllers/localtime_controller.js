@@ -6,8 +6,10 @@ import { Controller } from "@hotwired/stimulus"
 //
 //   data-localtime-relative-value="true"  -> "5 minutes ago", with the absolute
 //                                            local time as a hover tooltip.
+//   data-localtime-format-value="compact" -> "4d", with the absolute local time
+//                                            as a hover tooltip.
 export default class extends Controller {
-  static values = { datetime: String, relative: Boolean }
+  static values = { datetime: String, format: String, relative: Boolean }
 
   connect() {
     const date = new Date(this.datetimeValue)
@@ -15,11 +17,15 @@ export default class extends Controller {
 
     const absolute = this.formatAbsolute(date)
 
-    if (this.relativeValue) {
+    if (this.formatValue === "compact") {
+      this.element.textContent = this.compactRelativeFrom(date)
+      this.element.title = absolute
+    } else if (this.relativeValue) {
       this.element.textContent = this.relativeFrom(date)
       this.element.title = absolute
     } else {
       this.element.textContent = absolute
+      this.element.title = absolute
     }
   }
 
@@ -42,5 +48,17 @@ export default class extends Controller {
       if (Math.abs(seconds) >= secs) return rtf.format(Math.round(seconds / secs), unit)
     }
     return rtf.format(seconds, "second")
+  }
+
+  compactRelativeFrom(date) {
+    const seconds = Math.abs(Math.round((Date.now() - date.getTime()) / 1000))
+    const units = [
+      ["y", 31536000], ["mo", 2592000], ["w", 604800],
+      ["d", 86400], ["h", 3600], ["m", 60]
+    ]
+    for (const [unit, secs] of units) {
+      if (seconds >= secs) return `${Math.max(1, Math.round(seconds / secs))}${unit}`
+    }
+    return "now"
   }
 }

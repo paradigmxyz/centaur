@@ -5,7 +5,71 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta charset="utf-8">
     <%= csrf_meta_tags %>
-    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icon-dark.svg" type="image/svg+xml" data-console-favicon>
+    <script>
+      (() => {
+        const storageKey = "centaur-console-theme";
+        const storageSourceKey = "centaur-console-theme-source";
+        const validTheme = (theme) => theme === "light" || theme === "dark";
+        const systemTheme = () => {
+          if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) {
+            return "light";
+          }
+          return "dark";
+        };
+        const storedTheme = () => {
+          try {
+            const theme = localStorage.getItem(storageKey);
+            const source = localStorage.getItem(storageSourceKey);
+            return source === "manual" && validTheme(theme) ? theme : null;
+          } catch (_error) {
+            return null;
+          }
+        };
+        const resolveTheme = () => storedTheme() || systemTheme();
+        const applyTheme = (theme) => {
+          const nextTheme = validTheme(theme) ? theme : systemTheme();
+          document.documentElement.dataset.consoleTheme = nextTheme;
+
+          const favicon = document.querySelector("[data-console-favicon]");
+          if (favicon) {
+            favicon.setAttribute("href", nextTheme === "light" ? "/icon-light.svg" : "/icon-dark.svg");
+          }
+
+          return nextTheme;
+        };
+
+        window.ConsoleTheme = {
+          apply: applyTheme,
+          persist: (theme) => {
+            const nextTheme = applyTheme(theme);
+            try {
+              localStorage.setItem(storageKey, nextTheme);
+              localStorage.setItem(storageSourceKey, "manual");
+            } catch (_error) {
+              // Theme still applies for this page load when storage is unavailable.
+            }
+            return nextTheme;
+          },
+          resolve: resolveTheme
+        };
+
+        applyTheme(resolveTheme());
+
+        if (window.matchMedia) {
+          const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
+          const syncSystemTheme = () => {
+            if (!storedTheme()) applyTheme(resolveTheme());
+          };
+
+          if (typeof mediaQuery.addEventListener === "function") {
+            mediaQuery.addEventListener("change", syncSystemTheme);
+          } else if (typeof mediaQuery.addListener === "function") {
+            mediaQuery.addListener(syncSystemTheme);
+          }
+        }
+      })();
+    </script>
 
     <%# Tailwind is compiled by the standalone binary into app/assets/builds/tailwind.css.
         See config/tailwind.config.js for the centaur/ink palette and radii overrides. %>
@@ -18,64 +82,940 @@
 
     <style>
       ::selection { background: #28c26a; color: #050506; }
+      html[data-console-theme="dark"] { color-scheme: dark; }
+      html[data-console-theme="light"] { color-scheme: light; }
       .glow { filter: drop-shadow(0 0 14px rgba(40,194,106,0.45)); }
       *::-webkit-scrollbar { width: 10px; height: 10px; }
       *::-webkit-scrollbar-track { background: #0b0b0d; }
       *::-webkit-scrollbar-thumb { background: #33333a; border-radius: 1px; }
       *::-webkit-scrollbar-thumb:hover { background: #28c26a; }
+
+      .console-shell {
+        display: flex;
+        height: 100%;
+        overflow: hidden;
+        background: #050506;
+      }
+
+      .console-sidebar {
+        width: 18rem;
+        flex: 0 0 auto;
+        display: flex;
+        min-height: 0;
+        flex-direction: column;
+        border-right: 1px solid rgba(255, 255, 255, 0.07);
+        background: #070708;
+        transition: width 160ms ease;
+      }
+
+      .console-sidebar-top {
+        display: flex;
+        height: 3.5rem;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0 1.5rem;
+      }
+
+      .console-brand {
+        display: flex;
+        min-width: 0;
+        flex: 1;
+        align-items: center;
+        color: #f4f4f5;
+      }
+
+      .console-brand img {
+        height: 1.75rem;
+        width: auto;
+      }
+
+      .console-brand-glyph {
+        display: none;
+        height: 2rem;
+        width: 2rem;
+        place-items: center;
+        border-radius: 0.5rem;
+      }
+
+      .console-brand-glyph img {
+        height: 1.75rem;
+        width: 1.75rem;
+        object-fit: contain;
+      }
+
+      .console-sidebar-scroll {
+        min-height: 0;
+        flex: 1;
+        overflow-y: auto;
+        padding: 0.25rem 0.75rem 1rem;
+      }
+
+      .console-nav-list {
+        display: grid;
+        gap: 0.125rem;
+        margin-bottom: 0.125rem;
+      }
+
+      .console-nav-link {
+        display: flex;
+        min-width: 0;
+        height: 2.35rem;
+        align-items: center;
+        gap: 0.625rem;
+        border-radius: 0.875rem;
+        padding: 0 0.875rem;
+        color: #a1a1aa;
+        text-decoration: none;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-nav-link:hover {
+        background: rgba(255, 255, 255, 0.045);
+        color: #f4f4f5;
+      }
+
+      .console-nav-link-active {
+        background: rgba(255, 255, 255, 0.07);
+        color: #3ace79;
+      }
+
+      .console-nav-icon {
+        display: grid;
+        width: 1rem;
+        flex: 0 0 auto;
+        place-items: center;
+        color: currentColor;
+      }
+
+      .console-nav-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+
+      .console-thread-group-title {
+        display: flex;
+        height: 2.35rem;
+        align-items: center;
+        gap: 0.625rem;
+        border-radius: 0.875rem;
+        padding: 0 0.875rem;
+        color: #a1a1aa;
+        font-size: 0.875rem;
+        font-weight: 500;
+        text-decoration: none;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-thread-group-title:hover {
+        background: rgba(255, 255, 255, 0.045);
+        color: #f4f4f5;
+      }
+
+      .console-thread-group-title-active {
+        background: rgba(255, 255, 255, 0.07);
+        color: #3ace79;
+      }
+
+      .console-thread-list {
+        display: grid;
+        gap: 0.125rem;
+        margin-top: 0.15rem;
+      }
+
+      .console-thread-link {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 0.5rem;
+        border-radius: 0.875rem;
+        padding: 0.55rem 0.75rem 0.55rem 2.5rem;
+        color: #d4d4d8;
+        text-decoration: none;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-thread-link:hover {
+        background: rgba(255, 255, 255, 0.045);
+        color: #f4f4f5;
+      }
+
+      .console-thread-link-active {
+        background: rgba(255, 255, 255, 0.07);
+        color: #f4f4f5;
+      }
+
+      .console-thread-link-hidden {
+        display: none;
+      }
+
+      .console-thread-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+
+      .console-thread-time {
+        color: #71717a;
+        font-size: 0.75rem;
+      }
+
+      .console-thread-empty,
+      .console-thread-show-all {
+        display: block;
+        width: 100%;
+        cursor: pointer;
+        padding: 0.45rem 0.75rem 0.45rem 2.5rem;
+        color: #71717a;
+        font-size: 0.8125rem;
+        text-decoration: none;
+        text-align: left;
+      }
+
+      .console-thread-show-all:hover {
+        color: #a1a1aa;
+      }
+
+      .console-thread-show-all[hidden] {
+        display: none;
+      }
+
+      .console-sidebar-account {
+        position: relative;
+        border-top: 1px solid rgba(255, 255, 255, 0.07);
+      }
+
+      .console-account-button {
+        display: flex;
+        height: 3.625rem;
+        min-width: 0;
+        width: 100%;
+        cursor: pointer;
+        align-items: center;
+        gap: 0.625rem;
+        padding: 0 1.5rem;
+        text-align: left;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-account-button:hover,
+      .console-account-button[aria-expanded="true"] {
+        background: rgba(255, 255, 255, 0.045);
+      }
+
+      .console-user-avatar {
+        display: grid;
+        height: 1.75rem;
+        width: 1.75rem;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 999px;
+        background: rgba(40, 194, 106, 0.16);
+        color: #93e7b7;
+        font-size: 0.75rem;
+        font-weight: 700;
+      }
+
+      .console-account-email {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #71717a;
+        font-size: 0.75rem;
+      }
+
+      .console-account-menu {
+        position: absolute;
+        right: 0.75rem;
+        bottom: 4.125rem;
+        left: 0.75rem;
+        z-index: 30;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.11);
+        border-radius: 0.875rem;
+        background: #101012;
+        padding: 0.5rem;
+        box-shadow: 0 18px 45px rgba(0, 0, 0, 0.4);
+      }
+
+      .console-account-menu[hidden] {
+        display: none;
+      }
+
+      .console-account-menu-line {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 0.5rem 0.625rem;
+        color: #8b8b94;
+        font-size: 0.75rem;
+      }
+
+      .console-account-menu-muted {
+        color: #5f6068;
+      }
+
+      .console-account-menu-separator {
+        height: 1px;
+        margin: 0.375rem 0.25rem;
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      .console-account-menu form {
+        margin: 0;
+      }
+
+      .console-account-menu-button,
+      .console-signout-button {
+        display: flex;
+        height: 2.25rem;
+        width: 100%;
+        cursor: pointer;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 0.5rem;
+        border-radius: 0.625rem;
+        padding: 0 0.625rem;
+        color: #a1a1aa;
+        font: inherit;
+        font-size: 0.875rem;
+        font-weight: 500;
+        line-height: 1.25rem;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-account-menu-button:hover,
+      .console-signout-button:hover {
+        background: rgba(255, 255, 255, 0.055);
+        color: #f4f4f5;
+      }
+
+      .console-main {
+        display: flex;
+        height: 100%;
+        min-width: 0;
+        min-height: 0;
+        flex: 1;
+        flex-direction: column;
+        overflow-y: auto;
+      }
+
+      .console-main-threads {
+        overflow: hidden;
+      }
+
+      .console-main-page {
+        width: 100%;
+        max-width: 80rem;
+        margin: 0 auto;
+        padding: 1.35rem 2rem 2.5rem;
+      }
+
+      .console-main-thread-frame {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        flex-direction: column;
+        padding: 1.35rem 2rem 0;
+      }
+
+      .console-thread-content {
+        width: min(100%, 52rem);
+        margin-left: 0;
+        margin-right: auto;
+      }
+
+      .console-thread-detail-header {
+        flex: 0 0 auto;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .console-markdown {
+        min-width: 0;
+      }
+
+      .console-markdown-link {
+        overflow-wrap: anywhere;
+        word-break: normal;
+      }
+
+      .console-message-stack {
+        min-width: 0;
+      }
+
+      .console-message-timestamp {
+        min-height: 1.25rem;
+        padding-top: 0.375rem;
+        color: #71717a;
+        font-size: 0.75rem;
+        line-height: 0.875rem;
+        opacity: 0;
+        transition: opacity 120ms ease;
+      }
+
+      .group:hover .console-message-timestamp,
+      .group:focus-within .console-message-timestamp {
+        opacity: 1;
+      }
+
+      .console-control-tabs {
+        display: flex;
+        gap: 0.25rem;
+        margin-bottom: 1.5rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .console-control-tab {
+        margin-bottom: -1px;
+        padding: 0.625rem 0.75rem;
+        border-bottom: 1px solid transparent;
+        color: #a1a1aa;
+        font-size: 0.875rem;
+        font-weight: 500;
+        text-decoration: none;
+        transition: border-color 120ms ease, color 120ms ease;
+      }
+
+      .console-control-tab:hover {
+        color: #f4f4f5;
+      }
+
+      .console-control-tab-active {
+        border-color: #28c26a;
+        color: #3ace79;
+      }
+
+      .console-run-row {
+        background: rgba(11, 11, 13, 0.45);
+        color: #71717a;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+      }
+
+      .console-run-status {
+        color: #d4d4d8;
+      }
+
+      .console-run-id {
+        color: #52525b;
+      }
+
+      html[data-console-theme="light"] ::selection {
+        background: rgba(40, 194, 106, 0.22);
+        color: #1f2428;
+      }
+
+      html[data-console-theme="light"] *::-webkit-scrollbar-track {
+        background: #f3f3ef;
+      }
+
+      html[data-console-theme="light"] *::-webkit-scrollbar-thumb {
+        background: #c9cbc5;
+      }
+
+      html[data-console-theme="light"] *::-webkit-scrollbar-thumb:hover {
+        background: #28a65d;
+      }
+
+      html[data-console-theme="light"] body,
+      html[data-console-theme="light"] .console-shell,
+      html[data-console-theme="light"] .console-main,
+      html[data-console-theme="light"] .console-main-page,
+      html[data-console-theme="light"] .console-main-thread-frame {
+        background: #f6f6f2;
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .console-sidebar {
+        border-right-color: #deded7;
+        background: #fbfbf8;
+      }
+
+      html[data-console-theme="light"] .console-sidebar-account {
+        border-top-color: #deded7;
+      }
+
+      html[data-console-theme="light"] .console-brand {
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-brand-lockup img,
+      html[data-console-theme="light"] .console-brand-glyph img {
+        filter: invert(1) drop-shadow(0 0 14px rgba(40, 194, 106, 0.14));
+      }
+
+      html[data-console-theme="light"] .console-nav-link,
+      html[data-console-theme="light"] .console-thread-group-title,
+      html[data-console-theme="light"] .console-account-menu-button,
+      html[data-console-theme="light"] .console-signout-button {
+        color: #5f656c;
+      }
+
+      html[data-console-theme="light"] .console-nav-link:hover,
+      html[data-console-theme="light"] .console-thread-group-title:hover,
+      html[data-console-theme="light"] .console-thread-link:hover,
+      html[data-console-theme="light"] .console-account-button:hover,
+      html[data-console-theme="light"] .console-account-button[aria-expanded="true"],
+      html[data-console-theme="light"] .console-account-menu-button:hover,
+      html[data-console-theme="light"] .console-signout-button:hover {
+        background: #edede8;
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-nav-link-active,
+      html[data-console-theme="light"] .console-thread-group-title-active,
+      html[data-console-theme="light"] .console-thread-link-active {
+        background: #e7eee8;
+        color: #168f4a;
+      }
+
+      html[data-console-theme="light"] .console-thread-link {
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .console-thread-time,
+      html[data-console-theme="light"] .console-thread-empty,
+      html[data-console-theme="light"] .console-thread-show-all,
+      html[data-console-theme="light"] .console-account-email,
+      html[data-console-theme="light"] .console-page-meta {
+        color: #7a7f86;
+      }
+
+      html[data-console-theme="light"] .console-thread-show-all:hover {
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .console-user-avatar {
+        background: #dff2e7;
+        color: #12733f;
+      }
+
+      html[data-console-theme="light"] .console-account-menu {
+        border-color: #d8d8d0;
+        background: #ffffff;
+        box-shadow: 0 18px 45px rgba(31, 36, 40, 0.12);
+      }
+
+      html[data-console-theme="light"] .console-account-menu-line {
+        color: #5f656c;
+      }
+
+      html[data-console-theme="light"] .console-account-menu-muted {
+        color: #8a8f96;
+      }
+
+      html[data-console-theme="light"] .console-account-menu-separator {
+        background: #e5e5de;
+      }
+
+      html[data-console-theme="light"] .console-control-tabs {
+        border-bottom-color: #deded7;
+      }
+
+      html[data-console-theme="light"] .console-thread-detail-header {
+        border-bottom-color: #deded7;
+      }
+
+      html[data-console-theme="light"] .console-control-tab {
+        color: #6b7078;
+      }
+
+      html[data-console-theme="light"] .console-control-tab:hover {
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-control-tab-active {
+        border-color: #28a65d;
+        color: #168f4a;
+      }
+
+      html[data-console-theme="light"] .console-run-row {
+        background: #ffffff;
+        color: #6f757c;
+        box-shadow: inset 0 0 0 1px #deded7;
+      }
+
+      html[data-console-theme="light"] .console-run-status {
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .console-run-id {
+        color: #7a7f86;
+      }
+
+      html[data-console-theme="light"] .form-section,
+      html[data-console-theme="light"] .console-panel,
+      html[data-console-theme="light"] .console-scroll-panel {
+        border-color: #deded7;
+        background: #ffffff;
+      }
+
+      html[data-console-theme="light"] .console-table-head {
+        background: #f0f0eb;
+        color: #7a7f86;
+      }
+
+      html[data-console-theme="light"] .console-table > :not(:last-child) {
+        border-color: #e6e5de;
+      }
+
+      html[data-console-theme="light"] .form-input {
+        border-color: #d2d3cc;
+        background: #ffffff;
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .form-input::placeholder,
+      html[data-console-theme="light"] .placeholder-zinc-500::placeholder,
+      html[data-console-theme="light"] .placeholder-zinc-600::placeholder {
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .btn-secondary {
+        border-color: #d2d3cc;
+        color: #5f656c;
+      }
+
+      html[data-console-theme="light"] .empty-state {
+        border-color: #d8d8d0;
+        background: #f0f0eb;
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .console-link,
+      html[data-console-theme="light"] .text-centaur-300,
+      html[data-console-theme="light"] .text-centaur-400,
+      html[data-console-theme="light"] .text-centaur-500 {
+        color: #168f4a;
+      }
+
+      html[data-console-theme="light"] .bg-ink-950,
+      html[data-console-theme="light"] .bg-ink-950\/15,
+      html[data-console-theme="light"] .bg-ink-950\/35,
+      html[data-console-theme="light"] .bg-ink-900,
+      html[data-console-theme="light"] .bg-ink-900\/25,
+      html[data-console-theme="light"] .bg-ink-900\/35,
+      html[data-console-theme="light"] .bg-ink-900\/80 {
+        background-color: #f6f6f2;
+      }
+
+      html[data-console-theme="light"] .bg-ink-850,
+      html[data-console-theme="light"] .bg-ink-850\/40,
+      html[data-console-theme="light"] .bg-ink-850\/50,
+      html[data-console-theme="light"] .bg-ink-850\/60,
+      html[data-console-theme="light"] .bg-ink-850\/70,
+      html[data-console-theme="light"] .bg-ink-850\/80,
+      html[data-console-theme="light"] .bg-ink-800,
+      html[data-console-theme="light"] .bg-ink-800\/60,
+      html[data-console-theme="light"] .bg-ink-800\/80,
+      html[data-console-theme="light"] .bg-ink-700,
+      html[data-console-theme="light"] .bg-ink-700\/60 {
+        background-color: #ffffff;
+      }
+
+      html[data-console-theme="light"] .bg-ink-600 {
+        background-color: #e8e9e3;
+      }
+
+      html[data-console-theme="light"] .border-ink-500,
+      html[data-console-theme="light"] .border-ink-600,
+      html[data-console-theme="light"] .border-ink-600\/80,
+      html[data-console-theme="light"] .border-ink-700 {
+        border-color: #deded7;
+      }
+
+      html[data-console-theme="light"] .ring-ink-500,
+      html[data-console-theme="light"] .ring-ink-600 {
+        --tw-ring-color: #d8d8d0;
+      }
+
+      html[data-console-theme="light"] .divide-ink-600 > :not([hidden]) ~ :not([hidden]),
+      html[data-console-theme="light"] .divide-ink-700 > :not([hidden]) ~ :not([hidden]) {
+        border-color: #deded7;
+      }
+
+      html[data-console-theme="light"] .text-zinc-50,
+      html[data-console-theme="light"] .text-zinc-100,
+      html[data-console-theme="light"] .text-zinc-200,
+      html[data-console-theme="light"] .text-zinc-300 {
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .text-zinc-400 {
+        color: #565c63;
+      }
+
+      html[data-console-theme="light"] .text-zinc-500 {
+        color: #6f757c;
+      }
+
+      html[data-console-theme="light"] .text-zinc-600 {
+        color: #8c9198;
+      }
+
+      @media (max-width: 760px) {
+        .console-sidebar {
+          width: 11rem;
+        }
+
+        .console-brand-lockup,
+        .console-account-details {
+          display: none;
+        }
+
+        .console-brand-glyph {
+          display: grid;
+        }
+
+        .console-sidebar-top {
+          justify-content: center;
+          padding: 0;
+        }
+
+        .console-main-page {
+          padding: 1rem 1rem 1.5rem;
+        }
+
+        .console-main-thread-frame {
+          padding: 1rem 1rem 0;
+        }
+
+        .console-thread-content {
+          margin-left: 0;
+        }
+      }
     </style>
   </head>
 
-  <body class="h-full bg-ink-900 text-zinc-300 font-mono antialiased">
-    <div class="min-h-full">
-      <header class="border-b border-ink-600 bg-ink-850/80 backdrop-blur sticky top-0 z-10">
-        <div class="mx-auto max-w-7xl px-6">
-          <div class="flex items-center justify-between h-16">
-            <a href="<%= root_path %>" class="group flex items-center" aria-label="Centaur Console">
-              <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "h-7 w-auto glow", width: 497, height: 127 %>
-            </a>
-            <div class="flex items-center gap-4 text-sm">
-              <nav class="flex items-center gap-1">
-                <% nav = [
-                  ["principals", console_principals_path],
-                  ["roles", console_roles_path],
-                  ["secrets", console_secrets_path],
-                  ["credentials", console_credentials_path],
-                  ["oauth apps", console_oauth_apps_path]
-                ] %>
-                <% nav << ["users", console_users_path] if current_user&.admin? %>
-                <% nav << ["ETLs", console_etls_path] %>
-                <% nav.each do |name, path| %>
-                  <% active = request.path == path || (name == "principals" && request.path.start_with?("/console/principals")) || (name == "roles" && request.path.start_with?("/console/roles")) || (name == "ETLs" && request.path.start_with?("/console/etls")) %>
-                  <a href="<%= path %>"
-                     class="px-4 py-2 transition-colors <%= active ? "text-centaur-400" : "text-zinc-400 hover:text-zinc-100" %>">
-                    <%= name == "ETLs" ? name : name.capitalize %>
-                  </a>
-                <% end %>
-              </nav>
+  <% threads_view = request.path.start_with?("/console/threads") %>
+  <% control_matches = [ "/console/principals", "/console/roles", "/console/secrets", "/console/credentials", "/console/oauth_apps" ] %>
+  <% control_matches << "/console/users" if current_user&.admin? %>
+  <% nav_items = [
+    { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true },
+    { label: "Data Sync", icon: "database", path: console_etls_path, matches: [ "/console/etls" ] }
+  ] %>
 
-              <% if current_user %>
-                <div class="flex items-center gap-3 border-l border-ink-600 pl-4">
-                  <span class="text-zinc-500" title="<%= current_user.email %>"><%= current_user.email %></span>
-                  <%= button_to "Sign out", logout_path, method: :delete,
-                        class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
-                </div>
+  <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased">
+    <div id="console-shell" class="console-shell">
+      <aside class="console-sidebar" aria-label="Console navigation">
+        <div class="console-sidebar-top">
+          <a href="<%= root_path %>" class="console-brand" aria-label="Centaur Console">
+            <span class="console-brand-glyph">
+              <%= image_tag "/icon.svg", alt: "", aria: { hidden: true }, width: 275, height: 275 %>
+            </span>
+            <span class="console-brand-lockup">
+              <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "glow", width: 497, height: 127 %>
+            </span>
+          </a>
+        </div>
+
+        <div class="console-sidebar-scroll">
+          <% selected_sidebar_thread_key = params[:thread].to_s %>
+          <nav class="console-nav-list" aria-label="Console sections">
+            <% nav_items.each do |item| %>
+              <% active = request.path == item[:path] ||
+                          item[:matches].any? { |match| request.path.start_with?(match) } ||
+                          (item[:root_active] && request.path == root_path) %>
+              <a href="<%= item[:path] %>"
+                 class="console-nav-link <%= "console-nav-link-active" if active %>"
+                 title="<%= item[:label] %>">
+                <span class="console-nav-icon"><%= console_icon(item[:icon], classes: "size-4") %></span>
+                <span class="console-nav-label"><%= item[:label] %></span>
+              </a>
+            <% end %>
+          </nav>
+
+          <div class="console-thread-group">
+            <a href="<%= console_threads_path %>"
+               class="console-thread-group-title <%= "console-thread-group-title-active" if threads_view %>"
+               title="Threads">
+              <span class="console-nav-icon"><%= console_icon("message-square", classes: "size-4") %></span>
+              <span class="console-nav-label">Threads</span>
+            </a>
+            <div class="console-thread-list">
+              <% if @console_sidebar_threads.blank? %>
+                <div class="console-thread-empty">No recent threads</div>
+              <% else %>
+                <% @console_sidebar_threads.each_with_index do |thread, index| %>
+                  <% active_thread = selected_sidebar_thread_key == thread.thread_key %>
+                  <% latest_message = @console_sidebar_latest_messages[thread.thread_key] %>
+                  <% title = console_sidebar_thread_title(thread, latest_message) %>
+                  <%= link_to console_threads_path(thread: thread.thread_key),
+                              class: "console-thread-link #{active_thread ? "console-thread-link-active" : ""} #{index >= 5 && !active_thread ? "console-thread-link-hidden" : ""}",
+                              data: { console_thread_link: true },
+                              title: title do %>
+                    <span class="console-thread-title"><%= title %></span>
+                    <span class="console-thread-time"><%= local_time(thread.updated_at || thread.created_at, relative: true, format: :compact) %></span>
+                  <% end %>
+                <% end %>
+                <% if @console_sidebar_threads.size > 5 %>
+                  <button type="button"
+                          class="console-thread-show-all"
+                          data-console-thread-show-more
+                          data-page-size="5">
+                    Show more
+                  </button>
+                <% end %>
               <% end %>
             </div>
           </div>
         </div>
-      </header>
 
-      <main class="mx-auto max-w-7xl px-6 py-10">
-        <% if flash[:notice] %>
-          <div class="mb-6 rounded border border-ink-600 bg-ink-850/60 px-4 py-3 text-sm text-zinc-400"><%= flash[:notice] %></div>
+        <% if current_user %>
+          <div class="console-sidebar-account" data-account-menu>
+            <button type="button"
+                    id="console-account-menu-button"
+                    class="console-account-button"
+                    aria-haspopup="menu"
+                    aria-expanded="false"
+                    aria-controls="console-account-menu">
+              <span class="console-user-avatar"><%= current_user.email.to_s[0].to_s.upcase.presence || "?" %></span>
+              <span class="console-account-email console-account-details" title="<%= current_user.email %>"><%= current_user.email %></span>
+            </button>
+            <div id="console-account-menu"
+                 class="console-account-menu"
+                 role="menu"
+                 aria-labelledby="console-account-menu-button"
+                 hidden>
+              <div class="console-account-menu-line" title="<%= current_user.email %>"><%= current_user.email %></div>
+              <div class="console-account-menu-line console-account-menu-muted">Centaur Console</div>
+              <div class="console-account-menu-separator"></div>
+              <button type="button"
+                      class="console-account-menu-button"
+                      data-console-theme-toggle
+                      role="menuitem"
+                      aria-label="Switch to light mode">
+                <span data-console-theme-action-icon="light"><%= console_icon("sun", classes: "size-4") %></span>
+                <span data-console-theme-action-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
+                <span data-console-theme-label>Light mode</span>
+              </button>
+              <%= button_to logout_path,
+                    method: :delete,
+                    class: "console-signout-button",
+                    form: { class: "console-signout-form" },
+                    role: "menuitem",
+                    title: "Sign out",
+                    aria: { label: "Sign out" } do %>
+                <%= console_icon("log-out", classes: "size-4") %>
+                <span class="console-signout-label">Sign out</span>
+              <% end %>
+            </div>
+          </div>
         <% end %>
-        <% if flash[:alert] %>
-          <div class="alert-error"><%= flash[:alert] %></div>
-        <% end %>
-        <%= yield %>
+      </aside>
+
+      <main class="console-main <%= "console-main-threads" if threads_view %>">
+        <div class="<%= threads_view ? "console-main-thread-frame" : "console-main-page" %>">
+          <% if flash[:notice] %>
+            <div class="mb-6 rounded border border-ink-600 bg-ink-850/60 px-4 py-3 text-sm text-zinc-400"><%= flash[:notice] %></div>
+          <% end %>
+          <% if flash[:alert] %>
+            <div class="alert-error"><%= flash[:alert] %></div>
+          <% end %>
+          <%= yield %>
+        </div>
       </main>
-
     </div>
+
+    <script>
+      (() => {
+        const accountButton = document.getElementById("console-account-menu-button");
+        const accountMenu = document.getElementById("console-account-menu");
+        if (!accountButton || !accountMenu) return;
+
+        const closeAccountMenu = () => {
+          accountMenu.hidden = true;
+          accountButton.setAttribute("aria-expanded", "false");
+        };
+
+        accountButton.addEventListener("click", () => {
+          const expanded = accountButton.getAttribute("aria-expanded") === "true";
+          accountMenu.hidden = expanded;
+          accountButton.setAttribute("aria-expanded", String(!expanded));
+        });
+
+        document.addEventListener("click", (event) => {
+          if (accountMenu.hidden) return;
+          if (accountButton.contains(event.target) || accountMenu.contains(event.target)) return;
+          closeAccountMenu();
+        });
+
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") closeAccountMenu();
+        });
+      })();
+
+      (() => {
+        const themeToggle = document.querySelector("[data-console-theme-toggle]");
+        if (!themeToggle) return;
+
+        const root = document.documentElement;
+        const label = themeToggle.querySelector("[data-console-theme-label]");
+        const lightIcon = themeToggle.querySelector("[data-console-theme-action-icon='light']");
+        const darkIcon = themeToggle.querySelector("[data-console-theme-action-icon='dark']");
+
+        const syncThemeControl = (theme) => {
+          const nextTheme = theme === "light" ? "light" : "dark";
+          const isLight = nextTheme === "light";
+          if (label) label.textContent = isLight ? "Dark mode" : "Light mode";
+          themeToggle.setAttribute(
+            "aria-label",
+            isLight ? "Switch to dark mode" : "Switch to light mode"
+          );
+          if (lightIcon) lightIcon.hidden = isLight;
+          if (darkIcon) darkIcon.hidden = !isLight;
+        };
+
+        const applyTheme = (theme, persist = false) => {
+          let nextTheme;
+          if (window.ConsoleTheme) {
+            nextTheme = persist ? window.ConsoleTheme.persist(theme) : window.ConsoleTheme.apply(theme);
+          } else {
+            nextTheme = theme === "light" ? "light" : "dark";
+            root.dataset.consoleTheme = nextTheme;
+          }
+          syncThemeControl(nextTheme);
+        };
+
+        applyTheme(root.dataset.consoleTheme || window.ConsoleTheme?.resolve?.() || "dark");
+        themeToggle.addEventListener("click", () => {
+          applyTheme(root.dataset.consoleTheme === "light" ? "dark" : "light", true);
+        });
+      })();
+
+      (() => {
+        const showMoreButton = document.querySelector("[data-console-thread-show-more]");
+        if (!showMoreButton) return;
+
+        const list = showMoreButton.closest(".console-thread-list");
+        if (!list) return;
+
+        const revealNextThreads = () => {
+          const pageSize = Number.parseInt(showMoreButton.dataset.pageSize || "5", 10);
+          const hiddenThreads = Array.from(list.querySelectorAll(".console-thread-link-hidden"));
+          hiddenThreads.slice(0, Number.isFinite(pageSize) ? pageSize : 5).forEach((link) => {
+            link.classList.remove("console-thread-link-hidden");
+          });
+
+          if (!list.querySelector(".console-thread-link-hidden")) {
+            showMoreButton.hidden = true;
+          }
+        };
+
+        if (!list.querySelector(".console-thread-link-hidden")) {
+          showMoreButton.hidden = true;
+        } else {
+          showMoreButton.addEventListener("click", revealNextThreads);
+        }
+      })();
+    </script>
   </body>
 </html>
