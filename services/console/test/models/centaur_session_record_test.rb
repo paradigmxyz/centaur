@@ -7,6 +7,14 @@ require "test_helper"
 # UrlConfig merges url-derived keys over sibling hash keys. The fallback must
 # resolve the url into discrete params, drop :url, and force the ai_v2 name.
 class CentaurSessionRecordTest < ActiveSupport::TestCase
+  # session_database_configuration is environment-sensitive and the class body
+  # calls establish_connection with its result the first time the constant is
+  # referenced. Force that (clean, real-test-env) load here, at file-require
+  # time, so the tests below can stub Rails.env / the primary config to exercise
+  # the production path WITHOUT repointing the process-wide session connection
+  # at a database that does not exist in CI (ai_v2).
+  CentaurSessionRecord
+
   def build_config
     CentaurSessionRecord.send(:session_database_configuration)
   end
@@ -30,21 +38,22 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
     CentaurSessionRecord.stub(:primary_database_configuration, config) { yield }
   end
 
-  test "fallback targets ai_v2 even when the primary url has another database path" do
-    with_env(
-      "CENTAUR_CONSOLE_CENTAUR_DATABASE_URL" => nil,
-      "CENTAUR_DATABASE_URL" => nil,
-      "CENTAUR_CONSOLE_CENTAUR_DATABASE_NAME" => nil,
-      "CENTAUR_DATABASE_NAME" => "ai_v2"
-    ) do
-      primary = {
-        "adapter" => "postgresql",
-        "encoding" => "unicode",
-        "pool" => 5,
-        "url" => "postgres://console_user:secret@db-host:6543/iron_control_development"
-      }
+  # Stub the production (non-test) branch of session_database_name without
+  # mutating ENV, so building the config here never rebinds the live connection.
+  def as_production
+    Rails.env.stub(:test?, false) { yield }
+  end
 
-      stub_primary(primary) do
+  test "fallback targets ai_v2 even when the primary url has another database path" do
+    primary = {
+      "adapter" => "postgresql",
+      "encoding" => "unicode",
+      "pool" => 5,
+      "url" => "postgres://console_user:secret@db-host:6543/iron_control_development"
+    }
+
+    stub_primary(primary) do
+      as_production do
         config = build_config
 
         assert_equal "ai_v2", config[:database]
@@ -57,27 +66,41 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
   end
 
   test "fallback keeps ai_v2 for a host/port style primary config without a url" do
-    with_env(
-      "CENTAUR_CONSOLE_CENTAUR_DATABASE_URL" => nil,
-      "CENTAUR_DATABASE_URL" => nil,
-      "CENTAUR_CONSOLE_CENTAUR_DATABASE_NAME" => nil,
-      "CENTAUR_DATABASE_NAME" => "ai_v2"
-    ) do
-      primary = {
-        "adapter" => "postgresql",
-        "host" => "localhost",
-        "port" => 5432,
-        "username" => "postgres",
-        "database" => "iron_control_development"
-      }
+    primary = {
+      "adapter" => "postgresql",
+      "host" => "localhost",
+      "port" => 5432,
+      "username" => "postgres",
+      "database" => "iron_control_development"
+    }
 
-      stub_primary(primary) do
+    stub_primary(primary) do
+      as_production do
         config = build_config
 
         assert_equal "ai_v2", config[:database]
         assert_not config.key?(:url)
         assert_equal "localhost", config[:host]
       end
+    end
+  end
+
+  test "test environment points the session models at the console database" do
+    primary = {
+      "adapter" => "postgresql",
+      "host" => "localhost",
+      "port" => 5432,
+      "username" => "postgres",
+      "database" => "iron_control_test"
+    }
+
+    stub_primary(primary) do
+      # Real (test) env: the session connection must resolve to the console's
+      # own test database, which exists in CI, so session-table-dependent tests
+      # can skip rather than error on a missing ai_v2 database.
+      config = build_config
+
+      assert_equal "iron_control_test", config[:database]
     end
   end
 
