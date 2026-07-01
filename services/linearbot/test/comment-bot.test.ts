@@ -47,6 +47,25 @@ describe("CommentReplyCollector chain-of-thought flattening", () => {
     ]);
   });
 
+  it("records in-progress task details for live replies without duplicating the terminal update", () => {
+    const collector = new CommentReplyCollector();
+    collector.update({
+      type: "task_update",
+      id: "cmd-1",
+      title: "1. Command execution",
+      status: "in_progress",
+      details: "```sh\npnpm test\n```",
+    });
+    collector.update({
+      type: "task_update",
+      id: "cmd-1",
+      title: "1. Command execution",
+      status: "complete",
+    });
+
+    expect(collector.cotLines).toEqual(["1. Command execution: `pnpm test`"]);
+  });
+
   it("tracks the latest reasoning as the current thought", () => {
     const collector = new CommentReplyCollector();
     collector.update(thinking("t-1", "First, read the options."));
