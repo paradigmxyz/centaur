@@ -2015,7 +2015,7 @@ async function* slackSafeChatSdkStream(
 type SlackStreamTaskDisplayMode = NonNullable<SlackbotV2Options['streamTaskDisplayMode']>
 
 function slackStreamTaskDisplayMode(options: SlackbotV2Options): SlackStreamTaskDisplayMode {
-  return options.streamTaskDisplayMode ?? 'none'
+  return options.streamTaskDisplayMode ?? (options.activitySummaryStatusEnabled ? 'none' : 'plan')
 }
 
 async function* slackVisibleChatSdkStream(
@@ -2768,7 +2768,7 @@ function rendererOptions(
       if (event.type === 'renderer.title.update') {
         await setAssistantTitle(thread, event.title, options)
       }
-      if (event.type === 'renderer.status') {
+      if (event.type === 'renderer.status' && options.activitySummaryStatusEnabled) {
         await setAssistantStatus(thread, event.status, options, trace)
       }
     }

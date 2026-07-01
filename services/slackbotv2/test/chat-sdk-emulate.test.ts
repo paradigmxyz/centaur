@@ -3136,8 +3136,77 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
   })
 
-  it('uses session activity summaries as assistant status instead of visible text', async () => {
+  it('shows visible task progress by default when activity summary status is disabled', async () => {
     bot = createProductionDefaultTestBot()
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before default progress.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> summarize progress`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-default-visible-progress',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> summarize progress`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const summary = "I'm checking the event stream so I can explain the current state."
+    codexApi.emitSessionEvent(key, 'session.activity_summary', {
+      execution_id: 'exe-default-visible-progress',
+      summary
+    })
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.started',
+        item: {
+          id: 'cmd-default-progress',
+          type: 'commandExecution',
+          command: 'rg activity summary',
+          status: 'inProgress'
+        }
+      })
+    )
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'turn.done',
+        result: 'Default progress done.'
+      })
+    )
+
+    await Promise.all(waits)
+    const statusCalls = slackApi.calls.filter(call => call.method === 'assistant.threads.setStatus')
+    expect(statusCalls.map(call => stringField(call.body.status))).toEqual(['Thinking...', ''])
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    expect(transcripts[0]!.start.body.task_display_mode).toBe('plan')
+    expect(transcripts[0]!.chunks.some(chunk => chunk.type === 'task_update')).toBe(true)
+    const text = await threadText(parent.ts)
+    expect(text).toContain('Command execution')
+    expect(text).toContain('Default progress done.')
+    expect(text).not.toContain(summary)
+  })
+
+  it('uses session activity summaries as assistant status instead of visible text', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
     codexApi.autoRespond = false
 
     const parent = await postUserMessage('Context before status update.')
@@ -3887,8 +3956,7 @@ function createTestBot(
   overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
 ): SlackbotV2 {
   return createProductionDefaultTestBot({
-    // Most tests in this file exercise the legacy structured-card renderer.
-    // Production omits this option and uses assistant status for live activity.
+    // Most tests in this file pin the structured progress renderer explicitly.
     streamTaskDisplayMode: 'plan',
     ...overrides
   })

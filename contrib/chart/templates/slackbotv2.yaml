@@ -67,6 +67,8 @@ spec:
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
             - name: SLACKBOTV2_USER_NAME
               value: {{ .Values.slackbotv2.userName | quote }}
+            - name: SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED
+              value: {{ .Values.apiRs.activitySummary.enabled | quote }}
 {{- if .Values.slackbotv2.assistantStatus }}
             - name: SLACKBOTV2_ASSISTANT_STATUS
               value: {{ .Values.slackbotv2.assistantStatus | quote }}
