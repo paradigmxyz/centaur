@@ -177,10 +177,15 @@ module Mcp
 
       refresh = nil
       invalid_grant = false
+      inactive_user = false
       McpOauthAuthorizationCode.transaction do
         code.lock!
         if code.consumed_at.present? || code.expires_at <= Time.current
           invalid_grant = true
+        elsif !code.user.active?
+          inactive_user = true
+          code.consume!
+          code.user.revoke_mcp_oauth_refresh_tokens!
         else
           code.consume!
           refresh = McpOauthRefreshToken.create!(
@@ -196,6 +201,13 @@ module Mcp
         return oauth_error(
           :invalid_grant,
           "Authorization code is invalid or expired.",
+          status: :bad_request
+        )
+      end
+      if inactive_user
+        return oauth_error(
+          :invalid_grant,
+          "User account is not active.",
           status: :bad_request
         )
       end
@@ -232,10 +244,14 @@ module Mcp
 
       rotated = nil
       invalid_grant = false
+      inactive_user = false
       McpOauthRefreshToken.transaction do
         refresh.lock!
         if refresh.revoked_at.present? || refresh.expires_at <= Time.current
           invalid_grant = true
+        elsif !refresh.user.active?
+          inactive_user = true
+          refresh.user.revoke_mcp_oauth_refresh_tokens!
         else
           refresh.update!(revoked_at: Time.current, last_used_at: Time.current)
           rotated = McpOauthRefreshToken.create!(
@@ -251,6 +267,13 @@ module Mcp
         return oauth_error(
           :invalid_grant,
           "Refresh token is invalid or expired.",
+          status: :bad_request
+        )
+      end
+      if inactive_user
+        return oauth_error(
+          :invalid_grant,
+          "User account is not active.",
           status: :bad_request
         )
       end
