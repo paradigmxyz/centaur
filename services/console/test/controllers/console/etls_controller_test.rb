@@ -60,7 +60,7 @@ class Console::EtlsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
-  test "renders Slack archive imports on the ETLs page" do
+  test "renders Slack archive imports on the Data Sync page" do
     @client.imports = [
       {
         "import_id" => "sai_uploaded",
@@ -85,8 +85,8 @@ class Console::EtlsControllerTest < ActionDispatch::IntegrationTest
 
     get console_etls_url
     assert_response :ok
-    assert_select "h1", text: "ETLs"
-    assert_select "nav a[href=?]", console_etls_path, text: "ETLs"
+    assert_select "h1", text: "Data Sync"
+    assert_select "nav a[href=?]", console_etls_path, text: "Data Sync"
     assert_select "td", text: /export\.zip/
     assert_select "th", text: "Workspace", count: 0
     assert_select "span", text: "uploaded"

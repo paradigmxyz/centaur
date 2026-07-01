@@ -9,6 +9,51 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "form[action=?]", login_path
   end
 
+  test "local auth param signs in and redirects to requested console path" do
+    host! "localhost"
+
+    get login_url, params: { auth: @operator.email, next: console_threads_path }
+
+    assert_redirected_to console_threads_path
+    assert_equal @operator.id, session[:user_id]
+  end
+
+  test "local auth param can sign in directly on a console URL" do
+    host! "localhost"
+
+    get console_threads_url, params: { auth: @operator.email }
+
+    assert_response :ok
+    assert_equal @operator.id, session[:user_id]
+  end
+
+  test "local auth param falls back to the first active admin for true values" do
+    host! "localhost"
+
+    get login_url, params: { auth: "1" }
+
+    assert_redirected_to console_principals_path
+    assert_equal @operator.id, session[:user_id]
+  end
+
+  test "auth param is ignored for non-local hosts" do
+    host! "console.example"
+
+    get login_url, params: { auth: @operator.email }
+
+    assert_response :ok
+    assert_nil session[:user_id]
+  end
+
+  test "local auth return path rejects external redirects" do
+    host! "localhost"
+
+    get login_url, params: { auth: @operator.email, next: "https://example.test/console/threads" }
+
+    assert_redirected_to console_principals_path
+    assert_equal @operator.id, session[:user_id]
+  end
+
   test "valid credentials sign in and redirect to the console" do
     post login_url, params: { email: @operator.email, password: "password123456" }
     assert_redirected_to console_principals_path
