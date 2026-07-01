@@ -60,7 +60,8 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     }
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
-    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime);
+    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime)
+        .with_openai_session_title_generator_from_env();
     let mut warm_pool_bootstrap_principal = None;
     let mut workflow_host_principal = None;
     if let Some(iron_control) = args.iron_control_runtime().await? {

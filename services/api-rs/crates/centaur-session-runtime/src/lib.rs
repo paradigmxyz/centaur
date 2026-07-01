@@ -1,7 +1,9 @@
 mod cleanup;
+mod title_generator;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    future::Future,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -27,8 +29,8 @@ use centaur_telemetry::{
     record_session_execution_finished, record_session_execution_started, record_session_failure,
     record_session_first_token_latency, set_span_parent_trace,
 };
-use dashmap::DashMap;
-use futures_util::{SinkExt, Stream, StreamExt, stream};
+use dashmap::{DashMap, DashSet};
+use futures_util::{FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -42,6 +44,10 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::{Instrument, Span, error, info, info_span, warn};
 
 pub use cleanup::SessionSandboxCleanupConfig;
+pub use title_generator::SessionTitleGenerationError;
+use title_generator::{
+    OpenAiSessionTitleGenerator, sanitize_session_title, session_title_source_from_parts,
+};
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 pub const SESSION_FIRST_TOKEN_EVENT: &str = "session.first_token";
@@ -63,6 +69,10 @@ type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 type SessionPipeMap = Arc<DashMap<String, SessionPipe>>;
 type SessionPipeOpenLocks = Arc<DashMap<String, Arc<Mutex<()>>>>;
+type SessionTitleThreadSet = Arc<DashSet<ThreadKey>>;
+type SessionTitleGenerator = Arc<
+    dyn Fn(String) -> BoxFuture<'static, Result<String, SessionTitleGenerationError>> + Send + Sync,
+>;
 
 #[derive(Clone)]
 pub struct SessionRuntime {
@@ -74,6 +84,9 @@ pub struct SessionRuntime {
     iron_control: Option<SessionRegistrar>,
     warm_pool: Option<Arc<WarmPoolManager>>,
     personas: Option<Arc<PersonaRegistry>>,
+    session_title_generator: Option<SessionTitleGenerator>,
+    session_title_in_flight: SessionTitleThreadSet,
+    session_title_rerun_requested: SessionTitleThreadSet,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -319,7 +332,30 @@ impl SessionRuntime {
             iron_control: None,
             warm_pool: None,
             personas: None,
+            session_title_generator: None,
+            session_title_in_flight: Arc::new(DashSet::new()),
+            session_title_rerun_requested: Arc::new(DashSet::new()),
         }
+    }
+
+    pub fn with_session_title_generator<F, Fut>(mut self, generator: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, SessionTitleGenerationError>> + Send + 'static,
+    {
+        self.session_title_generator = Some(Arc::new(move |source| generator(source).boxed()));
+        self
+    }
+
+    pub fn with_openai_session_title_generator_from_env(mut self) -> Self {
+        let Some(generator) = OpenAiSessionTitleGenerator::from_env() else {
+            return self;
+        };
+        self.session_title_generator = Some(Arc::new(move |source| {
+            let generator = generator.clone();
+            async move { generator.generate(source).await }.boxed()
+        }));
+        self
     }
 
     pub fn with_personas(mut self, personas: PersonaRegistry) -> Self {
@@ -332,6 +368,13 @@ impl SessionRuntime {
             .as_ref()
             .map(|personas| personas.summaries())
             .unwrap_or_default()
+    }
+
+    pub async fn session_title(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        Ok(self.store.get_session_title(thread_key).await?)
     }
 
     fn resolve_persona_for_create(
@@ -712,7 +755,43 @@ impl SessionRuntime {
         };
         self.forward_messages_to_active_execution(thread_key, messages, &message_ids)
             .await;
+        self.spawn_session_title_generation(thread_key);
         Ok(message_ids)
+    }
+
+    fn spawn_session_title_generation(&self, thread_key: &ThreadKey) {
+        let Some(generator) = self.session_title_generator.clone() else {
+            return;
+        };
+        if !self.session_title_in_flight.insert(thread_key.clone()) {
+            self.session_title_rerun_requested
+                .insert(thread_key.clone());
+            return;
+        }
+        let store = self.store.clone();
+        let in_flight = self.session_title_in_flight.clone();
+        let rerun_requested = self.session_title_rerun_requested.clone();
+        let thread_key = thread_key.clone();
+        tokio::spawn(async move {
+            // Appends skipped while generation is in flight request one more pass,
+            // which lets low-signal wakeups defer to a later substantive message.
+            loop {
+                rerun_requested.remove(&thread_key);
+                maybe_generate_session_title(store.clone(), generator.clone(), thread_key.clone())
+                    .await;
+                if rerun_requested.remove(&thread_key).is_some() {
+                    continue;
+                }
+
+                in_flight.remove(&thread_key);
+                if rerun_requested.remove(&thread_key).is_some()
+                    && in_flight.insert(thread_key.clone())
+                {
+                    continue;
+                }
+                break;
+            }
+        });
     }
 
     /// Stop every non-terminal sandbox the backend currently owns.
@@ -2091,6 +2170,73 @@ impl SessionRuntime {
                 execution_id,
                 error = %record_error,
                 "failed to record orphaned execution failure"
+            );
+        }
+    }
+}
+
+async fn maybe_generate_session_title(
+    store: PgSessionStore,
+    generator: SessionTitleGenerator,
+    thread_key: ThreadKey,
+) {
+    let parts = match store.title_generation_candidate(&thread_key).await {
+        Ok(Some(parts)) => parts,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_title_candidate_failed",
+                thread_key = %thread_key,
+                %error,
+                "failed to load session title candidate"
+            );
+            return;
+        }
+    };
+    let Some(source) = session_title_source_from_parts(&parts) else {
+        return;
+    };
+    let raw_title = match generator(source).await {
+        Ok(title) => title,
+        Err(error) => {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_title_generation_failed",
+                thread_key = %thread_key,
+                %error,
+                "failed to generate session title"
+            );
+            return;
+        }
+    };
+    let Some(title) = sanitize_session_title(&raw_title) else {
+        warn!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_title_generation_empty",
+            thread_key = %thread_key,
+            "session title generation returned an empty title"
+        );
+        return;
+    };
+    match store.set_session_title_if_empty(&thread_key, &title).await {
+        Ok(true) => {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_title_set",
+                thread_key = %thread_key,
+                title,
+                "session title set"
+            );
+        }
+        Ok(false) => {}
+        Err(error) => {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_title_set_failed",
+                thread_key = %thread_key,
+                %error,
+                "failed to set session title"
             );
         }
     }
@@ -5774,6 +5920,7 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         Session {
             thread_key,
+            title: None,
             sandbox_id: Some(sandbox_id.to_owned()),
             sandbox_capabilities: None,
             harness_type: HarnessType::Codex,
@@ -6087,6 +6234,22 @@ mod adoption_tests {
         }
     }
 
+    async fn wait_for_session_title(
+        store: &PgSessionStore,
+        thread_key: &ThreadKey,
+        expected: &str,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let session = store.get_session(thread_key).await.expect("get session");
+            if session.title.as_deref() == Some(expected) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for title");
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     async fn events(store: &PgSessionStore, thread_key: &ThreadKey) -> Vec<SessionEvent> {
         store
             .list_events_after(thread_key, 0, None, 1000)
@@ -6099,6 +6262,116 @@ mod adoption_tests {
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_messages_generates_missing_session_title_once() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key = ThreadKey::parse(format!("test:title-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sources = Arc::new(Mutex::new(Vec::<String>::new()));
+        let generator_started = Arc::new(tokio::sync::Notify::new());
+        let generator_release = Arc::new(tokio::sync::Notify::new());
+        let calls_for_generator = calls.clone();
+        let sources_for_generator = sources.clone();
+        let started_for_generator = generator_started.clone();
+        let release_for_generator = generator_release.clone();
+        let runtime = runtime_with(
+            &store,
+            Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new())),
+        )
+        .with_session_title_generator(move |source| {
+            let calls = calls_for_generator.clone();
+            let sources = sources_for_generator.clone();
+            let started = started_for_generator.clone();
+            let release = release_for_generator.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                sources.lock().await.push(source);
+                started.notify_one();
+                release.notified().await;
+                Ok("Fix worker memory leak".to_owned())
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.append_messages(
+                &thread_key,
+                &[SessionMessageInput {
+                    client_message_id: Some("first".to_owned()),
+                    role: MessageRole::User,
+                    parts: vec![
+                        json!({
+                            "type": "text",
+                            "text": "# Requester Context\n\nThe Slack user who prompted this turn is Alice."
+                        }),
+                        json!({
+                            "type": "text",
+                            "text": "<@U123> please fix the memory leak in the worker"
+                        }),
+                    ],
+                    metadata: json!({}),
+                }],
+            ),
+        )
+        .await
+        .expect("append first message should not wait for title generation")
+        .expect("append first message");
+
+        generator_started.notified().await;
+
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.title, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sources.lock().await.clone(),
+            vec!["please fix the memory leak in the worker".to_owned()]
+        );
+
+        runtime
+            .append_messages(
+                &thread_key,
+                &[SessionMessageInput {
+                    client_message_id: Some("burst".to_owned()),
+                    role: MessageRole::User,
+                    parts: vec![json!({"type": "text", "text": "add more logging"})],
+                    metadata: json!({}),
+                }],
+            )
+            .await
+            .expect("append burst message");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        generator_release.notify_one();
+        wait_for_session_title(&store, &thread_key, "Fix worker memory leak").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        runtime
+            .append_messages(
+                &thread_key,
+                &[SessionMessageInput {
+                    client_message_id: Some("second".to_owned()),
+                    role: MessageRole::User,
+                    parts: vec![json!({"type": "text", "text": "add more logging"})],
+                    metadata: json!({}),
+                }],
+            )
+            .await
+            .expect("append second message");
+
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.title.as_deref(), Some("Fix worker memory leak"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {

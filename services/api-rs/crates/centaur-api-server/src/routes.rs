@@ -404,10 +404,22 @@ async fn get_session_context(
     State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,
 ) -> Result<Json<SessionContextResponse>, ApiError> {
-    let _runtime = state.runtime()?;
+    let runtime = state.runtime()?;
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let title = match runtime.session_title(&thread_key).await {
+        Ok(title) => title,
+        Err(error) => {
+            tracing::warn!(
+                thread_key = %thread_key,
+                %error,
+                "failed to load optional session title"
+            );
+            None
+        }
+    };
     Ok(Json(SessionContextResponse {
         slack: slack_thread_context(&thread_key),
+        title,
         thread_key,
     }))
 }
