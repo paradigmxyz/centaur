@@ -682,18 +682,14 @@ class Console::ThreadsController < ApplicationController
     connection = CentaurSessionRecord.connection
     return {} unless connection.data_source_exists?("slack_sync_users")
 
-    quoted_ids = user_ids.map { |user_id| connection.quote(user_id) }.join(", ")
-    rows = connection.exec_query(<<~SQL.squish)
-      select user_id, user_name, display_name, real_name
-      from slack_sync_users
-      where lower(user_id) in (#{quoted_ids})
-    SQL
-
-    rows.to_h do |row|
-      user_id = normalize_key(row["user_id"])
-      label = slack_mention_label_from_values(row["user_name"], row["display_name"], row["real_name"])
-      [ user_id, label ]
-    end.compact
+    SlackSyncUser
+      .where("lower(user_id) IN (?)", user_ids)
+      .pluck(:user_id, :user_name, :display_name, :real_name)
+      .each_with_object({}) do |(user_id, user_name, display_name, real_name), labels|
+        user_id = normalize_key(user_id)
+        label = slack_mention_label_from_values(user_name, display_name, real_name)
+        labels[user_id] = label if user_id.present? && label.present?
+      end
   rescue ActiveRecord::ActiveRecordError, PG::Error => e
     Rails.logger.debug("console_threads_slack_user_lookup_failed error=#{e.class}: #{e.message}")
     {}
@@ -703,35 +699,35 @@ class Console::ThreadsController < ApplicationController
     user_ids = user_ids.filter_map { |value| normalize_key(value) }.uniq
     return {} if user_ids.empty?
 
-    connection = CentaurSessionRecord.connection
-    quoted_ids = user_ids.map { |user_id| connection.quote(user_id) }.join(", ")
-    rows = connection.exec_query(<<~SQL.squish)
-      select
-        metadata ->> 'slack_user_id' as slack_user_id,
-        metadata ->> 'user_id' as user_id,
-        metadata ->> 'actor_user_id' as actor_user_id,
-        metadata ->> 'slack_user_name' as slack_user_name,
-        metadata ->> 'user_name' as user_name,
-        metadata ->> 'slack_display_name' as slack_display_name,
-        metadata ->> 'display_name' as display_name
-      from session_messages
-      where lower(coalesce(
-        nullif(metadata ->> 'slack_user_id', ''),
-        nullif(metadata ->> 'user_id', ''),
-        nullif(metadata ->> 'actor_user_id', '')
-      )) in (#{quoted_ids})
-      order by created_at desc, message_id desc
-    SQL
+    rows = CentaurSessionMessage
+      .where(<<~SQL.squish, user_ids)
+        lower(coalesce(
+          nullif(metadata ->> 'slack_user_id', ''),
+          nullif(metadata ->> 'user_id', ''),
+          nullif(metadata ->> 'actor_user_id', '')
+        )) IN (?)
+      SQL
+      .order(created_at: :desc, message_id: :desc)
+      .pluck(
+        Arel.sql("metadata ->> 'slack_user_id'"),
+        Arel.sql("metadata ->> 'user_id'"),
+        Arel.sql("metadata ->> 'actor_user_id'"),
+        Arel.sql("metadata ->> 'slack_user_name'"),
+        Arel.sql("metadata ->> 'user_name'"),
+        Arel.sql("metadata ->> 'slack_display_name'"),
+        Arel.sql("metadata ->> 'display_name'")
+      )
 
     rows.each_with_object({}) do |row, labels|
-      user_id = normalize_key(row["slack_user_id"] || row["user_id"] || row["actor_user_id"])
+      slack_user_id, user_id_value, actor_user_id, slack_user_name, user_name, slack_display_name, display_name = row
+      user_id = normalize_key(slack_user_id || user_id_value || actor_user_id)
       next if user_id.blank? || labels.key?(user_id)
 
       label = slack_mention_label_from_values(
-        row["slack_user_name"],
-        row["user_name"],
-        row["slack_display_name"],
-        row["display_name"]
+        slack_user_name,
+        user_name,
+        slack_display_name,
+        display_name
       )
       labels[user_id] = label if label.present?
     end
