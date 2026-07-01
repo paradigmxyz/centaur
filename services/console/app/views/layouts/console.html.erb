@@ -829,7 +829,6 @@
         </div>
 
         <div class="console-sidebar-scroll">
-          <% selected_sidebar_thread_key = params[:thread].to_s %>
           <nav class="console-nav-list" aria-label="Console sections">
             <% nav_items.each do |item| %>
               <% active = request.path == item[:path] ||
@@ -852,29 +851,14 @@
               <span class="console-nav-label">Threads</span>
             </a>
             <div class="console-thread-list">
-              <% if @console_sidebar_threads.blank? %>
-                <div class="console-thread-empty">No recent threads</div>
-              <% else %>
-                <% @console_sidebar_threads.each_with_index do |thread, index| %>
-                  <% active_thread = selected_sidebar_thread_key == thread.thread_key %>
-                  <% latest_message = @console_sidebar_latest_messages[thread.thread_key] %>
-                  <% title = console_sidebar_thread_title(thread, latest_message) %>
-                  <%= link_to console_threads_path(thread: thread.thread_key),
-                              class: "console-thread-link #{active_thread ? "console-thread-link-active" : ""} #{index >= 5 && !active_thread ? "console-thread-link-hidden" : ""}",
-                              data: { console_thread_link: true },
-                              title: title do %>
-                    <span class="console-thread-title"><%= title %></span>
-                    <span class="console-thread-time"><%= local_time(thread.updated_at || thread.created_at, relative: true, format: :compact) %></span>
-                  <% end %>
-                <% end %>
-                <% if @console_sidebar_threads.size > 5 %>
-                  <button type="button"
-                          class="console-thread-show-all"
-                          data-console-thread-show-more
-                          data-page-size="5">
-                    Show more
-                  </button>
-                <% end %>
+              <%# The thread list is loaded lazily via a Turbo Frame so the
+                  unindexed cross-database sessions query never blocks the primary
+                  page render. See ApplicationController#init_console_sidebar_threads
+                  and Console::ThreadsController#sidebar. %>
+              <%= turbo_frame_tag "console_sidebar_threads",
+                                  src: console_sidebar_threads_path,
+                                  loading: :lazy do %>
+                <div class="console-thread-empty">Loading threads…</div>
               <% end %>
             </div>
           </div>
@@ -1003,29 +987,40 @@
       })();
 
       (() => {
-        const showMoreButton = document.querySelector("[data-console-thread-show-more]");
-        if (!showMoreButton) return;
+        // The thread list is loaded lazily into a Turbo Frame, so the show-more
+        // button does not exist on initial page load. Wire it up both now (in
+        // case the frame is already populated) and each time the frame loads.
+        const wireShowMore = () => {
+          const showMoreButton = document.querySelector("[data-console-thread-show-more]");
+          if (!showMoreButton || showMoreButton.dataset.consoleThreadShowMoreWired === "true") return;
 
-        const list = showMoreButton.closest(".console-thread-list");
-        if (!list) return;
+          const list = showMoreButton.closest(".console-thread-list");
+          if (!list) return;
 
-        const revealNextThreads = () => {
-          const pageSize = Number.parseInt(showMoreButton.dataset.pageSize || "5", 10);
-          const hiddenThreads = Array.from(list.querySelectorAll(".console-thread-link-hidden"));
-          hiddenThreads.slice(0, Number.isFinite(pageSize) ? pageSize : 5).forEach((link) => {
-            link.classList.remove("console-thread-link-hidden");
-          });
+          const revealNextThreads = () => {
+            const pageSize = Number.parseInt(showMoreButton.dataset.pageSize || "5", 10);
+            const hiddenThreads = Array.from(list.querySelectorAll(".console-thread-link-hidden"));
+            hiddenThreads.slice(0, Number.isFinite(pageSize) ? pageSize : 5).forEach((link) => {
+              link.classList.remove("console-thread-link-hidden");
+            });
+
+            if (!list.querySelector(".console-thread-link-hidden")) {
+              showMoreButton.hidden = true;
+            }
+          };
 
           if (!list.querySelector(".console-thread-link-hidden")) {
             showMoreButton.hidden = true;
+          } else {
+            showMoreButton.addEventListener("click", revealNextThreads);
           }
+          showMoreButton.dataset.consoleThreadShowMoreWired = "true";
         };
 
-        if (!list.querySelector(".console-thread-link-hidden")) {
-          showMoreButton.hidden = true;
-        } else {
-          showMoreButton.addEventListener("click", revealNextThreads);
-        }
+        wireShowMore();
+        document.addEventListener("turbo:frame-load", (event) => {
+          if (event.target && event.target.id === "console_sidebar_threads") wireShowMore();
+        });
       })();
     </script>
   </body>

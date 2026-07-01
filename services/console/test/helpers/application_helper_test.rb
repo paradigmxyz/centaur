@@ -75,7 +75,7 @@ class ApplicationHelperTest < ActionView::TestCase
   test "console_markdown terminates on bare list and heading markers" do
     # A line that is only a block-start marker (no content) once spun the
     # markdown parser forever, pinning a worker. It must render and return.
-    ["- ", "* ", "+ ", "1. ", "# ", "## ", "hello\n- \nworld"].each do |input|
+    [ "- ", "* ", "+ ", "1. ", "# ", "## ", "hello\n- \nworld" ].each do |input|
       html = Timeout.timeout(3) { console_markdown(input) }
       assert html.present?, "expected markdown for #{input.inspect}"
     end

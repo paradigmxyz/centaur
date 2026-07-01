@@ -49,6 +49,15 @@ class Console::ThreadsController < ApplicationController
     )
   end
 
+  # Lazily-loaded sidebar thread list, requested by the Turbo Frame in
+  # layouts/console.html.erb. Runs the cross-database sessions query out of band
+  # so it never blocks the primary page render. Renders only the frame partial
+  # (no layout). DB errors leave the list empty via load_console_sidebar_threads.
+  def sidebar
+    load_console_sidebar_threads
+    render partial: "console/threads/sidebar_threads", layout: false
+  end
+
   private
 
   def load_threads
@@ -285,11 +294,15 @@ class Console::ThreadsController < ApplicationController
   def selected_messages
     return [] unless @selected_session
 
+    # Fetch the newest MESSAGE_LIMIT messages, then reverse for oldest-first
+    # display. Ordering ascending before LIMIT would return the OLDEST N and
+    # drop the newest for long threads (mirrors selected_events below).
     CentaurSessionMessage
       .where(thread_key: @selected_session.thread_key)
-      .order(:created_at, :message_id)
+      .order(created_at: :desc, message_id: :desc)
       .limit(MESSAGE_LIMIT)
       .to_a
+      .reverse
   end
 
   def selected_executions
