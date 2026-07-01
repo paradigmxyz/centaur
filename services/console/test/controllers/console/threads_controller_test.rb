@@ -67,7 +67,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to console_threads_path(thread: thread_key)
   end
 
-  test "direct selected thread appears in sidebar when outside owner filtered list" do
+  test "direct selected thread is hidden when the current user did not start it" do
     skip_unless_session_table
 
     thread_key = "slack:C0DIRECT:#{SecureRandom.hex(6)}"
@@ -77,12 +77,14 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       slack_user_name: "someone-else"
     )
 
+    # @operator has no Slack OAuth credential matching U_OTHER, so this thread is
+    # outside their owner scope. A direct ?thread= link must not surface it.
     get console_threads_url(thread: thread_key)
 
     assert_response :ok
     assert_select ".console-thread-list a.console-thread-link-active[href=?]",
                   console_threads_path(thread: thread_key),
-                  count: 1
+                  count: 0
   end
 
   test "slack assistant-role messages from the current Slack user render as user authored" do
@@ -361,27 +363,23 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     refute_includes sql, "slack_user_id"
   end
 
-  test "direct selected thread can load outside visible Slack list scope" do
+  test "selected session resolves a directly linked thread only within the owner scope" do
     controller = Console::ThreadsController.new
-    direct_thread = SelectedSession.new(thread_key: "slack:C123:1782339173.755169")
+    owned_thread = SelectedSession.new(thread_key: "slack:C123:1782339173.755169")
     scoped_relation = Object.new
-    scoped_relation.define_singleton_method(:where) { |**_kwargs| [] }
-    controller.instance_variable_set(:@selected_thread_key, direct_thread.thread_key)
+    scoped_relation.define_singleton_method(:where) do |thread_key:|
+      thread_key == owned_thread.thread_key ? [ owned_thread ] : []
+    end
     controller.instance_variable_set(:@starting_new_thread, false)
     controller.instance_variable_set(:@sessions, [])
-    controller.define_singleton_method(:direct_selected_session) do |thread_key|
-      direct_thread if thread_key == direct_thread.thread_key
-    end
 
-    selected = controller.send(:selected_session, scoped_relation, [])
+    # An owned key outside the base window is recovered through the scope.
+    controller.instance_variable_set(:@selected_thread_key, owned_thread.thread_key)
+    assert_equal owned_thread, controller.send(:selected_session, scoped_relation, [])
 
-    assert_equal direct_thread, selected
-  end
-
-  test "direct selected thread fallback does not bypass console thread scope" do
-    controller = Console::ThreadsController.new
-
-    assert_nil controller.send(:direct_selected_session, "console:someone-else")
+    # A key the scope does not own has no unscoped fallback, so it stays hidden.
+    controller.instance_variable_set(:@selected_thread_key, "slack:C999:1782339173.999999")
+    assert_nil controller.send(:selected_session, scoped_relation, [])
   end
 
   test "starting a thread is blocked without calling the session api" do

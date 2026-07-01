@@ -218,7 +218,10 @@ class ApplicationController < ActionController::Base
     return if thread_key.blank?
     return if threads.any? { |thread| thread.thread_key == thread_key }
 
-    CentaurSession.find_by(thread_key: thread_key)
+    # Resolve through the owner scope, not a raw find_by, so a directly linked
+    # thread only surfaces in the sidebar when the current user started it. This
+    # mirrors Console::ThreadsController#selected_session.
+    console_sidebar_visible_thread_scope.where(thread_key: thread_key).first
   end
 
   def console_sidebar_selected_thread_key

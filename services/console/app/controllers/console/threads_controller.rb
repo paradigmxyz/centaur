@@ -103,8 +103,10 @@ class Console::ThreadsController < ApplicationController
     selected = nil
     if @selected_thread_key.present?
       selected = base_sessions.find { |session| session.thread_key == @selected_thread_key }
+      # Resolve the key through the owner scope so a directly linked thread only
+      # loads when the current user started it. base_sessions is capped at
+      # THREAD_LIMIT, so this also recovers an owned thread beyond that window.
       selected ||= session_scope.where(thread_key: @selected_thread_key).first
-      selected ||= direct_selected_session(@selected_thread_key)
     end
     selected || @sessions.first
   end
@@ -126,13 +128,6 @@ class Console::ThreadsController < ApplicationController
     @latest_executions.merge!(latest_executions_for(selected_key))
     @message_counts.merge!(count_records(CentaurSessionMessage, selected_key))
     @execution_counts.merge!(count_records(CentaurSessionExecution, selected_key))
-  end
-
-  def direct_selected_session(thread_key)
-    return if thread_key.blank?
-    return unless thread_key.to_s.start_with?("slack:")
-
-    CentaurSession.where(thread_key: thread_key).first
   end
 
   def visible_thread_scope
