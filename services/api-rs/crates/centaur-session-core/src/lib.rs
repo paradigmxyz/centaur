@@ -180,6 +180,10 @@ pub struct Session {
     /// iron-control principal OID this session's egress proxy binds to,
     /// captured at registration so a resumed session can recreate its sandbox.
     pub iron_control_principal: Option<String>,
+    /// Last meaningful activity for the currently assigned sandbox. This is
+    /// the eviction signal for capacity pressure and intentionally separate
+    /// from `updated_at`, which also changes for metadata/status writes.
+    pub sandbox_last_active_at: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }

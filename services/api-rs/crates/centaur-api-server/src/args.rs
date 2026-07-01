@@ -30,12 +30,14 @@ use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode, SessionSandboxCleanupConfig};
+use centaur_session_runtime::{
+    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
+};
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use crate::ServerError;
+use crate::{ServerError, activity_summary::ActivitySummaryConfig};
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 
@@ -57,6 +59,8 @@ pub(crate) struct Args {
     pub(crate) server: ServerArgs,
     #[command(flatten)]
     sandbox: SandboxArgs,
+    #[command(flatten)]
+    activity_summary: ActivitySummaryArgs,
 }
 
 impl Args {
@@ -70,18 +74,16 @@ impl Args {
         self.sandbox.iron_control_runtime().await
     }
 
-    pub(crate) fn iron_control_tool_reconciler(
-        &self,
-    ) -> Result<Option<IronControlToolReconciler>, ServerError> {
-        self.sandbox.iron_control_tool_reconciler()
-    }
-
     pub(crate) fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
         self.sandbox.persona_registry()
     }
 
     pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
         self.sandbox.warm_pool_config()
+    }
+
+    pub(crate) fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
+        self.sandbox.sandbox_capacity_config()
     }
 
     pub(crate) fn sandbox_reaper_config(&self) -> SandboxReaperConfig {
@@ -100,6 +102,10 @@ impl Args {
             .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
             .await
     }
+
+    pub(crate) fn activity_summary_config(&self) -> Option<ActivitySummaryConfig> {
+        self.activity_summary.config()
+    }
 }
 
 pub(crate) struct IronControlRuntime {
@@ -108,14 +114,80 @@ pub(crate) struct IronControlRuntime {
     pub(crate) workflow_host_principal: String,
 }
 
-pub(crate) struct IronControlToolReconciler {
-    client: IronControlClient,
-    namespace: String,
-    source_policy: SourcePolicy,
-    base_infra_fragment: ProxyFragment,
-    tool_dirs: Vec<PathBuf>,
-    tool_git_sources: Vec<ToolGitSource>,
-    interval: Duration,
+#[derive(Debug, ClapArgs)]
+struct ActivitySummaryArgs {
+    /// Enable API-side model summaries of durable Codex App Server activity.
+    #[arg(
+        long = "session-activity-summary-enabled",
+        env = "SESSION_ACTIVITY_SUMMARY_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    enabled: bool,
+    #[arg(
+        long = "session-activity-summary-model",
+        env = "SESSION_ACTIVITY_SUMMARY_MODEL",
+        default_value = "gpt-5.4-nano"
+    )]
+    model: String,
+    #[arg(
+        long = "session-activity-summary-openai-base-url",
+        env = "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
+        default_value = "https://api.openai.com/v1"
+    )]
+    openai_base_url: String,
+    #[arg(
+        long = "session-activity-summary-min-interval-secs",
+        env = "SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS",
+        default_value_t = 8,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    min_interval_secs: u64,
+    #[arg(
+        long = "session-activity-summary-timeout-secs",
+        env = "SESSION_ACTIVITY_SUMMARY_TIMEOUT_SECS",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    timeout_secs: u64,
+    #[arg(
+        long = "session-activity-summary-max-facts",
+        env = "SESSION_ACTIVITY_SUMMARY_MAX_FACTS",
+        default_value_t = 12,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_facts: u64,
+    #[arg(
+        long = "session-activity-summary-max-output-tokens",
+        env = "SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS",
+        default_value_t = 128,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_output_tokens: u64,
+}
+
+impl ActivitySummaryArgs {
+    fn config(&self) -> Option<ActivitySummaryConfig> {
+        if !self.enabled {
+            return None;
+        }
+        let Some(api_key) = clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref()) else {
+            warn!(
+                "session activity summaries are enabled but no OpenAI credential is configured; \
+                 set OPENAI_API_KEY in the api-rs environment"
+            );
+            return None;
+        };
+        Some(ActivitySummaryConfig {
+            base_url: self.openai_base_url.clone(),
+            api_key,
+            max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
+            max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
+            min_interval: Duration::from_secs(self.min_interval_secs),
+            model: self.model.clone(),
+            timeout: Duration::from_secs(self.timeout_secs),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,79 +197,6 @@ struct ToolGitSource {
     source_subdir: String,
     cache_dir: PathBuf,
     repo_cache_path: Option<String>,
-}
-
-impl IronControlToolReconciler {
-    pub(crate) async fn run(self) {
-        let mut interval = tokio::time::interval(self.interval);
-        // The startup path already registered once; wait a full period so this
-        // task only handles post-start git/volume updates.
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            if let Err(error) = self.reconcile_once().await {
-                error!(%error, "failed to reconcile iron-control tool secrets");
-            }
-        }
-    }
-
-    async fn reconcile_once(&self) -> Result<(), ServerError> {
-        let tool_dirs = self.tool_dirs()?;
-        let tool_fragment = self.discover_tool_proxy_fragment()?;
-        let mut infra = self.base_infra_fragment.clone();
-        if let Some(tool_fragment) = &tool_fragment {
-            merge_fragment(&mut infra, tool_fragment.fragment.clone());
-        }
-        let role_id = register_role(
-            &self.client,
-            &self.namespace,
-            &RoleSpec::infra(),
-            &infra,
-            &self.source_policy,
-        )
-        .await?;
-        info!(
-            role_id,
-            tool_dirs = ?tool_dirs,
-            tool_count = tool_fragment
-                .as_ref()
-                .map_or(0, |fragment| fragment.tool_count),
-            secret_count = tool_fragment
-                .as_ref()
-                .map_or(0, |fragment| fragment.secret_count),
-            "reconciled iron-control tool secrets"
-        );
-        Ok(())
-    }
-
-    fn discover_tool_proxy_fragment(
-        &self,
-    ) -> Result<Option<DiscoveredToolProxyFragment>, ServerError> {
-        let tool_dirs = self.tool_dirs()?;
-        let discovered = discover_tool_proxy_fragment(&tool_dirs)?;
-        if discovered.secret_count == 0 {
-            return Ok(None);
-        }
-        Ok(Some(discovered))
-    }
-
-    fn tool_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
-        if !self.tool_git_sources.is_empty() {
-            let mut dirs = Vec::with_capacity(self.tool_git_sources.len());
-            for source in &self.tool_git_sources {
-                source.sync()?;
-                let tools_dir = source.tools_dir();
-                // Skip sources without a tools tree (chart-defaulted subdirs
-                // make this a normal case for non-tool overlay repos).
-                if !tools_dir.is_dir() {
-                    continue;
-                }
-                dirs.push(tools_dir);
-            }
-            return Ok(dirs);
-        }
-        Ok(self.tool_dirs.clone())
-    }
 }
 
 impl ToolGitSource {
@@ -526,6 +525,22 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
+    /// Hard cap on observed running-like sandboxes. 0 disables capacity
+    /// admission.
+    #[arg(
+        long = "session-sandbox-running-limit",
+        env = "SESSION_SANDBOX_RUNNING_LIMIT",
+        default_value_t = 0
+    )]
+    sandbox_running_limit: usize,
+    /// Do not evict assigned idle sandboxes that were active within this
+    /// window. Warm sandboxes can still be discarded first.
+    #[arg(
+        long = "session-sandbox-hot-idle-grace-secs",
+        env = "SESSION_SANDBOX_HOT_IDLE_GRACE_SECS",
+        default_value_t = 300
+    )]
+    sandbox_hot_idle_grace_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
@@ -611,12 +626,6 @@ struct SandboxArgs {
     kubernetes_workflow_dirs: Option<String>,
     #[command(flatten)]
     tools_source: ToolsArgs,
-    #[arg(
-        long = "tool-proxy-reconcile-interval-secs",
-        env = "TOOL_PROXY_RECONCILE_INTERVAL_SECS",
-        default_value_t = 60
-    )]
-    tool_proxy_reconcile_interval_secs: u64,
 }
 
 impl SandboxArgs {
@@ -629,8 +638,7 @@ impl SandboxArgs {
         let namespace = self.iron_control.namespace.clone();
         let role_ids = if self.iron_control_sync_infra_secrets {
             let policy = self.iron_proxy.source_policy();
-            let tool_fragment = self.discover_tool_proxy_fragment()?;
-            let roles = self.iron_proxy.roles_to_register(tool_fragment.as_ref())?;
+            let roles = self.iron_proxy.roles_to_register()?;
             let mut role_ids = Vec::with_capacity(roles.len());
             for (spec, fragment) in &roles {
                 role_ids.push(
@@ -681,39 +689,6 @@ impl SandboxArgs {
             registrar: SessionRegistrar::new(client, namespace, role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
-        }))
-    }
-
-    /// Background registration for git/volume-backed tool updates. Startup
-    /// registration keeps the stable infra role current; re-upserting that role
-    /// here adds newly discovered tool secrets to principals that hold the role
-    /// without restarting api-rs or sandboxes. Session registration only seeds
-    /// this role onto brand-new principals, so operator revocations stay sticky.
-    fn iron_control_tool_reconciler(
-        &self,
-    ) -> Result<Option<IronControlToolReconciler>, ServerError> {
-        if !self.iron_control_sync_infra_secrets {
-            return Ok(None);
-        }
-        let Some(client) = self.iron_control.client() else {
-            return Ok(None);
-        };
-        if self.tool_proxy_reconcile_interval_secs == 0 {
-            return Ok(None);
-        }
-        Ok(Some(IronControlToolReconciler {
-            client,
-            namespace: self.iron_control.namespace.clone(),
-            source_policy: self.iron_proxy.source_policy(),
-            base_infra_fragment: self.iron_proxy.infra_fragment()?,
-            tool_dirs: self.tools.resolve_tool_dirs()?,
-            tool_git_sources: self
-                .tools_source
-                .to_config()
-                .as_ref()
-                .map(ToolGitSource::from_config)
-                .unwrap_or_default(),
-            interval: Duration::from_secs(self.tool_proxy_reconcile_interval_secs),
         }))
     }
 
@@ -1207,6 +1182,15 @@ impl SandboxArgs {
             target_size: self.warm_pool_size,
             replenish_interval: Duration::from_secs(self.warm_pool_replenish_interval_secs),
             bootstrap_iron_control_principal: None,
+            max_running_sandboxes: (self.sandbox_running_limit > 0)
+                .then_some(self.sandbox_running_limit),
+        })
+    }
+
+    fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
+        (self.sandbox_running_limit > 0).then(|| SandboxCapacityConfig {
+            max_running: self.sandbox_running_limit,
+            hot_idle_grace: Duration::from_secs(self.sandbox_hot_idle_grace_secs),
         })
     }
 
@@ -1580,22 +1564,15 @@ impl IronProxyArgs {
     }
 
     /// The role to register in iron-control. The shared `infra` role contains
-    /// infra, harness, and discovered tool secrets, and every session principal
-    /// is granted that single role (see [`SessionRegistrar`]).
-    fn roles_to_register(
-        &self,
-        tool_fragment: Option<&DiscoveredToolProxyFragment>,
-    ) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
-        let mut infra = self.infra_fragment()?;
-        if let Some(tool_fragment) = tool_fragment {
-            merge_fragment(&mut infra, tool_fragment.fragment.clone());
-        }
+    /// infra and harness secrets, and every session principal is granted that
+    /// role (see [`SessionRegistrar`]).
+    fn roles_to_register(&self) -> Result<Vec<(RoleSpec, ProxyFragment)>, ServerError> {
+        let infra = self.infra_fragment()?;
         Ok(vec![(RoleSpec::infra(), infra)])
     }
 
     /// The full infra fragment: the shared infra secrets plus every available
-    /// harness auth fragment (also infra), selected by auth mode. Discovered
-    /// tool secrets are folded into the same infra role at registration time.
+    /// harness auth fragment (also infra), selected by auth mode.
     fn infra_fragment(&self) -> Result<ProxyFragment, ServerError> {
         let mut infra = infra_fragment()?;
         for fragment in self.harness.fragments()? {
@@ -1997,6 +1974,55 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
+    }
+
+    #[test]
+    fn activity_summary_uses_direct_openai_key_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("FIREWALL_MANAGER_SECRET_SOURCE", "env"),
+            ("KUBERNETES_OP_CONNECT_HOST", ""),
+            ("OP_CONNECT_TOKEN", ""),
+            ("OP_VAULT", ""),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.api_key, "sk-test");
+    }
+
+    #[test]
+    fn activity_summary_uses_mounted_openai_key_even_with_onepassword_connect_source() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-mounted"),
+            ("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword-connect"),
+            (
+                "KUBERNETES_OP_CONNECT_HOST",
+                "http://onepassword-connect:8080",
+            ),
+            ("OP_CONNECT_TOKEN", "op-token"),
+            ("OP_VAULT", "centaur-agent"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.api_key, "sk-mounted");
     }
 
     #[test]
@@ -2595,62 +2621,6 @@ mod tests {
     }
 
     #[test]
-    fn iron_control_registers_discovered_tool_secrets_on_infra_role() {
-        use centaur_iron_proxy::{Secret, SecretReplace, Transform, TransformConfig};
-
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--kubernetes-iron-proxy-harness-auth-mode",
-            "api_key",
-        ])
-        .unwrap();
-        let tool_fragment = DiscoveredToolProxyFragment {
-            fragment: ProxyFragment {
-                transforms: vec![Transform {
-                    name: "secrets".to_owned(),
-                    config: TransformConfig {
-                        secrets: vec![Secret {
-                            id: Some("TOOL_API_KEY".to_owned()),
-                            replace: Some(SecretReplace {
-                                proxy_value: Some("TOOL_API_KEY".to_owned()),
-                                ..Default::default()
-                            }),
-                            rules: vec![serde_yaml::from_str("{host: api.tool.test}").unwrap()],
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            tool_count: 1,
-            secret_count: 1,
-        };
-
-        let roles = args
-            .sandbox
-            .iron_proxy
-            .roles_to_register(Some(&tool_fragment))
-            .unwrap();
-
-        assert_eq!(roles.len(), 1);
-        assert_eq!(roles[0].0.foreign_id, "infra");
-        assert!(roles[0].1.transforms.iter().any(|transform| {
-            transform.config.secrets.iter().any(|secret| {
-                secret.id.as_deref() == Some("TOOL_API_KEY")
-                    && secret
-                        .replace
-                        .as_ref()
-                        .and_then(|replace| replace.proxy_value.as_deref())
-                        == Some("TOOL_API_KEY")
-            })
-        }));
-    }
-
-    #[test]
     fn iron_control_infra_secret_sync_can_be_disabled() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2666,12 +2636,6 @@ mod tests {
         .unwrap();
 
         assert!(!args.sandbox.iron_control_sync_infra_secrets);
-        assert!(
-            args.sandbox
-                .iron_control_tool_reconciler()
-                .unwrap()
-                .is_none()
-        );
     }
 
     #[test]

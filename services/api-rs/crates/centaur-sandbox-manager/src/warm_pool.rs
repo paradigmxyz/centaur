@@ -9,11 +9,13 @@ use tracing::warn;
 use crate::SandboxManager;
 
 pub type WarmSandboxSpecFactory = Arc<dyn Fn() -> SandboxSpec + Send + Sync>;
+const STALE_EVICTING_WARM_SANDBOX_AGE: Duration = Duration::from_secs(300);
 
 pub struct WarmPoolConfig {
     pub target_size: usize,
     pub replenish_interval: Duration,
     pub bootstrap_iron_control_principal: Option<String>,
+    pub max_running_sandboxes: Option<usize>,
 }
 
 pub struct WarmPoolManager {
@@ -116,6 +118,7 @@ impl WarmPoolManager {
 
     async fn replenish_once(&self) -> Result<(), WarmPoolError> {
         self.prune_stale_ready_sandboxes().await?;
+        self.prune_stale_evicting_sandboxes().await?;
 
         let needed = self.config.target_size.saturating_sub(
             self.store
@@ -123,6 +126,7 @@ impl WarmPoolManager {
                 .await?
                 .max(0) as usize,
         );
+        let needed = needed.min(self.available_running_slots().await?);
 
         for _ in 0..needed {
             let mut spec = (self.spec_factory)();
@@ -163,6 +167,65 @@ impl WarmPoolManager {
         }
         Ok(())
     }
+
+    async fn prune_stale_evicting_sandboxes(&self) -> Result<(), WarmPoolError> {
+        for sandbox_id in self
+            .store
+            .list_stale_evicting_warm_sandbox_ids(STALE_EVICTING_WARM_SANDBOX_AGE)
+            .await?
+        {
+            let id = SandboxId::new(sandbox_id.as_str());
+            let failure = match self.manager.status(&id).await {
+                Ok(status) if status_consumes_running_slot(&status) => {
+                    match self.manager.stop(&id).await {
+                        Ok(()) | Err(SandboxError::NotFound(_)) => {
+                            "stale evicting warm sandbox stopped".to_owned()
+                        }
+                        Err(error) => {
+                            let error_message = error.to_string();
+                            warn!(%sandbox_id, error = %error_message);
+                            return Err(WarmPoolError::Sandbox(error));
+                        }
+                    }
+                }
+                Ok(status) => format!("stale evicting warm sandbox was not running: {status:?}"),
+                Err(SandboxError::NotFound(_)) => {
+                    "stale evicting warm sandbox was not found".to_owned()
+                }
+                Err(error) => {
+                    let error_message = error.to_string();
+                    warn!(%sandbox_id, error = %error_message);
+                    return Err(WarmPoolError::Sandbox(error));
+                }
+            };
+            warn!(%sandbox_id, reason = %failure, "marking stale evicting warm sandbox failed");
+            self.store
+                .mark_warm_sandbox_failed(&sandbox_id, &failure)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn available_running_slots(&self) -> Result<usize, WarmPoolError> {
+        let Some(max_running) = self.config.max_running_sandboxes else {
+            return Ok(usize::MAX);
+        };
+        let running = self
+            .manager
+            .list_observed()
+            .await?
+            .into_iter()
+            .filter(|observed| status_consumes_running_slot(&observed.status))
+            .count();
+        Ok(max_running.saturating_sub(running))
+    }
+}
+
+fn status_consumes_running_slot(status: &SandboxStatus) -> bool {
+    matches!(
+        status,
+        SandboxStatus::Created | SandboxStatus::Running | SandboxStatus::Unknown(_)
+    )
 }
 
 #[derive(Debug, Error)]
@@ -234,6 +297,7 @@ mod tests {
                 target_size: 1,
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: None,
+                max_running_sandboxes: None,
             },
         );
 
@@ -260,6 +324,64 @@ mod tests {
                 .await
                 .expect("count ready warm sandboxes for old workload"),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn replenisher_prunes_stale_evicting_rows() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = unique_suffix();
+        let workload_key = format!("test-evicting-{suffix}");
+        let stale_sandbox = format!("stale-evicting-{suffix}");
+
+        store
+            .insert_ready_warm_sandbox(&stale_sandbox, &workload_key)
+            .await
+            .expect("insert stale evicting warm sandbox row");
+        sqlx::query(
+            r#"
+            update session_warm_sandboxes
+            set status = 'evicting', updated_at = now() - interval '10 minutes'
+            where sandbox_id = $1
+            "#,
+        )
+        .bind(&stale_sandbox)
+        .execute(store.pool())
+        .await
+        .expect("make warm sandbox eviction stale");
+
+        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        backend.set_status(&stale_sandbox, SandboxStatus::Running);
+        let pool = WarmPoolManager::new(
+            Arc::new(SandboxManager::new(backend.clone())),
+            store.clone(),
+            Arc::new(|| SandboxSpec::new("image")),
+            workload_key.clone(),
+            WarmPoolConfig {
+                target_size: 0,
+                replenish_interval: Duration::from_secs(60),
+                bootstrap_iron_control_principal: None,
+                max_running_sandboxes: None,
+            },
+        );
+
+        pool.replenish_once().await.expect("replenish warm pool");
+
+        assert_eq!(
+            backend
+                .status(&SandboxId::new(&stale_sandbox))
+                .await
+                .unwrap(),
+            SandboxStatus::Stopped
+        );
+        assert!(
+            !store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&stale_sandbox)
         );
     }
 
@@ -300,6 +422,13 @@ mod tests {
 
         fn created(&self) -> Vec<String> {
             self.created.lock().unwrap().clone()
+        }
+
+        fn set_status(&self, sandbox_id: &str, status: SandboxStatus) {
+            self.statuses
+                .lock()
+                .unwrap()
+                .insert(sandbox_id.to_owned(), status);
         }
     }
 

@@ -55,7 +55,7 @@ export class CommentReplyCollector {
   private cotChars = 0;
   // The renderer re-emits terminal task updates at stream close; one line per
   // task id is enough (mirrors the narrator's settledTaskIds).
-  private readonly settledTaskIds = new Set<string>();
+  private readonly recordedTaskIds = new Set<string>();
   // The command/reasoning text arrives on the in-progress update; the terminal
   // update often omits `details` (carrying only output). Cache per task id so
   // the settled line keeps its parameter — mirrors the narrator's taskDetails.
@@ -83,15 +83,18 @@ export class CommentReplyCollector {
         .filter(Boolean)
         .join("\n");
     }
-    // Only persist settled tasks; in-progress repeats are noise in a static
-    // transcript.
-    if (chunk.status !== "complete" && chunk.status !== "error") return;
-    if (this.settledTaskIds.has(chunk.id)) return;
-    this.settledTaskIds.add(chunk.id);
     const line = flattenCotLine(this.formatTaskLine(chunk));
     if (chunk.title === "Thinking" && line) {
       this.latestThoughtText = line.slice(0, THOUGHT_MAX_CHARS);
     }
+    if (chunk.status !== "complete" && chunk.status !== "error") {
+      if (!line || this.recordedTaskIds.has(chunk.id)) return;
+      this.recordedTaskIds.add(chunk.id);
+      this.pushCot(line);
+      return;
+    }
+    if (this.recordedTaskIds.has(chunk.id)) return;
+    this.recordedTaskIds.add(chunk.id);
     this.pushCot(line);
   }
 

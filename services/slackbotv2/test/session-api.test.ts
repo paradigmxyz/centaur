@@ -5,6 +5,7 @@ import {
   DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   forwardToSessionApi,
   harnessRestartPreamble,
+  openSessionEventStream,
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
@@ -135,6 +136,56 @@ function textPartIncludes(part: JsonObject, text: string): boolean {
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
+
+describe('session event streaming', () => {
+  test('passes activity summary events through to the renderer source stream', async () => {
+    const encoded = new TextEncoder().encode(
+      [
+        'id: 1',
+        'event: session.activity_summary',
+        'data: {"summary":"The agent is reading App Server events."}',
+        '',
+        'id: 2',
+        'event: session.execution_completed',
+        'data: {"result_text":"done"}',
+        '',
+      ].join('\n')
+    )
+    const fetchFn: SlackbotV2Options['fetch'] = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded)
+            controller.close()
+          }
+        }),
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+    const seenEventIds: number[] = []
+
+    const stream = await openSessionEventStream(options(fetchFn), {
+      afterEventId: 0,
+      executionId: 'exec-1',
+      onEventId: eventId => seenEventIds.push(eventId),
+      threadId: 'slack:C1:1700000000.000100'
+    })
+    const events = []
+    for await (const event of stream) events.push(event)
+
+    expect(events[0]).toEqual({
+      data: { summary: 'The agent is reading App Server events.' },
+      event: 'session.activity_summary',
+      eventId: 1,
+      eventKind: 'session.activity_summary'
+    })
+    expect(events[1]).toMatchObject({
+      event: 'session.execution_completed',
+      eventId: 2,
+      eventKind: 'session.execution_completed'
+    })
+    expect(seenEventIds).toEqual([1, 2])
+  })
+})
 
 describe('Slack display text fallback', () => {
   test('serializeMessage extracts raw Slack blocks when adapter text is empty', async () => {

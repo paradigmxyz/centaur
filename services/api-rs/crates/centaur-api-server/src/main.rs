@@ -1,3 +1,4 @@
+mod activity_summary;
 mod args;
 
 use centaur_api_server::{AppState, build_router_with_app_state};
@@ -57,6 +58,10 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if args.server.run_migrations {
         store.run_migrations().await?;
     }
+    if let Some(config) = args.activity_summary_config() {
+        let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;
+        tokio::spawn(worker.run());
+    }
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime)
@@ -69,11 +74,11 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         workflow_host_principal = Some(iron_control.workflow_host_principal);
         runtime = runtime.with_iron_control(iron_control.registrar);
     }
-    if let Some(reconciler) = args.iron_control_tool_reconciler()? {
-        info!("iron-control tool secret reconciliation enabled");
-        tokio::spawn(reconciler.run());
-    }
     runtime = runtime.with_personas(args.persona_registry()?);
+    let sandbox_capacity_config = args.sandbox_capacity_config();
+    if let Some(config) = sandbox_capacity_config {
+        runtime = runtime.with_sandbox_capacity(config);
+    }
     if let Some(mut config) = args.warm_pool_config() {
         config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
         runtime = runtime.with_warm_pool(config);
@@ -139,6 +144,8 @@ pub(crate) enum ServerError {
     Telemetry(#[from] centaur_telemetry::TelemetryError),
     #[error(transparent)]
     ToolDiscovery(#[from] centaur_api_server::ToolDiscoveryError),
+    #[error(transparent)]
+    ActivitySummary(#[from] activity_summary::ActivitySummaryError),
     #[error("tool source error: {0}")]
     ToolSource(String),
     #[error("iron-proxy requires both firewall CA cert and key Secret names")]

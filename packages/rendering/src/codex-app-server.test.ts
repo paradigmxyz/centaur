@@ -4,7 +4,6 @@ import {
   codexAppServerToChatSdkStream,
   codexAppServerToRendererEvents
 } from './codex-app-server'
-import type { RendererTaskBlock } from './types'
 
 describe('CodexAppServerRendererEventMapper', () => {
   it('maps final answer deltas to generic renderer message deltas after activity exists', () => {
@@ -53,18 +52,18 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
-  it('maps commentary to Thinking task updates instead of message deltas', () => {
+  it('suppresses commentary thinking blocks', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
-    mapper.process({
+    expect(mapper.process({
       type: 'item.started',
       item: { id: 'thinking-1', type: 'agentMessage', phase: 'commentary' }
-    })
-    mapper.process({
+    })).toEqual([])
+    expect(mapper.process({
       type: 'item.agentMessage.delta',
       itemId: 'thinking-1',
       delta: 'Checking the runtime.'
-    })
+    })).toEqual([])
 
     const events = mapper.process({
       type: 'item.completed',
@@ -77,31 +76,18 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
 
     expect(events.some(event => event.type === 'renderer.message.delta')).toBe(false)
-    const task = events.find(event => event.type === 'renderer.task.update')
-    // Sealed commentary stays in_progress until the next activity starts so
-    // "Thinking completed" never headlines the Slack plan card mid-turn.
-    expect(task).toMatchObject({
-      type: 'renderer.task.update',
-      task: {
-        id: 'thinking-thinking-1',
-        title: 'Thinking',
-        status: 'in_progress'
-      }
-    })
-    expect(plain(task?.type === 'renderer.task.update' ? task.task.details : undefined)).toContain(
-      'Checking the runtime.'
-    )
+    expect(events.some(event => event.type === 'renderer.task.update')).toBe(false)
 
     const next = mapper.process({
       type: 'item.started',
       item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test' }
     })
     expect(next.find(event => event.type === 'renderer.task.update')).toMatchObject({
-      task: { id: 'thinking-thinking-1', title: 'Thinking', status: 'complete' }
+      task: { id: 'cmd-1', title: '1. Command execution', status: 'in_progress' }
     })
   })
 
-  it('keeps one Thinking task in_progress across reasoning deltas until the item seals', () => {
+  it('suppresses reasoning thinking blocks', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
     const first = mapper.process({
@@ -109,22 +95,14 @@ describe('CodexAppServerRendererEventMapper', () => {
       itemId: 'reasoning-1',
       delta: 'Inspecting the '
     })
-    expect(first).toContainEqual({
-      type: 'renderer.task.update',
-      task: {
-        id: 'reasoning-1',
-        title: 'Thinking',
-        status: 'in_progress',
-        details: [{ type: 'text', text: 'Inspecting the' }],
-        output: undefined
-      },
-      flush: true
-    })
+    expect(first).toEqual([])
 
-    // A command starting mid-thought must not flip the Thinking task to complete.
-    mapper.process({
+    const command = mapper.process({
       type: 'item.started',
       item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test' }
+    })
+    expect(command.find(event => event.type === 'renderer.task.update')).toMatchObject({
+      task: { id: 'cmd-1', title: '1. Command execution', status: 'in_progress' }
     })
 
     const second = mapper.process({
@@ -132,24 +110,13 @@ describe('CodexAppServerRendererEventMapper', () => {
       itemId: 'reasoning-1',
       delta: 'event stream'
     })
-    const secondUpdate = second.find(event => event.type === 'renderer.task.update')
-    expect(secondUpdate).toMatchObject({
-      task: { id: 'reasoning-1', title: 'Thinking', status: 'in_progress' }
-    })
-    expect(
-      plain(secondUpdate?.type === 'renderer.task.update' ? secondUpdate.task.details : undefined)
-    ).toContain('Inspecting the event stream')
+    expect(second.some(event => event.type === 'renderer.task.update')).toBe(false)
 
-    // Sealing completes the Thinking task; the still-running command keeps
-    // the plan in an in-progress state so the Slack header tracks it.
     const sealed = mapper.process({
       type: 'item.completed',
       item: { id: 'reasoning-1', type: 'reasoning', content: ['Inspecting the event stream'] }
     })
-    const sealedUpdate = sealed.find(event => event.type === 'renderer.task.update')
-    expect(sealedUpdate).toMatchObject({
-      task: { id: 'reasoning-1', title: 'Thinking', status: 'complete' }
-    })
+    expect(sealed.some(event => event.type === 'renderer.task.update')).toBe(false)
   })
 
   it('holds the last finished task in_progress so the Slack header never claims completion mid-turn', () => {
@@ -161,8 +128,8 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
 
     // The command finishes, leaving nothing else running. Slack would show
-    // "Thinking completed" for an all-complete plan, so the completion is
-    // held back and the task stays presented as in_progress.
+    // a completed-task header, so the completion is held back and the task
+    // stays presented as in_progress.
     const completed = mapper.process({
       type: 'item.completed',
       item: {
@@ -205,30 +172,22 @@ describe('CodexAppServerRendererEventMapper', () => {
     )
   })
 
-  it('separates Codex reasoning summary sections within one Thinking task', () => {
+  it('suppresses Codex reasoning summary sections', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
-    mapper.process({
+    expect(mapper.process({
       type: 'item.reasoning.summaryTextDelta',
       itemId: 'reasoning-1',
       summaryIndex: 0,
       delta: 'First section.'
-    })
+    })).toEqual([])
     const events = mapper.process({
       type: 'item.reasoning.summaryTextDelta',
       itemId: 'reasoning-1',
       summaryIndex: 1,
       delta: 'Second section.'
     })
-    const update = events.find(event => event.type === 'renderer.task.update')
-    expect(update).toMatchObject({
-      task: {
-        id: 'reasoning-1',
-        title: 'Thinking',
-        status: 'in_progress',
-        details: [{ type: 'text', text: 'First section.\n\nSecond section.' }]
-      }
-    })
+    expect(events).toEqual([])
   })
 
   it('parses Rust session output lines before mapping app-server notifications', () => {
@@ -288,6 +247,24 @@ describe('CodexAppServerRendererEventMapper', () => {
       type: 'renderer.done',
       answerMarkdown: 'TERMINAL_RESULT_OK'
     })
+  })
+
+  it('maps Rust activity summary events to renderer status updates', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const events = mapper.process({
+      eventKind: 'session.activity_summary',
+      data: {
+        execution_id: 'exe-1',
+        summary: 'The agent is inspecting App Server events.'
+      }
+    })
+
+    expect(events).toEqual([
+      {
+        type: 'renderer.status',
+        status: 'The agent is inspecting App Server events.'
+      }
+    ])
   })
 
   it('maps app-server agent message deltas keyed by turnId', () => {
@@ -408,23 +385,13 @@ describe('CodexAppServerRendererEventMapper', () => {
       title: 'Inspect App Server events',
       status: 'complete'
     })
-    expect(chunks).toContainEqual({
-      type: 'task_update',
-      id: 'reasoning-1',
-      title: 'Thinking',
-      status: 'in_progress',
-      details: 'Inspecting the event stream'
-    })
-    expect(chunks).toContainEqual({
-      type: 'task_update',
-      id: 'reasoning-1',
-      title: 'Thinking',
-      status: 'complete'
-    })
+    expect(chunks.some(chunk => chunk.type === 'task_update' && chunk.title === 'Thinking')).toBe(
+      false
+    )
     expect(chunks).toContainEqual({ type: 'markdown_text', text: 'Done.' })
   })
 
-  it('coalesces repeated reasoning deltas into one Thinking task', async () => {
+  it('suppresses repeated reasoning deltas from Chat SDK output', async () => {
     const chunks = await collect(
       codexAppServerToChatSdkStream(
         toAsyncIterable([
@@ -452,24 +419,9 @@ describe('CodexAppServerRendererEventMapper', () => {
       )
     )
 
-    const thinkingChunks = chunks.filter(
-      (chunk): chunk is Extract<(typeof chunks)[number], { type: 'task_update' }> =>
-        chunk.type === 'task_update' && chunk.title === 'Thinking'
+    expect(chunks.some(chunk => chunk.type === 'task_update' && chunk.title === 'Thinking')).toBe(
+      false
     )
-    expect(new Set(thinkingChunks.map(chunk => chunk.id))).toEqual(new Set(['reasoning-1']))
-    expect(thinkingChunks).toContainEqual({
-      type: 'task_update',
-      id: 'reasoning-1',
-      title: 'Thinking',
-      status: 'in_progress',
-      details: 'Inspecting the event stream'
-    })
-    expect(thinkingChunks).toContainEqual({
-      type: 'task_update',
-      id: 'reasoning-1',
-      title: 'Thinking',
-      status: 'complete'
-    })
   })
 
   it('streams command details once and command output incrementally', async () => {
@@ -784,12 +736,6 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 })
-
-function plain(elements: RendererTaskBlock[] | undefined): string {
-  return (elements ?? [])
-    .map(element => element.text)
-    .join('')
-}
 
 async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
   const out: T[] = []

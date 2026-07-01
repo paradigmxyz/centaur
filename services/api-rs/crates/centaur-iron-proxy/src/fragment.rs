@@ -162,11 +162,9 @@ transforms:
     config:
       secrets:
         - id: OPENAI_API_KEY_AUTHORIZATION
-          source:
-            placeholder: OPENAI_API_KEY
-          inject:
-            header: Authorization
-            formatter: "Bearer {{.Value}}"
+          replace:
+            proxy_value: OPENAI_API_KEY
+            match_headers: ["Authorization"]
           rules: [{ host: api.openai.com }]
 "#;
 
@@ -176,11 +174,9 @@ transforms:
     config:
       secrets:
         - id: OPENROUTER_API_KEY_AUTHORIZATION
-          source:
-            placeholder: OPENROUTER_API_KEY
-          inject:
-            header: Authorization
-            formatter: "Bearer {{.Value}}"
+          replace:
+            proxy_value: OPENROUTER_API_KEY
+            match_headers: ["Authorization"]
           rules: [{ host: openrouter.ai }]
 "#;
 
