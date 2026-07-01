@@ -1,7 +1,7 @@
 <% content_for :title, "#{@oauth_app.slug} · Centaur Console" %>
 
 <div class="mb-8">
-  <a href="<%= console_oauth_apps_path %>" class="back-link">← back to OAuth apps</a>
+  <a href="<%= console_oauth_apps_path %>" class="back-link">← back to Apps</a>
   <div class="mt-2 flex flex-wrap items-center gap-3">
     <h1 class="text-2xl font-bold font-mono text-zinc-100"><%= @oauth_app.slug %></h1>
     <% if @oauth_app.enabled? %>

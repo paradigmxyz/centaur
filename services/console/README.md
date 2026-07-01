@@ -30,6 +30,34 @@ Operators manage credentials, principals, roles, and grants through the API or t
 
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
 
+The Threads tab reads api-rs session rows from the Centaur API database. Set
+`CENTAUR_CONSOLE_CENTAUR_DATABASE_URL` to that database URL when it differs from
+the console's primary database. In the Helm chart this is sourced from the
+shared `DATABASE_URL` secret key.
+
+For local-only browser sessions, `CENTAUR_CONSOLE_LOCAL_AUTH_PARAM_ENABLED=1`
+enables a passwordless query-param shortcut on localhost hosts. Use
+`http://localhost:3000/console/threads?auth=1` to sign in as
+`CENTAUR_CONSOLE_LOCAL_AUTH_EMAIL`, `CENTAUR_CONSOLE_INITIAL_USER_EMAIL`, or the
+first active admin user. Use `?auth=user@example.com` to choose a specific
+active user. The shortcut is ignored on non-local hosts.
+
+To build the Threads UX against production-shaped data without connecting the
+Console to production, create a bounded local snapshot:
+
+```bash
+export CENTAUR_PROD_DATABASE_URL=postgresql://readonly:...@.../ai_v2
+scripts/mirror-prod-threads-snapshot.sh all
+```
+
+The script exports recent `sessions`, `session_messages`,
+`session_executions`, terminal `session_events`, and referenced
+`slack_sync_users` rows with the source connection forced read-only, then
+imports them into the local `ai_v2` database used by the Console dev container.
+Start the local Console with
+`CENTAUR_CONSOLE_THREADS_READ_ONLY=1` while browsing mirrored production data;
+the Threads composer is disabled and POSTs are rejected server-side.
+
 ## First Boot
 
 The console requires an authenticated user and API key before any API endpoint will respond. To bootstrap a fresh deployment without a console, set the following environment variables on startup:

@@ -25,6 +25,16 @@ module Console
       get console_users_url
       assert_response :ok
       assert_select "td", /pending@acme.example/
+      assert_select ".console-nav-link", text: "Control"
+      assert_select ".console-nav-link", text: "Apps", count: 0
+      assert_select ".console-nav-link", text: "Users", count: 0
+      assert_select ".console-control-tab", text: "Apps"
+      assert_select ".console-control-tab-active", text: "Users"
+      assert_select "button[data-console-theme-toggle]", text: "Light mode"
+      assert_select "link[data-console-favicon][href=?]", "/icon-dark.svg"
+      assert_includes response.body, "/icon-light.svg"
+      assert_includes response.body, "prefers-color-scheme: light"
+      assert_includes response.body, "centaur-console-theme-source"
     end
 
     test "the index shows IdP chips for linked identities and a password chip otherwise" do

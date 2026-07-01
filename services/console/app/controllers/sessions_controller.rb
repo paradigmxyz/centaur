@@ -14,7 +14,7 @@ class SessionsController < ApplicationController
   skip_before_action :require_active_account
 
   def new
-    redirect_to console_principals_path if current_user&.active?
+    redirect_to safe_console_return_path if current_user&.active?
   end
 
   # Holding page for a signed-in but not-yet-approved user. Active users have no

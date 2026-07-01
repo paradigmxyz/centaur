@@ -1,12 +1,11 @@
 <% content_for :title, "Roles · Centaur Console" %>
 
-<div class="mb-8 flex items-start justify-between gap-4">
-  <div>
-    <h1 class="page-title">Roles</h1>
-    <p class="page-subtitle"><%= pluralize(@roles.size, "role") %> across all namespaces.</p>
-  </div>
-  <a href="<%= new_console_role_path %>" class="btn-primary">Add Role</a>
-</div>
+<%= render "console/control_tabs" %>
+
+<%= render "console/page_header",
+           title: "Roles",
+           subtitle: "#{pluralize(@roles.size, "role")} across all namespaces.",
+           actions: link_to("Add Role", new_console_role_path, class: "btn-primary") %>
 
 <div class="console-panel">
   <table class="console-table">

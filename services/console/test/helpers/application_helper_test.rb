@@ -33,8 +33,47 @@ class ApplicationHelperTest < ActionView::TestCase
     assert_select_in html, "time[data-localtime-relative-value=true]"
   end
 
+  test "local_time can request compact relative formatting" do
+    html = local_time(Time.utc(2026, 6, 4, 18, 30, 0), relative: true, format: :compact)
+
+    assert_select_in html, "time[data-localtime-relative-value=true]"
+    assert_select_in html, "time[data-localtime-format-value=compact]"
+  end
+
   test "local_time renders a placeholder for nil" do
     assert_select_in local_time(nil), "span", text: "—"
+  end
+
+  test "console_markdown renders common github-flavored markdown" do
+    html = console_markdown(<<~MARKDOWN)
+      Yes, **partially legit**.
+
+      Issue 1 is real on current `main`.
+
+      - one
+      - two
+
+      https://github.com/paradigmxyz/centaur/issues/792
+    MARKDOWN
+
+    assert_select_in html, "p", text: /Yes, partially legit/
+    assert_select_in html, "strong", text: "partially legit"
+    assert_select_in html, "code", text: "main"
+    assert_select_in html, "ul li", count: 2
+    assert_select_in html, "a.console-markdown-link[href='https://github.com/paradigmxyz/centaur/issues/792']",
+                     text: "https://github.com/paradigmxyz/centaur/issues/792"
+  end
+
+  test "console_markdown escapes unsafe html" do
+    html = console_markdown("<script>alert(1)</script> **safe**")
+
+    refute_includes html, "<script>"
+    assert_select_in html, "strong", text: "safe"
+  end
+
+  test "console_icon renders theme toggle icons" do
+    assert_select_in console_icon("sun"), "svg path[d*='M12 3v2.25']"
+    assert_select_in console_icon("moon"), "svg path[d*='21.752 15.002']"
   end
 
   private
