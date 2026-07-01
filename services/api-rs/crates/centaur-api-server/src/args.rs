@@ -526,21 +526,13 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
-    /// Stop sandboxes that have been idle-paused longer than this. 0 disables
-    /// the idle sweep.
-    #[arg(
-        long = "session-sandbox-idle-stop-ttl-secs",
-        env = "SESSION_SANDBOX_IDLE_STOP_TTL_SECS",
-        default_value_t = 3600
-    )]
-    sandbox_idle_stop_ttl_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
     #[arg(
         long = "session-sandbox-max-lifetime-secs",
         env = "SESSION_SANDBOX_MAX_LIFETIME_SECS",
-        default_value_t = 86_400
+        default_value_t = 259_200
     )]
     sandbox_max_lifetime_secs: u64,
     #[arg(
@@ -1222,7 +1214,6 @@ impl SandboxArgs {
         let ttl = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
         SandboxReaperConfig {
             interval: Duration::from_secs(self.sandbox_reap_interval_secs),
-            idle_ttl: ttl(self.sandbox_idle_stop_ttl_secs),
             max_lifetime: ttl(self.sandbox_max_lifetime_secs),
         }
     }
@@ -1423,6 +1414,14 @@ struct ToolsArgs {
     )]
     repo_cache_pvc: Option<String>,
     #[arg(
+        id = "tools_auto_reload",
+        long = "kubernetes-tools-auto-reload",
+        env = "KUBERNETES_TOOLS_AUTO_RELOAD",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    auto_reload: bool,
+    #[arg(
         id = "tools_extra_sources",
         long = "kubernetes-tools-extra-sources",
         env = "KUBERNETES_TOOLS_EXTRA_SOURCES"
@@ -1475,6 +1474,7 @@ impl ToolsArgs {
         }
         config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
         config.repo_cache_pvc = clean_optional_value(self.repo_cache_pvc.as_deref());
+        config.auto_reload = self.auto_reload;
         config.extra_sources = self.extra_sources();
         Some(config)
     }
@@ -2030,6 +2030,19 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_reaper_defaults_delete_after_max_lifetime() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        let config = args.sandbox_reaper_config();
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(259_200)));
+    }
+
+    #[test]
     fn accepts_kubernetes_aliases_for_sandbox_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2112,9 +2125,34 @@ mod tests {
             tools.repo_cache_path.as_deref(),
             Some("/var/lib/centaur/repos")
         );
+        assert!(tools.auto_reload);
         let token = tools.github_token.expect("token should be Some");
         assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
         assert_eq!(token.secret_key, "token");
+    }
+
+    #[test]
+    fn tools_config_reads_auto_reload_flag() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-auto-reload",
+            "false",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        let tools = config.tools.expect("tools should be Some");
+        assert!(!tools.auto_reload);
     }
 
     #[test]

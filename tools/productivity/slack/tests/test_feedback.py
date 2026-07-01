@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from slack import feedback
@@ -52,8 +53,12 @@ def test_run_improvement_cycle_dispatches_only_actionable_items(tmp_path, monkey
     monkeypatch.setattr(feedback, "FEEDBACK_DB_PATH", tmp_path / "feedback.db")
 
     conn = feedback.init_db()
-    actionable_id = feedback.save_feedback_item(conn, _sample_item(category="cli_bug", severity="high")).item_id
-    success_id = feedback.save_feedback_item(conn, _sample_item(category="success", severity="low")).item_id
+    actionable_id = feedback.save_feedback_item(
+        conn, _sample_item(category="cli_bug", severity="high")
+    ).item_id
+    success_id = feedback.save_feedback_item(
+        conn, _sample_item(category="success", severity="low")
+    ).item_id
     conn.close()
 
     monkeypatch.setattr(
@@ -74,7 +79,6 @@ def test_run_improvement_cycle_dispatches_only_actionable_items(tmp_path, monkey
             assert "git-branch paradigmxyz/centaur" in prompt
             return {
                 "thread_key": "feedback-improvement:test",
-                "assignment_generation": 7,
                 "execution_id": "exec-test-123",
                 "status": "queued",
             }
@@ -103,6 +107,54 @@ def test_run_improvement_cycle_dispatches_only_actionable_items(tmp_path, monkey
     assert row_by_id[actionable_id]["agent_execution_id"] == "exec-test-123"
     assert row_by_id[success_id]["status"] == "new"
     assert row_by_id[success_id]["agent_execution_id"] is None
+
+
+def test_agent_client_uses_session_api_for_improvement_runs():
+    class RecordingAgentClient(feedback.CentaurAgentClient):
+        def __init__(self):
+            super().__init__(base_url="http://api.local", api_key="test-key")
+            self.calls = []
+
+        def _request_json(self, method: str, path: str, payload: dict | None = None):
+            self.calls.append((method, path, payload))
+            if path.endswith("/execute"):
+                return {"execution_id": "exec-test-123", "status": "queued"}
+            return {"ok": True}
+
+    client = RecordingAgentClient()
+
+    result = client.start_improvement_run(
+        "Improve the Slack tool",
+        harness="codex",
+        persona_id="eng",
+        thread_key="feedback-improvement:test:1",
+    )
+
+    assert result == {
+        "thread_key": "feedback-improvement:test:1",
+        "execution_id": "exec-test-123",
+        "status": "queued",
+    }
+    assert [path for _, path, _ in client.calls] == [
+        "/api/session/feedback-improvement%3Atest%3A1",
+        "/api/session/feedback-improvement%3Atest%3A1/messages",
+        "/api/session/feedback-improvement%3Atest%3A1/execute",
+    ]
+    assert client.calls[0][2] == {
+        "harness_type": "codex",
+        "persona_id": "eng",
+        "metadata": {"source": "slack-feedback-loop"},
+        "on_harness_conflict": "restart",
+    }
+    execute_payload = client.calls[2][2]
+    assert execute_payload["metadata"] == {
+        "source": "slack-feedback-loop",
+        "delivery": {"platform": "dev"},
+    }
+    assert json.loads(execute_payload["input_lines"][0]) == {
+        "type": "user",
+        "message": {"content": [{"type": "text", "text": "Improve the Slack tool"}]},
+    }
 
 
 def test_analyze_thread_signals_does_not_treat_exceptional_as_error():

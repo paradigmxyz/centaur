@@ -59,7 +59,7 @@ Supported v2 primitives:
 | `handler(inp, ctx)` | Supported |
 | `ctx.step(name, fn)` | Supported |
 | `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
-| `ctx.call_tool(...)` | Supported through the configured tool API proxy |
+| `ctx.call_tool(...)` | Supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
 | `WEBHOOKS` | Supported |
@@ -197,9 +197,10 @@ Workflows that import unrelated API-service internals should move that behavior
 into the workflow-host API surface or a small local helper owned by the workflow
 domain before they are v2-ready.
 
-The tool runtime is also still proxied. `ctx.call_tool(...)` works through the
-configured tool API, but a fully native `api-rs` tool runtime is a separate
-migration step.
+`ctx.call_tool(...)` is a compatibility surface in the Python workflow host. It
+uses the generated `centaur-tools call` bridge against the installed tool
+package; agent sandboxes should use direct tool CLIs instead of deprecated
+`/tools/...` HTTP routes.
 
 ## Verify a migration
 
@@ -217,7 +218,6 @@ Then create a real run:
 ```bash
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $WORKFLOW_API_KEY" \
   -d '{
     "workflow_name": "nightly_report",
     "input": {"topic": "open incidents"}

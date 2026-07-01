@@ -165,6 +165,8 @@ impl Default for SandboxCapabilities {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub thread_key: ThreadKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub sandbox_id: Option<String>,
     /// Capabilities applied to the currently assigned sandbox. `None` means the
     /// sandbox predates capability tracking; callers may treat it as compatible

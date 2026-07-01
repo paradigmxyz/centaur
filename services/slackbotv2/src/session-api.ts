@@ -62,8 +62,17 @@ export function isRetryableSessionApiError(error: unknown): boolean {
   return error.name === 'AbortError' || error.name === 'TypeError'
 }
 
+export const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 3 * 60 * 60 * 1000
 const DEFAULT_SESSION_API_TIMEOUT_MS = 30_000
 const DEFAULT_SLACK_API_TIMEOUT_MS = 5_000
+
+function sessionIdleTimeoutMs(options: SlackbotV2Options): number {
+  if (options.idleTimeoutMs !== undefined) return options.idleTimeoutMs
+  if (options.maxDurationMs !== undefined) {
+    return Math.min(DEFAULT_SESSION_IDLE_TIMEOUT_MS, options.maxDurationMs)
+  }
+  return DEFAULT_SESSION_IDLE_TIMEOUT_MS
+}
 
 class FetchTimeoutError extends Error {
   constructor(action: string, timeoutMs: number) {
@@ -1166,6 +1175,7 @@ async function executeSession(
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
+  const idleTimeoutMs = sessionIdleTimeoutMs(options)
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
     metadata: sessionMetadata(message, { action: 'execute' }, requesterIdentity),
@@ -1179,7 +1189,7 @@ async function executeSession(
       reasoning,
       provider
     ),
-    ...(options.idleTimeoutMs === undefined ? {} : { idle_timeout_ms: options.idleTimeoutMs }),
+    idle_timeout_ms: idleTimeoutMs,
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
   const response = await fetchWithTimeout(

@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -113,15 +114,17 @@ class SaveFeedbackResult:
 
 
 class CentaurAgentClient:
-    """Minimal client for starting a background improvement agent run."""
+    """Minimal client for starting a background improvement agent session."""
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
-        self.base_url = (base_url or os.environ.get("CENTAUR_API_URL") or "http://api:8000").rstrip("/")
+        self.base_url = (base_url or os.getenv("CENTAUR_API_URL") or "http://api:8000").rstrip("/")
         self.api_key = api_key or _load_centaur_api_key()
         if not self.api_key:
-            raise RuntimeError("CENTAUR_AGENT_API_KEY not set")
+            raise RuntimeError("SLACK_FEEDBACK_API_KEY not set")
 
-    def _request_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request_json(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
@@ -159,57 +162,62 @@ class CentaurAgentClient:
         persona_id: str = "eng",
         thread_key: str | None = None,
     ) -> dict[str, Any]:
-        """Spawn, message, and execute a background improvement agent run."""
-        thread_key = thread_key or f"feedback-improvement:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}:{uuid.uuid4().hex[:8]}"
-        spawn = self._request_json(
-            "POST",
-            "/agent/spawn",
-            {
-                "thread_key": thread_key,
-                "harness": harness,
-                "persona_id": persona_id,
-            },
+        """Create a session, persist the prompt, and execute it."""
+        thread_key = thread_key or (
+            f"feedback-improvement:{datetime.now(datetime.UTC).strftime('%Y%m%dT%H%M%SZ')}:{uuid.uuid4().hex[:8]}"
         )
-        assignment_generation = spawn["assignment_generation"]
+        thread_path = urllib.parse.quote(thread_key, safe="")
 
         self._request_json(
             "POST",
-            "/agent/message",
+            f"/api/session/{thread_path}",
             {
-                "thread_key": thread_key,
-                "assignment_generation": assignment_generation,
-                "role": "user",
-                "parts": [{"type": "text", "text": prompt}],
+                "harness_type": harness,
+                "persona_id": persona_id,
                 "metadata": {"source": "slack-feedback-loop"},
+                "on_harness_conflict": "restart",
+            },
+        )
+
+        parts = [{"type": "text", "text": prompt}]
+        self._request_json(
+            "POST",
+            f"/api/session/{thread_path}/messages",
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "parts": parts,
+                        "metadata": {"source": "slack-feedback-loop"},
+                    }
+                ],
             },
         )
 
         execute = self._request_json(
             "POST",
-            "/agent/execute",
+            f"/api/session/{thread_path}/execute",
             {
-                "thread_key": thread_key,
-                "assignment_generation": assignment_generation,
-                "execute_id": f"feedback-improvement-{uuid.uuid4().hex[:12]}",
-                "harness": harness,
-                "delivery": {"platform": "dev"},
-                "metadata": {"source": "slack-feedback-loop"},
+                "idempotency_key": f"feedback-improvement-{uuid.uuid4().hex[:12]}",
+                "metadata": {"source": "slack-feedback-loop", "delivery": {"platform": "dev"}},
+                "input_lines": [
+                    json.dumps(
+                        {"type": "user", "message": {"content": parts}},
+                        separators=(",", ":"),
+                    )
+                ],
             },
         )
 
         return {
             "thread_key": thread_key,
-            "assignment_generation": assignment_generation,
             "execution_id": execute["execution_id"],
             "status": execute.get("status"),
         }
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    columns = {
-        row["name"]
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-    }
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
@@ -244,7 +252,7 @@ def _severity_filter_clause(min_severity: str | None) -> tuple[str, list[str]]:
 
 
 def _load_centaur_api_key() -> str | None:
-    return os.environ.get("CENTAUR_AGENT_API_KEY")
+    return os.getenv("SLACK_FEEDBACK_API_KEY")
 
 
 def _bot_message_looks_like_error(text: str) -> bool:
@@ -430,8 +438,10 @@ def classify_feedback(signals: FeedbackSignals, messages: list[dict]) -> tuple[s
     if signals.has_bot_error:
         category = "cli_bug"
     elif (
-        signals.has_positive_reaction or signals.positive_keywords_found
-    ) and not signals.has_negative_reaction and not signals.negative_keywords_found:
+        (signals.has_positive_reaction or signals.positive_keywords_found)
+        and not signals.has_negative_reaction
+        and not signals.negative_keywords_found
+    ):
         category = "success"
     elif signals.repeated_requests:
         category = "routing_error"
