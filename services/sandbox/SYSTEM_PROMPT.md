@@ -103,6 +103,7 @@
 |slack search "query"            → Slack search
 |linear search "query"           → Linear issue search
 |vlogs query "level:error"       → recent service errors
+|centaur-tools call vmetrics query '{"expr":"centaur_deployment_info"}' → live Centaur deployment image/version/SHA metadata
 |Tool commands are normal CLIs backed by mounted repo packages. Use direct tool CLIs for tools.
 |For tool smoke tests, use `<tool> health` as the canonical check. Do not invent ad hoc "test this tool" probes or raw upstream calls unless `health` fails and you are triaging the failure.
 |For broad tool smoke tests, use the `tool-health-smoke` skill or run its health runner when it is available.
@@ -129,6 +130,15 @@
 |  vlogs sandbox_activity                                 → sandbox container lifecycle
 |  vlogs tool_analytics --start 7d                        → tool usage stats
 |  vlogs query 'level:error AND event:tool_call_completed' --limit 20 → raw LogsQL
+|
+|Metrics (VictoriaMetrics via `vmetrics`):
+|When a user asks what Centaur version, image, Git SHA, overlay revision, deploy time, or latest deployment is live, query VictoriaMetrics before answering.
+|Use the live metrics emitted by the `centaur-deployment-metrics` exporter; repo files and manifests only describe what should exist, not what is currently deployed.
+|  centaur-tools call vmetrics query '{"expr":"centaur_deployment_info"}'                 → deployed component metadata; labels include `component`, `version`, `git_sha`, and `image`
+|  centaur-tools call vmetrics query '{"expr":"centaur_last_deploy_timestamp_seconds"}'   → last successful deploy timestamp per component
+|  centaur-tools call vmetrics query '{"expr":"centaur_overlay_revision_info"}'           → deployed overlay repo revisions
+|  centaur-tools call vmetrics query '{"expr":"centaur_overlay_revision_scrape_success"}' → whether overlay revision scraping is healthy
+|If these queries fail or return no data, say you cannot verify the live deployment from metrics right now; do not substitute git history, image tags in values files, or memory as the latest deployed state.
 |
 [Ethereum Mainnet RPC]
 |When you need an Ethereum mainnet RPC endpoint and the user has not specified another provider, use the Reth-hosted mainnet endpoints:
