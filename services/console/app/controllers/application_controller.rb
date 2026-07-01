@@ -1,7 +1,4 @@
 class ApplicationController < ActionController::Base
-  LOCAL_AUTH_HOSTS = %w[localhost 127.0.0.1 ::1 0.0.0.0].freeze
-  TRUE_PARAM_VALUES = %w[1 true yes on local dev].freeze
-
   # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
   allow_browser versions: :modern
 
@@ -31,11 +28,6 @@ class ApplicationController < ActionController::Base
     URI.join(public_base_url, "/oauth/#{slug}/callback").to_s
   end
 
-  # A development shortcut for local browser sessions. It is gated by host and
-  # env so production deployments do not accidentally expose a passwordless
-  # sign-in flow.
-  before_action :apply_local_auth_param
-
   # Gate every UI route behind a console session by default. Controllers that
   # must stay reachable while signed out (e.g. the login form) skip this. API
   # controllers descend from ActionController::API, not this class, so they keep
@@ -63,23 +55,6 @@ class ApplicationController < ActionController::Base
   # from Api::BaseController#current_user, which resolves a User from an API key.
   def current_user
     @current_user ||= User.find_by(id: session[:user_id]) if session[:user_id]
-  end
-
-  def apply_local_auth_param
-    return unless request.get? || request.head?
-    return unless params.key?(:auth)
-    return if current_user
-    return unless local_auth_param_allowed?
-
-    user = local_auth_param_user
-    unless user
-      Rails.logger.warn("console local auth param did not match an active user")
-      return
-    end
-
-    reset_session
-    session[:user_id] = user.id
-    @current_user = user
   end
 
   # before_action gate for console pages: bounce anonymous requests to the login
@@ -164,41 +139,6 @@ class ApplicationController < ActionController::Base
     uri.to_s
   rescue URI::InvalidURIError
     default
-  end
-
-  def local_auth_param_allowed?
-    local_auth_param_enabled? && local_auth_host? && local_auth_path?
-  end
-
-  def local_auth_param_enabled?
-    Rails.env.development? ||
-      Rails.env.test? ||
-      TRUE_PARAM_VALUES.include?(ConsoleEnv["LOCAL_AUTH_PARAM_ENABLED"].to_s.strip.downcase)
-  end
-
-  def local_auth_host?
-    LOCAL_AUTH_HOSTS.include?(request.host.to_s.downcase)
-  end
-
-  def local_auth_path?
-    request.path == "/" || request.path == login_path || request.path.start_with?("/console")
-  end
-
-  def local_auth_param_user
-    users = User.active.order(admin: :desc, id: :asc)
-    email = local_auth_param_email
-    return users.find_by(email: email) if email.present?
-
-    configured_email = ConsoleEnv["LOCAL_AUTH_EMAIL"].presence ||
-      ConsoleEnv["INITIAL_USER_EMAIL"].presence
-    users.find_by(email: configured_email.to_s.strip.downcase) || users.first
-  end
-
-  def local_auth_param_email
-    value = params[:auth].to_s.strip
-    return if value.blank? || TRUE_PARAM_VALUES.include?(value.downcase)
-
-    value.downcase
   end
 
   def render_not_found(e)
