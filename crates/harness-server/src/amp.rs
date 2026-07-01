@@ -24,8 +24,9 @@ pub struct AmpEventNormalizer {
 
 impl AmpEventNormalizer {
     fn normalize(&mut self, event: AnthropicStreamEvent) -> Vec<NormalizedEvent> {
+        let token_usage = event.token_usage();
         let normalized = self.anthropic.normalize(event);
-        match normalized {
+        let mut out = match normalized {
             NormalizedEvent::AgentTextDelta { ref item_id, delta } => {
                 if !delta.is_empty() {
                     self.pre_final_text_items.insert(item_id.clone());
@@ -49,7 +50,11 @@ impl AmpEventNormalizer {
                 content,
             } => self.chunk_final_assistant_message(stop_reason, content),
             event => vec![event],
+        };
+        if let Some(usage) = token_usage {
+            out.insert(0, NormalizedEvent::TokenUsage { usage });
         }
+        out
     }
 
     fn chunk_final_assistant_message(

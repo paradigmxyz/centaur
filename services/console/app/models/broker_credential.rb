@@ -10,9 +10,9 @@
 # BrokerCredential is itself NOT synced and NOT grantable.
 #
 # The OAuth credentials it refreshes with -- client_id, optional client_secret,
-# optional username/password, and any token-endpoint headers -- are fields on the
-# credential, resolved by control itself. client_id is not secret; every other
-# credential value is encrypted at rest.
+# optional username/password/api_key, and any token-endpoint headers -- are fields
+# on the credential, resolved by control itself. client_id is not secret; every
+# other credential value is encrypted at rest.
 class BrokerCredential < ApplicationRecord
   oid_prefix "bcr"
 
@@ -21,7 +21,8 @@ class BrokerCredential < ApplicationRecord
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
 
-  GRANTS = %w[refresh_token password].freeze
+  PREQIN_TOKEN_ENDPOINT = Broker::CredentialGrants::PREQIN_TOKEN_ENDPOINT
+  GRANTS = Broker::CredentialGrants::GRANTS
 
   # The access token must keep at least this much life past the scheduled
   # refresh, regardless of slack/fraction. Mirrors the 60s floor in
@@ -52,6 +53,8 @@ class BrokerCredential < ApplicationRecord
   # is no FK to cascade or nullify, so deletion would silently leave those secrets
   # undeliverable. The operator must remove the references first.
   before_destroy :ensure_not_referenced
+  after_commit :auto_grant_matching_principals, on: %i[create update], if: :oauth_app_id?
+  before_validation :default_preqin_token_endpoint
   before_commit :bump_referencing_principal_sync_config_versions, if: :sync_config_relevant_change?
 
   serialize :token_endpoint_headers, coder: JSON
@@ -60,14 +63,15 @@ class BrokerCredential < ApplicationRecord
   encrypts :client_secret
   encrypts :username
   encrypts :password
+  encrypts :api_key
   encrypts :token_endpoint_headers
 
   scope :refreshable, -> {
     where(dead: false)
       .where("(\"broker_credentials\".\"grant\" = ? AND " \
              "(last_refresh IS NULL OR refresh_token IS NOT NULL)) OR " \
-             "\"broker_credentials\".\"grant\" = ?",
-             "refresh_token", "password")
+             "\"broker_credentials\".\"grant\" IN (?)",
+             "refresh_token", Broker::CredentialGrants::REFRESHABLE_WITHOUT_TOKEN_GRANTS)
       .where("next_attempt_at IS NULL OR next_attempt_at <= ?", Time.current)
   }
 
@@ -77,8 +81,8 @@ class BrokerCredential < ApplicationRecord
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :token_endpoint, presence: true
   # client_id is sourced from the linked OauthApp for flow-minted credentials, so
-  # it is only required on standalone (operator-authored) credentials.
-  validates :client_id, presence: true, unless: :oauth_app_id?
+  # it is only required for standalone grants whose strategy uses it.
+  validates :client_id, presence: true, if: -> { Broker::CredentialGrants.client_id_required?(self) }
   validates :external_user_key, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE },
             length: { maximum: 128 }, allow_nil: true
   validates :early_refresh_fraction,
@@ -87,7 +91,7 @@ class BrokerCredential < ApplicationRecord
             numericality: { only_integer: true, greater_than: 0 }
   validate :labels_is_a_hash
   validate :scopes_is_an_array
-  validate :password_grant_credentials_present
+  validate :grant_credentials_present
   validate :token_endpoint_headers_valid
 
   # OAuth client identity used for refresh. Flow-minted credentials delegate to
@@ -102,6 +106,18 @@ class BrokerCredential < ApplicationRecord
     return "dead" if dead?
     return "bootstrapping" if last_refresh.nil?
     "live"
+  end
+
+  def preqin? = grant == "preqin"
+
+  # Used by broker grant strategies. Kept public so tests can inject a stub via
+  # attr_writer and the strategy registry can stay outside the ActiveRecord model.
+  def refresh_client
+    @refresh_client ||= Broker::RefreshClient.new
+  end
+
+  def refresh_scopes_for_provider
+    oauth_app&.provider_strategy&.refresh_scopes(scopes) || scopes
   end
 
   # --- Refresh state machine (ported from iron-token-broker credential.go) ----
@@ -135,8 +151,16 @@ class BrokerCredential < ApplicationRecord
     with_lock do
       return if dead?
 
-      result, clear_refresh_token = perform_refresh
-      apply_success!(result, now: now, clear_refresh_token: clear_refresh_token) if result
+      outcome = perform_refresh
+      if outcome.dead_reason
+        mark_dead!(outcome.dead_reason)
+      elsif outcome.result
+        apply_success!(
+          outcome.result,
+          now: now,
+          clear_refresh_token: outcome.clear_refresh_token
+        )
+      end
     rescue Broker::RefreshError => e
       if e.retryable?
         record_retryable_failure(e.message, now: now)
@@ -148,79 +172,12 @@ class BrokerCredential < ApplicationRecord
 
   private
 
-  def refresh_client
-    @refresh_client ||= Broker::RefreshClient.new
+  def auto_grant_matching_principals
+    PrincipalCredentialReconciliation.new.apply_for_credential(self)
   end
 
   def perform_refresh
-    case grant
-    when "password"
-      perform_password_grant_refresh
-    else
-      perform_refresh_token_refresh
-    end
-  end
-
-  def perform_refresh_token_refresh
-    if refresh_token.blank?
-      mark_dead!("missing_initial_refresh_token")
-      return nil
-    end
-
-    [ refresh_with_stored_token, false ]
-  end
-
-  def refresh_with_stored_token
-    refresh_client.refresh(
-      token_endpoint: token_endpoint,
-      grant: "refresh_token",
-      client_id: effective_client_id,
-      client_secret: effective_client_secret,
-      refresh_token: refresh_token,
-      scopes: refresh_scopes_for_provider,
-      headers: token_endpoint_headers || {},
-      timeout: refresh_timeout_seconds
-    )
-  end
-
-  def perform_password_grant_refresh
-    clear_stale_refresh_token = false
-
-    if refresh_token.present?
-      begin
-        return [ refresh_with_stored_token, false ]
-      rescue Broker::RefreshError => e
-        raise if e.retryable?
-
-        Rails.logger.warn do
-          "broker credential #{oid} refresh_token grant failed with #{e.reason}; " \
-            "falling back to password grant"
-        end
-        clear_stale_refresh_token = true
-      end
-    end
-
-    unless password_grant_initial_values_present?
-      mark_dead!("password_grant_missing_initial_values")
-      return nil
-    end
-
-    result = refresh_client.refresh(
-      token_endpoint: token_endpoint,
-      grant: "password",
-      client_id: effective_client_id,
-      client_secret: effective_client_secret,
-      username: username,
-      password: password,
-      scopes: refresh_scopes_for_provider,
-      headers: token_endpoint_headers || {},
-      timeout: refresh_timeout_seconds
-    )
-    [ result, clear_stale_refresh_token && result.refresh_token.blank? ]
-  end
-
-  def refresh_scopes_for_provider
-    oauth_app&.provider_strategy&.refresh_scopes(scopes) || scopes
+    Broker::CredentialGrants.refresh(self)
   end
 
   def apply_success!(result, now:, clear_refresh_token:)
@@ -293,15 +250,8 @@ class BrokerCredential < ApplicationRecord
     errors.add(:scopes, "must be an array of strings")
   end
 
-  def password_grant_credentials_present
-    return unless grant == "password"
-
-    errors.add(:username, "can't be blank for the password grant") if username.blank?
-    errors.add(:password, "can't be blank for the password grant") if password.blank?
-  end
-
-  def password_grant_initial_values_present?
-    username.present? && password.present?
+  def grant_credentials_present
+    Broker::CredentialGrants.validate(self)
   end
 
   def token_endpoint_headers_valid
@@ -309,5 +259,11 @@ class BrokerCredential < ApplicationRecord
     valid = token_endpoint_headers.is_a?(Hash) &&
             token_endpoint_headers.all? { |k, v| k.is_a?(String) && v.is_a?(String) }
     errors.add(:token_endpoint_headers, "must be an object mapping header names to string values") unless valid
+  end
+
+  def default_preqin_token_endpoint
+    return unless grant == "preqin"
+
+    self.token_endpoint = Broker::CredentialGrants.default_token_endpoint(grant)
   end
 end

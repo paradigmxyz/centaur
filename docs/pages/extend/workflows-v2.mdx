@@ -59,7 +59,7 @@ Supported v2 primitives:
 | `handler(inp, ctx)` | Supported |
 | `ctx.step(name, fn)` | Supported |
 | `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
-| `ctx.call_tool(...)` | Supported through the configured tool API proxy |
+| `ctx.call_tool(...)` | Supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
 | `WEBHOOKS` | Supported |
@@ -69,25 +69,23 @@ Supported v2 primitives:
 
 ### Keep imports narrow
 
-Workflow files should import only the workflow context compatibility module:
+Workflow files should import only the supported workflow-host API surface they
+need:
 
 ```python
 from api.workflow_engine import WorkflowContext
+from api.runtime_control import ControlPlaneError
 ```
 
-Do not import Python API internals such as:
+Supported workflow-host modules are `api.workflow_engine`,
+`api.runtime_control`, `api.app`, and `api.metrics`.
 
-```python
-from api.runtime_control import canonical_json
-from api.vm_metrics import workflow_counter
-```
-
-Those modules were implementation details of the Python API service. In v2,
-the workflow host provides a small compatibility surface instead of the whole
-Python API package.
+Do not import unrelated API-service internals or another workflow domain's local
+helpers. Domain-specific helpers should live next to the workflows that own
+them, for example `workflows/slack/metrics.py`.
 
 If a workflow needs a helper, move it into the workflow file, a shared overlay
-module, or a supported workflow-host compatibility shim.
+module, or a supported workflow-host API module.
 
 ### Put side effects behind steps
 
@@ -194,14 +192,15 @@ For each existing workflow:
 
 ## Known gaps
 
-The v2 POC supports the workflow model, but it does not yet emulate the full
-Python API package. Workflows that import `api.runtime_control`, `api.vm_metrics`,
-or other Python API internals need a compatibility shim or a small local helper
-before they are v2-ready.
+The v2 workflow host intentionally exposes a narrow Python API package.
+Workflows that import unrelated API-service internals should move that behavior
+into the workflow-host API surface or a small local helper owned by the workflow
+domain before they are v2-ready.
 
-The tool runtime is also still proxied. `ctx.call_tool(...)` works through the
-configured tool API, but a fully native `api-rs` tool runtime is a separate
-migration step.
+`ctx.call_tool(...)` is a compatibility surface in the Python workflow host. It
+uses the generated `centaur-tools call` bridge against the installed tool
+package; agent sandboxes should use direct tool CLIs instead of deprecated
+`/tools/...` HTTP routes.
 
 ## Verify a migration
 
@@ -219,7 +218,6 @@ Then create a real run:
 ```bash
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $WORKFLOW_API_KEY" \
   -d '{
     "workflow_name": "nightly_report",
     "input": {"topic": "open incidents"}

@@ -4,9 +4,25 @@ description = "Chart generation for Centaur. Single render_chart method returns 
 version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "typer>=0.12.0",
     "matplotlib>=3.7.0",
     "pandas>=2.0.0",
 ]
+
+[project.scripts]
+chart = "centaur_tool_chart.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_chart"
 
 [tool.centaur]
 module = "client.py"

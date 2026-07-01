@@ -128,11 +128,20 @@ class PgDsnSecretTest < ActiveSupport::TestCase
 
   test "to_proxy_dsn resolves value_from principal labels and fields" do
     principal = principals(:acme_channel)
-    principal.update!(labels: { "slack_channel_id" => "C0123456789" })
+    principal.update!(
+      labels: {
+        "slack_channel_id" => "C0123456789",
+        "google_subject" => "google-sub-alice"
+      }
+    )
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
       {
         "name" => "centaur.slack_channel_id",
         "value_from" => { "principal_label" => "slack_channel_id" }
+      },
+      {
+        "name" => "centaur.google_subject",
+        "value_from" => { "principal_label" => "google_subject" }
       },
       { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } },
       { "name" => "centaur.principal_id", "value_from" => { "principal_field" => "id" } },
@@ -143,6 +152,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert_equal(
       [
         { "name" => "centaur.slack_channel_id", "value" => "C0123456789" },
+        { "name" => "centaur.google_subject", "value" => "google-sub-alice" },
         { "name" => "centaur.principal", "value" => principal.foreign_id },
         { "name" => "centaur.principal_id", "value" => principal.oid },
         { "name" => "app.tenant", "value" => "centaur" }

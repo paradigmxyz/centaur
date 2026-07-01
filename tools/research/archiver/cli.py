@@ -13,12 +13,32 @@ import typer
 from .client import _client
 from .utils import dump_json, normalize_url
 
-app = typer.Typer(name="archiver", help="Reducto-first document extraction for investment materials.")
-
-DEFAULT_GOOGLE_ACCOUNT = (
-    (os.getenv("GOOGLE_ACCOUNT") or "").strip()
-    or ""
+app = typer.Typer(
+    name="archiver", help="Reducto-first document extraction for investment materials."
 )
+
+
+@app.command("health")
+def health():
+    """Assert archiver connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = {"auth_mode": "local-only", "live_probe": False}
+        payload = {"ok": True, "tool": "archiver", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "archiver", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
+DEFAULT_GOOGLE_ACCOUNT = (os.getenv("GOOGLE_ACCOUNT") or "").strip() or ""
 
 
 def _read_context(
@@ -26,7 +46,11 @@ def _read_context(
     context_file: str | None,
 ) -> dict | None:
     if context and context_file:
-        print(dump_json({"status": "error", "error": "Cannot specify both --context and --context-file"}))
+        print(
+            dump_json(
+                {"status": "error", "error": "Cannot specify both --context and --context-file"}
+            )
+        )
         raise typer.Exit(1)
     if context:
         return json.loads(context)
@@ -148,7 +172,9 @@ def download(
         and _looks_password_required(payload)
         and _is_interactive()
     ):
-        entered_password = typer.prompt("DocSend password", hide_input=True, confirmation_prompt=False)
+        entered_password = typer.prompt(
+            "DocSend password", hide_input=True, confirmation_prompt=False
+        )
         entered_password = entered_password.strip()
         if entered_password:
             payload = client.download(
@@ -230,13 +256,17 @@ def extract(
         payload = client.extract_manifest(manifest, context=ctx)
     elif source:
         if not output:
-            print(dump_json({"status": "error", "error": "--output is required when using --source"}))
+            print(
+                dump_json({"status": "error", "error": "--output is required when using --source"})
+            )
             raise typer.Exit(1)
-        source_kind, resolved_account, resolved_password, resolved_email = _resolve_source_auth_inputs(
-            source_url=source,
-            account=account,
-            password=password,
-            email=email,
+        source_kind, resolved_account, resolved_password, resolved_email = (
+            _resolve_source_auth_inputs(
+                source_url=source,
+                account=account,
+                password=password,
+                email=email,
+            )
         )
         payload = client.extract_source(
             source_url=source,
@@ -255,7 +285,9 @@ def extract(
             and _looks_password_required(payload)
             and _is_interactive()
         ):
-            entered_password = typer.prompt("DocSend password", hide_input=True, confirmation_prompt=False)
+            entered_password = typer.prompt(
+                "DocSend password", hide_input=True, confirmation_prompt=False
+            )
             entered_password = entered_password.strip()
             if entered_password:
                 payload = client.extract_source(

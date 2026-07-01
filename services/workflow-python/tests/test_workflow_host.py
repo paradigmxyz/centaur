@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 def load_workflow_host():
     module_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
+    sys.path.insert(0, str(module_path.parent))
     spec = importlib.util.spec_from_file_location("workflow_host_under_test", module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -35,7 +36,130 @@ class FakeRpc:
         self.drained = True
 
 
+class RequestRpc(FakeRpc):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests = []
+
+    async def request(self, payload):
+        self.requests.append(payload)
+        message_type = payload["type"]
+        if message_type == "ctx.step.get":
+            return {"done": False, "checkpoint_name": "checkpoint-1"}
+        if message_type == "ctx.step.put":
+            return payload["value"]
+        if message_type == "ctx.call_tool":
+            return {
+                "tool": payload["tool"],
+                "method": payload["method"],
+                "args": payload["args"],
+                "via": "rpc",
+            }
+        if message_type == "ctx.agent_turn":
+            return payload["args"]
+        if message_type == "ctx.sleep":
+            return {"slept": True}
+        raise AssertionError(f"unexpected request {payload}")
+
+
 class WorkflowHostTests(unittest.TestCase):
+    def test_workflow_api_modules_are_importable(self) -> None:
+        load_workflow_host()
+
+        from api.runtime_control import ControlPlaneError, canonical_json, decode_jsonb
+        from api.workflow_engine import Delivery, WorkflowContext
+
+        self.assertEqual(canonical_json({"b": 1, "a": 2}), '{"a":2,"b":1}')
+        self.assertEqual(decode_jsonb('{"ok": true}', {}), {"ok": True})
+        self.assertEqual(Delivery().metadata, {})
+        self.assertTrue(WorkflowContext)
+
+        error = ControlPlaneError("INVALID", "bad input", 422)
+        self.assertEqual(error.to_dict()["status_code"], 422)
+        self.assertIn("INVALID", str(error))
+
+    def test_step_accepts_step_kind_and_binds_tool_manager_rpc(self) -> None:
+        host = load_workflow_host()
+        from api import app as workflow_app
+
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        async def run_step():
+            async def call_tool():
+                manager = workflow_app.get_tool_manager()
+                return await manager.call_tool_raw("demo", "method", {"x": 1})
+
+            return await ctx.step("call_tool", call_tool, step_kind="tool_call")
+
+        with patch.object(workflow_app, "resolve_tool_shim", return_value=None):
+            result = asyncio.run(run_step())
+
+        self.assertEqual(result["via"], "rpc")
+        self.assertEqual(rpc.requests[0]["type"], "ctx.step.get")
+        self.assertEqual(rpc.requests[0]["step_kind"], "tool_call")
+        self.assertEqual(rpc.requests[-1]["type"], "ctx.step.put")
+        self.assertEqual(rpc.requests[-1]["step_kind"], "tool_call")
+
+    def test_sleep_sends_duration_seconds(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        asyncio.run(ctx.sleep("pause", 2.5))
+
+        self.assertEqual(
+            rpc.requests,
+            [{"type": "ctx.sleep", "step": "pause", "duration_seconds": 2.5}],
+        )
+
+    def test_tools_proxy_calls_tool_manager(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        async def call_tool():
+            return await ctx.tools.demo.method(x=1)
+
+        from api import app as workflow_app
+
+        with patch.object(workflow_app, "resolve_tool_shim", return_value=None):
+            result = asyncio.run(call_tool())
+
+        self.assertEqual(
+            result,
+            {"tool": "demo", "method": "method", "args": {"x": 1}, "via": "rpc"},
+        )
+
+    def test_run_agent_accepts_positional_step_name_with_text(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(ctx.run_agent("draft_summary", text="summarize this"))
+
+        self.assertEqual(result, {"name": "draft_summary", "text": "summarize this"})
+
     def test_workflow_result_includes_grouping_identifiers(self) -> None:
         host = load_workflow_host()
         pool = FakePool()

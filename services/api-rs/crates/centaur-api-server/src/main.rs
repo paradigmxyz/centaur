@@ -65,7 +65,8 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     }
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
-    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime);
+    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime)
+        .with_openai_session_title_generator_from_env();
     let mut warm_pool_bootstrap_principal = None;
     let mut workflow_host_principal = None;
     if let Some(iron_control) = args.iron_control_runtime().await? {
@@ -84,6 +85,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         runtime = runtime.with_warm_pool(config);
     }
     runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
+    runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
         .await?;

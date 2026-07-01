@@ -390,6 +390,21 @@ mkdir -p "$HOME_DIR/uploads"
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2
 
+# ── Background: refresh repo-cache-backed tools/skills in running sandboxes ───
+case "${CENTAUR_TOOLS_AUTO_RELOAD:-true}" in
+    0|false|False|FALSE|no|No|NO|off|Off|OFF) _centaur_tools_auto_reload=0 ;;
+    *) _centaur_tools_auto_reload=1 ;;
+esac
+if [ "$_centaur_tools_auto_reload" = "1" ] \
+    && [ "${CENTAUR_SANDBOX_REPO_CACHE_ENABLED:-true}" != "false" ] \
+    && [ -n "${TOOL_DIRS:-}" ]; then
+    (
+        WORKSPACE_DIR="$WORKSPACE_DIR" repo-cache-watch \
+            || echo "warning: Centaur tool auto-reload watcher stopped" >&2
+    ) &
+fi
+unset _centaur_tools_auto_reload
+
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
 # Org/persona overlays are mounted alongside the base prompt when present.
@@ -412,6 +427,16 @@ elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
     && [ -f "$TARGET_PROMPT" ]; then
     printf '\n\n---\n\n' >> "$TARGET_PROMPT"
     cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
+fi
+
+if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
+    cat >> "$TARGET_PROMPT" <<'EOF'
+
+---
+
+[Observability access]
+This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
+EOF
 fi
 
 # Persona prompt injection is done by the API when it writes AGENTS_BASE.md.

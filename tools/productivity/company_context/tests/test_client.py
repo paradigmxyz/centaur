@@ -42,16 +42,6 @@ class _FakeConnection:
         self.closed = True
 
 
-class _FakeSlackClient:
-    def __init__(self, messages=None) -> None:
-        self.messages = messages or []
-        self.calls = []
-
-    def search_messages(self, query, max_results=20, channels=None):
-        self.calls.append((query, max_results, channels))
-        return self.messages
-
-
 @pytest.mark.parametrize("query", ["", "   "])
 def test_search_rejects_empty_query(query):
     result = CompanyContextClient("postgresql://example").search(query)
@@ -140,14 +130,10 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
             "document_count": 42,
         },
     )
-    fake_slack = _FakeSlackClient()
-
     async def fake_connect(*args, **kwargs):
         return fake
 
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-    monkeypatch.setattr(company_context_client, "_load_slack_client", lambda: fake_slack)
-    monkeypatch.setattr(company_context_client, "_current_slack_channel_id", lambda: "C123")
 
     result = CompanyContextClient("postgresql://example").search(
         "ParadeDB BM25",
@@ -159,9 +145,6 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
     assert result["status"] == "ok"
     assert result["count"] == 1
     assert result["indexed_count"] == 1
-    assert result["live_count"] == 0
-    assert result["indexed_cutoff"] == "2026-05-10T15:30:00+00:00"
-    assert fake_slack.calls == [("ParadeDB BM25 after:2026-05-10", 5, ["C123"])]
     assert result["results"][0] == {
         "document_id": "slack:thread:C123:1770000000.000000",
         "source": "slack",
@@ -190,6 +173,7 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
     assert "WHEN 'slack_channel_day' THEN 0.75" in query
     assert "END DESC" in query
     assert "paradedb.score(document_id)" in query
+    assert "metadata ->> 'channel_id'" not in query
     assert args == (
         "ParadeDB BM25",
         "ParadeDB",
@@ -199,114 +183,8 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
         None,
         None,
         5,
-        "C123",
     )
     assert fake.closed is True
-
-
-def test_search_appends_live_slack_gap_results(monkeypatch):
-    fake = _FakeConnection(
-        rows=[],
-        row={
-            "latest_date": dt.datetime(2026, 5, 10, 15, 30, tzinfo=dt.UTC),
-            "latest_source_updated_at": dt.datetime(2026, 5, 10, 15, 30, tzinfo=dt.UTC),
-            "latest_occurred_at": dt.datetime(2026, 5, 10, 14, 0, tzinfo=dt.UTC),
-            "document_count": 42,
-        },
-    )
-    fake_slack = _FakeSlackClient(
-        [
-            {
-                "channel": "eng-ai",
-                "channel_id": "C123",
-                "user": "alice",
-                "user_id": "U123",
-                "text": "New state root mismatch update",
-                "timestamp": "1770000000.000000",
-                "permalink": "https://slack.example/archives/C123/p1770000000000000",
-                "thread_ts": "1770000000.000000",
-                "reply_count": 3,
-            }
-        ]
-    )
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-    monkeypatch.setattr(company_context_client, "_load_slack_client", lambda: fake_slack)
-    monkeypatch.setattr(company_context_client, "_current_slack_channel_id", lambda: "C123")
-
-    result = CompanyContextClient("postgresql://example").search(
-        "state root mismatch",
-        limit=7,
-        source="slack",
-    )
-
-    assert result["status"] == "ok"
-    assert result["count"] == 1
-    assert result["indexed_count"] == 0
-    assert result["live_count"] == 1
-    assert result["indexed_cutoff"] == "2026-05-10T15:30:00+00:00"
-    assert result["live_error"] is None
-    assert fake_slack.calls == [("state root mismatch after:2026-05-10", 7, ["C123"])]
-    assert result["results"] == [
-        {
-            "document_id": "",
-            "source": "slack",
-            "source_type": "slack_live_message",
-            "source_document_id": "1770000000.000000",
-            "source_chunk_id": "1770000000.000000",
-            "parent_document_id": None,
-            "title": "#eng-ai from alice",
-            "url": "https://slack.example/archives/C123/p1770000000000000",
-            "author_name": "alice",
-            "access_scope": "",
-            "score": None,
-            "preview": "New state root mismatch update",
-            "occurred_at": "2026-02-02T02:40:00+00:00",
-            "source_updated_at": None,
-            "lane": "live",
-            "result_type": "slack_live_message",
-            "metadata": {
-                "channel_name": "eng-ai",
-                "channel_id": "C123",
-                "user_name": "alice",
-                "user_id": "U123",
-                "message_ts": "1770000000.000000",
-                "thread_ts": "1770000000.000000",
-                "reply_count": 3,
-            },
-        }
-    ]
-
-
-def test_search_preserves_existing_slack_after_modifier(monkeypatch):
-    fake = _FakeConnection(
-        rows=[],
-        row={
-            "latest_date": dt.datetime(2026, 5, 10, 15, 30, tzinfo=dt.UTC),
-            "latest_source_updated_at": dt.datetime(2026, 5, 10, 15, 30, tzinfo=dt.UTC),
-            "latest_occurred_at": dt.datetime(2026, 5, 10, 14, 0, tzinfo=dt.UTC),
-            "document_count": 42,
-        },
-    )
-    fake_slack = _FakeSlackClient()
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-    monkeypatch.setattr(company_context_client, "_load_slack_client", lambda: fake_slack)
-    monkeypatch.setattr(company_context_client, "_current_slack_channel_id", lambda: "C123")
-
-    result = CompanyContextClient("postgresql://example").search(
-        "state root after:2026-05-11",
-        source="slack",
-    )
-
-    assert result["status"] == "ok"
-    assert fake_slack.calls == [("state root after:2026-05-11", 10, ["C123"])]
 
 
 def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
@@ -332,6 +210,7 @@ def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
     assert "title ||| $6::text::pdb.boost(4)" not in query
     placeholders = {int(match.group(1)) for match in re.finditer(r"\$(\d+)", query)}
     assert placeholders == set(range(1, len(args) + 1))
+    assert "metadata ->> 'channel_id'" not in query
     assert args == (
         "what is the state root state mismatch in prod",
         "state",
@@ -343,7 +222,6 @@ def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
         None,
         None,
         3,
-        None,
     )
 
 
@@ -370,6 +248,7 @@ def test_search_applies_occurred_at_filters(monkeypatch):
     query, args = fake.fetch_calls[0]
     assert "OR occurred_at >= $5" in query
     assert "OR occurred_at < $6" in query
+    assert "metadata ->> 'channel_id'" not in query
     assert args == (
         "planning",
         "planning",
@@ -378,7 +257,6 @@ def test_search_applies_occurred_at_filters(monkeypatch):
         dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
         dt.datetime(2026, 5, 8, 12, 30, tzinfo=dt.UTC),
         4,
-        None,
     )
 
 
@@ -396,6 +274,233 @@ def test_search_rejects_invalid_occurred_at_filter():
 
 def test_search_rejects_inverted_occurred_at_filter():
     result = CompanyContextClient("postgresql://example").search(
+        "planning",
+        occurred_after="2026-05-08",
+        occurred_before="2026-05-01",
+    )
+
+    assert result == {
+        "status": "error",
+        "error": "occurred_after must be earlier than occurred_before",
+    }
+
+
+@pytest.mark.parametrize("query", ["", "   "])
+def test_search_dms_rejects_empty_query(query):
+    result = CompanyContextClient("postgresql://example").search_dms(query)
+
+    assert result == {"status": "error", "error": "query cannot be empty"}
+
+
+@pytest.mark.parametrize("query", ["", "   "])
+def test_search_dm_conversations_rejects_empty_query(query):
+    result = CompanyContextClient("postgresql://example").search_dm_conversations(query)
+
+    assert result == {"status": "error", "error": "query cannot be empty"}
+
+
+def test_search_dm_conversations_queries_projection(monkeypatch):
+    last_seen_at = dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC)
+    source_updated_at = dt.datetime(2026, 5, 8, 12, 5, tzinfo=dt.UTC)
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack_dm_conversation:T_HOME:D123",
+                "home_team_id": "T_HOME",
+                "conversation_id": "D123",
+                "conversation_type": "im",
+                "title": "Slack DM: Akshaan, Tom",
+                "body": "D123 U_SELF Akshaan U_TOM Tom tom@example.com",
+                "is_ext_shared": False,
+                "last_seen_at": last_seen_at,
+                "source_updated_at": source_updated_at,
+                "participant_user_ids": ["U_SELF", "U_TOM"],
+                "participant_labels": ["Akshaan", "Tom"],
+                "participant_count": 2,
+                "metadata": {"source": "slack_dm_conversation"},
+                "score": 3.25,
+            }
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search_dm_conversations(
+        " Tom ",
+        limit=500,
+    )
+
+    assert result == {
+        "status": "ok",
+        "query": "Tom",
+        "source": "slack_dm",
+        "count": 1,
+        "results": [
+            {
+                "document_id": "slack_dm_conversation:T_HOME:D123",
+                "source": "slack_dm",
+                "source_type": "slack_dm_conversation",
+                "home_team_id": "T_HOME",
+                "conversation_id": "D123",
+                "conversation_type": "im",
+                "title": "Slack DM: Akshaan, Tom",
+                "is_ext_shared": False,
+                "last_seen_at": "2026-05-08T12:00:00+00:00",
+                "source_updated_at": "2026-05-08T12:05:00+00:00",
+                "participant_user_ids": ["U_SELF", "U_TOM"],
+                "participant_labels": ["Akshaan", "Tom"],
+                "participant_count": 2,
+                "matched_labels": ["Tom"],
+                "metadata": {"source": "slack_dm_conversation"},
+                "score": 3.25,
+                "preview": "D123 U_SELF Akshaan U_TOM Tom tom@example.com",
+            }
+        ],
+    }
+    query, args = fake.fetch_calls[0]
+    assert "FROM slack_dm_conversation_context_documents" in query
+    assert "title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2)" in query
+    assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2::text)" in query
+    assert "LIMIT $3" in query
+    assert "centaur_search_slack_dm_conversations" not in query
+    assert args == ("Tom", "Tom", 50)
+    assert fake.closed is True
+
+
+def test_search_dms_queries_bm25_and_returns_compact_results(monkeypatch):
+    occurred_at = dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC)
+    source_updated_at = dt.datetime(2026, 5, 8, 12, 5, tzinfo=dt.UTC)
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack_dm:T_HOME:D123:1770000000.000000",
+                "home_team_id": "T_HOME",
+                "conversation_id": "D123",
+                "message_ts": "1770000000.000000",
+                "conversation_type": "im",
+                "thread_ts": None,
+                "user_id": "U123",
+                "bot_id": "",
+                "title": "Slack DM",
+                "body": "launch plan\nAlpha attachment",
+                "permalink": "https://slack.example/archives/D123/p1770000000000000",
+                "occurred_at": occurred_at,
+                "source_updated_at": source_updated_at,
+                "metadata": {"attachment_count": 1, "conversation_type": "im"},
+                "score": 2.5,
+            }
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search_dms(
+        "launch plan",
+        limit=5,
+        conversation_id=" D123 ",
+    )
+
+    assert result == {
+        "status": "ok",
+        "query": "launch plan",
+        "source": "slack_dm",
+        "conversation_id": "D123",
+        "occurred_after": None,
+        "occurred_before": None,
+        "count": 1,
+        "results": [
+            {
+                "document_id": "slack_dm:T_HOME:D123:1770000000.000000",
+                "source": "slack_dm",
+                "source_type": "slack_im",
+                "source_document_id": "D123",
+                "source_chunk_id": "1770000000.000000",
+                "parent_document_id": None,
+                "title": "Slack DM",
+                "url": "https://slack.example/archives/D123/p1770000000000000",
+                "author_name": "U123",
+                "access_scope": "slack_dm",
+                "occurred_at": "2026-05-08T12:00:00+00:00",
+                "source_updated_at": "2026-05-08T12:05:00+00:00",
+                "conversation_id": "D123",
+                "conversation_type": "im",
+                "message_ts": "1770000000.000000",
+                "thread_ts": None,
+                "user_id": "U123",
+                "bot_id": "",
+                "attachment_count": 1,
+                "metadata": {"attachment_count": 1, "conversation_type": "im"},
+                "score": 2.5,
+                "preview": "launch plan Alpha attachment",
+                "lane": "indexed",
+                "result_type": "slack_im",
+            }
+        ],
+    }
+    query, args = fake.fetch_calls[0]
+    assert "FROM slack_dm_context_documents" in query
+    assert "title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2)" in query
+    assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2::text)" in query
+    assert "OR (title ||| $3::text::pdb.boost(4) OR body ||| $3::text)" in query
+    assert "conversation_id = $4" in query
+    assert "OR occurred_at >= $5" in query
+    assert "OR occurred_at < $6" in query
+    assert "LIMIT $7" in query
+    assert "centaur.slack_user_id" not in query
+    assert "centaur.slack_team_id" not in query
+    assert args == ("launch plan", "launch", "plan", "D123", None, None, 5)
+    assert fake.closed is True
+
+
+def test_search_dms_applies_occurred_at_filters(monkeypatch):
+    fake = _FakeConnection(rows=[])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search_dms(
+        "planning",
+        limit=4,
+        occurred_after="2026-05-01",
+        occurred_before="2026-05-08T12:30:00Z",
+    )
+
+    assert result["status"] == "ok"
+    assert result["occurred_after"] == "2026-05-01T00:00:00+00:00"
+    assert result["occurred_before"] == "2026-05-08T12:30:00+00:00"
+    _, args = fake.fetch_calls[0]
+    assert args == (
+        "planning",
+        "planning",
+        None,
+        dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        dt.datetime(2026, 5, 8, 12, 30, tzinfo=dt.UTC),
+        4,
+    )
+
+
+def test_search_dms_rejects_invalid_occurred_at_filter():
+    result = CompanyContextClient("postgresql://example").search_dms(
+        "planning",
+        occurred_after="not-a-date",
+    )
+
+    assert result == {
+        "status": "error",
+        "error": "occurred_after must be an ISO 8601 date or timestamp",
+    }
+
+
+def test_search_dms_rejects_inverted_occurred_at_filter():
+    result = CompanyContextClient("postgresql://example").search_dms(
         "planning",
         occurred_after="2026-05-08",
         occurred_before="2026-05-01",
@@ -470,8 +575,8 @@ def test_list_documents_returns_date_bounded_document_summaries(monkeypatch):
     }
     query, args = fake.fetch_calls[0]
     assert "ORDER BY occurred_at ASC NULLS LAST" in query
+    assert "metadata ->> 'channel_id'" not in query
     assert args == (
-        None,
         "google_calendar",
         "calendar_event",
         dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
@@ -511,7 +616,7 @@ def test_latest_date_returns_latest_indexed_slack_timestamp(monkeypatch):
         "latest_occurred_at": "2026-05-10T14:00:00+00:00",
     }
     _, args = fake.fetchrow_calls[0]
-    assert args == (None, "slack", "slack_thread")
+    assert args == ("slack", "slack_thread")
     assert fake.closed is True
 
 
@@ -577,7 +682,7 @@ def test_read_document_returns_full_content_by_default(monkeypatch):
     assert result["content"] == body
     assert result["metadata"] == {"channel_name": "eng-ai"}
     _, args = fake.fetchrow_calls[0]
-    assert args == ("slack:channel_day:C123:2026-05-08", None)
+    assert args == ("slack:channel_day:C123:2026-05-08",)
     assert fake.closed is True
 
 
@@ -615,7 +720,7 @@ def test_read_document_can_return_bounded_content(monkeypatch):
     assert result["content"] == "x" * 1_200
     assert result["metadata"] == {"channel_name": "eng-ai"}
     _, args = fake.fetchrow_calls[0]
-    assert args == ("slack:channel_day:C123:2026-05-08", None)
+    assert args == ("slack:channel_day:C123:2026-05-08",)
     assert fake.closed is True
 
 

@@ -126,7 +126,9 @@ class InvestmemosClient:
         finally:
             await conn.close()
 
-    def list_memos(self, query: str | None = None, limit: int = 50, source: str | None = None) -> dict:
+    def list_memos(
+        self, query: str | None = None, limit: int = 50, source: str | None = None
+    ) -> dict:
         """List memo documents from the indexed memo corpus."""
         try:
             return asyncio.run(
@@ -219,8 +221,7 @@ class InvestmemosClient:
             for row in rows:
                 metadata = _as_dict(row["metadata"])
                 document_id = str(
-                    metadata.get("document_id")
-                    or str(row["source_id"]).split(":")[0]
+                    metadata.get("document_id") or str(row["source_id"]).split(":")[0]
                 )
                 memo_name = str(metadata.get("memo_name") or document_id)
                 content = str(row["content"] or "")

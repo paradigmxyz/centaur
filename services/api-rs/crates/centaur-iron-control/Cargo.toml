@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 centaur-iron-proxy.workspace = true
 reqwest.workspace = true
 serde.workspace = true

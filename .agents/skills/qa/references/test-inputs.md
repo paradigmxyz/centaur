@@ -1,6 +1,12 @@
 # Test Inputs by Tool Category
 
-Default test inputs to use when QA'ing tools. Use these as starting points — adjust based on what the tool's method schema requires.
+Default test inputs to use only when triaging a failed tool `health` check or when the user explicitly requests deeper per-method coverage. Do not use these as the first-pass smoke test. First run:
+
+```bash
+<tool> health
+```
+
+Use the inputs below only after recording the health result and only for safe read-only follow-up checks.
 
 ## Database / Structured-Data Tools
 
@@ -107,8 +113,9 @@ Tools: `gsuite`
 
 ## General Rules
 
-1. **Always use `limit: 2` or `3`** to keep responses small
-2. **Use well-known addresses** for blockchain lookups (vitalik.eth, WETH contract)
-3. **Use broad search terms** that are likely to return results ("bitcoin", "ethereum", "open source")
-4. **Never use real credentials** as test inputs
-5. **Prefer read-only methods** — skip anything that creates, updates, or deletes
+1. **Run `<tool> health` first** and keep the health output as the primary smoke result.
+2. **Always use `limit: 2` or `3`** to keep responses small.
+3. **Use well-known addresses** for blockchain lookups (vitalik.eth, WETH contract).
+4. **Use broad search terms** that are likely to return results ("bitcoin", "ethereum", "open source").
+5. **Never use real credentials** as test inputs.
+6. **Prefer read-only methods**. Skip anything that creates, updates, or deletes.

@@ -35,6 +35,14 @@ const CHANNEL_ID = 'C000000001'
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
 
+function contentTextWithHeading(
+  content: Array<{ text?: string; type: string }>,
+  heading: string
+): string {
+  return content.find(part => typeof part.text === 'string' && part.text.includes(heading))?.text
+    ?? ''
+}
+
 describe('normalizeSlackText', () => {
   it('preserves Slack channel IDs when rendering labeled channel mentions', () => {
     expect(normalizeSlackText('<#C0AJ07U8Z1N|eng-centaur>')).toBe(
@@ -260,7 +268,22 @@ describe('slackbotv2', () => {
         thread_key: threadKey(parent.ts)
       })
     )
-    expect(JSON.stringify(firstInputLine)).toContain('data:image/png;base64')
+    expect(firstInputLine).toEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              attachment_type: 'image',
+              dataBase64: Buffer.from('captured-image').toString('base64'),
+              mimeType: 'image/png',
+              name: 'captured.png',
+              type: 'attachment'
+            })
+          ])
+        })
+      })
+    )
+    expect(JSON.stringify(firstInputLine)).not.toContain('data:image/png;base64')
 
     const followUpAppend = codexApi.appends[1]!
     expect(followUpAppend.threadKey).toBe(threadKey(parent.ts))
@@ -286,7 +309,10 @@ describe('slackbotv2', () => {
     const assistantStatuses = slackApi.calls
       .filter(call => call.method === 'assistant.threads.setStatus')
       .map(call => stringField(call.body.status))
-    expect(assistantStatuses).toEqual(['Thinking...', '', 'Thinking...', ''])
+    expect(assistantStatuses[0]).toBe('Thinking...')
+    expect(assistantStatuses.at(-1)).toBe('')
+    expect(assistantStatuses.filter(status => status === 'Thinking...').length).toBeGreaterThanOrEqual(2)
+    expect(assistantStatuses.filter(status => status === '').length).toBeGreaterThanOrEqual(2)
     expect(
       slackApi.calls
         .filter(call => call.method === 'assistant.threads.setTitle')
@@ -316,6 +342,92 @@ describe('slackbotv2', () => {
     expect(renderedReplies).toHaveLength(2)
     expectSlackRenderedReply(renderedReplies[0]!, 'Executed request 1.')
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
+  })
+
+  it('keeps harness and model flags sticky within a Slack thread', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+
+    const parent = await postUserMessage('Thread default context.')
+    const firstMention = await postUserMessage(
+      `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 first pass`,
+      parent.ts
+    )
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-sticky-overrides-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 first pass`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+
+    const secondMention = await postUserMessage(
+      `<@${BOT_USER_ID}> continue without flags`,
+      parent.ts
+    )
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-sticky-overrides-second',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> continue without flags`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+
+    expect(codexApi.creates.map(create => create.body.harness_type)).toEqual([
+      'claudecode',
+      'claudecode'
+    ])
+    expect(codexApi.executes).toHaveLength(2)
+    const firstInput = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as Record<
+      string,
+      unknown
+    >
+    const secondInput = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!) as Record<
+      string,
+      unknown
+    >
+    expect(firstInput.model).toBe('claude-opus-4-8')
+    expect(secondInput.model).toBe('claude-opus-4-8')
+    expect(JSON.stringify(firstInput)).not.toContain('--claude')
+    expect(JSON.stringify(firstInput)).not.toContain('--model')
+    expect(JSON.stringify(secondInput)).toContain('continue without flags')
+
+    const state = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${threadKey(parent.ts)}`
+    )
+    expect(state).toEqual(
+      expect.objectContaining({
+        harnessType: 'claudecode',
+        model: 'claude-opus-4-8'
+      })
+    )
   })
 
   it('includes all preceding Slack thread messages for a first mid-thread mention', async () => {
@@ -365,6 +477,285 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('First preceding reply.')
     expect(executeInput).toContain('Second preceding reply.')
     expect(executeInput).toContain('summarize the thread so far')
+  })
+
+  it('materializes Slack event files on root mentions without fetching thread replies', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this root screenshot`)
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-file-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> inspect this root screenshot`,
+          files: [
+            {
+              id: 'F-root-captured',
+              mimetype: 'image/png',
+              name: 'captured.png',
+              original_h: 600,
+              original_w: 800,
+              size: 16,
+              url_private: fileUrl
+            }
+          ]
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const appendedAttachment = codexApi.appends[0]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        attachment_type: 'image',
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'captured.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+
+    const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines[0]!))
+    expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
+    expect(executeInput).toContain('"attachment_type":"image"')
+  })
+
+  it('repairs delayed Slack Connect file-only messages as a follow-up turn', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> what's in this image`)
+    const mentionWaits: Promise<unknown>[] = []
+    const mentionResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-late-file-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> what's in this image`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    expect(mentionResponse.status).toBe(200)
+    await Promise.all(mentionWaits)
+
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    const fileTs = incrementSlackTs(mention.ts, 2)
+    const fileWaits: Promise<unknown>[] = []
+    const fileResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-late-file-message',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: fileTs,
+          text: '',
+          files: [
+            {
+              id: 'F-late-captured',
+              mimetype: 'image/png',
+              name: 'late-captured.png',
+              original_h: 600,
+              original_w: 800,
+              size: 16,
+              url_private: fileUrl
+            }
+          ]
+        }
+      }),
+      {},
+      waitUntilContext(fileWaits)
+    )
+
+    expect(fileResponse.status).toBe(200)
+    await Promise.all(fileWaits)
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.executes.map(execute => execute.threadKey)).toEqual([
+      threadKey(mention.ts),
+      threadKey(mention.ts)
+    ])
+    expect(codexApi.executes[1]!.body.idempotency_key).toBe(fileTs)
+    const appendedAttachment = codexApi.appends[1]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        attachment_type: 'image',
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'late-captured.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+    const secondExecuteInput = JSON.stringify(
+      JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!)
+    )
+    expect(secondExecuteInput).toContain('Late Slack file attachment')
+    expect(secondExecuteInput).toContain('"attachment_type":"image"')
+  })
+
+  it('hydrates Slack Connect check_file_info placeholders before late-file repair', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect the delayed file`)
+    const mentionWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-check-file-info-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> inspect the delayed file`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    await Promise.all(mentionWaits)
+
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    slackApi.setFileInfo('F-check-file-info', {
+      id: 'F-check-file-info',
+      mimetype: 'image/png',
+      name: 'hydrated.png',
+      original_h: 600,
+      original_w: 800,
+      size: 16,
+      url_private: fileUrl
+    })
+
+    const fileWaits: Promise<unknown>[] = []
+    const fileTs = incrementSlackTs(mention.ts, 2)
+    const fileResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-check-file-info-message',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: fileTs,
+          text: '',
+          files: [{ id: 'F-check-file-info', file_access: 'check_file_info' }]
+        }
+      }),
+      {},
+      waitUntilContext(fileWaits)
+    )
+
+    expect(fileResponse.status).toBe(200)
+    await Promise.all(fileWaits)
+
+    expect(slackApi.fileInfoRequestCount('F-check-file-info')).toBe(1)
+    expect(codexApi.executes).toHaveLength(2)
+    const appendedAttachment = codexApi.appends[1]!.body.messages
+      .flatMap(message => message.parts)
+      .find(part => isRecord(part) && part.type === 'attachment')
+    expect(appendedAttachment).toEqual(
+      expect.objectContaining({
+        dataBase64: Buffer.from('captured-image').toString('base64'),
+        mimeType: 'image/png',
+        name: 'hydrated.png',
+        type: 'attachment',
+        url: fileUrl
+      })
+    )
+  })
+
+  it('ignores unmatched and duplicate delayed file-only messages', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> maybe an image follows`)
+    const mentionWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-dedupe-late-file-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> maybe an image follows`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    await Promise.all(mentionWaits)
+
+    const unrelatedWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-unmatched-late-file',
+        event: {
+          type: 'message',
+          user: USER_B_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: incrementSlackTs(mention.ts, 2),
+          text: '',
+          files: [{ id: 'F-unmatched', mimetype: 'image/png', name: 'unmatched.png' }]
+        }
+      }),
+      {},
+      waitUntilContext(unrelatedWaits)
+    )
+    await Promise.all(unrelatedWaits)
+    expect(codexApi.executes).toHaveLength(1)
+
+    const fileEvent = signedSlackEvent({
+      event_id: 'Ev-slackbotv2-duplicate-late-file',
+      event: {
+        type: 'message',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: incrementSlackTs(mention.ts, 3),
+        text: '',
+        files: [
+          {
+            id: 'F-dedupe-late',
+            mimetype: 'image/png',
+            name: 'dedupe.png',
+            url_private: `${slackApi.url}/files/captured.png`
+          }
+        ]
+      }
+    })
+    const firstWaits: Promise<unknown>[] = []
+    await bot.app.request('/api/webhooks/slack', fileEvent, {}, waitUntilContext(firstWaits))
+    await Promise.all(firstWaits)
+    const duplicateWaits: Promise<unknown>[] = []
+    await bot.app.request('/api/webhooks/slack', fileEvent, {}, waitUntilContext(duplicateWaits))
+    await Promise.all(duplicateWaits)
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.executes[1]!.body.idempotency_key).toBe(incrementSlackTs(mention.ts, 3))
   })
 
   it('fetches attachments from preceding Slack thread messages for a mid-thread mention', async () => {
@@ -420,9 +811,10 @@ describe('slackbotv2', () => {
     const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
     expect(executeInput).toContain('Screenshot is attached here.')
     expect(executeInput).toContain('Earlier Slack thread attachment')
-    expect(executeInput).toContain(
-      `data:image/png;base64,${Buffer.from('captured-image').toString('base64')}`
-    )
+    expect(executeInput).toContain('"attachment_type":"image"')
+    expect(executeInput).toContain('"type":"attachment"')
+    expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
+    expect(executeInput).not.toContain('data:image/png;base64')
   })
 
   it('injects Slack requester identity and verified GitHub handle into Codex input', async () => {
@@ -475,12 +867,13 @@ describe('slackbotv2', () => {
     const input = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
       message: { content: Array<{ text?: string; type: string }> }
     }
-    expect(input.message.content[0]?.text).toContain('# Requester Context')
-    expect(input.message.content[0]?.text).toContain(`Slack user ID: ${USER_ID}`)
-    expect(input.message.content[0]?.text).toContain('Slack username: akshaan')
-    expect(input.message.content[0]?.text).toContain('GitHub handle from Slack profile: @decofe')
-    expect(input.message.content[0]?.text).toContain('Prompted by: @decofe')
-    expect(input.message.content[1]?.text).toBe(`@${BOT_USER_ID} what is my name?`)
+    const requesterContext = contentTextWithHeading(input.message.content, '# Requester Context')
+    expect(requesterContext).toContain('# Requester Context')
+    expect(requesterContext).toContain(`Slack user ID: ${USER_ID}`)
+    expect(requesterContext).toContain('Slack username: akshaan')
+    expect(requesterContext).toContain('GitHub handle from Slack profile: @decofe')
+    expect(requesterContext).toContain('Prompted by: @decofe')
+    expect(input.message.content.at(-1)?.text).toBe(`@${BOT_USER_ID} what is my name?`)
   })
 
   it('caches Slack requester identity across mentions from the same user', async () => {
@@ -524,7 +917,9 @@ describe('slackbotv2', () => {
       const input = JSON.parse(execute.body.input_lines.at(-1)!) as {
         message: { content: Array<{ text?: string; type: string }> }
       }
-      expect(input.message.content[0]?.text).toContain('GitHub handle from Slack profile: @decofe')
+      expect(contentTextWithHeading(input.message.content, '# Requester Context')).toContain(
+        'GitHub handle from Slack profile: @decofe'
+      )
     }
   })
 
@@ -604,8 +999,8 @@ describe('slackbotv2', () => {
     const replyInput = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!) as {
       message: { content: Array<{ text?: string; type: string }> }
     }
-    const rootContext = rootInput.message.content[0]?.text ?? ''
-    const replyContext = replyInput.message.content[0]?.text ?? ''
+    const rootContext = contentTextWithHeading(rootInput.message.content, '# Requester Context')
+    const replyContext = contentTextWithHeading(replyInput.message.content, '# Requester Context')
 
     expect(rootContext).toContain(`Slack user ID: ${USER_ID}`)
     expect(rootContext).toContain('GitHub handle from Slack profile: @alice-gh')
@@ -2623,14 +3018,24 @@ describe('slackbotv2', () => {
         assistant_status_requested: true,
         message_id: mention.ts,
         mode: 'execute',
+        slack_user_id: USER_ID,
         thread_id: threadKey(parent.ts),
         trigger: 'new_mention'
+      })
+    )
+    expect(logData(logs, 'slackbotv2_forward_started')).toEqual(
+      expect.objectContaining({
+        message_id: mention.ts,
+        mode: 'execute',
+        slack_user_id: USER_ID,
+        thread_id: threadKey(parent.ts)
       })
     )
     expect(logData(logs, 'slackbotv2_assistant_status_started')).toEqual(
       expect.objectContaining({
         message_id: mention.ts,
         operation: 'set',
+        slack_user_id: USER_ID,
         thread_id: threadKey(parent.ts)
       })
     )
@@ -2642,7 +3047,7 @@ describe('slackbotv2', () => {
     )
     expect(logData(logs, 'slackbotv2_handoff_sync_starting')).toEqual(
       expect.objectContaining({
-        initial_assistant_status_visible: true,
+        initial_assistant_status_visible: expect.any(Boolean),
         trigger: 'new_mention'
       })
     )
@@ -2676,7 +3081,59 @@ describe('slackbotv2', () => {
       slackApi.calls
         .filter(call => call.method === 'assistant.threads.setStatus')
         .map(call => stringField(call.body.status))
-    ).toEqual(['Thinking...', ''])
+    ).toEqual(expect.arrayContaining(['Thinking...', '']))
+  })
+
+  it('does not wait for hung assistant status before creating Slack sessions', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs), slackApiTimeoutMs: 25 })
+    const releaseStatus = slackApi.holdAssistantStatus()
+    const waits: Promise<unknown>[] = []
+
+    try {
+      const parent = await postUserMessage('Context before hung status.')
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> keep going`, parent.ts)
+      const responsePromise = bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-hung-status',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> keep going`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      await waitFor(() => codexApi.creates.length === 1 && codexApi.executes.length === 1)
+      const response = await responsePromise
+      expect(response.status).toBe(200)
+      expect(codexApi.creates[0]?.threadKey).toBe(threadKey(parent.ts))
+      expect(codexApi.executes[0]?.threadKey).toBe(threadKey(parent.ts))
+      expect(logData(logs, 'slackbotv2_handoff_sync_starting')).toEqual(
+        expect.objectContaining({
+          initial_assistant_status_deferred: true,
+          initial_assistant_status_visible: false,
+          trigger: 'new_mention'
+        })
+      )
+      await waitFor(() => hasLog(logs, 'slackbotv2_assistant_status_failed'))
+      expect(logData(logs, 'slackbotv2_assistant_status_failed')).toEqual(
+        expect.objectContaining({
+          error: 'set assistant status timed out after 25ms',
+          operation: 'set'
+        })
+      )
+    } finally {
+      releaseStatus()
+    }
+    await Promise.all(waits)
   })
 
   it('uses session activity summaries as assistant status instead of visible text', async () => {
@@ -3380,6 +3837,49 @@ describe('slackbotv2', () => {
     await Promise.all(allowedBotWaits)
     expect(codexApi.appends).toHaveLength(1)
     expect(codexApi.executes).toHaveLength(1)
+
+    bot = createTestBot({ triggerBotAllowlist: ['bot:BOTHERBOT'] })
+    codexApi.reset()
+    const labeledBotMention = `<@${BOT_USER_ID}|centaur> from allowed bot message`
+    const allowedBotChannelMessage = await postUserMessage(labeledBotMention)
+    slackApi.reset()
+    const allowedBotChannelWaits: Promise<unknown>[] = []
+    const allowedBotChannelResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-bot-message-allowed',
+        event: {
+          type: 'message',
+          app_id: 'AOTHERBOT',
+          bot_id: 'BOTHERBOT',
+          bot_profile: {
+            app_id: 'AOTHERBOT',
+            id: 'BOTHERBOT',
+            user_id: 'UOTHERBOT'
+          },
+          channel: CHANNEL_ID,
+          subtype: 'bot_message',
+          team: TEAM_ID,
+          text: labeledBotMention,
+          ts: allowedBotChannelMessage.ts,
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(allowedBotChannelWaits)
+    )
+    expect(allowedBotChannelResponse.status).toBe(200)
+    await Promise.all(allowedBotChannelWaits)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
+    const allowedBotChannelTranscripts = slackStreamTranscripts(slackApi.calls)
+    expect(allowedBotChannelTranscripts).toHaveLength(1)
+    expect(allowedBotChannelTranscripts[0]!.start.body).toEqual(
+      expect.objectContaining({
+        recipient_team_id: TEAM_ID,
+        recipient_user_id: 'UOTHERBOT'
+      })
+    )
   })
 })
 
@@ -4115,7 +4615,10 @@ type PatchedSlackApi = {
   failRepliesWithThreadNotFound(channel: string, ts: string): void
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
+  fileInfoRequestCount(fileId: string): number
+  holdAssistantStatus(): () => void
   reset(): void
+  setFileInfo(fileId: string, file: Record<string, unknown>): void
   setUserProfile(userId: string, profile: Record<string, unknown>): void
   userProfileMethodRequestCount(userId: string, method: string): number
   userProfileRequestCount(userId: string): number
@@ -4152,18 +4655,31 @@ type SlackStreamTranscript = {
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
+  const fileInfo = new Map<string, Record<string, unknown>>()
+  const fileInfoRequests = new Map<string, number>()
   const threadMessageFiles = new Map<string, Record<string, unknown>[]>()
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
+  let assistantStatusGate: Promise<void> | null = null
+  let releaseAssistantStatusGate: (() => void) | null = null
   let maxStreamStopChars: number | null = null
   const appendFailure: { error: string; remaining: number } = { error: '', remaining: -1 }
   const streams = new Map<string, StreamRecord>()
+  const releaseCurrentAssistantStatusGate = () => {
+    const release = releaseAssistantStatusGate
+    assistantStatusGate = null
+    releaseAssistantStatusGate = null
+    release?.()
+  }
   const port = await availablePort(4053)
   const server = createServer((req, res) => {
     void handlePatchedSlackRequest(req, res, {
       appendFailure,
+      assistantStatusGate: () => assistantStatusGate,
       calls,
+      fileInfo,
+      fileInfoRequests,
       maxStreamStopChars,
       port,
       streams,
@@ -4195,16 +4711,32 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failStreamStopsLongerThan(maxChars: number) {
       maxStreamStopChars = maxChars
     },
+    fileInfoRequestCount(fileId: string) {
+      return fileInfoRequests.get(fileId) ?? 0
+    },
+    holdAssistantStatus() {
+      if (assistantStatusGate) throw new Error('assistant status is already held')
+      assistantStatusGate = new Promise(resolve => {
+        releaseAssistantStatusGate = resolve
+      })
+      return releaseCurrentAssistantStatusGate
+    },
     reset() {
+      releaseCurrentAssistantStatusGate()
       calls.length = 0
       maxStreamStopChars = null
       appendFailure.remaining = -1
       appendFailure.error = ''
       threadNotFoundReplies.clear()
       threadMessageFiles.clear()
+      fileInfo.clear()
+      fileInfoRequests.clear()
       streams.clear()
       userProfiles.clear()
       userProfileRequests.clear()
+    },
+    setFileInfo(fileId: string, file: Record<string, unknown>) {
+      fileInfo.set(fileId, file)
     },
     setUserProfile(userId: string, profile: Record<string, unknown>) {
       userProfiles.set(userId, profile)
@@ -4224,7 +4756,10 @@ async function handlePatchedSlackRequest(
   res: ServerResponse,
   input: {
     appendFailure: { error: string; remaining: number }
+    assistantStatusGate: () => Promise<void> | null
     calls: StreamCall[]
+    fileInfo: Map<string, Record<string, unknown>>
+    fileInfoRequests: Map<string, number>
     maxStreamStopChars: number | null
     port: number
     streams: Map<string, StreamRecord>
@@ -4265,6 +4800,8 @@ async function handlePatchedSlackRequest(
   if (path === '/api/assistant.threads.setStatus') {
     const body = await requestBody(request)
     input.calls.push({ method: 'assistant.threads.setStatus', body })
+    const gate = input.assistantStatusGate()
+    if (gate) await gate
     await sendWebResponse(res, Response.json({ ok: true }))
     return
   }
@@ -4300,6 +4837,19 @@ async function handlePatchedSlackRequest(
       return
     }
     await sendWebResponse(res, Response.json({ ok: true, profile }))
+    return
+  }
+  if (path === '/api/files.info') {
+    const body = await requestBody(request.clone())
+    const fileId = url.searchParams.get('file') ?? stringField(body.file)
+    input.fileInfoRequests.set(fileId, (input.fileInfoRequests.get(fileId) ?? 0) + 1)
+    const file = input.fileInfo.get(fileId)
+    await sendWebResponse(
+      res,
+      file
+        ? Response.json({ ok: true, file })
+        : Response.json({ ok: false, error: 'file_not_found' })
+    )
     return
   }
   if (path === '/api/chat.startStream') {
@@ -4769,6 +5319,11 @@ function streamKey(channel: string, ts: string): string {
 
 function slackReplyKey(channel: string, ts: string): string {
   return `${channel}:${ts}`
+}
+
+function incrementSlackTs(ts: string, seconds: number): string {
+  const [whole = '0', fractional = '000000'] = ts.split('.')
+  return `${Number.parseInt(whole, 10) + seconds}.${fractional.padEnd(6, '0').slice(0, 6)}`
 }
 
 function stringField(value: unknown): string {

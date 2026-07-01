@@ -6,13 +6,35 @@ import sys
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
-from centaur_sdk import Table
+from rich.table import Table
 
 from .client import AttioClient
 
 load_dotenv()
 
 app = typer.Typer(name="attio", help="Attio CRM CLI for AI agents")
+
+
+@app.command("health")
+def health():
+    """Assert attio connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_objects()
+        payload = {"ok": True, "tool": "attio", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "attio", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -468,9 +490,7 @@ def list_meetings(
     """List meetings, optionally filtered to a linked Attio record."""
     client = _get_client()
     participant_values = (
-        [part.strip() for part in participants.split(",") if part.strip()]
-        if participants
-        else None
+        [part.strip() for part in participants.split(",") if part.strip()] if participants else None
     )
     result = client.list_meetings(
         limit=limit,
@@ -502,7 +522,9 @@ def list_meetings(
     for meeting in meetings:
         meeting_id = meeting.get("id", {}).get("meeting_id", "") or meeting.get("id", "")
         title = meeting.get("title") or meeting.get("subject") or meeting.get("name") or ""
-        start = meeting.get("start_at") or meeting.get("starts_at") or meeting.get("start_time") or ""
+        start = (
+            meeting.get("start_at") or meeting.get("starts_at") or meeting.get("start_time") or ""
+        )
         end = meeting.get("end_at") or meeting.get("ends_at") or meeting.get("end_time") or ""
         table.add_row(meeting_id[:8] + "...", title, str(start)[:19], str(end)[:19])
 
@@ -552,8 +574,8 @@ def list_call_recordings(
     table.add_column("Created", style="white", max_width=20)
 
     for recording in recordings:
-        recording_id = (
-            recording.get("id", {}).get("call_recording_id", "") or recording.get("id", "")
+        recording_id = recording.get("id", {}).get("call_recording_id", "") or recording.get(
+            "id", ""
         )
         title = recording.get("title") or recording.get("name") or ""
         created = recording.get("created_at", "")[:19]

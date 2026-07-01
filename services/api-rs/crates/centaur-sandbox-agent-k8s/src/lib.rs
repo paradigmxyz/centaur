@@ -42,10 +42,8 @@ const MANAGED_BY_VALUE: &str = "api-rs";
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
 const IRON_CONTROL_PRINCIPAL_ANNOTATION: &str = "centaur.ai/iron-control-principal";
-// RFC 3339 instant stamped when the sandbox is paused for idleness and
-// cleared on resume. The reaper uses it to stop sandboxes whose pause
-// outlived the idle TTL, surviving api-rs restarts (the pause timer is
-// otherwise in-memory only).
+// RFC 3339 instant stamped when the sandbox is paused for idleness and cleared
+// on resume. This keeps suspended status observable across api-rs restarts.
 const PAUSED_AT_ANNOTATION: &str = "centaur.ai/paused-at";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -451,6 +449,15 @@ impl SandboxBackend for AgentSandboxBackend {
         self.assign_proxy_principal(id, principal_id).await
     }
 
+    async fn ensure_iron_control_proxy_resources(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<()> {
+        self.ensure_proxy_resources_for_principal(id, principal_id)
+            .await
+    }
+
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
         self.patch_sandbox_merge(id, sandbox_pause_patch(jiff::Timestamp::now()))
             .await
@@ -460,8 +467,13 @@ impl SandboxBackend for AgentSandboxBackend {
         // Resume only has the sandbox id, not the spec, so rebind the proxy to
         // the principal recorded at create rather than re-resolving from spec.
         let resolved_iron_proxy = self.resolve_iron_proxy_for_resume(id).await?;
-        self.create_iron_proxy_resources(id, resolved_iron_proxy.as_ref())
-            .await?;
+        if let Err(err) = self
+            .create_iron_proxy_resources(id, resolved_iron_proxy.as_ref())
+            .await
+        {
+            let _ = self.delete_iron_proxy_resources(id).await;
+            return Err(err);
+        }
         // The proxy resources were recreated, so re-bind them to the sandbox
         // for cascade deletion.
         if let Some(sandbox) = self.get_sandbox(id).await?
@@ -592,8 +604,18 @@ fn build_agent_sandbox(
         .iter()
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
-    if config.tools.is_some() {
-        for (name, value) in tools::agent_env(config.tools.as_ref()) {
+    let repo_cache_tools = config
+        .tools
+        .as_ref()
+        .filter(|_| spec.capabilities.repo_cache_enabled);
+    let baked_base_tools = config.tools.is_some() && !spec.capabilities.repo_cache_enabled;
+
+    if repo_cache_tools.is_some() {
+        for (name, value) in tools::agent_env(repo_cache_tools) {
+            upsert_env(&mut agent_env, &name, value);
+        }
+    } else if baked_base_tools {
+        for (name, value) in tools::baked_base_agent_env() {
             upsert_env(&mut agent_env, &name, value);
         }
     }
@@ -625,9 +647,9 @@ fn build_agent_sandbox(
     // Tool sources are bootstrapped into an emptyDir by an init container and
     // mounted into the agent at the same path `TOOL_DIRS` points at. The mount is
     // writable so `centaur-tools refresh` can fetch and republish the tree.
-    if config.tools.is_some() {
-        volume_mounts.extend(tools::agent_volume_mounts_json(config.tools.as_ref()));
-        volumes.extend(tools::volumes_json(config.tools.as_ref()));
+    if repo_cache_tools.is_some() {
+        volume_mounts.extend(tools::agent_volume_mounts_json(repo_cache_tools));
+        volumes.extend(tools::volumes_json(repo_cache_tools));
     }
     insert_optional(
         &mut container,
@@ -636,7 +658,7 @@ fn build_agent_sandbox(
     );
 
     // tools-bootstrap publishes the tools repo into /app/tools.
-    if let Some(tools) = &config.tools {
+    if let Some(tools) = repo_cache_tools {
         // The sandbox NetworkPolicy only allows egress to the per-sandbox proxy
         // (plus api-rs and DNS), so when iron-proxy is on the clone must ride it.
         // `apply_proxy_env` ran before this builder, so the resolved proxy URL is
@@ -663,7 +685,7 @@ fn build_agent_sandbox(
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
     });
-    if config.tools.is_some() {
+    if repo_cache_tools.is_some() {
         pod_spec["securityContext"] = tools::pod_security_context_json();
     }
     insert_optional(
@@ -835,7 +857,7 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{ResourceLimits, SandboxSpec};
+    use centaur_sandbox_core::{ResourceLimits, SandboxCapabilities, SandboxSpec};
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
 
     use super::*;
@@ -929,6 +951,47 @@ mod tests {
                 .iter()
                 .any(|mount| mount.name == "firewall-ca")
         );
+    }
+
+    #[test]
+    fn disabled_repo_cache_uses_baked_base_tools_without_bootstrap() {
+        let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
+            repo_cache_enabled: false,
+            observability_enabled: true,
+        });
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "api:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        let config = AgentSandboxConfig::new("centaur").tools(tools);
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+        assert!(pod_spec.init_containers.as_ref().is_none_or(Vec::is_empty));
+        let tool_dirs = pod_spec.containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|env| env.name == "TOOL_DIRS")
+            .and_then(|env| env.value.as_deref());
+        assert_eq!(tool_dirs, Some("/opt/centaur/tools"));
+        assert!(
+            pod_spec.containers[0]
+                .volume_mounts
+                .as_ref()
+                .is_none_or(|mounts| {
+                    !mounts.iter().any(|mount| {
+                        mount.name == "tools-root"
+                            || mount.name == "tools-repo-cache"
+                            || mount.mount_path == "/app/tools"
+                            || mount.mount_path == "/var/lib/centaur/repos"
+                    })
+                })
+        );
+        assert!(pod_spec.volumes.as_ref().is_none_or(|volumes| {
+            !volumes
+                .iter()
+                .any(|volume| volume.name == "tools-root" || volume.name == "tools-repo-cache")
+        }));
     }
 
     #[test]

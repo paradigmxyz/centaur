@@ -76,13 +76,11 @@ Legacy sandboxes often called tools through HTTP routes on the API service. In
 api-rs-managed sandboxes, prefer the local tool shim path when a dedicated tool
 server URL is not present.
 
-The expected `call` helper behavior is:
+The expected direct CLI behavior is:
 
-- if `CENTAUR_TOOLS_URL` is set, call the tool server;
-- otherwise, if `centaur-tools` is available, use local shims for:
-  - `call tools`
-  - `call discover <tool>`
-  - `call <tool> <method> [json]`
+- list installed tools with `centaur-tools list`;
+- discover one tool with `<tool> --help`;
+- invoke tools through their direct CLI, such as `<tool> ...`;
 - do not fall back to deprecated `/tools/...` HTTP routes on `CENTAUR_API_URL`.
 
 From inside a sandbox, validate:
@@ -90,9 +88,10 @@ From inside a sandbox, validate:
 ```bash
 command -v centaur-tools
 centaur-tools list
-call tools
-call discover <tool-name>
-call <tool-name> <method-name> '{"example":"payload"}'
+centaur-tools which <tool-name>
+<tool-name> --help
+# Run one safe command for that tool, for example: <tool-name> ...
+centaur-tools call <tool-name> <method-name> '{"example":"payload"}'
 ```
 
 ## 4. Make overlay tools installable as shims
@@ -196,9 +195,10 @@ kubectl -n centaur exec <sandbox-pod> -- sh -lc '
   set -e
   command -v centaur-tools
   centaur-tools list | head
-  call tools | head
-  call discover <tool-name> >/tmp/tool-discover.json
-  call <tool-name> <method-name> '\''{"example":"payload"}'\''
+  centaur-tools which <tool-name>
+  <tool-name> --help
+  # Run one safe command for that tool, for example: <tool-name> ...
+  centaur-tools call <tool-name> <method-name> '\''{"example":"payload"}'\''
 '
 ```
 
@@ -216,9 +216,8 @@ the secret manager token path, the Kubernetes Secret, or the console grant.
 
 ### `404` from `/tools/...`
 
-The sandbox is using the deprecated API tool route. Update the `call` helper or
-the sandbox image so local `centaur-tools` shims are used when
-`CENTAUR_TOOLS_URL` is unset.
+The sandbox is using the deprecated API tool route. Update the tool invocation
+path or the sandbox image so local direct CLI shims are used.
 
 ### Tool appears in the overlay but not in `centaur-tools list`
 

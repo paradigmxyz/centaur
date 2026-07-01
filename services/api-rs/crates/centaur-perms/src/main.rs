@@ -1,5 +1,5 @@
-//! `centaur-perms` — manage iron-control permissions for Centaur: which Slack
-//! principals (users / channels) and roles hold which tool roles and secrets.
+//! `centaur-perms` — manage iron-control permissions for Centaur: which chat
+//! principals (Slack, Discord, Teams) and roles hold which tool roles and secrets.
 //!
 //! Commands are resource-first: `centaur-perms <noun> <verb>`, where the noun is
 //! `principals`, `roles`, or `secrets`. The CLI reuses `centaur-iron-control`'s
@@ -227,8 +227,8 @@ struct FilterArgs {
 
 #[derive(Args, Debug)]
 struct PrincipalSelector {
-    /// Slack thread key (`slack:T…:C…[:ts]`, derived), a principal `foreign_id`
-    /// (e.g. `slack-channel-t1-c9`), or an OID (`prn_…`).
+    /// Slack/Teams/Discord thread key (derived), a principal `foreign_id`
+    /// (e.g. `slack-channel-t1-c9`), or an OID (`prn_...`).
     principal: String,
 
     /// Acting Slack user id, used only to key a DM principal from a thread key.
@@ -238,7 +238,7 @@ struct PrincipalSelector {
 
 #[derive(Args, Debug)]
 struct PrincipalGrantArgs {
-    /// Slack thread key (derived) or raw principal `foreign_id`.
+    /// Slack/Teams/Discord thread key (derived) or raw principal `foreign_id`.
     principal: String,
 
     /// Acting Slack user id, used only to key a DM principal from a thread key.

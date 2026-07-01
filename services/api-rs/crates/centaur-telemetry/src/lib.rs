@@ -1,15 +1,31 @@
 //! Shared telemetry setup for the Rust Centaur control plane.
 
 use std::{
+    collections::HashSet,
     env, fmt as std_fmt,
+    io::{Read, Write},
+    net::TcpStream,
     sync::{LazyLock, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
+use opentelemetry::{
+    Context, KeyValue,
+    trace::{
+        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
+        TracerProvider as _,
+    },
+};
+use opentelemetry_proto::tonic::{
+    collector::trace::v1::ExportTraceServiceRequest,
+    common::v1::{AnyValue, InstrumentationScope, KeyValue as ProtoKeyValue, any_value},
+    resource::v1::Resource as ProtoResource,
+    trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan, span},
+};
 use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+use prost::Message as _;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{Event, Subscriber};
@@ -64,6 +80,41 @@ pub const WORKFLOW_QUEUE_TASKS_BY_WORKFLOW: &str = "workflow_queue_tasks_by_work
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_SECONDS: &str = "workflow_queue_oldest_task_age_seconds";
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS: &str =
     "workflow_queue_oldest_task_age_by_workflow_seconds";
+pub const SLACK_ARCHIVE_IMPORT_RUNS_TOTAL: &str = "slack_archive_import_runs_total";
+pub const SLACK_ARCHIVE_IMPORT_DURATION_SECONDS: &str = "slack_archive_import_duration_seconds";
+pub const SLACK_ARCHIVE_IMPORT_BYTES_TOTAL: &str = "slack_archive_import_bytes_total";
+pub const SLACK_ARCHIVE_IMPORT_CHANNELS_TOTAL: &str = "slack_archive_import_channels_total";
+pub const SLACK_ARCHIVE_IMPORT_USERS_TOTAL: &str = "slack_archive_import_users_total";
+pub const SLACK_ARCHIVE_IMPORT_MESSAGES_TOTAL: &str = "slack_archive_import_messages_total";
+pub const SLACK_ARCHIVE_IMPORT_MESSAGE_FILES_TOTAL: &str =
+    "slack_archive_import_message_files_total";
+pub const SLACK_ARCHIVE_IMPORT_ATTACHMENTS_TOTAL: &str = "slack_archive_import_attachments_total";
+pub const SLACK_ARCHIVE_IMPORT_BATCH_DURATION_SECONDS: &str =
+    "slack_archive_import_batch_duration_seconds";
+pub const SLACK_ARCHIVE_IMPORT_BATCH_SIZE: &str = "slack_archive_import_batch_size";
+pub const SLACK_ARCHIVE_IMPORT_FAILURES_TOTAL: &str = "slack_archive_import_failures_total";
+pub const SLACK_ARCHIVE_IMPORT_SKIPPED_ITEMS_TOTAL: &str =
+    "slack_archive_import_skipped_items_total";
+pub const SLACK_ARCHIVE_IMPORT_BATCH_FAILURES_TOTAL: &str =
+    "slack_archive_import_batch_failures_total";
+pub const SLACK_ARCHIVE_IMPORT_LAST_FAILURE_TIMESTAMP_SECONDS: &str =
+    "slack_archive_import_last_failure_timestamp_seconds";
+pub const SLACK_RETENTION_RUNS_TOTAL: &str = "slack_retention_runs_total";
+pub const SLACK_RETENTION_RUN_DURATION_SECONDS: &str = "slack_retention_run_duration_seconds";
+pub const SLACK_RETENTION_MESSAGES_PROCESSED_TOTAL: &str =
+    "slack_retention_messages_processed_total";
+pub const SLACK_RETENTION_BACKFILL_JOBS_TOTAL: &str = "slack_retention_backfill_jobs_total";
+pub const SLACK_RETENTION_FAILURES_TOTAL: &str = "slack_retention_failures_total";
+pub const SLACK_RETENTION_API_REQUESTS_TOTAL: &str = "slack_retention_api_requests_total";
+pub const SLACK_RETENTION_API_RATE_LIMITED_TOTAL: &str = "slack_retention_api_rate_limited_total";
+pub const SLACK_RETENTION_BACKFILL_JOB_FAILURES_TOTAL: &str =
+    "slack_retention_backfill_job_failures_total";
+pub const SLACK_RETENTION_BACKFILL_TERMINAL_SKIPS_TOTAL: &str =
+    "slack_retention_backfill_terminal_skips_total";
+pub const SLACK_RETENTION_CHANNEL_FAILURES_TOTAL: &str = "slack_retention_channel_failures_total";
+pub const SLACK_RETENTION_LAST_FAILURE_TIMESTAMP_SECONDS: &str =
+    "slack_retention_last_failure_timestamp_seconds";
+pub const SLACK_RETENTION_WATERMARK_LAG_SECONDS: &str = "slack_retention_watermark_lag_seconds";
 
 const HTTP_REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
@@ -79,9 +130,18 @@ const SANDBOX_STARTUP_DURATION_BUCKETS: &[f64] =
 const COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS: &[f64] = &[
     100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 25_000.0, 50_000.0, 100_000.0, 250_000.0, 500_000.0,
 ];
+const SLACK_ARCHIVE_IMPORT_DURATION_BUCKETS: &[f64] = &[
+    1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1_200.0, 3_600.0,
+];
+const SLACK_ARCHIVE_IMPORT_BATCH_SIZE_BUCKETS: &[f64] =
+    &[1.0, 10.0, 100.0, 500.0, 1_000.0, 5_000.0, 10_000.0];
+const SLACK_RETENTION_DURATION_BUCKETS: &[f64] =
+    &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1_200.0];
 
 static PROMETHEUS_HANDLE: LazyLock<Mutex<Option<PrometheusHandle>>> =
     LazyLock::new(|| Mutex::new(None));
+static EXPORTED_THREAD_ROOT_SPANS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TelemetryConfig {
@@ -209,6 +269,22 @@ pub fn prometheus_handle() -> Result<PrometheusHandle, TelemetryError> {
         .set_buckets_for_metric(
             Matcher::Full(COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS.to_owned()),
             COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full(SLACK_ARCHIVE_IMPORT_DURATION_SECONDS.to_owned()),
+            SLACK_ARCHIVE_IMPORT_DURATION_BUCKETS,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full(SLACK_ARCHIVE_IMPORT_BATCH_DURATION_SECONDS.to_owned()),
+            SLACK_ARCHIVE_IMPORT_DURATION_BUCKETS,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full(SLACK_ARCHIVE_IMPORT_BATCH_SIZE.to_owned()),
+            SLACK_ARCHIVE_IMPORT_BATCH_SIZE_BUCKETS,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full(SLACK_RETENTION_RUN_DURATION_SECONDS.to_owned()),
+            SLACK_RETENTION_DURATION_BUCKETS,
         )?
         .install_recorder()?;
     describe_metrics();
@@ -416,6 +492,385 @@ pub fn traceparent_for_span(span: &tracing::Span) -> Option<String> {
     ))
 }
 
+/// Assign a remote parent trace to a not-yet-entered tracing span.
+///
+/// `trace_id` may be a UUID string or 32-character W3C trace id. The parent
+/// span id is a deterministic thread-root span id; callers should export that
+/// root span so trace viewers have a parentless node to render.
+pub fn set_span_parent_trace(span: &tracing::Span, trace_id: &str, parent_span_id: &str) -> bool {
+    let Some(parent_context) = remote_parent_context(trace_id, parent_span_id) else {
+        return false;
+    };
+    span.set_parent(parent_context).is_ok()
+}
+
+pub async fn export_thread_trace_root_span(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+) -> bool {
+    if TraceExporter::from_env() != TraceExporter::Otlp {
+        return false;
+    }
+
+    let export_key = format!("{trace_id}:{root_span_id}");
+    {
+        let mut exported = EXPORTED_THREAD_ROOT_SPANS
+            .lock()
+            .expect("thread root span export lock poisoned");
+        if !exported.insert(export_key.clone()) {
+            return true;
+        }
+    }
+
+    if let Err(error) =
+        export_thread_trace_root_span_inner(trace_id, root_span_id, thread_key).await
+    {
+        EXPORTED_THREAD_ROOT_SPANS
+            .lock()
+            .expect("thread root span export lock poisoned")
+            .remove(&export_key);
+        tracing::warn!(
+            %error,
+            trace_id,
+            root_span_id,
+            thread_key,
+            "failed to export thread trace root span"
+        );
+        return false;
+    }
+
+    true
+}
+
+async fn export_thread_trace_root_span_inner(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+) -> Result<(), String> {
+    let trace_id = trace_id.to_owned();
+    let root_span_id = root_span_id.to_owned();
+    let thread_key = thread_key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        export_thread_trace_root_span_blocking(&trace_id, &root_span_id, &thread_key)
+    })
+    .await
+    .map_err(|error| format!("thread root span export task failed: {error}"))?
+}
+
+fn export_thread_trace_root_span_blocking(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+) -> Result<(), String> {
+    let endpoint = otlp_traces_endpoint()
+        .ok_or_else(|| "OTLP traces endpoint is not configured".to_owned())?;
+    let request =
+        thread_trace_root_export_request(trace_id, root_span_id, thread_key, SystemTime::now())?;
+    let mut headers = otlp_export_headers();
+    headers.push(("x-trace-id".to_owned(), trace_id.to_owned()));
+    headers.push(("x-centaur-thread-key".to_owned(), thread_key.to_owned()));
+    post_otlp_trace_payload(&endpoint, &headers, &request.encode_to_vec())
+}
+
+fn thread_trace_root_export_request(
+    trace_id: &str,
+    root_span_id: &str,
+    thread_key: &str,
+    start_time: SystemTime,
+) -> Result<ExportTraceServiceRequest, String> {
+    let config = TelemetryConfig::from_env();
+    let trace_id = trace_id_bytes(trace_id)?;
+    let span_id = span_id_bytes(root_span_id)?;
+    let end_time = start_time
+        .checked_add(Duration::from_nanos(1))
+        .unwrap_or(start_time);
+    let start_time_unix_nano = unix_time_nanos(start_time);
+    let end_time_unix_nano = unix_time_nanos(end_time).max(start_time_unix_nano + 1);
+
+    Ok(ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(ProtoResource {
+                attributes: vec![
+                    proto_kv_string("service.name", &config.service_name),
+                    proto_kv_string(OTEL_SERVICE_NAMESPACE, SERVICE_NAMESPACE),
+                    proto_kv_string(OTEL_DEPLOYMENT_ENVIRONMENT_NAME, &config.environment),
+                    proto_kv_string("deployment.environment", &config.environment),
+                ],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "centaur.api-rs".to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    ..Default::default()
+                }),
+                spans: vec![ProtoSpan {
+                    trace_id,
+                    span_id,
+                    parent_span_id: Vec::new(),
+                    name: "centaur.api_rs.thread".to_owned(),
+                    kind: span::SpanKind::Internal as i32,
+                    start_time_unix_nano,
+                    end_time_unix_nano,
+                    attributes: vec![
+                        proto_kv_string(FIELD_COMPONENT, "session_runtime"),
+                        proto_kv_string(FIELD_EVENT, "thread_trace_root"),
+                        proto_kv_string("centaur.thread_key", thread_key),
+                        proto_kv_string(FIELD_THREAD_KEY, thread_key),
+                    ],
+                    flags: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    })
+}
+
+fn post_otlp_trace_payload(
+    endpoint: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(), String> {
+    let target = OtlpHttpTarget::parse(endpoint)?;
+    let mut upstream = TcpStream::connect((target.host.as_str(), target.port))
+        .map_err(|error| format!("failed to connect to OTLP endpoint: {error}"))?;
+    upstream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("failed to set OTLP read timeout: {error}"))?;
+    upstream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("failed to set OTLP write timeout: {error}"))?;
+    write!(
+        upstream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n",
+        target.path,
+        target.host_header,
+        body.len()
+    )
+    .map_err(|error| format!("failed to write OTLP request headers: {error}"))?;
+    for (name, value) in headers {
+        if matches!(
+            name.as_str(),
+            "authorization" | "x-trace-id" | "x-centaur-thread-key"
+        ) {
+            write!(upstream, "{name}: {value}\r\n")
+                .map_err(|error| format!("failed to write OTLP header {name}: {error}"))?;
+        }
+    }
+    upstream
+        .write_all(b"\r\n")
+        .and_then(|()| upstream.write_all(body))
+        .and_then(|()| upstream.flush())
+        .map_err(|error| format!("failed to write OTLP request body: {error}"))?;
+
+    let mut response = Vec::new();
+    upstream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("failed to read OTLP response: {error}"))?;
+    let status = http_status_code(&response).unwrap_or(0);
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "OTLP trace export failed with HTTP status {status}"
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct OtlpHttpTarget {
+    host: String,
+    port: u16,
+    host_header: String,
+    path: String,
+}
+
+impl OtlpHttpTarget {
+    fn parse(endpoint: &str) -> Result<Self, String> {
+        let endpoint = endpoint.trim();
+        let rest = endpoint.strip_prefix("http://").ok_or_else(|| {
+            "only http OTLP endpoints are supported for root span export".to_owned()
+        })?;
+        let (host_port, path) = match rest.split_once('/') {
+            Some((host_port, path)) => (host_port, format!("/{path}")),
+            None => (rest, "/v1/traces".to_owned()),
+        };
+        if host_port.is_empty() {
+            return Err("OTLP endpoint host is empty".to_owned());
+        }
+        let (host, port) = match host_port.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|error| format!("invalid OTLP endpoint port: {error}"))?;
+                (host.to_owned(), port)
+            }
+            None => (host_port.to_owned(), 80),
+        };
+        if host.is_empty() {
+            return Err("OTLP endpoint host is empty".to_owned());
+        }
+        Ok(Self {
+            host,
+            port,
+            host_header: host_port.to_owned(),
+            path,
+        })
+    }
+}
+
+fn http_status_code(response: &[u8]) -> Option<u16> {
+    let line = String::from_utf8_lossy(response).lines().next()?.to_owned();
+    let mut parts = line.split_whitespace();
+    let _version = parts.next()?;
+    parts.next()?.parse().ok()
+}
+
+fn otlp_traces_endpoint() -> Option<String> {
+    first_nonempty_env(&["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]).or_else(|| {
+        first_nonempty_env(&["OTEL_EXPORTER_OTLP_ENDPOINT"]).map(|endpoint| {
+            if endpoint.ends_with("/v1/traces") {
+                endpoint
+            } else {
+                format!("{}/v1/traces", endpoint.trim_end_matches('/'))
+            }
+        })
+    })
+}
+
+fn otlp_export_headers() -> Vec<(String, String)> {
+    first_nonempty_env(&[
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+    ])
+    .map(|raw| parse_otlp_headers(&raw))
+    .unwrap_or_default()
+}
+
+fn parse_otlp_headers(raw: &str) -> Vec<(String, String)> {
+    raw.split(',')
+        .filter_map(|part| {
+            let (name, value) = part.split_once('=')?;
+            let name = name.trim().to_ascii_lowercase();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name, percent_decode(value.trim())))
+        })
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            out.push(high << 4 | low);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn proto_kv_string(key: &str, value: &str) -> ProtoKeyValue {
+    ProtoKeyValue {
+        key: key.to_owned(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.to_owned())),
+        }),
+        ..Default::default()
+    }
+}
+
+fn trace_id_bytes(trace_id: &str) -> Result<Vec<u8>, String> {
+    let trace_hex =
+        normalize_trace_id_hex(trace_id).ok_or_else(|| "invalid thread trace id".to_owned())?;
+    let bytes = hex_to_bytes(&trace_hex)?;
+    if bytes.len() != 16 || bytes.iter().all(|byte| *byte == 0) {
+        return Err("invalid zero thread trace id".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn span_id_bytes(span_id: &str) -> Result<Vec<u8>, String> {
+    let span_id = span_id.trim();
+    if span_id.len() != 16 || !span_id.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("invalid thread root span id".to_owned());
+    }
+    let bytes = hex_to_bytes(span_id)?;
+    if bytes.len() != 8 || bytes.iter().all(|byte| *byte == 0) {
+        return Err("invalid zero thread root span id".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
+    if !hex.len().is_multiple_of(2) {
+        return Err("hex value must have even length".to_owned());
+    }
+    let bytes = hex.as_bytes();
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for index in (0..bytes.len()).step_by(2) {
+        let high = hex_value(bytes[index]).ok_or_else(|| "invalid hex digit".to_owned())?;
+        let low = hex_value(bytes[index + 1]).ok_or_else(|| "invalid hex digit".to_owned())?;
+        out.push(high << 4 | low);
+    }
+    Ok(out)
+}
+
+fn unix_time_nanos(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn remote_parent_context(trace_id: &str, parent_span_id: &str) -> Option<Context> {
+    let trace_id = normalize_trace_id_hex(trace_id)?;
+    let trace_id = TraceId::from_hex(&trace_id).ok()?;
+    let parent_span_id = SpanId::from_hex(parent_span_id).ok()?;
+    if trace_id == TraceId::INVALID || parent_span_id == SpanId::INVALID {
+        return None;
+    }
+    let span_context = SpanContext::new(
+        trace_id,
+        parent_span_id,
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    );
+    Some(Context::new().with_remote_span_context(span_context))
+}
+
+fn normalize_trace_id_hex(trace_id: &str) -> Option<String> {
+    let hex: String = trace_id.chars().filter(|ch| *ch != '-').collect();
+    if hex.len() == 32 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
 pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     let _metrics = prometheus_handle()?;
     let filter = EnvFilter::try_new(&config.rust_log).unwrap_or_else(|_| EnvFilter::new("info"));
@@ -567,6 +1022,116 @@ fn describe_metrics() {
         metrics::Unit::Seconds,
         "Oldest non-terminal workflow task age in seconds by queue, state, and workflow name."
     );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_RUNS_TOTAL,
+        "Slack archive import lifecycle events by status and reason."
+    );
+    metrics::describe_histogram!(
+        SLACK_ARCHIVE_IMPORT_DURATION_SECONDS,
+        metrics::Unit::Seconds,
+        "Slack archive import run duration in seconds by status."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_BYTES_TOTAL,
+        "Slack archive import zip bytes processed."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_CHANNELS_TOTAL,
+        "Slack archive import channel rows by result."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_USERS_TOTAL,
+        "Slack archive import user rows by result."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_MESSAGES_TOTAL,
+        "Slack archive import message rows by result."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_MESSAGE_FILES_TOTAL,
+        "Slack archive import message files by result."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_ATTACHMENTS_TOTAL,
+        "Slack archive import attachment rows by result."
+    );
+    metrics::describe_histogram!(
+        SLACK_ARCHIVE_IMPORT_BATCH_DURATION_SECONDS,
+        metrics::Unit::Seconds,
+        "Slack archive import batch write duration in seconds by entity."
+    );
+    metrics::describe_histogram!(
+        SLACK_ARCHIVE_IMPORT_BATCH_SIZE,
+        "Slack archive import batch size by entity."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_FAILURES_TOTAL,
+        "Slack archive import failures by stage and reason."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_SKIPPED_ITEMS_TOTAL,
+        "Slack archive import skipped items by type and reason."
+    );
+    metrics::describe_counter!(
+        SLACK_ARCHIVE_IMPORT_BATCH_FAILURES_TOTAL,
+        "Slack archive import batch failures by entity and reason."
+    );
+    metrics::describe_gauge!(
+        SLACK_ARCHIVE_IMPORT_LAST_FAILURE_TIMESTAMP_SECONDS,
+        metrics::Unit::Seconds,
+        "Unix timestamp of the most recent Slack archive import failure."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_RUNS_TOTAL,
+        "Slack retention workflow lifecycle events by workflow, status, mode, and reason."
+    );
+    metrics::describe_histogram!(
+        SLACK_RETENTION_RUN_DURATION_SECONDS,
+        metrics::Unit::Seconds,
+        "Slack retention workflow run duration in seconds."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_MESSAGES_PROCESSED_TOTAL,
+        "Slack retention messages processed by workflow, mode, and result."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_BACKFILL_JOBS_TOTAL,
+        "Slack retention backfill job transitions by job type, result, and reason."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_FAILURES_TOTAL,
+        "Slack retention failures by workflow, operation, and reason."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_API_REQUESTS_TOTAL,
+        "Slack API requests made by retention workflows by operation, result, and reason."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_API_RATE_LIMITED_TOTAL,
+        "Slack API rate-limit events observed by retention workflows by operation."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_BACKFILL_JOB_FAILURES_TOTAL,
+        "Slack retention backfill job failures by job type and reason."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_BACKFILL_TERMINAL_SKIPS_TOTAL,
+        "Slack retention backfill jobs terminally skipped by job type and reason."
+    );
+    metrics::describe_counter!(
+        SLACK_RETENTION_CHANNEL_FAILURES_TOTAL,
+        "Slack retention channel failures by workflow and reason."
+    );
+    metrics::describe_gauge!(
+        SLACK_RETENTION_LAST_FAILURE_TIMESTAMP_SECONDS,
+        metrics::Unit::Seconds,
+        "Unix timestamp of the most recent Slack retention failure by workflow."
+    );
+    metrics::describe_gauge!(
+        SLACK_RETENTION_WATERMARK_LAG_SECONDS,
+        metrics::Unit::Seconds,
+        "Slack retention watermark lag in seconds by mode."
+    );
 }
 
 fn workflow_metric_labels(labels: &[(String, String)]) -> Vec<metrics::Label> {
@@ -579,26 +1144,25 @@ fn workflow_metric_labels(labels: &[(String, String)]) -> Vec<metrics::Label> {
 fn build_otlp_tracer_provider(
     config: &TelemetryConfig,
 ) -> Result<SdkTracerProvider, TelemetryError> {
-    let resource = Resource::builder()
-        .with_service_name(config.service_name.clone())
-        .with_attribute(opentelemetry::KeyValue::new(
-            OTEL_SERVICE_NAMESPACE,
-            SERVICE_NAMESPACE,
-        ))
-        .with_attribute(opentelemetry::KeyValue::new(
-            OTEL_DEPLOYMENT_ENVIRONMENT_NAME,
-            config.environment.clone(),
-        ))
-        .build();
-
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .build()?;
 
     Ok(SdkTracerProvider::builder()
-        .with_resource(resource)
+        .with_resource(otlp_resource(config))
         .with_batch_exporter(exporter)
         .build())
+}
+
+fn otlp_resource(config: &TelemetryConfig) -> Resource {
+    Resource::builder()
+        .with_service_name(config.service_name.clone())
+        .with_attribute(KeyValue::new(OTEL_SERVICE_NAMESPACE, SERVICE_NAMESPACE))
+        .with_attribute(KeyValue::new(
+            OTEL_DEPLOYMENT_ENVIRONMENT_NAME,
+            config.environment.clone(),
+        ))
+        .build()
 }
 
 #[derive(Debug, Clone)]
@@ -726,6 +1290,39 @@ mod tests {
         assert_eq!(
             TraceExporter::from_values("none", true),
             TraceExporter::None
+        );
+    }
+
+    #[test]
+    fn thread_trace_root_export_request_uses_parentless_thread_root() {
+        let request = thread_trace_root_export_request(
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "1111111111111111",
+            "slack:T:C:1782217699.671539",
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("thread root span");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(
+            span.trace_id,
+            vec![
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ]
+        );
+        assert_eq!(
+            span.span_id,
+            vec![0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
+        );
+        assert!(span.parent_span_id.is_empty());
+        assert_eq!(span.name, "centaur.api_rs.thread");
+        assert_eq!(span.start_time_unix_nano, 0);
+        assert!(span.end_time_unix_nano > span.start_time_unix_nano);
+        assert!(
+            span.attributes
+                .iter()
+                .any(|attribute| attribute.key == "centaur.thread_key")
         );
     }
 

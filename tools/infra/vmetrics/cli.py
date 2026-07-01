@@ -53,10 +53,11 @@ def series(
     match: str = typer.Argument(..., help='Series selector, e.g. {__name__=~"agent_.*"}'),
     start: str = typer.Option(None, "--start", "-s", help="Range start timestamp"),
     end: str = typer.Option(None, "--end", "-e", help="Range end timestamp"),
+    limit: int | None = typer.Option(None, "--limit", "-n", help="Max returned series"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """Find matching time series."""
-    result = get_client().series(match=match, start=start, end=end)
+    result = get_client().series(match=match, start=start, end=end, limit=limit)
     if json_output:
         print(json.dumps(result, indent=2))
         return
@@ -93,11 +94,10 @@ def metric_names(
 
 @app.command()
 def health():
-    """Check VictoriaMetrics readiness."""
-    if get_client().ready():
-        console.print("[green]VictoriaMetrics is ready[/]")
-    else:
-        console.print("[red]VictoriaMetrics is not ready[/]")
+    """Assert VictoriaMetrics readiness and basic query functionality."""
+    payload = get_client().health()
+    print(json.dumps(payload, indent=2, default=str))
+    if not payload.get("ok"):
         raise typer.Exit(1)
 
 

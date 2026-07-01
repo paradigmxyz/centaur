@@ -25,5 +25,7 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-hosts = ["www.opentable.com"]
-secrets = []
+hosts = ["www.opentable.com", "api.browser-use.com", "llm.api.browser-use.com"]
+secrets = [
+    {type = "http", name = "BROWSER_USE_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.browser-use.com", "llm.api.browser-use.com"]},
+]

@@ -79,8 +79,7 @@ class LaminarClient:
     @property
     def base_url(self) -> str:
         url = (
-            self._base_url
-            or os.getenv("LAMINAR_BASE_URL", DEFAULT_BASE_URL)  # noqa: TID251
+            self._base_url or os.getenv("LAMINAR_BASE_URL", DEFAULT_BASE_URL)  # noqa: TID251
         ).rstrip("/")
         if url and not url.startswith(("http://", "https://")):
             url = f"http://{url}"
@@ -89,8 +88,7 @@ class LaminarClient:
     @property
     def external_url(self) -> str:
         return (
-            self._external_url
-            or os.getenv("LAMINAR_EXTERNAL_URL", DEFAULT_EXTERNAL_URL)  # noqa: TID251
+            self._external_url or os.getenv("LAMINAR_EXTERNAL_URL", DEFAULT_EXTERNAL_URL)  # noqa: TID251
         ).rstrip("/")
 
     @property
@@ -100,8 +98,7 @@ class LaminarClient:
     @property
     def project_id(self) -> str:
         return (
-            self._project_id
-            or os.getenv("LAMINAR_PROJECT_ID", DEFAULT_PROJECT_ID)  # noqa: TID251
+            self._project_id or os.getenv("LAMINAR_PROJECT_ID", DEFAULT_PROJECT_ID)  # noqa: TID251
         ).strip()
 
     @property
@@ -203,7 +200,9 @@ class LaminarClient:
         filters = [f"s.start_time >= now() - INTERVAL {minutes} MINUTE"]
         parameters: dict[str, Any] = {}
         if thread_key:
-            filters.append("JSONExtractString(s.attributes, 'centaur.thread_key') = {thread_key:String}")
+            filters.append(
+                "JSONExtractString(s.attributes, 'centaur.thread_key') = {thread_key:String}"
+            )
             parameters["thread_key"] = thread_key
         if execution_id:
             filters.append(

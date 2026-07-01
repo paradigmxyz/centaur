@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, slackbotv2, linearbot, discordbot, agent, iron-proxy, console]
+        service: [api-rs, slackbotv2, linearbot, discordbot, teamsbot, agent, iron-proxy, console]
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
@@ -68,6 +68,11 @@ jobs:
             image: centaur-discordbot
             context: .
             dockerfile: services/discordbot/Dockerfile
+            target: ""
+          - service: teamsbot
+            image: centaur-teamsbot
+            context: .
+            dockerfile: services/teamsbot/Dockerfile
             target: ""
           - service: agent
             image: centaur-agent
@@ -165,6 +170,7 @@ jobs:
           - image: centaur-iron-proxy
           - image: centaur-console
           - image: centaur-discordbot
+          - image: centaur-teamsbot
 
     steps:
       - name: Download digests

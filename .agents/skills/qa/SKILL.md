@@ -23,7 +23,9 @@ The smoke test passes only when all core workflows work from the running agent s
 - Slack overall message search works.
 - Current thread history works.
 - Company context can connect to the Paradigm database and return indexed documents or a valid empty result.
-- VictoriaLogs and VictoriaMetrics queries work.
+- AI-team critical tools load as packaged CLIs and pass their `health` commands through brokered auth.
+- Focused tool validation uses `<tool> health` as the canonical smoke surface. Do not invent ad hoc probes or substitute raw endpoint/search calls unless a health check fails and you are triaging that failure.
+- VictoriaLogs and VictoriaMetrics are reachable, and VictoriaMetrics proves metric existence without asserting exact metric values.
 
 Treat auth, permission, DNS, schema, and timeout errors as failures. Treat empty search results as warnings only when the tool successfully queried the backing service.
 
@@ -157,6 +159,15 @@ company_context search "centaur" --limit 3 --json
 
 Pass when the tool returns a valid JSON payload with `status: ok`, even if no documents match. Fail on database connection errors, permission errors, missing `COMPANY_CONTEXT_DSN`, or malformed results.
 
+If company context returns `upstream connection failed`, use runtime evidence before suggesting a code fix:
+
+```bash
+vlogs thread_logs --thread-key "${CENTAUR_THREAD_KEY}" --start 2h
+vlogs query '"upstream connection failed" OR "postgres upstream connect failed" OR "failed to fetch secret"' --limit 20 --json
+```
+
+Classify whether the failure is a database proxy upstream issue, missing database selection, secret-resolution failure, or tool schema/client error. Include the failing tool command and thread key in the report.
+
 ### 9. Logs Via VictoriaLogs
 
 ```bash
@@ -165,18 +176,54 @@ vlogs query '*' --limit 3 --json
 vlogs query "centaur.thread_key:\"${CENTAUR_THREAD_KEY}\"" --limit 10 --json
 ```
 
-Pass when VictoriaLogs is reachable and returns JSON log entries or a valid empty list for the thread-specific query. Fail on DNS, HTTP, or LogsQL errors.
+Pass when VictoriaLogs is reachable and returns JSON log entries or a valid empty list for the current-thread query. Fail on DNS, HTTP, or LogsQL errors. Keep this check scoped to the current deployment state visible from the current thread.
+
+Do not run broad error searches such as `level:error`, `vlogs errors`, or `error OR ERROR` as part of the default QA pass/fail decision. The goal of this step is to prove the vlogs connection works, not to audit whether unrelated services currently have errors. Only query error logs when a preceding check failed and you need runtime evidence to classify that specific failure.
 
 ### 10. Metrics Via VictoriaMetrics
 
 `vmetrics` may not have a direct CLI, so use the tool bridge:
 
 ```bash
-centaur-tools call vmetrics query '{"expr":"up"}'
-centaur-tools call vmetrics series '{"match":"{__name__=~\".*\"}"}'
+centaur-tools call vmetrics query '{"expr":"count({__name__=~\".+\"})"}'
+centaur-tools call vmetrics series '{"match":"{__name__=~\".+\"}","limit":5}'
 ```
 
-Pass when the responses are valid VictoriaMetrics API results. Fail on DNS, HTTP, or malformed response errors.
+Pass when VictoriaMetrics is reachable and the responses prove that at least one metric series exists. Do not assert exact sample values, counter values, gauge values, label values, or a specific `up` value; those are environment-dependent. Fail on DNS, HTTP, malformed response errors, or a valid response that proves no metric names or series exist.
+
+### 11. AI Tool Validation
+
+Run these checks when the user asks for AI-team coverage, deploy readiness, or tool smoke confidence. They validate that key AI-facing tools are packaged correctly, visible in the tool catalog, compatible with brokered auth, and able to reach their authenticated upstreams from the current deployment.
+
+First prove the tools are installed as CLIs and visible to the tool catalog:
+
+```bash
+centaur-tools list
+pitchbook --help
+alphasense --help
+company_context --help
+```
+
+Then exercise each tool's focused health command without requiring local env-only secrets:
+
+```bash
+env -u PITCHBOOK_API_KEY pitchbook health
+alphasense health
+company_context health
+```
+
+Pass only when each health command exits zero and returns valid JSON with `ok: true`. Fail when a CLI import/package error prevents startup, a client crashes because an env var is absent despite brokered auth being expected, an authenticated real endpoint returns `401`/`403`, or company context returns upstream/proxy errors.
+
+If a health command fails, triage the specific failing tool with the smallest safe read-only command that exercises the same path. Examples:
+
+```bash
+pitchbook --help
+alphasense --help
+company_context --help
+vlogs tool_calls --tool-name pitchbook --start 2h
+```
+
+Only run bespoke search or raw endpoint calls after recording the failed health result and only when needed to classify the failure.
 
 ## Extended Checks
 
@@ -188,8 +235,9 @@ Record the target environment, namespace or URL, commit/build if visible, curren
 
 - The target is serving traffic.
 - `centaur-tools list` succeeds from the running session.
-- Recent `vlogs errors --start 1h` or equivalent log query has no new critical errors for the QA run.
+- VictoriaLogs connectivity succeeds with `vlogs health` and a small valid query. Do not fail deployment health on broad recent error volume unless those errors are tied to a failed QA step or to the current QA thread.
 - The user-visible Slack thread receives the final QA report.
+- Use tool CLIs, runtime-owned state, logs, metrics, and the user-visible Slack surface for verification. Do not require direct cluster control-plane access for this skill.
 
 ### Concurrent Agent Turns
 
@@ -265,7 +313,12 @@ responses; Slack does not render them reliably. Use this exact shape:
 *Data + Observability*
 - *Company context:* PASS - list 0, search 0, status ok
 - *VictoriaLogs:* PASS - health ok, sample 3, thread query 0
-- *VictoriaMetrics:* PASS - health ok, up query ok, series ok
+- *VictoriaMetrics:* PASS - reachable, metric existence confirmed, series found
+
+*AI Tools*
+- *PitchBook:* PASS - health ok, brokered auth path reached
+- *AlphaSense:* PASS - health ok, authenticated upstream reached
+- *Company context:* PASS - health ok, database path reached
 
 *Extended*
 - *Requested extended checks:* SKIP - not requested
@@ -288,7 +341,7 @@ Rules for the digest:
   per-check result, and evidence. Do not require Block Kit for normal assistant
   replies.
 
-After the grouped digest, add at most three short bullets:
+After the grouped digest, add at most three short bullets. Use Slack mrkdwn list items with `- ` prefixes:
 
 - `Failures:` highest-signal failed rows and likely owner.
 - `Warnings:` non-blocking warnings such as Slack indexing lag or empty-but-valid
@@ -306,6 +359,10 @@ one Slack message.
 | `slack files --download` rejects URL | URL is not a Slack `url_private` file URL | Read thread history or `search_files` JSON and use `url_private` |
 | Search cannot find just-uploaded token | Slack search indexing lag | Retry up to three total attempts, then warn and run the separate overall message search |
 | `company_context` permission denied | Principal lacks DB-backed reader grant | Report principal/channel and ask owner to grant company context access |
+| `company_context` upstream connection failed | Database proxy upstream, database selection, or secret-resolution failure | Check thread logs and vlogs for upstream connect and secret fetch errors before proposing a code change |
+| Tool CLI import error | Package entrypoint or relative import packaging regression | Run `<tool> health`, `<tool> --help`, package build checks, and report the broken console script |
+| Tool crashes when an API key env var is absent | Client assumes local env auth despite brokered credentials | Re-run `<tool> health` with the env var unset and verify client construction does not raise |
+| AlphaSense `/auth` or `/gql` returns 401/403 | Upstream credential or header injection problem | Compare `/auth` and GraphQL logs; verify bearer/client headers reach the expected upstream path |
 | `vlogs` or `vmetrics` DNS failure | Observability service unavailable from sandbox | Check local stack or cluster service deployment |
 | Expected tools missing | Tool catalog did not load or overlay masked base tools | Report the missing tool names and include `centaur-tools list` output |
 | Concurrent runs hang | Runtime assignment, execution queue, or final delivery issue | Check execution state, vlogs thread trace, and delivery outbox |
@@ -319,6 +376,7 @@ When a flow fails, inspect runtime evidence before redesigning:
 - Missing Slack response: check Slackbot logs, final delivery state, and the Slack thread surface.
 - File failure: check Slack file metadata, `url_private`, downloaded byte size, and upload response.
 - Tool failure: classify credential, DNS, upstream, schema, timeout, or runtime errors separately.
+- Brokered-auth failure: verify whether the tool should work without local env vars and whether the proxy injected the expected headers.
 - Context bug: inspect thread history, requester context, and message ordering.
 - Scheduler bug: inspect scheduler-owned rows and logs for duplicate or catch-up decisions.
 
@@ -326,7 +384,8 @@ When a flow fails, inspect runtime evidence before redesigning:
 
 | Reference | When To Read |
 |-----------|--------------|
-| [references/test-inputs.md](references/test-inputs.md) | When doing broader tool-by-tool QA beyond the smoke test |
+| [../tool-health-smoke/SKILL.md](../tool-health-smoke/SKILL.md) | When doing broad all-tool health smoke coverage |
+| [references/test-inputs.md](references/test-inputs.md) | Only for deeper read-only triage after a tool health check fails |
 
 ## Templates
 

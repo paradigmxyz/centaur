@@ -4,10 +4,31 @@ import json
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="amplitude", help="Amplitude product analytics (Dashboard REST + Taxonomy)")
+
+
+@app.command("health")
+def health():
+    """Assert amplitude connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.events_list()
+        payload = {"ok": True, "tool": "amplitude", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "amplitude", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -165,9 +186,7 @@ def user_activity(
     """Fetch a single user's event stream by Amplitude ID."""
     client = get_client()
     result = _run(
-        lambda: client.user_activity(
-            user=user, limit=limit, offset=offset, direction=direction
-        )
+        lambda: client.user_activity(user=user, limit=limit, offset=offset, direction=direction)
     )
     _dump(result)
 

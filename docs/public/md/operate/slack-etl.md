@@ -6,7 +6,7 @@ description: Sync Slack channel history into Postgres, drain historical backfill
 # Slack ETL
 
 :::warning[Off by default in production]
-Slack ETL is disabled unless the API service has `SLACK_ETL_ENABLED=true`.
+Slack ETL is disabled unless Helm values set `apiRs.etl.slack.enabled=true`.
 Production deployments should enable it deliberately after choosing the Slack
 token, channel scope, exclusion patterns, and data boundary they want agents to
 use.
@@ -58,8 +58,17 @@ events.
 
 ## Enable the schedules
 
-Set `SLACK_ETL_ENABLED=true` on the API service. The other schedules default on
-once Slack ETL is enabled, but can be tuned independently.
+Set `apiRs.etl.slack.enabled=true` in Helm values. The chart renders the
+corresponding API and workflow-host env automatically; do not set
+`SESSION_SANDBOX_PASSTHROUGH_ENV` by hand for these ETLs. The other schedules
+default on once Slack ETL is enabled, but can be tuned independently.
+
+```yaml
+apiRs:
+  etl:
+    slack:
+      enabled: true
+```
 
 | Environment variable | Default | Effect |
 |----------------------|---------|--------|
@@ -74,6 +83,10 @@ once Slack ETL is enabled, but can be tuned independently.
 | `SLACK_ETL_ATTACHMENTS_ENABLED` | `true` | Download Slack message attachment bytes into Postgres. Metadata rows are still written when downloads are disabled. |
 | `SLACK_ETL_ATTACHMENT_MAX_BYTES` | `10485760` | Per-file byte cap for Slack attachment downloads. Oversized files keep metadata with `skipped_too_large` status. |
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | empty | Comma-separated channel-name globs to skip, without needing the leading `#`. |
+| `SLACK_RETENTION_ENABLED` | `true` | Allows the `slack_retention` schedule to run when at least one Slack retention TTL is positive. |
+| `SLACK_RETENTION_INTERVAL_MINUTES` | `60` | How often to prune Slack retention-managed rows. |
+| `SLACK_ETL_RETENTION_DAYS` | `0` | Deletes public Slack ETL messages, derived Slack documents, and terminal ETL run/job rows older than this many days. `0` disables public ETL retention. |
+| `SLACK_DM_RETENTION_DAYS` | `0` | Deletes Slack DM messages, stale empty DM conversations, and terminal DM run/job rows older than this many days. `0` disables DM retention. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `true` | Enables projection from Slack sync rows into company context documents. |
 | `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `14400` | How often to project changed Slack rows into documents. |
 
@@ -112,6 +125,11 @@ The lookback values are read windows, not retention windows. Lowering
 `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS` or `SLACK_SYNC_THREAD_LOOKBACK_DAYS` limits
 future backfill and refresh work, but it does not delete Slack rows or company
 context documents that were already synced.
+
+Retention is handled by the separate `slack_retention` workflow. Public Slack
+ETL and Slack DM data have independent TTLs so deployments can keep DM data for
+a shorter period than channel ETL data. The workflow only runs when at least one
+TTL is positive.
 
 ## Run it manually
 
@@ -235,7 +253,7 @@ setting alerts.
 | Symptom | What to check |
 |---------|---------------|
 | Schedules are missing | Confirm `WORKFLOW_DIRS` includes `/app/workflows` and the API restarted after the workflow files were deployed. |
-| Schedules exist but are disabled | Confirm `SLACK_ETL_ENABLED=true` is present in the API environment. |
+| Schedules exist but are disabled | Confirm Helm values set `apiRs.etl.slack.enabled=true` and the API pod was restarted. |
 | `slack_sync` skips with `no_public_channels` | Confirm the ETL user token can see the expected public channels. |
 | Channels are all skipped | Check `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` for broad globs. |
 | Checkpoints show `missing_scope` or `not_allowed_token_type` | Add the missing Slack OAuth scope or use the expected user-token class. |

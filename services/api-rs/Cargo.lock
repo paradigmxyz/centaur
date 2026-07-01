@@ -838,6 +838,7 @@ dependencies = [
 name = "centaur-iron-control"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "centaur-iron-proxy",
  "reqwest",
  "serde",
@@ -980,6 +981,7 @@ dependencies = [
  "centaur-telemetry",
  "dashmap",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1013,9 +1015,12 @@ dependencies = [
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
+ "prost",
  "serde_json",
  "thiserror",
+ "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

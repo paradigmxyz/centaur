@@ -9,24 +9,28 @@ Centaur routes tool and harness traffic through iron-proxy. The proxy only
 injects a credential when the active principal has a grant for that credential
 and the outbound request matches the credential's request rules.
 
-Use per-user permissions when different Slack users or channels should receive
-different access to the same Centaur installation. This is the normal production
-model for shared workspaces: sandboxes still receive placeholders, while
+Use per-user permissions when different chat users, channels, or conversations
+should receive different access to the same Centaur installation. This is the
+normal production model for shared workspaces: sandboxes still receive placeholders, while
 the Centaur Console decides which real credentials each session can use.
 
 ## How Access Is Resolved
 
-Centaur represents every Slack execution context as a console principal.
+Centaur represents every chat execution context as a console principal.
 Canonical principal ids are:
 
 | Context | Principal foreign id |
 |---------|----------------------|
-| Slack user | `slack-user-<id>` |
-| Slack channel | `slack-channel-<id>` |
+| Slack user | `slack-user-[<team-id-slug>-]<user-id-slug>` |
+| Slack channel | `slack-channel-[<team-id-slug>-]<channel-id-slug>` |
+| Discord channel | `discord-channel-<guild-id>-<channel-id>` |
+| Teams user | `teams-user-<tenant-id-slug>-<user-id-slug>` |
+| Teams conversation | `teams-conversation-<tenant-id-slug>-<conversation-id-slug>` |
 
-Channel grants win when present. If the channel has no matching grants, Centaur
-falls back to the requesting user's grants. DMs and one-person runs normally use
-the user principal directly.
+Channel grants are shared by everyone in that channel. DMs and one-person runs
+normally use the user principal directly. In the Slack rows, brackets mark the
+optional team scope; Slack principal ids include the team id when the Slack thread
+key carries it, such as `slack-channel-t123-c456`.
 
 Roles group secrets together. A principal's effective access is the union of:
 
@@ -141,7 +145,7 @@ cargo run -p centaur-perms -- \
 The UI flow is the same for channel principals. Open **Principals**, choose the
 channel principal, then assign roles or grant secrets from the detail page.
 
-Grant the channel principal when everyone in a Slack channel should share the
+Grant the channel principal when everyone in a chat channel should share the
 same agent permissions:
 
 ```bash

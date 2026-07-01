@@ -8,16 +8,16 @@
  *
  * Flags are stripped from the text before it reaches the agent. The harness
  * applies at session creation — an explicit harness flag on a thread pinned to
- * another harness restarts the thread on the requested one. The model and
- * reasoning effort apply per turn via the blocks-protocol `model` / `reasoning`
- * fields; `--model` accepts either a full model id (claude-sonnet-4-6, gpt-5.2,
- * ...), an amp mode (deep/fast), or a Claude alias (fable/opus/sonnet/haiku)
- * which expands to the full id. Reasoning effort only affects the codex harness
- * (it maps to codex's `turn/start` `effort`); other harnesses ignore it. The
- * provider rides the blocks-protocol `provider` field and is fixed when the
- * codex thread starts; `--bedrock` selects codex's built-in `amazon-bedrock`
- * provider (and implies the codex harness). Pair it with `--model <bedrock-id>`
- * to choose the Bedrock model.
+ * another harness restarts the thread on the requested one. Harness/model/provider
+ * choices are sticky at the Slack thread level: the last flag wins for later
+ * turns in the same thread. `--model` accepts either a full model id
+ * (claude-sonnet-4-6, gpt-5.2, ...), an amp mode (deep/fast), or a Claude alias
+ * (fable/opus/sonnet/haiku) which expands to the full id. Reasoning effort only
+ * affects the codex harness (it maps to codex's `turn/start` `effort`) and stays
+ * per-turn; other harnesses ignore it. The provider rides the blocks-protocol
+ * `provider` field and is fixed when the codex thread starts; `--bedrock`
+ * selects codex's built-in `amazon-bedrock` provider (and implies the codex
+ * harness). Pair it with `--model <bedrock-id>` to choose the Bedrock model.
  */
 
 export type MessageOverrides = {

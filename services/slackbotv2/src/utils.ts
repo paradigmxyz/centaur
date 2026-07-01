@@ -78,6 +78,7 @@ function traceFields(trace?: SlackbotV2Trace): JsonObject {
         message_id: trace.messageId,
         mode: trace.mode,
         open_stream: trace.openStream,
+        ...(trace.slackUserId ? { slack_user_id: trace.slackUserId } : {}),
         thread_id: trace.threadId
       }
     : {}

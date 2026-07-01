@@ -1,0 +1,117 @@
+{{- if .Values.teamsbot.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "teamsbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "teamsbot") | nindent 4 }}
+spec:
+  replicas: {{ .Values.teamsbot.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: teamsbot
+          image: {{ printf "%s:%s" .Values.teamsbot.image.repository .Values.teamsbot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.teamsbot.image.pullPolicy }}
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3100"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            - name: TEAMS_DEFAULT_HARNESS_TYPE
+              value: {{ .Values.sandbox.harnessEngine | quote }}
+            - name: TEAMS_BOT_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTEAMS_BOT_APP_ID" .Values.secretManager.envPrefix }}
+            - name: TEAMS_BOT_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTEAMS_BOT_APP_PASSWORD" .Values.secretManager.envPrefix }}
+            - name: TEAMS_BOT_APP_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTEAMS_BOT_APP_TENANT_ID" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTEAMSBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: TEAMSBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTEAMSBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: TEAMSBOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: TEAMS_ALLOWED_TEAM_IDS
+              value: {{ .Values.teamsbot.allowedTeamIds | quote }}
+            - name: TEAMS_ALLOWED_CHANNEL_IDS
+              value: {{ .Values.teamsbot.allowedChannelIds | quote }}
+            - name: TEAMS_ALLOWED_TENANT_IDS
+              value: {{ .Values.teamsbot.allowedTenantIds | quote }}
+            - name: TEAMS_REQUIRE_MENTION
+              value: {{ .Values.teamsbot.requireMention | quote }}
+            - name: TEAMS_DOWNLOAD_ATTACHMENTS
+              value: {{ .Values.teamsbot.downloadAttachments | quote }}
+{{- range $name, $value := .Values.teamsbot.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: 3100
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 3100
+            timeoutSeconds: 5
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+{{ toYaml .Values.teamsbot.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "teamsbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "teamsbot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+{{- end }}

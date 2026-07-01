@@ -6,17 +6,18 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
-use opentelemetry_proto::tonic::trace::v1::Span;
+use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
+use opentelemetry_proto::tonic::resource::v1::Resource;
+use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, span};
 use prost::Message as _;
-use serde_json::Value;
+use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
-use crate::{HarnessServerError, Result};
+use crate::{HarnessKind, HarnessServerError, NormalizedTokenUsage, Result};
 
 const CODEX_SPAN_PREFIX: &str = "codex.";
 const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
@@ -34,21 +35,23 @@ pub(crate) struct TraceContext {
 
 impl TraceContext {
     pub(crate) fn effective_trace_id(&self) -> Option<String> {
-        self.traceparent
-            .as_deref()
-            .and_then(trace_id_from_traceparent)
-            .or_else(|| self.trace_id.clone())
+        self.trace_id
+            .clone()
+            .or_else(|| self.traceparent.as_deref().and_then(trace_id_from_traceparent))
             .or_else(|| clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref()))
     }
 
     pub(crate) fn effective_traceparent(&self) -> Option<String> {
-        self.traceparent
+        let trace_id = self.effective_trace_id()?;
+        if let Some(traceparent) = self
+            .traceparent
             .as_deref()
-            .and_then(|value| validate_traceparent(value).map(str::to_owned))
-            .or_else(|| {
-                self.effective_trace_id()
-                    .and_then(|trace_id| traceparent_from_trace_id(&trace_id))
-            })
+            .and_then(validate_traceparent)
+            && trace_id_from_traceparent(traceparent).as_deref() == Some(trace_id.as_str())
+        {
+            return Some(traceparent.to_owned());
+        }
+        traceparent_from_trace_id(&trace_id)
     }
 }
 
@@ -56,7 +59,7 @@ pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<(
     let Some(trace_id) = trace.effective_trace_id() else {
         return Ok(());
     };
-    let Some(endpoint) = codex_otel_endpoint() else {
+    let Some(endpoint) = otlp_traces_endpoint() else {
         return Ok(());
     };
     if !trace.metadata.is_empty() {
@@ -91,6 +94,48 @@ pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<(
     Ok(())
 }
 
+pub(crate) fn unix_time_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HarnessUsageSpan<'a> {
+    pub(crate) harness: HarnessKind,
+    pub(crate) model: &'a str,
+    pub(crate) model_provider: &'a str,
+    pub(crate) turn_id: &'a str,
+    pub(crate) input: Option<&'a str>,
+    pub(crate) output: Option<&'a str>,
+    pub(crate) start_unix_nano: u64,
+    pub(crate) end_unix_nano: u64,
+}
+
+pub(crate) fn export_harness_usage_span(
+    trace: &TraceContext,
+    span: HarnessUsageSpan<'_>,
+    usage: &NormalizedTokenUsage,
+) -> Result<()> {
+    if !usage.has_counts() {
+        return Ok(());
+    }
+    let Some(endpoint) = otlp_traces_endpoint() else {
+        return Ok(());
+    };
+    let request = harness_usage_trace_request(trace, span, usage)?;
+    let mut headers = otel_forward_headers();
+    if let Some(trace_id) = trace.effective_trace_id() {
+        headers.insert("x-trace-id".to_string(), trace_id);
+    }
+    if let Some(thread_key) = clean_optional(trace.thread_key.as_deref()) {
+        headers.insert("x-centaur-thread-key".to_string(), thread_key);
+    }
+    post_otlp_trace_payload(&endpoint, &headers, &request.encode_to_vec())
+}
+
 fn codex_config_path() -> Option<PathBuf> {
     env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -98,7 +143,7 @@ fn codex_config_path() -> Option<PathBuf> {
         .map(|home| home.join("config.toml"))
 }
 
-fn codex_otel_endpoint() -> Option<String> {
+fn otlp_traces_endpoint() -> Option<String> {
     let traces_endpoint = clean_optional(
         env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             .ok()
@@ -214,6 +259,13 @@ fn otel_authorization_token() -> Option<String> {
         .or(Some(authorization))
 }
 
+fn otel_forward_headers() -> BTreeMap<String, String> {
+    otel_headers()
+        .into_iter()
+        .filter(|(name, _)| name == "authorization")
+        .collect()
+}
+
 fn otel_environment() -> String {
     if let Ok(raw) = env::var("OTEL_RESOURCE_ATTRIBUTES") {
         for item in raw.split(',') {
@@ -317,6 +369,56 @@ impl OtlpTarget {
             host_header,
         })
     }
+}
+
+fn post_otlp_trace_payload(
+    endpoint: &str,
+    headers: &BTreeMap<String, String>,
+    body: &[u8],
+) -> Result<()> {
+    let target = OtlpTarget::parse(endpoint)?;
+    let mut upstream = TcpStream::connect((target.host.as_str(), target.port))?;
+    upstream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    upstream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    write!(
+        upstream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n",
+        target.path,
+        target.host_header,
+        body.len()
+    )?;
+    for (name, value) in headers {
+        if matches!(
+            name.as_str(),
+            "authorization" | "x-trace-id" | "x-centaur-thread-key"
+        ) {
+            write!(upstream, "{name}: {value}\r\n")?;
+        }
+    }
+    upstream.write_all(b"\r\n")?;
+    upstream.write_all(body)?;
+    upstream.flush()?;
+
+    let mut response = Vec::new();
+    upstream.read_to_end(&mut response)?;
+    let status = http_status_code(&response).unwrap_or(0);
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(HarnessServerError::Protocol(format!(
+            "OTLP trace export failed with HTTP status {status}"
+        )))
+    }
+}
+
+fn http_status_code(response: &[u8]) -> Option<u16> {
+    let line = String::from_utf8_lossy(response)
+        .lines()
+        .next()?
+        .to_string();
+    let mut parts = line.split_whitespace();
+    let _version = parts.next()?;
+    parts.next()?.parse().ok()
 }
 
 fn run_otlp_proxy(listener: TcpListener, target: OtlpTarget) {
@@ -470,6 +572,461 @@ fn write_http_response(
     stream.write_all(body)
 }
 
+fn harness_usage_trace_request(
+    trace: &TraceContext,
+    span_context: HarnessUsageSpan<'_>,
+    usage: &NormalizedTokenUsage,
+) -> Result<ExportTraceServiceRequest> {
+    let (trace_id, parent_span_id) = harness_usage_span_trace_ids(trace)?;
+    let mut attributes = Vec::new();
+    let harness_name = harness_name(span_context.harness);
+    let system = gen_ai_system(span_context.harness, span_context.model_provider);
+    let model = usage
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(span_context.model);
+    let total_tokens = usage.total_tokens.or_else(|| {
+        [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.reasoning_output_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .try_fold(0_i64, |acc, value| acc.checked_add(value))
+    });
+
+    set_attribute_string(&mut attributes, "gen_ai.operation.name", "chat");
+    set_attribute_string(&mut attributes, "lmnr.span.type", "LLM");
+    set_attribute_string(&mut attributes, "gen_ai.system", system);
+    set_attribute_string(&mut attributes, "gen_ai.request.model", model);
+    set_attribute_string(&mut attributes, "gen_ai.response.model", model);
+    set_harness_span_io_attributes(&mut attributes, span_context.input, span_context.output);
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.input_tokens",
+        usage.input_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.output_tokens",
+        usage.output_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.cache_creation_input_tokens",
+        usage.cache_creation_input_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.cache_read_input_tokens",
+        usage.cache_read_input_tokens,
+    );
+    set_attribute_int(
+        &mut attributes,
+        "gen_ai.usage.reasoning_tokens",
+        usage.reasoning_output_tokens,
+    );
+    set_attribute_int(&mut attributes, "gen_ai.usage.total_tokens", total_tokens);
+    if let Some(cost) = estimate_usage_cost(span_context.harness, system, model, usage) {
+        set_attribute_double(&mut attributes, "gen_ai.usage.input_cost", cost.input_cost);
+        set_attribute_double(
+            &mut attributes,
+            "gen_ai.usage.output_cost",
+            cost.output_cost,
+        );
+        set_attribute_double(&mut attributes, "gen_ai.usage.cost", cost.total_cost());
+        set_attribute_string(&mut attributes, "gen_ai.usage.cost_currency", "USD");
+        set_attribute_double(
+            &mut attributes,
+            "centaur.usage.input_cost_usd",
+            cost.input_cost,
+        );
+        set_attribute_double(
+            &mut attributes,
+            "centaur.usage.output_cost_usd",
+            cost.output_cost,
+        );
+        set_attribute_double(
+            &mut attributes,
+            "centaur.usage.estimated_cost_usd",
+            cost.total_cost(),
+        );
+        set_attribute_string(&mut attributes, "centaur.usage.cost_source", cost.source);
+        set_attribute_bool(&mut attributes, "centaur.usage.cost_estimated", true);
+    }
+    set_attribute_string(&mut attributes, "centaur.harness", harness_name);
+    set_attribute_string(
+        &mut attributes,
+        "centaur.model_provider",
+        span_context.model_provider,
+    );
+    set_attribute_string(&mut attributes, "centaur.turn_id", span_context.turn_id);
+    if let Some(thread_key) = trace.thread_key.as_deref() {
+        set_attribute_string(&mut attributes, "centaur.thread_key", thread_key);
+    }
+    apply_laminar_trace_metadata_to_attributes(&mut attributes, &trace.metadata);
+
+    let start = span_context.start_unix_nano.min(span_context.end_unix_nano);
+    let end = span_context.end_unix_nano.max(start);
+    Ok(ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![
+                    kv_string("service.name", "harness-server"),
+                    kv_string("deployment.environment", &otel_environment()),
+                ],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "centaur.harness-server".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    ..Default::default()
+                }),
+                spans: vec![Span {
+                    trace_id,
+                    span_id: random_span_id(),
+                    parent_span_id,
+                    name: format!("{harness_name}.session_task.turn"),
+                    kind: span::SpanKind::Internal as i32,
+                    start_time_unix_nano: start,
+                    end_time_unix_nano: end,
+                    attributes,
+                    flags: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    })
+}
+
+fn harness_usage_span_trace_ids(trace: &TraceContext) -> Result<(Vec<u8>, Vec<u8>)> {
+    let trace_id = trace.effective_trace_id().ok_or_else(|| {
+        HarnessServerError::Protocol("missing trace id for harness usage span".to_string())
+    })?;
+    let trace_id = trace_id_to_bytes(&trace_id).ok_or_else(|| {
+        HarnessServerError::Protocol("invalid trace id for harness usage span".to_string())
+    })?;
+    let parent_span_id = trace
+        .traceparent
+        .as_deref()
+        .and_then(trace_ids_from_traceparent)
+        .and_then(|(parent_trace_id, parent_span_id)| {
+            if parent_trace_id == trace_id {
+                Some(parent_span_id)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    Ok((trace_id, parent_span_id))
+}
+
+fn set_harness_span_io_attributes(
+    attributes: &mut Vec<KeyValue>,
+    input: Option<&str>,
+    output: Option<&str>,
+) {
+    if let Some(input) = clean_optional(input) {
+        set_attribute_string(attributes, "input.value", &input);
+        set_attribute_string(
+            attributes,
+            "lmnr.span.input",
+            &legacy_chat_message_json("user", &input),
+        );
+        set_attribute_string(
+            attributes,
+            "gen_ai.input.messages",
+            &gen_ai_message_json("user", &input),
+        );
+    }
+    if let Some(output) = clean_optional(output) {
+        set_attribute_string(attributes, "output.value", &output);
+        set_attribute_string(
+            attributes,
+            "lmnr.span.output",
+            &legacy_chat_message_json("assistant", &output),
+        );
+        set_attribute_string(
+            attributes,
+            "gen_ai.output.messages",
+            &gen_ai_message_json("assistant", &output),
+        );
+    }
+}
+
+fn legacy_chat_message_json(role: &str, content: &str) -> String {
+    serde_json::to_string(&json!([{ "role": role, "content": content }]))
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
+fn gen_ai_message_json(role: &str, content: &str) -> String {
+    serde_json::to_string(&json!([
+        {
+            "role": role,
+            "parts": [{ "type": "text", "content": content }]
+        }
+    ]))
+    .unwrap_or_else(|_| "[]".to_string())
+}
+
+fn apply_laminar_trace_metadata_to_attributes(
+    attributes: &mut Vec<KeyValue>,
+    metadata: &BTreeMap<String, Value>,
+) {
+    for (key, value) in metadata {
+        let key = key.trim();
+        if !key.is_empty() {
+            set_attribute_json(
+                attributes,
+                &format!("{LAMINAR_METADATA_PREFIX}{key}"),
+                value,
+            );
+        }
+    }
+}
+
+fn trace_ids_from_traceparent(traceparent: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let parts = validate_traceparent(traceparent)?
+        .split('-')
+        .collect::<Vec<_>>();
+    Some((hex_bytes(parts[1])?, hex_bytes(parts[2])?))
+}
+
+fn trace_id_to_bytes(trace_id: &str) -> Option<Vec<u8>> {
+    Some(Uuid::parse_str(trace_id).ok()?.as_bytes().to_vec())
+}
+
+fn hex_bytes(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(value.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = hex_value(pair[0])?;
+        let lo = hex_value(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn random_span_id() -> Vec<u8> {
+    Uuid::new_v4().as_bytes()[..8].to_vec()
+}
+
+fn harness_name(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::Codex => "codex",
+        HarnessKind::ClaudeCode => "claude",
+        HarnessKind::Amp => "amp",
+    }
+}
+
+fn gen_ai_system(kind: HarnessKind, model_provider: &str) -> &'static str {
+    let provider = model_provider.trim().to_ascii_lowercase();
+    if provider.contains("anthropic") || matches!(kind, HarnessKind::ClaudeCode) {
+        "anthropic"
+    } else if provider.contains("openai") || matches!(kind, HarnessKind::Codex) {
+        "openai"
+    } else if provider.contains("amp") || matches!(kind, HarnessKind::Amp) {
+        "amp"
+    } else {
+        "unknown"
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TokenPricing {
+    input_per_mtok: f64,
+    cache_creation_per_mtok: f64,
+    cache_read_per_mtok: f64,
+    output_per_mtok: f64,
+    source: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UsageCost {
+    input_cost: f64,
+    output_cost: f64,
+    source: &'static str,
+}
+
+impl UsageCost {
+    fn total_cost(self) -> f64 {
+        self.input_cost + self.output_cost
+    }
+}
+
+fn estimate_usage_cost(
+    harness: HarnessKind,
+    system: &str,
+    model: &str,
+    usage: &NormalizedTokenUsage,
+) -> Option<UsageCost> {
+    let pricing = pricing_for_usage(harness, system, model)?;
+    let input_tokens = positive_tokens(usage.input_tokens);
+    let cache_creation_tokens = positive_tokens(usage.cache_creation_input_tokens);
+    let cache_read_tokens = positive_tokens(usage.cache_read_input_tokens);
+    let output_tokens = positive_tokens(usage.output_tokens);
+    let cache_tokens = cache_creation_tokens + cache_read_tokens;
+    let non_cached_input_tokens = if input_tokens >= cache_tokens {
+        input_tokens - cache_tokens
+    } else {
+        input_tokens
+    };
+
+    let input_cost = mtok_cost(non_cached_input_tokens, pricing.input_per_mtok)
+        + mtok_cost(cache_creation_tokens, pricing.cache_creation_per_mtok)
+        + mtok_cost(cache_read_tokens, pricing.cache_read_per_mtok);
+    let output_cost = mtok_cost(output_tokens, pricing.output_per_mtok);
+
+    Some(UsageCost {
+        input_cost,
+        output_cost,
+        source: pricing.source,
+    })
+}
+
+fn pricing_for_usage(harness: HarnessKind, system: &str, model: &str) -> Option<TokenPricing> {
+    let normalized = normalize_model_name(model);
+    match system {
+        "anthropic" => anthropic_pricing(&normalized),
+        "openai" => openai_pricing(&normalized),
+        "amp" => amp_pricing(harness, &normalized),
+        _ => None,
+    }
+}
+
+fn normalize_model_name(model: &str) -> String {
+    model.trim().to_ascii_lowercase().replace(['_', '.'], "-")
+}
+
+fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("fable-5") || model.contains("mythos-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 1.0,
+            output_per_mtok: 50.0,
+            source: "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write",
+        });
+    }
+    if model.contains("opus-4-8")
+        || model.contains("opus-4-7")
+        || model.contains("opus-4-6")
+        || model.contains("opus-4-5")
+    {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 6.25,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 25.0,
+            source: "centaur_estimate:anthropic:opus-4.5-plus:5m-cache-write",
+        });
+    }
+    if model.contains("opus-4-1") || model.contains("opus-4") {
+        return Some(TokenPricing {
+            input_per_mtok: 15.0,
+            cache_creation_per_mtok: 18.75,
+            cache_read_per_mtok: 1.5,
+            output_per_mtok: 75.0,
+            source: "centaur_estimate:anthropic:opus-4-deprecated:5m-cache-write",
+        });
+    }
+    if model.contains("sonnet-4-6") || model.contains("sonnet-4-5") || model.contains("sonnet-4") {
+        return Some(TokenPricing {
+            input_per_mtok: 3.0,
+            cache_creation_per_mtok: 3.75,
+            cache_read_per_mtok: 0.3,
+            output_per_mtok: 15.0,
+            source: "centaur_estimate:anthropic:sonnet-4:5m-cache-write",
+        });
+    }
+    if model.contains("haiku-4-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 1.0,
+            cache_creation_per_mtok: 1.25,
+            cache_read_per_mtok: 0.1,
+            output_per_mtok: 5.0,
+            source: "centaur_estimate:anthropic:haiku-4.5:5m-cache-write",
+        });
+    }
+    None
+}
+
+fn openai_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("gpt-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 5.0,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 30.0,
+            source: "centaur_estimate:openai:gpt-5.5",
+        });
+    }
+    if model.contains("gpt-5-4") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.5,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.25,
+            output_per_mtok: 15.0,
+            source: "centaur_estimate:openai:gpt-5.4",
+        });
+    }
+    None
+}
+
+fn amp_pricing(_harness: HarnessKind, model: &str) -> Option<TokenPricing> {
+    if model == "deep"
+        || model.starts_with("deep-")
+        || model == "rush"
+        || model.starts_with("rush-")
+    {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 5.0,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 30.0,
+            source: "centaur_estimate:amp:gpt-5.5",
+        });
+    }
+    if model == "smart" || model.starts_with("smart-") {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 6.25,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 25.0,
+            source: "centaur_estimate:amp:claude-opus-4.8:5m-cache-write",
+        });
+    }
+    openai_pricing(model).or_else(|| anthropic_pricing(model))
+}
+
+fn positive_tokens(value: Option<i64>) -> f64 {
+    value.unwrap_or_default().max(0) as f64
+}
+
+fn mtok_cost(tokens: f64, price_per_mtok: f64) -> f64 {
+    tokens * price_per_mtok / 1_000_000.0
+}
+
+fn kv_string(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.to_string())),
+        }),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn rewrite_otlp_trace_payload(payload: &[u8]) -> std::result::Result<Vec<u8>, String> {
     let mut request = ExportTraceServiceRequest::decode(payload)
         .map_err(|error| format!("invalid OTLP trace payload: {error}"))?;
@@ -604,6 +1161,29 @@ fn set_attribute_int(attributes: &mut Vec<KeyValue>, key: &str, value: Option<i6
     );
 }
 
+fn set_attribute_double(attributes: &mut Vec<KeyValue>, key: &str, value: f64) {
+    if !value.is_finite() {
+        return;
+    }
+    set_attribute_value(
+        attributes,
+        key,
+        AnyValue {
+            value: Some(any_value::Value::DoubleValue(value)),
+        },
+    );
+}
+
+fn set_attribute_bool(attributes: &mut Vec<KeyValue>, key: &str, value: bool) {
+    set_attribute_value(
+        attributes,
+        key,
+        AnyValue {
+            value: Some(any_value::Value::BoolValue(value)),
+        },
+    );
+}
+
 fn set_attribute_json(attributes: &mut Vec<KeyValue>, key: &str, value: &Value) {
     let any_value = match value {
         Value::Bool(value) => AnyValue {
@@ -716,6 +1296,29 @@ trust_level = "trusted"
     }
 
     #[test]
+    fn explicit_thread_trace_id_wins_over_foreign_traceparent() {
+        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let execution_traceparent = "00-fedcba9876543210fedcba9876543210-0123456789abcdef-01";
+        let trace = TraceContext {
+            thread_key: Some("slack:T:C:1.0".to_string()),
+            trace_id: Some(thread_trace_id.to_string()),
+            traceparent: Some(execution_traceparent.to_string()),
+            metadata: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            trace.effective_trace_id().as_deref(),
+            Some(thread_trace_id)
+        );
+        let effective_traceparent = trace.effective_traceparent().expect("traceparent");
+        assert_ne!(effective_traceparent, execution_traceparent);
+        assert_eq!(
+            trace_id_from_traceparent(&effective_traceparent).as_deref(),
+            Some(thread_trace_id)
+        );
+    }
+
+    #[test]
     fn rewrite_otlp_trace_payload_prefixes_and_normalizes_codex_turn_span() {
         let request = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
@@ -761,6 +1364,335 @@ trust_level = "trusted"
         );
     }
 
+    #[test]
+    fn harness_usage_trace_request_builds_laminar_priced_span() {
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: None,
+            traceparent: Some(
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
+            ),
+            metadata: BTreeMap::from([(
+                "execution_id".to_string(),
+                Value::String("exe_123".to_string()),
+            )]),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("claude-fable-5".to_string()),
+            input_tokens: Some(2),
+            output_tokens: Some(7),
+            cache_creation_input_tokens: Some(3),
+            cache_read_input_tokens: Some(5),
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::ClaudeCode,
+                model: "fallback-model",
+                model_provider: "anthropic",
+                turn_id: "turn-1",
+                input: Some("say hi"),
+                output: Some("hi there"),
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(span.name, "claude.session_task.turn");
+        assert_eq!(span.trace_id.len(), 16);
+        assert_eq!(span.parent_span_id.len(), 8);
+        assert_eq!(
+            attribute_string(&span.attributes, "gen_ai.system"),
+            "anthropic"
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "gen_ai.response.model"),
+            "claude-fable-5"
+        );
+        assert_eq!(attribute_string(&span.attributes, "lmnr.span.type"), "LLM");
+        assert_eq!(attribute_string(&span.attributes, "input.value"), "say hi");
+        assert_eq!(
+            serde_json::from_str::<Value>(&attribute_string(
+                &span.attributes,
+                "gen_ai.input.messages"
+            ))
+            .expect("input messages JSON"),
+            json!([{
+                "role": "user",
+                "parts": [{ "type": "text", "content": "say hi" }]
+            }])
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "output.value"),
+            "hi there"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&attribute_string(
+                &span.attributes,
+                "gen_ai.output.messages"
+            ))
+            .expect("output messages JSON"),
+            json!([{
+                "role": "assistant",
+                "parts": [{ "type": "text", "content": "hi there" }]
+            }])
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.input_tokens"),
+            Some(2)
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.cache_creation_input_tokens"),
+            Some(3)
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.cache_read_input_tokens"),
+            Some(5)
+        );
+        assert_eq!(
+            attribute_int(&span.attributes, "gen_ai.usage.total_tokens"),
+            Some(17)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.input_cost"),
+            Some(0.0000625)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.output_cost"),
+            Some(0.00035)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.cost"),
+            Some(0.0004125)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "centaur.usage.estimated_cost_usd"),
+            Some(0.0004125)
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "gen_ai.usage.cost_currency"),
+            "USD"
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "centaur.usage.cost_source"),
+            "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write"
+        );
+        assert_eq!(
+            attribute_string(
+                &span.attributes,
+                "lmnr.association.properties.metadata.execution_id"
+            ),
+            "exe_123"
+        );
+    }
+
+    #[test]
+    fn harness_usage_trace_request_uses_matching_traceparent_for_api_parentage() {
+        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: Some(thread_trace_id.to_string()),
+            traceparent: Some(
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
+            ),
+            metadata: BTreeMap::new(),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("claude-opus-4-8".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::ClaudeCode,
+                model: "fallback-model",
+                model_provider: "anthropic",
+                turn_id: "turn-1",
+                input: None,
+                output: None,
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(
+            span.trace_id,
+            Uuid::parse_str(thread_trace_id)
+                .expect("thread trace uuid")
+                .as_bytes()
+                .to_vec()
+        );
+        assert_eq!(
+            span.parent_span_id,
+            vec![0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
+        );
+    }
+
+    #[test]
+    fn harness_usage_trace_request_ignores_foreign_traceparent_parentage() {
+        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: Some(thread_trace_id.to_string()),
+            traceparent: Some(
+                "00-fedcba9876543210fedcba9876543210-1111111111111111-01".to_string(),
+            ),
+            metadata: BTreeMap::new(),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("claude-opus-4-8".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::ClaudeCode,
+                model: "fallback-model",
+                model_provider: "anthropic",
+                turn_id: "turn-1",
+                input: None,
+                output: None,
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(
+            span.trace_id,
+            Uuid::parse_str(thread_trace_id)
+                .expect("thread trace uuid")
+                .as_bytes()
+                .to_vec()
+        );
+        assert!(span.parent_span_id.is_empty());
+    }
+
+    #[test]
+    fn harness_usage_trace_request_falls_back_to_explicit_thread_trace_id() {
+        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: Some(thread_trace_id.to_string()),
+            traceparent: None,
+            metadata: BTreeMap::new(),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("claude-opus-4-8".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::ClaudeCode,
+                model: "fallback-model",
+                model_provider: "anthropic",
+                turn_id: "turn-1",
+                input: None,
+                output: None,
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(
+            span.trace_id,
+            Uuid::parse_str(thread_trace_id)
+                .expect("thread trace uuid")
+                .as_bytes()
+                .to_vec()
+        );
+        assert!(span.parent_span_id.is_empty());
+    }
+
+    #[test]
+    fn harness_usage_trace_request_estimates_amp_deep_cost() {
+        let trace = TraceContext {
+            thread_key: Some("slack:C123:123.456".to_string()),
+            trace_id: None,
+            traceparent: Some(
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
+            ),
+            metadata: BTreeMap::new(),
+        };
+        let usage = NormalizedTokenUsage {
+            model: Some("deep".to_string()),
+            input_tokens: Some(150_681),
+            output_tokens: Some(1_456),
+            cache_creation_input_tokens: Some(27_289),
+            cache_read_input_tokens: Some(123_392),
+            reasoning_output_tokens: None,
+            total_tokens: Some(152_137),
+        };
+        let request = harness_usage_trace_request(
+            &trace,
+            HarnessUsageSpan {
+                harness: HarnessKind::Amp,
+                model: "deep",
+                model_provider: "amp",
+                turn_id: "turn-1",
+                input: None,
+                output: None,
+                start_unix_nano: 100,
+                end_unix_nano: 200,
+            },
+            &usage,
+        )
+        .expect("usage trace request");
+        let span = &request.resource_spans[0].scope_spans[0].spans[0];
+
+        assert_eq!(span.name, "amp.session_task.turn");
+        assert_eq!(attribute_string(&span.attributes, "gen_ai.system"), "amp");
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.input_cost"),
+            Some(0.198141)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.output_cost"),
+            Some(0.04368)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "gen_ai.usage.cost"),
+            Some(0.241821)
+        );
+        assert_eq!(
+            attribute_double(&span.attributes, "centaur.usage.estimated_cost_usd"),
+            Some(0.241821)
+        );
+        assert_eq!(
+            attribute_string(&span.attributes, "centaur.usage.cost_source"),
+            "centaur_estimate:amp:gpt-5.5"
+        );
+    }
+
     fn kv_string(key: &str, value: &str) -> KeyValue {
         KeyValue {
             key: key.to_string(),
@@ -779,5 +1711,18 @@ trust_level = "trusted"
             }),
             ..Default::default()
         }
+    }
+
+    fn attribute_double(attributes: &[KeyValue], key: &str) -> Option<f64> {
+        attributes
+            .iter()
+            .find(|attribute| attribute.key == key)
+            .and_then(|attribute| attribute.value.as_ref())
+            .and_then(|value| match value.value.as_ref()? {
+                any_value::Value::DoubleValue(value) => Some(*value),
+                any_value::Value::IntValue(value) => Some(*value as f64),
+                any_value::Value::StringValue(value) => value.parse().ok(),
+                _ => None,
+            })
     }
 }

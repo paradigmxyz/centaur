@@ -90,7 +90,7 @@ endpoint, and inject a short-lived bearer token for matching API hosts.
 Check the API pod environment:
 
 ```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- env | \
+kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- env | \
   grep -E 'FIREWALL_MANAGER_SECRET_SOURCE|WAREHOUSE_API_KEY'
 ```
 

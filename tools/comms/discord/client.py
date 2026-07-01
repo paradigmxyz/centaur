@@ -12,6 +12,23 @@ from centaur_sdk import secret
 BASE_URL = "https://discord.com/api/v10"
 INVITE_RE = re.compile(r"(?:https?://)?(?:discord(?:\.gg|\.com/invite)/)?([A-Za-z0-9-]+)")
 
+# Discord asks automated clients to identify themselves with a descriptive
+# User-Agent (https://discord.com/developers/docs/reference#user-agent). When
+# this client runs under a *bot* token (Authorization: ``Bot <token>``), sending
+# a browser User-Agent trips Discord's edge anti-automation: guild/channel reads
+# come back ``403`` with body ``internal network error`` while ``/users/@me``
+# still succeeds. A proper bot UA keeps reads working under a bot token (and is
+# harmless under a user token).
+USER_AGENT = "DiscordBot (https://github.com/paradigmxyz/centaur, 0.1.0)"
+# Message flag that suppresses link/embed unfurling on a posted message (1 << 2).
+SUPPRESS_EMBEDS = 1 << 2
+
+# Discord thread channel types
+# (https://discord.com/developers/docs/resources/channel#channel-object-channel-types).
+THREAD_TYPES = {10: "announcement_thread", 11: "public_thread", 12: "private_thread"}
+PUBLIC_THREAD_TYPE = 11
+PRIVATE_THREAD_TYPE = 12
+
 
 class DiscordClient:
     """High-level Discord client using a regular user token."""
@@ -30,10 +47,7 @@ class DiscordClient:
         headers = {
             "Authorization": self._get_token(),
             "Content-Type": "application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": USER_AGENT,
         }
         with httpx.Client(timeout=self.timeout) as client:
             response = client.request(method, f"{BASE_URL}{endpoint}", headers=headers, **kwargs)
@@ -177,14 +191,53 @@ class DiscordClient:
         channel: str,
         content: str,
         reply_to_message_id: str | None = None,
+        suppress_embeds: bool = False,
     ) -> dict[str, Any]:
-        """Post a message to a channel by name or ID."""
+        """Post a message to a channel by name or ID.
+
+        Set ``suppress_embeds`` to stop Discord unfurling link previews — useful
+        for status/alert posts whose URLs should stay compact.
+        """
         resolved = self._find_channel(channel)
         payload: dict[str, Any] = {"content": content}
+        if suppress_embeds:
+            payload["flags"] = SUPPRESS_EMBEDS
         if reply_to_message_id:
             payload["message_reference"] = {"message_id": reply_to_message_id}
         msg = self._request("POST", f"/channels/{resolved['id']}/messages", json=payload)
         return self._format_message(msg, resolved.get("name"))
+
+    def create_thread(
+        self,
+        channel: str,
+        name: str,
+        from_message_id: str | None = None,
+        content: str | None = None,
+        private: bool = False,
+    ) -> dict[str, Any]:
+        """Create a thread in a channel by name or ID.
+
+        Pass from_message_id to branch a public thread off an existing message.
+        Otherwise a standalone thread is created (public by default, or private
+        when private is set), and content, if given, is posted as its first message.
+        """
+        resolved = self._find_channel(channel)
+        if from_message_id:
+            thread = self._request(
+                "POST",
+                f"/channels/{resolved['id']}/messages/{from_message_id}/threads",
+                json={"name": name},
+            )
+            return self._format_thread(thread)
+        thread_type = PRIVATE_THREAD_TYPE if private else PUBLIC_THREAD_TYPE
+        thread = self._request(
+            "POST",
+            f"/channels/{resolved['id']}/threads",
+            json={"name": name, "type": thread_type},
+        )
+        if content:
+            self._request("POST", f"/channels/{thread['id']}/messages", json={"content": content})
+        return self._format_thread(thread)
 
     def _guild_channels(self, guild_id: str) -> list[dict[str, Any]]:
         return list(self._request("GET", f"/guilds/{guild_id}/channels"))
@@ -248,6 +301,21 @@ class DiscordClient:
             "timestamp": _format_timestamp(msg),
             "content": msg.get("content") or "",
             "reply_to": ((msg.get("message_reference") or {}).get("message_id")),
+        }
+
+    def _format_thread(self, thread: dict[str, Any]) -> dict[str, Any]:
+        metadata = thread.get("thread_metadata") or {}
+        guild_id = str(thread.get("guild_id", ""))
+        thread_id = str(thread.get("id", ""))
+        return {
+            "id": thread_id,
+            "name": thread.get("name"),
+            "parent_id": str(thread.get("parent_id", "")),
+            "guild_id": guild_id,
+            "owner_id": str(thread.get("owner_id", "")),
+            "type": THREAD_TYPES.get(thread.get("type")),
+            "archived": metadata.get("archived", False),
+            "url": f"https://discord.com/channels/{guild_id}/{thread_id}",
         }
 
 

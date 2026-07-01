@@ -9,12 +9,33 @@ from datetime import datetime  # noqa: E402
 
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
-
-from centaur_sdk import Table  # noqa: E402
+from rich.table import Table  # noqa: E402
 
 from .client import _client  # noqa: E402
 
 app = typer.Typer(name="synoptic", help="Synoptic Twitter API CLI")
+
+
+@app.command("health")
+def health():
+    """Assert synoptic connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_usage()
+        payload = {"ok": True, "tool": "synoptic", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "synoptic", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

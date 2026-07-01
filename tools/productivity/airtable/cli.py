@@ -11,6 +11,28 @@ from .client import AirtableClient
 load_dotenv()
 
 app = typer.Typer(name="airtable", help="Airtable API client")
+
+
+@app.command("health")
+def health():
+    """Assert airtable connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.preflight_access()
+        payload = {"ok": True, "tool": "airtable", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "airtable", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

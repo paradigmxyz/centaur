@@ -51,6 +51,17 @@ Optional Discord ingress bootstrap (consumed when discordbot.enabled=true):
   DISCORDBOT_API_KEY           bearer the bot sends to api-rs; auto-generated
                                once when absent (never rotated in place)
 
+Optional Teams ingress bootstrap (consumed when teamsbot.enabled=true):
+  TEAMS_BOT_APP_ID             when set, seeds the teamsbot keys; requires
+                               TEAMS_BOT_APP_PASSWORD and
+                               TEAMS_BOT_APP_TENANT_ID (the script fails fast
+                               if either is missing). TEAMS_BOT_* values are
+                               overwritten on every run so they rotate.
+  TEAMS_BOT_APP_PASSWORD       Bot Framework app client secret
+  TEAMS_BOT_APP_TENANT_ID      Microsoft Entra tenant id for the Teams app
+  TEAMSBOT_API_KEY             bearer the bot sends to api-rs; auto-generated
+                               once when absent (never rotated in place)
+
 Optional iron-control bootstrap (consumed when ironControl.enabled=true):
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
@@ -137,6 +148,14 @@ if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
   require_env DISCORD_APPLICATION_ID
 fi
 
+# Teams keys are optional as a group, but partial configuration would silently
+# seed empty values and crashloop the bot at deploy time instead of failing here.
+if [[ -n "${TEAMS_BOT_APP_ID:-}${TEAMS_BOT_APP_PASSWORD:-}${TEAMS_BOT_APP_TENANT_ID:-}" ]]; then
+  require_env TEAMS_BOT_APP_ID
+  require_env TEAMS_BOT_APP_PASSWORD
+  require_env TEAMS_BOT_APP_TENANT_ID
+fi
+
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 delete_if_forced centaur-infra-env
@@ -179,6 +198,17 @@ if secret_exists centaur-infra-env; then
     patch_data+=("\"DISCORD_APPLICATION_ID\":\"$(printf '%s' "$DISCORD_APPLICATION_ID" | base64 | tr -d '\n')\"")
     if ! secret_key_present DISCORDBOT_API_KEY; then
       patch_data+=("\"DISCORDBOT_API_KEY\":\"$(printf '%s' "${DISCORDBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
+    fi
+  fi
+  # Teams ingress (teamsbot) keys: added when TEAMS_BOT_APP_ID is in the env.
+  # TEAMS_BOT_* are overwritten on each run; TEAMSBOT_API_KEY is generated once
+  # if absent.
+  if [[ -n "${TEAMS_BOT_APP_ID:-}" ]]; then
+    patch_data+=("\"TEAMS_BOT_APP_ID\":\"$(printf '%s' "$TEAMS_BOT_APP_ID" | base64 | tr -d '\n')\"")
+    patch_data+=("\"TEAMS_BOT_APP_PASSWORD\":\"$(printf '%s' "$TEAMS_BOT_APP_PASSWORD" | base64 | tr -d '\n')\"")
+    patch_data+=("\"TEAMS_BOT_APP_TENANT_ID\":\"$(printf '%s' "$TEAMS_BOT_APP_TENANT_ID" | base64 | tr -d '\n')\"")
+    if ! secret_key_present TEAMSBOT_API_KEY; then
+      patch_data+=("\"TEAMSBOT_API_KEY\":\"$(printf '%s' "${TEAMSBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
     fi
   fi
   # iron-control keys: top up only when absent so we never rotate them out from
@@ -272,6 +302,14 @@ else
       --from-literal=DISCORD_PUBLIC_KEY="$DISCORD_PUBLIC_KEY"
       --from-literal=DISCORD_APPLICATION_ID="$DISCORD_APPLICATION_ID"
       --from-literal=DISCORDBOT_API_KEY="${DISCORDBOT_API_KEY:-$(rand_hex)}"
+    )
+  fi
+  if [[ -n "${TEAMS_BOT_APP_ID:-}" ]]; then
+    secret_args+=(
+      --from-literal=TEAMS_BOT_APP_ID="$TEAMS_BOT_APP_ID"
+      --from-literal=TEAMS_BOT_APP_PASSWORD="$TEAMS_BOT_APP_PASSWORD"
+      --from-literal=TEAMS_BOT_APP_TENANT_ID="$TEAMS_BOT_APP_TENANT_ID"
+      --from-literal=TEAMSBOT_API_KEY="${TEAMSBOT_API_KEY:-$(rand_hex)}"
     )
   fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then

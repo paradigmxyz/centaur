@@ -106,6 +106,10 @@ console:
   # _SECRET), which must exist or the console pods CreateContainerConfigError.
   googleOauth:
     enabled: false
+  # OAuth app slug whose user-level Slack credentials are used by the DM sync
+  # worker. Keep this aligned with the Console OAuth app users authorize.
+  slackDmSync:
+    oauthAppSlug: slack
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale
@@ -222,7 +226,22 @@ sandbox:
 
 repoCache:
   enabled: true
+  autoReload: true
   hostPath: /var/lib/centaur/repos
+  storage:
+    # hostPath preserves the existing DaemonSet/node-local behavior. Set to
+    # persistentVolumeClaim for GKE Autopilot or other clusters that disallow
+    # writable hostPath.
+    type: hostPath
+    persistentVolumeClaim:
+      # When set, use this existing claim. It must support ReadWriteMany if
+      # repo-cache, api-rs, and sandboxes can schedule on different nodes.
+      existingClaim: ""
+      create: false
+      accessModes:
+        - ReadWriteMany
+      storageClassName: ""
+      size: 20Gi
   # Additional repos to cache. toolServer.repo is cached automatically when the
   # tool server is enabled.
   repositories: []
@@ -290,11 +309,51 @@ apiRs:
   # in workflowAllowedNames as a comma/whitespace-separated string.
   workflowEnableMode: all
   workflowAllowedNames: ""
-  # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
-  # the max lifetime. 0 disables that sweep. Interval must be >= 1.
-  sandboxIdleStopTtlSecs: 10800 # 3 hours
+  # Scheduled ETL workflow configuration. The chart renders these into api-rs
+  # env so workflow discovery sees the right schedules, then derives the
+  # workflow-host passthrough list from the same non-secret config.
+  etl:
+    slack:
+      enabled: false
+      syncIntervalSeconds: 3600
+      syncBackfillLookbackDays: 30
+      syncThreadLookbackDays: 3
+      excludedChannelPatterns: ""
+      attachments:
+        enabled: true
+        maxBytes: 10485760
+      backfill:
+        enabled: true
+        intervalSeconds: 600
+        channelBatchLimit: 50
+        channelPagesPerJob: 5
+      retention:
+        enabled: true
+        intervalMinutes: 60
+        etlDays: 0
+        dmDays: 0
+    linear:
+      enabled: false
+      syncIntervalSeconds: 14400
+    googleDrive:
+      enabled: false
+      syncIntervalSeconds: 14400
+    googleCalendar:
+      enabled: false
+      syncIntervalSeconds: 14400
+    companyContextDocuments:
+      enabled: true
+      intervalSeconds: 14400
+  # Reaper: stop sandboxes older than the max lifetime, regardless of whether
+  # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
+  # consecutive sweeps and restore idle-pauses lost across api-rs restarts.
+  # The idle backstop is only used when older execution rows have no persisted
+  # idle_timeout_ms. 0 disables the corresponding arm.
+  sandboxCleanupIntervalSecs: 300
+  sandboxIdleCleanupBackstopSecs: 21600 # 6 hours
   activitySummary:
     enabled: false
     model: gpt-5.4-nano
@@ -389,6 +448,30 @@ discordbot:
   extraEnv: {}
   resources: {}
 
+# Microsoft Teams chat ingress. Forwards Teams Bot Framework activities to the
+# api-rs control plane (:8080) and renders session events back to Teams. Off by
+# default; needs a Teams app registration and Bot Framework endpoint routing.
+teamsbot:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: centaur-teamsbot
+    tag: latest
+    pullPolicy: Always
+  allowedTeamIds: ""
+  allowedChannelIds: ""
+  allowedTenantIds: ""
+  requireMention: true
+  downloadAttachments: false
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: []
+  extraEnv: {}
+  resources: {}
+
 postgres:
   enabled: true
   image:
@@ -411,6 +494,11 @@ postgres:
     size: 20Gi
     storageClassName: ""
     subPath: ""
+  # PostgreSQL uses /dev/shm for dynamic shared memory during parallel queries.
+  # This memory-backed volume counts against the pod's memory limit.
+  sharedMemory:
+    enabled: true
+    sizeLimit: 1Gi
   resources: {}
 
 ingress:

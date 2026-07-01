@@ -9,13 +9,34 @@ import re
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(
     name="profslice",
     help="Firefox Profiler data extraction for LLM analysis. No browser required.",
 )
+
+
+@app.command("health")
+def health():
+    """Assert profslice connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = {"resolved_url": client.resolve_url("https://profiler.firefox.com/public/health")}
+        payload = {"ok": True, "tool": "profslice", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "profslice", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

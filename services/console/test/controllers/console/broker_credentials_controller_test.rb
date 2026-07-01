@@ -60,24 +60,46 @@ module Console
       assert_difference -> { BrokerCredential.count } => 1 do
         post console_broker_credentials_url, params: {
           credential: {
-            namespace: "acme", foreign_id: "alphasense", name: "AlphaSense",
-            grant: "password", token_endpoint: "https://api.alpha-sense.com/auth",
-            client_id: "alpha-client", client_secret: "alpha-secret",
-            username: "alpha-user", password: "alpha-password",
+            namespace: "acme", foreign_id: "password-provider", name: "Password Provider",
+            grant: "password", token_endpoint: "https://auth.example.com/token",
+            client_id: "password-client", client_secret: "password-secret",
+            username: "password-user", password: "password-value",
             early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
             max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
           },
-          headers: { "0" => { key: "x-api-key", value: "alpha-key" } }
+          headers: { "0" => { key: "x-api-key", value: "password-key" } }
         }
       end
 
-      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "alphasense")
+      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "password-provider")
       assert_redirected_to console_credential_path(cred.oid)
       assert_equal "password", cred.grant
-      assert_equal "alpha-user", cred.username
-      assert_equal "alpha-password", cred.password
-      assert_equal "alpha-secret", cred.client_secret
-      assert_equal({ "x-api-key" => "alpha-key" }, cred.token_endpoint_headers)
+      assert_equal "password-user", cred.username
+      assert_equal "password-value", cred.password
+      assert_equal "password-secret", cred.client_secret
+      assert_equal({ "x-api-key" => "password-key" }, cred.token_endpoint_headers)
+    end
+
+    test "POST create builds a preqin credential with write-only API key" do
+      assert_difference -> { BrokerCredential.count } => 1 do
+        post console_broker_credentials_url, params: {
+          credential: {
+            namespace: "acme", foreign_id: "preqin", name: "Preqin",
+            grant: "preqin",
+            preqin_username: "preqin-user", api_key: "preqin-api-key",
+            early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
+            max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
+          }
+        }
+      end
+
+      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "preqin")
+      assert_redirected_to console_credential_path(cred.oid)
+      assert_equal "preqin", cred.grant
+      assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, cred.token_endpoint
+      assert_nil cred.client_id
+      assert_equal "preqin-user", cred.username
+      assert_equal "preqin-api-key", cred.api_key
     end
 
     test "POST create without a token endpoint or client id is rejected without writing" do
@@ -158,6 +180,50 @@ module Console
       assert_equal "secret", cred.client_secret
       assert_equal "user", cred.username
       assert_equal "pass", cred.password
+    end
+
+    test "PATCH update with blank preqin fields leaves them in place" do
+      cred = BrokerCredential.create!(namespace: "acme", foreign_id: "preqin-console",
+                                      grant: "preqin", username: "user", api_key: "api-key",
+                                      created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          namespace: cred.namespace, foreign_id: cred.foreign_id,
+          grant: "preqin", token_endpoint: cred.token_endpoint,
+          preqin_username: "", api_key: "",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "user", cred.username
+      assert_equal "api-key", cred.api_key
+    end
+
+    test "PATCH preqin uses preqin username over hidden password username" do
+      cred = BrokerCredential.create!(namespace: "acme", foreign_id: "preqin-username",
+                                      grant: "preqin", username: "old-user", api_key: "api-key",
+                                      created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          namespace: cred.namespace, foreign_id: cred.foreign_id,
+          grant: "preqin", token_endpoint: cred.token_endpoint,
+          username: "password-panel-user", preqin_username: "preqin-panel-user", api_key: "",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "preqin-panel-user", cred.username
+      assert_equal "api-key", cred.api_key
     end
 
     test "PATCH update with a fresh refresh_token reschedules the credential" do

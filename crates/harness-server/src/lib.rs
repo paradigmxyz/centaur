@@ -15,7 +15,7 @@ pub use error::{HarnessServerError, Result};
 pub use server::{run_blocks_server, run_harness_server, run_validate_jsonrpc, server_for};
 pub use traits::{
     AppServerNormalizer, AppServerRuntime, HarnessKind, HarnessServer, NormalizedContent,
-    NormalizedEvent, NormalizedToolResult, ThreadState,
+    NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult, ThreadState,
 };
 pub use turn::{BridgeConfig, CodexTurnNormalizer};
 pub use validation::run_validate_agent_deltas;

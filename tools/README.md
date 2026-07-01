@@ -6,6 +6,7 @@ Drop tool directories here. Each tool needs:
 tools/
   my-tool/
     pyproject.toml   # [tool.centaur] section with module path
+                     # [project.scripts] entry for sandbox CLI shims
     .env.example     # Document required secrets
     __init__.py
     client.py        # API client class + _client() factory
@@ -16,7 +17,7 @@ tools/
 
 ```python
 # client.py
-from centaur.tool_sdk import secret
+from centaur_sdk.tool_sdk import secret
 
 
 class MyClient:
@@ -40,12 +41,31 @@ Secrets are resolved in this order:
 
 Use `secret("KEY")` to access. Never use `os.environ` — tool secrets are scoped.
 
+## Sandbox CLI shims
+
+Agent sandboxes install tool CLIs from `[project.scripts]` at startup through
+`services/sandbox/install_tool_shims.py`. To make a tool visible to agents,
+declare a script and verify it appears in the sandbox catalog:
+
+```toml
+[project.scripts]
+my-tool = "my_tool.cli:app"
+```
+
+```bash
+centaur-tools list
+my-tool --help
+```
+
+
 ## Available Plugins
 
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 
 - `centaur_investigator`: parse Centaur Slack thread references and enrich them
   with best-effort vlogs/vmetrics context without exposing message context.
+- `preqin`: query Preqin Operational API fund and fund-manager data, with
+  redacted auth diagnostics for `PREQIN_*` credentials.
 
 ## Sandbox Tool Paths
 

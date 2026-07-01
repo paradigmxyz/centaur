@@ -9,6 +9,28 @@ from rich.table import Table
 app = typer.Typer(
     name="crunchbase", help="Crunchbase Enterprise API CLI for company and funding data"
 )
+
+
+@app.command("health")
+def health():
+    """Assert crunchbase connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_deleted_entities()
+        payload = {"ok": True, "tool": "crunchbase", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "crunchbase", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 ORG_DEFAULT_FIELDS = [

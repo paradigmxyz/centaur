@@ -184,15 +184,12 @@ impl AgentSandboxBackend {
         let pg = self.resolved_pg();
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
 
-        Ok(Some(ResolvedIronProxy {
-            proxy_host: iron_proxy_service_name(id),
-            proxy_pod_name: new_iron_proxy_pod_name(id),
-            proxy_port: PROXY_TUNNEL_PORT,
+        Ok(Some(self.resolved_iron_proxy_for_principal(
+            id,
             principal_id,
             pg,
             replace_placeholders,
-            management_api_key: new_proxy_management_api_key(),
-        }))
+        )))
     }
 
     /// Read the principal's effective config from iron-control for the
@@ -264,7 +261,22 @@ impl AgentSandboxBackend {
         };
         let pg = self.resolved_pg();
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
-        Ok(Some(ResolvedIronProxy {
+        Ok(Some(self.resolved_iron_proxy_for_principal(
+            id,
+            principal_id,
+            pg,
+            replace_placeholders,
+        )))
+    }
+
+    fn resolved_iron_proxy_for_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: String,
+        pg: Option<ResolvedPg>,
+        replace_placeholders: BTreeMap<String, String>,
+    ) -> ResolvedIronProxy {
+        ResolvedIronProxy {
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
@@ -272,7 +284,7 @@ impl AgentSandboxBackend {
             pg,
             replace_placeholders,
             management_api_key: new_proxy_management_api_key(),
-        }))
+        }
     }
 
     pub(crate) async fn create_iron_proxy_resources(
@@ -312,7 +324,10 @@ impl AgentSandboxBackend {
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy pod", err))?;
-        self.wait_until_proxy_running(resolved).await
+        self.wait_until_proxy_running(resolved).await?;
+        self.wait_for_cold_proxy_principal_applied(id, &resolved.principal_id)
+            .await;
+        Ok(())
     }
 
     /// Register a per-sandbox proxy in iron-control and return the env (URL +
@@ -445,9 +460,21 @@ impl AgentSandboxBackend {
                 backend: crate::BACKEND_NAME,
                 operation: "assign_iron_control_proxy_principal",
             })?;
-        let proxy_id = self.proxy_id_for_sandbox(id).await?.ok_or_else(|| {
+        let mut proxy_id = self.proxy_id_for_sandbox(id).await?;
+        if proxy_id.is_none() || !self.has_usable_iron_proxy_resources(id).await? {
+            tracing::warn!(
+                sandbox_id = id.as_str(),
+                principal_id,
+                "iron-proxy resources are missing or not running; recreating before assignment"
+            );
+            proxy_id = Some(
+                self.recreate_iron_proxy_resources_for_principal(id, principal_id)
+                    .await?,
+            );
+        }
+        let proxy_id = proxy_id.ok_or_else(|| {
             SandboxError::backend(format!(
-                "iron-control proxy id for sandbox {} was not found",
+                "iron-control proxy id for sandbox {} was not found after repair",
                 id.as_str()
             ))
         })?;
@@ -467,6 +494,96 @@ impl AgentSandboxBackend {
         Ok(())
     }
 
+    pub(crate) async fn ensure_proxy_resources_for_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<()> {
+        if self.config.iron_proxy.is_none() {
+            return Ok(());
+        }
+        if self.config.iron_control.is_none() {
+            return Err(SandboxError::Unsupported {
+                backend: crate::BACKEND_NAME,
+                operation: "ensure_iron_control_proxy_resources",
+            });
+        }
+        let proxy_id = self.proxy_id_for_sandbox(id).await?;
+        if proxy_id.is_some() && self.has_usable_iron_proxy_resources(id).await? {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            sandbox_id = id.as_str(),
+            principal_id,
+            "iron-proxy resources are missing or not running; recreating before reuse"
+        );
+        self.recreate_iron_proxy_resources_for_principal(id, principal_id)
+            .await?;
+        self.patch_iron_control_principal_annotation(id, principal_id)
+            .await?;
+        Ok(())
+    }
+
+    async fn recreate_iron_proxy_resources_for_principal(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+    ) -> SandboxResult<String> {
+        if self.config.iron_proxy.is_none() {
+            return Err(SandboxError::Unsupported {
+                backend: crate::BACKEND_NAME,
+                operation: "assign_iron_control_proxy_principal",
+            });
+        }
+        let sandbox = match self.sandboxes().get(id.as_str()).await {
+            Ok(sandbox) => Some(sandbox),
+            Err(err) if is_not_found(&err) => None,
+            Err(err) => return Err(map_kube_error("get sandbox for iron-proxy repair", err)),
+        };
+        let pg = self.resolved_pg_for_repair(sandbox.as_ref());
+        let principal_id = principal_id.to_owned();
+        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
+        let resolved =
+            self.resolved_iron_proxy_for_principal(id, principal_id, pg, replace_placeholders);
+        self.create_iron_proxy_resources(id, Some(&resolved))
+            .await?;
+        if let Some(sandbox) = sandbox
+            && let Err(error) = self.adopt_iron_proxy_resources(id, &sandbox).await
+        {
+            tracing::warn!(
+                sandbox_id = id.as_str(),
+                %error,
+                "failed to set ownerReferences on recreated iron-proxy resources"
+            );
+        }
+        self.proxy_ids
+            .lock()
+            .await
+            .get(id.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                SandboxError::backend(format!(
+                    "iron-control proxy id for sandbox {} was not recorded after repair",
+                    id.as_str()
+                ))
+            })
+    }
+
+    fn resolved_pg_for_repair(&self, sandbox: Option<&crate::crd::Sandbox>) -> Option<ResolvedPg> {
+        let fallback = self.resolved_pg()?;
+        sandbox
+            .and_then(|sandbox| {
+                pg_from_sandbox_env(
+                    sandbox,
+                    &self.config.container_name,
+                    &fallback.listen,
+                    fallback.port,
+                )
+            })
+            .or(Some(fallback))
+    }
+
     /// Barrier between reassigning the proxy principal in iron-control and
     /// returning the claimed sandbox: the caller writes stdin (and the harness
     /// fires its first credentialed call) immediately after, so the proxy must
@@ -478,27 +595,115 @@ impl AgentSandboxBackend {
     /// brief 503 window rather than a failed execution.
     async fn wait_for_proxy_principal_applied(&self, id: &SandboxId, principal_id: &str) {
         let started = Instant::now();
-        let endpoint = match self.proxy_management_endpoint(id).await {
-            Ok(Some(endpoint)) => endpoint,
-            Ok(None) => {
+        match self
+            .proxy_principal_ack(id, principal_id, "claim barrier")
+            .await
+        {
+            Ok(ProxyAck::Applied) => {
+                tracing::info!(
+                    sandbox_id = id.as_str(),
+                    principal_id,
+                    barrier = "claim barrier",
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "iron-proxy acknowledged the claimed principal's config"
+                );
+            }
+            Ok(ProxyAck::ManagementUnavailable) => {
+                tracing::info!(
+                    sandbox_id = id.as_str(),
+                    "iron-proxy management API is unavailable (image without \
+                     managed status support?); using the fixed reassign delay"
+                );
+                sleep(proxy_fallback_delay_remaining(started.elapsed())).await;
+            }
+            Ok(ProxyAck::TimedOut) => {
+                // The ack timeout already waited longer than the fixed
+                // fallback delay, so do not add another sleep here.
                 tracing::warn!(
                     sandbox_id = id.as_str(),
-                    "no running iron-proxy pod found for the claim barrier; \
-                     using the fixed reassign delay"
+                    principal_id,
+                    "iron-proxy did not acknowledge the claimed principal's \
+                     config before the deadline; proceeding (managed proxies \
+                     fail closed until synced)"
                 );
-                sleep(PROXY_REASSIGN_FALLBACK_DELAY).await;
-                return;
             }
             Err(error) => {
                 tracing::warn!(
                     sandbox_id = id.as_str(),
                     %error,
-                    "failed to look up the iron-proxy management endpoint; \
-                     using the fixed reassign delay"
+                    "failed to check the iron-proxy management API for the \
+                     claim barrier; using the fixed reassign delay"
                 );
-                sleep(PROXY_REASSIGN_FALLBACK_DELAY).await;
-                return;
+                sleep(proxy_fallback_delay_remaining(started.elapsed())).await;
             }
+        }
+    }
+
+    /// Cold-created sandboxes do not go through the warm-pool claim barrier,
+    /// but the harness can make credentialed calls immediately after create
+    /// returns. Ask the proxy to report the requested principal's config before
+    /// creating the sandbox pod. If the management API cannot prove readiness,
+    /// fall back to the fixed delay instead of failing the sandbox create.
+    async fn wait_for_cold_proxy_principal_applied(&self, id: &SandboxId, principal_id: &str) {
+        let started = Instant::now();
+        match self
+            .proxy_principal_ack(id, principal_id, "cold create barrier")
+            .await
+        {
+            Ok(ProxyAck::Applied) => {
+                tracing::info!(
+                    sandbox_id = id.as_str(),
+                    principal_id,
+                    barrier = "cold create barrier",
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "iron-proxy acknowledged the claimed principal's config"
+                );
+            }
+            Ok(ProxyAck::ManagementUnavailable) => {
+                tracing::info!(
+                    sandbox_id = id.as_str(),
+                    "iron-proxy management API is unavailable (image without \
+                     managed status support?); using the fixed cold-create delay"
+                );
+                sleep(proxy_fallback_delay_remaining(started.elapsed())).await;
+            }
+            Ok(ProxyAck::TimedOut) => {
+                // The ack timeout already waited longer than the fixed
+                // fallback delay, so do not add another sleep here.
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    principal_id,
+                    "iron-proxy did not acknowledge the cold-created principal's \
+                     config before the deadline; proceeding (managed proxies \
+                     fail closed until synced)"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    %error,
+                    "failed to check the iron-proxy management API for the \
+                     cold create barrier; using the fixed cold-create delay"
+                );
+                sleep(proxy_fallback_delay_remaining(started.elapsed())).await;
+            }
+        }
+    }
+
+    async fn proxy_principal_ack(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+        barrier: &'static str,
+    ) -> SandboxResult<ProxyAck> {
+        let endpoint = match self.proxy_management_endpoint(id).await {
+            Ok(Some(endpoint)) => endpoint,
+            Ok(None) => {
+                return Err(SandboxError::NotReady(format!(
+                    "no running iron-proxy pod found for the {barrier}"
+                )));
+            }
+            Err(error) => return Err(error),
         };
         let Ok(client) = reqwest::Client::builder()
             // Pod-IP call inside the cluster: never route via env-configured
@@ -508,10 +713,11 @@ impl AgentSandboxBackend {
             .timeout(Duration::from_secs(2))
             .build()
         else {
-            sleep(PROXY_REASSIGN_FALLBACK_DELAY).await;
-            return;
+            return Err(SandboxError::backend(
+                "failed to build iron-proxy management client",
+            ));
         };
-        match wait_for_proxy_ack(
+        Ok(wait_for_proxy_ack(
             &client,
             &endpoint,
             principal_id,
@@ -519,34 +725,7 @@ impl AgentSandboxBackend {
             PROXY_ACK_PROBE_WINDOW,
             PROXY_ACK_POLL_INTERVAL,
         )
-        .await
-        {
-            ProxyAck::Applied => {
-                tracing::info!(
-                    sandbox_id = id.as_str(),
-                    principal_id,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "iron-proxy acknowledged the claimed principal's config"
-                );
-            }
-            ProxyAck::ManagementUnavailable => {
-                tracing::info!(
-                    sandbox_id = id.as_str(),
-                    "iron-proxy management API is unavailable (image without \
-                     managed status support?); using the fixed reassign delay"
-                );
-                sleep(PROXY_REASSIGN_FALLBACK_DELAY.saturating_sub(started.elapsed())).await;
-            }
-            ProxyAck::TimedOut => {
-                tracing::warn!(
-                    sandbox_id = id.as_str(),
-                    principal_id,
-                    "iron-proxy did not acknowledge the claimed principal's \
-                     config before the deadline; proceeding (managed proxies \
-                     fail closed until synced)"
-                );
-            }
-        }
+        .await)
     }
 
     /// Locate the management API of the sandbox's running proxy pod. The
@@ -602,6 +781,26 @@ impl AgentSandboxBackend {
             }
         }
         Ok(None)
+    }
+
+    async fn has_usable_iron_proxy_resources(&self, id: &SandboxId) -> SandboxResult<bool> {
+        let params = ListParams::default().labels(&format!(
+            "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+            id.as_str()
+        ));
+        let pods = self
+            .pods()
+            .list(&params)
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
+        if !pods.items.iter().any(pod_running) {
+            return Ok(false);
+        }
+        match self.services().get(&iron_proxy_service_name(id)).await {
+            Ok(_) => Ok(true),
+            Err(err) if is_not_found(&err) => Ok(false),
+            Err(err) => Err(map_kube_error("get iron-proxy service", err)),
+        }
     }
 
     async fn patch_iron_control_principal_annotation(
@@ -708,6 +907,10 @@ enum ProxyAck {
     /// The management API answered but the expected principal's config was
     /// not applied before the deadline.
     TimedOut,
+}
+
+fn proxy_fallback_delay_remaining(elapsed: Duration) -> Duration {
+    PROXY_REASSIGN_FALLBACK_DELAY.saturating_sub(elapsed)
 }
 
 /// Poll the proxy's management API until it reports `principal_id`'s config
@@ -1257,6 +1460,46 @@ fn env_value(spec: &SandboxSpec, name: &str) -> Option<String> {
         .map(|env| env.value.clone())
 }
 
+fn pg_from_sandbox_env(
+    sandbox: &crate::crd::Sandbox,
+    container_name: &str,
+    listen: &str,
+    port: u16,
+) -> Option<ResolvedPg> {
+    let container = sandbox
+        .spec
+        .pod_template
+        .spec
+        .containers
+        .iter()
+        .find(|container| container.name == container_name)
+        .or_else(|| sandbox.spec.pod_template.spec.containers.first())?;
+    let dsn = container
+        .env
+        .as_ref()?
+        .iter()
+        .find(|env| env.name == CENTAUR_POSTGRES_DSN_ENV)
+        .and_then(|env| env.value.as_deref())?;
+    pg_from_sandbox_dsn(dsn, listen, port)
+}
+
+fn pg_from_sandbox_dsn(dsn: &str, listen: &str, port: u16) -> Option<ResolvedPg> {
+    let rest = dsn
+        .strip_prefix("postgresql://")
+        .or_else(|| dsn.strip_prefix("postgres://"))?;
+    let auth = rest.split_once('@')?.0;
+    let (user, password) = auth.split_once(':')?;
+    if user.is_empty() || password.is_empty() {
+        return None;
+    }
+    Some(ResolvedPg {
+        listen: listen.to_owned(),
+        port,
+        user: user.to_owned(),
+        password: password.to_owned(),
+    })
+}
+
 fn current_env_values<const N: usize>(spec: &SandboxSpec, names: [&str; N]) -> Vec<String> {
     names
         .into_iter()
@@ -1601,6 +1844,27 @@ mod tests {
     }
 
     #[test]
+    fn pg_repair_reuses_credentials_from_existing_sandbox_dsn() {
+        let pg = pg_from_sandbox_dsn(
+            "postgresql://pg-user-original:pg-password-original@asbx-test-iron-proxy:5432",
+            "0.0.0.0:5432",
+            5432,
+        )
+        .unwrap();
+
+        assert_eq!(pg.listen, "0.0.0.0:5432");
+        assert_eq!(pg.port, 5432);
+        assert_eq!(pg.user, "pg-user-original");
+        assert_eq!(pg.password, "pg-password-original");
+    }
+
+    #[test]
+    fn pg_repair_ignores_unparseable_sandbox_dsn() {
+        assert!(pg_from_sandbox_dsn("not-a-postgres-dsn", "0.0.0.0:5432", 5432).is_none());
+        assert!(pg_from_sandbox_dsn("postgresql://@host:5432", "0.0.0.0:5432", 5432).is_none());
+    }
+
+    #[test]
     fn proxy_policy_allows_api_pods_to_management_port() {
         let id = SandboxId::new("asbx-test");
         let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
@@ -1858,6 +2122,18 @@ mod tests {
         .await;
 
         assert_eq!(ack, ProxyAck::ManagementUnavailable);
+    }
+
+    #[test]
+    fn proxy_fallback_delay_subtracts_elapsed_probe_time() {
+        assert_eq!(
+            proxy_fallback_delay_remaining(Duration::from_secs(2)),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            proxy_fallback_delay_remaining(Duration::from_secs(10)),
+            Duration::ZERO
+        );
     }
 
     #[test]

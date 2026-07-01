@@ -8,10 +8,31 @@ load_dotenv()
 
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
-
-from centaur_sdk import Table  # noqa: E402
+from rich.table import Table  # noqa: E402
 
 app = typer.Typer(name="discord", help="Discord self-token CLI for AI agents")
+
+
+@app.command("health")
+def health():
+    """Assert discord connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_me()
+        payload = {"ok": True, "tool": "discord", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "discord", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -66,7 +87,9 @@ def servers(
     table.add_column("ID", style="dim")
     table.add_column("Members", style="green")
     for guild in results:
-        table.add_row(guild.get("name", ""), guild.get("id", ""), str(guild.get("member_count", "")))
+        table.add_row(
+            guild.get("name", ""), guild.get("id", ""), str(guild.get("member_count", ""))
+        )
     console.print(table)
 
 
@@ -177,6 +200,9 @@ def post(
     channel: str = typer.Argument(..., help="Channel name or ID"),
     message: str = typer.Argument(..., help="Message text"),
     reply_to: str = typer.Option(None, "--reply-to", "-r", help="Message ID to reply to"),
+    suppress_embeds: bool = typer.Option(
+        False, "--suppress-embeds", help="Suppress link/embed unfurling on the message"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """Post a message to a channel."""
@@ -184,10 +210,40 @@ def post(
         channel=channel,
         content=message,
         reply_to_message_id=reply_to,
+        suppress_embeds=suppress_embeds,
     )
     if _emit(result, json_output):
         return
-    console.print(f"[green]Sent[/] message {result.get('id')} to channel {result.get('channel_id')}")
+    console.print(
+        f"[green]Sent[/] message {result.get('id')} to channel {result.get('channel_id')}"
+    )
+
+
+@app.command("create-thread")
+def create_thread(
+    channel: str = typer.Argument(..., help="Channel name or ID"),
+    name: str = typer.Argument(..., help="Thread name"),
+    from_message: str = typer.Option(
+        None, "--from-message", "-m", help="Message ID to branch the thread from"
+    ),
+    content: str = typer.Option(
+        None, "--content", "-c", help="First message to post in a standalone thread"
+    ),
+    private: bool = typer.Option(False, "--private", help="Create a private thread"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Create a thread in a channel."""
+    result = _get_client().create_thread(
+        channel=channel,
+        name=name,
+        from_message_id=from_message,
+        content=content,
+        private=private,
+    )
+    if _emit(result, json_output):
+        return
+    console.print(f"[green]Created thread[/] {result.get('name')} ({result.get('id')})")
+    console.print(f"[dim]{result.get('url')}[/]")
 
 
 if __name__ == "__main__":

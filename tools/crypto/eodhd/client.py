@@ -4,18 +4,17 @@ from typing import Any
 
 import httpx
 
+from centaur_sdk.tool_sdk import secret
+
 BASE_URL = "https://eodhd.com/api"
 
 
 class EodhdClient:
-
     def __init__(self, api_key: str | None = None):
         self._api_key = api_key or secret("EODHD_API_KEY", "")
         if not self._api_key:
             raise RuntimeError(
-                "EODHD API key not set.\n"
-                "Required: EODHD_API_KEY\n"
-                "Get a key at https://eodhd.com/"
+                "EODHD API key not set.\nRequired: EODHD_API_KEY\nGet a key at https://eodhd.com/"
             )
 
     def _request(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -71,6 +70,4 @@ class EodhdClient:
 
 
 def _client() -> EodhdClient:
-    from centaur_sdk.tool_sdk import secret
-
     return EodhdClient(api_key=secret("EODHD_API_KEY"))

@@ -14,6 +14,7 @@ class Principal < ApplicationRecord
   has_many :sync_config_snapshots, class_name: "PrincipalSyncConfigSnapshot", dependent: :destroy
   belongs_to :created_by, class_name: "User"
 
+  after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
@@ -152,6 +153,10 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def auto_grant_matching_oauth_credentials
+    PrincipalCredentialReconciliation.new.apply_for_principal(self)
+  end
 
   # The credentials actually delivered to the proxy, grouped by type, after
   # cross-type conflict resolution. Static secrets without a deliverable source

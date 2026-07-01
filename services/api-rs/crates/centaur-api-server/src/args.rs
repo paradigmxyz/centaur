@@ -27,7 +27,7 @@ use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode};
+use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode, SessionSandboxCleanupConfig};
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{error, info, warn};
@@ -92,6 +92,10 @@ impl Args {
 
     pub(crate) fn sandbox_reaper_config(&self) -> SandboxReaperConfig {
         self.sandbox.sandbox_reaper_config()
+    }
+
+    pub(crate) fn sandbox_cleanup_config(&self) -> SessionSandboxCleanupConfig {
+        self.sandbox.sandbox_cleanup_config()
     }
 
     pub(crate) async fn workflow_host_sandbox_runtime(
@@ -608,21 +612,13 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
-    /// Stop sandboxes that have been idle-paused longer than this. 0 disables
-    /// the idle sweep.
-    #[arg(
-        long = "session-sandbox-idle-stop-ttl-secs",
-        env = "SESSION_SANDBOX_IDLE_STOP_TTL_SECS",
-        default_value_t = 3600
-    )]
-    sandbox_idle_stop_ttl_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
     #[arg(
         long = "session-sandbox-max-lifetime-secs",
         env = "SESSION_SANDBOX_MAX_LIFETIME_SECS",
-        default_value_t = 86_400
+        default_value_t = 259_200
     )]
     sandbox_max_lifetime_secs: u64,
     #[arg(
@@ -632,6 +628,18 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     sandbox_reap_interval_secs: u64,
+    #[arg(
+        long = "session-sandbox-cleanup-interval-secs",
+        env = "SESSION_SANDBOX_CLEANUP_INTERVAL_SECS",
+        default_value_t = 300
+    )]
+    sandbox_cleanup_interval_secs: u64,
+    #[arg(
+        long = "session-sandbox-idle-cleanup-backstop-secs",
+        env = "SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS",
+        default_value_t = 21_600
+    )]
+    sandbox_idle_cleanup_backstop_secs: u64,
     #[arg(
         long = "session-sandbox-k8s-context",
         alias = "kubernetes-context",
@@ -647,6 +655,8 @@ struct SandboxArgs {
     centaur_api_url: Option<String>,
     #[arg(long = "repos-path", env = "REPOS_PATH")]
     repos_path: Option<String>,
+    #[arg(long = "repos-pvc", env = "REPOS_PVC")]
+    repos_pvc: Option<String>,
     #[arg(
         long = "session-sandbox-passthrough-env",
         env = "SESSION_SANDBOX_PASSTHROUGH_ENV",
@@ -906,13 +916,7 @@ impl SandboxArgs {
             && let Some(repos_path) = clean_optional_value(self.repos_path.as_deref())
         {
             spec = spec.mount(
-                Mount::new(
-                    MountKind::Bind {
-                        source_path: repos_path,
-                    },
-                    SANDBOX_REPOS_MOUNT_PATH,
-                )
-                .read_only(),
+                Mount::new(self.repos_mount_kind(repos_path), SANDBOX_REPOS_MOUNT_PATH).read_only(),
             );
         }
         for (name, value) in self.workflow_host_env_template()? {
@@ -987,13 +991,8 @@ impl SandboxArgs {
                 );
                 if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
                     workload = workload.mount(
-                        Mount::new(
-                            MountKind::Bind {
-                                source_path: repos_path,
-                            },
-                            SANDBOX_REPOS_MOUNT_PATH,
-                        )
-                        .read_only(),
+                        Mount::new(self.repos_mount_kind(repos_path), SANDBOX_REPOS_MOUNT_PATH)
+                            .read_only(),
                     );
                 }
                 Ok(workload)
@@ -1001,15 +1000,17 @@ impl SandboxArgs {
         }
     }
 
+    fn repos_mount_kind(&self, repos_path: String) -> MountKind {
+        if let Some(claim_name) = clean_optional_value(self.repos_pvc.as_deref()) {
+            return MountKind::NamedVolume(claim_name);
+        }
+        MountKind::Bind {
+            source_path: repos_path,
+        }
+    }
+
     fn codex_app_server_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let mut envs = vec![(
-            "CENTAUR_API_URL".to_owned(),
-            self.centaur_api_url_override
-                .as_deref()
-                .or(self.centaur_api_url.as_deref())
-                .unwrap_or("http://api:8000")
-                .to_owned(),
-        )];
+        let mut envs = vec![("CENTAUR_API_URL".to_owned(), self.centaur_api_url())];
 
         // Single source of truth: propagate this control plane's harness auth
         // modes into the sandbox so the agent's auth.json matches the
@@ -1192,7 +1193,7 @@ impl SandboxArgs {
     }
 
     fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let mut envs = Vec::new();
+        let mut envs = vec![("CENTAUR_API_URL".to_owned(), self.centaur_api_url())];
 
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             envs.push((name, value));
@@ -1234,6 +1235,14 @@ impl SandboxArgs {
         }
 
         Ok(envs)
+    }
+
+    fn centaur_api_url(&self) -> String {
+        self.centaur_api_url_override
+            .as_deref()
+            .or(self.centaur_api_url.as_deref())
+            .unwrap_or("http://api:8000")
+            .to_owned()
     }
 
     fn passthrough_env_names(&self) -> impl Iterator<Item = &str> {
@@ -1291,8 +1300,15 @@ impl SandboxArgs {
         let ttl = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
         SandboxReaperConfig {
             interval: Duration::from_secs(self.sandbox_reap_interval_secs),
-            idle_ttl: ttl(self.sandbox_idle_stop_ttl_secs),
             max_lifetime: ttl(self.sandbox_max_lifetime_secs),
+        }
+    }
+
+    fn sandbox_cleanup_config(&self) -> SessionSandboxCleanupConfig {
+        let duration = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
+        SessionSandboxCleanupConfig {
+            interval: duration(self.sandbox_cleanup_interval_secs),
+            idle_backstop: duration(self.sandbox_idle_cleanup_backstop_secs),
         }
     }
 }
@@ -1475,6 +1491,22 @@ struct ToolsArgs {
         env = "KUBERNETES_TOOLS_REPO_CACHE_PATH"
     )]
     repo_cache_path: Option<String>,
+    // Optional PVC claim backing the repo-cache root. When set, sandbox pods mount
+    // the repo cache from this PVC instead of using a hostPath.
+    #[arg(
+        id = "tools_repo_cache_pvc",
+        long = "kubernetes-tools-repo-cache-pvc",
+        env = "KUBERNETES_TOOLS_REPO_CACHE_PVC"
+    )]
+    repo_cache_pvc: Option<String>,
+    #[arg(
+        id = "tools_auto_reload",
+        long = "kubernetes-tools-auto-reload",
+        env = "KUBERNETES_TOOLS_AUTO_RELOAD",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    auto_reload: bool,
     #[arg(
         id = "tools_extra_sources",
         long = "kubernetes-tools-extra-sources",
@@ -1527,6 +1559,8 @@ impl ToolsArgs {
             });
         }
         config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
+        config.repo_cache_pvc = clean_optional_value(self.repo_cache_pvc.as_deref());
+        config.auto_reload = self.auto_reload;
         config.extra_sources = self.extra_sources();
         Some(config)
     }
@@ -2131,6 +2165,19 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_reaper_defaults_delete_after_max_lifetime() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        let config = args.sandbox_reaper_config();
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(259_200)));
+    }
+
+    #[test]
     fn accepts_kubernetes_aliases_for_sandbox_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2213,9 +2260,34 @@ mod tests {
             tools.repo_cache_path.as_deref(),
             Some("/var/lib/centaur/repos")
         );
+        assert!(tools.auto_reload);
         let token = tools.github_token.expect("token should be Some");
         assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
         assert_eq!(token.secret_key, "token");
+    }
+
+    #[test]
+    fn tools_config_reads_auto_reload_flag() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-auto-reload",
+            "false",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        let tools = config.tools.expect("tools should be Some");
+        assert!(!tools.auto_reload);
     }
 
     #[test]
@@ -2325,6 +2397,32 @@ mod tests {
     }
 
     #[test]
+    fn agent_k8s_workflow_host_mounts_repos_pvc_read_only() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+            "--repos-pvc",
+            "centaur-repo-cache",
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_REPOS_MOUNT_PATH
+                && mount.read_only
+                && mount.kind == MountKind::NamedVolume("centaur-repo-cache".to_owned())
+        }));
+    }
+
+    #[test]
     fn workflow_host_env_template_splits_passthrough_env_from_environment() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[
@@ -2341,6 +2439,8 @@ mod tests {
             "postgres://postgres:postgres@localhost/centaur",
             "--session-sandbox-backend",
             "agent-k8s",
+            "--session-sandbox-centaur-api-url",
+            "http://centaur-api-rs:8080",
             "--kubernetes-sandbox-iron-proxy-mode",
             "disabled",
         ])
@@ -2348,6 +2448,13 @@ mod tests {
 
         let spec = args.sandbox.workflow_host_spec(None).unwrap();
 
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "CENTAUR_API_URL")
+                .map(|env| env.value.as_str()),
+            Some("http://centaur-api-rs:8080")
+        );
         assert_eq!(
             spec.env
                 .iter()
@@ -2731,6 +2838,33 @@ mod tests {
                     == (MountKind::Bind {
                         source_path: "/var/lib/centaur/repos".to_owned(),
                     })
+        }));
+    }
+
+    #[test]
+    fn codex_workload_mounts_repos_pvc_read_only() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-workload",
+            "codex-app-server",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+            "--repos-pvc",
+            "centaur-repo-cache",
+        ])
+        .unwrap();
+
+        let workload = args.sandbox.container_workload_mode().unwrap();
+        let SandboxWorkloadMode::CodexAppServer { mounts, .. } = workload else {
+            panic!("expected codex app server workload");
+        };
+
+        assert!(mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_REPOS_MOUNT_PATH
+                && mount.read_only
+                && mount.kind == MountKind::NamedVolume("centaur-repo-cache".to_owned())
         }));
     }
 

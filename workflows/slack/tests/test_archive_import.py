@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import json
 import sys
 import types
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -26,16 +28,35 @@ def _load_archive_import():
     api_module.workflow_engine = workflow_engine
     sys.modules["api.workflow_engine"] = workflow_engine
 
-    vm_metrics = types.ModuleType("api.vm_metrics")
+    slack_metrics = types.ModuleType("workflows.slack.metrics")
     for name in (
+        "observe_slack_archive_import_batch_duration",
+        "observe_slack_archive_import_duration",
+        "record_slack_archive_import_attachments",
+        "record_slack_archive_import_batch_failure",
+        "record_slack_archive_import_batch_size",
+        "record_slack_archive_import_bytes",
+        "record_slack_archive_import_channels",
+        "record_slack_archive_import_failure",
+        "record_slack_archive_import_message_files",
+        "record_slack_archive_import_messages",
+        "record_slack_archive_import_run",
+        "record_slack_archive_import_skipped_items",
+        "record_slack_archive_import_users",
         "record_slack_etl_rate_limit",
+        "set_slack_archive_import_last_failure_timestamp",
+    ):
+        setattr(slack_metrics, name, lambda *_args, **_kwargs: None)
+    sys.modules["workflows.slack.metrics"] = slack_metrics
+
+    etl_metrics = types.ModuleType("workflows.etl_metrics")
+    for name in (
         "set_etl_active_scopes",
         "set_etl_failed_scopes",
         "set_etl_scope_sync_freshness_seconds",
     ):
-        setattr(vm_metrics, name, lambda *_args, **_kwargs: None)
-    api_module.vm_metrics = vm_metrics
-    sys.modules["api.vm_metrics"] = vm_metrics
+        setattr(etl_metrics, name, lambda *_args, **_kwargs: None)
+    sys.modules["workflows.etl_metrics"] = etl_metrics
 
     centaur_sdk = sys.modules.setdefault("centaur_sdk", types.ModuleType("centaur_sdk"))
     centaur_sdk.secret = lambda _name, default=None: default
@@ -349,3 +370,76 @@ def test_archive_upsert_sql_preserves_live_fields():
     assert "content_bytes =" not in attachment_update
     assert "content_sha256 =" not in attachment_update
     assert "download_status = CASE WHEN" in attachment_update
+
+
+def test_request_archive_download_url_uses_api_presign_endpoint(monkeypatch):
+    opened_requests = []
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        opened_requests.append((request, timeout))
+        return FakeResponse(
+            json.dumps(
+                {
+                    "ok": True,
+                    "download": {
+                        "download_url": "https://r2.example/presigned-download"
+                    },
+                }
+            ).encode()
+        )
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://centaur-api-rs:8080/")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    download_url = archive_import._request_archive_download_url("sai id/with/slash")
+
+    assert download_url == "https://r2.example/presigned-download"
+    request, timeout = opened_requests[0]
+    assert timeout == 30
+    assert request.get_method() == "POST"
+    assert (
+        request.full_url
+        == "http://centaur-api-rs:8080/api/admin/slack/archive-imports/"
+        "sai%20id%2Fwith%2Fslash/download-url"
+    )
+
+
+def test_download_archive_streams_api_presigned_url(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_request_archive_download_url(import_id):
+        calls.append(("presign", import_id))
+        return "https://r2.example/presigned-download"
+
+    def fake_download_url_to_path(download_url, destination):
+        calls.append(("download", download_url, destination))
+        destination.write_bytes(b"zip bytes")
+
+    monkeypatch.setattr(
+        archive_import,
+        "_request_archive_download_url",
+        fake_request_archive_download_url,
+    )
+    monkeypatch.setattr(
+        archive_import,
+        "_download_url_to_path",
+        fake_download_url_to_path,
+    )
+
+    destination = tmp_path / "archive.zip"
+    asyncio.run(
+        archive_import._download_archive({"import_id": "sai_dummy"}, destination)
+    )
+
+    assert calls == [
+        ("presign", "sai_dummy"),
+        ("download", "https://r2.example/presigned-download", destination),
+    ]
+    assert destination.read_bytes() == b"zip bytes"

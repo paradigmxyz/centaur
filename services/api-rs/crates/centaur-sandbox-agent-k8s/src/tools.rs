@@ -28,6 +28,10 @@ const AGENT_UID: i64 = 1001;
 
 /// Base tools path inside both the api-rs pod and the agent sandbox.
 pub(crate) const BASE_TOOL_DIR: &str = "/app/tools";
+/// Base Centaur tools baked into the sandbox image. Restricted sandboxes use
+/// this path so they keep first-party tool shims without mounting repo-cache or
+/// publishing overlay sources.
+pub(crate) const BAKED_BASE_TOOL_DIR: &str = "/opt/centaur/tools";
 /// emptyDir the `tools-bootstrap` init container publishes the tools tree into.
 const TOOLS_VOLUME: &str = "tools-root";
 /// Staging path where `tools-bootstrap` mounts the tools emptyDir. The agent
@@ -58,11 +62,18 @@ pub struct ToolsConfig {
     pub image_pull_policy: Option<String>,
     /// GitHub token secret for private-repo clones. `None` => unauthenticated clone.
     pub github_token: Option<GitHubTokenRef>,
-    /// Optional repo-cache root path mounted from the host. When set,
+    /// Optional repo-cache root path mounted into the sandbox. When set,
     /// tools-bootstrap publishes from `<repo_cache_path>/<repo>/<source_subdir>`
     /// and `centaur-tools refresh` republishes from the same cache instead of
-    /// fetching.
+    /// fetching. By default this path is mounted from the host; set
+    /// `repo_cache_pvc` to mount the path from a PersistentVolumeClaim instead.
     pub repo_cache_path: Option<String>,
+    /// Optional PVC backing for `repo_cache_path`. This lets Autopilot clusters use
+    /// repoCache without hostPath volumes.
+    pub repo_cache_pvc: Option<String>,
+    /// Whether running sandboxes should watch repo-cache checkouts and refresh
+    /// local tool shims when commits change.
+    pub auto_reload: bool,
     /// Additional tool sources copied after the base tree. Duplicate tool names
     /// are skipped by the copy helper.
     pub extra_sources: Vec<ToolSource>,
@@ -93,6 +104,8 @@ impl ToolsConfig {
             image_pull_policy: None,
             github_token: None,
             repo_cache_path: None,
+            repo_cache_pvc: None,
+            auto_reload: true,
             extra_sources: Vec::new(),
         }
     }
@@ -131,9 +144,21 @@ pub(crate) fn agent_tool_dirs() -> String {
     BASE_TOOL_DIR.to_owned()
 }
 
+/// `TOOL_DIRS` for restricted sandboxes that should not receive repo-cache or
+/// overlay-derived tool sources.
+pub(crate) fn baked_base_tool_dirs() -> String {
+    BAKED_BASE_TOOL_DIR.to_owned()
+}
+
 /// Agent env added for tools wiring.
 pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
     let mut env = vec![("TOOL_DIRS".to_owned(), agent_tool_dirs())];
+    if let Some(tools) = tools {
+        env.push((
+            "CENTAUR_TOOLS_AUTO_RELOAD".to_owned(),
+            tools.auto_reload.to_string(),
+        ));
+    }
     if tools
         .and_then(|tools| tools.github_token.as_ref())
         .is_some()
@@ -144,6 +169,12 @@ pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
         ));
     }
     env
+}
+
+/// Agent env for baked base tools only. No GitHub token is exposed because
+/// restricted sandboxes do not refresh from git or repo-cache.
+pub(crate) fn baked_base_agent_env() -> Vec<(String, String)> {
+    vec![("TOOL_DIRS".to_owned(), baked_base_tool_dirs())]
 }
 
 /// Routes the tools clone through the per-sandbox egress proxy. The sandbox
@@ -354,13 +385,23 @@ pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
             }));
         }
         if let Some(repo_cache_path) = &tools.repo_cache_path {
-            volumes.push(json!({
-                "name": REPO_CACHE_VOLUME,
-                "hostPath": {
-                    "path": repo_cache_path,
-                    "type": "DirectoryOrCreate",
-                },
-            }));
+            if let Some(claim_name) = &tools.repo_cache_pvc {
+                volumes.push(json!({
+                    "name": REPO_CACHE_VOLUME,
+                    "persistentVolumeClaim": {
+                        "claimName": claim_name,
+                        "readOnly": true,
+                    },
+                }));
+            } else {
+                volumes.push(json!({
+                    "name": REPO_CACHE_VOLUME,
+                    "hostPath": {
+                        "path": repo_cache_path,
+                        "type": "DirectoryOrCreate",
+                    },
+                }));
+            }
         }
     }
     volumes
@@ -401,9 +442,33 @@ mod tests {
     }
 
     #[test]
+    fn baked_base_tool_dirs_point_at_image_tools() {
+        assert_eq!(baked_base_tool_dirs(), "/opt/centaur/tools");
+    }
+
+    #[test]
     fn agent_env_sets_tool_dirs() {
         let env = agent_env(None);
         assert_eq!(env, vec![("TOOL_DIRS".to_owned(), "/app/tools".to_owned())]);
+    }
+
+    #[test]
+    fn agent_env_sets_auto_reload_from_tools_config() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.auto_reload = false;
+
+        let env = agent_env(Some(&tools));
+
+        assert!(env.contains(&("TOOL_DIRS".to_owned(), "/app/tools".to_owned())));
+        assert!(env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "false".to_owned())));
+    }
+
+    #[test]
+    fn baked_base_agent_env_sets_baked_tool_dirs() {
+        assert_eq!(
+            baked_base_agent_env(),
+            vec![("TOOL_DIRS".to_owned(), "/opt/centaur/tools".to_owned())]
+        );
     }
 
     #[test]
@@ -542,6 +607,26 @@ mod tests {
     }
 
     #[test]
+    fn tools_init_can_mount_repo_cache_from_pvc() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        tools.repo_cache_pvc = Some("centaur-repo-cache".to_owned());
+
+        let volumes = volumes_json(Some(&tools));
+        let volume = volumes
+            .iter()
+            .find(|volume| volume["name"] == REPO_CACHE_VOLUME)
+            .expect("repo-cache volume");
+
+        assert_eq!(
+            volume["persistentVolumeClaim"]["claimName"],
+            "centaur-repo-cache"
+        );
+        assert_eq!(volume["persistentVolumeClaim"]["readOnly"], true);
+        assert!(volume.get("hostPath").is_none());
+    }
+
+    #[test]
     fn tools_init_with_token_wires_askpass_and_secret_volume() {
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
         tools.github_token = Some(GitHubTokenRef {
@@ -602,6 +687,7 @@ mod tests {
         });
 
         let env = agent_env(Some(&tools));
+        assert!(env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "true".to_owned())));
         assert!(env.contains(&(
             "CENTAUR_TOOLS_GITHUB_TOKEN_FILE".to_owned(),
             "/tools-github-token/token".to_owned()

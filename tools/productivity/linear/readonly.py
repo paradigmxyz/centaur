@@ -377,8 +377,8 @@ class LinearReadonlyClient(LinearGraphQLClient):
     def search_issues(self, query_str: str, limit: int = 25) -> list[dict[str, Any]]:
         """Search issues by text."""
         query = """
-        query SearchIssues($query: String!, $first: Int!, $after: String) {
-            searchIssues(query: $query, first: $first, after: $after) {
+        query SearchIssues($term: String!, $first: Int!, $after: String) {
+            searchIssues(term: $term, first: $first, after: $after) {
                 nodes {
                     id
                     identifier
@@ -396,7 +396,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
         return self._connection_nodes(
             query,
             connection_path=("searchIssues",),
-            variables={"query": query_str},
+            variables={"term": query_str},
             limit=limit,
         )
 

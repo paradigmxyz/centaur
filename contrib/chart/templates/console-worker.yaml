@@ -2,6 +2,7 @@
 {{- if and $console.enabled $console.worker.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 # console background job worker — runs Solid Queue (`bin/jobs`) so
 # console's enqueued jobs actually execute. The most important of these is
 # the broker-credential OAuth refresh loop, which mints and refreshes the access
@@ -135,8 +136,16 @@ spec:
 {{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
+{{- with $console.slackDmSync.oauthAppSlug }}
+            - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
+              value: {{ . | quote }}
+{{- end }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
+{{- if .Values.apiRs.enabled }}
+            - name: CENTAUR_CONSOLE_CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+{{- end }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             # No readOnlyRootFilesystem — Rails writes to tmp/ at runtime.
@@ -169,6 +178,15 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+{{- end }}
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
 {{- end }}
     # Outbound HTTPS to OAuth token endpoints for the broker refresh loop.
     - ports:

@@ -195,6 +195,7 @@ impl CodexTurnNormalizer {
                     self.emit_tool_result(result, &mut out)?;
                 }
             }
+            NormalizedEvent::TokenUsage { .. } => {}
             NormalizedEvent::Result { error } => {
                 if let Some(error) = error {
                     self.last_error = Some(error.clone());

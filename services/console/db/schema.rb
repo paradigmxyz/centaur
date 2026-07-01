@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_24_000100) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_25_030000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -44,6 +44,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_24_000100) do
 
   create_table "broker_credentials", force: :cascade do |t|
     t.text "access_token"
+    t.text "api_key"
     t.string "client_id"
     t.text "client_secret"
     t.datetime "created_at", null: false
@@ -258,6 +259,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_24_000100) do
     t.jsonb "labels", default: {}, null: false
     t.string "name"
     t.string "namespace", default: "default", null: false
+    t.boolean "sandbox_observability_enabled", default: true, null: false
+    t.boolean "sandbox_repo_cache_enabled", default: true, null: false
     t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"

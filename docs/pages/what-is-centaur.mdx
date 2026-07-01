@@ -23,7 +23,9 @@ Sandboxes speak a stable Anthropic-style message format with the API. Harness-sp
 
 ## Approved Tools
 
-Agents call tools through Centaur's API, not through ad hoc local credentials. Tool plugins expose typed REST endpoints, are discovered by the API, and can be extended without changing the core control plane.
+Agents call approved tool CLIs inside the sandbox, not ad hoc local
+credentials. Tool plugins are discovered by api-rs for metadata and secret
+grants, then installed in sandboxes as local CLI shims by `centaur-tools`.
 
 This creates a narrow and auditable boundary for agent capabilities. Teams decide which tools exist, how they authenticate, and what methods are available.
 
@@ -33,9 +35,15 @@ Sandboxes only ever see placeholder strings for upstream credentials. Real value
 
 ## Durable Workflows
 
-Centaur includes a Python workflow engine for long-running automation. Workflow handlers checkpoint each step, sleep or wait for external events, start child workflows, and run agent turns as part of larger processes.
+Centaur includes a durable workflow runtime for long-running automation:
+api-rs owns the Absurd-backed state machine, while `services/workflow-python`
+runs Python workflow handlers. Handlers checkpoint each step, sleep or wait for
+external events, start child workflows, and run agent turns as part of larger
+processes.
 
-This lets teams move beyond one-off prompts. A workflow can poll, branch, retry, call tools, wait for a signal, delegate to an agent turn, and resume after process restarts without rebuilding orchestration from scratch.
+This lets teams move beyond one-off prompts. A workflow can poll, branch,
+retry, invoke tools, wait for a signal, delegate to an agent turn, and resume
+after process restarts without rebuilding orchestration from scratch.
 
 ## Slack And API Surfaces
 

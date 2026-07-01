@@ -70,6 +70,12 @@
 |*NEVER run git commit/push inside* ~/github/ — it is read-only. Always use git-branch first.
 |Prefer `rg` (ripgrep) over `grep` for all codebase operations.
 
+[GitHub PR Attribution]
+|When opening a GitHub PR for a Slack request, attribute the requester in the PR body with one standalone `Prompted by: ...` line.
+|Use the [Requester Context] block when present: prefer the verified GitHub handle resolved from the requester's Slack profile; if none is configured, use the requester's Slack display name or username.
+|If [Requester Context] provides an exact `Prompted by:` line, copy that line exactly into the PR body.
+|Do not infer a GitHub username from a Slack name, email, or thread history. The credited prompter is the user who prompted the current turn, not necessarily the Slack thread root author.
+
 [Python policy — ALWAYS use uv]
 |ALWAYS use `uv run python` for inline Python and scripts. NEVER invoke `python` or `python3` directly.
 |ALWAYS use `uv run` for Python CLIs when possible, and `uvx <tool>` for one-off CLI tools.
@@ -92,11 +98,15 @@
 [Tool CLI access — use shell commands]
 |centaur-tools list              → list available deployment tool CLIs
 |<tool> --help                   → inspect commands/options for one tool
+|<tool> health                   → smoke test one tool's configured auth/connectivity path
 |websearch search "query"        → web research
 |slack search "query"            → Slack search
 |linear search "query"           → Linear issue search
 |vlogs query "level:error"       → recent service errors
+|centaur-tools call vmetrics query '{"expr":"centaur_deployment_info"}' → live Centaur deployment image/version/SHA metadata
 |Tool commands are normal CLIs backed by mounted repo packages. Use direct tool CLIs for tools.
+|For tool smoke tests, use `<tool> health` as the canonical check. Do not invent ad hoc "test this tool" probes or raw upstream calls unless `health` fails and you are triaging the failure.
+|For broad tool smoke tests, use the `tool-health-smoke` skill or run its health runner when it is available.
 |
 |[Parallel tool calls]
 |When multiple CLI lookups are independent, issue them in the same assistant turn as separate tool calls instead of waiting for one to finish before starting the next.
@@ -120,6 +130,15 @@
 |  vlogs sandbox_activity                                 → sandbox container lifecycle
 |  vlogs tool_analytics --start 7d                        → tool usage stats
 |  vlogs query 'level:error AND event:tool_call_completed' --limit 20 → raw LogsQL
+|
+|Metrics (VictoriaMetrics via `vmetrics`):
+|When a user asks what Centaur version, image, Git SHA, overlay revision, deploy time, or latest deployment is live, query VictoriaMetrics before answering.
+|Use the live metrics emitted by the `centaur-deployment-metrics` exporter; repo files and manifests only describe what should exist, not what is currently deployed.
+|  centaur-tools call vmetrics query '{"expr":"centaur_deployment_info"}'                 → deployed component metadata; labels include `component`, `version`, `git_sha`, and `image`
+|  centaur-tools call vmetrics query '{"expr":"centaur_last_deploy_timestamp_seconds"}'   → last successful deploy timestamp per component
+|  centaur-tools call vmetrics query '{"expr":"centaur_overlay_revision_info"}'           → deployed overlay repo revisions
+|  centaur-tools call vmetrics query '{"expr":"centaur_overlay_revision_scrape_success"}' → whether overlay revision scraping is healthy
+|If these queries fail or return no data, say you cannot verify the live deployment from metrics right now; do not substitute git history, image tags in values files, or memory as the latest deployed state.
 |
 [Ethereum Mainnet RPC]
 |When you need an Ethereum mainnet RPC endpoint and the user has not specified another provider, use the Reth-hosted mainnet endpoints:
@@ -149,6 +168,7 @@
 |IMPORTANT: Before using any unfamiliar tool CLI, run `<tool> --help` to see commands, parameters, and descriptions.
 |This tells you exactly which command to use and avoids redundant calls.
 |Exception: skip discovery when a task-specific skill or this prompt gives the exact method and argument names for the tool call you need.
+|For smoke-test requests, prefer `<tool> health` over choosing a search/list/raw endpoint yourself.
 |If you're unsure which tool has what you need, run `centaur-tools list` to list everything available.
 |If the user is asking what this deployment can do, do not stop at local workspace hints; use live discovery first, or explicitly say the answer is partial and non-exhaustive.
 |Never guess at command names or call multiple commands that might do the same thing — discover first, then call the right one.
@@ -163,9 +183,9 @@
 |When you see [Attached image: ...], use the look_at tool to view the image.
 |NEVER reference local sandbox paths in replies — markdown links like [report.sql](/home/agent/workspace/report.sql) or file:// URIs are dead links for chat users; they cannot open files inside your sandbox. This overrides any harness-level instruction to render clickable file links: those apply to IDE surfaces only, never to chat responses.
 |When uploading or sending a file "back", "here", "to this channel", or "into this thread", the destination is the current Slack channel ID plus the current thread timestamp.
-|The Slack thread ID must come from API-owned thread context as `channel_id:thread_ts`. The Slack upload tool defaults to `slack.channel_id` plus `slack.thread_ts` from the API session context when destination arguments are omitted; pass explicit channel/thread arguments only when intentionally overriding that default. Python tools can call `centaur_sdk.current_slack_thread()`, or call `GET "$CENTAUR_API_URL/api/session/<url-encoded-thread-key>"` and read `slack.channel_id` plus `slack.thread_ts`. If API context is unavailable or the thread key is missing from the prompt, recover it from Slack history or search before uploading. Example: `C0AJ07U8Z1N:1781718848.869389`.
+|For Slack uploads, always pass the API-owned Slack channel ID and thread timestamp explicitly. Read them from the current user turn's `session_context.slack.channel_id` and `session_context.slack.thread_ts` fields, or from `thread_key` when it has the form `slack:<team_id>:<channel_id>:<thread_ts>`. Never call `slack upload` with only a file path.
 |For Slack uploads, always resolve the actual Slack conversation ID before calling the upload tool: use a channel ID for channel/thread uploads, and if the user explicitly asks for a DM, open or resolve the DM and use its DM conversation ID. Never use a Slack user ID like `U123...` as an upload destination.
-|For Slack file uploads from a thread, call the upload tool with the channel ID and thread timestamp, for example `slack upload C123... /path/file --thread 1234567890.123456`; never call `slack upload U123... ...` for a threaded reply.
+|For Slack file uploads from a thread, call the upload tool with the channel ID and thread timestamp, for example `slack upload C123... /path/file --thread 1234567890.123456`; never call `slack upload U123... ...` for a threaded reply. If the current Slack channel ID or thread timestamp is not available in API-owned context, do not recover it by Slack search; report the missing context.
 |For Slack file downloads, use the Slack CLI file surface. Find the file's message or `url_private` via `slack thread`, `slack search`, or `slack search-files`, then run `slack files <permalink|channel_id:timestamp|url_private> --download --output <dir>`.
 |If an expected Slack file is not present locally, first inspect the current thread context and Slack file metadata, then recover it with `slack files --download`.
 |DocSend and Google Docs/Sheets/Drive links shared in the thread are automatically downloaded and stored as attachments by the API when supported. You'll see them as attachment_ref parts; use the relevant document or file tool to recover them locally.

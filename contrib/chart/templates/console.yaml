@@ -163,6 +163,10 @@ spec:
 {{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
+{{- with $console.slackDmSync.oauthAppSlug }}
+            - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
+              value: {{ . | quote }}
+{{- end }}
             - name: PORT
               value: {{ $console.service.httpPort | quote }}
             - name: RAILS_LOG_TO_STDOUT

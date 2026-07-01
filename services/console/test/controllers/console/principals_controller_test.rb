@@ -17,6 +17,22 @@ module Console
       assert_redirected_to login_path
     end
 
+    test "update_sandbox_access toggles repo cache and observability access" do
+      principal = principals(:acme_user_bob)
+
+      patch console_principal_sandbox_access_url(principal.oid),
+            params: {
+              sandbox_repo_cache_enabled: "0",
+              sandbox_observability_enabled: "0"
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal "Updated sandbox access.", flash[:notice]
+      principal.reload
+      assert_equal false, principal.sandbox_repo_cache_enabled
+      assert_equal false, principal.sandbox_observability_enabled
+    end
+
     test "assign_role attaches the role and redirects with a notice" do
       principal = principals(:acme_user_bob)
       role = roles(:acme_admin_role)

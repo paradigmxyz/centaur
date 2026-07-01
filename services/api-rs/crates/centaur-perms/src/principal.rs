@@ -7,7 +7,7 @@ use centaur_iron_control::{IdentityInput, derive_principal};
 /// Turn a `--principal` value (plus optional `--slack-user`) into the identity
 /// to upsert/look up.
 ///
-/// A value containing `:` is treated as a Slack thread key and run through the
+/// A value containing `:` is treated as a chat thread key and run through the
 /// canonical [`derive_principal`], so the resulting `foreign_id` matches exactly
 /// what api-rs writes at session start. Any other value is used verbatim as a
 /// principal `foreign_id` (e.g. `slack-channel-t1-c9`), so an operator can name
@@ -45,6 +45,30 @@ mod tests {
     fn dm_thread_key_keys_on_user() {
         let id = resolve_principal("slack:D9:ts", Some("U07ABC"), "default");
         assert_eq!(id.foreign_id, "slack-user-u07abc");
+    }
+
+    #[test]
+    fn teams_adapter_thread_key_is_derived() {
+        let conversation = "MTk6YWJjMTIzQHRocmVhZC50YWN2Mg";
+        let service_url = "aHR0cHM6Ly9zbWJhLnRyYWZmaWNtYW5hZ2VyLm5ldC9hbWVyLw";
+        let id = resolve_principal(
+            &format!("teams:{conversation}:{service_url}"),
+            Some("aad-user-1"),
+            "default",
+        );
+        assert_eq!(id.foreign_id, "teams-conversation-19-abc123-thread-tacv2");
+    }
+
+    #[test]
+    fn teams_adapter_thread_suffix_does_not_change_the_conversation_principal() {
+        let conversation = "MTk6YWJjMTIzQHRocmVhZC50YWN2MjttZXNzYWdlaWQ9cm9vdC1tZXNzYWdlLTE";
+        let service_url = "aHR0cHM6Ly9zbWJhLnRyYWZmaWNtYW5hZ2VyLm5ldC9hbWVyLw";
+        let id = resolve_principal(
+            &format!("teams:{conversation}:{service_url}"),
+            Some("aad-user-1"),
+            "default",
+        );
+        assert_eq!(id.foreign_id, "teams-conversation-19-abc123-thread-tacv2");
     }
 
     #[test]

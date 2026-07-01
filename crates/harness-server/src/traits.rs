@@ -113,6 +113,9 @@ pub enum NormalizedEvent {
         delta: String,
     },
     ToolResults(Vec<NormalizedToolResult>),
+    TokenUsage {
+        usage: NormalizedTokenUsage,
+    },
     Result {
         error: Option<String>,
     },
@@ -134,6 +137,13 @@ impl NormalizedEvent {
 
     pub(crate) fn is_terminal(&self) -> bool {
         matches!(self, Self::Result { .. } | Self::Error { .. })
+    }
+
+    pub(crate) fn token_usage(&self) -> Option<&NormalizedTokenUsage> {
+        match self {
+            Self::TokenUsage { usage } => Some(usage),
+            _ => None,
+        }
     }
 
     pub(crate) fn is_assistant_end_turn(&self) -> bool {
@@ -171,6 +181,28 @@ pub struct NormalizedToolResult {
     pub content: String,
     pub is_error: bool,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NormalizedTokenUsage {
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub reasoning_output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+}
+
+impl NormalizedTokenUsage {
+    pub(crate) fn has_counts(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.cache_creation_input_tokens.is_some()
+            || self.cache_read_input_tokens.is_some()
+            || self.reasoning_output_tokens.is_some()
+            || self.total_tokens.is_some()
+    }
 }
 
 #[derive(Debug)]

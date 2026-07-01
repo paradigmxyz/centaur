@@ -59,6 +59,22 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{- define "centaur.repoCachePvcName" -}}
+{{- if .Values.repoCache.storage.persistentVolumeClaim.existingClaim -}}
+{{- .Values.repoCache.storage.persistentVolumeClaim.existingClaim | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-repo-cache" (include "centaur.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "centaur.repoCacheStorageType" -}}
+{{- $storageType := default "hostPath" .Values.repoCache.storage.type -}}
+{{- if and (ne $storageType "hostPath") (ne $storageType "persistentVolumeClaim") -}}
+{{- fail "repoCache.storage.type must be either hostPath or persistentVolumeClaim" -}}
+{{- end -}}
+{{- $storageType -}}
+{{- end -}}
+
 {{- define "centaur.overlaySources" -}}
 {{- $sources := list -}}
 {{- with .Values.overlays.sources -}}

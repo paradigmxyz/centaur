@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22eed819d8e 100644
+index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818ff52ce63 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -31,6 +31,216 @@ import {
@@ -219,7 +219,32 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
  
  // src/cards.ts
  import {
-@@ -3452,26 +3662,251 @@ var SlackAdapter = class _SlackAdapter {
+@@ -2004,7 +2214,10 @@ var SlackAdapter = class _SlackAdapter {
+       channel: event.channel,
+       threadTs
+     });
+-    const isMention = event.type === "app_mention";
++    const botMentioned = Boolean(
++      this._botUserId && typeof event.text === "string" && (event.text.includes(`<@${this._botUserId}>`) || event.text.includes(`<@${this._botUserId}|`))
++    );
++    const isMention = event.type === "app_mention" || botMentioned && (event.bot_id || event.subtype === "bot_message");
+     const factory = async () => {
+       const msg = await this.parseSlackMessage(event, threadId);
+       if (isMention) {
+@@ -2520,10 +2732,10 @@ var SlackAdapter = class _SlackAdapter {
+       formatted: this.formatConverter.toAst(text),
+       raw: event,
+       author: {
+-        userId: event.user || event.bot_id || "unknown",
++        userId: event.user || event.bot_profile?.user_id || event.bot_id || "unknown",
+         userName,
+         fullName,
+-        isBot: !!event.bot_id,
++        isBot: Boolean(event.bot_id || event.bot_profile || event.subtype === "bot_message"),
+         isMe
+       },
+       metadata: {
+@@ -3452,26 +3664,251 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -480,7 +505,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
      const sendStructuredChunk = async (chunk) => {
        if (!structuredChunksSupported) {
          return;
-@@ -3481,8 +3916,45 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3481,8 +3918,45 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
@@ -527,7 +552,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
          structuredChunksSupported = false;
          this.logger.warn(
            "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
-@@ -3497,31 +3969,91 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3497,31 +3971,91 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };
@@ -547,7 +572,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +        } else {
 +          await sendStructuredChunk(chunk);
 +        }
-+      }
+       }
 +      renderer.finish();
 +      const finalCommittable = renderer.getCommittableText();
 +      const finalDelta = finalCommittable.slice(lastAppended.length);
@@ -610,7 +635,7 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
 +            error: stopError
 +          });
 +        }
-       }
++      }
 +      annotateSlackAnswerLost(error, !sourceConsumed || answerStopFailed);
 +      throw error;
      }
@@ -638,3 +663,16 @@ index 53a35e40d7dc03dea57f965325728761467ad7c7..d960b5a2daa267af4f860f787261a22e
      };
    }
    /**
+@@ -3798,10 +4332,10 @@ var SlackAdapter = class _SlackAdapter {
+       formatted: this.formatConverter.toAst(text),
+       raw: event,
+       author: {
+-        userId: event.user || event.bot_id || "unknown",
++        userId: event.user || event.bot_profile?.user_id || event.bot_id || "unknown",
+         userName,
+         fullName,
+-        isBot: !!event.bot_id,
++        isBot: Boolean(event.bot_id || event.bot_profile || event.subtype === "bot_message"),
+         isMe
+       },
+       metadata: {

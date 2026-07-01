@@ -50,6 +50,14 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({}, principal.reload.labels)
   end
 
+  test "sandbox access defaults to enabled" do
+    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-sandbox-access"))
+    principal.reload
+
+    assert_predicate principal, :sandbox_repo_cache_enabled
+    assert_predicate principal, :sandbox_observability_enabled
+  end
+
   test "labels accepts arbitrary string map" do
     principal = Principal.create!(default_attrs(
       namespace: "acme",
