@@ -1,4 +1,5 @@
 require "test_helper"
+require "timeout"
 
 class ApplicationHelperTest < ActionView::TestCase
   test "truncate_middle leaves short values unchanged" do
@@ -69,6 +70,15 @@ class ApplicationHelperTest < ActionView::TestCase
 
     refute_includes html, "<script>"
     assert_select_in html, "strong", text: "safe"
+  end
+
+  test "console_markdown terminates on bare list and heading markers" do
+    # A line that is only a block-start marker (no content) once spun the
+    # markdown parser forever, pinning a worker. It must render and return.
+    ["- ", "* ", "+ ", "1. ", "# ", "## ", "hello\n- \nworld"].each do |input|
+      html = Timeout.timeout(3) { console_markdown(input) }
+      assert html.present?, "expected markdown for #{input.inspect}"
+    end
   end
 
   test "console_icon renders theme toggle icons" do
