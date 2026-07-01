@@ -206,10 +206,11 @@ class ApplicationController < ActionController::Base
   end
 
   def console_sidebar_visible_thread_scope
-    conditions = [ console_sidebar_console_thread_owner_sql ].compact
-
     slack_owners = console_sidebar_slack_thread_owners_for_current_user
-    conditions << console_sidebar_slack_thread_owner_sql(slack_owners) if slack_owners.any?
+    conditions = [
+      console_sidebar_console_thread_owner_sql,
+      (console_sidebar_slack_thread_owner_sql(slack_owners) if slack_owners.any?)
+    ].compact
 
     return CentaurSession.where("1=0") if conditions.empty?
 
@@ -226,7 +227,10 @@ class ApplicationController < ActionController::Base
     return if thread_key.blank?
     return if threads.any? { |thread| thread.thread_key == thread_key }
 
-    CentaurSession.find_by(thread_key: thread_key)
+    # Resolve through the owner scope, not a raw find_by, so a directly linked
+    # thread only surfaces in the sidebar when the current user started it. This
+    # mirrors Console::ThreadsController#selected_session.
+    console_sidebar_visible_thread_scope.where(thread_key: thread_key).first
   end
 
   def console_sidebar_selected_thread_key
@@ -272,13 +276,15 @@ class ApplicationController < ActionController::Base
           )
           next if user_id.blank?
 
-          ConsoleSidebarSlackThreadOwner.new(
-            user_id: user_id,
-            team_id: console_sidebar_first_present(
-              credential.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL),
-              credential.oauth_app&.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL)
-            )
+          team_id = console_sidebar_first_present(
+            credential.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL),
+            credential.oauth_app&.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL)
           )
+          # Require a resolvable workspace; see Console::ThreadsController for why
+          # a team-less credential cannot own threads.
+          next if team_id.blank?
+
+          ConsoleSidebarSlackThreadOwner.new(user_id: user_id, team_id: team_id)
         end.uniq { |owner| [ console_sidebar_normalize_key(owner.user_id), console_sidebar_normalize_key(owner.team_id) ] }
       end
     end
@@ -326,24 +332,24 @@ class ApplicationController < ActionController::Base
       "metadata ->> 'source' = 'slackbotv2'"
     ].join(" OR ")
 
-    owner_clauses = owners.map do |owner|
+    owner_clauses = owners.filter_map do |owner|
+      team_id = console_sidebar_normalize_key(owner.team_id)
+      # Team scoping is mandatory: never match a Slack thread on user id alone.
+      next if team_id.blank?
+
       user_id = console_sidebar_normalize_key(owner.user_id)
       user_clauses = CONSOLE_SIDEBAR_SLACK_THREAD_OWNER_METADATA_KEYS.map do |key|
         "lower(metadata ->> #{console_sidebar_sql_quote(key)}) = #{console_sidebar_sql_quote(user_id)}"
       end
-      owner_clause = "(#{user_clauses.join(" OR ")})"
-
-      if owner.team_id.present?
-        team_id = console_sidebar_normalize_key(owner.team_id)
-        team_clauses = CONSOLE_SIDEBAR_SLACK_THREAD_TEAM_METADATA_KEYS.map do |key|
-          "lower(metadata ->> #{console_sidebar_sql_quote(key)}) = #{console_sidebar_sql_quote(team_id)}"
-        end
-        team_clauses << "lower(split_part(thread_key, ':', 2)) = #{console_sidebar_sql_quote(team_id)}"
-        owner_clause = "(#{owner_clause} AND (#{team_clauses.join(" OR ")}))"
+      team_clauses = CONSOLE_SIDEBAR_SLACK_THREAD_TEAM_METADATA_KEYS.map do |key|
+        "lower(metadata ->> #{console_sidebar_sql_quote(key)}) = #{console_sidebar_sql_quote(team_id)}"
       end
+      team_clauses << "lower(split_part(thread_key, ':', 2)) = #{console_sidebar_sql_quote(team_id)}"
 
-      owner_clause
+      "((#{user_clauses.join(" OR ")}) AND (#{team_clauses.join(" OR ")}))"
     end
+
+    return if owner_clauses.empty?
 
     "(#{slack_source}) AND (#{owner_clauses.join(" OR ")})"
   end
