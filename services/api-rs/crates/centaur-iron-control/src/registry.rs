@@ -4,9 +4,8 @@
 //! Today the proxy config is rendered from fragments and baked into a
 //! per-sandbox ConfigMap. Under iron-control the same fragments become durable
 //! control-plane state: each fragment's secrets are upserted as typed secret
-//! resources and granted to a role. api-rs currently folds infra, harness, and
-//! discovered tool fragments into the single shared infra role so each sandbox
-//! principal only needs one assignment.
+//! resources and granted to a role. api-rs registers infra and harness
+//! fragments against the shared infra role.
 //!
 //! [`secret_inputs_from_fragment`] is the pure translation (fragment → secret
 //! inputs) and is unit-tested without a server; [`register_role`] drives the

@@ -98,6 +98,11 @@ export type SlackbotV2Options = {
   apiKey?: string
   apiUrl: string
   assistantStatus?: string
+  /**
+   * When enabled, session.activity_summary events update Slack's assistant
+   * status and structured task output is hidden from the Slack stream.
+   */
+  activitySummaryStatusEnabled?: boolean
   botToken: string
   botUserId?: string
   /**
@@ -124,7 +129,7 @@ export type SlackbotV2Options = {
   slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
-  streamTaskDisplayMode?: 'plan' | 'timeline'
+  streamTaskDisplayMode?: 'none' | 'plan' | 'timeline'
   triggerBotAllowlist?: readonly string[]
   userName?: string
   mapper?: CodexAppServerToChatStreamOptions

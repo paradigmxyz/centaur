@@ -245,6 +245,8 @@
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
+        "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
+        "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
         "etl": {
           "type": "object",
           "properties": {
