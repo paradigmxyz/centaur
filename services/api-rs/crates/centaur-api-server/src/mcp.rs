@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     env, fs,
     path::PathBuf,
     sync::Mutex,
@@ -137,22 +137,30 @@ fn mcp_whoami_tool() -> Value {
 fn mcp_centaur_tool_entries() -> Result<Vec<Value>, ApiError> {
     let mut entries = Vec::new();
     for tool in mcp_centaur_tool_catalog()? {
-        let methods = mcp_tool_method_names(&tool);
+        let methods = mcp_tool_methods(&tool);
+        let signatures = methods
+            .iter()
+            .map(|method| method.signature.as_str())
+            .collect::<Vec<_>>();
+        let names = methods
+            .iter()
+            .map(|method| method.name.as_str())
+            .collect::<Vec<_>>();
         let mut description = tool
             .description
             .clone()
             .unwrap_or_else(|| format!("Centaur tool package {}", tool.package));
         if !methods.is_empty() {
             description.push_str(" Available methods: ");
-            description.push_str(&methods.join(", "));
-            description.push_str(". Call method=help for this list.");
+            description.push_str(&signatures.join(", "));
+            description.push_str(". Pass keyword arguments matching the method signature; call method=help for this list.");
         }
         let mut method_schema = json!({
             "type": "string",
             "description": "Public method on the tool client to call. Use help to list available methods.",
         });
         if !methods.is_empty() {
-            method_schema["enum"] = json!(methods);
+            method_schema["enum"] = json!(names);
         }
         entries.push(json!({
             "name": tool.name,
@@ -175,41 +183,78 @@ fn mcp_centaur_tool_entries() -> Result<Vec<Value>, ApiError> {
     Ok(entries)
 }
 
-fn mcp_tool_method_names(tool: &DiscoveredTool) -> Vec<String> {
-    let path = tool.project_dir.join(&tool.client_module);
-    let Ok(contents) = fs::read_to_string(&path) else {
-        return vec!["help".to_owned()];
-    };
-    let mut methods = BTreeSet::from(["help".to_owned()]);
-    for line in contents.lines() {
-        let indent = line.chars().take_while(|ch| *ch == ' ').count();
-        if indent != 0 && indent != 4 {
-            continue;
-        }
-        let trimmed = line.trim_start();
-        let signature = trimmed
-            .strip_prefix("def ")
-            .or_else(|| trimmed.strip_prefix("async def "));
-        let Some(signature) = signature else {
-            continue;
-        };
-        let Some(name) = signature.split_once('(').map(|(name, _)| name.trim()) else {
-            continue;
-        };
-        if name.is_empty() || name.starts_with('_') {
-            continue;
-        }
-        methods.insert(name.to_owned());
-    }
-    methods.into_iter().collect()
+struct McpToolMethod {
+    name: String,
+    signature: String,
 }
 
-fn mcp_tool_help_result(tool: &DiscoveredTool, methods: &[String]) -> Result<Value, ApiError> {
+fn mcp_tool_methods(tool: &DiscoveredTool) -> Vec<McpToolMethod> {
+    let mut methods = BTreeMap::from([("help".to_owned(), "help()".to_owned())]);
+    let path = tool.project_dir.join(&tool.client_module);
+    if let Ok(contents) = fs::read_to_string(&path) {
+        for line in contents.lines() {
+            let indent = line.chars().take_while(|ch| *ch == ' ').count();
+            if indent != 0 && indent != 4 {
+                continue;
+            }
+            let trimmed = line.trim_start();
+            let definition = trimmed
+                .strip_prefix("def ")
+                .or_else(|| trimmed.strip_prefix("async def "));
+            let Some(definition) = definition else {
+                continue;
+            };
+            let Some((name, params)) = definition.split_once('(') else {
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty() || name.starts_with('_') {
+                continue;
+            }
+            methods.insert(name.to_owned(), mcp_method_signature(name, params));
+        }
+    }
+    methods
+        .into_iter()
+        .map(|(name, signature)| McpToolMethod { name, signature })
+        .collect()
+}
+
+/// Render `name(params)` from the text after the opening paren of a `def`
+/// line, dropping a leading `self`. Multi-line parameter lists fall back to
+/// `name(...)`.
+fn mcp_method_signature(name: &str, params: &str) -> String {
+    let mut depth = 1usize;
+    let Some(end) = params.find(|ch| {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        depth == 0
+    }) else {
+        return format!("{name}(...)");
+    };
+    let mut params = params[..end].trim();
+    if let Some(rest) = params.strip_prefix("self") {
+        params = rest.trim_start().trim_start_matches(',').trim_start();
+    }
+    format!("{name}({params})")
+}
+
+fn mcp_tool_help_result(
+    tool: &DiscoveredTool,
+    methods: &[McpToolMethod],
+) -> Result<Value, ApiError> {
     Ok(mcp_text_result(
         serde_json::to_string_pretty(&json!({
             "tool": tool.name,
             "description": tool.description,
-            "methods": methods,
+            "methods": methods
+                .iter()
+                .map(|method| method.signature.as_str())
+                .collect::<Vec<_>>(),
+            "usage": "Call this tool with {\"method\": \"<name>\", \"arguments\": {<keyword arguments matching the signature>}}.",
         }))?,
         false,
     ))
@@ -279,16 +324,20 @@ async fn mcp_centaur_tool_result(
         return Err(ApiError::BadRequest("method is required".to_owned()));
     }
     let method = params.method.trim().to_owned();
-    let methods = mcp_tool_method_names(&tool);
+    let methods = mcp_tool_methods(&tool);
     if method == "help" {
         return mcp_tool_help_result(&tool, &methods);
     }
-    if !methods.iter().any(|candidate| candidate == &method) {
+    if !methods.iter().any(|candidate| candidate.name == method) {
         return Ok(mcp_text_result(
             format!(
                 "centaur tool {} has no method {method}. Available methods: {}",
                 tool.name,
-                methods.join(", ")
+                methods
+                    .iter()
+                    .map(|method| method.signature.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             true,
         ));
@@ -333,15 +382,16 @@ async fn run_tool_host_centaur_tool(
         ));
     }
     if output.exit_status != Some(0) {
-        let detail = if output.stderr.is_empty() {
-            output.stdout.trim().to_owned()
+        let raw = if output.stderr.is_empty() {
+            &output.stdout
         } else {
-            output.stderr.trim().to_owned()
+            &output.stderr
         };
+        let detail = mcp_tool_failure_detail(raw);
         return Ok(mcp_text_result(
             format!(
-                "centaur tool {}.{method} failed in sandbox {} with status {:?}: {detail}",
-                tool.name, output.sandbox_id, output.exit_status
+                "centaur tool {}.{method} failed in sandbox {} with status {:?}: {detail}\n\nCall the {} tool with method \"help\" to list available methods and their signatures.",
+                tool.name, output.sandbox_id, output.exit_status, tool.name
             ),
             true,
         ));
@@ -362,6 +412,25 @@ async fn run_tool_host_centaur_tool(
             ),
             true,
         )),
+    }
+}
+
+/// Reduce a Python traceback to its final exception message: agents act on
+/// the error line, not on stack frames or build noise, so keep everything
+/// from the last traceback's exception message to the end.
+fn mcp_tool_failure_detail(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let Some(index) = trimmed.rfind("Traceback (most recent call last):") else {
+        return trimmed.to_owned();
+    };
+    let lines = trimmed[index..].lines().collect::<Vec<_>>();
+    let message_start = lines
+        .iter()
+        .skip(1)
+        .position(|line| !line.is_empty() && !line.starts_with(char::is_whitespace));
+    match message_start {
+        Some(position) => lines[position + 1..].join("\n"),
+        None => trimmed.to_owned(),
     }
 }
 
@@ -458,7 +527,11 @@ class DemoClient:
         )
         .unwrap();
 
-        let methods = mcp_tool_method_names(&test_tool(temp.clone()));
+        let parsed = mcp_tool_methods(&test_tool(temp.clone()));
+        let methods = parsed
+            .iter()
+            .map(|method| method.name.clone())
+            .collect::<Vec<_>>();
 
         assert!(methods.contains(&"help".to_owned()));
         assert!(methods.contains(&"search".to_owned()));
@@ -467,7 +540,47 @@ class DemoClient:
         assert!(!methods.contains(&"_hidden".to_owned()));
         assert!(!methods.contains(&"nested_helper".to_owned()));
 
+        let signatures = parsed
+            .into_iter()
+            .map(|method| method.signature)
+            .collect::<Vec<_>>();
+        assert!(signatures.contains(&"search(query, limit=20)".to_owned()));
+        assert!(signatures.contains(&"list_channels(limit=200)".to_owned()));
+        assert!(signatures.contains(&"search_messages(query)".to_owned()));
+        assert!(signatures.contains(&"help()".to_owned()));
+
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn mcp_tool_failure_detail_keeps_final_exception_from_chained_traceback() {
+        let stderr = r#"Building twitter @ file:///tools/comms/twitter
+Installed 16 packages in 66ms
+Traceback (most recent call last):
+  File "/tools/comms/twitter/client.py", line 53, in _request
+    response.raise_for_status()
+httpx.HTTPStatusError: Client error '401 Unauthorized' for url 'https://api.x.com/2/tweets/search/recent'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<string>", line 45, in <module>
+  File "/tools/comms/twitter/client.py", line 229, in search_tweets
+    tweets, meta, includes = self._paged(
+RuntimeError: X API error: 401 - {
+  "title": "Unauthorized",
+  "status": 401
+}"#;
+
+        let detail = mcp_tool_failure_detail(stderr);
+
+        assert!(detail.starts_with("RuntimeError: X API error: 401"));
+        assert!(detail.contains("\"title\": \"Unauthorized\""));
+        assert!(!detail.contains("Traceback"));
+        assert!(!detail.contains("Installed 16 packages"));
+
+        let plain = "invalid arguments for search_tweets(query, limit=10): got an unexpected keyword argument 'max_results'";
+        assert_eq!(mcp_tool_failure_detail(plain), plain);
     }
 
     #[tokio::test]

@@ -534,6 +534,23 @@ if target is None and hasattr(module, "_client"):
 if target is None:
     raise RuntimeError(f"tool has no method {{method}}")
 
+# Validate keyword arguments up front so a wrong argument name produces a
+# short usage error with the expected signature instead of a traceback.
+if isinstance(payload, dict) and callable(target):
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        try:
+            signature.bind(**payload)
+        except TypeError as exc:
+            print(
+                f"invalid arguments for {{method}}{{signature}}: {{exc}}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
 ctx_token = None
 thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
 if thread_key:
