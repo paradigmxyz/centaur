@@ -113,6 +113,7 @@ const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
 const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
+const ASSISTANT_STATUS_MAX_CHARS = 50
 const SLACK_TASK_DETAILS_MAX_CHARS = 500
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
@@ -365,6 +366,7 @@ async function handleSlackMessageHandoff(
       trigger: input.trigger
     })
     await syncThreadMessageToSession(thread, message, {
+      initialAssistantStatusRequested: input.assistantStatusRequested,
       initialAssistantStatusVisible,
       mode: input.mode,
       options: input.options,
@@ -578,6 +580,7 @@ async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   input: {
+    initialAssistantStatusRequested?: boolean
     initialAssistantStatusVisible?: boolean
     mode: SlackbotV2MessageMode
     options: SlackbotV2Options
@@ -617,7 +620,8 @@ async function syncThreadMessageToSession(
     history_forwarded: state.historyForwarded === true
   })
   const assistantStatusVisible = shouldStartExecution
-    ? input.initialAssistantStatusVisible === true
+    ? input.initialAssistantStatusVisible === true ||
+      input.initialAssistantStatusRequested === true
     : false
   if (shouldStartExecution && input.initialAssistantStatusVisible === undefined) {
     backgroundWaitUntil(
@@ -1824,12 +1828,16 @@ async function renderExecutionStream(
   })
   const capture = { diverged: false }
   try {
+    const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
-          codexAppServerToChatSdkStream(
-            stream,
-            rendererOptions(thread, options, capture)
+          slackVisibleChatSdkStream(
+            codexAppServerToChatSdkStream(
+              stream,
+              rendererOptions(thread, options, capture, trace)
+            ),
+            taskDisplayMode
           )
         )
       )
@@ -1843,7 +1851,7 @@ async function renderExecutionStream(
     const sent = await thread.adapter.stream!(thread.id, visibleStream, {
       recipientTeamId: message.teamId,
       recipientUserId: message.author.userId,
-      taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
+      ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
     })
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
@@ -1871,12 +1879,16 @@ async function renderRecoveredExecutionStream(
   })
   const capture = { diverged: false }
   try {
+    const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
-          codexAppServerToChatSdkStream(
-            stream,
-            rendererOptions(thread, options, capture)
+          slackVisibleChatSdkStream(
+            codexAppServerToChatSdkStream(
+              stream,
+              rendererOptions(thread, options, capture, trace)
+            ),
+            taskDisplayMode
           )
         )
       )
@@ -1888,7 +1900,7 @@ async function renderRecoveredExecutionStream(
       {
         recipientTeamId: message.teamId,
         recipientUserId: message.author.userId,
-        taskDisplayMode: options.streamTaskDisplayMode ?? 'plan'
+        ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
       }
     )
     return { diverged: capture.diverged, messageId: sent?.id }
@@ -1925,7 +1937,7 @@ async function renderPlainTextExecutionStream(
       slackSafeChatSdkStream(
         codexAppServerToChatSdkStream(
           fallback.collectSource(stream),
-          rendererOptions(thread, options)
+          rendererOptions(thread, options, undefined, trace)
         )
       )
     )
@@ -1997,6 +2009,22 @@ async function* slackSafeChatSdkStream(
 ): AsyncIterable<ChatSDKStreamChunk> {
   for await (const chunk of stream) {
     yield slackSafeChatSdkChunk(chunk)
+  }
+}
+
+type SlackStreamTaskDisplayMode = NonNullable<SlackbotV2Options['streamTaskDisplayMode']>
+
+function slackStreamTaskDisplayMode(options: SlackbotV2Options): SlackStreamTaskDisplayMode {
+  return options.streamTaskDisplayMode ?? 'none'
+}
+
+async function* slackVisibleChatSdkStream(
+  stream: AsyncIterable<ChatSDKStreamChunk>,
+  taskDisplayMode: SlackStreamTaskDisplayMode
+): AsyncIterable<ChatSDKStreamChunk> {
+  for await (const chunk of stream) {
+    if (taskDisplayMode === 'none' && chunk.type !== 'markdown_text') continue
+    yield chunk
   }
 }
 
@@ -2728,7 +2756,8 @@ function rendererLogInfo(
 function rendererOptions(
   thread: Thread,
   options: SlackbotV2Options,
-  capture?: { diverged: boolean }
+  capture?: { diverged: boolean },
+  trace?: SlackbotV2Trace
 ): CodexAppServerToChatStreamOptions {
   const mapper = options.mapper
   return {
@@ -2738,6 +2767,9 @@ function rendererOptions(
       await mapper?.onRendererEvent?.(event)
       if (event.type === 'renderer.title.update') {
         await setAssistantTitle(thread, event.title, options)
+      }
+      if (event.type === 'renderer.status') {
+        await setAssistantStatus(thread, event.status, options, trace)
       }
     }
   }
@@ -2797,13 +2829,14 @@ async function setAssistantStatus(
   trace?: SlackbotV2Trace
 ): Promise<boolean> {
   const startedAtMs = nowMs()
+  const normalizedStatus = normalizeAssistantStatus(status)
   const target = slackAssistantTarget(thread)
   const adapter = thread.adapter as SlackAssistantAdapter
   const fields = {
     has_adapter: Boolean(adapter.setAssistantStatus),
     has_target: Boolean(target),
-    operation: status ? 'set' : 'clear',
-    status_empty: !status
+    operation: normalizedStatus ? 'set' : 'clear',
+    status_empty: !normalizedStatus
   }
   if (options) traceLog(options, 'slackbotv2_assistant_status_started', trace, fields)
   if (!target || !adapter.setAssistantStatus) {
@@ -2831,8 +2864,8 @@ async function setAssistantStatus(
         adapter.setAssistantStatus!(
           target.channel,
           target.threadTs,
-          status,
-          status ? [status] : undefined
+          normalizedStatus,
+          normalizedStatus ? [normalizedStatus] : undefined
         )
       )
     )
@@ -2856,6 +2889,13 @@ async function setAssistantStatus(
   } finally {
     stopPendingLog()
   }
+}
+
+function normalizeAssistantStatus(status: string): string {
+  const oneLine = status.replace(/\s+/g, ' ').trim()
+  const chars = Array.from(oneLine)
+  if (chars.length <= ASSISTANT_STATUS_MAX_CHARS) return oneLine
+  return `${chars.slice(0, ASSISTANT_STATUS_MAX_CHARS - 3).join('').trimEnd()}...`
 }
 
 async function setAssistantTitle(

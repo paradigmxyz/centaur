@@ -327,8 +327,9 @@ describe('slackbotv2', () => {
     const text = await threadText(parent.ts)
     expect(text).toContain('Implementation plan')
     expect(text).toContain('Inspect App Server events')
-    expect(text).toContain('Checking the command output')
-    expect(text).toContain('Inspecting the event stream')
+    expect(text).not.toContain('Checking the command output')
+    expect(text).not.toContain('Inspecting the event stream')
+    expect(text).not.toContain('Thinking')
     expect(text).toContain('Command execution')
     expect(text).toContain('pnpm test')
     expect(text).not.toContain('tests passed')
@@ -3135,6 +3136,91 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
   })
 
+  it('uses session activity summaries as assistant status instead of visible text', async () => {
+    bot = createProductionDefaultTestBot()
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before status update.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> summarize activity`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-activity-summary-status',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> summarize activity`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const summary =
+      "I'm checking the benchmark page and related logs so I can explain the chart shape."
+    const clippedSummary = `${summary.slice(0, 47).trimEnd()}...`
+    codexApi.emitSessionEvent(key, 'session.activity_summary', {
+      execution_id: 'exe-activity-summary-status',
+      summary
+    })
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.started',
+        item: {
+          id: 'cmd-1',
+          type: 'commandExecution',
+          command: 'rg activity summary',
+          status: 'inProgress'
+        }
+      })
+    )
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'turn.done',
+        result: 'Done with status.'
+      })
+    )
+
+    await Promise.all(waits)
+    const statusCalls = slackApi.calls.filter(call => call.method === 'assistant.threads.setStatus')
+    expect(statusCalls.map(call => stringField(call.body.status))).toEqual([
+      'Thinking...',
+      clippedSummary,
+      ''
+    ])
+    expect(Array.from(clippedSummary)).toHaveLength(50)
+    expect(statusCalls[1]?.body).toEqual(
+      expect.objectContaining({
+        channel_id: CHANNEL_ID,
+        thread_ts: parent.ts,
+        loading_messages: [clippedSummary],
+        status: clippedSummary
+      })
+    )
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    expect(transcripts[0]!.start.body.task_display_mode).toBeUndefined()
+    expect(transcripts[0]!.chunks.every(chunk => chunk.type === 'markdown_text')).toBe(true)
+    const text = await threadText(parent.ts)
+    expect(text).toContain('Done with status.')
+    expect(text).not.toContain(summary)
+    expect(text).not.toContain('Command execution')
+    expect(text).not.toContain('Thinking')
+  })
+
   it('recovers unfinished render obligations from Chat SDK state on startup', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -3798,6 +3884,17 @@ describe('slackbotv2', () => {
 })
 
 function createTestBot(
+  overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
+): SlackbotV2 {
+  return createProductionDefaultTestBot({
+    // Most tests in this file exercise the legacy structured-card renderer.
+    // Production omits this option and uses assistant status for live activity.
+    streamTaskDisplayMode: 'plan',
+    ...overrides
+  })
+}
+
+function createProductionDefaultTestBot(
   overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
 ): SlackbotV2 {
   return createSlackbotV2({
@@ -5095,6 +5192,7 @@ function expectSlackPlanStreamShape(
     expect(markdownText).not.toContain('Implementation plan')
     expect(markdownText).not.toContain('Checking the command output')
     expect(markdownText).not.toContain('Inspecting the event stream')
+    expect(markdownText).not.toContain('Thinking')
     expect(markdownText).not.toContain('Command execution')
     expect(markdownText).not.toContain('pnpm test')
     expect(markdownText).not.toContain('tests passed')
@@ -5109,25 +5207,11 @@ function expectSlackPlanStreamShape(
     expect(progressChunks).toContainEqual(
       expect.objectContaining({ type: 'plan_update', title: 'Implementation plan' })
     )
-    // Conflation may merge intermediate states into the final card update
-    // when the consumer is behind, so only assert the terminal status per
-    // card here; content presence is asserted on the aggregate text below.
-    expect(progressChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        id: 'thinking-commentary-1',
-        title: 'Thinking',
-        status: 'complete'
-      })
-    )
-    expect(progressChunks).toContainEqual(
-      expect.objectContaining({
-        type: 'task_update',
-        id: 'reasoning-1',
-        title: 'Thinking',
-        status: 'complete'
-      })
-    )
+    expect(
+      progressChunks.some(chunk => chunk.type === 'task_update' && chunk.title === 'Thinking')
+    ).toBe(false)
+    expect(progressText).not.toContain('Checking the command output')
+    expect(progressText).not.toContain('Inspecting the event stream')
     expect(progressChunks).toContainEqual(
       expect.objectContaining({
         type: 'task_update',
@@ -5149,8 +5233,9 @@ function expectSlackPlanStreamShape(
     expect(renderedText).toContain('Implementation plan')
     expect(renderedText).toContain('Inspect App Server events')
     expect(renderedText).toContain('Stream Chat SDK chunks')
-    expect(renderedText).toContain('Checking the command output')
-    expect(renderedText).toContain('Inspecting the event stream')
+    expect(renderedText).not.toContain('Checking the command output')
+    expect(renderedText).not.toContain('Inspecting the event stream')
+    expect(renderedText).not.toContain('Thinking')
     expect(renderedText).toContain('Command execution')
     expect(renderedText).toContain('pnpm test')
     expect(renderedText).not.toContain('tests passed')
@@ -5162,9 +5247,9 @@ function expectSlackRenderedReply(text: string, answer: string): void {
   expect(text).toContain('Implementation plan')
   expect(text).toContain('Inspect App Server events')
   expect(text).toContain('Stream Chat SDK chunks')
-  expect(text).toContain('Thinking')
-  expect(text).toContain('Checking the command output')
-  expect(text).toContain('Inspecting the event stream')
+  expect(text).not.toContain('Thinking')
+  expect(text).not.toContain('Checking the command output')
+  expect(text).not.toContain('Inspecting the event stream')
   expect(text).toContain('Command execution')
   expect(text).toContain('pnpm test')
   expect(text).not.toContain('tests passed')

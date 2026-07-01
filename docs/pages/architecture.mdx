@@ -52,7 +52,7 @@ https://api.acme.com/api/webhooks/slack
 The webhook does not use a Centaur API key. Slack signs every request with
 `X-Slack-Signature` and `X-Slack-Request-Timestamp`; the Slackbot validates that
 HMAC signature with `SLACK_SIGNING_SECRET` before it routes the event to the API.
-After validation, the Slackbot calls Centaur's agent API with
+After validation, the Slackbot calls Centaur's api-rs session API with
 `SLACKBOT_API_KEY`.
 
 During a Slack delivery, the API owns the execution state while Slackbot owns

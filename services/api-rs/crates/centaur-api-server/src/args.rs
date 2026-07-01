@@ -27,13 +27,16 @@ use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
-use centaur_session_runtime::{PersonaRegistry, SandboxWorkloadMode, SessionSandboxCleanupConfig};
+use centaur_session_runtime::{
+    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
+};
 use centaur_workflows::WorkflowHostSandboxRuntime;
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{info, warn};
 
 use crate::{
     ServerError,
+    activity_summary::ActivitySummaryConfig,
     tool_discovery::{
         DiscoveredToolProxyFragment, ToolDiscoveryConfig, discover_persona_registry,
         discover_tool_proxy_fragment,
@@ -60,6 +63,8 @@ pub(crate) struct Args {
     pub(crate) server: ServerArgs,
     #[command(flatten)]
     sandbox: SandboxArgs,
+    #[command(flatten)]
+    activity_summary: ActivitySummaryArgs,
 }
 
 impl Args {
@@ -81,6 +86,10 @@ impl Args {
         self.sandbox.warm_pool_config()
     }
 
+    pub(crate) fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
+        self.sandbox.sandbox_capacity_config()
+    }
+
     pub(crate) fn sandbox_reaper_config(&self) -> SandboxReaperConfig {
         self.sandbox.sandbox_reaper_config()
     }
@@ -97,12 +106,92 @@ impl Args {
             .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
             .await
     }
+
+    pub(crate) fn activity_summary_config(&self) -> Option<ActivitySummaryConfig> {
+        self.activity_summary.config()
+    }
 }
 
 pub(crate) struct IronControlRuntime {
     pub(crate) registrar: SessionRegistrar,
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ActivitySummaryArgs {
+    /// Enable API-side model summaries of durable Codex App Server activity.
+    #[arg(
+        long = "session-activity-summary-enabled",
+        env = "SESSION_ACTIVITY_SUMMARY_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    enabled: bool,
+    #[arg(
+        long = "session-activity-summary-model",
+        env = "SESSION_ACTIVITY_SUMMARY_MODEL",
+        default_value = "gpt-5.4-nano"
+    )]
+    model: String,
+    #[arg(
+        long = "session-activity-summary-openai-base-url",
+        env = "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
+        default_value = "https://api.openai.com/v1"
+    )]
+    openai_base_url: String,
+    #[arg(
+        long = "session-activity-summary-min-interval-secs",
+        env = "SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS",
+        default_value_t = 8,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    min_interval_secs: u64,
+    #[arg(
+        long = "session-activity-summary-timeout-secs",
+        env = "SESSION_ACTIVITY_SUMMARY_TIMEOUT_SECS",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    timeout_secs: u64,
+    #[arg(
+        long = "session-activity-summary-max-facts",
+        env = "SESSION_ACTIVITY_SUMMARY_MAX_FACTS",
+        default_value_t = 12,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_facts: u64,
+    #[arg(
+        long = "session-activity-summary-max-output-tokens",
+        env = "SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS",
+        default_value_t = 128,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_output_tokens: u64,
+}
+
+impl ActivitySummaryArgs {
+    fn config(&self) -> Option<ActivitySummaryConfig> {
+        if !self.enabled {
+            return None;
+        }
+        let Some(api_key) = clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref()) else {
+            warn!(
+                "session activity summaries are enabled but no OpenAI credential is configured; \
+                 set OPENAI_API_KEY in the api-rs environment"
+            );
+            return None;
+        };
+        Some(ActivitySummaryConfig {
+            base_url: self.openai_base_url.clone(),
+            api_key,
+            max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
+            max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
+            min_interval: Duration::from_secs(self.min_interval_secs),
+            model: self.model.clone(),
+            timeout: Duration::from_secs(self.timeout_secs),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -440,21 +529,29 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
-    /// Stop sandboxes that have been idle-paused longer than this. 0 disables
-    /// the idle sweep.
+    /// Hard cap on observed running-like sandboxes. 0 disables capacity
+    /// admission.
     #[arg(
-        long = "session-sandbox-idle-stop-ttl-secs",
-        env = "SESSION_SANDBOX_IDLE_STOP_TTL_SECS",
-        default_value_t = 3600
+        long = "session-sandbox-running-limit",
+        env = "SESSION_SANDBOX_RUNNING_LIMIT",
+        default_value_t = 0
     )]
-    sandbox_idle_stop_ttl_secs: u64,
+    sandbox_running_limit: usize,
+    /// Do not evict assigned idle sandboxes that were active within this
+    /// window. Warm sandboxes can still be discarded first.
+    #[arg(
+        long = "session-sandbox-hot-idle-grace-secs",
+        env = "SESSION_SANDBOX_HOT_IDLE_GRACE_SECS",
+        default_value_t = 300
+    )]
+    sandbox_hot_idle_grace_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
     #[arg(
         long = "session-sandbox-max-lifetime-secs",
         env = "SESSION_SANDBOX_MAX_LIFETIME_SECS",
-        default_value_t = 86_400
+        default_value_t = 259_200
     )]
     sandbox_max_lifetime_secs: u64,
     #[arg(
@@ -1089,6 +1186,15 @@ impl SandboxArgs {
             target_size: self.warm_pool_size,
             replenish_interval: Duration::from_secs(self.warm_pool_replenish_interval_secs),
             bootstrap_iron_control_principal: None,
+            max_running_sandboxes: (self.sandbox_running_limit > 0)
+                .then_some(self.sandbox_running_limit),
+        })
+    }
+
+    fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
+        (self.sandbox_running_limit > 0).then(|| SandboxCapacityConfig {
+            max_running: self.sandbox_running_limit,
+            hot_idle_grace: Duration::from_secs(self.sandbox_hot_idle_grace_secs),
         })
     }
 
@@ -1096,7 +1202,6 @@ impl SandboxArgs {
         let ttl = |secs: u64| (secs > 0).then(|| Duration::from_secs(secs));
         SandboxReaperConfig {
             interval: Duration::from_secs(self.sandbox_reap_interval_secs),
-            idle_ttl: ttl(self.sandbox_idle_stop_ttl_secs),
             max_lifetime: ttl(self.sandbox_max_lifetime_secs),
         }
     }
@@ -1297,6 +1402,14 @@ struct ToolsArgs {
     )]
     repo_cache_pvc: Option<String>,
     #[arg(
+        id = "tools_auto_reload",
+        long = "kubernetes-tools-auto-reload",
+        env = "KUBERNETES_TOOLS_AUTO_RELOAD",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    auto_reload: bool,
+    #[arg(
         id = "tools_extra_sources",
         long = "kubernetes-tools-extra-sources",
         env = "KUBERNETES_TOOLS_EXTRA_SOURCES"
@@ -1349,6 +1462,7 @@ impl ToolsArgs {
         }
         config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
         config.repo_cache_pvc = clean_optional_value(self.repo_cache_pvc.as_deref());
+        config.auto_reload = self.auto_reload;
         config.extra_sources = self.extra_sources();
         Some(config)
     }
@@ -1867,6 +1981,55 @@ mod tests {
     }
 
     #[test]
+    fn activity_summary_uses_direct_openai_key_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("FIREWALL_MANAGER_SECRET_SOURCE", "env"),
+            ("KUBERNETES_OP_CONNECT_HOST", ""),
+            ("OP_CONNECT_TOKEN", ""),
+            ("OP_VAULT", ""),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.api_key, "sk-test");
+    }
+
+    #[test]
+    fn activity_summary_uses_mounted_openai_key_even_with_onepassword_connect_source() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-mounted"),
+            ("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword-connect"),
+            (
+                "KUBERNETES_OP_CONNECT_HOST",
+                "http://onepassword-connect:8080",
+            ),
+            ("OP_CONNECT_TOKEN", "op-token"),
+            ("OP_VAULT", "centaur-agent"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.api_key, "sk-mounted");
+    }
+
+    #[test]
     fn parses_session_sandbox_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -1894,6 +2057,19 @@ mod tests {
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
+    }
+
+    #[test]
+    fn sandbox_reaper_defaults_delete_after_max_lifetime() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        let config = args.sandbox_reaper_config();
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(259_200)));
     }
 
     #[test]
@@ -1979,9 +2155,34 @@ mod tests {
             tools.repo_cache_path.as_deref(),
             Some("/var/lib/centaur/repos")
         );
+        assert!(tools.auto_reload);
         let token = tools.github_token.expect("token should be Some");
         assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
         assert_eq!(token.secret_key, "token");
+    }
+
+    #[test]
+    fn tools_config_reads_auto_reload_flag() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-auto-reload",
+            "false",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        let tools = config.tools.expect("tools should be Some");
+        assert!(!tools.auto_reload);
     }
 
     #[test]

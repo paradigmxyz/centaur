@@ -130,7 +130,7 @@ impl SessionSandboxCleanupWorker {
                 &candidate.thread_key,
                 &candidate.execution_id,
                 &candidate.sandbox_id,
-                idle_backstop,
+                candidate.idle_timeout,
             )
             .await
             {

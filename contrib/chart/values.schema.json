@@ -166,6 +166,7 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "autoReload": { "type": "boolean" },
         "hostPath": { "type": "string" },
         "repositories": {
           "type": "array",
@@ -242,6 +243,8 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
+        "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
         "etl": {
           "type": "object",
           "properties": {

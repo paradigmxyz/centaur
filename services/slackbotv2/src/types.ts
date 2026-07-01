@@ -106,6 +106,7 @@ export type SlackbotV2Options = {
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
+  /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
   maxDurationMs?: number
@@ -123,7 +124,7 @@ export type SlackbotV2Options = {
   slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
-  streamTaskDisplayMode?: 'plan' | 'timeline'
+  streamTaskDisplayMode?: 'none' | 'plan' | 'timeline'
   triggerBotAllowlist?: readonly string[]
   userName?: string
   mapper?: CodexAppServerToChatStreamOptions
