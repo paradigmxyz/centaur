@@ -358,7 +358,6 @@ struct EnsureSessionSandboxRequest<'a> {
     iron_control_principal: Option<&'a str>,
     desired_capabilities: &'a SessionSandboxCapabilities,
     execution_id: &'a str,
-    boot_mode: SandboxBootMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -529,15 +528,47 @@ impl SessionRuntime {
         }
 
         let thread_key = tool_host_thread_key(&principal_id)?;
-        let call_lock = {
-            let entry = self
-                .tool_host_call_locks
-                .entry(thread_key.as_str().to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(())));
-            entry.clone()
+        let input = ToolHostCallInput {
+            principal_id,
+            tool_name,
+            method,
+            ..input
         };
-        let _call_guard = call_lock.lock().await;
-        self.create_or_get_tool_host_session(&thread_key, &principal_id)
+        let call_lock = self.tool_host_call_lock(&thread_key);
+        let result = {
+            let _call_guard = call_lock.lock().await;
+            self.locked_tool_host_call(&thread_key, input).await
+        };
+        // Drop our clone so an idle entry is only referenced by the map, then
+        // evict it; remove_if holds the shard lock, so no concurrent caller
+        // can clone the entry between the count check and the removal.
+        drop(call_lock);
+        self.tool_host_call_locks
+            .remove_if(thread_key.as_str(), |_, lock| Arc::strong_count(lock) == 1);
+        result
+    }
+
+    fn tool_host_call_lock(&self, thread_key: &ThreadKey) -> Arc<Mutex<()>> {
+        self.tool_host_call_locks
+            .entry(thread_key.as_str().to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    async fn locked_tool_host_call(
+        &self,
+        thread_key: &ThreadKey,
+        input: ToolHostCallInput,
+    ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
+        let ToolHostCallInput {
+            principal_id,
+            token_id,
+            tool_name,
+            method,
+            arguments,
+            timeout,
+        } = input;
+        self.create_or_get_tool_host_session(thread_key, &principal_id)
             .await?;
 
         let request_id = format!("mcp-call-{}", Uuid::new_v4().simple());
@@ -545,18 +576,18 @@ impl SessionRuntime {
             id: request_id.clone(),
             tool: tool_name.clone(),
             method: method.clone(),
-            arguments: input.arguments,
+            arguments,
             principal_id,
-            token_id: input.token_id,
-            timeout_seconds: input.timeout.as_secs().max(1),
+            token_id,
+            timeout_seconds: timeout.as_secs().max(1),
         };
         let input_line = serde_json::to_string(&request).map_err(|error| {
             SessionRuntimeError::Sandbox(SandboxError::io_source("encode tool host request", error))
         })?;
-        let response_timeout = input.timeout.saturating_add(Duration::from_secs(5));
+        let response_timeout = timeout.saturating_add(Duration::from_secs(5));
         let execution = self
             .execute_session(
-                &thread_key,
+                thread_key,
                 ExecuteSessionInput {
                     idempotency_key: Some(request_id.clone()),
                     metadata: Some(json!({
@@ -564,7 +595,7 @@ impl SessionRuntime {
                         "request_id": request_id,
                         "tool": tool_name,
                         "method": method,
-                        "timeout_ms": duration_millis_u64(input.timeout),
+                        "timeout_ms": duration_millis_u64(timeout),
                     })),
                     input_lines: vec![input_line],
                     idle_timeout_ms: None,
@@ -572,7 +603,7 @@ impl SessionRuntime {
                 },
             )
             .await?;
-        self.wait_for_tool_host_call(&thread_key, &execution.execution_id, response_timeout)
+        self.wait_for_tool_host_call(thread_key, &execution.execution_id, response_timeout)
             .await
     }
 
@@ -586,10 +617,7 @@ impl SessionRuntime {
             .warm_harness
             .clone()
             .unwrap_or(HarnessType::Codex);
-        let metadata = json!({
-            "mcp_tool_host": true,
-            "mcp_principal_id": principal_id,
-        });
+        let metadata = tool_host_session_metadata(principal_id);
         let session = self
             .store
             .create_or_get_session(thread_key, &harness, None, metadata)
@@ -634,8 +662,13 @@ impl SessionRuntime {
         .await
         {
             Ok(output) => output,
+            // Best-effort sandbox id: a store error must not replace the
+            // timeout result with an internal error.
             Err(_) => Ok(ToolHostCallOutput {
-                sandbox_id: self.current_sandbox_id(thread_key).await?,
+                sandbox_id: self
+                    .current_sandbox_id(thread_key)
+                    .await
+                    .unwrap_or_default(),
                 stdout: String::new(),
                 stderr: format!(
                     "tool host call timed out after {} ms",
@@ -739,13 +772,13 @@ impl SessionRuntime {
                 "mcp tool host principal_id must not contain ':'".to_owned(),
             ));
         }
-        let thread_key = ThreadKey::parse(format!("mcp:{principal_id}"))
-            .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))?;
+        let thread_key = tool_host_thread_key(principal_id)?;
         if let Some(registrar) = &self.iron_control {
-            let metadata = json!({
-                "mcp_tool_host": true,
-                "mcp_principal_id": principal_id,
-            });
+            // Serialize with run_tool_host_call so concurrent registrations
+            // for the same principal cannot interleave with session setup.
+            let call_lock = self.tool_host_call_lock(&thread_key);
+            let _call_guard = call_lock.lock().await;
+            let metadata = tool_host_session_metadata(principal_id);
             let principal = registrar
                 .register_session(thread_key.as_str(), Some(&metadata))
                 .await?;
@@ -1393,7 +1426,6 @@ impl SessionRuntime {
             let desired_capabilities = self
                 .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
                 .await?;
-            let boot_mode = sandbox_boot_mode_for_session(&session);
 
             let sandbox_id = match self
                 .ensure_session_sandbox(EnsureSessionSandboxRequest {
@@ -1405,7 +1437,6 @@ impl SessionRuntime {
                     iron_control_principal: session.iron_control_principal.as_deref(),
                     desired_capabilities: &desired_capabilities,
                     execution_id: &execution.execution_id,
-                    boot_mode,
                 })
                 .instrument(execution_trace_span.clone())
                 .await
@@ -1731,8 +1762,8 @@ impl SessionRuntime {
             iron_control_principal,
             desired_capabilities,
             execution_id,
-            boot_mode,
         } = request;
+        let boot_mode = sandbox_boot_mode_for_thread(thread_key, iron_control_principal);
         let span = info_span!(
             "centaur.api_rs.sandbox.ensure",
             component = COMPONENT_SESSION_RUNTIME,
@@ -5255,13 +5286,23 @@ fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeE
         .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))
 }
 
-fn sandbox_boot_mode_for_session(session: &Session) -> SandboxBootMode {
-    let Some(thread_principal_id) = session.thread_key.as_str().strip_prefix("mcp:") else {
+/// Session/principal metadata recorded for observability; runtime behavior
+/// derives from the `mcp:` thread-key prefix, not from these fields.
+fn tool_host_session_metadata(principal_id: &str) -> Value {
+    json!({
+        "mcp_tool_host": true,
+        "mcp_principal_id": principal_id,
+    })
+}
+
+fn sandbox_boot_mode_for_thread(
+    thread_key: &ThreadKey,
+    iron_control_principal: Option<&str>,
+) -> SandboxBootMode {
+    let Some(thread_principal_id) = thread_key.as_str().strip_prefix("mcp:") else {
         return SandboxBootMode::Harness;
     };
-    let principal_id = session
-        .iron_control_principal
-        .as_deref()
+    let principal_id = iron_control_principal
         .unwrap_or(thread_principal_id)
         .to_owned();
     SandboxBootMode::ToolHost { principal_id }
@@ -6854,7 +6895,6 @@ mod adoption_tests {
                 iron_control_principal: None,
                 desired_capabilities: &restricted_capabilities(),
                 execution_id: &execution_id,
-                boot_mode: SandboxBootMode::Harness,
             })
             .await
             .expect("replace sandbox");
@@ -6934,7 +6974,6 @@ mod adoption_tests {
                 iron_control_principal: None,
                 desired_capabilities: &restricted_capabilities(),
                 execution_id: &execution_id,
-                boot_mode: SandboxBootMode::Harness,
             })
             .await
             .expect("ensure sandbox");
@@ -6988,7 +7027,6 @@ mod adoption_tests {
                 iron_control_principal: Some("principal-existing"),
                 desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
                 execution_id: &execution_id,
-                boot_mode: SandboxBootMode::Harness,
             })
             .await
             .expect("reuse existing sandbox");
@@ -7196,7 +7234,6 @@ mod adoption_tests {
                 iron_control_principal: None,
                 desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
                 execution_id: &execution_id,
-                boot_mode: SandboxBootMode::Harness,
             })
             .await
             .expect("resume failure should fall through to replacement");
