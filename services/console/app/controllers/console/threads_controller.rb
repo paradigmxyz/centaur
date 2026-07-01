@@ -374,8 +374,8 @@ class Console::ThreadsController < ApplicationController
       metadata["generated_title"].presence ||
       metadata["summary_title"].presence ||
       metadata["thread_title"].presence ||
-      metadata.dig("thread", "title").presence ||
-      metadata.dig("summary", "title").presence ||
+      (metadata["thread"].is_a?(Hash) ? metadata["thread"]["title"] : nil).presence ||
+      (metadata["summary"].is_a?(Hash) ? metadata["summary"]["title"] : nil).presence ||
       (summary if summary.is_a?(String)).presence ||
       metadata["subject"].presence ||
       metadata["issue_title"].presence

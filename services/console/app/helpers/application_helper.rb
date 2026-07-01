@@ -155,8 +155,8 @@ module ApplicationHelper
       metadata["generated_title"].presence ||
       metadata["summary_title"].presence ||
       metadata["thread_title"].presence ||
-      metadata.dig("thread", "title").presence ||
-      metadata.dig("summary", "title").presence ||
+      (metadata["thread"].is_a?(Hash) ? metadata["thread"]["title"] : nil).presence ||
+      (metadata["summary"].is_a?(Hash) ? metadata["summary"]["title"] : nil).presence ||
       (summary if summary.is_a?(String)).presence ||
       metadata["subject"].presence ||
       metadata["issue_title"].presence
@@ -261,6 +261,7 @@ module ApplicationHelper
 
     while index < lines.length
       line = lines[index]
+      start_index = index
 
       if line.blank?
         index += 1
@@ -306,6 +307,15 @@ module ApplicationHelper
           index += 1
         end
         blocks << %(<p class="mb-3 last:mb-0">#{markdown_inline(paragraph.join(" "))}</p>)
+      end
+
+      # Guarantee forward progress: a block-start marker with no content (e.g.
+      # a bare "- ", "1. ", or "# ") matches a branch guard but not its inner
+      # consuming regex, which would otherwise spin this loop forever. Emit such
+      # a line as an escaped paragraph and advance.
+      if index == start_index
+        blocks << %(<p class="mb-3 last:mb-0">#{markdown_inline(line)}</p>)
+        index += 1
       end
     end
 
