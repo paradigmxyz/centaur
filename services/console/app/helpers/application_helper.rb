@@ -242,11 +242,11 @@ module ApplicationHelper
 
   def outline_icon(classes, path)
     tag.svg(
-      tag.path(d: path, :"stroke-linecap" => "round", :"stroke-linejoin" => "round"),
+      tag.path(d: path, "stroke-linecap": "round", "stroke-linejoin": "round"),
       xmlns: "http://www.w3.org/2000/svg",
       fill: "none",
       viewBox: "0 0 24 24",
-      :"stroke-width" => "1.8",
+      "stroke-width": "1.8",
       stroke: "currentColor",
       class: classes,
       aria: { hidden: true },
