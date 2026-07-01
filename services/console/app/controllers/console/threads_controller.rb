@@ -1,12 +1,6 @@
-require "securerandom"
-
 class Console::ThreadsController < ApplicationController
   layout "console"
 
-  class_attribute :client_factory, default: -> { CentaurApiClient.new }
-  class_attribute :read_only_override, default: nil
-
-  SUPPORTED_HARNESSES = %w[codex amp claudecode].freeze
   THREAD_LIMIT = 250
   MESSAGE_LIMIT = 80
   EXECUTION_LIMIT = 8
@@ -39,8 +33,6 @@ class Console::ThreadsController < ApplicationController
     @selected_thread_key = params[:thread].to_s
     @starting_new_thread = params[:new].present?
     @thread_db_unavailable = false
-    @threads_read_only = threads_read_only?
-    @threads_read_only_reason = threads_read_only_reason
 
     load_threads
     redirect_to_first_thread if auto_select_first_thread?
@@ -51,55 +43,10 @@ class Console::ThreadsController < ApplicationController
   end
 
   def create
-    if threads_read_only?
-      return redirect_to(
-        console_threads_path(thread: params[:thread_key].presence),
-        alert: threads_read_only_reason
-      )
-    end
-
-    prompt = params[:prompt].to_s.strip
-    if prompt.blank?
-      return redirect_to console_threads_path, alert: "Enter a message to start a thread."
-    end
-
-    existing_thread_key = params[:thread_key].to_s.presence
-    harness_type = params[:harness_type].presence_in(SUPPORTED_HARNESSES) || "codex"
-    thread_key = existing_thread_key || "console:#{SecureRandom.uuid}"
-    message_id = "console-msg-#{SecureRandom.uuid}"
-    metadata = console_thread_metadata
-    action = existing_thread_key ? "reply" : "start_thread"
-
-    unless existing_thread_key
-      api_client.create_session(
-        thread_key: thread_key,
-        harness_type: harness_type,
-        metadata: metadata,
-        on_harness_conflict: "reject"
-      )
-    end
-    api_client.append_session_messages(
-      thread_key: thread_key,
-      messages: [
-        {
-          client_message_id: message_id,
-          role: "user",
-          parts: [ { type: "text", text: prompt } ],
-          metadata: metadata.merge(action: action)
-        }
-      ]
+    redirect_to(
+      console_threads_path(thread: params[:thread_key].presence),
+      alert: READ_ONLY_REASON
     )
-    api_client.execute_session(
-      thread_key: thread_key,
-      idempotency_key: "console-#{SecureRandom.uuid}",
-      metadata: metadata.merge(action: "execute"),
-      input_lines: [ console_input_line(thread_key, message_id, prompt, metadata) ]
-    )
-
-    notice = existing_thread_key ? "Message sent." : "Thread started."
-    redirect_to console_threads_path(thread: thread_key), notice: notice
-  rescue CentaurApiClient::Error => e
-    redirect_to console_threads_path, alert: e.message
   end
 
   private
@@ -873,41 +820,5 @@ class Console::ThreadsController < ApplicationController
     return thread_key if parts.empty?
 
     "#{source.titleize}: #{parts.last}"
-  end
-
-  def console_thread_metadata
-    {
-      platform: "console",
-      source: "console",
-      actor_email: current_user&.email,
-      user_email: current_user&.email,
-      user_name: current_user&.email.to_s.split("@").first
-    }.compact
-  end
-
-  def console_input_line(thread_key, message_id, prompt, metadata)
-    JSON.generate(
-      type: "user",
-      thread_key: thread_key,
-      trace_metadata: metadata.merge(action: "execute", client_message_id: message_id),
-      message: {
-        role: "user",
-        content: [ { type: "text", text: prompt } ]
-      }
-    )
-  end
-
-  def api_client
-    @api_client ||= self.class.client_factory.call
-  end
-
-  def threads_read_only?
-    return self.class.read_only_override unless self.class.read_only_override.nil?
-
-    ActiveModel::Type::Boolean.new.cast(ConsoleEnv["THREADS_READ_ONLY"])
-  end
-
-  def threads_read_only_reason
-    ConsoleEnv["THREADS_READ_ONLY_REASON"].presence || READ_ONLY_REASON
   end
 end
