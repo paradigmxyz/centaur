@@ -143,7 +143,7 @@ struct ActivitySummaryArgs {
     #[arg(
         long = "session-activity-summary-min-interval-secs",
         env = "SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS",
-        default_value_t = 8,
+        default_value_t = 20,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     min_interval_secs: u64,

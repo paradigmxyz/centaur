@@ -363,7 +363,7 @@ apiRs:
     enabled: false
     model: gpt-5.4-nano
     openaiBaseUrl: https://api.openai.com/v1
-    minIntervalSecs: 8
+    minIntervalSecs: 20
     timeoutSecs: 5
     maxFacts: 12
     maxOutputTokens: 128
