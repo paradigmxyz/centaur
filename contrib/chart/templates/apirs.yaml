@@ -378,6 +378,8 @@ spec:
 {{- if $toolsUseRepoCache }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PATH
               value: {{ .Values.repoCache.hostPath | quote }}
+            - name: KUBERNETES_TOOLS_AUTO_RELOAD
+              value: {{ .Values.repoCache.autoReload | quote }}
 {{- if $repoCacheUsePvc }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PVC
               value: {{ $repoCachePvcName | quote }}

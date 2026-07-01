@@ -166,6 +166,7 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "autoReload": { "type": "boolean" },
         "hostPath": { "type": "string" },
         "repositories": {
           "type": "array",

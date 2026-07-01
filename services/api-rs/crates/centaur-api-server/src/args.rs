@@ -1426,6 +1426,14 @@ struct ToolsArgs {
     )]
     repo_cache_pvc: Option<String>,
     #[arg(
+        id = "tools_auto_reload",
+        long = "kubernetes-tools-auto-reload",
+        env = "KUBERNETES_TOOLS_AUTO_RELOAD",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    auto_reload: bool,
+    #[arg(
         id = "tools_extra_sources",
         long = "kubernetes-tools-extra-sources",
         env = "KUBERNETES_TOOLS_EXTRA_SOURCES"
@@ -1478,6 +1486,7 @@ impl ToolsArgs {
         }
         config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
         config.repo_cache_pvc = clean_optional_value(self.repo_cache_pvc.as_deref());
+        config.auto_reload = self.auto_reload;
         config.extra_sources = self.extra_sources();
         Some(config)
     }
@@ -2115,9 +2124,34 @@ mod tests {
             tools.repo_cache_path.as_deref(),
             Some("/var/lib/centaur/repos")
         );
+        assert!(tools.auto_reload);
         let token = tools.github_token.expect("token should be Some");
         assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
         assert_eq!(token.secret_key, "token");
+    }
+
+    #[test]
+    fn tools_config_reads_auto_reload_flag() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "disabled",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-auto-reload",
+            "false",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        let tools = config.tools.expect("tools should be Some");
+        assert!(!tools.auto_reload);
     }
 
     #[test]

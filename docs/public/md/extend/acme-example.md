@@ -87,8 +87,12 @@ git -C centaur-acme rev-parse --short HEAD
 The Centaur chart's repo-cache DaemonSet checks out the overlay repo on each
 node, so changing tools, workflows, or skills is a Git push — no API, sandbox,
 or overlay image rebuild is required for overlay-only changes. New sandboxes see
-the latest cached checkout; existing sandboxes can run `centaur-tools refresh`
-when they need to refresh tool shims from the current repo-cache checkout.
+the latest cached checkout. Repo-cache-enabled running sandboxes auto-refresh
+their local tool shims and copied skills from the latest cached checkout; use
+`centaur-tools refresh` only when you need a manual refresh. This only updates
+the runtime catalog and local source copy. Secret grants and proxy credentials
+are reconciled separately, so a newly visible tool may still fail normally until
+its credential path is available.
 
 Configure the ordered overlay sources in Helm values:
 

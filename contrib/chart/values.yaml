@@ -226,6 +226,7 @@ sandbox:
 
 repoCache:
   enabled: true
+  autoReload: true
   hostPath: /var/lib/centaur/repos
   storage:
     # hostPath preserves the existing DaemonSet/node-local behavior. Set to
