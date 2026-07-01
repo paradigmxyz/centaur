@@ -3313,13 +3313,11 @@ async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRun
         return serde_json::to_value(run_time_now_tool()).map_err(WorkflowRuntimeError::from);
     }
 
-    let base_url = env::var(WORKFLOW_TOOL_API_URL_ENV)
-        .or_else(|_| env::var("CENTAUR_PYTHON_API_URL"))
-        .map_err(|_| {
-            WorkflowRuntimeError::BadRequest(format!(
-                "{WORKFLOW_TOOL_API_URL_ENV} must be set for ctx.call_tool({tool}.{method})"
-            ))
-        })?;
+    let base_url = env::var(WORKFLOW_TOOL_API_URL_ENV).map_err(|_| {
+        WorkflowRuntimeError::BadRequest(format!(
+            "{WORKFLOW_TOOL_API_URL_ENV} must be set for ctx.call_tool({tool}.{method})"
+        ))
+    })?;
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/tools/{tool}/{method}");
     let args = message.get("args").cloned().unwrap_or_else(|| json!({}));

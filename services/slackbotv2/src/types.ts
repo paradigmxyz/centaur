@@ -106,6 +106,7 @@ export type SlackbotV2Options = {
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
+  /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
   maxDurationMs?: number

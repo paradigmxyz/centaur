@@ -238,6 +238,10 @@ ironProxy:
   secretSource: onepassword-connect
   secretTtl: 10m
 
+apiRs:
+  # Delete any sandbox older than this, running or suspended.
+  sandboxMaxLifetimeSecs: 259200
+
 onepasswordConnect:
   connect:
     create: true
@@ -254,6 +258,17 @@ sandbox:
 
 The Kubernetes sandbox backend is the active runtime backend; there is no chart
 switch named `api.sandboxBackend`.
+
+Sandbox lifecycle has two separate timers:
+
+- Slackbot v2 sends `idle_timeout_ms` on execute requests, defaulting to up to
+  3 hours, so api-rs can pause an idle sandbox after a turn finishes.
+- api-rs deletes old sandboxes through `apiRs.sandboxMaxLifetimeSecs`, default
+  72 hours, regardless of whether the sandbox is still running or already
+  suspended.
+
+There is no suspended-only delete setting. If you want sandboxes gone after N
+hours, set `apiRs.sandboxMaxLifetimeSecs` to N hours in seconds.
 
 Install or upgrade:
 

@@ -229,6 +229,7 @@ sandbox:
 
 repoCache:
   enabled: true
+  autoReload: true
   hostPath: /var/lib/centaur/repos
   storage:
     # hostPath preserves the existing DaemonSet/node-local behavior. Set to
@@ -349,14 +350,14 @@ apiRs:
     companyContextDocuments:
       enabled: true
       intervalSeconds: 14400
-  # Reaper: stop sandboxes idle-paused longer than the idle TTL or older than
-  # the max lifetime. 0 disables that sweep. Interval must be >= 1.
-  sandboxIdleStopTtlSecs: 10800 # 3 hours
+  # Reaper: stop sandboxes older than the max lifetime, regardless of whether
+  # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
   # consecutive sweeps and restore idle-pauses lost across api-rs restarts.
-  # 0 disables the corresponding arm.
+  # The idle backstop is only used when older execution rows have no persisted
+  # idle_timeout_ms. 0 disables the corresponding arm.
   sandboxCleanupIntervalSecs: 300
   sandboxIdleCleanupBackstopSecs: 21600 # 6 hours
   ironProxy:

@@ -97,9 +97,8 @@ These primitives compose into larger automations:
 Create a run through the API:
 
 ```bash
-curl -s "$CENTAUR_API_URL/workflows/runs" \
+curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $WORKFLOW_API_KEY" \
   -d '{
     "workflow_name": "nightly_report",
     "input": {"channel": "ops", "topic": "open incidents"},
@@ -110,8 +109,7 @@ curl -s "$CENTAUR_API_URL/workflows/runs" \
 Inspect it:
 
 ```bash
-curl -s "$CENTAUR_API_URL/workflows/runs/$RUN_ID" \
-  -H "X-Api-Key: $WORKFLOW_API_KEY" | jq
+curl -s "$CENTAUR_API_URL/api/workflows/runs/$RUN_ID" | jq
 ```
 
 ## Schedule a workflow

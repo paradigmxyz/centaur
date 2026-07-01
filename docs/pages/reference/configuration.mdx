@@ -85,6 +85,18 @@ Optional required-by-mode variables:
 | `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
 | `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |
 
+Sandbox lifecycle:
+
+| Env var or value | Set from | Controls |
+| --- | --- | --- |
+| `SESSION_IDLE_TIMEOUT_MS` | `slackbotv2.extraEnv`; default is up to 3 hours. | Slackbot v2 execute idle timeout. After an execution reaches a terminal state, api-rs pauses the sandbox if no newer execution has used that sandbox. If `SESSION_MAX_DURATION_MS` is lower than 3 hours and this value is unset, Slackbot v2 caps the default idle timeout to the max duration. |
+| `SESSION_MAX_DURATION_MS` | `slackbotv2.extraEnv`. | Optional per-execution max duration forwarded to api-rs. api-rs rejects requests where `idle_timeout_ms` is greater than `max_duration_ms`. |
+| `apiRs.sandboxMaxLifetimeSecs` / `SESSION_SANDBOX_MAX_LIFETIME_SECS` | Helm value, default `259200` (72 hours). | Restart-surviving sandbox deletion backstop. The reaper stops any non-terminal sandbox older than this, regardless of whether it is running or suspended. Set `0` to disable max-lifetime reaping. |
+| `apiRs.sandboxReapIntervalSecs` / `SESSION_SANDBOX_REAP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs sweeps observed sandboxes for max-lifetime expiry. |
+
+There is no separate suspended-only delete timer. Pausing is controlled by the
+per-execution idle timeout; deletion is controlled by sandbox max lifetime.
+
 Execution tuning:
 
 | Env var | Set from | Controls |
@@ -163,7 +175,7 @@ Kubernetes backend:
 | `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
 | `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
-| `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and idle-pause backstop after API restarts. |
+| `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and restart recovery for idle pauses. Persisted `idle_timeout_ms` is honored after restart; the backstop is the fallback for older execution rows without that metadata. |
 | `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |
 | `KUBERNETES_WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`) using the sandbox repo-cache mount prefix. | Workflow-host sandbox discovery paths. |
 | `KUBERNETES_FIREWALL_CA_SECRET_NAME`, `KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME` | `firewall.existingCa*` or generated CA Secrets. | CA material for sandbox/proxy TLS interception. |

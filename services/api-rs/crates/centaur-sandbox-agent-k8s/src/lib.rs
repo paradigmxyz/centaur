@@ -42,10 +42,8 @@ const MANAGED_BY_VALUE: &str = "api-rs";
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
 const IRON_CONTROL_PRINCIPAL_ANNOTATION: &str = "centaur.ai/iron-control-principal";
-// RFC 3339 instant stamped when the sandbox is paused for idleness and
-// cleared on resume. The reaper uses it to stop sandboxes whose pause
-// outlived the idle TTL, surviving api-rs restarts (the pause timer is
-// otherwise in-memory only).
+// RFC 3339 instant stamped when the sandbox is paused for idleness and cleared
+// on resume. This keeps suspended status observable across api-rs restarts.
 const PAUSED_AT_ANNOTATION: &str = "centaur.ai/paused-at";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
