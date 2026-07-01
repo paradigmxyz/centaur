@@ -429,14 +429,28 @@
       }
 
       .console-thread-content {
-        width: min(100%, 52rem);
-        margin-left: 0;
+        width: 100%;
+        max-width: 52rem;
+        margin-left: auto;
         margin-right: auto;
       }
 
       .console-thread-detail-header {
+        display: flex;
+        justify-content: center;
         flex: 0 0 auto;
         border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .console-thread-detail-header > .console-thread-content,
+      #thread-transcript-scroll > .console-thread-content {
+        flex: 0 0 auto;
+      }
+
+      #thread-transcript-scroll {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
       }
 
       .console-markdown {
@@ -788,9 +802,6 @@
           padding: 1rem 1rem 0;
         }
 
-        .console-thread-content {
-          margin-left: 0;
-        }
       }
     </style>
   </head>
