@@ -7,12 +7,14 @@ import contextlib
 import json
 import logging
 import mimetypes
-from urllib.parse import quote
+import os
 import urllib.request
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +127,47 @@ def current_slack_thread() -> dict[str, str]:
     }
 
 
+def _sandbox_uploads_dir() -> Path | None:
+    configured = os.environ.get("CENTAUR_UPLOADS_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    if os.environ.get("CENTAUR_THREAD_KEY", "").strip():
+        return Path.home() / "uploads"
+    return None
+
+
+def _unique_upload_path(uploads_dir: Path, name: str) -> Path:
+    candidate = uploads_dir / name
+    if not candidate.exists():
+        return candidate
+    suffix = candidate.suffix
+    stem = candidate.stem or "attachment"
+    return uploads_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
+
+
+def _save_local_attachment(
+    *,
+    name: str,
+    data: bytes,
+    mime_type: str,
+    source_url: str | None,
+    uploads_dir: Path,
+) -> dict[str, Any]:
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    path = _unique_upload_path(uploads_dir, name)
+    path.write_bytes(data)
+    return {
+        "attachment_id": None,
+        "filename": name,
+        "mime_type": mime_type,
+        "download_url": None,
+        "path": str(path),
+        "local_path": str(path),
+        "source_url": source_url,
+        "size_bytes": len(data),
+    }
+
+
 def save_attachment(
     *,
     name: str,
@@ -133,9 +176,19 @@ def save_attachment(
     source_url: str | None = None,
 ) -> dict[str, Any]:
     """Persist bytes as a Centaur attachment scoped to the current tool thread."""
-    thread_key = current_thread_key()
     safe_name = Path(name).name or "attachment"
     resolved_mime = mime_type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    uploads_dir = _sandbox_uploads_dir()
+    if uploads_dir is not None:
+        return _save_local_attachment(
+            name=safe_name,
+            data=data,
+            mime_type=resolved_mime,
+            source_url=source_url,
+            uploads_dir=uploads_dir,
+        )
+
+    thread_key = current_thread_key()
     base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
     payload = json.dumps(
         {

@@ -18,7 +18,6 @@ use codex_app_server_protocol::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use url::Url;
 use uuid::Uuid;
 
 use crate::amp::AmpHarness;
@@ -434,7 +433,7 @@ fn blocks_content_to_user_input(
 fn blocks_input_to_user_input(
     input: &BlocksInput,
     state: &mut BlocksState,
-    trace_context: &TraceContext,
+    _trace_context: &TraceContext,
 ) -> Result<Vec<UserInput>> {
     match input {
         BlocksInput::UserInput(input) => Ok(vec![input.clone()]),
@@ -442,7 +441,7 @@ fn blocks_input_to_user_input(
             attachment_block_to_user_input(block, state)
         }
         BlocksInput::Attachment(block) if block.kind == "attachment_ref" => {
-            Ok(attachment_ref_block_to_user_input(block, trace_context))
+            Ok(attachment_ref_block_to_user_input(block))
         }
         BlocksInput::Attachment(block) => Ok(vec![UserInput::Text {
             text: format!("[Unsupported attachment block type: {}]", block.kind),
@@ -451,37 +450,10 @@ fn blocks_input_to_user_input(
     }
 }
 
-fn attachment_ref_block_to_user_input(
-    block: &AttachmentBlock,
-    trace_context: &TraceContext,
-) -> Vec<UserInput> {
+fn attachment_ref_block_to_user_input(block: &AttachmentBlock) -> Vec<UserInput> {
     let attachment_id = non_empty(block.attachment_id.as_deref());
     let mime_type = non_empty(block.mime_type.as_deref());
-    let attachment_type = non_empty(block.attachment_type.as_deref());
     let name = non_empty(block.name.as_deref()).unwrap_or("attachment");
-
-    if let (Some(attachment_id), Some(thread_key)) = (
-        attachment_id,
-        non_empty(trace_context.thread_key.as_deref()),
-    ) {
-        match download_attachment_ref(attachment_id, thread_key, name, mime_type) {
-            Ok(path) => {
-                return local_file_inputs(
-                    &path,
-                    mime_type,
-                    is_image_attachment(attachment_type, mime_type),
-                );
-            }
-            Err(error) => {
-                return vec![UserInput::Text {
-                    text: format!(
-                        "[Attachment reference could not be downloaded: id={attachment_id} name={name} error={error}. The file is not preloaded in /home/agent/uploads; recover it locally before inspecting it.]"
-                    ),
-                    text_elements: Vec::new(),
-                }];
-            }
-        }
-    }
 
     let mut fields = Vec::new();
     if let Some(attachment_id) = attachment_id {
@@ -499,58 +471,10 @@ fn attachment_ref_block_to_user_input(
     };
     vec![UserInput::Text {
         text: format!(
-            "[Attachment reference: {summary}. The file is not preloaded in /home/agent/uploads; recover it locally before inspecting it.]"
+            "[Attachment reference: {summary}. The file was not provided to this sandbox. Ask the caller to resend the attachment as an upload, inline file data, or staged attachment chunk before inspecting it.]"
         ),
         text_elements: Vec::new(),
     }]
-}
-
-fn download_attachment_ref(
-    attachment_id: &str,
-    thread_key: &str,
-    name: &str,
-    mime_type: Option<&str>,
-) -> std::result::Result<PathBuf, String> {
-    let api_base = attachment_api_base().ok_or_else(|| "CENTAUR_API_URL is not set".to_string())?;
-    let url = attachment_download_url(&api_base, attachment_id, thread_key)?;
-    let response = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| error.to_string())?
-        .get(url)
-        .send()
-        .map_err(|error| error.to_string())?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("download returned HTTP {status}"));
-    }
-    let bytes = response.bytes().map_err(|error| error.to_string())?;
-    let path = unique_upload_path(name, mime_type).map_err(|error| error.to_string())?;
-    std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
-    Ok(path)
-}
-
-fn attachment_api_base() -> Option<String> {
-    ["CENTAUR_API_URL", "SESSION_SANDBOX_CENTAUR_API_URL"]
-        .iter()
-        .find_map(|name| non_empty(env::var(name).ok().as_deref()).map(str::to_owned))
-}
-
-fn attachment_download_url(
-    api_base: &str,
-    attachment_id: &str,
-    thread_key: &str,
-) -> std::result::Result<Url, String> {
-    let mut url = Url::parse(api_base.trim_end_matches('/')).map_err(|error| error.to_string())?;
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| "attachment API base URL cannot be a base".to_string())?;
-        segments.pop_if_empty();
-        segments.extend(["agent", "attachments", attachment_id, "download"]);
-    }
-    url.query_pairs_mut().append_pair("thread_key", thread_key);
-    Ok(url)
 }
 
 fn attachment_block_to_user_input(
@@ -1462,7 +1386,6 @@ pub(crate) fn write_blocks_error<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read as _;
 
     fn temp_upload_dir() -> PathBuf {
         let path = env::temp_dir().join(format!("harness-server-test-{}", Uuid::new_v4().simple()));
@@ -1534,64 +1457,8 @@ mod tests {
         assert!(text.contains("id=att_123"));
         assert!(text.contains("name=report.pdf"));
         assert!(text.contains("mime=application/pdf"));
-        assert!(text.contains("not preloaded in /home/agent/uploads"));
+        assert!(text.contains("not provided to this sandbox"));
         assert!(!text.contains("Unsupported attachment block type"));
-    }
-
-    #[test]
-    fn attachment_ref_downloads_to_uploads_dir_when_api_is_available() {
-        let upload_dir = temp_upload_dir();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let api_base = format!("http://{}", listener.local_addr().expect("local addr"));
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut request = String::new();
-            let mut buffer = [0; 1024];
-            loop {
-                let read = stream.read(&mut buffer).expect("read request");
-                if read == 0 {
-                    break;
-                }
-                request.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                if request.contains("\r\n\r\n") {
-                    break;
-                }
-            }
-            assert!(
-                request.starts_with("GET /agent/attachments/att_123/download?thread_key=web%3At1 ")
-            );
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nhello-ref",
-                )
-                .expect("write response");
-        });
-
-        unsafe {
-            env::set_var("CENTAUR_API_URL", api_base);
-        }
-        let line = r#"{"type":"user","thread_key":"web:t1","message":{"role":"user","content":[{"type":"text","text":"inspect this"},{"type":"attachment_ref","attachment_id":"att_123","name":"report.txt","mime_type":"text/plain"}]}}"#;
-        let BlocksCommand::User { input, .. } = parse_blocks_line(line).expect("parses") else {
-            panic!("expected user command");
-        };
-        server.join().expect("server thread");
-
-        assert_eq!(input.len(), 2);
-        let UserInput::Text { text, .. } = &input[1] else {
-            panic!("expected attachment_ref to become text input");
-        };
-        assert!(text.contains("Attached file saved to"));
-        assert!(!text.contains("Unsupported attachment block type"));
-        let path = text
-            .strip_prefix("[Attached file saved to ")
-            .and_then(|value| value.strip_suffix(']'))
-            .map(PathBuf::from)
-            .expect("saved path");
-        assert!(path.starts_with(&upload_dir) || path.exists());
-        assert_eq!(
-            std::fs::read_to_string(path).expect("downloaded file"),
-            "hello-ref"
-        );
     }
 
     #[test]
