@@ -69,10 +69,6 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         workflow_host_principal = Some(iron_control.workflow_host_principal);
         runtime = runtime.with_iron_control(iron_control.registrar);
     }
-    if let Some(reconciler) = args.iron_control_tool_reconciler()? {
-        info!("iron-control tool secret reconciliation enabled");
-        tokio::spawn(reconciler.run());
-    }
     runtime = runtime.with_personas(args.persona_registry()?);
     if let Some(mut config) = args.warm_pool_config() {
         config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
