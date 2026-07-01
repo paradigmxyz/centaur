@@ -1339,6 +1339,7 @@ fn build_iron_proxy_network_policies(
                 egress: Some(proxy_egress_rules(
                     iron_proxy,
                     control_target,
+                    otlp_egress,
                     observability_enabled,
                 )),
             }),
@@ -1355,10 +1356,13 @@ fn sandbox_to_proxy_ports(resolved: &ResolvedIronProxy) -> Vec<NetworkPolicyPort
 fn proxy_egress_rules(
     iron_proxy: &IronProxyConfig,
     control_target: &ControlPlaneEgressTarget,
+    otlp_egress: Option<&OtlpEgressTarget>,
     observability_enabled: bool,
 ) -> Vec<NetworkPolicyEgressRule> {
     // Upstream egress: 443/5432 for normal traffic, plus the iron-control port
-    // (deduped) so a sync-mode proxy can reach the control plane.
+    // (deduped) so a sync-mode proxy can reach the control plane. Public
+    // upstreams are always constrained away from private/cluster CIDRs; any
+    // intra-cluster destination must be added as an explicit rule below.
     let mut upstream_ports = vec![network_port(443), network_port(5432)];
     if control_target.port != 443 && control_target.port != 5432 {
         upstream_ports.push(network_port(control_target.port));
@@ -1370,17 +1374,18 @@ fn proxy_egress_rules(
             vec![network_port(control_target.port)],
         ));
     }
+    rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
     if observability_enabled {
         rules.push(egress_to(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
             vec![network_port(8000), network_port(8080)],
         ));
-        rules.push(NetworkPolicyEgressRule {
-            ports: Some(upstream_ports),
-            ..Default::default()
-        });
-    } else {
-        rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
+        if let Some(target) = otlp_egress {
+            rules.push(egress_to(
+                vec![namespace_peer(&target.namespace)],
+                vec![network_port(target.port)],
+            ));
+        }
     }
     if matches!(
         iron_proxy.source_policy.kind,
@@ -1941,6 +1946,13 @@ mod tests {
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
+        let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert!(
+            proxy_egress
+                .iter()
+                .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
+        );
+        assert!(!proxy_egress.iter().any(|rule| rule.to.is_none()));
 
         let policies = build_iron_proxy_network_policies(
             &id,
@@ -2000,6 +2012,11 @@ mod tests {
         }));
 
         let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert!(
+            !proxy_egress
+                .iter()
+                .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
+        );
         assert!(!proxy_egress.iter().any(|rule| {
             rule.to.as_ref().is_some_and(|peers| {
                 peers.iter().any(|peer| {
