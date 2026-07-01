@@ -57,6 +57,35 @@ module Mcp
       assert_equal "mcp:tools", body.fetch("scope")
     end
 
+    test "dynamic client registration rejects non-loopback redirect URIs" do
+      assert_no_difference -> { McpOauthClient.count } do
+        post "/mcp/oauth/register",
+             params: {
+               client_name: "Attacker",
+               redirect_uris: [ "https://evil.example/callback" ],
+               scope: "mcp:tools"
+             },
+             as: :json
+      end
+
+      assert_response :bad_request
+      assert_equal "invalid_client_metadata", JSON.parse(response.body).fetch("error")
+    end
+
+    test "authorize rejects non-loopback redirect URIs even when already stored" do
+      client = create_client
+      client.update_column(:redirect_uris, [ "https://evil.example/callback" ])
+      post login_url, params: { email: @operator.email, password: "password123456" }
+
+      assert_no_difference -> { McpOauthAuthorizationCode.count } do
+        get "/mcp/oauth/authorize",
+            params: authorize_params(client).merge(redirect_uri: "https://evil.example/callback")
+      end
+
+      assert_response :bad_request
+      assert_includes response.body, "redirect_uri is not registered"
+    end
+
     test "authorize redirects signed-out users through login and preserves the request" do
       client = create_client
       get "/mcp/oauth/authorize", params: authorize_params(client)
@@ -69,18 +98,39 @@ module Mcp
 
     test "authorize accepts dynamic loopback redirect ports" do
       client = create_client(redirect_uris: [ "http://localhost/callback" ])
+      approval_params = authorize_params(client).merge(
+        redirect_uri: "http://localhost:49153/callback"
+      )
       post login_url, params: { email: @operator.email, password: "password123456" }
 
-      get "/mcp/oauth/authorize",
-          params: authorize_params(client).merge(
-            redirect_uri: "http://localhost:49153/callback"
-          )
+      assert_no_difference -> { McpOauthAuthorizationCode.count } do
+        get "/mcp/oauth/authorize", params: approval_params
+      end
 
+      assert_response :ok
+      assert_select "form[action=?]", "/mcp/oauth/authorize"
+
+      post "/mcp/oauth/authorize", params: approval_params.merge(decision: "approve")
       assert_response :redirect
       redirect = URI.parse(response.location)
       assert_equal "localhost", redirect.host
       assert_equal 49153, redirect.port
       assert Rack::Utils.parse_nested_query(redirect.query).key?("code")
+    end
+
+    test "authorization approval denial redirects without issuing a code" do
+      client = create_client
+      post login_url, params: { email: @operator.email, password: "password123456" }
+
+      assert_no_difference -> { McpOauthAuthorizationCode.count } do
+        post "/mcp/oauth/authorize", params: authorize_params(client).merge(decision: "deny")
+      end
+
+      assert_response :redirect
+      redirect = URI.parse(response.location)
+      query = Rack::Utils.parse_nested_query(redirect.query)
+      assert_equal "access_denied", query.fetch("error")
+      assert_equal "state-test", query.fetch("state")
     end
 
     test "authorization code exchange returns a JWT access token for the console principal" do
@@ -177,8 +227,16 @@ module Mcp
     end
 
     def authorize_code(client)
+      approval_params = authorize_params(client)
       post login_url, params: { email: @operator.email, password: "password123456" }
-      get "/mcp/oauth/authorize", params: authorize_params(client)
+
+      assert_no_difference -> { McpOauthAuthorizationCode.count } do
+        get "/mcp/oauth/authorize", params: approval_params
+      end
+      assert_response :ok
+      assert_select "form[action=?]", "/mcp/oauth/authorize"
+
+      post "/mcp/oauth/authorize", params: approval_params.merge(decision: "approve")
       assert_response :redirect
       redirect = URI.parse(response.location)
       Rack::Utils.parse_nested_query(redirect.query).fetch("code")

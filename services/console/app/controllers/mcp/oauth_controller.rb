@@ -70,64 +70,27 @@ module Mcp
       return redirect_to pending_path if current_user.pending?
       return redirect_to login_path, alert: "Your account is disabled." if current_user.disabled?
 
-      client = resolve_client(params[:client_id])
-      return authorization_error(nil, :invalid_request, "Unknown client.") unless client
-      unless params[:response_type] == "code"
-        return authorization_error(
-          client,
-          :unsupported_response_type,
-          "Only response_type=code is supported."
-        )
-      end
-      unless client.redirect_uri_allowed?(params[:redirect_uri])
-        return authorization_error(
-          client,
-          :invalid_request,
-          "redirect_uri is not registered for this client."
-        )
-      end
-      unless params[:code_challenge_method] == "S256"
-        return authorization_error(
-          client,
-          :invalid_request,
-          "code_challenge_method must be S256."
-        )
-      end
-      if params[:code_challenge].blank?
-        return authorization_error(client, :invalid_request, "code_challenge is required.")
-      end
+      authorization = validated_authorization_request
+      return unless authorization
 
-      scopes = normalize_scope_param(params[:scope], McpOauthClient::DEFAULT_SCOPES)
-      unsupported = scopes - McpOauthClient::DEFAULT_SCOPES
-      if unsupported.any?
+      assign_authorization_view(authorization)
+      render :authorize
+    end
+
+    # POST /mcp/oauth/authorize
+    def approve
+      authorization = validated_authorization_request
+      return unless authorization
+
+      unless params[:decision] == "approve"
         return authorization_error(
-          client,
-          :invalid_scope,
-          "Unsupported scope: #{unsupported.join(' ')}."
+          authorization[:client],
+          :access_denied,
+          "The user denied the authorization request."
         )
       end
 
-      resource = resolve_requested_resource
-      return authorization_error(client, :invalid_target, "resource is required.") if resource.blank?
-
-      principal = principal_for_current_user
-      code = McpOauthAuthorizationCode.create!(
-        mcp_oauth_client: client,
-        user: current_user,
-        principal: principal,
-        redirect_uri: params[:redirect_uri].to_s,
-        code_challenge: params[:code_challenge].to_s,
-        resource: resource,
-        scopes: scopes
-      )
-      client.touch(:last_used_at)
-
-      uri = URI.parse(params[:redirect_uri])
-      query = Rack::Utils.parse_nested_query(uri.query)
-      query["code"] = code.plaintext_code
-      query["state"] = params[:state] if params[:state].present?
-      uri.query = query.to_query
-      redirect_to uri.to_s, allow_other_host: true
+      issue_authorization_code(authorization)
     rescue ActiveRecord::RecordInvalid => e
       authorization_error(nil, :server_error, e.record.errors.full_messages.to_sentence)
     end
@@ -145,6 +108,106 @@ module Mcp
     end
 
     private
+
+    def validated_authorization_request
+      client = resolve_client(params[:client_id])
+      return authorization_request_error(nil, :invalid_request, "Unknown client.") unless client
+
+      unless params[:response_type] == "code"
+        return authorization_request_error(
+          client,
+          :unsupported_response_type,
+          "Only response_type=code is supported."
+        )
+      end
+      unless client.redirect_uri_allowed?(params[:redirect_uri])
+        return authorization_request_error(
+          client,
+          :invalid_request,
+          "redirect_uri is not registered for this client."
+        )
+      end
+      unless params[:code_challenge_method] == "S256"
+        return authorization_request_error(
+          client,
+          :invalid_request,
+          "code_challenge_method must be S256."
+        )
+      end
+      if params[:code_challenge].blank?
+        return authorization_request_error(client, :invalid_request, "code_challenge is required.")
+      end
+
+      scopes = normalize_scope_param(params[:scope], McpOauthClient::DEFAULT_SCOPES)
+      unsupported = scopes - McpOauthClient::DEFAULT_SCOPES
+      if unsupported.any?
+        return authorization_request_error(
+          client,
+          :invalid_scope,
+          "Unsupported scope: #{unsupported.join(' ')}."
+        )
+      end
+
+      resource = resolve_requested_resource
+      return authorization_request_error(client, :invalid_target, "resource is required.") if resource.blank?
+
+      { client: client, scopes: scopes, resource: resource }
+    end
+
+    def authorization_request_error(client, error, description)
+      authorization_error(client, error, description)
+      nil
+    end
+
+    def assign_authorization_view(authorization)
+      @client = authorization[:client]
+      @scopes = authorization[:scopes]
+      @resource = authorization[:resource]
+      @redirect_uri = params[:redirect_uri].to_s
+      @redirect_host = redirect_uri_host(@redirect_uri)
+      @authorization_params = authorization_form_params(authorization)
+    end
+
+    def issue_authorization_code(authorization)
+      client = authorization[:client]
+      principal = principal_for_current_user
+      code = McpOauthAuthorizationCode.create!(
+        mcp_oauth_client: client,
+        user: current_user,
+        principal: principal,
+        redirect_uri: params[:redirect_uri].to_s,
+        code_challenge: params[:code_challenge].to_s,
+        resource: authorization[:resource],
+        scopes: authorization[:scopes]
+      )
+      client.touch(:last_used_at)
+
+      uri = URI.parse(params[:redirect_uri])
+      query = Rack::Utils.parse_nested_query(uri.query)
+      query["code"] = code.plaintext_code
+      query["state"] = params[:state] if params[:state].present?
+      uri.query = query.to_query
+      redirect_to uri.to_s, allow_other_host: true
+    end
+
+    def authorization_form_params(authorization)
+      {
+        response_type: params[:response_type].to_s,
+        client_id: authorization[:client].public_client_id,
+        redirect_uri: params[:redirect_uri].to_s,
+        scope: authorization[:scopes].join(" "),
+        state: params[:state].to_s,
+        resource: authorization[:resource],
+        code_challenge: params[:code_challenge].to_s,
+        code_challenge_method: params[:code_challenge_method].to_s
+      }
+    end
+
+    def redirect_uri_host(value)
+      URI.parse(value).host
+    rescue URI::InvalidURIError
+      value
+    end
 
     def exchange_authorization_code
       client = resolve_client(params[:client_id])

@@ -28,6 +28,7 @@ Rails.application.routes.draw do
   get ".well-known/openid-configuration", to: "mcp/oauth#metadata"
   post "mcp/oauth/register", to: "mcp/oauth#register"
   get "mcp/oauth/authorize", to: "mcp/oauth#authorize"
+  post "mcp/oauth/authorize", to: "mcp/oauth#approve"
   post "mcp/oauth/token", to: "mcp/oauth#token"
 
   # Operator console (server-rendered HTML UI).

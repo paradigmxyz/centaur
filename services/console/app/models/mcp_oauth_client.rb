@@ -19,8 +19,11 @@ class McpOauthClient < ApplicationRecord
   def public_client_id = oid
 
   def redirect_uri_allowed?(uri)
+    return false unless self.class.allowed_redirect_uri?(uri)
+
     requested = URI.parse(uri.to_s)
     redirect_uris.any? do |registered|
+      next false unless self.class.allowed_redirect_uri?(registered)
       next true if registered == uri.to_s
 
       registered_uri = URI.parse(registered.to_s)
@@ -62,10 +65,7 @@ class McpOauthClient < ApplicationRecord
 
   def self.allowed_redirect_uri?(value)
     uri = URI.parse(value.to_s)
-    return true if uri.scheme == "https" && uri.host.present?
-    return false unless uri.scheme == "http"
-    host = uri.host.to_s.downcase
-    host == "localhost" || host == "127.0.0.1" || host == "::1" || host.start_with?("127.")
+    uri.scheme == "http" && loopback_host?(uri.host)
   rescue URI::InvalidURIError
     false
   end
