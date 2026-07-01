@@ -3,6 +3,7 @@
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+{{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
 # console background job worker — runs Solid Queue (`bin/jobs`) so
 # console's enqueued jobs actually execute. The most important of these is
 # the broker-credential OAuth refresh loop, which mints and refreshes the access
@@ -120,6 +121,19 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
+{{- if $console.publicUrl }}
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ $console.publicUrl | quote }}
+{{- end }}
+{{- if $mcpPublicUrl }}
+            - name: CENTAUR_MCP_PUBLIC_URL
+              value: {{ $mcpPublicUrl | quote }}
+{{- end }}
 {{- if $console.googleOauth.enabled }}
             # Google OAuth app credentials, needed by the broker-credential
             # OAuth refresh loop. Gated on console.googleOauth.enabled.

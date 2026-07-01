@@ -54,7 +54,7 @@ use uuid::Uuid;
 
 use crate::{
     ApiError,
-    mcp::{mcp_get, mcp_post},
+    mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
@@ -191,6 +191,14 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/personas", get(list_personas))
         .route("/mcp", post(mcp_post).get(mcp_get))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(mcp_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(mcp_protected_resource_metadata),
+        )
         .route(
             "/api/session/{thread_key}",
             post(create_or_get_session).get(get_session_context),

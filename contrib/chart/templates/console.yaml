@@ -4,6 +4,7 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $dbName := $console.database.name }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+{{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
 # console — Rails control plane for authenticated API access and encrypted
 # secret storage. The chart owns the Deployment shape (image, port, env,
 # security context) so operators tune it via `helm upgrade`. It runs against a
@@ -146,6 +147,19 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
+{{- if $console.publicUrl }}
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ $console.publicUrl | quote }}
+{{- end }}
+{{- if $mcpPublicUrl }}
+            - name: CENTAUR_MCP_PUBLIC_URL
+              value: {{ $mcpPublicUrl | quote }}
+{{- end }}
 {{- if $console.googleOauth.enabled }}
             # Google OAuth app credentials (sign-in + brokered token refresh).
             # Gated on console.googleOauth.enabled; the keys must exist in the

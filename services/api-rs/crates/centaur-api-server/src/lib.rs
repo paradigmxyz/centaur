@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_initialize_is_available_without_auth_before_runtime_is_ready() {
+    async fn mcp_requires_bearer_before_runtime_is_ready() {
         let app = build_router_with_app_state(AppState::unready());
 
         let response = app
@@ -250,14 +250,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["result"]["serverInfo"]["name"], "centaur");
-        assert_eq!(
-            body["result"]["capabilities"]["tools"]["listChanged"],
-            false
-        );
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        assert!(challenge.contains("Bearer"));
+        assert!(challenge.contains(
+            "resource_metadata=\"http://centaur.local/.well-known/oauth-protected-resource/mcp\""
+        ));
     }
 
     #[tokio::test]
