@@ -1,3 +1,4 @@
+require "ipaddr"
 require "uri"
 
 class McpOauthClient < ApplicationRecord
@@ -83,7 +84,10 @@ class McpOauthClient < ApplicationRecord
 
   def self.loopback_host?(host)
     normalized = host.to_s.downcase
-    normalized == "localhost" || normalized == "127.0.0.1" || normalized == "::1" ||
-      normalized.start_with?("127.")
+    return true if normalized == "localhost"
+
+    IPAddr.new(normalized).loopback?
+  rescue IPAddr::Error
+    false
   end
 end

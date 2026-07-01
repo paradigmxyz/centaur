@@ -32,9 +32,12 @@ pub(crate) async fn mcp_get() -> Response {
 }
 
 pub(crate) async fn mcp_protected_resource_metadata(headers: HeaderMap) -> Json<Value> {
+    let authorization_servers = mcp_authorization_server_url()
+        .into_iter()
+        .collect::<Vec<_>>();
     Json(json!({
         "resource": mcp_resource_url(&headers),
-        "authorization_servers": [mcp_authorization_server_url(&headers)],
+        "authorization_servers": authorization_servers,
         "bearer_methods_supported": ["header"],
         "scopes_supported": ["mcp:tools"],
     }))
@@ -459,7 +462,10 @@ fn verify_mcp_jwt(token: &str, headers: &HeaderMap) -> Result<Option<McpPrincipa
     if claims.nbf.is_some_and(|nbf| nbf > now + 30) {
         return Ok(None);
     }
-    if !same_url(&claims.iss, &mcp_authorization_server_url(headers)) {
+    let Some(issuer) = mcp_authorization_server_url() else {
+        return Ok(None);
+    };
+    if !same_url(&claims.iss, &issuer) {
         return Ok(None);
     }
     if !audience_contains(&claims.aud, &mcp_resource_url(headers)) {
@@ -624,20 +630,15 @@ fn mcp_resource_url(headers: &HeaderMap) -> String {
     format!("{}/mcp", request_base_url(headers))
 }
 
-fn mcp_authorization_server_url(headers: &HeaderMap) -> String {
-    for env_name in [
-        "CENTAUR_CONSOLE_PUBLIC_URL",
-        "IRON_CONTROL_PUBLIC_URL",
-        "CENTAUR_CONSOLE_URL",
-        "IRON_CONTROL_URL",
-    ] {
+fn mcp_authorization_server_url() -> Option<String> {
+    for env_name in ["CENTAUR_CONSOLE_PUBLIC_URL", "IRON_CONTROL_PUBLIC_URL"] {
         if let Ok(url) = env::var(env_name) {
             if let Some(url) = normalize_public_url(&url) {
-                return url;
+                return Some(url);
             }
         }
     }
-    request_base_url(headers)
+    None
 }
 
 fn mcp_public_base_url(headers: &HeaderMap) -> String {
@@ -910,6 +911,35 @@ def search(query, limit=20):
     }
 
     #[test]
+    fn mcp_jwt_rejects_internal_console_control_plane_issuer() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CENTAUR_JWT_SIGNING_SECRET", "test-secret"),
+            ("CENTAUR_MCP_PUBLIC_URL", "http://localhost:3000/mcp"),
+            ("CENTAUR_CONSOLE_PUBLIC_URL", ""),
+            ("IRON_CONTROL_PUBLIC_URL", ""),
+            ("CENTAUR_CONSOLE_URL", "http://centaur-console:3000"),
+            ("IRON_CONTROL_URL", "http://centaur-console:3000"),
+        ]);
+        let token = test_jwt(
+            "test-secret",
+            json!({
+                "iss": "http://centaur-console:3000",
+                "aud": "http://localhost:3000/mcp",
+                "exp": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+                "principal_id": "prn_test",
+                "scope": "mcp:tools",
+            }),
+        );
+
+        assert!(
+            authenticate_mcp_bearer(&mcp_auth_headers(&token))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn mcp_non_jwt_bearer_values_are_not_accepted() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[("CENTAUR_JWT_SIGNING_SECRET", "test-secret")]);
@@ -938,6 +968,22 @@ def search(query, limit=20):
             metadata["authorization_servers"][0],
             "http://localhost:3001"
         );
+    }
+
+    #[test]
+    fn mcp_protected_resource_metadata_ignores_internal_console_control_plane_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CENTAUR_CONSOLE_PUBLIC_URL", ""),
+            ("IRON_CONTROL_PUBLIC_URL", ""),
+            ("CENTAUR_CONSOLE_URL", "http://centaur-console:3000"),
+            ("IRON_CONTROL_URL", "http://centaur-console:3000"),
+        ]);
+        let Json(metadata) = mcp_protected_resource_metadata(HeaderMap::new())
+            .now_or_never()
+            .unwrap();
+
+        assert_eq!(metadata["authorization_servers"], json!([]));
     }
 
     #[test]
