@@ -14,8 +14,9 @@ class User < ApplicationRecord
   after_update :revoke_mcp_oauth_refresh_tokens_when_disabled,
                if: -> { saved_change_to_status? && disabled? }
 
-  # pending: signed in via SSO but not yet approved -- cannot use the console.
-  # active: approved operator. disabled: access revoked.
+  # active: normal operator (SSO users are provisioned active). pending: legacy
+  # state from the retired approval queue, flipped to active on next SSO login.
+  # disabled: access revoked.
   enum :status, { pending: "pending", active: "active", disabled: "disabled" },
        default: :pending, validate: true
 
@@ -41,10 +42,9 @@ class User < ApplicationRecord
   # as needed, and (re)caches the identity's email/name. A returning login matches
   # by the stable (provider, subject). A new identity links to an existing user
   # only when the IdP-verified email matches -- an unverified email must never
-  # adopt an account -- otherwise a new user is created: active + admin when the
-  # email is on the bootstrap allowlist, active when the verified email's domain
-  # is on the auto-activate allowlist, pending otherwise. +identity+ is the
-  # provider strategy's { subject:, email:, email_verified:, name: } hash.
+  # adopt an account -- otherwise a new active user is created (admin when the
+  # verified email is on the bootstrap allowlist). +identity+ is the provider
+  # strategy's { subject:, email:, email_verified:, name: } hash.
   def self.link_or_provision(provider:, identity:)
     transaction do
       user =
@@ -61,7 +61,7 @@ class User < ApplicationRecord
             )
           end
         end
-      auto_activate(user, identity)
+      activate_on_login(user)
       user
     end
   end
@@ -74,25 +74,24 @@ class User < ApplicationRecord
   end
   private_class_method :linkable_user
 
-  # Attributes for a brand-new SSO user: active + admin when bootstrap-allowlisted
-  # by a verified IdP email, pending otherwise (auto_activate then flips
-  # allowlisted domains to active before the login completes).
+  # Attributes for a brand-new SSO user: everyone is provisioned active -- the
+  # console is only reachable on the internal network, so a completed SSO login
+  # is sufficient and there is no admin-approval queue. Admin additionally
+  # requires a bootstrap-allowlisted, IdP-verified email.
   def self.provisioned_attributes(identity)
     admin = identity[:email_verified] == true && ConsoleAuth.bootstrap_admin?(identity[:email])
-    { email: identity[:email], name: identity[:name], status: admin ? :active : :pending, admin: admin }
+    { email: identity[:email], name: identity[:name], status: :active, admin: admin }
   end
   private_class_method :provisioned_attributes
 
-  # A pending user whose IdP-verified email domain is on the auto-activate
-  # allowlist becomes active on login, so allowlisted operators skip the approval
-  # queue -- including users provisioned pending before the domain was listed.
-  # Never touches disabled accounts and never grants admin.
-  def self.auto_activate(user, identity)
+  # Flips a pending user to active on login: covers accounts provisioned pending
+  # under the old approval-queue policy. Never touches disabled accounts and
+  # never grants admin.
+  def self.activate_on_login(user)
     return unless user.pending?
-    return unless identity[:email_verified] == true && ConsoleAuth.auto_activate?(identity[:email])
     user.update!(status: :active, approved_at: Time.current)
   end
-  private_class_method :auto_activate
+  private_class_method :activate_on_login
 
   private
 

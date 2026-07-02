@@ -9,7 +9,6 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   GOOGLE_CLIENT_ID = "google-login-client-id".freeze
   ENV_KEYS = %w[
     CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET CENTAUR_CONSOLE_BOOTSTRAP_ADMINS
-    CENTAUR_CONSOLE_AUTO_ACTIVATE_DOMAINS
   ].freeze
 
   setup do
@@ -102,34 +101,17 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
   # --- callback: provisioning ------------------------------------------------
 
-  test "callback provisions a pending user for a non-bootstrap email and signs them in" do
+  test "callback provisions an active user for a non-bootstrap email and lands on the console" do
     assert_difference -> { User.count }, 1 do
       run_callback(sub: "new-sub", email: "newcomer@example.com")
     end
-    assert_redirected_to pending_path
+    assert_redirected_to console_threads_path
     user = User.find_by(email: "newcomer@example.com")
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
     assert_equal "Test User", user.name
     assert_equal user.id, session[:user_id]
     assert_equal [ [ "google", "new-sub" ] ], user.user_identities.pluck(:provider, :subject)
-  end
-
-  test "callback auto-activates an allowlisted email domain and lands on the console" do
-    ENV["CENTAUR_CONSOLE_AUTO_ACTIVATE_DOMAINS"] = "acme.example"
-    run_callback(sub: "team-sub", email: "teammate@acme.example")
-    assert_redirected_to console_threads_path
-    user = User.find_by(email: "teammate@acme.example")
-    assert user.active?
-    assert_not user.admin?
-    assert_equal user.id, session[:user_id]
-  end
-
-  test "callback keeps an unverified email pending even on an allowlisted domain" do
-    ENV["CENTAUR_CONSOLE_AUTO_ACTIVATE_DOMAINS"] = "acme.example"
-    run_callback(sub: "unv-team-sub", email: "impostor@acme.example", email_verified: false)
-    assert_redirected_to pending_path
-    assert User.find_by(email: "impostor@acme.example").pending?
   end
 
   test "callback makes a bootstrap-allowlisted email active and admin" do
@@ -162,12 +144,12 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_nil session[:user_id]
   end
 
-  test "callback creates a pending user for an unverified, unrecognized email" do
+  test "callback creates an active user for an unverified, unrecognized email" do
     assert_difference -> { User.count }, 1 do
       run_callback(sub: "unv-sub", email: "stranger@example.com", email_verified: false)
     end
     user = User.find_by(email: "stranger@example.com")
-    assert user.pending?
+    assert user.active?
     assert_not user.user_identities.first.email_verified
   end
 

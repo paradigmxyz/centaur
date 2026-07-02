@@ -103,14 +103,14 @@ class UserTest < ActiveSupport::TestCase
     { subject: "sub-1", email: "newcomer@example.com", email_verified: true, name: "New Comer" }.merge(overrides)
   end
 
-  test "link_or_provision creates a pending user + identity for an unknown email" do
+  test "link_or_provision creates an active user + identity for an unknown email" do
     user = nil
     assert_difference -> { User.count }, 1 do
       assert_difference -> { UserIdentity.count }, 1 do
         user = User.link_or_provision(provider: "google", identity: identity)
       end
     end
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
     assert_equal "New Comer", user.name
     assert_equal [ [ "google", "sub-1" ] ], user.user_identities.pluck(:provider, :subject)
@@ -160,80 +160,32 @@ class UserTest < ActiveSupport::TestCase
     user = User.link_or_provision(provider: "google",
                                   identity: identity(subject: "boss-sub", email: "boss@example.com",
                                                      email_verified: false))
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
   ensure
     ENV.delete("CENTAUR_CONSOLE_BOOTSTRAP_ADMINS")
   end
 
-  # --- auto-activate domains -------------------------------------------------
-
-  def with_auto_activate_domains(value)
-    ENV["CENTAUR_CONSOLE_AUTO_ACTIVATE_DOMAINS"] = value
-    yield
-  ensure
-    ENV.delete("CENTAUR_CONSOLE_AUTO_ACTIVATE_DOMAINS")
-  end
-
-  test "link_or_provision auto-activates a verified email on an allowlisted domain" do
-    with_auto_activate_domains("Acme.example, @beta.example") do
-      user = User.link_or_provision(provider: "slack",
-                                    identity: identity(subject: "auto-sub", email: "worker@acme.example"))
-      assert user.active?
-      assert_not user.admin?
-      assert_not_nil user.approved_at
-      assert_nil user.approved_by
-    end
-  end
-
-  test "link_or_provision auto-activate handles @-prefixed and mixed-case domain entries" do
-    with_auto_activate_domains("Acme.example, @beta.example") do
-      user = User.link_or_provision(provider: "slack",
-                                    identity: identity(subject: "beta-sub", email: "Worker@Beta.Example"))
-      assert user.active?
-    end
-  end
-
-  test "link_or_provision keeps an unverified email pending despite an allowlisted domain" do
-    with_auto_activate_domains("acme.example") do
-      user = User.link_or_provision(provider: "slack",
-                                    identity: identity(subject: "unv-sub", email: "worker@acme.example",
-                                                       email_verified: false))
-      assert user.pending?
-    end
-  end
-
-  test "link_or_provision keeps an unlisted domain pending" do
-    with_auto_activate_domains("acme.example") do
-      user = User.link_or_provision(provider: "slack",
-                                    identity: identity(subject: "other-sub", email: "stranger@other.example"))
-      assert user.pending?
-    end
-  end
-
-  test "link_or_provision activates a returning pending user once their domain is allowlisted" do
+  test "link_or_provision activates a returning legacy-pending user" do
     user = User.link_or_provision(provider: "slack",
                                   identity: identity(subject: "late-sub", email: "worker@acme.example"))
-    assert user.pending?
+    user.update!(status: :pending)
 
-    with_auto_activate_domains("acme.example") do
-      returning = User.link_or_provision(provider: "slack",
-                                         identity: identity(subject: "late-sub", email: "worker@acme.example"))
-      assert_equal user, returning
-      assert returning.active?
-      assert_not returning.admin?
-    end
+    returning = User.link_or_provision(provider: "slack",
+                                       identity: identity(subject: "late-sub", email: "worker@acme.example"))
+    assert_equal user, returning
+    assert returning.active?
+    assert_not returning.admin?
+    assert_not_nil returning.approved_at
   end
 
-  test "link_or_provision never reactivates a disabled user via the domain allowlist" do
+  test "link_or_provision never reactivates a disabled user" do
     user = User.link_or_provision(provider: "slack",
                                   identity: identity(subject: "gone-sub", email: "worker@acme.example"))
     user.update!(status: :disabled)
 
-    with_auto_activate_domains("acme.example") do
-      returning = User.link_or_provision(provider: "slack",
-                                         identity: identity(subject: "gone-sub", email: "worker@acme.example"))
-      assert returning.disabled?
-    end
+    returning = User.link_or_provision(provider: "slack",
+                                       identity: identity(subject: "gone-sub", email: "worker@acme.example"))
+    assert returning.disabled?
   end
 end
