@@ -54,7 +54,7 @@
         </div>
       </div>
 
-      <div id="thread-transcript-scroll" class="min-h-0 flex-1 overflow-y-auto py-6" data-thread-transcript-scroll>
+      <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6">
         <% if @selected_session %>
           <div class="console-thread-content flex flex-col gap-6">
             <%= render "console/threads/transcript", items: @selected_transcript_items %>
@@ -73,23 +73,3 @@
   <% end %>
 </div>
 
-<script>
-  (() => {
-    const scrollThreadTranscripts = () => {
-      const transcripts = document.querySelectorAll("[data-thread-transcript-scroll]");
-      if (!transcripts.length) return;
-
-      window.requestAnimationFrame(() => {
-        transcripts.forEach((transcript) => {
-          transcript.scrollTop = transcript.scrollHeight;
-        });
-      });
-    };
-
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", scrollThreadTranscripts, { once: true });
-    } else {
-      scrollThreadTranscripts();
-    }
-  })();
-</script>

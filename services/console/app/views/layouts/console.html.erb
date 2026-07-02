@@ -518,9 +518,16 @@
         flex: 0 0 auto;
       }
 
-      #thread-transcript-scroll {
+      /* Transcript scroll containers hold a single content child inside a
+         column-reverse flex, which makes the scroll origin the bottom: threads
+         open already scrolled to the newest message, with no post-render JS
+         jump and no reflow drift when webfonts land. */
+      .console-transcript-scroll {
         display: flex;
-        flex-direction: column;
+        flex-direction: column-reverse;
+      }
+
+      #thread-transcript-scroll {
         align-items: center;
         /* Reserve symmetric scrollbar gutters so the centered transcript
            column lines up with the (non-scrolling) header above it. */

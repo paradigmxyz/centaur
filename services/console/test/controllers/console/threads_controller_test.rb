@@ -647,7 +647,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :ok
     assert_select "[data-thread-panel]", count: 0
-    assert_select "#thread-transcript-scroll[data-thread-transcript-scroll]"
+    # column-reverse scroll container opens the thread at its newest message.
+    assert_select "#thread-transcript-scroll.console-transcript-scroll"
   end
 
   test "sidebar thread links carry the cmd-click split view hook" do
