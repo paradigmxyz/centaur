@@ -1313,10 +1313,6 @@ fn build_iron_proxy_network_policies(
             sandbox_to_proxy_ports.clone(),
         ),
         dns_egress_rule(),
-        egress_to(
-            vec![pod_peer(iron_proxy.api_pod_labels.clone())],
-            vec![network_port(8000), network_port(8080)],
-        ),
     ];
     vec![
         NetworkPolicy {
@@ -2089,7 +2085,7 @@ mod tests {
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
-        assert!(sandbox_egress.iter().any(|rule| {
+        assert!(!sandbox_egress.iter().any(|rule| {
             rule.to.as_ref().is_some_and(|peers| {
                 peers.iter().any(|peer| {
                     peer.pod_selector.as_ref().is_some_and(|selector| {

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_30_090002) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_02_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -310,6 +310,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_30_090002) do
     t.jsonb "labels", default: {}, null: false
     t.string "name"
     t.string "namespace", default: "default", null: false
+    t.boolean "sandbox_api_server_enabled", default: true, null: false
     t.boolean "sandbox_observability_enabled", default: true, null: false
     t.boolean "sandbox_repo_cache_enabled", default: true, null: false
     t.bigint "sync_config_cache_version", default: 0, null: false
