@@ -52,8 +52,6 @@ const CENTAUR_POSTGRES_DSN_ENV: &str = "CENTAUR_POSTGRES_DSN";
 const PG_LISTEN_ENV: &str = "IRON_PROXY_PG_LISTEN";
 const PG_CLIENT_USER_ENV: &str = "IRON_PROXY_PG_CLIENT_USER";
 const PG_CLIENT_PASSWORD_ENV: &str = "IRON_PROXY_PG_CLIENT_PASSWORD";
-const VICTORIAMETRICS_PORT: u16 = 8428;
-const VICTORIALOGS_PORT: u16 = 9428;
 // Managed iron-proxy instances pick up principal/config changes on their next
 // /proxy/sync poll (5s cadence upstream). Claiming a warm sandbox must not
 // return before the proxy has applied the session principal's config: the
@@ -339,9 +337,9 @@ impl AgentSandboxBackend {
             id,
             resolved,
             iron_proxy,
-            &self.config.namespace,
             &control_target,
             self.config.otlp_egress.as_ref(),
+            &self.config.observability_egress,
             resolved.observability_enabled,
         ) {
             self.network_policies()
@@ -1305,9 +1303,9 @@ fn build_iron_proxy_network_policies(
     id: &SandboxId,
     resolved: &ResolvedIronProxy,
     iron_proxy: &IronProxyConfig,
-    namespace: &str,
     control_target: &ControlPlaneEgressTarget,
     otlp_egress: Option<&OtlpEgressTarget>,
+    observability_egress: &[OtlpEgressTarget],
     observability_enabled: bool,
 ) -> Vec<NetworkPolicy> {
     let sandbox_to_proxy_ports = sandbox_to_proxy_ports(resolved);
@@ -1323,13 +1321,12 @@ fn build_iron_proxy_network_policies(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
             vec![network_port(8000), network_port(8080)],
         ));
-        sandbox_egress.push(egress_to(
-            vec![namespace_peer(namespace)],
-            vec![
-                network_port(VICTORIAMETRICS_PORT),
-                network_port(VICTORIALOGS_PORT),
-            ],
-        ));
+        sandbox_egress.extend(observability_egress.iter().map(|target| {
+            egress_to(
+                vec![namespace_peer(&target.namespace)],
+                vec![network_port(target.port)],
+            )
+        }));
     }
     if observability_enabled && let Some(target) = otlp_egress {
         // Direct harness OTLP export (codex usage/cost spans). The collector
@@ -2034,14 +2031,24 @@ mod tests {
             namespace: "laminar".to_owned(),
             port: 8000,
         };
+        let observability_targets = vec![
+            OtlpEgressTarget {
+                namespace: "observability".to_owned(),
+                port: 8428,
+            },
+            OtlpEgressTarget {
+                namespace: "observability".to_owned(),
+                port: 9428,
+            },
+        ];
 
         let policies = build_iron_proxy_network_policies(
             &id,
             &resolved(),
             &iron_proxy,
-            "centaur",
             &control_target,
             Some(&target),
+            &observability_targets,
             true,
         );
         let sandbox_egress = policies[0]
@@ -2059,13 +2066,13 @@ mod tests {
         );
         assert!(sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
             rule,
-            "centaur",
-            VICTORIAMETRICS_PORT
+            "observability",
+            8428
         )));
         assert!(sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
             rule,
-            "centaur",
-            VICTORIALOGS_PORT
+            "observability",
+            9428
         )));
         let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
         assert!(
@@ -2079,9 +2086,9 @@ mod tests {
             &id,
             &resolved(),
             &iron_proxy,
-            "centaur",
             &control_target,
             None,
+            &observability_targets,
             true,
         );
         let sandbox_egress = policies[0]
@@ -2108,14 +2115,24 @@ mod tests {
             namespace: "laminar".to_owned(),
             port: 8000,
         };
+        let observability_targets = vec![
+            OtlpEgressTarget {
+                namespace: "observability".to_owned(),
+                port: 8428,
+            },
+            OtlpEgressTarget {
+                namespace: "observability".to_owned(),
+                port: 9428,
+            },
+        ];
 
         let policies = build_iron_proxy_network_policies(
             &id,
             &resolved(),
             &iron_proxy,
-            "centaur",
             &control_target,
             Some(&target),
+            &observability_targets,
             false,
         );
         let sandbox_egress = policies[0].spec.as_ref().unwrap().egress.as_ref().unwrap();
@@ -2127,15 +2144,15 @@ mod tests {
         assert!(
             !sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
                 rule,
-                "centaur",
-                VICTORIAMETRICS_PORT
+                "observability",
+                8428
             ))
         );
         assert!(
             !sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
                 rule,
-                "centaur",
-                VICTORIALOGS_PORT
+                "observability",
+                9428
             ))
         );
         assert!(!sandbox_egress.iter().any(|rule| {
@@ -2243,9 +2260,9 @@ mod tests {
             &id,
             &resolved(),
             &iron_proxy,
-            "centaur",
             &control_target,
             None,
+            &[],
             true,
         );
         let ingress = policies[1]

@@ -69,6 +69,10 @@ pub struct AgentSandboxConfig {
     /// destinations except the proxy/control plane, so without this rule the
     /// harness's usage/cost spans never leave the pod.
     pub otlp_egress: Option<OtlpEgressTarget>,
+    /// Direct in-cluster observability services reached through NO_PROXY by
+    /// tools such as vlogs/vmetrics. Enabled only for observability-capable
+    /// sandboxes.
+    pub observability_egress: Vec<OtlpEgressTarget>,
     pub ready_timeout: Duration,
 }
 
@@ -110,6 +114,7 @@ impl AgentSandboxConfig {
             iron_control: None,
             tools: None,
             otlp_egress: None,
+            observability_egress: Vec::new(),
             ready_timeout: Duration::from_secs(60),
         }
     }

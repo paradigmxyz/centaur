@@ -383,6 +383,15 @@
         "ingressControllerNamespaces": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "apiServerPort": { "type": "integer" },
+        "otlpEgress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "port": { "type": "integer" }
+          }
         }
       }
     }
