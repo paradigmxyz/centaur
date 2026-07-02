@@ -22,6 +22,7 @@
     </section>
   <% else %>
     <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-900/25">
+      <% unless @thread_not_found %>
       <div class="console-thread-detail-header">
         <div class="console-thread-content">
           <% if @selected_session %>
@@ -47,13 +48,6 @@
                        title_class: "truncate text-base font-semibold text-zinc-100",
                        subtitle_class: "mt-0.5 text-xs text-zinc-500",
                        class: "mb-0 min-h-16 items-center" %>
-          <% elsif @thread_not_found %>
-            <%= render "console/page_header",
-                       title: "Chat not found",
-                       subtitle: "This chat may not exist, or you may not have access to it.",
-                       title_class: "text-base font-semibold text-zinc-100",
-                       subtitle_class: "mt-0.5 text-xs text-zinc-500",
-                       class: "mb-0 min-h-16 items-center" %>
           <% else %>
             <%= render "console/page_header",
                        title: "New chat",
@@ -64,6 +58,7 @@
           <% end %>
         </div>
       </div>
+      <% end %>
 
       <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6">
         <% if @selected_session %>
@@ -77,14 +72,6 @@
                 <%= console_icon("message-square", classes: "size-5") %>
               </div>
               <div class="text-sm font-semibold text-zinc-200">Chat not found</div>
-              <p class="text-sm leading-6 text-zinc-500">
-                This chat may not exist, or you may not have access to it.
-                Chats you start show up in the sidebar.
-              </p>
-              <a href="<%= console_threads_path %>"
-                 class="mt-1 text-sm font-medium text-centaur-300 hover:text-centaur-200">
-                Back to your chats
-              </a>
             </div>
           </div>
         <% elsif @sessions.empty? %>

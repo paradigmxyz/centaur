@@ -87,7 +87,10 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :not_found
     assert_select "body", text: /Chat not found/
-    assert_select "body", text: /may not exist, or you may not have access/
+    # The not-found rendering carries no page header and no explainer copy —
+    # just the centered "Chat not found" state.
+    assert_select ".console-thread-detail-header", count: 0
+    assert_select "body", text: /may not exist/, count: 0
     assert_select "[data-thread-panel]", count: 0
     assert_select ".console-thread-list a.console-thread-link-active[href=?]",
                   console_threads_path(thread: thread_key),
