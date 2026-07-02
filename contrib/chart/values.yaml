@@ -106,6 +106,17 @@ console:
   # _SECRET), which must exist or the console pods CreateContainerConfigError.
   googleOauth:
     enabled: false
+  # Slack as an OIDC identity provider for console sign-in. Off by default —
+  # not every deployment uses Slack to log in. When enabled, the
+  # IRON_CONTROL_SLACK_CLIENT_ID and IRON_CONTROL_SLACK_CLIENT_SECRET env vars
+  # are sourced from the shared infra Secret (keys
+  # <secretManager.envPrefix>IRON_CONTROL_SLACK_CLIENT_ID / _SECRET), which
+  # must exist or the console pods CreateContainerConfigError. This is the
+  # Sign-in-with-Slack OIDC app (scopes openid/email/profile, redirect URL
+  # <publicUrl>/auth/slack/callback) — not the DB-managed Slack OAuth app the
+  # bot and DM sync use.
+  slackOauth:
+    enabled: false
   # OAuth app slug whose user-level Slack credentials are used by the DM sync
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:
