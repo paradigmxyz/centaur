@@ -16,17 +16,21 @@ pub(crate) const SESSION_ACTIVITY_SUMMARY_EVENT: &str = "session.activity_summar
 
 const SYSTEM_PROMPT: &str = "\
 You write live status text for a software agent. Use only the supplied event facts. \
-Write one conversational first-person present-tense sentence under 45 characters, \
-including spaces, as if you are the agent. Describe the current user-facing goal or \
-question you are resolving, not the exact command, file path, ID, flag, or \
-implementation step. Prefer specific noun phrases from the session goal over \
-generic phrases like details, info, items, update, or summary. Use the session goal \
-and facts labeled commentary, plan, or tool before any lower-level facts. If the facts only show \
-setup, help output, dependency installs, builds, command output, logs, tests, or \
-other mechanics, output exactly SKIP. If you cannot say a meaningful new status \
-that differs from the previous one, output exactly SKIP. Do not mention tests, \
-output, builds, logs, rollouts, commands, paths, IDs, or flags unless the user asked \
-for them. Do not refer to \"the agent\". No markdown, no quotes, no event IDs, and no speculation.";
+Write one first-person present-tense sentence of at most 40 characters, including \
+spaces, as if you are the agent. The hard limit is 45 characters: anything longer is \
+thrown away, so when in doubt cut words and use the shortest name for things. \
+Describe the current step or latest finding, not the overall session goal: say what \
+you are doing or learned right now, like \"I'm computing TPS from blocks\", \
+\"I found the chain config\", or \"I'm blocked on metrics access\". Take the newest \
+facts labeled commentary, plan, or tool as the current step; earlier facts are only \
+context. Name one specific thing from the facts (a chain, PR, partner, tool, or \
+topic); avoid generic words like details, info, items, update, or summary, and avoid \
+repeating the session goal word for word. Each status must say something new \
+compared to the previous status sentence; if you cannot, output exactly SKIP. If the \
+facts only show setup, help output, dependency installs, builds, command output, \
+logs, tests, or other mechanics, output exactly SKIP. Do not mention commands, \
+paths, IDs, or flags. Do not refer to \"the agent\". No markdown, no quotes, no \
+event IDs, and no speculation.";
 
 #[derive(Clone)]
 pub(crate) struct ActivitySummaryConfig {
@@ -1047,14 +1051,15 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_requires_conversational_goal_status() {
+    fn system_prompt_requires_conversational_step_status() {
         assert!(SYSTEM_PROMPT.contains("first-person"));
-        assert!(SYSTEM_PROMPT.contains("under 45 characters"));
-        assert!(SYSTEM_PROMPT.contains("user-facing goal"));
-        assert!(SYSTEM_PROMPT.contains("not the exact"));
-        assert!(SYSTEM_PROMPT.contains("specific noun phrases"));
+        assert!(SYSTEM_PROMPT.contains("at most 40 characters"));
+        assert!(SYSTEM_PROMPT.contains("hard limit is 45 characters"));
+        assert!(SYSTEM_PROMPT.contains("current step or latest finding"));
+        assert!(SYSTEM_PROMPT.contains("not the overall session goal"));
+        assert!(SYSTEM_PROMPT.contains("Name one specific thing"));
         assert!(SYSTEM_PROMPT.contains("output exactly SKIP"));
-        assert!(SYSTEM_PROMPT.contains("Do not mention tests"));
+        assert!(SYSTEM_PROMPT.contains("Do not mention commands"));
         assert!(SYSTEM_PROMPT.contains("Do not refer to \"the agent\""));
     }
 
