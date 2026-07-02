@@ -9,8 +9,10 @@ usage() {
 Usage: scripts/bootstrap-k8s-secrets.sh [--namespace NAMESPACE] [--force]
 
 Creates the required local-dev Kubernetes infra Secrets consumed by the Helm chart.
-Requires OP_SERVICE_ACCOUNT_TOKEN, OP_VAULT, SLACK_BOT_TOKEN,
-SLACK_SIGNING_SECRET, and SLACKBOT_API_KEY in the shell environment.
+When creating centaur-infra-env from scratch or with --force, requires
+OP_SERVICE_ACCOUNT_TOKEN, OP_VAULT, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET,
+and SLACKBOT_API_KEY in the shell environment. Existing Secrets are only topped
+up with newly generated optional keys when absent.
 
 Optional 1Password Connect bootstrap (when ironProxy.manager.secretSource is
 set to onepassword-connect in the Helm values):
@@ -127,11 +129,6 @@ rand_hex() {
 
 require_cmd kubectl
 require_cmd openssl
-require_env OP_SERVICE_ACCOUNT_TOKEN
-require_env OP_VAULT
-require_env SLACK_BOT_TOKEN
-require_env SLACK_SIGNING_SECRET
-require_env SLACKBOT_API_KEY
 
 # Linear config is optional but must be complete: a token without the webhook
 # secret (or vice versa) deploys a linearbot that boots and then rejects every
@@ -162,6 +159,14 @@ delete_if_forced centaur-infra-env
 delete_if_forced centaur-firewall-ca
 delete_if_forced centaur-firewall-ca-key
 delete_if_forced centaur-onepassword-connect-credentials
+
+if ! secret_exists centaur-infra-env; then
+  require_env OP_SERVICE_ACCOUNT_TOKEN
+  require_env OP_VAULT
+  require_env SLACK_BOT_TOKEN
+  require_env SLACK_SIGNING_SECRET
+  require_env SLACKBOT_API_KEY
+fi
 
 secret_key_present() {
   local key="$1"
@@ -249,6 +254,9 @@ if secret_exists centaur-infra-env; then
   if ! secret_key_present IRON_CONTROL_SECRET_KEY_BASE; then
     patch_data+=("\"IRON_CONTROL_SECRET_KEY_BASE\":\"$(printf '%s%s' "$(rand_hex)" "$(rand_hex)" | base64 | tr -d '\n')\"")
   fi
+  if ! secret_key_present CENTAUR_JWT_SIGNING_SECRET; then
+    patch_data+=("\"CENTAUR_JWT_SIGNING_SECRET\":\"$(printf '%s%s' "$(rand_hex)" "$(rand_hex)" | base64 | tr -d '\n')\"")
+  fi
   # Linear bot credentials. Set whenever present so the OAuth token can be
   # rotated; the api-rs bearer is generated once and kept stable.
   if [[ -n "${LINEAR_ACCESS_TOKEN:-}" ]]; then
@@ -295,6 +303,7 @@ else
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY="$(rand_hex)"
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT="$(rand_hex)"
     --from-literal=IRON_CONTROL_SECRET_KEY_BASE="$(rand_hex)$(rand_hex)"
+    --from-literal=CENTAUR_JWT_SIGNING_SECRET="$(rand_hex)$(rand_hex)"
   )
   if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
     secret_args+=(

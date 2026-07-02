@@ -85,6 +85,9 @@ toolServer:
 console:
   enabled: false
   replicaCount: 1
+  # Public URL users reach in a browser. Set this when console is exposed behind
+  # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
+  publicUrl: ""
   image:
     repository: centaur-console
     tag: latest
@@ -105,6 +108,17 @@ console:
   # Secret (keys <secretManager.envPrefix>IRON_CONTROL_GOOGLE_CLIENT_ID /
   # _SECRET), which must exist or the console pods CreateContainerConfigError.
   googleOauth:
+    enabled: false
+  # Slack as an OIDC identity provider for console sign-in. Off by default —
+  # not every deployment uses Slack to log in. When enabled, the
+  # CENTAUR_CONSOLE_SLACK_CLIENT_ID and CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
+  # env vars are sourced from the shared infra Secret (keys
+  # <secretManager.envPrefix>CENTAUR_CONSOLE_SLACK_CLIENT_ID / _SECRET), which
+  # must exist or the console pods CreateContainerConfigError. This is the
+  # Sign-in-with-Slack OIDC app (scopes openid/email/profile, redirect URL
+  # <publicUrl>/auth/slack/callback) — not the DB-managed Slack OAuth app the
+  # bot and DM sync use.
+  slackOauth:
     enabled: false
   # OAuth app slug whose user-level Slack credentials are used by the DM sync
   # worker. Keep this aligned with the Console OAuth app users authorize.
@@ -293,6 +307,9 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Public/local MCP endpoint advertised through OAuth protected-resource
+  # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
+  mcpPublicUrl: ""
   runMigrations: true
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
@@ -363,7 +380,7 @@ apiRs:
     enabled: false
     model: gpt-5.4-nano
     openaiBaseUrl: https://api.openai.com/v1
-    minIntervalSecs: 8
+    minIntervalSecs: 20
     timeoutSecs: 5
     maxFacts: 12
     maxOutputTokens: 128
@@ -407,6 +424,9 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Public/local MCP endpoint shown in MCP SSO setup messages. The default
+  # assumes users connect through `kubectl port-forward ... 3000:8080`.
+  mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
   metrics:

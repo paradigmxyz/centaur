@@ -1,6 +1,8 @@
 pub mod client;
 mod error;
+mod mcp;
 mod routes;
+mod tool_discovery;
 pub mod types;
 
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
@@ -8,6 +10,10 @@ pub use error::ApiError;
 pub use routes::{
     AppState, build_router_with_app_state, build_router_with_runtime,
     build_router_with_session_and_workflow_runtime, build_router_with_session_runtime,
+};
+pub use tool_discovery::{
+    DiscoveredToolProxyFragment, ToolDiscoveryConfig, ToolDiscoveryError,
+    discover_persona_registry, discover_tool_proxy_fragment,
 };
 
 #[cfg(test)]
@@ -223,6 +229,37 @@ mod tests {
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_requires_bearer_before_runtime_is_ready() {
+        let app = build_router_with_app_state(AppState::unready());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::HOST, "centaur.local")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        assert!(challenge.contains("Bearer"));
+        assert!(challenge.contains(
+            "resource_metadata=\"http://centaur.local/.well-known/oauth-protected-resource/mcp\""
+        ));
     }
 
     #[tokio::test]

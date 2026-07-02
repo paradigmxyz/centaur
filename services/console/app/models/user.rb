@@ -7,8 +7,12 @@ class User < ApplicationRecord
   has_secure_password validations: false
 
   has_many :api_keys, dependent: :destroy
+  has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   has_many :user_identities, dependent: :destroy
   belongs_to :approved_by, class_name: "User", optional: true
+
+  after_update :revoke_mcp_oauth_refresh_tokens_when_disabled,
+               if: -> { saved_change_to_status? && disabled? }
 
   # pending: signed in via SSO but not yet approved -- cannot use the console.
   # active: approved operator. disabled: access revoked.
@@ -26,6 +30,11 @@ class User < ApplicationRecord
   # Marks a pending user active, recording who approved them and when.
   def approve!(by:)
     update!(status: :active, approved_at: Time.current, approved_by: by)
+  end
+
+  def revoke_mcp_oauth_refresh_tokens!
+    now = Time.current
+    mcp_oauth_refresh_tokens.usable.update_all(revoked_at: now, updated_at: now)
   end
 
   # Resolves the console user behind a verified SSO identity, creating or linking
@@ -68,4 +77,10 @@ class User < ApplicationRecord
     { email: identity[:email], name: identity[:name], status: admin ? :active : :pending, admin: admin }
   end
   private_class_method :provisioned_attributes
+
+  private
+
+  def revoke_mcp_oauth_refresh_tokens_when_disabled
+    revoke_mcp_oauth_refresh_tokens!
+  end
 end

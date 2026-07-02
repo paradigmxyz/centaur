@@ -1,6 +1,5 @@
 mod activity_summary;
 mod args;
-mod tool_discovery;
 
 use centaur_api_server::{AppState, build_router_with_app_state};
 use centaur_session_runtime::SessionRuntime;
@@ -144,7 +143,7 @@ pub(crate) enum ServerError {
     #[error(transparent)]
     Telemetry(#[from] centaur_telemetry::TelemetryError),
     #[error(transparent)]
-    ToolDiscovery(#[from] tool_discovery::ToolDiscoveryError),
+    ToolDiscovery(#[from] centaur_api_server::ToolDiscoveryError),
     #[error(transparent)]
     ActivitySummary(#[from] activity_summary::ActivitySummaryError),
     #[error("tool source error: {0}")]
