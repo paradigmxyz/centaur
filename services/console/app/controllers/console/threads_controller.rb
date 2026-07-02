@@ -451,17 +451,19 @@ class Console::ThreadsController < ApplicationController
   end
 
   # The api-rs stdout pump persists every harness output line verbatim as a
-  # session.output.line event whose payload is a JSON-encoded string. Reasoning
-  # blocks arrive as item/completed notifications with item.type == "reasoning"
-  # carrying the full accumulated thinking text. The SQL LIKE filter keeps the
-  # query from paging through the whole firehose; exact matching happens here.
+  # session.output.line event whose payload is a JSON-encoded string. Codex
+  # reasoning arrives as item/completed notifications with item.type ==
+  # "reasoning" carrying the full accumulated thinking text; Claude Code
+  # stream-json persists each assistant API message whose content can include
+  # "thinking" blocks. The SQL LIKE filter keeps the query from paging through
+  # the whole firehose; exact matching happens here.
   def selected_thinking_items
     return [] unless @selected_session
 
     CentaurSessionEvent
       .where(thread_key: @selected_session.thread_key)
       .where(event_type: "session.output.line")
-      .where("payload::text LIKE '%reasoning%'")
+      .where("payload::text LIKE '%reasoning%' OR payload::text LIKE '%thinking%'")
       .order(event_id: :desc)
       .limit(THINKING_EVENT_LIMIT)
       .to_a
@@ -476,13 +478,7 @@ class Console::ThreadsController < ApplicationController
     value = JSON.parse(line)
     return nil unless value.is_a?(Hash)
 
-    method = (value["method"] || value["type"]).to_s.tr("/", ".")
-    return nil unless method == "item.completed"
-
-    item = value.dig("params", "item") || value["item"]
-    return nil unless item.is_a?(Hash) && item["type"].to_s == "reasoning"
-
-    text = reasoning_item_text(item)
+    text = reasoning_event_text(value) || claude_thinking_text(value)
     return nil if text.blank?
 
     {
@@ -495,6 +491,35 @@ class Console::ThreadsController < ApplicationController
     }
   rescue JSON::ParserError
     nil
+  end
+
+  def reasoning_event_text(value)
+    method = (value["method"] || value["type"]).to_s.tr("/", ".")
+    return nil unless method == "item.completed"
+
+    item = value.dig("params", "item") || value["item"]
+    return nil unless item.is_a?(Hash) && item["type"].to_s == "reasoning"
+
+    reasoning_item_text(item)
+  end
+
+  # Claude Code's stream-json output persists each assistant API message as
+  # {"type":"assistant","message":{"content":[...]}} where extended thinking
+  # arrives in content blocks of type "thinking" (text under the "thinking"
+  # key). Partial stream_event lines never carry type == "assistant", so each
+  # thinking block surfaces exactly once.
+  def claude_thinking_text(value)
+    return nil unless value["type"].to_s == "assistant"
+
+    message = value["message"]
+    content = message.is_a?(Hash) ? message["content"] : value["content"]
+    return nil unless content.is_a?(Array)
+
+    content.filter_map do |part|
+      next unless part.is_a?(Hash) && part["type"].to_s == "thinking"
+
+      part["thinking"].presence || part["text"].presence
+    end.join("\n").strip.presence
   end
 
   # Claude/Amp reasoning lands in content (full text); Codex-native reasoning
@@ -557,6 +582,9 @@ class Console::ThreadsController < ApplicationController
   end
 
   def thread_title(session)
+    stored = stored_session_title(session)
+    return clip_one_line(stored, 80) if stored
+
     metadata = session.metadata_hash
     summary = metadata["summary"]
     title = metadata["title"].presence ||
@@ -575,6 +603,13 @@ class Console::ThreadsController < ApplicationController
     return generated if generated.present?
 
     human_thread_key(session.thread_key)
+  end
+
+  # The title api-rs generates and writes onto sessions.title after a message
+  # append. Guarded because sessions mirrored from a snapshot taken before the
+  # title migration have no such column.
+  def stored_session_title(session)
+    session.title.presence if session.respond_to?(:title)
   end
 
   def thread_source_icon(session)

@@ -2,7 +2,8 @@ require "cgi"
 
 module ApplicationHelper
   MARKDOWN_ALLOWED_TAGS = %w[
-    a blockquote br code del em h1 h2 h3 h4 li ol p pre strong ul
+    a blockquote br code del div em h1 h2 h3 h4 li ol p pre strong
+    table tbody td th thead tr ul
   ].freeze
   MARKDOWN_ALLOWED_ATTRIBUTES = %w[class href rel target].freeze
 
@@ -153,6 +154,12 @@ module ApplicationHelper
   end
 
   def console_sidebar_thread_title(session, latest_message = nil)
+    # sessions.title is the title api-rs generates on message append; prefer it
+    # over metadata heuristics. Guarded because snapshots mirrored before the
+    # title migration have no such column.
+    stored = session.title.presence if session.respond_to?(:title)
+    return console_sidebar_clip_one_line(stored, 48) if stored
+
     metadata = session.metadata_hash
     summary = metadata["summary"]
     title = metadata["title"].presence ||
@@ -304,13 +311,25 @@ module ApplicationHelper
           index += 1
         end
         blocks << %(<blockquote class="mb-3 border-l border-ink-500 pl-3 text-zinc-400 last:mb-0">#{markdown_inline(quoted.join(" "))}</blockquote>)
+      elsif markdown_table_row?(line) && markdown_table_separator?(lines[index + 1])
+        header = markdown_table_cells(line)
+        alignments = markdown_table_alignments(lines[index + 1])
+        index += 2
+        rows = []
+        while index < lines.length && markdown_table_row?(lines[index])
+          rows << markdown_table_cells(lines[index])
+          index += 1
+        end
+        blocks << markdown_table(header, alignments, rows)
       else
         paragraph = []
         while index < lines.length && lines[index].present? && !markdown_block_start?(lines[index])
           paragraph << lines[index]
           index += 1
         end
-        blocks << %(<p class="mb-3 last:mb-0">#{markdown_inline(paragraph.join(" "))}</p>)
+        # Empty when the line is a table row without a separator: the progress
+        # guard below emits it as its own paragraph.
+        blocks << %(<p class="mb-3 last:mb-0">#{markdown_inline(paragraph.join(" "))}</p>) unless paragraph.empty?
       end
 
       # Guarantee forward progress: a block-start marker with no content (e.g.
@@ -331,7 +350,54 @@ module ApplicationHelper
       line.match?(/\A\#{1,4}\s+/) ||
       line.match?(/\A\s*[-*+]\s+/) ||
       line.match?(/\A\s*\d+\.\s+/) ||
-      line.match?(/\A\s*>\s?/)
+      line.match?(/\A\s*>\s?/) ||
+      markdown_table_row?(line)
+  end
+
+  def markdown_table_row?(line)
+    stripped = line.to_s.strip
+    stripped.start_with?("|") && stripped.length > 1
+  end
+
+  def markdown_table_separator?(line)
+    return false unless line && markdown_table_row?(line)
+
+    cells = markdown_table_cells(line)
+    cells.any? && cells.all? { |cell| cell.match?(/\A:?-+:?\z/) }
+  end
+
+  def markdown_table_cells(line)
+    inner = line.strip.delete_prefix("|").delete_suffix("|")
+    inner.split(/(?<!\\)\|/, -1).map { |cell| cell.strip.gsub("\\|", "|") }
+  end
+
+  def markdown_table_alignments(separator_line)
+    markdown_table_cells(separator_line).map do |cell|
+      left = cell.start_with?(":")
+      right = cell.end_with?(":")
+      if left && right
+        "text-center"
+      elsif right
+        "text-right"
+      else
+        "text-left"
+      end
+    end
+  end
+
+  # Extra body cells beyond the header width are dropped and short rows are
+  # padded with empty cells, matching GFM table semantics.
+  def markdown_table(header, alignments, rows)
+    head_cells = header.each_with_index.map do |cell, column|
+      %(<th class="border-b border-ink-700 px-3 py-1.5 font-semibold text-zinc-100 #{alignments[column] || "text-left"}">#{markdown_inline(cell)}</th>)
+    end
+    body_rows = rows.map do |row|
+      cells = Array.new(header.length) do |column|
+        %(<td class="border-b border-ink-800/70 px-3 py-1.5 align-top #{alignments[column] || "text-left"}">#{markdown_inline(row[column].to_s)}</td>)
+      end
+      "<tr>#{cells.join}</tr>"
+    end
+    %(<div class="mb-3 overflow-x-auto last:mb-0"><table class="w-full border-collapse text-sm"><thead><tr>#{head_cells.join}</tr></thead><tbody>#{body_rows.join}</tbody></table></div>)
   end
 
   def markdown_inline(raw_text)

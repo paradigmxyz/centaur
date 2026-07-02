@@ -65,6 +65,76 @@ class ApplicationHelperTest < ActionView::TestCase
                      text: "https://github.com/paradigmxyz/centaur/issues/792"
   end
 
+  test "console_markdown renders gfm tables with alignment" do
+    html = console_markdown(<<~MARKDOWN)
+      Before the table.
+
+      | Name | Count | Status |
+      | :--- | ---: | :---: |
+      | `api-rs` | 12 | **ok** |
+      | console | 3 | pending |
+
+      After the table.
+    MARKDOWN
+
+    assert_select_in html, "table thead tr th", count: 3
+    assert_select_in html, "table tbody tr", count: 2
+    assert_select_in html, "th.text-right", text: "Count"
+    assert_select_in html, "th.text-center", text: "Status"
+    assert_select_in html, "td.text-right", text: "12"
+    assert_select_in html, "tbody code", text: "api-rs"
+    assert_select_in html, "tbody strong", text: "ok"
+    assert_select_in html, "p", text: "Before the table."
+    assert_select_in html, "p", text: "After the table."
+  end
+
+  test "console_markdown pads and truncates ragged table rows to the header width" do
+    html = console_markdown(<<~MARKDOWN)
+      | a | b |
+      | --- | --- |
+      | only |
+      | one | two | three |
+    MARKDOWN
+
+    assert_select_in html, "tbody tr", count: 2
+    assert_select_in html, "tbody tr:first-child td", count: 2
+    assert_select_in html, "tbody tr:last-child td", count: 2
+    refute_includes html, "three"
+  end
+
+  test "console_markdown escapes html inside table cells" do
+    html = console_markdown("| h |\n| --- |\n| <script>alert(1)</script> |")
+
+    refute_includes html, "<script>"
+    assert_select_in html, "tbody td", text: /alert\(1\)/
+  end
+
+  test "console_markdown leaves pipe-prefixed lines without a separator as text" do
+    html = console_markdown("| not a table |\nplain line")
+
+    assert_select_in html, "table", count: 0
+    assert_select_in html, "p", count: 2
+    assert_includes html, "not a table"
+  end
+
+  test "console_sidebar_thread_title prefers the stored generated title" do
+    session = Struct.new(:title, :metadata_hash, keyword_init: true).new(
+      title: "Fix worker memory leak",
+      metadata_hash: { "title" => "metadata title" }
+    )
+
+    assert_equal "Fix worker memory leak", console_sidebar_thread_title(session)
+  end
+
+  test "console_sidebar_thread_title falls back to metadata when no stored title" do
+    session = Struct.new(:title, :metadata_hash, keyword_init: true).new(
+      title: nil,
+      metadata_hash: { "title" => "metadata title" }
+    )
+
+    assert_equal "metadata title", console_sidebar_thread_title(session)
+  end
+
   test "console_markdown escapes unsafe html" do
     html = console_markdown("<script>alert(1)</script> **safe**")
 

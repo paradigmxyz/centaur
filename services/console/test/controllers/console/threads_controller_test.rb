@@ -3,7 +3,7 @@ require "tmpdir"
 
 class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   TranscriptMessage = Struct.new(:role, :parts_array, :metadata_hash, :created_at, keyword_init: true)
-  TranscriptSession = Struct.new(:metadata_hash, :harness_type, keyword_init: true)
+  TranscriptSession = Struct.new(:metadata_hash, :harness_type, :title, keyword_init: true)
   ModelSession = Struct.new(:thread_key, :metadata_hash, :harness_type, keyword_init: true)
   ModelExecution = Struct.new(:metadata, keyword_init: true)
   TranscriptEvent = Struct.new(:event_type, :payload_hash, :created_at, keyword_init: true)
@@ -357,6 +357,28 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert title.start_with?("Approach truth-seeking")
     assert_operator title.length, :<=, 80
     assert title.end_with?("...")
+  end
+
+  test "thread title prefers the stored generated title over metadata" do
+    controller = Console::ThreadsController.new
+    session = TranscriptSession.new(
+      metadata_hash: { "summary" => { "title" => "metadata title" } },
+      harness_type: "codex",
+      title: "Fix worker memory leak"
+    )
+
+    assert_equal "Fix worker memory leak", controller.send(:thread_title, session)
+  end
+
+  test "thread title ignores a blank stored title" do
+    controller = Console::ThreadsController.new
+    session = TranscriptSession.new(
+      metadata_hash: { "subject" => "Fallback subject" },
+      harness_type: "codex",
+      title: "  "
+    )
+
+    assert_equal "Fallback subject", controller.send(:thread_title, session)
   end
 
   test "thread title prefers stored summary metadata when present" do
@@ -753,6 +775,56 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: tool, created_at: now))
     assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: non_json, created_at: now))
     assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: non_string, created_at: now))
+  end
+
+  test "thinking transcript item is extracted from a claude stream-json assistant line" do
+    controller = Console::ThreadsController.new
+    line = {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "The schema mismatch explains the failure.", signature: "sig" },
+          { type: "text", text: "Here is the fix." }
+        ]
+      }
+    }.to_json
+    event = OutputLineEvent.new(payload: line, created_at: Time.zone.parse("2026-06-26 17:15:58 UTC"))
+
+    item = controller.send(:thinking_transcript_item, event)
+
+    assert_equal "thinking", item[:role]
+    assert_equal :thinking, item[:source]
+    assert_equal "The schema mismatch explains the failure.", item[:text]
+    assert_equal event.created_at, item[:created_at]
+  end
+
+  test "thinking extraction joins multiple claude thinking blocks and skips thinking-free assistant lines" do
+    controller = Console::ThreadsController.new
+    now = Time.zone.now
+
+    multi = {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "thinking", thinking: "First thought." },
+          { type: "thinking", thinking: "Second thought." }
+        ]
+      }
+    }.to_json
+    text_only = {
+      type: "assistant",
+      message: { content: [ { type: "text", text: "No thinking here." } ] }
+    }.to_json
+    stream_event = {
+      type: "stream_event",
+      event: { delta: { type: "thinking_delta", thinking: "partial" } }
+    }.to_json
+
+    item = controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: multi, created_at: now))
+    assert_equal "First thought.\nSecond thought.", item[:text]
+    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: text_only, created_at: now))
+    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: stream_event, created_at: now))
   end
 
   test "requested thread keys are deduped, stripped, and capped at the panel limit" do
