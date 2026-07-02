@@ -265,13 +265,44 @@ def test_drive_upload_sets_supports_all_drives(tmp_path, monkeypatch):
     assert result["name"] == "example.txt"
 
 
-def test_drive_upload_rejects_local_path_argument():
-    with pytest.raises(TypeError, match="unexpected keyword argument 'file_path'"):
-        client.drive_upload(file_path="/tmp/secret.txt")
+def test_drive_upload_accepts_content_path(tmp_path, monkeypatch):
+    upload_file = tmp_path / "example.txt"
+    upload_file.write_text("hello from disk")
+    fake_service = _FakeDriveService()
+
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+    monkeypatch.setattr(
+        client,
+        "MediaIoBaseUpload",
+        lambda fd, mimetype, resumable: {
+            "content": fd.getvalue(),
+            "mimetype": mimetype,
+            "resumable": resumable,
+        },
+    )
+
+    result = client.drive_upload(
+        content_path=str(upload_file),
+        folder_id="parent-123",
+    )
+
+    create_call = fake_service.files_api.create_calls[0]
+    assert create_call["body"]["name"] == "example.txt"
+    assert create_call["body"]["parents"] == ["parent-123"]
+    assert create_call["media_body"]["content"] == b"hello from disk"
+    assert result["id"] == "file-123"
+
+
+def test_drive_upload_rejects_missing_content_path(tmp_path):
+    with pytest.raises(ValueError, match="content_path does not exist or is not a file"):
+        client.drive_upload(content_path=str(tmp_path / "missing.txt"))
 
 
 def test_drive_upload_requires_a_content_source():
-    with pytest.raises(ValueError, match="content_base64, attachment_id, or attachment_url"):
+    with pytest.raises(
+        ValueError,
+        match="content_base64, content_path, attachment_id, or attachment_url",
+    ):
         client.drive_upload()
 
 

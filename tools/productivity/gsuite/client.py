@@ -774,6 +774,7 @@ def _download_attachment_bytes(
 
 def drive_upload(
     content_base64: str | None = None,
+    content_path: str | None = None,
     name: str | None = None,
     folder_id: str | None = None,
     mime_type: str | None = None,
@@ -784,14 +785,13 @@ def drive_upload(
 ) -> dict:
     """Upload a file to Google Drive.
 
-    Accepts one of: content_base64, attachment_id, or attachment_url.
-    There is deliberately no local-path option: this tool runs in-process on
-    the API server, so a caller-supplied path would read the API host's
-    filesystem. Sandboxes pass bytes via content_base64 or a Centaur attachment
-    handle instead.
+    Accepts one of: content_base64, content_path, attachment_id, or attachment_url.
+    content_path is for workflow files already on the API host filesystem. Sandbox
+    callers should pass a Centaur attachment handle instead.
 
     Args:
         content_base64: Base64-encoded file bytes
+        content_path: Path to a file on the API host filesystem
         name: File name in Drive
         folder_id: Parent folder ID
         mime_type: MIME type (auto-detected if not provided)
@@ -809,6 +809,12 @@ def drive_upload(
     if content_base64:
         upload_bytes = base64.b64decode(content_base64)
         file_name = name or filename or "upload.bin"
+    elif content_path:
+        path = Path(content_path)
+        if not path.is_file():
+            raise ValueError(f"content_path does not exist or is not a file: {content_path}")
+        upload_bytes = path.read_bytes()
+        file_name = name or filename or path.name
     elif attachment_id or attachment_url:
         upload_bytes = _download_attachment_bytes(
             attachment_id=attachment_id,
@@ -816,7 +822,9 @@ def drive_upload(
         )
         file_name = name or filename or f"{attachment_id or 'attachment'}.bin"
     else:
-        raise ValueError("One of content_base64, attachment_id, or attachment_url is required")
+        raise ValueError(
+            "One of content_base64, content_path, attachment_id, or attachment_url is required"
+        )
 
     content_type = mime_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
 
@@ -2734,6 +2742,7 @@ class GSuiteClient:
     def drive_upload(
         self,
         content_base64: str | None = None,
+        content_path: str | None = None,
         name: str | None = None,
         folder_id: str | None = None,
         mime_type: str | None = None,
@@ -2746,6 +2755,7 @@ class GSuiteClient:
 
         Args:
             content_base64: Base64-encoded file bytes
+            content_path: Path to a file on the API host filesystem
             name: File name in Drive
             folder_id: Parent folder ID
             mime_type: MIME type (auto-detected if not provided)
@@ -2759,6 +2769,7 @@ class GSuiteClient:
         """
         return drive_upload(
             content_base64=content_base64,
+            content_path=content_path,
             name=name,
             folder_id=folder_id,
             mime_type=mime_type,
