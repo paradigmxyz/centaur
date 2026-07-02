@@ -20,7 +20,7 @@
                   data: {
                     console_thread_link: true,
                     turbo_frame: "_top",
-                    console_pane_index: (pane_index + 1 if open_thread)
+                    console_pane_index: (pane_index + 1 if open_thread && open_thread_keys.size > 1)
                   }.compact,
                   title: title do %>
         <span class="console-thread-title"><%= title %></span>

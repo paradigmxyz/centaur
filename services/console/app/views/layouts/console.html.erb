@@ -240,18 +240,33 @@
         transition: background 120ms ease, color 120ms ease;
       }
 
-      /* An open thread: bright title plus its pane number (grid order) as a
-         small numeral in the indent gutter — no filled pill on thread rows. */
+      /* An open thread: bright title plus a marker in the indent gutter — no
+         filled pill on thread rows. A single open thread gets a dot; once a
+         second pane opens, rows carry data-console-pane-index and the marker
+         becomes the pane number in grid order. */
       .console-thread-link-open {
         color: #f4f4f5;
       }
 
       .console-thread-link-open::before {
-        content: attr(data-console-pane-index);
+        content: "";
         position: absolute;
         top: 50%;
-        left: 1.05rem;
+        left: 1.35rem;
+        height: 0.3rem;
+        width: 0.3rem;
         transform: translateY(-50%);
+        border-radius: 999px;
+        background: #28c26a;
+      }
+
+      .console-thread-link-open[data-console-pane-index]::before {
+        content: attr(data-console-pane-index);
+        left: 1.05rem;
+        height: auto;
+        width: auto;
+        border-radius: 0;
+        background: none;
         color: #3ace79;
         font-size: 0.6875rem;
         font-weight: 700;
@@ -700,6 +715,11 @@
       }
 
       html[data-console-theme="light"] .console-thread-link-open::before {
+        background: #28a65d;
+      }
+
+      html[data-console-theme="light"] .console-thread-link-open[data-console-pane-index]::before {
+        background: none;
         color: #168f4a;
       }
 
@@ -1192,7 +1212,12 @@
             const open = paneIndex !== -1;
             link.classList.toggle("console-thread-link-open", open);
             if (open) {
-              link.dataset.consolePaneIndex = String(paneIndex + 1);
+              // Dot for a single open thread; numbers once a second pane opens.
+              if (openKeys.length > 1) {
+                link.dataset.consolePaneIndex = String(paneIndex + 1);
+              } else {
+                delete link.dataset.consolePaneIndex;
+              }
               link.classList.remove("console-thread-link-hidden");
             } else {
               delete link.dataset.consolePaneIndex;
