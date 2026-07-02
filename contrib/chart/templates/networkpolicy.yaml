@@ -189,9 +189,10 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/api-server-enabled: "true"
-        # Transitional compatibility: existing sandboxes created before the API
-        # server capability label was introduced still carry only this label.
-        # Keep this until old sandbox pods have aged out.
+        # Transitional compatibility: existing sandbox/proxy pods created
+        # before the API server capability label was introduced still carry only
+        # this label. Remove with the matching egress compatibility policy below
+        # after old api-rs-managed pods have aged out.
         - podSelector:
             matchLabels:
               centaur.ai/managed-by: api-rs
@@ -200,6 +201,32 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: {{ . | quote }}
 {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+---
+# Transitional compatibility for pre-deploy sandbox/proxy pods. They do not
+# have centaur.ai/api-server-enabled=true, and resume/repair can recreate their
+# per-sandbox policies with the new restricted rule set while the old pods keep
+# running. Remove this with the matching api-rs ingress compatibility selector
+# once old api-rs-managed pods have aged out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-sandbox-api-server-compat
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/managed-by: api-rs
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}

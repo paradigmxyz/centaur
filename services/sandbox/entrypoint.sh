@@ -439,6 +439,16 @@ This sandbox does not have Centaur observability access. Do not use vlogs, vmetr
 EOF
 fi
 
+if [ "${CENTAUR_SANDBOX_API_SERVER_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
+    cat >> "$TARGET_PROMPT" <<'EOF'
+
+---
+
+[API server access]
+This sandbox does not have Centaur API server access. Do not use workflows or tool options that call the api-rs control plane, such as dispatching background agent sessions or downloading Centaur attachment handles.
+EOF
+fi
+
 # Persona prompt injection is done by the API when it writes AGENTS_BASE.md.
 
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
