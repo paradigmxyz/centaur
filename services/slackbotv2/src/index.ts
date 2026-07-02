@@ -645,7 +645,7 @@ async function syncThreadMessageToSession(
   setMessageText(serializedMessage, overrides.cleanedText)
   const stickyOverridesUpdate = stickyThreadOverrideUpdate(overrides)
   const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
-  // Slack-only "Open session in Console" link on the FIRST assistant message in
+  // Slack-only "Open chat in Console" link on the FIRST assistant message in
   // a thread (the reply to the first message that starts an execution). The
   // block is undefined when no Console base URL is configured. `thread.id`
   // (`slack:CHANNEL:THREAD_TS`) is the exact value sent to the session API as

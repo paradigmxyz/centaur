@@ -441,7 +441,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('Open session in Console'))
+        .filter(text => text.includes('Open chat in Console'))
 
     const parent = await postUserMessage('Console link thread context.')
     const firstMention = await postUserMessage(
@@ -475,7 +475,7 @@ describe('slackbotv2', () => {
     expect(firstBlocks[0]).toContain(
       `https://console.example.dev/console/threads?thread=${encodedThread}`
     )
-    expect(firstBlocks[0]).toContain('Open session in Console')
+    expect(firstBlocks[0]).toContain('Open chat in Console')
     expect(firstBlocks[0]).toContain('Claude Code')
     expect(firstBlocks[0]).toContain('CLAUDE-OPUS-4-8')
     expect(firstBlocks[0]).toContain(' · ')
@@ -523,7 +523,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('Open session in Console'))
+        .filter(text => text.includes('Open chat in Console'))
 
     const parent = await postUserMessage('Default model thread context.')
     const mention = await postUserMessage(

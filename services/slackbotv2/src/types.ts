@@ -108,7 +108,7 @@ export type SlackbotV2Options = {
   /**
    * Public origin of the Console UI (same value the Console itself uses,
    * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
-   * Slack thread gets an "Open session in Console" context link. Unset skips
+   * Slack thread gets an "Open chat in Console" context link. Unset skips
    * the block entirely.
    */
   consolePublicUrl?: string

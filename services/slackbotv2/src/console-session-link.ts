@@ -1,5 +1,5 @@
 /**
- * Slack-only "Open session in Console" context line.
+ * Slack-only "Open chat in Console" context line.
  *
  * On the first assistant message in a Slack thread, slackbotv2 appends a Block
  * Kit `context` block linking to the Console session view. The block is passed
@@ -98,8 +98,8 @@ export type SlackContextBlock = {
 }
 
 /**
- * Builds the "Open session in Console · {MODEL} · {Harness}" context block, or
- * undefined when no Console base URL is configured (a bare "Open session in
+ * Builds the "Open chat in Console · {MODEL} · {Harness}" context block, or
+ * undefined when no Console base URL is configured (a bare "Open chat in
  * Console" with no link is pointless, so the whole block is skipped). The
  * model id is uppercased for display.
  */
@@ -111,7 +111,7 @@ export function buildConsoleSessionContextBlock(params: {
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   if (!url) return undefined
-  const segments = [`<${url}|Open session in Console>`]
+  const segments = [`<${url}|Open chat in Console>`]
   const model = params.model?.trim()
   if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
   const harness = harnessDisplayName(params.harnessType)
