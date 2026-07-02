@@ -19,7 +19,7 @@ class Console::ThreadsController < ApplicationController
   SLACK_USER_ID_PATTERN = /\A[UW][A-Z0-9]+\z/.freeze
   SLACK_MENTION_PATTERN = /<@([UW][A-Z0-9]+)(?:\|([^>]+))?>|@([UW][A-Z0-9]+)/.freeze
   READ_ONLY_REASON =
-    "Threads are read-only while browsing a mirrored production snapshot.".freeze
+    "Chats are read-only while browsing a mirrored production snapshot.".freeze
   # Deploy-time default-model overrides: the same env vars deployers set in
   # sandbox.extraEnv to change the harness model, mirrored onto the Console by
   # the chart. Amp has no fixed default model, so it is intentionally absent.
@@ -56,8 +56,13 @@ class Console::ThreadsController < ApplicationController
     @pane_thread_keys = requested_keys.drop(1)
     @starting_new_thread = params[:new].present?
     @thread_db_unavailable = false
+    @thread_not_found = false
 
     load_threads
+    if @thread_not_found
+      render status: :not_found
+      return
+    end
     redirect_to_first_thread if auto_select_first_thread?
   rescue ActiveRecord::ActiveRecordError, PG::Error => e
     Rails.logger.warn("console_threads_load_failed error=#{e.class}: #{e.message}")
@@ -95,6 +100,15 @@ class Console::ThreadsController < ApplicationController
 
     @sessions = base_sessions.select { |session| matches_query?(session) }
     @selected_session = selected_session(session_scope, base_sessions)
+    if @thread_not_found
+      @pane_sessions = []
+      @thread_panels = []
+      @selected_messages = []
+      @selected_executions = []
+      @selected_events = []
+      @selected_transcript_items = []
+      return
+    end
     @pane_sessions = resolve_pane_sessions(session_scope, base_sessions)
     load_selected_session_summaries(keys)
     @selected_thread_key = @selected_session&.thread_key.to_s
@@ -103,6 +117,7 @@ class Console::ThreadsController < ApplicationController
   end
 
   def empty_thread_state
+    @thread_not_found = false
     @sessions = []
     @selected_session = nil
     @pane_sessions = []
@@ -133,15 +148,19 @@ class Console::ThreadsController < ApplicationController
   def selected_session(session_scope, base_sessions)
     return nil if @starting_new_thread
 
-    selected = nil
     if @selected_thread_key.present?
       selected = base_sessions.find { |session| session.thread_key == @selected_thread_key }
-      # Resolve the key through the owner scope so a directly linked thread only
+      # Resolve the key through the owner scope so a directly linked chat only
       # loads when the current user started it. base_sessions is capped at
       # THREAD_LIMIT, so this also recovers an owned thread beyond that window.
       selected ||= session_scope.where(thread_key: @selected_thread_key).first
+      # A directly requested key outside the owner scope renders as 404 rather
+      # than silently falling back to another chat, so nonexistent and
+      # inaccessible chats are indistinguishable to the viewer.
+      @thread_not_found = selected.nil?
+      return selected
     end
-    selected || @sessions.first
+    @sessions.first
   end
 
   def auto_select_first_thread?

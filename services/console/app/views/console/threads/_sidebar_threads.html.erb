@@ -5,7 +5,7 @@
 <%= turbo_frame_tag "console_sidebar_threads" do %>
   <% open_thread_keys = params[:thread].to_s.split(",").map(&:strip).reject(&:blank?) %>
   <% if @console_sidebar_threads.blank? %>
-    <div class="console-thread-empty">No recent threads</div>
+    <div class="console-thread-empty">No recent chats</div>
   <% else %>
     <% @console_sidebar_threads.each_with_index do |thread, index| %>
       <%# Open threads carry their 1-based pane number, rendered as a small
