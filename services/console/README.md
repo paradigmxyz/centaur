@@ -49,11 +49,23 @@ scripts/mirror-prod-threads-snapshot.sh all
 ```
 
 The script exports recent `sessions`, `session_messages`,
-`session_executions`, terminal `session_events`, and referenced
-`slack_sync_users` rows with the source connection forced read-only, then
-imports them into the local `ai_v2` database used by the Console dev container.
-The Threads surface is read-only: it does not render a composer and rejects
-POSTs server-side.
+`session_executions`, terminal `session_events` plus reasoning
+`session.output.line` events (capped by `THINKING_EVENT_LIMIT_PER_THREAD`,
+default 200 per thread), and referenced `slack_sync_users` rows with the source
+connection forced read-only, then imports them into the local `ai_v2` database
+used by the Console dev container. The Threads surface is read-only: it does
+not render a composer and rejects POSTs server-side.
+
+Threads extras beyond the Slack surface:
+
+- Thinking traces: reasoning items the harness streamed over stdout are
+  persisted by api-rs as `session.output.line` events; the transcript renders
+  each completed reasoning block as a collapsed "Thinking" disclosure.
+- Split view: Cmd/Ctrl-click a sidebar thread to open it alongside the current
+  one, up to four threads in a grid. The `thread` param carries the open keys
+  comma-separated (`?thread=<primary>,<key2>,<key3>,<key4>`), primary first.
+  All keys resolve through the same owner scope as a single thread, and each
+  panel has a close control.
 
 ## First Boot
 
