@@ -60,8 +60,8 @@ const SESSION_PIPE_MAX_REATTACH_ATTEMPTS: u32 = 3;
 const SESSION_PIPE_REATTACH_DELAY: Duration = Duration::from_millis(500);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
-const RESTRICTED_SANDBOX_TOOL_BLOCKLIST: &str =
-    "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator,gsuite,slack";
+const OBSERVABILITY_TOOL_BLOCKLIST: &str =
+    "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
@@ -4527,7 +4527,7 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
             .retain(|mount| mount.target_path != SANDBOX_REPOS_MOUNT_PATH);
     }
     if !capabilities.observability_enabled {
-        append_spec_env_csv(spec, "TOOL_BLOCKLIST", RESTRICTED_SANDBOX_TOOL_BLOCKLIST);
+        append_spec_env_csv(spec, "TOOL_BLOCKLIST", OBSERVABILITY_TOOL_BLOCKLIST);
     }
 }
 
@@ -6973,7 +6973,7 @@ mod adoption_tests {
             Some("false")
         );
         let blocklist = env_value(&spec, "TOOL_BLOCKLIST").unwrap_or("");
-        for tool in RESTRICTED_SANDBOX_TOOL_BLOCKLIST.split(',') {
+        for tool in OBSERVABILITY_TOOL_BLOCKLIST.split(',') {
             assert!(blocklist.split(',').any(|blocked| blocked == tool));
         }
         assert!(
