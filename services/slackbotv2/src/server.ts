@@ -33,6 +33,13 @@ const options: SlackbotV2Options = {
   botUserId: optionalEnv('SLACK_BOT_USER_ID'),
   consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
+  // Same env vars deployers use to override the sandbox harness model
+  // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
+  // track the deployment instead of the baked harness config.
+  harnessDefaultModels: {
+    ...(optionalEnv('CLAUDE_MODEL') ? { claudecode: optionalEnv('CLAUDE_MODEL')! } : {}),
+    ...(optionalEnv('CODEX_MODEL') ? { codex: optionalEnv('CODEX_MODEL')! } : {})
+  },
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   postgresUrl:

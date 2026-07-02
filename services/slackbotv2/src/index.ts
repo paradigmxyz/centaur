@@ -40,6 +40,7 @@ import {
 } from './session-api'
 import {
   buildConsoleSessionContextBlock,
+  defaultModelForHarness,
   type SlackContextBlock
 } from './console-session-link'
 import { extractMessageOverrides } from './overrides'
@@ -650,12 +651,20 @@ async function syncThreadMessageToSession(
   // (`slack:CHANNEL:THREAD_TS`) is the exact value sent to the session API as
   // `thread_key`, which the Console indexes by.
   const isFirstAssistantMessage = shouldStartExecution && executedMessageIds.size === 0
+  const effectiveHarnessType =
+    effectiveOverrides.harnessType ?? input.options.defaultHarnessType ?? 'codex'
+  // Without an explicit --model/--opus/... override the harness runs its
+  // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
+  // config); show and record that instead of dropping the model entirely.
+  const effectiveModel =
+    effectiveOverrides.model ??
+    defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
   const consoleSessionBlock = isFirstAssistantMessage
     ? buildConsoleSessionContextBlock({
         consoleBaseUrl: input.options.consolePublicUrl,
         threadKey: thread.id,
-        harnessType: effectiveOverrides.harnessType ?? input.options.defaultHarnessType ?? 'codex',
-        model: effectiveOverrides.model
+        harnessType: effectiveHarnessType,
+        model: effectiveModel
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
@@ -726,6 +735,7 @@ async function syncThreadMessageToSession(
     harnessType: shouldStartExecution ? effectiveOverrides.harnessType : undefined,
     messages: messagesToAppend,
     model: shouldStartExecution ? effectiveOverrides.model : undefined,
+    metadataModel: shouldStartExecution ? effectiveModel : undefined,
     provider: shouldStartExecution ? effectiveOverrides.provider : undefined,
     reasoning: overrides.reasoning,
     onEventId: eventId => {

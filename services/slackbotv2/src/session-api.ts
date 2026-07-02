@@ -517,7 +517,8 @@ export async function forwardToSessionApi(
       input.executeContextMessages,
       input.contextPreamble,
       input.reasoning,
-      input.provider
+      input.provider,
+      input.metadataModel
     ),
     sessionApiTimeoutMs(options),
     'execute session'
@@ -1171,14 +1172,24 @@ async function executeSession(
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
   reasoning?: string,
-  provider?: string
+  provider?: string,
+  metadataModel?: string
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
+  const recordedModel = metadataModel ?? model
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
-    metadata: sessionMetadata(message, { action: 'execute' }, requesterIdentity),
+    // Record the model this execution runs on (explicit override, else the
+    // configured/baked harness default) so readers like the Console can show
+    // it. Metadata only; the harness receives `model` via input_lines and only
+    // when explicitly overridden.
+    metadata: sessionMetadata(
+      message,
+      { action: 'execute', ...(recordedModel ? { model: recordedModel } : {}) },
+      requesterIdentity
+    ),
     input_lines: toCodexInputLines(
       message,
       threadId,

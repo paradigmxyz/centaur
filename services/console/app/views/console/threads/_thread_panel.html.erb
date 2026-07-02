@@ -19,6 +19,10 @@
         <span class="truncate"><%= thread_source_label(session) %></span>
         <span>·</span>
         <span><%= thread_harness_label(session) %></span>
+        <% if (model_label = thread_model_label(session)) %>
+          <span>·</span>
+          <span class="truncate"><%= model_label %></span>
+        <% end %>
         <span>·</span>
         <%= local_time(session.updated_at || session.created_at, relative: true, format: :compact) %>
       </div>

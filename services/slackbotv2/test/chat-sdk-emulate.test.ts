@@ -22,6 +22,7 @@ import {
   type SlackbotV2SessionMessage
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
+import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
 const USER_TOKEN = 'xoxp-slackbotv2-user'
@@ -479,6 +480,11 @@ describe('slackbotv2', () => {
     expect(firstBlocks[0]).toContain('claude-opus-4-8')
     expect(firstBlocks[0]).toContain(' · ')
 
+    // Explicit --model overrides are recorded in execution metadata so the
+    // Console can display the model for the thread.
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.executes[0]!.body.metadata.model).toBe('claude-opus-4-8')
+
     slackApi.reset()
 
     const secondMention = await postUserMessage(`<@${BOT_USER_ID}> keep going`, parent.ts)
@@ -505,6 +511,58 @@ describe('slackbotv2', () => {
 
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
     expect(consoleBlockTexts(slackApi.calls)).toHaveLength(0)
+  })
+
+  it('shows the harness default model in the Console context block when no --model is set', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ consolePublicUrl: 'https://console.example.dev', state: sharedState })
+
+    const consoleBlockTexts = (calls: StreamCall[]): string[] =>
+      calls
+        .filter(call => call.method === 'chat.stopStream')
+        .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+        .map(block => JSON.stringify(block))
+        .filter(text => text.includes('Open session in Console'))
+
+    const parent = await postUserMessage('Default model thread context.')
+    const mention = await postUserMessage(
+      `<@${BOT_USER_ID}> --claude what is your current model?`,
+      parent.ts
+    )
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-console-link-default-model',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> --claude what is your current model?`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const blocks = consoleBlockTexts(slackApi.calls)
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]).toContain('Claude Code')
+    expect(blocks[0]).toContain(claudeSettings.model)
+
+    // The effective (default) model is recorded in execution metadata for the
+    // Console, but never forwarded to the harness — only explicit overrides
+    // ride the input lines.
+    expect(codexApi.executes).toHaveLength(1)
+    const executeBody = codexApi.executes[0]!.body
+    expect(executeBody.metadata.model).toBe(claudeSettings.model)
+    expect(JSON.parse(executeBody.input_lines.at(-1)!).model).toBeUndefined()
   })
 
   it('includes all preceding Slack thread messages for a first mid-thread mention', async () => {
