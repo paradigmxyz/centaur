@@ -70,7 +70,7 @@ Optional required-by-mode variables:
 | `SLACKBOT_URL` | Chart-rendered Slackbot service URL. | API callback target for Slack delivery. |
 | `FINAL_DELIVERY_MAX_ATTEMPTS`, `FINAL_DELIVERY_READY_GRACE_S` | `api.extraEnv`. | Final-delivery retry and claim timing. |
 | `CENTAUR_ENABLE_GCLOUD_BOOTSTRAP`, `GCP_GCLOUD_CREDENTIAL`, `GCLOUD_PROJECT` | `api.extraEnv` or Secret. | Optional gcloud ADC bootstrap in the API container. |
-| `CLAUDE_MODEL`, `CODEX_MODEL` | `api.extraEnv` or request model override. | Harness model selection defaults. |
+| `CLAUDE_MODEL`, `CODEX_MODEL` | `api.extraEnv` or request model override. | Harness model selection defaults. When set via `sandbox.extraEnv`, the chart also mirrors them into slackbotv2 and the Console so their model displays track the deployment. |
 
 ## API-RS
 

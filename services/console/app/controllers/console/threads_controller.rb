@@ -16,14 +16,21 @@ class Console::ThreadsController < ApplicationController
   SLACK_MENTION_PATTERN = /<@([UW][A-Z0-9]+)(?:\|([^>]+))?>|@([UW][A-Z0-9]+)/.freeze
   READ_ONLY_REASON =
     "Threads are read-only while browsing a mirrored production snapshot.".freeze
-  # Default model each harness runs when no explicit override was recorded.
-  # Mirrors the models pinned in the harness images (harness/claude/settings.json
-  # and harness/codex/config.toml) and the map in
-  # services/slackbotv2/src/console-session-link.ts. Keep in sync when those
-  # change. Amp has no fixed default model, so it is intentionally absent.
-  HARNESS_DEFAULT_MODELS = {
-    "claudecode" => "claude-opus-4-8",
-    "codex" => "gpt-5.5"
+  # Deploy-time default-model overrides: the same env vars deployers set in
+  # sandbox.extraEnv to change the harness model, mirrored onto the Console by
+  # the chart. Amp has no fixed default model, so it is intentionally absent.
+  HARNESS_DEFAULT_MODEL_ENVS = {
+    "claudecode" => "CLAUDE_MODEL",
+    "codex" => "CODEX_MODEL"
+  }.freeze
+  # Harness config files carrying each harness's baked-in default model, used
+  # when no env override is set. Resolved against CENTAUR_HARNESS_CONFIG_DIR
+  # (the sandbox entrypoint's variable) or the repo checkout's harness/
+  # directory; absent files (e.g. in the production image, whose build context
+  # is services/console) simply yield no default.
+  HARNESS_CONFIG_FILES = {
+    "claudecode" => "claude/settings.json",
+    "codex" => "codex/config.toml"
   }.freeze
 
   SlackThreadOwner = Struct.new(:user_id, :team_id, keyword_init: true)
@@ -428,21 +435,62 @@ class Console::ThreadsController < ApplicationController
     end
   end
 
-  # Model the thread most recently ran on. slackbotv2 records `model` in
-  # execution metadata only for explicit --model/--opus/... overrides; without
-  # one the harness ran its baked-in default, so fall back to the
-  # HARNESS_DEFAULT_MODELS map. Nil (segment omitted) for harnesses without a
-  # fixed default.
+  # Model the thread most recently ran on. slackbotv2 records the effective
+  # model in execution metadata; for older rows without it, fall back to the
+  # deployment's default the way the sandbox resolves it: CLAUDE_MODEL /
+  # CODEX_MODEL env override first, then the model pinned in the harness
+  # config files when they are present. Nil (segment omitted) when none of
+  # those sources know the model.
   def thread_model_label(session)
     recorded_model(@latest_executions&.[](session.thread_key)&.metadata) ||
       recorded_model(session.metadata_hash) ||
-      HARNESS_DEFAULT_MODELS[session.harness_type.to_s]
+      default_model_for_harness(session.harness_type.to_s)
   end
 
   def recorded_model(metadata)
     return unless metadata.is_a?(Hash)
 
     metadata["model"].presence
+  end
+
+  def default_model_for_harness(harness_type)
+    env_name = HARNESS_DEFAULT_MODEL_ENVS[harness_type]
+    return unless env_name
+
+    ENV[env_name].presence || self.class.baked_harness_default_model(harness_type)
+  end
+
+  # Cached per (config dir, harness): the files are immutable within a deploy,
+  # and the dir key keeps tests with CENTAUR_HARNESS_CONFIG_DIR overrides
+  # isolated.
+  def self.baked_harness_default_model(harness_type)
+    relative = HARNESS_CONFIG_FILES[harness_type]
+    return unless relative
+
+    dir = ENV["CENTAUR_HARNESS_CONFIG_DIR"].presence ||
+      Rails.root.join("..", "..", "harness").to_s
+    cache = (@baked_harness_default_models ||= {})
+    key = [ dir, harness_type ]
+    return cache[key] if cache.key?(key)
+
+    cache[key] = parse_harness_default_model(File.join(dir, relative))
+  end
+
+  def self.parse_harness_default_model(path)
+    return unless File.file?(path)
+
+    contents = File.read(path)
+    model =
+      if path.end_with?(".json")
+        parsed = JSON.parse(contents)
+        parsed["model"] if parsed.is_a?(Hash)
+      else
+        # Minimal TOML: the top-level `model = "..."` line in codex/config.toml.
+        contents[/^model\s*=\s*"([^"]+)"/, 1]
+      end
+    model.presence
+  rescue JSON::ParserError, SystemCallError
+    nil
   end
 
   def thread_source_key(session)

@@ -22,6 +22,7 @@ import {
   type SlackbotV2SessionMessage
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
+import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
 const USER_TOKEN = 'xoxp-slackbotv2-user'
@@ -553,13 +554,14 @@ describe('slackbotv2', () => {
     const blocks = consoleBlockTexts(slackApi.calls)
     expect(blocks).toHaveLength(1)
     expect(blocks[0]).toContain('Claude Code')
-    expect(blocks[0]).toContain('claude-opus-4-8')
+    expect(blocks[0]).toContain(claudeSettings.model)
 
-    // The default is display-only: it is not forwarded to the harness and not
-    // recorded in execution metadata (only explicit overrides are).
+    // The effective (default) model is recorded in execution metadata for the
+    // Console, but never forwarded to the harness — only explicit overrides
+    // ride the input lines.
     expect(codexApi.executes).toHaveLength(1)
     const executeBody = codexApi.executes[0]!.body
-    expect(executeBody.metadata.model).toBeUndefined()
+    expect(executeBody.metadata.model).toBe(claudeSettings.model)
     expect(JSON.parse(executeBody.input_lines.at(-1)!).model).toBeUndefined()
   })
 

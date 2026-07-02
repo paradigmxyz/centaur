@@ -9,23 +9,30 @@
  * and out of the shared `@centaur/rendering` package used by Discord/Teams.
  */
 
+import claudeSettings from '../../../harness/claude/settings.json'
+import codexConfig from '../../../harness/codex/config.toml'
+
 const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
   codex: 'Codex'
 }
 
-// Default model each harness runs when no --model/--opus/... override is set.
-// Mirrors the models pinned in this repo's harness images —
-// harness/claude/settings.json ("model") and harness/codex/config.toml
-// (`model`) — which slackbotv2 cannot read at runtime (they are baked into the
-// harness images, not this service's). Keep in sync when those change. Amp has
-// no fixed default model (deep/fast modes), so it is intentionally absent.
-// The Console mirrors this map in
-// services/console/app/controllers/console/threads_controller.rb.
-const HARNESS_DEFAULT_MODELS: Record<string, string> = {
-  claudecode: 'claude-opus-4-8',
-  codex: 'gpt-5.5'
+// Default model each harness runs when no --model/--opus/... override is set,
+// read from the same harness config files the sandbox images bake in
+// (harness/claude/settings.json, harness/codex/config.toml; the slackbotv2
+// Dockerfile copies harness/ so these imports resolve in the image too).
+// Deployers who override the sandbox model via CLAUDE_MODEL / CODEX_MODEL
+// (sandbox.extraEnv) get the same values mirrored into slackbotv2 by the chart
+// and passed here through SlackbotV2Options.harnessDefaultModels, which takes
+// precedence. Amp has no fixed default model (deep/fast modes), so it is
+// intentionally absent.
+const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
+  claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
+  codex:
+    typeof (codexConfig as { model?: unknown }).model === 'string'
+      ? ((codexConfig as { model: string }).model)
+      : undefined
 }
 
 /** Slack mrkdwn requires `&`, `<`, `>` to be escaped in free text. */
@@ -54,14 +61,19 @@ export function harnessDisplayName(harnessType: string | null | undefined): stri
 }
 
 /**
- * Returns the model a harness runs by default (no explicit override), or
- * undefined for harnesses without a fixed default (amp, unknown harnesses).
+ * Returns the model a harness runs by default (no explicit override):
+ * the deployment-configured value (CLAUDE_MODEL / CODEX_MODEL via
+ * SlackbotV2Options.harnessDefaultModels, keyed by harness wire value) when
+ * set, else the model pinned in this repo's harness config files. Undefined
+ * for harnesses without a fixed default (amp, unknown harnesses).
  */
 export function defaultModelForHarness(
-  harnessType: string | null | undefined
+  harnessType: string | null | undefined,
+  configured?: Record<string, string>
 ): string | undefined {
   if (!harnessType) return undefined
-  return HARNESS_DEFAULT_MODELS[harnessType.trim().toLowerCase()]
+  const key = harnessType.trim().toLowerCase()
+  return configured?.[key]?.trim() || BAKED_DEFAULT_MODELS[key]
 }
 
 /**

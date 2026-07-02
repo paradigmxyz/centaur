@@ -1,4 +1,5 @@
 require "test_helper"
+require "tmpdir"
 
 class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   TranscriptMessage = Struct.new(:role, :parts_array, :metadata_hash, :created_at, keyword_init: true)
@@ -383,17 +384,44 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "claude-fable-5", controller.send(:thread_model_label, session)
   end
 
-  test "thread model label falls back to the harness default model" do
+  test "thread model label falls back to the deployment's model env override" do
     controller = Console::ThreadsController.new
 
-    assert_equal "claude-opus-4-8", controller.send(
-      :thread_model_label,
-      TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
-    )
-    assert_equal "gpt-5.5", controller.send(
-      :thread_model_label,
-      TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
-    )
+    with_env("CLAUDE_MODEL" => "claude-fable-5", "CODEX_MODEL" => "gpt-6") do
+      assert_equal "claude-fable-5", controller.send(
+        :thread_model_label,
+        TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
+      )
+      assert_equal "gpt-6", controller.send(
+        :thread_model_label,
+        TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
+      )
+    end
+  end
+
+  test "thread model label falls back to the models pinned in the harness config files" do
+    controller = Console::ThreadsController.new
+
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "claude"))
+      FileUtils.mkdir_p(File.join(dir, "codex"))
+      File.write(File.join(dir, "claude", "settings.json"), { model: "claude-baked-1" }.to_json)
+      File.write(File.join(dir, "codex", "config.toml"), <<~TOML)
+        model = "gpt-baked-1"
+        model_reasoning_effort = "low"
+      TOML
+
+      with_env("CLAUDE_MODEL" => nil, "CODEX_MODEL" => nil, "CENTAUR_HARNESS_CONFIG_DIR" => dir) do
+        assert_equal "claude-baked-1", controller.send(
+          :thread_model_label,
+          TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
+        )
+        assert_equal "gpt-baked-1", controller.send(
+          :thread_model_label,
+          TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
+        )
+      end
+    end
   end
 
   test "thread model label is nil for harnesses without a fixed default" do
@@ -575,6 +603,16 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  # Sets each env var for the block (nil deletes) and restores the previous
+  # values afterwards.
+  def with_env(overrides)
+    previous = overrides.keys.index_with { |name| ENV[name] }
+    overrides.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
+    yield
+  ensure
+    previous.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
+  end
 
   def with_recent_first_error
     singleton = class << CentaurSession; self; end
