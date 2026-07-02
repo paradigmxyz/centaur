@@ -665,6 +665,37 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
                   console_threads_path(thread: thread_key)
   end
 
+  # The sidebar list loads out of band via a lazy Turbo Frame, so the page must
+  # forward the current thread selection on the frame src for the active
+  # highlight to render.
+  test "threads page forwards the thread selection to the sidebar frame src" do
+    skip_unless_session_table
+
+    thread_key = "console:sidebar-active-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "turbo-frame#console_sidebar_threads[src=?]",
+                  console_sidebar_threads_path(thread: thread_key)
+  end
+
+  test "sidebar highlights every open thread of a split view" do
+    skip_unless_session_table
+
+    keys = Array.new(2) { |i| "console:sidebar-open-#{i}-#{SecureRandom.hex(4)}" }
+    keys.each { |key| insert_console_session(key) }
+
+    get console_sidebar_threads_url(thread: keys.join(","))
+
+    assert_response :ok
+    keys.each do |key|
+      assert_select "a.console-thread-link-active[href=?]",
+                    console_threads_path(thread: key)
+    end
+  end
+
   test "split view close control drops one thread and keeps the rest open" do
     skip_unless_session_table
 

@@ -930,8 +930,13 @@
                   unindexed cross-database sessions query never blocks the primary
                   page render. See ApplicationController#init_console_sidebar_threads
                   and Console::ThreadsController#sidebar. %>
+              <%# The current thread selection rides along on the frame src so the
+                  out-of-band sidebar render can highlight the open thread(s);
+                  without it the lazy fetch has no params. %>
               <%= turbo_frame_tag "console_sidebar_threads",
-                                  src: console_sidebar_threads_path,
+                                  src: console_sidebar_threads_path(
+                                    thread: (params[:thread].to_s.presence if threads_view)
+                                  ),
                                   loading: :lazy do %>
                 <div class="console-thread-empty">Loading threads…</div>
               <% end %>
