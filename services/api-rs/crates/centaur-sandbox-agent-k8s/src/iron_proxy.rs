@@ -2064,9 +2064,7 @@ mod tests {
             Some("true")
         );
         assert!(
-            iron_proxy_labels(&id, false)
-                .get(API_SERVER_ENABLED_LABEL)
-                .is_none()
+            !iron_proxy_labels(&id, false).contains_key(API_SERVER_ENABLED_LABEL)
         );
         assert_eq!(
             iron_proxy_labels(&id, false)
