@@ -17,12 +17,12 @@
       </a>
       <div class="mt-0.5 flex min-w-0 items-center gap-1.5 truncate text-xs text-zinc-500">
         <span class="truncate"><%= thread_source_label(session) %></span>
-        <span>·</span>
-        <span><%= thread_harness_label(session) %></span>
         <% if (model_label = thread_model_label(session)) %>
           <span>·</span>
           <span class="truncate"><%= model_label %></span>
         <% end %>
+        <span>·</span>
+        <span><%= thread_harness_label(session) %></span>
         <span>·</span>
         <%= local_time(session.updated_at || session.created_at, relative: true, format: :compact) %>
       </div>

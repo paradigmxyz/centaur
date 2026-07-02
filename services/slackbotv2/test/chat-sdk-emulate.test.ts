@@ -477,7 +477,7 @@ describe('slackbotv2', () => {
     )
     expect(firstBlocks[0]).toContain('Open session in Console')
     expect(firstBlocks[0]).toContain('Claude Code')
-    expect(firstBlocks[0]).toContain('claude-opus-4-8')
+    expect(firstBlocks[0]).toContain('CLAUDE-OPUS-4-8')
     expect(firstBlocks[0]).toContain(' · ')
 
     // Explicit --model overrides are recorded in execution metadata so the
@@ -554,7 +554,7 @@ describe('slackbotv2', () => {
     const blocks = consoleBlockTexts(slackApi.calls)
     expect(blocks).toHaveLength(1)
     expect(blocks[0]).toContain('Claude Code')
-    expect(blocks[0]).toContain(claudeSettings.model)
+    expect(blocks[0]).toContain(claudeSettings.model.toUpperCase())
 
     // The effective (default) model is recorded in execution metadata for the
     // Console, but never forwarded to the harness — only explicit overrides
