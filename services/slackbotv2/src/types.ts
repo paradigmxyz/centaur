@@ -106,6 +106,13 @@ export type SlackbotV2Options = {
   botToken: string
   botUserId?: string
   /**
+   * Public origin of the Console UI (same value the Console itself uses,
+   * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
+   * Slack thread gets an "Open session in Console" context link. Unset skips
+   * the block entirely.
+   */
+  consolePublicUrl?: string
+  /**
    * Harness for new threads when no --claude/--amp/--codex flag is given
    * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
    */
