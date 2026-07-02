@@ -387,7 +387,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     refute_includes sql, "slack_user_id"
   end
 
-  test "visible thread scope ignores Slack credentials without a resolvable team" do
+  test "visible thread scope matches Slack threads by user id when the credential has no team" do
     app = oauth_apps(:acme_slack)
     app.update!(client_secret: "slack-secret", labels: {})
     create_slack_oauth_credential(
@@ -400,11 +400,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
     sql = controller.send(:visible_thread_scope).to_sql
 
-    # A credential with no team cannot own threads: no Slack matching is emitted,
-    # so the scope falls back to the current user's console threads only.
-    refute_includes sql, "thread_key LIKE 'slack:%'"
-    refute_includes sql, "uowner"
-    assert_includes sql, "thread_key LIKE 'console:%'"
+    # slackbotv2 threads carry no team (slack:CHANNEL:TS keys, no slack_team_id),
+    # so a team-less credential still matches on slack_user_id alone; team scoping
+    # is added only when the credential exposes a team.
+    assert_includes sql, "thread_key LIKE 'slack:%'"
+    assert_includes sql, "metadata ->> 'slack_user_id'"
+    assert_includes sql, "uowner"
+    refute_includes sql, "split_part(thread_key, ':', 2)"
   end
 
   test "selected session resolves a directly linked thread only within the owner scope" do
