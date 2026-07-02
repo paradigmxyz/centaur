@@ -339,7 +339,6 @@ impl AgentSandboxBackend {
             iron_proxy,
             &control_target,
             self.config.otlp_egress.as_ref(),
-            &self.config.observability_egress,
             resolved.observability_enabled,
         ) {
             self.network_policies()
@@ -1305,11 +1304,10 @@ fn build_iron_proxy_network_policies(
     iron_proxy: &IronProxyConfig,
     control_target: &ControlPlaneEgressTarget,
     otlp_egress: Option<&OtlpEgressTarget>,
-    observability_egress: &[OtlpEgressTarget],
     observability_enabled: bool,
 ) -> Vec<NetworkPolicy> {
     let sandbox_to_proxy_ports = sandbox_to_proxy_ports(resolved);
-    let mut sandbox_egress = vec![
+    let sandbox_egress = vec![
         egress_to(
             vec![pod_peer(iron_proxy_labels(id))],
             sandbox_to_proxy_ports.clone(),
@@ -1320,23 +1318,6 @@ fn build_iron_proxy_network_policies(
             vec![network_port(8000), network_port(8080)],
         ),
     ];
-    if observability_enabled {
-        sandbox_egress.extend(observability_egress.iter().map(|target| {
-            egress_to(
-                vec![namespace_peer(&target.namespace)],
-                vec![network_port(target.port)],
-            )
-        }));
-    }
-    if observability_enabled && let Some(target) = otlp_egress {
-        // Direct harness OTLP export (codex usage/cost spans). The collector
-        // lives outside this namespace, so the sandbox bypasses iron-proxy for
-        // this one destination (the endpoint host also rides NO_PROXY).
-        sandbox_egress.push(egress_to(
-            vec![namespace_peer(&target.namespace)],
-            vec![network_port(target.port)],
-        ));
-    }
     vec![
         NetworkPolicy {
             metadata: object_meta(
@@ -2023,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_egress_policy_allows_otlp_collector_when_configured() {
+    fn sandbox_egress_policy_does_not_inline_otlp_collector_rule() {
         let id = SandboxId::new("asbx-test");
         let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
         let control_target = control_target();
@@ -2031,16 +2012,6 @@ mod tests {
             namespace: "laminar".to_owned(),
             port: 8000,
         };
-        let observability_targets = vec![
-            OtlpEgressTarget {
-                namespace: "observability".to_owned(),
-                port: 8428,
-            },
-            OtlpEgressTarget {
-                namespace: "observability".to_owned(),
-                port: 9428,
-            },
-        ];
 
         let policies = build_iron_proxy_network_policies(
             &id,
@@ -2048,7 +2019,6 @@ mod tests {
             &iron_proxy,
             &control_target,
             Some(&target),
-            &observability_targets,
             true,
         );
         let sandbox_egress = policies[0]
@@ -2060,20 +2030,10 @@ mod tests {
             .unwrap()
             .clone();
         assert!(
-            sandbox_egress
+            !sandbox_egress
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
-        assert!(sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
-            rule,
-            "observability",
-            8428
-        )));
-        assert!(sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
-            rule,
-            "observability",
-            9428
-        )));
         let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
         assert!(
             proxy_egress
@@ -2088,7 +2048,6 @@ mod tests {
             &iron_proxy,
             &control_target,
             None,
-            &observability_targets,
             true,
         );
         let sandbox_egress = policies[0]
@@ -2115,16 +2074,6 @@ mod tests {
             namespace: "laminar".to_owned(),
             port: 8000,
         };
-        let observability_targets = vec![
-            OtlpEgressTarget {
-                namespace: "observability".to_owned(),
-                port: 8428,
-            },
-            OtlpEgressTarget {
-                namespace: "observability".to_owned(),
-                port: 9428,
-            },
-        ];
 
         let policies = build_iron_proxy_network_policies(
             &id,
@@ -2132,7 +2081,6 @@ mod tests {
             &iron_proxy,
             &control_target,
             Some(&target),
-            &observability_targets,
             false,
         );
         let sandbox_egress = policies[0].spec.as_ref().unwrap().egress.as_ref().unwrap();
@@ -2140,20 +2088,6 @@ mod tests {
             !sandbox_egress
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
-        );
-        assert!(
-            !sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
-                rule,
-                "observability",
-                8428
-            ))
-        );
-        assert!(
-            !sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
-                rule,
-                "observability",
-                9428
-            ))
         );
         assert!(sandbox_egress.iter().any(|rule| {
             rule.to.as_ref().is_some_and(|peers| {
@@ -2262,7 +2196,6 @@ mod tests {
             &iron_proxy,
             &control_target,
             None,
-            &[],
             true,
         );
         let ingress = policies[1]
