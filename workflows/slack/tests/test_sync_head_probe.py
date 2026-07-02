@@ -193,6 +193,7 @@ def _patch_handler_io(monkeypatch, sync, *, checkpoint=None, client=None):
 
 def test_overflowing_window_probes_head_and_advances_watermark(monkeypatch):
     monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.delenv("SLACK_BACKFILL_ENABLED", raising=False)
     sync = _load_sync()
     head_ts = f"{time.time():.6f}"
     client = FakeBusyClient(head_ts=head_ts)
@@ -241,6 +242,10 @@ def test_overflowing_window_probes_head_and_advances_watermark(monkeypatch):
     assert len(continuations) == 1
     assert continuations[0]["payload"]["cursor"] == "cursor-window"
     assert continuations[0]["refresh_pending"] is False
+    # One STABLE key per channel for the standing incremental continuation —
+    # a window-derived key would mint a new overlapping job every tick now
+    # that the watermark advances.
+    assert continuations[0]["job_key"] == "continuation:C123:incremental"
 
     thread_refreshes = [
         c
@@ -252,8 +257,63 @@ def test_overflowing_window_probes_head_and_advances_watermark(monkeypatch):
     assert thread_refreshes[0]["refresh_pending"] is False
 
 
+class FakeProbeFailClient(FakeBusyClient):
+    """Window page succeeds; the head probe raises (e.g. rate limit)."""
+
+    def _sync_etl_channel_history(self, channel_id, **kwargs):
+        if self.history_calls:
+            self.history_calls.append({"channel_id": channel_id, **kwargs})
+            raise RuntimeError("Slack API error: ratelimited")
+        return super()._sync_etl_channel_history(channel_id, **kwargs)
+
+
+def test_head_probe_failure_keeps_window_progress(monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.delenv("SLACK_BACKFILL_ENABLED", raising=False)
+    sync = _load_sync()
+    client = FakeProbeFailClient(head_ts="unused")
+    calls = _patch_handler_io(
+        monkeypatch,
+        sync,
+        checkpoint={"watermark_ts": "1770000050.000001", "last_error": ""},
+        client=client,
+    )
+
+    ctx = FakeContext()
+    result = asyncio.run(sync.handler(sync.Input(), ctx))
+
+    # The probe is best-effort: its failure must not discard the fetched
+    # window page, the continuation enqueue, or the checkpoint write.
+    assert result["status"] == "completed"
+    assert len(client.history_calls) == 2
+    assert [row["message_ts"] for row in calls["upserted"]] == ["1770000100.000001"]
+    assert calls["checkpoint_success"][0]["watermark_ts"] == "1770000100.000001"
+    assert any(
+        c["job_type"] == sync.BACKFILL_JOB_CHANNEL_CONTINUATION
+        for c in calls["enqueued"]
+    )
+    assert any(name == "slack_sync_head_probe_failed" for name, _ in ctx.logs)
+
+
+def test_head_probe_skipped_when_backfill_disabled(monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.setenv("SLACK_BACKFILL_ENABLED", "false")
+    sync = _load_sync()
+    client = FakeBusyClient(head_ts="1779999999.000001")
+    calls = _patch_handler_io(monkeypatch, sync, client=client)
+
+    result = asyncio.run(sync.handler(sync.Input(), FakeContext()))
+
+    # Without the backfill worker there is nothing to drain the middle of the
+    # backlog, so jumping the watermark would certify a permanent hole.
+    assert result["status"] == "completed"
+    assert len(client.history_calls) == 1
+    assert calls["checkpoint_success"][0]["watermark_ts"] == "1770000100.000001"
+
+
 def test_head_probe_skipped_for_bounded_manual_runs(monkeypatch):
     monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.delenv("SLACK_BACKFILL_ENABLED", raising=False)
     sync = _load_sync()
     client = FakeBusyClient(head_ts="1779999999.000001")
     _calls = _patch_handler_io(monkeypatch, sync, client=client)
@@ -293,6 +353,7 @@ class FakeQuietClient(FakeBusyClient):
 
 def test_watermark_never_regresses_below_checkpoint(monkeypatch):
     monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.delenv("SLACK_BACKFILL_ENABLED", raising=False)
     sync = _load_sync()
     client = FakeQuietClient(
         head_ts="unused", window_watermark="1770000100.000001"

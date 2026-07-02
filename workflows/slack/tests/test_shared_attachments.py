@@ -312,7 +312,7 @@ def test_serialize_message_preserves_bot_attachments_and_blocks():
     client = object.__new__(shared.SlackEtlClient)
     attachments = [
         {
-            "fallback": "Deployment to Preview by lyoungblood",
+            "fallback": "Deployment approved by <@U04ABCDEF>",
             "title": "unused when fallback is present",
             "color": "36a64f",
         }
@@ -328,17 +328,18 @@ def test_serialize_message_preserves_bot_attachments_and_blocks():
             "blocks": blocks,
         },
         "C123",
-        {},
+        {"U04ABCDEF": "artur"},
     )
 
     assert message["attachments"] == attachments
     assert message["blocks"] == blocks
-    assert message["text"] == "Deployment to Preview by lyoungblood"
+    # Fallback text is mention-resolved, same as the primary text path.
+    assert message["text"] == "Deployment approved by @artur"
 
     row = shared.message_row(message, "run_123")
     assert row["raw_payload"]["attachments"] == attachments
     assert row["raw_payload"]["blocks"] == blocks
-    assert row["text"] == "Deployment to Preview by lyoungblood"
+    assert row["text"] == "Deployment approved by @artur"
     # Slack legacy attachments are message content, not file rows.
     assert row["attachments"] == []
 
@@ -352,6 +353,7 @@ def test_serialize_message_keeps_user_text_over_attachment_fallback():
             "text": "see the graph below",
             "ts": "1770000000.000700",
             "attachments": [{"fallback": "graph.png"}],
+            "blocks": [{"type": "rich_text", "elements": []}],
         },
         "C123",
         {"U123": "alice"},
@@ -359,6 +361,8 @@ def test_serialize_message_keeps_user_text_over_attachment_fallback():
 
     assert message["text"] == "see the graph below"
     assert message["attachments"] == [{"fallback": "graph.png"}]
+    # Human rich_text blocks mirror the text; not persisted.
+    assert message["blocks"] == []
 
 
 def test_attachment_fallback_text_prefers_fallback_then_joins_fields():
@@ -574,6 +578,7 @@ def test_backfill_handler_terminally_skips_permanent_slack_errors(monkeypatch):
     monkeypatch.setattr(backfill, "_emit_backfill_job_metrics", fake_noop)
     monkeypatch.setattr(backfill, "emit_slack_checkpoint_metrics", fake_noop)
     monkeypatch.setattr(backfill, "claim_backfill_jobs", fake_claim_jobs)
+    monkeypatch.setattr(backfill, "touch_backfill_job_started", fake_noop)
     monkeypatch.setattr(backfill, "shared_client", lambda **_kwargs: FakeClient())
     monkeypatch.setattr(backfill, "record_run_start", fake_noop)
     monkeypatch.setattr(backfill, "record_run_finish", fake_record_finish)
@@ -797,13 +802,55 @@ def test_claim_backfill_jobs_reclaims_stale_running_rows():
 
     assert result == []
     assert len(conn.fetch_calls) == 1
-    sql = conn.fetch_calls[0][0]
+    sql = " ".join(conn.fetch_calls[0][0].split())
     assert "status IN ('pending', 'failed')" in sql
-    assert "status = 'running'" in sql
     assert (
-        f"last_started_at < NOW() - INTERVAL '{shared.BACKFILL_JOB_STALE_RUNNING_HOURS} hours'"
-        in sql
+        "status = 'running' AND last_started_at < "
+        f"NOW() - INTERVAL '{shared.BACKFILL_JOB_STALE_RUNNING_HOURS} hours'"
+    ) in sql
+
+
+def test_touch_backfill_job_started_restamps_running_row():
+    pool = FakeExecutePool()
+
+    asyncio.run(shared.touch_backfill_job_started(pool, 42))
+
+    assert len(pool.execute_calls) == 1
+    sql, args = pool.execute_calls[0]
+    assert "SET last_started_at = NOW()" in sql
+    assert "status = 'running'" in sql
+    assert args == (42,)
+
+
+def test_sync_etl_channel_history_watermark_never_regresses(monkeypatch):
+    client = object.__new__(shared.SlackEtlClient)
+
+    def fake_page(**kwargs):
+        return {
+            "channel": "busy",
+            "channel_id": "C123",
+            "messages": [{"timestamp": "100.000000"}],
+            "count": 1,
+            "has_more": False,
+            "next_cursor": None,
+            "window": {
+                "oldest": kwargs.get("oldest"),
+                "latest": kwargs.get("latest"),
+                "inclusive": True,
+            },
+            "order": "desc",
+        }
+
+    monkeypatch.setattr(
+        client, "_get_etl_channel_history_page", lambda **kw: fake_page(**kw)
     )
+
+    out = client._sync_etl_channel_history(
+        "C123", state={"watermark": "200.000000"}, limit=10
+    )
+
+    # An oldest-anchored page below the prior watermark must not regress it.
+    assert out["sync_state"]["watermark"] == "200.000000"
 
 
 def test_backfill_handler_drains_continuation_pages_then_completes(monkeypatch):
@@ -900,6 +947,7 @@ def test_backfill_handler_drains_continuation_pages_then_completes(monkeypatch):
     monkeypatch.setattr(backfill, "_emit_backfill_job_metrics", fake_noop)
     monkeypatch.setattr(backfill, "emit_slack_checkpoint_metrics", fake_noop)
     monkeypatch.setattr(backfill, "claim_backfill_jobs", fake_claim_jobs)
+    monkeypatch.setattr(backfill, "touch_backfill_job_started", fake_noop)
     monkeypatch.setattr(backfill, "shared_client", lambda **_kwargs: fake_client)
     monkeypatch.setattr(backfill, "upsert_messages", fake_upsert_messages)
     monkeypatch.setattr(backfill, "enqueue_backfill_job", fake_enqueue)

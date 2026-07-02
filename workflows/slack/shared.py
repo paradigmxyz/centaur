@@ -1048,7 +1048,13 @@ class SlackEtlClient:
         ts = msg.get("ts", "")
         text = self._resolve_mentions(msg.get("text", ""), user_cache)
         if not text.strip():
-            text = _attachment_fallback_text(msg.get("attachments"))
+            text = self._resolve_mentions(
+                _attachment_fallback_text(msg.get("attachments")), user_cache
+            )
+        # Human rich_text blocks just mirror `text`; keep blocks only where they
+        # can carry unique content (app/bot posts or empty-text messages) so
+        # raw_payload doesn't double for every ordinary message.
+        keep_blocks = bool(msg.get("bot_id")) or not (msg.get("text") or "").strip()
         message = {
             "user": username,
             "user_id": user_id,
@@ -1065,7 +1071,7 @@ class SlackEtlClient:
             "parent_user_id": msg.get("parent_user_id"),
             "bot_id": msg.get("bot_id"),
             "attachments": msg.get("attachments") or [],
-            "blocks": msg.get("blocks") or [],
+            "blocks": (msg.get("blocks") or []) if keep_blocks else [],
             "files": [
                 normalized
                 for file_obj in msg.get("files", []) or []
@@ -1396,9 +1402,12 @@ class SlackEtlClient:
 
         latest_seen = watermark
         if page["messages"]:
-            latest_seen = self._format_ts(
-                max(float(message["timestamp"]) for message in page["messages"])
-            )
+            page_max = max(float(message["timestamp"]) for message in page["messages"])
+            # An oldest-anchored page can sit entirely below the prior watermark;
+            # never let the returned watermark regress past it.
+            if watermark is not None:
+                page_max = max(page_max, float(watermark))
+            latest_seen = self._format_ts(page_max)
 
         next_state: dict[str, Any] = {
             "cursor": page["next_cursor"] if page["has_more"] else None,
@@ -1647,8 +1656,8 @@ async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
                 "    SELECT job_id "
                 "    FROM slack_sync_backfill_jobs "
                 "    WHERE status IN ('pending', 'failed') "
-                "       OR (status = 'running' "
-                f"           AND last_started_at < NOW() - INTERVAL '{BACKFILL_JOB_STALE_RUNNING_HOURS} hours') "
+                "       OR (status = 'running' AND last_started_at < "
+                f"           NOW() - INTERVAL '{BACKFILL_JOB_STALE_RUNNING_HOURS} hours') "
                 "    ORDER BY priority, updated_at, job_id "
                 "    LIMIT $1 "
                 "    FOR UPDATE SKIP LOCKED"
@@ -1666,6 +1675,22 @@ async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
                 limit,
             )
     return [dict(row) for row in rows]
+
+
+async def touch_backfill_job_started(pool, job_id: int) -> None:
+    """Re-stamp a claimed job as this worker starts actually processing it.
+
+    A claim batch stamps `last_started_at` once for up to 50 jobs; without the
+    per-job re-stamp, a job at the tail of a slow (rate-limited) but alive run
+    can cross the stale-`running` threshold and be reclaimed by a concurrent
+    run while still owned.
+    """
+    await pool.execute(
+        "UPDATE slack_sync_backfill_jobs "
+        "SET last_started_at = NOW(), updated_at = NOW() "
+        "WHERE job_id = $1 AND status = 'running'",
+        job_id,
+    )
 
 
 async def load_backfill_job_metrics(pool) -> list[dict[str, Any]]:
