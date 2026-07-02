@@ -224,15 +224,13 @@ class ApplicationController < ActionController::Base
           )
           next if user_id.blank?
 
-          team_id = console_sidebar_first_present(
-            credential.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL),
-            credential.oauth_app&.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL)
+          ConsoleSidebarSlackThreadOwner.new(
+            user_id: user_id,
+            team_id: console_sidebar_first_present(
+              credential.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL),
+              credential.oauth_app&.labels&.[](CONSOLE_SIDEBAR_SLACK_TEAM_LABEL)
+            )
           )
-          # Require a resolvable workspace; see Console::ThreadsController for why
-          # a team-less credential cannot own threads.
-          next if team_id.blank?
-
-          ConsoleSidebarSlackThreadOwner.new(user_id: user_id, team_id: team_id)
         end.uniq { |owner| [ console_sidebar_normalize_key(owner.user_id), console_sidebar_normalize_key(owner.team_id) ] }
       end
     end
@@ -280,24 +278,26 @@ class ApplicationController < ActionController::Base
       "metadata ->> 'source' = 'slackbotv2'"
     ].join(" OR ")
 
-    owner_clauses = owners.filter_map do |owner|
-      team_id = console_sidebar_normalize_key(owner.team_id)
-      # Team scoping is mandatory: never match a Slack thread on user id alone.
-      next if team_id.blank?
-
+    owner_clauses = owners.map do |owner|
       user_id = console_sidebar_normalize_key(owner.user_id)
       user_clauses = CONSOLE_SIDEBAR_SLACK_THREAD_OWNER_METADATA_KEYS.map do |key|
         "lower(metadata ->> #{console_sidebar_sql_quote(key)}) = #{console_sidebar_sql_quote(user_id)}"
       end
-      team_clauses = CONSOLE_SIDEBAR_SLACK_THREAD_TEAM_METADATA_KEYS.map do |key|
-        "lower(metadata ->> #{console_sidebar_sql_quote(key)}) = #{console_sidebar_sql_quote(team_id)}"
+      owner_clause = "(#{user_clauses.join(" OR ")})"
+
+      # Team scoping narrows the match only when the credential exposes a team;
+      # see Console::ThreadsController#slack_thread_owner_sql.
+      if owner.team_id.present?
+        team_id = console_sidebar_normalize_key(owner.team_id)
+        team_clauses = CONSOLE_SIDEBAR_SLACK_THREAD_TEAM_METADATA_KEYS.map do |key|
+          "lower(metadata ->> #{console_sidebar_sql_quote(key)}) = #{console_sidebar_sql_quote(team_id)}"
+        end
+        team_clauses << "lower(split_part(thread_key, ':', 2)) = #{console_sidebar_sql_quote(team_id)}"
+        owner_clause = "(#{owner_clause} AND (#{team_clauses.join(" OR ")}))"
       end
-      team_clauses << "lower(split_part(thread_key, ':', 2)) = #{console_sidebar_sql_quote(team_id)}"
 
-      "((#{user_clauses.join(" OR ")}) AND (#{team_clauses.join(" OR ")}))"
+      owner_clause
     end
-
-    return if owner_clauses.empty?
 
     "(#{slack_source}) AND (#{owner_clauses.join(" OR ")})"
   end
