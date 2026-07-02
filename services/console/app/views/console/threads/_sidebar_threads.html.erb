@@ -8,11 +8,15 @@
     <div class="console-thread-empty">No recent threads</div>
   <% else %>
     <% @console_sidebar_threads.each_with_index do |thread, index| %>
-      <% active_thread = open_thread_keys.include?(thread.thread_key) %>
+      <%# The primary (first) open thread gets the filled pill; other open
+          split-view panes get a subtle dot marker so a full grid does not
+          render as a stack of touching highlight blocks. %>
+      <% primary_thread = open_thread_keys.first == thread.thread_key %>
+      <% open_thread = !primary_thread && open_thread_keys.include?(thread.thread_key) %>
       <% latest_message = @console_sidebar_latest_messages[thread.thread_key] %>
       <% title = console_sidebar_thread_title(thread, latest_message) %>
       <%= link_to console_threads_path(thread: thread.thread_key),
-                  class: "console-thread-link #{active_thread ? "console-thread-link-active" : ""} #{index >= 5 && !active_thread ? "console-thread-link-hidden" : ""}",
+                  class: "console-thread-link #{primary_thread ? "console-thread-link-active" : ""} #{open_thread ? "console-thread-link-open" : ""} #{index >= 5 && !primary_thread && !open_thread ? "console-thread-link-hidden" : ""}",
                   data: { console_thread_link: true, turbo_frame: "_top" },
                   title: title do %>
         <span class="console-thread-title"><%= title %></span>

@@ -227,6 +227,7 @@
       }
 
       .console-thread-link {
+        position: relative;
         display: grid;
         min-width: 0;
         grid-template-columns: minmax(0, 1fr) auto;
@@ -237,6 +238,24 @@
         color: #d4d4d8;
         text-decoration: none;
         transition: background 120ms ease, color 120ms ease;
+      }
+
+      /* A thread open as a non-primary split-view pane: bright title plus a
+         small dot in the indent gutter, instead of another filled pill. */
+      .console-thread-link-open {
+        color: #f4f4f5;
+      }
+
+      .console-thread-link-open::before {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 1.35rem;
+        height: 0.3rem;
+        width: 0.3rem;
+        transform: translateY(-50%);
+        border-radius: 999px;
+        background: #28c26a;
       }
 
       .console-thread-link:hover {
@@ -676,6 +695,14 @@
         color: #303438;
       }
 
+      html[data-console-theme="light"] .console-thread-link-open {
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-thread-link-open::before {
+        background: #28a65d;
+      }
+
       html[data-console-theme="light"] .console-thread-time,
       html[data-console-theme="light"] .console-thread-empty,
       html[data-console-theme="light"] .console-thread-show-all,
@@ -960,23 +987,27 @@
               <span class="console-nav-icon"><%= console_icon("message-square", classes: "size-4") %></span>
               <span class="console-nav-label">Threads</span>
             </a>
-            <div class="console-thread-list">
-              <%# The thread list is loaded lazily via a Turbo Frame so the
-                  unindexed cross-database sessions query never blocks the primary
-                  page render. See ApplicationController#init_console_sidebar_threads
-                  and Console::ThreadsController#sidebar. %>
-              <%# The current thread selection rides along on the frame src so the
-                  initial out-of-band render can surface and highlight the open
-                  thread(s). The frame is turbo-permanent: Turbo Drive carries
-                  the loaded list across page visits instead of refetching it,
-                  so thread navigation does not repaint the sidebar; the active
-                  highlight is re-synced client-side from the page URL. %>
+            <%# The thread list is loaded lazily via a Turbo Frame so the
+                unindexed cross-database sessions query never blocks the primary
+                page render. See ApplicationController#init_console_sidebar_threads
+                and Console::ThreadsController#sidebar.
+
+                The current thread selection rides along on the frame src so the
+                initial out-of-band render can surface and highlight the open
+                thread(s). The wrapper div (not the frame itself — a permanent
+                turbo-frame trips Turbo's frame lifecycle and can wedge the
+                visit progress bar) is turbo-permanent: Turbo Drive carries the
+                loaded list across page visits instead of refetching it, so
+                thread navigation does not repaint the sidebar; the active
+                highlight is re-synced client-side from the page URL. %>
+            <div id="console_sidebar_thread_list"
+                 class="console-thread-list"
+                 data-turbo-permanent>
               <%= turbo_frame_tag "console_sidebar_threads",
                                   src: console_sidebar_threads_path(
                                     thread: (params[:thread].to_s.presence if threads_view)
                                   ),
-                                  loading: :lazy,
-                                  data: { turbo_permanent: true } do %>
+                                  loading: :lazy do %>
                 <div class="console-thread-empty">Loading threads…</div>
               <% end %>
             </div>
@@ -1157,9 +1188,11 @@
 
           document.querySelectorAll("[data-console-thread-link]").forEach((link) => {
             const key = new URL(link.href, window.location.origin).searchParams.get("thread");
-            const active = openKeys.includes(key);
-            link.classList.toggle("console-thread-link-active", active);
-            if (active) link.classList.remove("console-thread-link-hidden");
+            const primary = openKeys[0] === key;
+            const open = !primary && openKeys.includes(key);
+            link.classList.toggle("console-thread-link-active", primary);
+            link.classList.toggle("console-thread-link-open", open);
+            if (primary || open) link.classList.remove("console-thread-link-hidden");
           });
         };
 

@@ -691,10 +691,11 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     get console_sidebar_threads_url(thread: keys.join(","))
 
     assert_response :ok
-    keys.each do |key|
-      assert_select "a.console-thread-link-active[href=?]",
-                    console_threads_path(thread: key)
-    end
+    # Primary thread gets the filled pill; other open panes get the dot marker.
+    assert_select "a.console-thread-link-active[href=?]",
+                  console_threads_path(thread: keys.first)
+    assert_select "a.console-thread-link-open[href=?]",
+                  console_threads_path(thread: keys.last)
   end
 
   test "split view close control drops one thread and keeps the rest open" do
