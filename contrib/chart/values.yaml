@@ -85,6 +85,11 @@ toolServer:
 console:
   enabled: false
   replicaCount: 1
+  # Public origin of the Console UI (e.g. https://console.example.com), used as
+  # CENTAUR_CONSOLE_PUBLIC_URL. When set, the slackbotv2 deployment links the
+  # first assistant message in a Slack thread to the Console session view.
+  # Leave empty to omit the link.
+  publicUrl: ""
   image:
     repository: centaur-console
     tag: latest

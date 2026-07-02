@@ -430,6 +430,83 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('appends an Open-session-in-Console context block to the first assistant message only', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ consolePublicUrl: 'https://console.example.dev', state: sharedState })
+
+    const consoleBlockTexts = (calls: StreamCall[]): string[] =>
+      calls
+        .filter(call => call.method === 'chat.stopStream')
+        .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+        .map(block => JSON.stringify(block))
+        .filter(text => text.includes('Open session in Console'))
+
+    const parent = await postUserMessage('Console link thread context.')
+    const firstMention = await postUserMessage(
+      `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 kick things off`,
+      parent.ts
+    )
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-console-link-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 kick things off`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+
+    const firstBlocks = consoleBlockTexts(slackApi.calls)
+    expect(firstBlocks).toHaveLength(1)
+    const encodedThread = encodeURIComponent(threadKey(parent.ts))
+    expect(firstBlocks[0]).toContain(
+      `https://console.example.dev/console/threads?thread=${encodedThread}`
+    )
+    expect(firstBlocks[0]).toContain('Open session in Console')
+    expect(firstBlocks[0]).toContain('Claude Code')
+    expect(firstBlocks[0]).toContain('claude-opus-4-8')
+    expect(firstBlocks[0]).toContain(' · ')
+
+    slackApi.reset()
+
+    const secondMention = await postUserMessage(`<@${BOT_USER_ID}> keep going`, parent.ts)
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-console-link-second',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> keep going`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+
+    expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
+    expect(consoleBlockTexts(slackApi.calls)).toHaveLength(0)
+  })
+
   it('includes all preceding Slack thread messages for a first mid-thread mention', async () => {
     const parent = await postUserMessage('Root context for the thread.')
     const firstReply = await postUserMessage('First preceding reply.', parent.ts)
