@@ -1090,46 +1090,36 @@ impl SandboxArgs {
             return Ok(Vec::new());
         }
         let envs = self.codex_app_server_env_template()?;
-        Ok([
-            (
-                "VICTORIAMETRICS_URL",
-                "http://victoriametrics.observability.svc:8428",
-            ),
-            (
-                "VICTORIALOGS_URL",
-                "http://victorialogs.observability.svc:9428",
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(key, default_endpoint)| {
-            let endpoint = envs
-                .iter()
-                .find(|(name, value)| name == key && !value.trim().is_empty())
-                .map(|(_, value)| value.trim().to_owned())
-                .unwrap_or_else(|| default_endpoint.to_owned());
-            match parse_otlp_egress_target(&endpoint) {
-                Some(target) => {
-                    info!(
-                        env = key,
-                        namespace = %target.namespace,
-                        port = target.port,
-                        endpoint = %endpoint,
-                        "sandbox observability egress enabled"
-                    );
-                    Some(target)
+        Ok(["VICTORIAMETRICS_URL", "VICTORIALOGS_URL"]
+            .into_iter()
+            .filter_map(|key| {
+                let endpoint = envs
+                    .iter()
+                    .find(|(name, value)| name == key && !value.trim().is_empty())
+                    .map(|(_, value)| value.trim().to_owned())?;
+                match parse_otlp_egress_target(&endpoint) {
+                    Some(target) => {
+                        info!(
+                            env = key,
+                            namespace = %target.namespace,
+                            port = target.port,
+                            endpoint = %endpoint,
+                            "sandbox observability egress enabled"
+                        );
+                        Some(target)
+                    }
+                    None => {
+                        warn!(
+                            env = key,
+                            endpoint = %endpoint,
+                            "sandbox observability endpoint is not an in-cluster service DNS name; \
+                             no sandbox egress NetworkPolicy rule will be created for it"
+                        );
+                        None
+                    }
                 }
-                None => {
-                    warn!(
-                        env = key,
-                        endpoint = %endpoint,
-                        "sandbox observability endpoint is not an in-cluster service DNS name; \
-                         no sandbox egress NetworkPolicy rule will be created for it"
-                    );
-                    None
-                }
-            }
-        })
-        .collect())
+            })
+            .collect())
     }
 
     fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
@@ -2546,7 +2536,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_observability_egress_uses_default_endpoints() {
+    fn sandbox_observability_egress_absent_without_endpoint_env() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2556,18 +2546,11 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            args.sandbox.sandbox_observability_egress_targets().unwrap(),
-            vec![
-                OtlpEgressTarget {
-                    namespace: "observability".to_owned(),
-                    port: 8428,
-                },
-                OtlpEgressTarget {
-                    namespace: "observability".to_owned(),
-                    port: 9428,
-                },
-            ]
+        assert!(
+            args.sandbox
+                .sandbox_observability_egress_targets()
+                .unwrap()
+                .is_empty()
         );
     }
 
