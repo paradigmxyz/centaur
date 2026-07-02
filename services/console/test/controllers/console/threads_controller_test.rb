@@ -1,8 +1,11 @@
 require "test_helper"
+require "tmpdir"
 
 class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   TranscriptMessage = Struct.new(:role, :parts_array, :metadata_hash, :created_at, keyword_init: true)
   TranscriptSession = Struct.new(:metadata_hash, :harness_type, keyword_init: true)
+  ModelSession = Struct.new(:thread_key, :metadata_hash, :harness_type, keyword_init: true)
+  ModelExecution = Struct.new(:metadata, keyword_init: true)
   TranscriptEvent = Struct.new(:event_type, :payload_hash, :created_at, keyword_init: true)
   SelectedSession = Struct.new(:thread_key, keyword_init: true)
 
@@ -356,6 +359,78 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Slack", controller.send(:thread_source_label, session)
     assert_equal "slack", controller.send(:thread_source_icon, session)
     assert_equal "Codex", controller.send(:thread_harness_label, session)
+  end
+
+  test "thread model label prefers the latest execution's recorded model override" do
+    controller = Console::ThreadsController.new
+    session = ModelSession.new(
+      thread_key: "slack:C1:1",
+      metadata_hash: {},
+      harness_type: "claudecode"
+    )
+    execution = ModelExecution.new(metadata: { "model" => "claude-sonnet-4-6" })
+    controller.instance_variable_set(:@latest_executions, { "slack:C1:1" => execution })
+
+    assert_equal "claude-sonnet-4-6", controller.send(:thread_model_label, session)
+  end
+
+  test "thread model label reads session metadata before the harness default" do
+    controller = Console::ThreadsController.new
+    session = TranscriptSession.new(
+      metadata_hash: { "model" => "claude-fable-5" },
+      harness_type: "claudecode"
+    )
+
+    assert_equal "claude-fable-5", controller.send(:thread_model_label, session)
+  end
+
+  test "thread model label falls back to the deployment's model env override" do
+    controller = Console::ThreadsController.new
+
+    with_env("CLAUDE_MODEL" => "claude-fable-5", "CODEX_MODEL" => "gpt-6") do
+      assert_equal "claude-fable-5", controller.send(
+        :thread_model_label,
+        TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
+      )
+      assert_equal "gpt-6", controller.send(
+        :thread_model_label,
+        TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
+      )
+    end
+  end
+
+  test "thread model label falls back to the models pinned in the harness config files" do
+    controller = Console::ThreadsController.new
+
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "claude"))
+      FileUtils.mkdir_p(File.join(dir, "codex"))
+      File.write(File.join(dir, "claude", "settings.json"), { model: "claude-baked-1" }.to_json)
+      File.write(File.join(dir, "codex", "config.toml"), <<~TOML)
+        model = "gpt-baked-1"
+        model_reasoning_effort = "low"
+      TOML
+
+      with_env("CLAUDE_MODEL" => nil, "CODEX_MODEL" => nil, "CENTAUR_HARNESS_CONFIG_DIR" => dir) do
+        assert_equal "claude-baked-1", controller.send(
+          :thread_model_label,
+          TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
+        )
+        assert_equal "gpt-baked-1", controller.send(
+          :thread_model_label,
+          TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
+        )
+      end
+    end
+  end
+
+  test "thread model label is nil for harnesses without a fixed default" do
+    controller = Console::ThreadsController.new
+
+    assert_nil controller.send(
+      :thread_model_label,
+      TranscriptSession.new(metadata_hash: {}, harness_type: "amp")
+    )
   end
 
   test "visible thread scope matches Slack threads owned by the current user's Slack OAuth record" do
@@ -720,6 +795,16 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  # Sets each env var for the block (nil deletes) and restores the previous
+  # values afterwards.
+  def with_env(overrides)
+    previous = overrides.keys.index_with { |name| ENV[name] }
+    overrides.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
+    yield
+  ensure
+    previous.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
+  end
 
   def with_recent_first_error
     singleton = class << CentaurSession; self; end
