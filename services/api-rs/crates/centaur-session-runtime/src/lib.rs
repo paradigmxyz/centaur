@@ -61,6 +61,7 @@ const SESSION_PIPE_MAX_REATTACH_ATTEMPTS: u32 = 3;
 const SESSION_PIPE_REATTACH_DELAY: Duration = Duration::from_millis(500);
 const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
 const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
+const EXECUTION_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
@@ -3016,6 +3017,99 @@ impl SessionRuntime {
                 error = %record_error,
                 "failed to record orphaned execution failure"
             );
+        }
+    }
+
+    /// Hands off this control plane's in-flight executions before process
+    /// exit. Waits up to `timeout` for owned executions to finish naturally
+    /// (their stdout pumps keep running until the process exits), then
+    /// releases the remaining stdout-owner leases so another control
+    /// plane's adoption scan can claim the executions right away instead of
+    /// waiting out the lease TTL. Turn output produced after the release is
+    /// not lost: adoption replays it from the sandbox backend's recorded
+    /// output.
+    pub async fn handoff_owned_executions(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self
+                .store
+                .count_executions_with_stdout_owner(&self.stdout_owner_id)
+                .await
+            {
+                Ok(0) => {
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "execution_handoff_idle",
+                        "no in-flight executions to hand off at shutdown"
+                    );
+                    return;
+                }
+                Ok(in_flight) => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "execution_handoff_waiting",
+                        in_flight,
+                        "waiting for in-flight executions to finish before shutdown"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "execution_handoff_count_failed",
+                        %error,
+                        "failed to count in-flight executions; releasing leases now"
+                    );
+                    break;
+                }
+            }
+            sleep(EXECUTION_HANDOFF_POLL_INTERVAL).await;
+        }
+        match self
+            .store
+            .release_stdout_owned_executions(&self.stdout_owner_id)
+            .await
+        {
+            Ok(released) => {
+                for execution in &released {
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "execution_handoff_released",
+                        thread_key = %execution.thread_key,
+                        execution_id = %execution.execution_id,
+                        "released stdout-owner lease at shutdown for adoption by a peer"
+                    );
+                    let _ = self
+                        .store
+                        .append_event(
+                            &execution.thread_key,
+                            Some(&execution.execution_id),
+                            "session.stdout_owner_released",
+                            json!({
+                                "execution_id": execution.execution_id,
+                                "reason": "control_plane_shutdown",
+                            }),
+                        )
+                        .await;
+                }
+                if released.is_empty() {
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "execution_handoff_idle",
+                        "in-flight executions finished during the shutdown drain"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_handoff_release_failed",
+                    %error,
+                    "failed to release stdout-owner leases at shutdown"
+                );
+            }
         }
     }
 }
@@ -8309,5 +8403,90 @@ mod adoption_tests {
             "unexpected error: {error}"
         );
         assert_eq!(backend.opens(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_handoff_releases_owned_leases() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:handoff-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend);
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &execution_id,
+                    &runtime.stdout_owner_id,
+                    Duration::from_secs(60)
+                )
+                .await
+                .expect("claim as this control plane")
+        );
+
+        runtime.handoff_owned_executions(Duration::ZERO).await;
+
+        wait_for_event(&store, &thread_key, "session.stdout_owner_released").await;
+        // The lease is immediately claimable by a peer control plane; without
+        // the handoff it would only expire after the lease TTL.
+        assert!(
+            store
+                .claim_stdout_owner(&execution_id, "peer-control-plane", Duration::from_secs(5))
+                .await
+                .expect("peer claims released lease")
+        );
+        store
+            .fail_execution_if_active(&execution_id, "test cleanup")
+            .await
+            .expect("terminalize execution");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_handoff_waits_for_executions_to_finish() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:handoff-wait-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend);
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &execution_id,
+                    &runtime.stdout_owner_id,
+                    Duration::from_secs(60)
+                )
+                .await
+                .expect("claim as this control plane")
+        );
+
+        // The execution finishes while the drain is waiting; no lease should
+        // be released and no handoff event recorded.
+        let completer_store = store.clone();
+        let completer_id = execution_id.clone();
+        let completer = tokio::spawn(async move {
+            sleep(Duration::from_millis(300)).await;
+            completer_store
+                .complete_execution_if_active(&completer_id)
+                .await
+                .expect("complete execution")
+        });
+        runtime
+            .handoff_owned_executions(Duration::from_secs(5))
+            .await;
+        completer.await.expect("completer task");
+
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .all(|event| event.event_type != "session.stdout_owner_released"),
+            "finished execution must not be handed off"
+        );
     }
 }

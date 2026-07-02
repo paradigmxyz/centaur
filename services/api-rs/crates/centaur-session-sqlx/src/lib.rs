@@ -37,6 +37,14 @@ pub struct ClaimExecutionResult {
     pub claimed: bool,
 }
 
+/// An active execution whose stdout-owner lease was released by
+/// [`PgSessionStore::release_stdout_owned_executions`].
+#[derive(Clone, Debug)]
+pub struct ReleasedExecution {
+    pub execution_id: String,
+    pub thread_key: ThreadKey,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdleSandboxCandidate {
     pub thread_key: ThreadKey,
@@ -538,6 +546,60 @@ impl PgSessionStore {
         .await?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn count_executions_with_stdout_owner(
+        &self,
+        owner_id: &str,
+    ) -> Result<u64, SessionStoreError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            select count(*)
+            from session_executions
+            where stdout_owner_id = $1 and status in ($2, $3)
+            "#,
+        )
+        .bind(owner_id)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(u64::try_from(count).unwrap_or_default())
+    }
+
+    /// Releases every active stdout-owner lease held by `owner_id` in one
+    /// statement, returning the affected executions. Used by a clean
+    /// control-plane shutdown so a peer's adoption scan can claim the
+    /// executions immediately instead of waiting out the lease TTL.
+    pub async fn release_stdout_owned_executions(
+        &self,
+        owner_id: &str,
+    ) -> Result<Vec<ReleasedExecution>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            r#"
+            update session_executions
+            set stdout_owner_id = null,
+                stdout_owner_lease_expires_at = null,
+                updated_at = now()
+            where stdout_owner_id = $1 and status in ($2, $3)
+            returning execution_id, thread_key
+            "#,
+        )
+        .bind(owner_id)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(execution_id, thread_key)| {
+                Ok(ReleasedExecution {
+                    execution_id,
+                    thread_key: parse_persisted(thread_key)?,
+                })
+            })
+            .collect()
     }
 
     pub async fn complete_execution(
@@ -1961,6 +2023,94 @@ mod tests {
         assert_eq!(
             completed.status,
             centaur_session_core::ExecutionStatus::Completed
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn releases_all_stdout_leases_held_by_one_owner() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let owner = format!("owner-{}", Uuid::new_v4().simple());
+        let peer = format!("peer-{}", Uuid::new_v4().simple());
+        let mut owned = Vec::new();
+        for label in ["a", "b"] {
+            let thread_key =
+                ThreadKey::parse(format!("test:handoff-{label}-{}", Uuid::new_v4())).unwrap();
+            store
+                .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+                .await
+                .expect("create session");
+            let execution_id = store
+                .create_execution(&thread_key, None, json!({}))
+                .await
+                .expect("create execution")
+                .execution
+                .execution_id;
+            store
+                .mark_execution_running(&execution_id)
+                .await
+                .expect("mark running");
+            assert!(
+                store
+                    .claim_stdout_owner(&execution_id, &owner, Duration::from_secs(60))
+                    .await
+                    .expect("claim stdout owner")
+            );
+            owned.push((execution_id, thread_key));
+        }
+        assert_eq!(
+            store
+                .count_executions_with_stdout_owner(&owner)
+                .await
+                .expect("count owned"),
+            2
+        );
+
+        let released = store
+            .release_stdout_owned_executions(&owner)
+            .await
+            .expect("release owned leases");
+        assert_eq!(released.len(), 2);
+        for (execution_id, thread_key) in &owned {
+            assert!(
+                released.iter().any(|execution| {
+                    execution.execution_id == *execution_id && execution.thread_key == *thread_key
+                }),
+                "released set must include {execution_id}"
+            );
+        }
+        assert_eq!(
+            store
+                .count_executions_with_stdout_owner(&owner)
+                .await
+                .expect("count after release"),
+            0
+        );
+
+        // Released leases are immediately claimable by a peer, without
+        // waiting for expiry.
+        assert!(
+            store
+                .claim_stdout_owner(&owned[0].0, &peer, Duration::from_secs(60))
+                .await
+                .expect("peer claims released lease")
+        );
+
+        // Terminal executions are never part of a release, even if a lease
+        // column is still populated.
+        for (execution_id, _) in &owned {
+            store
+                .fail_execution_if_active(execution_id, "test cleanup")
+                .await
+                .expect("terminalize execution");
+        }
+        assert!(
+            store
+                .release_stdout_owned_executions(&peer)
+                .await
+                .expect("release for peer")
+                .is_empty()
         );
     }
 

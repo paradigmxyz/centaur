@@ -126,6 +126,14 @@ impl AppState {
         self.initialized().is_some()
     }
 
+    /// The session runtime, if initialization completed. Unlike the private
+    /// request-path accessor this does not error while starting; the
+    /// shutdown path uses it to skip the execution handoff when the runtime
+    /// never came up.
+    pub fn session_runtime(&self) -> Option<SessionRuntime> {
+        self.initialized().map(|initialized| initialized.runtime)
+    }
+
     pub(crate) fn runtime(&self) -> Result<SessionRuntime, ApiError> {
         self.initialized()
             .map(|initialized| initialized.runtime)

@@ -106,6 +106,10 @@ impl Args {
     pub(crate) fn activity_summary_config(&self) -> Option<ActivitySummaryConfig> {
         self.activity_summary.config()
     }
+
+    pub(crate) fn shutdown_execution_drain_timeout(&self) -> Duration {
+        Duration::from_secs(self.server.shutdown_execution_drain_timeout_secs)
+    }
 }
 
 pub(crate) struct IronControlRuntime {
@@ -448,6 +452,16 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
+    /// How long shutdown waits for in-flight executions to finish before
+    /// releasing their stdout-owner leases for adoption by a peer. Keep
+    /// below the pod's terminationGracePeriodSeconds (35s in the chart) so
+    /// the release happens before SIGKILL. 0 releases immediately.
+    #[arg(
+        long = "shutdown-execution-drain-timeout-secs",
+        env = "SHUTDOWN_EXECUTION_DRAIN_TIMEOUT_SECS",
+        default_value_t = 20
+    )]
+    shutdown_execution_drain_timeout_secs: u64,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2051,6 +2065,35 @@ mod tests {
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
+    }
+
+    #[test]
+    fn shutdown_drain_defaults_to_twenty_seconds() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.shutdown_execution_drain_timeout(),
+            Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn shutdown_drain_timeout_is_configurable() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--shutdown-execution-drain-timeout-secs",
+            "0",
+        ])
+        .unwrap();
+
+        assert_eq!(args.shutdown_execution_drain_timeout(), Duration::ZERO);
     }
 
     #[test]

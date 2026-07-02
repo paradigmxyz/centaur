@@ -27,9 +27,20 @@ async fn main() -> Result<(), ServerError> {
 
     let app_state = AppState::unready();
     let app = build_router_with_app_state(app_state.clone());
+    let shutdown_state = app_state.clone();
+    let drain_timeout = args.shutdown_execution_drain_timeout();
     let mut server = tokio::spawn(async move {
         axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                info!("shutdown signal received; handing off in-flight executions");
+                // Hand off before axum starts draining connections: open SSE
+                // streams can keep the server future alive until SIGKILL, and
+                // the lease release must not be lost to that.
+                if let Some(runtime) = shutdown_state.session_runtime() {
+                    runtime.handoff_owned_executions(drain_timeout).await;
+                }
+            })
             .await
     });
 
@@ -114,8 +125,32 @@ fn init_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
+/// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM — the signal Kubernetes
+/// sends on pod termination. The binary runs as PID 1 in its container, and
+/// PID 1 ignores signals without installed handlers: without the SIGTERM arm
+/// every rollout burned the full termination grace period and ended in
+/// SIGKILL, never reaching the graceful shutdown path.
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(sigterm) => sigterm,
+            Err(error) => {
+                tracing::warn!(%error, "failed to install SIGTERM handler; using ctrl-c only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[derive(Debug, Error)]
