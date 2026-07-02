@@ -45,7 +45,7 @@ use tokio::{
     time::{Instant, Interval, MissedTickBehavior, interval_at, sleep, timeout},
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
-use tracing::{Instrument, Span, error, info, info_span, warn};
+use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
 pub use cleanup::SessionSandboxCleanupConfig;
@@ -66,6 +66,13 @@ const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
 const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 const EXECUTION_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const EXECUTION_HANDOFF_DB_TIMEOUT: Duration = Duration::from_secs(5);
+/// Executions are queued only between `create_execution` and the
+/// running transition a few statements later in `execute_session`, so a
+/// healthy row spends milliseconds in that state. An adoption scan racing a
+/// live `execute_session` (another control plane mid-rollout, or this
+/// process's own request handler) must not fail a young queued row it
+/// happens to observe in that window.
+const QUEUED_ORPHAN_GRACE: Duration = Duration::from_secs(120);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
@@ -2799,6 +2806,30 @@ impl SessionRuntime {
     ///    and re-arm the remaining max-duration deadline.
     /// 3. The sandbox is gone: record the failure honestly.
     pub async fn adopt_orphaned_executions(&self) {
+        self.run_orphan_adoption_scan(&mut OrphanAdoptionState::default())
+            .await;
+    }
+
+    /// Re-run the orphan adoption scan every `interval` for the lifetime of
+    /// the process (the first scan runs immediately). A startup-only scan
+    /// misses executions orphaned after it ran — most commonly the previous
+    /// pod of a rolling deploy reaching its termination grace period
+    /// mid-turn after the new pod already scanned — and those stay wedged
+    /// until the next deploy.
+    pub fn spawn_orphan_adoption(&self, interval: Duration) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let mut state = OrphanAdoptionState::default();
+            let mut ticker = interval_at(Instant::now(), interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                runtime.run_orphan_adoption_scan(&mut state).await;
+            }
+        });
+    }
+
+    async fn run_orphan_adoption_scan(&self, state: &mut OrphanAdoptionState) {
         let executions = match self.store.list_active_executions().await {
             Ok(executions) => executions,
             Err(error) => {
@@ -2812,37 +2843,87 @@ impl SessionRuntime {
             }
         };
         if executions.is_empty() {
+            state.deferred.clear();
             return;
         }
-        info!(
-            component = COMPONENT_SESSION_RUNTIME,
-            event = "execution_adoption_scan",
-            orphan_count = executions.len(),
-            "adopting executions orphaned by a previous control plane process"
-        );
+        let mut adopted = 0_usize;
+        let mut failed = 0_usize;
+        let mut skipped = 0_usize;
+        let mut deferred = HashSet::new();
         for execution in executions {
-            if let Err(error) = self.adopt_orphaned_execution(&execution).await {
-                warn!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "execution_adoption_failed",
-                    thread_key = %execution.thread_key,
-                    execution_id = %execution.execution_id,
-                    %error,
-                    "failed to adopt orphaned execution; will retry on next startup"
-                );
+            let record_deferral = !state.deferred.contains(&execution.execution_id);
+            match self
+                .adopt_orphaned_execution(&execution, record_deferral)
+                .await
+            {
+                Ok(OrphanAdoption::Adopted) => adopted += 1,
+                Ok(OrphanAdoption::Failed) => failed += 1,
+                Ok(OrphanAdoption::Skipped) => skipped += 1,
+                Ok(OrphanAdoption::Deferred) => {
+                    deferred.insert(execution.execution_id);
+                }
+                Err(error) => {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "execution_adoption_failed",
+                        thread_key = %execution.thread_key,
+                        execution_id = %execution.execution_id,
+                        %error,
+                        "failed to adopt orphaned execution; will retry on the next scan"
+                    );
+                }
             }
+        }
+        state.deferred = deferred;
+        if adopted > 0 || failed > 0 {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_adoption_scan",
+                adopted,
+                failed,
+                deferred = state.deferred.len(),
+                skipped,
+                "adopted executions orphaned by a previous control plane process"
+            );
+        } else {
+            debug!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_adoption_scan",
+                adopted,
+                failed,
+                deferred = state.deferred.len(),
+                skipped,
+                "orphan adoption scan found nothing adoptable"
+            );
         }
     }
 
     async fn adopt_orphaned_execution(
         &self,
         execution: &SessionExecution,
-    ) -> Result<(), SessionRuntimeError> {
+        record_deferral: bool,
+    ) -> Result<OrphanAdoption, SessionRuntimeError> {
         let thread_key = &execution.thread_key;
         let execution_id = execution.execution_id.as_str();
         if execution.status == ExecutionStatus::Queued {
             // Input is only written after an execution is marked running, so
             // a queued orphan never reached the harness: nothing can come.
+            // Young queued rows are skipped instead of failed: they are most
+            // likely a live execute_session observed mid-transition.
+            let age = SystemTime::now()
+                .duration_since(SystemTime::from(execution.created_at))
+                .unwrap_or_default();
+            if age < QUEUED_ORPHAN_GRACE {
+                debug!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_skipped",
+                    thread_key = %thread_key,
+                    execution_id,
+                    age_ms = duration_millis_u64(age),
+                    "skipping young queued execution; a live execute may still claim it"
+                );
+                return Ok(OrphanAdoption::Skipped);
+            }
             self.fail_orphaned_execution(
                 thread_key,
                 execution_id,
@@ -2850,7 +2931,7 @@ impl SessionRuntime {
                 "orphaned before input was sent",
             )
             .await;
-            return Ok(());
+            return Ok(OrphanAdoption::Failed);
         }
         let session = self.store.get_session(thread_key).await?;
         let Some(sandbox_id) = session.sandbox_id.as_deref() else {
@@ -2861,7 +2942,7 @@ impl SessionRuntime {
                 "orphaned with no sandbox assigned",
             )
             .await;
-            return Ok(());
+            return Ok(OrphanAdoption::Failed);
         };
         let id = SandboxId::new(sandbox_id);
         let status = match self.sandbox_runtime.manager.status(&id).await {
@@ -2879,27 +2960,41 @@ impl SessionRuntime {
                 &format!("sandbox no longer accepts io (status {status:?})"),
             )
             .await;
-            return Ok(());
+            return Ok(OrphanAdoption::Failed);
         }
         if !self.claim_expired_stdout_owner(execution_id).await? {
-            info!(
-                component = COMPONENT_SESSION_RUNTIME,
-                event = "execution_adoption_deferred",
-                thread_key = %thread_key,
-                execution_id,
-                sandbox_id,
-                "active stdout owner lease still exists; deferring adoption"
-            );
-            let _ = self
-                .store
-                .append_event(
-                    thread_key,
-                    Some(execution_id),
-                    "session.execution_adoption_deferred",
-                    json!({ "sandbox_id": sandbox_id, "reason": "stdout_owner_lease_active" }),
-                )
-                .await;
-            return Ok(());
+            // Deferrals repeat on every periodic scan while another control
+            // plane pumps the execution; only the first observation is worth
+            // an info log and a durable event.
+            if record_deferral {
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_deferred",
+                    thread_key = %thread_key,
+                    execution_id,
+                    sandbox_id,
+                    "active stdout owner lease still exists; deferring adoption"
+                );
+                let _ = self
+                    .store
+                    .append_event(
+                        thread_key,
+                        Some(execution_id),
+                        "session.execution_adoption_deferred",
+                        json!({ "sandbox_id": sandbox_id, "reason": "stdout_owner_lease_active" }),
+                    )
+                    .await;
+            } else {
+                debug!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_deferred",
+                    thread_key = %thread_key,
+                    execution_id,
+                    sandbox_id,
+                    "active stdout owner lease still exists; deferring adoption"
+                );
+            }
+            return Ok(OrphanAdoption::Deferred);
         }
 
         // The turn may have finished while no control plane was attached. An
@@ -2954,7 +3049,7 @@ impl SessionRuntime {
                 terminal,
             )
             .await?;
-            return Ok(());
+            return Ok(OrphanAdoption::Adopted);
         }
 
         // No terminal in the recorded output: treat the turn as still in
@@ -2997,7 +3092,7 @@ impl SessionRuntime {
                 idle_timeout_from_execution(execution),
             );
         }
-        Ok(())
+        Ok(OrphanAdoption::Adopted)
     }
 
     async fn fail_orphaned_execution(
@@ -3150,6 +3245,28 @@ impl SessionRuntime {
             }
         }
     }
+}
+
+/// Outcome of one orphan-adoption attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrphanAdoption {
+    /// Terminal output was recovered or a live pump was re-attached.
+    Adopted,
+    /// Another control plane still holds the stdout-owner lease.
+    Deferred,
+    /// The execution was failed as unrecoverable.
+    Failed,
+    /// Too young to judge (freshly queued); revisit on a later scan.
+    Skipped,
+}
+
+/// Scan state carried across periodic orphan-adoption ticks.
+#[derive(Debug, Default)]
+struct OrphanAdoptionState {
+    /// Executions whose deferral was already recorded, so long-lived leases
+    /// do not produce a `session.execution_adoption_deferred` event on every
+    /// tick.
+    deferred: HashSet<String>,
 }
 
 async fn maybe_generate_session_title(
@@ -7393,6 +7510,20 @@ mod adoption_tests {
         execution_id
     }
 
+    /// Ages an execution row past `QUEUED_ORPHAN_GRACE` so adoption treats it
+    /// as a genuine orphan instead of a young row racing a live execute.
+    async fn backdate_execution(store: &PgSessionStore, execution_id: &str, seconds: f64) {
+        sqlx::query(
+            "update session_executions set created_at = created_at - make_interval(secs => $2) \
+             where execution_id = $1",
+        )
+        .bind(execution_id)
+        .bind(seconds)
+        .execute(store.pool())
+        .await
+        .expect("backdate execution");
+    }
+
     async fn wait_for_event(store: &PgSessionStore, thread_key: &ThreadKey, event_type: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -8426,7 +8557,8 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:adopt-queued-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
+        backdate_execution(&store, &execution_id, 300.0).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let runtime = runtime_with(&store, backend.clone());
@@ -8444,6 +8576,141 @@ mod adoption_tests {
             "unexpected error: {error}"
         );
         assert_eq!(backend.opens(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skips_young_queued_executions_until_grace_passes() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-young-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+
+        // A queued row younger than the grace window may belong to a live
+        // execute_session mid-transition; the scan must leave it alone.
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .all(|event| event.event_type != "session.execution_failed"),
+            "young queued execution must not be failed"
+        );
+        let active = store
+            .list_active_executions()
+            .await
+            .expect("list active executions");
+        assert!(
+            active
+                .iter()
+                .any(|execution| execution.execution_id == execution_id),
+            "young queued execution must stay active"
+        );
+
+        // Once the row ages past the grace window, a later scan fails it.
+        backdate_execution(&store, &execution_id, 300.0).await;
+        runtime.adopt_orphaned_executions().await;
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopts_deferred_execution_after_lease_expires() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-deferred-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+        store
+            .claim_stdout_owner(
+                &execution_id,
+                "other-control-plane",
+                Duration::from_millis(200),
+            )
+            .await
+            .expect("claim lease for other owner");
+
+        let backend = Arc::new(MockBackend::new(
+            SandboxStatus::Running,
+            vec![
+                json!({"type": "item.completed", "item": {"id": "msg-1", "type": "agentMessage", "text": "Done: recovered after handoff.", "phase": "final_answer"}}).to_string(),
+                json!({"type": "turn.completed", "turn": {"id": "turn-1", "status": "completed"}}).to_string(),
+            ],
+        ));
+        let runtime = runtime_with(&store, backend.clone());
+
+        // While another control plane holds the stdout-owner lease the scan
+        // must defer instead of stealing the execution.
+        runtime.adopt_orphaned_executions().await;
+        wait_for_event(&store, &thread_key, "session.execution_adoption_deferred").await;
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .all(|event| event.event_type != "session.execution_completed"),
+            "deferred execution must not be terminalized"
+        );
+
+        // Once the lease expires (owner died without releasing), a later
+        // scan adopts the execution and recovers the recorded terminal.
+        sleep(Duration::from_millis(250)).await;
+        runtime.adopt_orphaned_executions().await;
+        wait_for_event(&store, &thread_key, "session.execution_adopted").await;
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn periodic_scans_record_deferral_once() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-dedup-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+        store
+            .claim_stdout_owner(
+                &execution_id,
+                "other-control-plane",
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("claim lease for other owner");
+
+        let backend = Arc::new(MockBackend::new(
+            SandboxStatus::Running,
+            vec![
+                json!({"type": "item.completed", "item": {"id": "msg-1", "type": "agentMessage", "text": "Done: recovered after release.", "phase": "final_answer"}}).to_string(),
+                json!({"type": "turn.completed", "turn": {"id": "turn-1", "status": "completed"}}).to_string(),
+            ],
+        ));
+        let runtime = runtime_with(&store, backend.clone());
+
+        // Repeated periodic scans over the same held lease must record the
+        // deferral event only once.
+        let mut state = OrphanAdoptionState::default();
+        runtime.run_orphan_adoption_scan(&mut state).await;
+        runtime.run_orphan_adoption_scan(&mut state).await;
+        let all = events(&store, &thread_key).await;
+        let deferrals = all
+            .iter()
+            .filter(|event| event.event_type == "session.execution_adoption_deferred")
+            .count();
+        assert_eq!(deferrals, 1, "deferral event must be recorded once");
+
+        // Releasing the lease (a clean shutdown handoff) lets the next scan
+        // adopt immediately; this also terminalizes the execution before the
+        // test releases TEST_LOCK.
+        store
+            .release_stdout_owner(&execution_id, "other-control-plane")
+            .await
+            .expect("release lease");
+        runtime.run_orphan_adoption_scan(&mut state).await;
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

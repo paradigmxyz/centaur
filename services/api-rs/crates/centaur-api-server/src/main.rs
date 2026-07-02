@@ -108,13 +108,21 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         .await?,
     );
 
-    // Adopt executions orphaned by the previous process (deploy/crash):
-    // recover finished turns from recorded sandbox output, re-attach still
-    // running sandboxes, and fail the rest so their threads unwedge.
-    let adoption_runtime = runtime.clone();
-    tokio::spawn(async move {
-        adoption_runtime.adopt_orphaned_executions().await;
-    });
+    // Adopt executions orphaned by another control plane process
+    // (deploy/crash): recover finished turns from recorded sandbox output,
+    // re-attach still running sandboxes, and fail the rest so their threads
+    // unwedge. The scan re-runs periodically because executions can be
+    // orphaned after startup — e.g. a rolling deploy terminates the previous
+    // pod mid-turn after this pod's startup scan already ran.
+    match args.execution_adoption_interval() {
+        Some(interval) => runtime.spawn_orphan_adoption(interval),
+        None => {
+            let adoption_runtime = runtime.clone();
+            tokio::spawn(async move {
+                adoption_runtime.adopt_orphaned_executions().await;
+            });
+        }
+    }
 
     app_state.mark_ready(runtime, workflows, Some(pool));
     info!("centaur api-rs runtime initialized");

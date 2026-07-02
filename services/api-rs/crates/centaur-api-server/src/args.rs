@@ -110,6 +110,11 @@ impl Args {
     pub(crate) fn shutdown_execution_drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.shutdown_execution_drain_timeout_secs)
     }
+
+    pub(crate) fn execution_adoption_interval(&self) -> Option<Duration> {
+        (self.server.execution_adoption_interval_secs > 0)
+            .then(|| Duration::from_secs(self.server.execution_adoption_interval_secs))
+    }
 }
 
 pub(crate) struct IronControlRuntime {
@@ -463,6 +468,17 @@ pub(crate) struct ServerArgs {
         value_parser = clap::value_parser!(u64).range(0..=600)
     )]
     shutdown_execution_drain_timeout_secs: u64,
+    /// How often to re-run the orphaned-execution adoption scan after the
+    /// startup pass. Executions orphaned while the process is already
+    /// running (e.g. a rolling deploy terminating the previous pod mid-turn
+    /// after this pod's startup scan) are only recovered by these re-scans.
+    /// 0 disables re-scans and keeps the startup-only behavior.
+    #[arg(
+        long = "session-execution-adoption-interval-secs",
+        env = "SESSION_EXECUTION_ADOPTION_INTERVAL_SECS",
+        default_value_t = 60
+    )]
+    execution_adoption_interval_secs: u64,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2066,6 +2082,35 @@ mod tests {
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
+    }
+
+    #[test]
+    fn execution_adoption_rescans_every_minute_by_default() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.execution_adoption_interval(),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn execution_adoption_interval_zero_disables_rescans() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-execution-adoption-interval-secs",
+            "0",
+        ])
+        .unwrap();
+
+        assert_eq!(args.execution_adoption_interval(), None);
     }
 
     #[test]
