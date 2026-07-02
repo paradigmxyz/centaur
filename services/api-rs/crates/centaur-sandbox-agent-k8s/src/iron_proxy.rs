@@ -20,8 +20,9 @@ use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
 use crate::{
-    API_SERVER_ENABLED_LABEL, AgentSandboxBackend, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
-    OtlpEgressTarget, SANDBOX_ID_LABEL, is_not_found, map_kube_error,
+    API_SERVER_ENABLED_LABEL, AgentSandboxBackend, CAPABILITY_LABELS_STAMPED_LABEL,
+    MANAGED_BY_LABEL, MANAGED_BY_VALUE, OtlpEgressTarget, SANDBOX_ID_LABEL, is_not_found,
+    map_kube_error,
 };
 
 const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
@@ -1910,15 +1911,19 @@ fn sandbox_labels(id: &SandboxId) -> BTreeMap<String, String> {
 }
 
 fn iron_proxy_labels(id: &SandboxId, api_server_enabled: bool) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut labels = BTreeMap::from([
         (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
         (SANDBOX_ID_LABEL.to_owned(), id.as_str().to_owned()),
         (IRON_PROXY_LABEL.to_owned(), "true".to_owned()),
         (
-            API_SERVER_ENABLED_LABEL.to_owned(),
-            api_server_enabled.to_string(),
+            CAPABILITY_LABELS_STAMPED_LABEL.to_owned(),
+            "true".to_owned(),
         ),
-    ])
+    ]);
+    if api_server_enabled {
+        labels.insert(API_SERVER_ENABLED_LABEL.to_owned(), "true".to_owned());
+    }
+    labels
 }
 
 fn unique_suffix() -> String {
@@ -2049,7 +2054,7 @@ mod tests {
     }
 
     #[test]
-    fn iron_proxy_labels_api_server_capability_explicitly() {
+    fn iron_proxy_labels_api_server_capability_when_enabled() {
         let id = SandboxId::new("asbx-test");
 
         assert_eq!(
@@ -2058,11 +2063,16 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
-        assert_eq!(
+        assert!(
             iron_proxy_labels(&id, false)
                 .get(API_SERVER_ENABLED_LABEL)
+                .is_none()
+        );
+        assert_eq!(
+            iron_proxy_labels(&id, false)
+                .get(CAPABILITY_LABELS_STAMPED_LABEL)
                 .map(String::as_str),
-            Some("false")
+            Some("true")
         );
     }
 
