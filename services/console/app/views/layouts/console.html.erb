@@ -966,13 +966,17 @@
                   page render. See ApplicationController#init_console_sidebar_threads
                   and Console::ThreadsController#sidebar. %>
               <%# The current thread selection rides along on the frame src so the
-                  out-of-band sidebar render can highlight the open thread(s);
-                  without it the lazy fetch has no params. %>
+                  initial out-of-band render can surface and highlight the open
+                  thread(s). The frame is turbo-permanent: Turbo Drive carries
+                  the loaded list across page visits instead of refetching it,
+                  so thread navigation does not repaint the sidebar; the active
+                  highlight is re-synced client-side from the page URL. %>
               <%= turbo_frame_tag "console_sidebar_threads",
                                   src: console_sidebar_threads_path(
                                     thread: (params[:thread].to_s.presence if threads_view)
                                   ),
-                                  loading: :lazy do %>
+                                  loading: :lazy,
+                                  data: { turbo_permanent: true } do %>
                 <div class="console-thread-empty">Loading threads…</div>
               <% end %>
             </div>
@@ -1135,6 +1139,33 @@
         wireShowMore();
         document.addEventListener("turbo:frame-load", (event) => {
           if (event.target && event.target.id === "console_sidebar_threads") wireShowMore();
+        });
+      })();
+
+      (() => {
+        // The sidebar thread list is turbo-permanent, so it is not re-rendered
+        // when navigating between threads. Re-derive the active highlight from
+        // the page URL after every Turbo visit and after the frame's initial
+        // lazy load, un-hiding an open thread that sits in the collapsed tail.
+        const THREADS_PATH = "<%= console_threads_path %>";
+
+        const syncSidebarActiveThreads = () => {
+          const url = new URL(window.location.href);
+          const openKeys = url.pathname.startsWith(THREADS_PATH)
+            ? (url.searchParams.get("thread") || "").split(",").filter(Boolean)
+            : [];
+
+          document.querySelectorAll("[data-console-thread-link]").forEach((link) => {
+            const key = new URL(link.href, window.location.origin).searchParams.get("thread");
+            const active = openKeys.includes(key);
+            link.classList.toggle("console-thread-link-active", active);
+            if (active) link.classList.remove("console-thread-link-hidden");
+          });
+        };
+
+        document.addEventListener("turbo:load", syncSidebarActiveThreads);
+        document.addEventListener("turbo:frame-load", (event) => {
+          if (event.target && event.target.id === "console_sidebar_threads") syncSidebarActiveThreads();
         });
       })();
 
