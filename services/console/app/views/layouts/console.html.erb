@@ -222,8 +222,8 @@
 
       .console-thread-list {
         display: grid;
-        gap: 0.125rem;
-        margin-top: 0.15rem;
+        gap: 0.3rem;
+        margin-top: 0.3rem;
       }
 
       .console-thread-link {
@@ -265,6 +265,22 @@
       .console-thread-time {
         color: #71717a;
         font-size: 0.75rem;
+      }
+
+      .console-panel-close {
+        display: grid;
+        height: 1.75rem;
+        width: 1.75rem;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 0.5rem;
+        color: #71717a;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-panel-close:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f5;
       }
 
       .console-thinking {
@@ -506,6 +522,9 @@
         display: flex;
         flex-direction: column;
         align-items: center;
+        /* Reserve symmetric scrollbar gutters so the centered transcript
+           column lines up with the (non-scrolling) header above it. */
+        scrollbar-gutter: stable both-edges;
       }
 
       .console-markdown {
@@ -660,6 +679,15 @@
 
       html[data-console-theme="light"] .console-thread-show-all:hover {
         color: #303438;
+      }
+
+      html[data-console-theme="light"] .console-panel-close {
+        color: #7a7f86;
+      }
+
+      html[data-console-theme="light"] .console-panel-close:hover {
+        background: #e8e9e3;
+        color: #24272b;
       }
 
       html[data-console-theme="light"] .console-thinking {
