@@ -17,9 +17,19 @@ from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_conte
 
 
 class _FakeConnection:
-    def __init__(self, *, rows=None, row=None, val=None) -> None:
+    def __init__(
+        self,
+        *,
+        rows=None,
+        fetch_rows=None,
+        row=None,
+        fetchrow_rows=None,
+        val=None,
+    ) -> None:
         self.rows = rows or []
+        self.fetch_rows = list(fetch_rows or [])
         self.row = row
+        self.fetchrow_rows = list(fetchrow_rows or [])
         self.val = val
         self.fetch_calls = []
         self.fetchrow_calls = []
@@ -28,10 +38,14 @@ class _FakeConnection:
 
     async def fetch(self, query, *args):
         self.fetch_calls.append((query, args))
+        if self.fetch_rows:
+            return self.fetch_rows.pop(0)
         return self.rows
 
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
+        if self.fetchrow_rows:
+            return self.fetchrow_rows.pop(0)
         return self.row
 
     async def fetchval(self, query, *args):
@@ -258,6 +272,119 @@ def test_search_applies_occurred_at_filters(monkeypatch):
         dt.datetime(2026, 5, 8, 12, 30, tzinfo=dt.UTC),
         4,
     )
+
+
+def test_search_docs_source_queries_legacy_drive_and_oauth_docs_indexes(monkeypatch):
+    created_at = dt.datetime(2026, 5, 1, 9, 0, tzinfo=dt.UTC)
+    modified_at = dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC)
+    fake = _FakeConnection(
+        fetch_rows=[
+            [
+                {
+                    "document_id": "google_drive:doc:legacy-doc-1",
+                    "source": "google_drive",
+                    "source_type": "google_doc",
+                    "source_document_id": "legacy-doc-1",
+                    "source_chunk_id": "",
+                    "parent_document_id": None,
+                    "title": "Legacy roadmap notes",
+                    "body": "Legacy Drive projection mentions launch sequencing.",
+                    "url": "https://docs.google.com/document/d/legacy-doc-1/edit",
+                    "author_name": "Bob",
+                    "access_scope": "",
+                    "occurred_at": created_at,
+                    "source_updated_at": modified_at,
+                    "metadata": {"drive_id": "drive-legacy"},
+                    "score": 1.5,
+                }
+            ],
+            [
+                {
+                    "document_id": "google_docs:doc-123:chunk-0000",
+                    "file_id": "doc-123",
+                    "chunk_id": "chunk-0000",
+                    "title": "Roadmap notes",
+                    "body": "Roadmap notes mention launch sequencing and onboarding.",
+                    "url": "https://docs.google.com/document/d/doc-123/edit",
+                    "provider_author_id": "perm-1",
+                    "provider_author_name": "Alice",
+                    "mime_type": "application/vnd.google-apps.document",
+                    "drive_id": "drive-1",
+                    "source_created_at": created_at,
+                    "source_modified_at": modified_at,
+                    "metadata": {"provider_email": "alice@example.com"},
+                    "score": 2.5,
+                }
+            ],
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search(
+        "roadmap",
+        limit=3,
+        source="docs",
+        source_type="google_doc",
+        occurred_after="2026-05-01",
+        occurred_before="2026-05-09",
+    )
+
+    assert result["status"] == "ok"
+    assert result["source"] == "docs"
+    assert result["source_type"] == "google_doc"
+    assert result["count"] == 2
+    assert result["indexed_count"] == 2
+    assert "google_docs_error" not in result
+    assert result["results"][0]["source"] == "docs"
+    assert result["results"][0]["document_id"] == "google_docs:doc-123:chunk-0000"
+    assert result["results"][1]["source"] == "google_drive"
+    assert result["results"][1]["document_id"] == "google_drive:doc:legacy-doc-1"
+    legacy_query, legacy_args = fake.fetch_calls[0]
+    oauth_query, oauth_args = fake.fetch_calls[1]
+    assert "FROM company_context_documents" in legacy_query
+    assert legacy_args == (
+        "roadmap",
+        "roadmap",
+        "google_drive",
+        "google_doc",
+        dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        dt.datetime(2026, 5, 9, tzinfo=dt.UTC),
+        3,
+    )
+    assert "FROM google_docs_context_documents" in oauth_query
+    assert "source_modified_at >= $3" in oauth_query
+    assert "source_modified_at < $4" in oauth_query
+    assert oauth_args == (
+        "roadmap",
+        "roadmap",
+        dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        dt.datetime(2026, 5, 9, tzinfo=dt.UTC),
+        3,
+    )
+    assert fake.closed is True
+
+
+def test_search_drive_source_is_not_docs_alias(monkeypatch):
+    fake = _FakeConnection(rows=[])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search("roadmap", source="drive")
+
+    assert result["status"] == "ok"
+    assert len(fake.fetch_calls) == 1
+    query, args = fake.fetch_calls[0]
+    assert "FROM company_context_documents" in query
+    assert "FROM google_docs_context_documents" not in query
+    assert args == ("roadmap", "roadmap", "drive", None, None, None, 10)
+    assert fake.closed is True
 
 
 def test_search_rejects_invalid_occurred_at_filter():
@@ -721,6 +848,53 @@ def test_read_document_can_return_bounded_content(monkeypatch):
     assert result["metadata"] == {"channel_name": "eng-ai"}
     _, args = fake.fetchrow_calls[0]
     assert args == ("slack:channel_day:C123:2026-05-08",)
+    assert fake.closed is True
+
+
+def test_read_document_falls_back_to_oauth_google_docs_index(monkeypatch):
+    created_at = dt.datetime(2026, 5, 1, 9, 0, tzinfo=dt.UTC)
+    modified_at = dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC)
+    body = "OAuth Google Doc content"
+    fake = _FakeConnection(
+        fetchrow_rows=[
+            None,
+            {
+                "document_id": "google_docs:doc-123:chunk-0000",
+                "file_id": "doc-123",
+                "chunk_id": "chunk-0000",
+                "title": "Roadmap notes",
+                "body": body,
+                "url": "https://docs.google.com/document/d/doc-123/edit",
+                "provider_author_id": "perm-1",
+                "provider_author_name": "Alice",
+                "mime_type": "application/vnd.google-apps.document",
+                "drive_id": "drive-1",
+                "source_created_at": created_at,
+                "source_modified_at": modified_at,
+                "metadata": {"provider_email": "alice@example.com"},
+            },
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").read_document(
+        "google_docs:doc-123:chunk-0000",
+        max_chars=10,
+    )
+
+    assert result["status"] == "ok"
+    assert result["source"] == "docs"
+    assert result["source_type"] == "google_doc"
+    assert result["source_document_id"] == "doc-123"
+    assert result["content"] == "OAuth Goog"
+    assert result["chars"] == 10
+    assert result["total_chars"] == len(body)
+    assert result["truncated"] is True
+    assert len(fake.fetchrow_calls) == 2
     assert fake.closed is True
 
 

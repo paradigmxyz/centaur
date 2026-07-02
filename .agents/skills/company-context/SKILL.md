@@ -1,11 +1,11 @@
 ---
 name: company-context
-description: "Use Centaur's indexed company context together with direct Slack, Linear, Google Drive, or Calendar searches when answering internal company-history, prior-decision, project-context, meeting-context, roadmap/status, or cross-source memory questions. Use for questions like what was discussed, decided, planned, mentioned, or documented internally, especially when the user did not name one exact source."
+description: "Use Centaur's indexed company context together with direct Slack, Linear, Google Docs, Drive, or Calendar searches when answering internal company-history, prior-decision, project-context, meeting-context, roadmap/status, or cross-source memory questions. Indexed context includes Slack channels, user-visible Slack DMs, Google Docs, Google Calendar, and Linear. Use for questions like what was discussed, decided, planned, mentioned, or documented internally, especially when the user did not name one exact source."
 ---
 
 # Company Context
 
-Use `company_context` as the first retrieval step for internal historical context. Its `search` command queries indexed company memory across enabled sources such as Slack, Google Drive/Docs, Google Calendar, and Linear. Always pair indexed results with the relevant direct source tools, then reconcile and collate both evidence sets before answering.
+Use `company_context` as the first retrieval step for internal historical context. Its `search` command queries indexed company memory across enabled sources such as Slack channels, Google Docs (`--source docs`), Google Calendar, and Linear. It also has dedicated commands for user-visible Slack DMs and DM conversations. Always pair indexed results with the relevant direct source tools, then reconcile and collate both evidence sets before answering.
 
 ## Default Workflow
 
@@ -13,6 +13,13 @@ Use `company_context` as the first retrieval step for internal historical contex
 
 ```bash
 company_context search "QUERY" --limit 10 --json
+```
+
+For DM-specific questions, use the dedicated DM search surface:
+
+```bash
+company_context search-dms "QUERY" --limit 10 --json
+company_context search-dm-conversations "PERSON OR QUERY" --limit 10 --json
 ```
 
 2. Read promising documents before answering:
@@ -37,6 +44,7 @@ Use the source-specific tools that match the question. For broad cross-source qu
 ```bash
 company_context latest-date --json
 company_context latest-date --source slack --json
+company_context latest-date --source docs --source-type google_doc --json
 company_context latest-date --source linear --json
 ```
 
@@ -44,9 +52,10 @@ company_context latest-date --source linear --json
 
 ```bash
 company_context search "QUERY" --source slack --limit 10 --json
-company_context search "QUERY" --source google_drive --limit 10 --json
+company_context search "QUERY" --source docs --source-type google_doc --limit 10 --json
 company_context search "QUERY" --source google_calendar --limit 10 --json
 company_context search "QUERY" --source linear --limit 10 --json
+company_context search-dms "QUERY" --limit 10 --json
 ```
 
 6. Collate indexed and live results before answering:

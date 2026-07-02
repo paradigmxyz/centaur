@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -24,6 +25,9 @@ CHANNEL_DAY_SCORE_MULTIPLIER = 0.75
 DEFAULT_PREVIEW_CHARS = 280
 MAX_RELATED_CHILDREN = 25
 SLACK_DM_SOURCE = "slack_dm"
+DOCS_SOURCE = "docs"
+LEGACY_GOOGLE_DRIVE_SOURCE = "google_drive"
+GOOGLE_DOCS_SOURCE_TYPE = "google_doc"
 COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
@@ -243,6 +247,37 @@ def _document_summary(row: Any) -> dict[str, Any]:
     }
 
 
+def _google_doc_summary(row: Any) -> dict[str, Any]:
+    """Return the common result shape for OAuth Google Docs context chunks."""
+    metadata = _as_dict(_row_value(row, "metadata", {}))
+    metadata.update(
+        {
+            "file_id": str(_row_value(row, "file_id", "")),
+            "chunk_id": str(_row_value(row, "chunk_id", "")),
+            "drive_id": str(_row_value(row, "drive_id", "")),
+            "mime_type": str(_row_value(row, "mime_type", "")),
+            "provider_author_id": str(_row_value(row, "provider_author_id", "")),
+        }
+    )
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": DOCS_SOURCE,
+        "source_type": GOOGLE_DOCS_SOURCE_TYPE,
+        "source_document_id": str(_row_value(row, "file_id", "")),
+        "source_chunk_id": str(_row_value(row, "chunk_id", "")),
+        "parent_document_id": None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "url", "")),
+        "author_name": str(_row_value(row, "provider_author_name", "")),
+        "access_scope": "",
+        "occurred_at": _isoformat(
+            _row_value(row, "source_created_at") or _row_value(row, "source_modified_at")
+        ),
+        "source_updated_at": _isoformat(_row_value(row, "source_modified_at")),
+        "metadata": metadata,
+    }
+
+
 def _dm_document_summary(row: Any) -> dict[str, Any]:
     """Return the common metadata we expose for Slack DM context records."""
     metadata = _as_dict(_row_value(row, "metadata", {}))
@@ -296,6 +331,23 @@ def _dm_conversation_summary(row: Any) -> dict[str, Any]:
     }
 
 
+def _include_google_docs_source(source: str | None, source_type: str | None) -> bool:
+    return (source is None or source == DOCS_SOURCE) and source_type in (
+        None,
+        GOOGLE_DOCS_SOURCE_TYPE,
+    )
+
+
+def _company_context_filters_for_source(
+    source: str | None,
+    source_type: str | None,
+) -> tuple[str | None, str | None]:
+    """Map the public docs source to the legacy projected Google Drive rows."""
+    if source == DOCS_SOURCE:
+        return LEGACY_GOOGLE_DRIVE_SOURCE, source_type or GOOGLE_DOCS_SOURCE_TYPE
+    return source, source_type
+
+
 class CompanyContextClient:
     """Query the shared company context document table."""
 
@@ -327,6 +379,12 @@ class CompanyContextClient:
         try:
             terms = _search_terms(query)
             search_terms = [query, *terms]
+            results = []
+            google_docs_error = None
+            company_source, company_source_type = _company_context_filters_for_source(
+                source,
+                source_type,
+            )
             source_param = len(search_terms) + 1
             source_type_param = len(search_terms) + 2
             occurred_after_param = len(search_terms) + 3
@@ -369,13 +427,12 @@ class CompanyContextClient:
                 LIMIT ${limit_param}
                 """,
                 *search_terms,
-                source,
-                source_type,
+                company_source,
+                company_source_type,
                 occurred_after,
                 occurred_before,
                 limit,
             )
-            results = []
             for row in rows:
                 result = _document_summary(row)
                 result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
@@ -387,7 +444,39 @@ class CompanyContextClient:
                 result["result_type"] = str(result["source_type"] or "indexed_document")
                 results.append(result)
 
-            return {
+            if _include_google_docs_source(source, source_type):
+                try:
+                    google_rows = await self._search_google_docs_async(
+                        conn,
+                        search_terms=search_terms,
+                        term_count=len(terms),
+                        limit=limit,
+                        modified_after=occurred_after,
+                        modified_before=occurred_before,
+                    )
+                    for row in google_rows:
+                        result = _google_doc_summary(row)
+                        result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query=query,
+                        )
+                        result["lane"] = "indexed"
+                        result["result_type"] = GOOGLE_DOCS_SOURCE_TYPE
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    google_docs_error = str(exc)
+
+            results.sort(
+                key=lambda item: (
+                    float(item.get("score") or 0.0),
+                    str(item.get("source_updated_at") or ""),
+                ),
+                reverse=True,
+            )
+            results = results[:limit]
+
+            response = {
                 "status": "ok",
                 "query": query,
                 "source": source,
@@ -398,8 +487,58 @@ class CompanyContextClient:
                 "indexed_count": len(results),
                 "results": results,
             }
+            if google_docs_error:
+                response["google_docs_error"] = google_docs_error
+            return response
         finally:
             await conn.close()
+
+    async def _search_google_docs_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        search_terms: list[str],
+        term_count: int,
+        limit: int,
+        modified_after: datetime | None,
+        modified_before: datetime | None,
+    ) -> list[Any]:
+        modified_after_param = len(search_terms) + 1
+        modified_before_param = len(search_terms) + 2
+        limit_param = len(search_terms) + 3
+        return await conn.fetch(
+            f"""
+            SELECT
+                document_id,
+                file_id,
+                chunk_id,
+                title,
+                body,
+                url,
+                provider_author_id,
+                provider_author_name,
+                mime_type,
+                drive_id,
+                source_created_at,
+                source_modified_at,
+                metadata,
+                paradedb.score(document_id) AS score
+            FROM google_docs_context_documents
+            WHERE {_search_where_clause(term_count)}
+              AND (${modified_after_param}::timestamptz IS NULL
+                   OR source_modified_at >= ${modified_after_param})
+              AND (${modified_before_param}::timestamptz IS NULL
+                   OR source_modified_at < ${modified_before_param})
+            ORDER BY paradedb.score(document_id) DESC,
+                     source_modified_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT ${limit_param}
+            """,
+            *search_terms,
+            modified_after,
+            modified_before,
+            limit,
+        )
 
     async def _latest_date_for_connection(
         self,
@@ -409,6 +548,10 @@ class CompanyContextClient:
         source_type: str | None,
     ) -> dict[str, Any]:
         """Return latest indexed date using an existing DB connection."""
+        company_source, company_source_type = _company_context_filters_for_source(
+            source,
+            source_type,
+        )
         row = await conn.fetchrow(
             """
             SELECT
@@ -420,8 +563,8 @@ class CompanyContextClient:
             WHERE ($1::text IS NULL OR source = $1)
               AND ($2::text IS NULL OR source_type = $2)
             """,
-            source,
-            source_type,
+            company_source,
+            company_source_type,
         )
         if not row or int(row["document_count"] or 0) == 0:
             return {
@@ -441,6 +584,83 @@ class CompanyContextClient:
             "latest_date": _isoformat(row["latest_date"]),
             "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
             "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
+        }
+
+    async def _latest_google_docs_for_connection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not _include_google_docs_source(source, source_type):
+            return {
+                "status": "ok",
+                "source": source,
+                "source_type": source_type,
+                "document_count": 0,
+                "latest_date": None,
+                "latest_source_updated_at": None,
+                "latest_occurred_at": None,
+            }
+        row = await conn.fetchrow(
+            """
+            SELECT
+                MAX(COALESCE(source_modified_at, source_created_at)) AS latest_date,
+                MAX(source_modified_at) AS latest_source_updated_at,
+                MAX(source_created_at) AS latest_occurred_at,
+                COUNT(*)::bigint AS document_count
+            FROM google_docs_context_documents
+            """
+        )
+        if not row or int(row["document_count"] or 0) == 0:
+            return {
+                "status": "ok",
+                "source": source,
+                "source_type": source_type,
+                "document_count": 0,
+                "latest_date": None,
+                "latest_source_updated_at": None,
+                "latest_occurred_at": None,
+            }
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": int(row["document_count"] or 0),
+            "latest_date": _isoformat(row["latest_date"]),
+            "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
+            "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
+        }
+
+    def _merge_latest_dates(
+        self,
+        *,
+        source: str | None,
+        source_type: str | None,
+        indexed: dict[str, Any],
+        google_docs: dict[str, Any],
+    ) -> dict[str, Any]:
+        def latest(values: list[str | None]) -> str | None:
+            present = [value for value in values if value]
+            return max(present) if present else None
+
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": int(indexed.get("document_count") or 0)
+            + int(google_docs.get("document_count") or 0),
+            "latest_date": latest([indexed.get("latest_date"), google_docs.get("latest_date")]),
+            "latest_source_updated_at": latest(
+                [
+                    indexed.get("latest_source_updated_at"),
+                    google_docs.get("latest_source_updated_at"),
+                ]
+            ),
+            "latest_occurred_at": latest(
+                [indexed.get("latest_occurred_at"), google_docs.get("latest_occurred_at")]
+            ),
         }
 
     def search(
@@ -693,6 +913,12 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
+            results = []
+            google_docs_error = None
+            company_source, company_source_type = _company_context_filters_for_source(
+                source,
+                source_type,
+            )
             rows = await conn.fetch(
                 """
                 SELECT
@@ -719,18 +945,42 @@ class CompanyContextClient:
                          document_id ASC
                 LIMIT $5
                 """,
-                source,
-                source_type,
+                company_source,
+                company_source_type,
                 occurred_after,
                 occurred_before,
                 limit,
             )
-            results = []
             for row in rows:
                 result = _document_summary(row)
                 result["preview"] = _body_preview(str(_row_value(row, "body", "") or ""), query="")
                 results.append(result)
-            return {
+            if _include_google_docs_source(source, source_type):
+                try:
+                    google_rows = await self._list_google_docs_async(
+                        conn,
+                        limit=limit,
+                        modified_after=occurred_after,
+                        modified_before=occurred_before,
+                    )
+                    for row in google_rows:
+                        result = _google_doc_summary(row)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query="",
+                        )
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    google_docs_error = str(exc)
+            results.sort(
+                key=lambda item: (
+                    str(item.get("occurred_at") or ""),
+                    str(item.get("source_updated_at") or ""),
+                    str(item.get("document_id") or ""),
+                )
+            )
+            results = results[:limit]
+            response = {
                 "status": "ok",
                 "source": source,
                 "source_type": source_type,
@@ -739,8 +989,47 @@ class CompanyContextClient:
                 "count": len(results),
                 "results": results,
             }
+            if google_docs_error:
+                response["google_docs_error"] = google_docs_error
+            return response
         finally:
             await conn.close()
+
+    async def _list_google_docs_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        limit: int,
+        modified_after: datetime | None,
+        modified_before: datetime | None,
+    ) -> list[Any]:
+        return await conn.fetch(
+            """
+            SELECT
+                document_id,
+                file_id,
+                chunk_id,
+                title,
+                body,
+                url,
+                provider_author_id,
+                provider_author_name,
+                mime_type,
+                drive_id,
+                source_created_at,
+                source_modified_at,
+                metadata
+            FROM google_docs_context_documents
+            WHERE ($1::timestamptz IS NULL OR source_modified_at >= $1)
+              AND ($2::timestamptz IS NULL OR source_modified_at < $2)
+            ORDER BY source_modified_at DESC NULLS LAST, source_created_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT $3
+            """,
+            modified_after,
+            modified_before,
+            limit,
+        )
 
     def list_documents(
         self,
@@ -781,10 +1070,31 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
-            return await self._latest_date_for_connection(
+            indexed = await self._latest_date_for_connection(
                 conn,
                 source=source,
                 source_type=source_type,
+            )
+            google_docs = {
+                "status": "ok",
+                "source": source,
+                "source_type": source_type,
+                "document_count": 0,
+                "latest_date": None,
+                "latest_source_updated_at": None,
+                "latest_occurred_at": None,
+            }
+            with suppress(asyncpg.UndefinedTableError):
+                google_docs = await self._latest_google_docs_for_connection(
+                    conn,
+                    source=source,
+                    source_type=source_type,
+                )
+            return self._merge_latest_dates(
+                source=source,
+                source_type=source_type,
+                indexed=indexed,
+                google_docs=google_docs,
             )
         finally:
             await conn.close()
@@ -898,6 +1208,12 @@ class CompanyContextClient:
                 document_id,
             )
             if not row:
+                try:
+                    google_doc = await self._read_google_doc_async(conn, document_id, max_chars)
+                except asyncpg.UndefinedTableError:
+                    google_doc = None
+                if google_doc is not None:
+                    return google_doc
                 return {
                     "status": "error",
                     "error": f"document not found: {document_id}",
@@ -923,6 +1239,48 @@ class CompanyContextClient:
             return result
         finally:
             await conn.close()
+
+    async def _read_google_doc_async(
+        self,
+        conn: asyncpg.Connection,
+        document_id: str,
+        max_chars: int | None,
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                document_id,
+                file_id,
+                chunk_id,
+                title,
+                body,
+                url,
+                provider_author_id,
+                provider_author_name,
+                mime_type,
+                drive_id,
+                source_created_at,
+                source_modified_at,
+                metadata
+            FROM google_docs_context_documents
+            WHERE document_id = $1
+            """,
+            document_id,
+        )
+        if not row:
+            return None
+
+        body = str(row["body"] or "")
+        content = body if max_chars is None else body[:max_chars]
+        truncated = max_chars is not None and len(body) > max_chars
+        return {
+            "status": "ok",
+            **_google_doc_summary(row),
+            "chars": len(content),
+            "total_chars": len(body),
+            "truncated": truncated,
+            "content": content,
+        }
 
     def read_document(
         self,
