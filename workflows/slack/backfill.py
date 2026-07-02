@@ -444,6 +444,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                         run_id=run_id,
                         priority=200,
                         refresh_completed=False,
+                        refresh_pending=False,
                     )
                     record_etl_items_enqueued(
                         "slack", "channel", "thread_refresh_job", 1

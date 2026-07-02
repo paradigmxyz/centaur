@@ -192,6 +192,23 @@ def _watermark_lag_seconds(ts: str | None) -> float | None:
     return max((dt.datetime.now(dt.timezone.utc) - occurred_at).total_seconds(), 0.0)
 
 
+def _max_slack_ts(*values: Any) -> str | None:
+    """Return the numerically greatest Slack ts string, ignoring empty/invalid."""
+    best: str | None = None
+    best_value = float("-inf")
+    for value in values:
+        if not value:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric > best_value:
+            best_value = numeric
+            best = str(value)
+    return best
+
+
 async def _upsert_channels(pool, channels: list[dict[str, Any]]) -> None:
     """Refresh public Slack sync channel rows and mark absent channels out of scope."""
     async with pool.acquire() as conn:
@@ -504,6 +521,26 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             )
             record_slack_retention_api_request("fetch_history", "success")
             messages = page.get("messages") or []
+            head_page: dict[str, Any] | None = None
+            if page.get("has_more") and inp.latest is None:
+                # An overflowing window anchors at `oldest`, so this page holds
+                # the oldest slice and the live head stays unfetched — on a busy
+                # channel the watermark would otherwise freeze below the backlog
+                # forever. Probe the head with a default (newest-first) fetch;
+                # the middle is drained by the continuation job.
+                head_page = client._sync_etl_channel_history(
+                    channel_id,
+                    state={
+                        "cursor": None,
+                        "watermark": None,
+                        "oldest": None,
+                        "latest": None,
+                    },
+                    limit=limit,
+                    lookback_days=0,
+                )
+                record_slack_retention_api_request("fetch_history", "success")
+                messages = messages + (head_page.get("messages") or [])
             message_rows = [message_row(msg, run_id) for msg in messages]
             counts["messages_fetched"] += len(message_rows)
             record_slack_retention_messages_processed(
@@ -555,6 +592,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     payload={"thread_ts": thread_ts},
                     run_id=run_id,
                     priority=200,
+                    refresh_pending=False,
                 )
                 record_etl_items_enqueued("slack", "channel", "thread_refresh_job", 1)
                 ctx.log(
@@ -613,6 +651,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     },
                     run_id=run_id,
                     priority=100,
+                    # Never clobber a pending/running continuation: the backfill
+                    # worker owns its cursor progress under this job_key.
+                    refresh_pending=False,
                 )
                 continuation_job_key = _continuation_backfill_job_key(
                     channel_id,
@@ -632,13 +673,21 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     latest_ts=next_state.get("latest"),
                     has_cursor=True,
                 )
+            # Monotonic watermark: an oldest-anchored window page can carry a
+            # max ts *below* the stored watermark; never let it regress. The
+            # head probe (when it ran) contributes the true live head.
+            watermark_ts = _max_slack_ts(
+                next_state.get("watermark"),
+                ((head_page or {}).get("sync_state") or {}).get("watermark"),
+                checkpoint_watermark,
+            )
             await _update_checkpoint_success(
                 ctx._pool,
                 channel_id=channel_id,
-                watermark_ts=next_state.get("watermark"),
+                watermark_ts=watermark_ts,
                 run_id=run_id,
             )
-            lag_s = _watermark_lag_seconds(next_state.get("watermark"))
+            lag_s = _watermark_lag_seconds(watermark_ts)
             if lag_s is not None:
                 set_slack_retention_watermark_lag_seconds(mode, lag_s)
             synced.append(channel_ref(channel))

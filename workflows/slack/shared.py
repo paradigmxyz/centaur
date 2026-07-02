@@ -29,6 +29,9 @@ BACKFILL_JOB_CHANNEL_CONTINUATION = "channel_continuation"
 BACKFILL_JOB_CHANNEL_BOOTSTRAP = "channel_bootstrap"
 BACKFILL_JOB_THREAD_REFRESH = "thread_refresh"
 BACKFILL_JOB_PAYLOAD_VERSION = 1
+# Reclaim jobs orphaned in `running` by a dead worker after this long. Must
+# exceed the longest plausible backfill workflow run.
+BACKFILL_JOB_STALE_RUNNING_HOURS = 2
 BACKFILL_JOB_TYPES = (
     BACKFILL_JOB_CHANNEL_BOOTSTRAP,
     BACKFILL_JOB_CHANNEL_CONTINUATION,
@@ -178,6 +181,33 @@ def _attachment_raw_payload(attachment: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value for key, value in attachment.items() if key not in {"content_bytes"}
     }
+
+
+def _attachment_fallback_text(attachments: Any) -> str:
+    """Plain-text stand-in for app messages whose content lives in legacy attachments.
+
+    Bot integrations (GitHub, alerting apps) often post with an empty top-level
+    `text` and put everything in `attachments`; Slack defines `fallback` as the
+    plain-text summary for exactly this case.
+    """
+    if not isinstance(attachments, list):
+        return ""
+    parts: list[str] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        fallback = str(attachment.get("fallback") or "").strip()
+        if fallback:
+            parts.append(fallback)
+            continue
+        pieces = [
+            str(attachment.get(key) or "").strip()
+            for key in ("pretext", "title", "text")
+        ]
+        joined = "\n".join(piece for piece in pieces if piece)
+        if joined:
+            parts.append(joined)
+    return "\n".join(parts)
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -1016,10 +1046,13 @@ class SlackEtlClient:
             username = msg.get("bot_profile", {}).get("name", "") or user_id
 
         ts = msg.get("ts", "")
+        text = self._resolve_mentions(msg.get("text", ""), user_cache)
+        if not text.strip():
+            text = _attachment_fallback_text(msg.get("attachments"))
         message = {
             "user": username,
             "user_id": user_id,
-            "text": self._resolve_mentions(msg.get("text", ""), user_cache),
+            "text": text,
             "timestamp": ts,
             "permalink": self._message_permalink(channel_id, ts),
             "channel_id": channel_id,
@@ -1031,6 +1064,8 @@ class SlackEtlClient:
             "subtype": msg.get("subtype"),
             "parent_user_id": msg.get("parent_user_id"),
             "bot_id": msg.get("bot_id"),
+            "attachments": msg.get("attachments") or [],
+            "blocks": msg.get("blocks") or [],
             "files": [
                 normalized
                 for file_obj in msg.get("files", []) or []
@@ -1442,15 +1477,30 @@ async def enqueue_backfill_job(
     run_id: str,
     priority: int = 100,
     refresh_completed: bool = True,
+    refresh_pending: bool = True,
 ) -> None:
-    """Store or refresh a queued backfill job outside the incremental checkpoint."""
+    """Store or refresh a queued backfill job outside the incremental checkpoint.
+
+    `refresh_pending=False` protects in-flight work: the conflict update then
+    only reopens finished (or just failed) jobs and never rewrites the payload,
+    status, or attempt count of a `pending`/`running` row. Periodic enqueuers
+    (the incremental sync) must use it so they cannot clobber the cursor a
+    backfill worker is actively advancing under the same job_key.
+    """
     if not payload:
         return
-    completion_guard = (
-        ""
-        if refresh_completed
-        else " WHERE slack_sync_backfill_jobs.status <> 'completed'"
-    )
+    if refresh_pending:
+        completion_guard = (
+            ""
+            if refresh_completed
+            else " WHERE slack_sync_backfill_jobs.status <> 'completed'"
+        )
+    else:
+        completion_guard = (
+            " WHERE slack_sync_backfill_jobs.status IN ('completed', 'failed')"
+            if refresh_completed
+            else " WHERE slack_sync_backfill_jobs.status = 'failed'"
+        )
     await pool.execute(
         "INSERT INTO slack_sync_backfill_jobs ("
         "job_key, job_type, payload_version, channel_id, status, payload_json, "
@@ -1584,7 +1634,12 @@ async def widen_channel_bootstrap_job(
 
 
 async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
-    """Claim a bounded batch of pending backfill jobs for one workflow run."""
+    """Claim a bounded batch of pending backfill jobs for one workflow run.
+
+    Jobs stuck in `running` past the stale interval are reclaimed too: a worker
+    that died mid-job leaves its row `running` forever, and nothing else may
+    touch in-flight rows (see `enqueue_backfill_job(refresh_pending=False)`).
+    """
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
@@ -1592,6 +1647,8 @@ async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
                 "    SELECT job_id "
                 "    FROM slack_sync_backfill_jobs "
                 "    WHERE status IN ('pending', 'failed') "
+                "       OR (status = 'running' "
+                f"           AND last_started_at < NOW() - INTERVAL '{BACKFILL_JOB_STALE_RUNNING_HOURS} hours') "
                 "    ORDER BY priority, updated_at, job_id "
                 "    LIMIT $1 "
                 "    FOR UPDATE SKIP LOCKED"
