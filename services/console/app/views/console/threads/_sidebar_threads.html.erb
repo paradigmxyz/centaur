@@ -10,13 +10,23 @@
       <% active_thread = selected_sidebar_thread_key == thread.thread_key %>
       <% latest_message = @console_sidebar_latest_messages[thread.thread_key] %>
       <% title = console_sidebar_thread_title(thread, latest_message) %>
-      <%= link_to console_threads_path(thread: thread.thread_key),
-                  class: "console-thread-link #{active_thread ? "console-thread-link-active" : ""} #{index >= 5 && !active_thread ? "console-thread-link-hidden" : ""}",
-                  data: { console_thread_link: true, turbo_frame: "_top" },
-                  title: title do %>
-        <span class="console-thread-title"><%= title %></span>
-        <span class="console-thread-time"><%= local_time(thread.updated_at || thread.created_at, relative: true, format: :compact) %></span>
-      <% end %>
+      <div class="console-thread-row <%= index >= 5 && !active_thread ? "console-thread-link-hidden" : "" %>">
+        <%= link_to console_threads_path(thread: thread.thread_key),
+                    class: "console-thread-link #{active_thread ? "console-thread-link-active" : ""}",
+                    data: { console_thread_link: true, turbo_frame: "_top" },
+                    title: title do %>
+          <span class="console-thread-title"><%= title %></span>
+          <span class="console-thread-time"><%= local_time(thread.updated_at || thread.created_at, relative: true, format: :compact) %></span>
+        <% end %>
+        <button type="button"
+                class="console-thread-split"
+                data-console-thread-split
+                data-thread-key="<%= thread.thread_key %>"
+                title="Open in split view"
+                aria-label="Open in split view">
+          <%= console_icon("panel-right", classes: "size-3.5") %>
+        </button>
+      </div>
     <% end %>
     <% if @console_sidebar_threads.size > 5 %>
       <button type="button"

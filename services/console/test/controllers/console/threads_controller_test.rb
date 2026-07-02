@@ -527,6 +527,141 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal indices, indices.sort
   end
 
+  OutputLineEvent = Struct.new(:payload, :created_at, keyword_init: true)
+
+  test "thinking transcript item is extracted from a completed reasoning output line" do
+    controller = Console::ThreadsController.new
+    line = {
+      method: "item/completed",
+      params: {
+        item: {
+          type: "reasoning",
+          content: [ "First I will check the schema.", "Then write the query." ]
+        }
+      }
+    }.to_json
+    event = OutputLineEvent.new(payload: line, created_at: Time.zone.parse("2026-06-26 17:15:58 UTC"))
+
+    item = controller.send(:thinking_transcript_item, event)
+
+    assert_equal "thinking", item[:role]
+    assert_equal "Thinking", item[:label]
+    assert_equal :thinking, item[:source]
+    assert_equal :start, item[:align]
+    assert_equal "First I will check the schema.\nThen write the query.", item[:text]
+    assert_equal event.created_at, item[:created_at]
+  end
+
+  test "thinking extraction accepts dot-form types and summary-only reasoning" do
+    controller = Console::ThreadsController.new
+    line = {
+      type: "item.completed",
+      item: { type: "reasoning", summary: [ { text: "Condensed thought." } ] }
+    }.to_json
+    event = OutputLineEvent.new(payload: line, created_at: Time.zone.now)
+
+    item = controller.send(:thinking_transcript_item, event)
+
+    assert_equal "Condensed thought.", item[:text]
+  end
+
+  test "thinking extraction ignores non-reasoning and non-completed output lines" do
+    controller = Console::ThreadsController.new
+    now = Time.zone.now
+
+    delta = { method: "item/reasoning/textDelta", params: { delta: "partial" } }.to_json
+    tool = { method: "item/completed", params: { item: { type: "mcpToolCall" } } }.to_json
+    non_json = "plain stdout noise mentioning reasoning"
+    non_string = { "result" => "reasoning" }
+
+    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: delta, created_at: now))
+    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: tool, created_at: now))
+    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: non_json, created_at: now))
+    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: non_string, created_at: now))
+  end
+
+  test "requested pane thread keys are deduped, stripped, and capped" do
+    controller = Console::ThreadsController.new
+    controller.params = ActionController::Parameters.new(
+      panes: " a , b,a,, c ,d,e "
+    )
+
+    assert_equal %w[a b c], controller.send(:requested_pane_thread_keys)
+  end
+
+  test "thinking trace renders as a collapsed disclosure in the transcript" do
+    skip_unless_session_table
+
+    thread_key = "console:thinking-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 0)
+    insert_reasoning_event(thread_key, text: "I should compare the two schemas before answering.")
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "details.console-thinking summary", text: /Thinking/
+    assert_select "details.console-thinking", text: /compare the two schemas/
+  end
+
+  test "split view renders owned panes as panels and drops unowned keys" do
+    skip_unless_session_table
+
+    primary_key = "console:panel-a-#{SecureRandom.hex(6)}"
+    pane_key = "console:panel-b-#{SecureRandom.hex(6)}"
+    unowned_key = "slack:C0PANEL:#{SecureRandom.hex(6)}"
+    insert_console_session(primary_key)
+    insert_console_session(pane_key)
+    insert_slack_session(unowned_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    get console_threads_url(thread: primary_key, panes: [ pane_key, unowned_key ].join(","))
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: 2
+    assert_select "[data-thread-panel=?]", primary_key
+    assert_select "[data-thread-panel=?]", pane_key
+    assert_select "[data-thread-panel=?]", unowned_key, count: 0
+    # Each panel exposes a close control back to the remaining threads.
+    assert_select "[data-thread-panel] a[aria-label='Close panel']", count: 2
+  end
+
+  test "split view caps the grid at four panels" do
+    skip_unless_session_table
+
+    keys = Array.new(5) { |i| "console:panel-cap-#{i}-#{SecureRandom.hex(4)}" }
+    keys.each { |key| insert_console_session(key) }
+
+    get console_threads_url(thread: keys.first, panes: keys.drop(1).join(","))
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: Console::ThreadsController::PANEL_LIMIT
+  end
+
+  test "single thread view does not render the split grid" do
+    skip_unless_session_table
+
+    thread_key = "console:solo-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: 0
+    assert_select "#thread-transcript-scroll[data-thread-transcript-scroll]"
+  end
+
+  test "sidebar thread rows expose a split view button" do
+    skip_unless_session_table
+
+    thread_key = "console:sidebar-split-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+
+    get console_sidebar_threads_url
+
+    assert_response :ok
+    assert_select "button[data-console-thread-split][data-thread-key=?]", thread_key
+  end
+
   private
 
   def with_recent_first_error
@@ -593,6 +728,25 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         #{connection.quote(parts)}::jsonb,
         '{}'::jsonb,
         now() + (#{index} * interval '1 second')
+      )
+    SQL
+  end
+
+  # Mirrors how api-rs persists harness stdout: the payload column is a
+  # JSON-encoded *string* holding one protocol notification line.
+  def insert_reasoning_event(thread_key, text:)
+    connection = CentaurSession.connection
+    line = {
+      method: "item/completed",
+      params: { item: { type: "reasoning", content: [ text ] } }
+    }.to_json
+    connection.execute(<<~SQL.squish)
+      insert into session_events (thread_key, event_type, payload, created_at)
+      values (
+        #{connection.quote(thread_key)},
+        'session.output.line',
+        #{connection.quote(line.to_json)}::jsonb,
+        now()
       )
     SQL
   end
