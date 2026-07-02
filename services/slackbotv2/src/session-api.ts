@@ -671,6 +671,7 @@ type RequesterIdentity = {
   githubUnavailableReason?: string
   slackDisplayName?: string
   slackMention?: string
+  slackTeamId?: string
   slackUserId?: string
   slackUserName?: string
 }
@@ -818,14 +819,21 @@ function sessionRequesterMetadata(
   identity?: RequesterIdentity
 ): JsonObject {
   const slackUserId = identity?.slackUserId ?? messageRequesterUserId(message)
+  const slackTeamId = identity?.slackTeamId ?? messageSlackTeamId(message)
   const slackUserName = identity?.slackUserName ?? message?.author.userName
   const slackDisplayName = identity?.slackDisplayName ?? message?.author.fullName
   return {
     ...(slackUserId ? { slack_user_id: slackUserId } : {}),
+    ...(slackTeamId ? { slack_team_id: slackTeamId } : {}),
     ...(slackUserName ? { slack_user_name: slackUserName } : {}),
     ...(slackDisplayName ? { slack_display_name: slackDisplayName } : {}),
     ...(identity?.githubHandle ? { github_handle: identity.githubHandle } : {})
   }
+}
+
+function messageSlackTeamId(message: SlackbotV2ApiMessage | undefined): string | undefined {
+  if (!message) return undefined
+  return message.teamId || slackTeamId(message.raw) || rawSlackString(message.raw, 'team_id')
 }
 
 function messageRequesterUserId(message: SlackbotV2ApiMessage | undefined): string | undefined {
@@ -843,6 +851,7 @@ async function resolveRequesterIdentity(
   const identity: RequesterIdentity = {
     slackDisplayName: stringValue(message.author.fullName),
     slackMention: slackUserId ? `<@${slackUserId}>` : undefined,
+    slackTeamId: messageSlackTeamId(message),
     slackUserId,
     slackUserName: stringValue(message.author.userName)
   }
@@ -915,6 +924,7 @@ function mergeRequesterIdentity(
     ...cached,
     slackDisplayName: cached.slackDisplayName ?? fallback.slackDisplayName,
     slackMention: fallback.slackMention ?? cached.slackMention,
+    slackTeamId: fallback.slackTeamId ?? cached.slackTeamId,
     slackUserId: fallback.slackUserId ?? cached.slackUserId,
     slackUserName: cached.slackUserName ?? fallback.slackUserName
   }

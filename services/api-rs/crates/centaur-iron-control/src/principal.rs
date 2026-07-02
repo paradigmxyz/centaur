@@ -70,6 +70,17 @@ pub fn derive_principal(
     actor_user_id: Option<&str>,
     conversation_name: Option<&str>,
 ) -> PrincipalRef {
+    derive_principal_with_slack_team(thread_key, actor_user_id, None, conversation_name)
+}
+
+/// Resolve the principal for a thread, allowing ingress metadata to supply the
+/// Slack team id when legacy DM thread keys omit it.
+pub fn derive_principal_with_slack_team(
+    thread_key: &str,
+    actor_user_id: Option<&str>,
+    slack_team_id: Option<&str>,
+    conversation_name: Option<&str>,
+) -> PrincipalRef {
     let display_name = conversation_name
         .map(str::trim)
         .filter(|name| !name.is_empty());
@@ -144,7 +155,9 @@ pub fn derive_principal(
         };
     }
 
-    let (team_id, conversation_id) = parse_slack_segments(thread_key);
+    let (thread_team_id, conversation_id) = parse_slack_segments(thread_key);
+    let metadata_team_id = slack_team_id.map(str::trim).filter(|team| !team.is_empty());
+    let team_id = thread_team_id.or(metadata_team_id);
     let mut labels = BTreeMap::new();
     if let Some(team) = team_id {
         labels.insert("slack_team_id".to_owned(), team.to_owned());
@@ -324,6 +337,41 @@ mod tests {
         let principal = derive_principal("slack:T123:D9:ts", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
         assert_eq!(principal.name, "Slack User U07ABC (team T123)");
+    }
+
+    #[test]
+    fn metadata_team_id_is_folded_into_legacy_dm_user_key() {
+        let principal = derive_principal_with_slack_team(
+            "slack:D9:ts",
+            Some("U07ABC"),
+            Some("T123"),
+            Some("Ada Lovelace"),
+        );
+        assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
+        assert_eq!(principal.name, "Slack DM @Ada Lovelace");
+        assert_eq!(
+            principal.labels.get("slack_team_id").map(String::as_str),
+            Some("T123")
+        );
+        assert_eq!(
+            principal.labels.get("slack_user_id").map(String::as_str),
+            Some("U07ABC")
+        );
+    }
+
+    #[test]
+    fn thread_key_team_id_wins_over_metadata_team_id() {
+        let principal = derive_principal_with_slack_team(
+            "slack:T_FROM_KEY:D9:ts",
+            Some("U07ABC"),
+            Some("T_FROM_METADATA"),
+            None,
+        );
+        assert_eq!(principal.foreign_id, "slack-user-t-from-key-u07abc");
+        assert_eq!(
+            principal.labels.get("slack_team_id").map(String::as_str),
+            Some("T_FROM_KEY")
+        );
     }
 
     #[test]

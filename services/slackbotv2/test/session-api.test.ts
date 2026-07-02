@@ -719,9 +719,19 @@ describe('session principal display name', () => {
     }
   }
 
-  function createBody(requests: RecordedRequest[]): { metadata?: { slack_conversation_name?: string } } {
+  function createBody(requests: RecordedRequest[]): {
+    metadata?: {
+      slack_conversation_name?: string
+      slack_team_id?: string
+      slack_user_id?: string
+    }
+  } {
     return (requests.find(request => request.url.endsWith('.000100'))?.body ?? {}) as {
-      metadata?: { slack_conversation_name?: string }
+      metadata?: {
+        slack_conversation_name?: string
+        slack_team_id?: string
+        slack_user_id?: string
+      }
     }
   }
 
@@ -871,6 +881,8 @@ describe('session principal display name', () => {
       }
     )
     expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
+    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
+    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
   })
 
   test('falls back to no name when the channel lookup fails', async () => {

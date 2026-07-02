@@ -338,6 +338,16 @@ def _include_google_docs_source(source: str | None, source_type: str | None) -> 
     )
 
 
+def _include_slack_dms_source(source: str | None, source_type: str | None) -> bool:
+    return (source is None or source == SLACK_DM_SOURCE) and source_type in (
+        None,
+        SLACK_DM_SOURCE,
+        "slack_im",
+        "slack_mpim",
+        "slack_dm_conversation",
+    )
+
+
 def _company_context_filters_for_source(
     source: str | None,
     source_type: str | None,
@@ -548,6 +558,8 @@ class CompanyContextClient:
         source_type: str | None,
     ) -> dict[str, Any]:
         """Return latest indexed date using an existing DB connection."""
+        if source == SLACK_DM_SOURCE:
+            return self._empty_latest_date_result(source=source, source_type=source_type)
         company_source, company_source_type = _company_context_filters_for_source(
             source,
             source_type,
@@ -567,15 +579,7 @@ class CompanyContextClient:
             company_source_type,
         )
         if not row or int(row["document_count"] or 0) == 0:
-            return {
-                "status": "ok",
-                "source": source,
-                "source_type": source_type,
-                "document_count": 0,
-                "latest_date": None,
-                "latest_source_updated_at": None,
-                "latest_occurred_at": None,
-            }
+            return self._empty_latest_date_result(source=source, source_type=source_type)
         return {
             "status": "ok",
             "source": source,
@@ -594,15 +598,7 @@ class CompanyContextClient:
         source_type: str | None,
     ) -> dict[str, Any]:
         if not _include_google_docs_source(source, source_type):
-            return {
-                "status": "ok",
-                "source": source,
-                "source_type": source_type,
-                "document_count": 0,
-                "latest_date": None,
-                "latest_source_updated_at": None,
-                "latest_occurred_at": None,
-            }
+            return self._empty_latest_date_result(source=source, source_type=source_type)
         row = await conn.fetchrow(
             """
             SELECT
@@ -614,15 +610,106 @@ class CompanyContextClient:
             """
         )
         if not row or int(row["document_count"] or 0) == 0:
-            return {
-                "status": "ok",
-                "source": source,
-                "source_type": source_type,
-                "document_count": 0,
-                "latest_date": None,
-                "latest_source_updated_at": None,
-                "latest_occurred_at": None,
-            }
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": int(row["document_count"] or 0),
+            "latest_date": _isoformat(row["latest_date"]),
+            "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
+            "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
+        }
+
+    async def _latest_slack_dms_for_connection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not _include_slack_dms_source(source, source_type):
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+
+        message_conversation_type = None
+        include_messages = source_type in (None, SLACK_DM_SOURCE, "slack_im", "slack_mpim")
+        if source_type in ("slack_im", "slack_mpim"):
+            message_conversation_type = source_type.removeprefix("slack_")
+        include_conversations = source_type in (None, SLACK_DM_SOURCE, "slack_dm_conversation")
+
+        messages = self._empty_latest_date_result(source=source, source_type=source_type)
+        conversations = self._empty_latest_date_result(source=source, source_type=source_type)
+
+        if include_messages:
+            with suppress(asyncpg.UndefinedTableError):
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        MAX(COALESCE(source_updated_at, occurred_at)) AS latest_date,
+                        MAX(source_updated_at) AS latest_source_updated_at,
+                        MAX(occurred_at) AS latest_occurred_at,
+                        COUNT(*)::bigint AS document_count
+                    FROM slack_dm_context_documents
+                    WHERE ($1::text IS NULL OR conversation_type = $1)
+                    """,
+                    message_conversation_type,
+                )
+                messages = self._latest_date_result_from_row(
+                    row,
+                    source=source,
+                    source_type=source_type,
+                )
+
+        if include_conversations:
+            with suppress(asyncpg.UndefinedTableError):
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        MAX(COALESCE(source_updated_at, last_seen_at)) AS latest_date,
+                        MAX(source_updated_at) AS latest_source_updated_at,
+                        MAX(last_seen_at) AS latest_occurred_at,
+                        COUNT(*)::bigint AS document_count
+                    FROM slack_dm_conversation_context_documents
+                    """,
+                )
+                conversations = self._latest_date_result_from_row(
+                    row,
+                    source=source,
+                    source_type=source_type,
+                )
+
+        return self._merge_latest_dates(
+            source=source,
+            source_type=source_type,
+            indexed=messages,
+            google_docs=conversations,
+        )
+
+    def _empty_latest_date_result(
+        self,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": 0,
+            "latest_date": None,
+            "latest_source_updated_at": None,
+            "latest_occurred_at": None,
+        }
+
+    def _latest_date_result_from_row(
+        self,
+        row: Any,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not row or int(row["document_count"] or 0) == 0:
+            return self._empty_latest_date_result(source=source, source_type=source_type)
         return {
             "status": "ok",
             "source": source,
@@ -640,26 +727,29 @@ class CompanyContextClient:
         source_type: str | None,
         indexed: dict[str, Any],
         google_docs: dict[str, Any],
+        slack_dms: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         def latest(values: list[str | None]) -> str | None:
             present = [value for value in values if value]
             return max(present) if present else None
 
+        latest_results = [indexed, google_docs]
+        if slack_dms is not None:
+            latest_results.append(slack_dms)
+
         return {
             "status": "ok",
             "source": source,
             "source_type": source_type,
-            "document_count": int(indexed.get("document_count") or 0)
-            + int(google_docs.get("document_count") or 0),
-            "latest_date": latest([indexed.get("latest_date"), google_docs.get("latest_date")]),
+            "document_count": sum(
+                int(result.get("document_count") or 0) for result in latest_results
+            ),
+            "latest_date": latest([result.get("latest_date") for result in latest_results]),
             "latest_source_updated_at": latest(
-                [
-                    indexed.get("latest_source_updated_at"),
-                    google_docs.get("latest_source_updated_at"),
-                ]
+                [result.get("latest_source_updated_at") for result in latest_results]
             ),
             "latest_occurred_at": latest(
-                [indexed.get("latest_occurred_at"), google_docs.get("latest_occurred_at")]
+                [result.get("latest_occurred_at") for result in latest_results]
             ),
         }
 
@@ -953,7 +1043,10 @@ class CompanyContextClient:
             )
             for row in rows:
                 result = _document_summary(row)
-                result["preview"] = _body_preview(str(_row_value(row, "body", "") or ""), query="")
+                result["preview"] = _body_preview(
+                    str(_row_value(row, "body", "") or ""),
+                    query="",
+                )
                 results.append(result)
             if _include_google_docs_source(source, source_type):
                 try:
@@ -1075,26 +1168,25 @@ class CompanyContextClient:
                 source=source,
                 source_type=source_type,
             )
-            google_docs = {
-                "status": "ok",
-                "source": source,
-                "source_type": source_type,
-                "document_count": 0,
-                "latest_date": None,
-                "latest_source_updated_at": None,
-                "latest_occurred_at": None,
-            }
+            google_docs = self._empty_latest_date_result(source=source, source_type=source_type)
             with suppress(asyncpg.UndefinedTableError):
                 google_docs = await self._latest_google_docs_for_connection(
                     conn,
                     source=source,
                     source_type=source_type,
                 )
+            slack_dms = self._empty_latest_date_result(source=source, source_type=source_type)
+            slack_dms = await self._latest_slack_dms_for_connection(
+                conn,
+                source=source,
+                source_type=source_type,
+            )
             return self._merge_latest_dates(
                 source=source,
                 source_type=source_type,
                 indexed=indexed,
                 google_docs=google_docs,
+                slack_dms=slack_dms,
             )
         finally:
             await conn.close()

@@ -776,6 +776,77 @@ def test_latest_date_reports_empty_index(monkeypatch):
     assert fake.closed is True
 
 
+def test_latest_date_counts_slack_dm_projection_tables(monkeypatch):
+    fake = _FakeConnection(
+        fetchrow_rows=[
+            {
+                "latest_date": dt.datetime(2026, 5, 9, 15, 30, tzinfo=dt.UTC),
+                "latest_source_updated_at": dt.datetime(2026, 5, 9, 15, 30, tzinfo=dt.UTC),
+                "latest_occurred_at": dt.datetime(2026, 5, 8, 14, 0, tzinfo=dt.UTC),
+                "document_count": 161,
+            },
+            {
+                "latest_date": dt.datetime(2026, 5, 10, 10, 0, tzinfo=dt.UTC),
+                "latest_source_updated_at": dt.datetime(2026, 5, 7, 8, 0, tzinfo=dt.UTC),
+                "latest_occurred_at": dt.datetime(2026, 5, 10, 10, 0, tzinfo=dt.UTC),
+                "document_count": 115,
+            },
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").latest_date(source="slack_dm")
+
+    assert result == {
+        "status": "ok",
+        "source": "slack_dm",
+        "source_type": None,
+        "document_count": 276,
+        "latest_date": "2026-05-10T10:00:00+00:00",
+        "latest_source_updated_at": "2026-05-09T15:30:00+00:00",
+        "latest_occurred_at": "2026-05-10T10:00:00+00:00",
+    }
+    assert len(fake.fetchrow_calls) == 2
+    assert "FROM slack_dm_context_documents" in fake.fetchrow_calls[0][0]
+    assert "FROM slack_dm_conversation_context_documents" in fake.fetchrow_calls[1][0]
+    assert fake.closed is True
+
+
+def test_latest_date_can_filter_slack_dm_messages_by_conversation_type(monkeypatch):
+    fake = _FakeConnection(
+        fetchrow_rows=[
+            {
+                "latest_date": dt.datetime(2026, 5, 9, 15, 30, tzinfo=dt.UTC),
+                "latest_source_updated_at": dt.datetime(2026, 5, 9, 15, 30, tzinfo=dt.UTC),
+                "latest_occurred_at": dt.datetime(2026, 5, 8, 14, 0, tzinfo=dt.UTC),
+                "document_count": 31,
+            },
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").latest_date(
+        source="slack_dm",
+        source_type="slack_im",
+    )
+
+    assert result["document_count"] == 31
+    assert result["latest_date"] == "2026-05-09T15:30:00+00:00"
+    assert len(fake.fetchrow_calls) == 1
+    query, args = fake.fetchrow_calls[0]
+    assert "FROM slack_dm_context_documents" in query
+    assert args == ("im",)
+    assert fake.closed is True
+
+
 def test_read_document_returns_full_content_by_default(monkeypatch):
     body = "x" * 2_500
     fake = _FakeConnection(

@@ -12,11 +12,12 @@ use serde_json::Value;
 use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
 use crate::models::Principal;
-use crate::principal::derive_principal;
+use crate::principal::derive_principal_with_slack_team;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SessionPrincipalMetadata<'a> {
     actor_user_id: Option<&'a str>,
+    slack_team_id: Option<&'a str>,
     conversation_name: Option<&'a str>,
 }
 
@@ -31,6 +32,7 @@ impl<'a> SessionPrincipalMetadata<'a> {
                 .or_else(|| metadata.get("aad_object_id"))
                 .or_else(|| metadata.get("user_id"))
                 .and_then(Value::as_str),
+            slack_team_id: metadata.get("slack_team_id").and_then(Value::as_str),
             conversation_name: metadata
                 .get("slack_conversation_name")
                 .or_else(|| metadata.get("discord_conversation_name"))
@@ -82,9 +84,10 @@ impl SessionRegistrar {
         metadata: Option<&Value>,
     ) -> Result<Principal> {
         let metadata = SessionPrincipalMetadata::from_session_metadata(metadata);
-        let principal = derive_principal(
+        let principal = derive_principal_with_slack_team(
             thread_key,
             metadata.actor_user_id,
+            metadata.slack_team_id,
             metadata.conversation_name,
         );
         let input = principal.to_identity_input(&self.namespace);
@@ -167,6 +170,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_principal_metadata_carries_slack_team_id() {
+        assert_eq!(
+            SessionPrincipalMetadata::from_session_metadata(Some(&json!({
+                "slack_team_id": "T123"
+            })))
+            .slack_team_id,
+            Some("T123")
+        );
+    }
+
     #[tokio::test]
     async fn register_session_seeds_roles_for_new_principal() {
         let (base_url, requests, server) = spawn_iron_control_stub(false).await;
@@ -177,6 +191,7 @@ mod tests {
         );
         let metadata = json!({
             "slack_user_id": "U123",
+            "slack_team_id": "T123",
             "slack_conversation_name": "general"
         });
 
@@ -206,6 +221,7 @@ mod tests {
         );
         let metadata = json!({
             "slack_user_id": "U123",
+            "slack_team_id": "T123",
             "slack_conversation_name": "general"
         });
 
