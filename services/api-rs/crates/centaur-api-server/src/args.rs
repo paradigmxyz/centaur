@@ -471,12 +471,15 @@ pub(crate) struct ServerArgs {
     /// How often to re-run the orphaned-execution adoption scan after the
     /// startup pass. Executions orphaned while the process is already
     /// running (e.g. a rolling deploy terminating the previous pod mid-turn
-    /// after this pod's startup scan) are only recovered by these re-scans.
+    /// after this pod's startup scan) are only recovered by these re-scans,
+    /// so the interval bounds how long a handed-off turn stays frozen. A
+    /// steady-state tick is a single SELECT (executions with a live
+    /// stdout-owner lease are skipped before any session or sandbox reads).
     /// 0 disables re-scans and keeps the startup-only behavior.
     #[arg(
         long = "session-execution-adoption-interval-secs",
         env = "SESSION_EXECUTION_ADOPTION_INTERVAL_SECS",
-        default_value_t = 60
+        default_value_t = 15
     )]
     execution_adoption_interval_secs: u64,
 }
@@ -2085,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_adoption_rescans_every_minute_by_default() {
+    fn execution_adoption_rescans_every_fifteen_seconds_by_default() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2095,7 +2098,7 @@ mod tests {
 
         assert_eq!(
             args.execution_adoption_interval(),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_secs(15))
         );
     }
 
