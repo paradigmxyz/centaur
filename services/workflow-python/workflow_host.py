@@ -24,12 +24,9 @@ from typing import Any
 from api import metrics
 from api.workflow_engine import WorkflowContext
 
-DATABASE_CONNECT_ATTEMPTS_ENV = "WORKFLOW_HOST_DATABASE_CONNECT_ATTEMPTS"
-DATABASE_CONNECT_BACKOFF_ENV = "WORKFLOW_HOST_DATABASE_CONNECT_BACKOFF_SECONDS"
-DATABASE_CONNECT_BACKOFF_MAX_ENV = "WORKFLOW_HOST_DATABASE_CONNECT_BACKOFF_MAX_SECONDS"
-DEFAULT_DATABASE_CONNECT_ATTEMPTS = 5
-DEFAULT_DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
-DEFAULT_DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
+DATABASE_CONNECT_ATTEMPTS = 5
+DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
+DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
 
 
 class ProtocolError(RuntimeError):
@@ -230,26 +227,6 @@ def coerce_input(raw: Any, input_cls: type | None) -> Any:
         return raw
 
 
-def env_int(name: str, default: int, minimum: int = 1) -> int:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return max(minimum, int(raw))
-    except ValueError:
-        return default
-
-
-def env_float(name: str, default: float, minimum: float = 0.0) -> float:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return max(minimum, float(raw))
-    except ValueError:
-        return default
-
-
 async def create_pool() -> Any:
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
@@ -259,24 +236,22 @@ async def create_pool() -> Any:
     except ImportError:
         return None
 
-    attempts = env_int(DATABASE_CONNECT_ATTEMPTS_ENV, DEFAULT_DATABASE_CONNECT_ATTEMPTS)
-    backoff = env_float(DATABASE_CONNECT_BACKOFF_ENV, DEFAULT_DATABASE_CONNECT_BACKOFF_SECONDS)
-    max_backoff = env_float(
-        DATABASE_CONNECT_BACKOFF_MAX_ENV,
-        DEFAULT_DATABASE_CONNECT_BACKOFF_MAX_SECONDS,
-    )
     last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
+    for attempt in range(1, DATABASE_CONNECT_ATTEMPTS + 1):
         try:
             return await asyncpg.create_pool(database_url)
         except Exception as exc:
             last_error = exc
-            if attempt == attempts:
+            if attempt == DATABASE_CONNECT_ATTEMPTS:
                 break
-            delay = min(max_backoff, backoff * (2 ** (attempt - 1)))
+            delay = min(
+                DATABASE_CONNECT_BACKOFF_MAX_SECONDS,
+                DATABASE_CONNECT_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+            )
             print(
                 "workflow_database_connect_retry "
-                f"attempt={attempt} attempts={attempts} delay_seconds={delay} "
+                f"attempt={attempt} attempts={DATABASE_CONNECT_ATTEMPTS} "
+                f"delay_seconds={delay} "
                 f"error={type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )

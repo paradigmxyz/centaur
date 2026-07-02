@@ -180,16 +180,7 @@ class WorkflowHostTests(unittest.TestCase):
         fake_asyncpg = types.SimpleNamespace(create_pool=create_pool)
 
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "DATABASE_URL": "postgresql://example/db",
-                    "WORKFLOW_HOST_DATABASE_CONNECT_ATTEMPTS": "3",
-                    "WORKFLOW_HOST_DATABASE_CONNECT_BACKOFF_SECONDS": "0.1",
-                    "WORKFLOW_HOST_DATABASE_CONNECT_BACKOFF_MAX_SECONDS": "1.0",
-                },
-                clear=False,
-            ),
+            patch.dict(os.environ, {"DATABASE_URL": "postgresql://example/db"}, clear=False),
             patch.dict(sys.modules, {"asyncpg": fake_asyncpg}),
             patch.object(host.asyncio, "sleep", sleep),
         ):
@@ -197,7 +188,7 @@ class WorkflowHostTests(unittest.TestCase):
 
         self.assertIs(result, pool)
         self.assertEqual(calls, ["postgresql://example/db"] * 3)
-        self.assertEqual(sleeps, [0.1, 0.2])
+        self.assertEqual(sleeps, [0.25, 0.5])
 
     def test_workflow_result_includes_grouping_identifiers(self) -> None:
         host = load_workflow_host()
