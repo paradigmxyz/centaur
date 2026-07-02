@@ -45,6 +45,20 @@ pub struct ReleasedExecution {
     pub thread_key: ThreadKey,
 }
 
+/// An active execution together with its stdout-owner lease state, as
+/// returned by [`PgSessionStore::list_active_executions_with_ownership`].
+/// The lease snapshot is advisory — only the conditional
+/// `claim_expired_stdout_owner` update decides ownership — but it lets an
+/// adoption scan skip executions with a live owner without touching the
+/// session row or the sandbox backend.
+#[derive(Clone, Debug)]
+pub struct ActiveExecutionOwnership {
+    pub execution: SessionExecution,
+    pub stdout_owner_id: Option<String>,
+    /// True when a stdout-owner lease exists and has not expired yet.
+    pub stdout_owner_lease_active: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdleSandboxCandidate {
     pub thread_key: ThreadKey,
@@ -365,6 +379,35 @@ impl PgSessionStore {
         .await?;
 
         rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    pub async fn list_active_executions_with_ownership(
+        &self,
+    ) -> Result<Vec<ActiveExecutionOwnership>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, ActiveExecutionOwnershipRow>(
+            r#"
+            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at,
+                   stdout_owner_id,
+                   coalesce(stdout_owner_lease_expires_at > now(), false) as stdout_owner_lease_active
+            from session_executions
+            where status in ($1, $2)
+            order by created_at, execution_id
+            "#,
+        )
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ActiveExecutionOwnership {
+                    execution: row.execution.try_into()?,
+                    stdout_owner_id: row.stdout_owner_id,
+                    stdout_owner_lease_active: row.stdout_owner_lease_active,
+                })
+            })
+            .collect()
     }
 
     pub async fn latest_execution_for_thread(
@@ -1588,6 +1631,14 @@ struct SessionExecutionRow {
     updated_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     completed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct ActiveExecutionOwnershipRow {
+    #[sqlx(flatten)]
+    execution: SessionExecutionRow,
+    stdout_owner_id: Option<String>,
+    stdout_owner_lease_active: bool,
 }
 
 #[derive(Debug, FromRow)]
