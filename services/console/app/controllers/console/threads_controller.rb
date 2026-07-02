@@ -278,7 +278,7 @@ class Console::ThreadsController < ApplicationController
             .where(oauth_apps: { provider: SLACK_PROVIDER })
             .where(slack_oauth_credential_owner_sql(subjects: subjects, emails: emails))
 
-          credentials.filter_map do |credential|
+          credential_owners = credentials.filter_map do |credential|
             user_id = first_present(
               credential.provider_subject,
               *SLACK_CREDENTIAL_USER_LABEL_KEYS.map { |key| credential.labels&.[](key) }
@@ -292,7 +292,18 @@ class Console::ThreadsController < ApplicationController
                 credential.oauth_app&.labels&.[](SLACK_TEAM_LABEL)
               )
             )
-          end.uniq { |owner| [ normalize_key(owner.user_id), normalize_key(owner.team_id) ] }
+          end
+
+          # A Slack OIDC sign-in stores the workspace user id (U…) as the
+          # identity subject — the same id slackbotv2 writes into session
+          # metadata — so SSO alone owns those threads even when the user has
+          # not minted a broker credential through the connect flow.
+          identity_owners = subjects.map do |subject|
+            SlackThreadOwner.new(user_id: subject, team_id: nil)
+          end
+
+          (credential_owners + identity_owners)
+            .uniq { |owner| [ normalize_key(owner.user_id), normalize_key(owner.team_id) ] }
         end
       else
         []

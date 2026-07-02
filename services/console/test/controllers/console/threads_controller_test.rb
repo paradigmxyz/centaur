@@ -506,6 +506,62 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     refute_includes sql, "split_part(thread_key, ':', 2)"
   end
 
+  test "visible thread scope matches Slack threads via the SSO identity without a broker credential" do
+    UserIdentity.create!(
+      user: @operator,
+      provider: "slack",
+      subject: "USSOONLY",
+      email: @operator.email,
+      email_verified: true
+    )
+    controller = threads_controller_for(@operator)
+
+    sql = controller.send(:visible_thread_scope).to_sql
+
+    # The Slack OIDC subject is the workspace user id, so signing in with
+    # Slack is enough to own the threads slackbotv2 attributed to that id —
+    # no broker credential required.
+    assert_includes sql, "thread_key LIKE 'slack:%'"
+    assert_includes sql, "metadata ->> 'slack_user_id'"
+    assert_includes sql, "ussoonly"
+    refute_includes sql, "split_part(thread_key, ':', 2)"
+  end
+
+  test "visible thread scope dedupes an SSO identity that matches its broker credential" do
+    app = oauth_apps(:acme_slack)
+    app.update!(client_secret: "slack-secret", labels: {})
+    create_slack_oauth_credential(app, subject: "UOWNER", email: @operator.email, labels: {})
+    UserIdentity.create!(
+      user: @operator,
+      provider: "slack",
+      subject: "UOWNER",
+      email: @operator.email,
+      email_verified: true
+    )
+    controller = threads_controller_for(@operator)
+
+    owners = controller.send(:slack_thread_owners_for_current_user)
+
+    assert_equal [ "UOWNER" ], owners.map { |owner| owner.user_id.upcase }
+  end
+
+  test "sidebar thread scope matches Slack threads via the SSO identity without a broker credential" do
+    UserIdentity.create!(
+      user: @operator,
+      provider: "slack",
+      subject: "USSOONLY",
+      email: @operator.email,
+      email_verified: true
+    )
+    controller = threads_controller_for(@operator)
+
+    sql = controller.send(:console_sidebar_visible_thread_scope).to_sql
+
+    assert_includes sql, "thread_key LIKE 'slack:%'"
+    assert_includes sql, "metadata ->> 'slack_user_id'"
+    assert_includes sql, "ussoonly"
+  end
+
   test "selected session resolves a directly linked thread only within the owner scope" do
     controller = Console::ThreadsController.new
     owned_thread = SelectedSession.new(thread_key: "slack:C123:1782339173.755169")
