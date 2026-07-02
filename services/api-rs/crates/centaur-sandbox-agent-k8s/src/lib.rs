@@ -39,7 +39,6 @@ const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
 const API_SERVER_ENABLED_LABEL: &str = "centaur.ai/api-server-enabled";
-const CAPABILITY_LABELS_STAMPED_LABEL: &str = "centaur.ai/capability-labels-stamped";
 const MANAGED_BY_VALUE: &str = "api-rs";
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
@@ -573,10 +572,6 @@ fn build_agent_sandbox(
     labels.extend(spec.labels.clone());
     labels.insert(MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned());
     labels.insert(SANDBOX_ID_LABEL.to_owned(), id.as_str().to_owned());
-    labels.insert(
-        CAPABILITY_LABELS_STAMPED_LABEL.to_owned(),
-        "true".to_owned(),
-    );
     if spec.capabilities.observability_enabled {
         labels.insert(OBSERVABILITY_ENABLED_LABEL.to_owned(), "true".to_owned());
     }
@@ -966,15 +961,6 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
-        assert_eq!(
-            sandbox
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|labels| labels.get(CAPABILITY_LABELS_STAMPED_LABEL))
-                .map(String::as_str),
-            Some("true")
-        );
     }
 
     #[test]
@@ -1019,15 +1005,6 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.labels.as_ref())
                 .is_none_or(|labels| !labels.contains_key(API_SERVER_ENABLED_LABEL))
-        );
-        assert_eq!(
-            sandbox
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|labels| labels.get(CAPABILITY_LABELS_STAMPED_LABEL))
-                .map(String::as_str),
-            Some("true")
         );
     }
 

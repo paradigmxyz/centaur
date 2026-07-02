@@ -20,9 +20,8 @@ use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
 use crate::{
-    API_SERVER_ENABLED_LABEL, AgentSandboxBackend, CAPABILITY_LABELS_STAMPED_LABEL,
-    MANAGED_BY_LABEL, MANAGED_BY_VALUE, OtlpEgressTarget, SANDBOX_ID_LABEL, is_not_found,
-    map_kube_error,
+    API_SERVER_ENABLED_LABEL, AgentSandboxBackend, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
+    OtlpEgressTarget, SANDBOX_ID_LABEL, is_not_found, map_kube_error,
 };
 
 const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
@@ -1915,10 +1914,6 @@ fn iron_proxy_labels(id: &SandboxId, api_server_enabled: bool) -> BTreeMap<Strin
         (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
         (SANDBOX_ID_LABEL.to_owned(), id.as_str().to_owned()),
         (IRON_PROXY_LABEL.to_owned(), "true".to_owned()),
-        (
-            CAPABILITY_LABELS_STAMPED_LABEL.to_owned(),
-            "true".to_owned(),
-        ),
     ]);
     if api_server_enabled {
         labels.insert(API_SERVER_ENABLED_LABEL.to_owned(), "true".to_owned());
@@ -2063,15 +2058,7 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
-        assert!(
-            !iron_proxy_labels(&id, false).contains_key(API_SERVER_ENABLED_LABEL)
-        );
-        assert_eq!(
-            iron_proxy_labels(&id, false)
-                .get(CAPABILITY_LABELS_STAMPED_LABEL)
-                .map(String::as_str),
-            Some("true")
-        );
+        assert!(!iron_proxy_labels(&id, false).contains_key(API_SERVER_ENABLED_LABEL));
     }
 
     #[test]

@@ -189,19 +189,16 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/api-server-enabled: "true"
-        # Transitional compatibility: pre-deploy sandbox/proxy pods carry
-        # centaur.ai/managed-by=api-rs but no capability stamp. New disabled
-        # pods omit centaur.ai/api-server-enabled but carry the stamp, so they
-        # are excluded from this selector from day one. Remove with the matching
-        # egress compatibility policy below after old api-rs-managed pods have
-        # aged out.
+        # Transitional compatibility: pre-deploy sandbox/proxy pods carry only
+        # centaur.ai/managed-by=api-rs, so this also covers newly-created
+        # API-disabled pods while the rollout policy is present. Remove with the
+        # matching egress compatibility policy below after old api-rs-managed
+        # pods have aged out.
         - podSelector:
             matchLabels:
               centaur.ai/managed-by: api-rs
             matchExpressions:
               - key: centaur.ai/api-server-enabled
-                operator: DoesNotExist
-              - key: centaur.ai/capability-labels-stamped
                 operator: DoesNotExist
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
@@ -212,11 +209,11 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 ---
-# Transitional compatibility for pre-deploy sandbox/proxy pods. They have
-# centaur.ai/managed-by=api-rs but no capability stamp. New disabled pods omit
-# centaur.ai/api-server-enabled but carry the stamp, so they are excluded from
-# this selector from day one. Remove this with the matching api-rs ingress
-# compatibility selector once old api-rs-managed pods have aged out.
+# Transitional compatibility for pre-deploy sandbox/proxy pods. They carry only
+# centaur.ai/managed-by=api-rs, so this also covers newly-created API-disabled
+# pods while the rollout policy is present. Remove this with the matching
+# api-rs ingress compatibility selector once old api-rs-managed pods have aged
+# out.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -229,8 +226,6 @@ spec:
       centaur.ai/managed-by: api-rs
     matchExpressions:
       - key: centaur.ai/api-server-enabled
-        operator: DoesNotExist
-      - key: centaur.ai/capability-labels-stamped
         operator: DoesNotExist
   policyTypes:
     - Egress
