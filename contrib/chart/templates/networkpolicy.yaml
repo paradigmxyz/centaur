@@ -184,11 +184,17 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
 {{- end }}
 {{- end }}
-        # Sandboxes call back into the control plane only when their principal
-        # has the API server sandbox capability.
+        # New sandboxes call back into the control plane only when their
+        # principal has the API server sandbox capability.
         - podSelector:
             matchLabels:
               centaur.ai/api-server-enabled: "true"
+        # Transitional compatibility: existing sandboxes created before the API
+        # server capability label was introduced still carry only this label.
+        # Keep this until old sandbox pods have aged out.
+        - podSelector:
+            matchLabels:
+              centaur.ai/managed-by: api-rs
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
