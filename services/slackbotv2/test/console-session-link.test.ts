@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildConsoleSessionContextBlock,
   consoleSessionUrl,
+  defaultModelForHarness,
   harnessDisplayName
 } from '../src/console-session-link'
+import claudeSettings from '../../../harness/claude/settings.json'
+import codexConfig from '../../../harness/codex/config.toml'
 
 describe('harnessDisplayName', () => {
   test('maps known harness wire values to display names', () => {
@@ -27,6 +30,37 @@ describe('harnessDisplayName', () => {
     expect(harnessDisplayName(null)).toBeUndefined()
     expect(harnessDisplayName('')).toBeUndefined()
     expect(harnessDisplayName('   ')).toBeUndefined()
+  })
+})
+
+describe('defaultModelForHarness', () => {
+  const bakedClaudeModel = claudeSettings.model
+  const bakedCodexModel = (codexConfig as { model: string }).model
+
+  test('reads the baked default model from the repo harness config files', () => {
+    expect(bakedClaudeModel).toBeTruthy()
+    expect(bakedCodexModel).toBeTruthy()
+    expect(defaultModelForHarness('claudecode')).toBe(bakedClaudeModel)
+    expect(defaultModelForHarness('codex')).toBe(bakedCodexModel)
+  })
+
+  test('prefers the deployment-configured model over the baked default', () => {
+    const configured = { claudecode: 'claude-fable-5' }
+    expect(defaultModelForHarness('claudecode', configured)).toBe('claude-fable-5')
+    expect(defaultModelForHarness('codex', configured)).toBe(bakedCodexModel)
+    expect(defaultModelForHarness('claudecode', { claudecode: '   ' })).toBe(bakedClaudeModel)
+  })
+
+  test('is case-insensitive and trims', () => {
+    expect(defaultModelForHarness(' CLAUDECODE ')).toBe(bakedClaudeModel)
+  })
+
+  test('returns undefined for harnesses without a fixed default', () => {
+    expect(defaultModelForHarness('amp')).toBeUndefined()
+    expect(defaultModelForHarness('gemini')).toBeUndefined()
+    expect(defaultModelForHarness(undefined)).toBeUndefined()
+    expect(defaultModelForHarness(null)).toBeUndefined()
+    expect(defaultModelForHarness('')).toBeUndefined()
   })
 })
 

@@ -7,6 +7,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
     "types": ["bun", "node"],
     "skipLibCheck": true,
     "esModuleInterop": true,

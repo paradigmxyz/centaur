@@ -122,6 +122,15 @@ spec:
                   key: {{ printf "%sDATABASE_URL" $prefix }}
             - name: CENTAUR_CONSOLE_SLACKBOTV2_USER_NAME
               value: {{ .Values.slackbotv2.userName | quote }}
+{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
+{{- if hasKey $.Values.sandbox.extraEnv $name }}
+            # Mirror the deployer's harness default-model override
+            # (sandbox.extraEnv) so the Threads view names the model threads
+            # without a recorded override actually ran on.
+            - name: {{ $name }}
+              value: {{ index $.Values.sandbox.extraEnv $name | toString | quote }}
+{{- end }}
+{{- end }}
             - name: IRON_CONTROL_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
