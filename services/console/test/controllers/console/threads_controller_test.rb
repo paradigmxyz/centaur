@@ -580,13 +580,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: non_string, created_at: now))
   end
 
-  test "requested pane thread keys are deduped, stripped, and capped" do
+  test "requested thread keys are deduped, stripped, and capped at the panel limit" do
     controller = Console::ThreadsController.new
     controller.params = ActionController::Parameters.new(
-      panes: " a , b,a,, c ,d,e "
+      thread: " a , b,a,, c ,d,e "
     )
 
-    assert_equal %w[a b c], controller.send(:requested_pane_thread_keys)
+    assert_equal %w[a b c d], controller.send(:requested_thread_keys)
   end
 
   test "thinking trace renders as a collapsed disclosure in the transcript" do
@@ -614,7 +614,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     insert_console_session(pane_key)
     insert_slack_session(unowned_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
 
-    get console_threads_url(thread: primary_key, panes: [ pane_key, unowned_key ].join(","))
+    get console_threads_url(thread: [ primary_key, pane_key, unowned_key ].join(","))
 
     assert_response :ok
     assert_select "[data-thread-panel]", count: 2
@@ -631,7 +631,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     keys = Array.new(5) { |i| "console:panel-cap-#{i}-#{SecureRandom.hex(4)}" }
     keys.each { |key| insert_console_session(key) }
 
-    get console_threads_url(thread: keys.first, panes: keys.drop(1).join(","))
+    get console_threads_url(thread: keys.join(","))
 
     assert_response :ok
     assert_select "[data-thread-panel]", count: Console::ThreadsController::PANEL_LIMIT
@@ -650,7 +650,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "#thread-transcript-scroll[data-thread-transcript-scroll]"
   end
 
-  test "sidebar thread rows expose a split view button" do
+  test "sidebar thread links carry the cmd-click split view hook" do
     skip_unless_session_table
 
     thread_key = "console:sidebar-split-#{SecureRandom.hex(8)}"
@@ -659,7 +659,29 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     get console_sidebar_threads_url
 
     assert_response :ok
-    assert_select "button[data-console-thread-split][data-thread-key=?]", thread_key
+    # The layout's Cmd/Ctrl-click handler targets this attribute to add the
+    # thread to the split-view grid.
+    assert_select "a[data-console-thread-link][href=?]",
+                  console_threads_path(thread: thread_key)
+  end
+
+  test "split view close control drops one thread and keeps the rest open" do
+    skip_unless_session_table
+
+    keys = Array.new(3) { |i| "console:panel-close-#{i}-#{SecureRandom.hex(4)}" }
+    keys.each { |key| insert_console_session(key) }
+
+    get console_threads_url(thread: keys.join(","))
+
+    assert_response :ok
+    # Closing the middle panel keeps the primary and the last pane.
+    assert_select "[data-thread-panel=?] a[aria-label='Close panel'][href=?]",
+                  keys[1],
+                  console_threads_path(thread: [ keys[0], keys[2] ].join(","))
+    # Closing the primary panel promotes the next thread to primary.
+    assert_select "[data-thread-panel=?] a[aria-label='Close panel'][href=?]",
+                  keys[0],
+                  console_threads_path(thread: [ keys[1], keys[2] ].join(","))
   end
 
   private

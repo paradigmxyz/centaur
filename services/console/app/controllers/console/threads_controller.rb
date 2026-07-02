@@ -34,8 +34,9 @@ class Console::ThreadsController < ApplicationController
 
   def index
     @query = params[:q].to_s.strip
-    @selected_thread_key = params[:thread].to_s
-    @pane_thread_keys = requested_pane_thread_keys
+    requested_keys = requested_thread_keys
+    @selected_thread_key = requested_keys.first.to_s
+    @pane_thread_keys = requested_keys.drop(1)
     @starting_new_thread = params[:new].present?
     @thread_db_unavailable = false
 
@@ -127,16 +128,18 @@ class Console::ThreadsController < ApplicationController
   end
 
   def auto_select_first_thread?
-    params[:thread].blank? && params[:panes].blank? && !@starting_new_thread &&
-      @query.blank? && @selected_session.present?
+    params[:thread].blank? && !@starting_new_thread && @query.blank? && @selected_session.present?
   end
 
-  def requested_pane_thread_keys
-    params[:panes].to_s.split(",").map(&:strip).reject(&:blank?).uniq.first(PANEL_LIMIT - 1)
+  # The thread param carries up to PANEL_LIMIT comma-separated thread keys; the
+  # first is the primary thread and the rest are extra split-view panes
+  # (Cmd/Ctrl-click on a sidebar thread appends its key).
+  def requested_thread_keys
+    params[:thread].to_s.split(",").map(&:strip).reject(&:blank?).uniq.first(PANEL_LIMIT)
   end
 
   # Extra split-view panes resolve through the same owner scope as the primary
-  # thread, so a crafted ?panes= value cannot surface another user's thread.
+  # thread, so a crafted ?thread= list cannot surface another user's thread.
   # Unowned keys are dropped silently.
   def resolve_pane_sessions(session_scope, base_sessions)
     keys = @pane_thread_keys - [ @selected_session&.thread_key ]

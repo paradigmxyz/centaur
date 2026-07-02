@@ -1,32 +1,23 @@
 <%# Sidebar thread list, rendered inside the lazy console_sidebar_threads Turbo
     Frame. The turbo-frame id must match the one in layouts/console.html.erb so
-    the deferred fetch replaces the loading placeholder. %>
+    the deferred fetch replaces the loading placeholder. Cmd/Ctrl-click on a
+    thread link adds it to the split-view grid (wired in the console layout). %>
 <%= turbo_frame_tag "console_sidebar_threads" do %>
-  <% selected_sidebar_thread_key = params[:thread].to_s %>
+  <% open_thread_keys = params[:thread].to_s.split(",").map(&:strip).reject(&:blank?) %>
   <% if @console_sidebar_threads.blank? %>
     <div class="console-thread-empty">No recent threads</div>
   <% else %>
     <% @console_sidebar_threads.each_with_index do |thread, index| %>
-      <% active_thread = selected_sidebar_thread_key == thread.thread_key %>
+      <% active_thread = open_thread_keys.include?(thread.thread_key) %>
       <% latest_message = @console_sidebar_latest_messages[thread.thread_key] %>
       <% title = console_sidebar_thread_title(thread, latest_message) %>
-      <div class="console-thread-row <%= index >= 5 && !active_thread ? "console-thread-link-hidden" : "" %>">
-        <%= link_to console_threads_path(thread: thread.thread_key),
-                    class: "console-thread-link #{active_thread ? "console-thread-link-active" : ""}",
-                    data: { console_thread_link: true, turbo_frame: "_top" },
-                    title: title do %>
-          <span class="console-thread-title"><%= title %></span>
-          <span class="console-thread-time"><%= local_time(thread.updated_at || thread.created_at, relative: true, format: :compact) %></span>
-        <% end %>
-        <button type="button"
-                class="console-thread-split"
-                data-console-thread-split
-                data-thread-key="<%= thread.thread_key %>"
-                title="Open in split view"
-                aria-label="Open in split view">
-          <%= console_icon("panel-right", classes: "size-3.5") %>
-        </button>
-      </div>
+      <%= link_to console_threads_path(thread: thread.thread_key),
+                  class: "console-thread-link #{active_thread ? "console-thread-link-active" : ""} #{index >= 5 && !active_thread ? "console-thread-link-hidden" : ""}",
+                  data: { console_thread_link: true, turbo_frame: "_top" },
+                  title: title do %>
+        <span class="console-thread-title"><%= title %></span>
+        <span class="console-thread-time"><%= local_time(thread.updated_at || thread.created_at, relative: true, format: :compact) %></span>
+      <% end %>
     <% end %>
     <% if @console_sidebar_threads.size > 5 %>
       <button type="button"

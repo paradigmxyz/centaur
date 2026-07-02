@@ -267,40 +267,6 @@
         font-size: 0.75rem;
       }
 
-      .console-thread-row {
-        position: relative;
-        min-width: 0;
-      }
-
-      .console-thread-split {
-        position: absolute;
-        top: 50%;
-        right: 0.5rem;
-        display: none;
-        height: 1.5rem;
-        width: 1.5rem;
-        transform: translateY(-50%);
-        cursor: pointer;
-        place-items: center;
-        border-radius: 0.5rem;
-        color: #71717a;
-        transition: background 120ms ease, color 120ms ease;
-      }
-
-      .console-thread-row:hover .console-thread-split,
-      .console-thread-split:focus-visible {
-        display: grid;
-      }
-
-      .console-thread-row:hover .console-thread-time {
-        opacity: 0;
-      }
-
-      .console-thread-split:hover {
-        background: rgba(255, 255, 255, 0.08);
-        color: #f4f4f5;
-      }
-
       .console-thinking {
         min-width: 0;
         border-left: 2px solid rgba(255, 255, 255, 0.12);
@@ -694,11 +660,6 @@
 
       html[data-console-theme="light"] .console-thread-show-all:hover {
         color: #303438;
-      }
-
-      html[data-console-theme="light"] .console-thread-split:hover {
-        background: #e8e9e3;
-        color: #24272b;
       }
 
       html[data-console-theme="light"] .console-thinking {
@@ -1138,37 +1099,39 @@
       })();
 
       (() => {
-        // Sidebar "open in split view" buttons. Delegated on document because
-        // the thread list arrives later via the lazy Turbo Frame. Adds the
-        // thread as an extra pane of the threads grid (?panes=), or opens it as
-        // the primary thread when the current page has none.
+        // Cmd/Ctrl-click on a sidebar thread adds it to the split-view grid.
+        // The thread param carries up to PANEL_LIMIT comma-separated keys, the
+        // first being the primary thread. Delegated on document because the
+        // thread list arrives later via the lazy Turbo Frame; Turbo already
+        // ignores modified clicks, so only the browser's new-tab default needs
+        // preventing.
         const THREADS_PATH = "<%= console_threads_path %>";
-        const MAX_EXTRA_PANES = 3;
+        const PANEL_LIMIT = <%= Console::ThreadsController::PANEL_LIMIT %>;
 
         document.addEventListener("click", (event) => {
-          const button = event.target.closest("[data-console-thread-split]");
-          if (!button) return;
+          if (!(event.metaKey || event.ctrlKey)) return;
 
-          event.preventDefault();
-          const key = button.dataset.threadKey;
+          const link = event.target.closest("[data-console-thread-link]");
+          if (!link) return;
+
+          const key = new URL(link.href, window.location.origin).searchParams.get("thread");
           if (!key) return;
 
+          event.preventDefault();
+
           const current = new URL(window.location.href);
-          const primary = current.pathname.startsWith(THREADS_PATH)
-            ? current.searchParams.get("thread")
-            : null;
+          const open = current.pathname.startsWith(THREADS_PATH)
+            ? (current.searchParams.get("thread") || "").split(",").filter(Boolean)
+            : [];
+          if (!open.includes(key)) open.push(key);
+
+          // Keep the primary thread and the newest panes when over the limit.
+          const capped = open.length > PANEL_LIMIT
+            ? [open[0], ...open.slice(-(PANEL_LIMIT - 1))]
+            : open;
 
           const next = new URL(THREADS_PATH, window.location.origin);
-          if (!primary || primary === key) {
-            next.searchParams.set("thread", key);
-          } else {
-            const panes = (current.searchParams.get("panes") || "")
-              .split(",")
-              .filter((pane) => pane && pane !== primary);
-            if (!panes.includes(key)) panes.push(key);
-            next.searchParams.set("thread", primary);
-            next.searchParams.set("panes", panes.slice(0, MAX_EXTRA_PANES).join(","));
-          }
+          next.searchParams.set("thread", capped.join(","));
           window.location.assign(next.toString());
         });
       })();

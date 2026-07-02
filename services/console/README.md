@@ -61,10 +61,11 @@ Threads extras beyond the Slack surface:
 - Thinking traces: reasoning items the harness streamed over stdout are
   persisted by api-rs as `session.output.line` events; the transcript renders
   each completed reasoning block as a collapsed "Thinking" disclosure.
-- Split view: open up to four threads side by side with `?thread=<primary>` and
-  `?panes=<key2>,<key3>,<key4>`, or hover a sidebar thread and use its
-  "Open in split view" button. Panes resolve through the same owner scope as
-  the primary thread, and each panel has a close control.
+- Split view: Cmd/Ctrl-click a sidebar thread to open it alongside the current
+  one, up to four threads in a grid. The `thread` param carries the open keys
+  comma-separated (`?thread=<primary>,<key2>,<key3>,<key4>`), primary first.
+  All keys resolve through the same owner scope as a single thread, and each
+  panel has a close control.
 
 ## First Boot
 
