@@ -105,6 +105,10 @@ module ApplicationHelper
       )
     when "plus"
       outline_icon(classes, "M12 4.5v15m7.5-7.5h-15")
+    when "chevron-right"
+      outline_icon(classes, "m8.25 4.5 7.5 7.5-7.5 7.5")
+    when "x-mark"
+      outline_icon(classes, "M6 18 18 6M6 6l12 12")
     when "shield-check"
       outline_icon(
         classes,

@@ -1,0 +1,40 @@
+<%# Shared transcript stream for the single-thread view and split-view panels.
+    items: transcript items built by Console::ThreadsController. Thinking items
+    (source: :thinking) render as collapsed disclosures, Claude-app style. %>
+<% if items.empty? %>
+  <div class="rounded-xl border border-dashed border-ink-800/80 bg-ink-850/40 px-5 py-6 text-sm text-zinc-600">
+    No messages have been persisted for this thread yet.
+  </div>
+<% end %>
+
+<% items.each do |item| %>
+  <% if item[:source] == :thinking %>
+    <div class="flex justify-start">
+      <details class="console-thinking w-full max-w-3xl">
+        <summary class="console-thinking-summary">
+          <span class="console-thinking-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
+          <span class="font-medium">Thinking</span>
+          <span class="console-thinking-preview"><%= item[:text].to_s.gsub(/\s+/, " ").truncate(96) %></span>
+        </summary>
+        <div class="console-thinking-body console-markdown text-sm leading-6">
+          <%= console_markdown(item[:text]) %>
+        </div>
+      </details>
+    </div>
+  <% else %>
+    <% user_message = item[:align] == :end %>
+    <div class="group flex <%= user_message ? "justify-end" : "justify-start" %>">
+      <div class="console-message-stack flex flex-col <%= user_message ? "max-w-[72%] items-end" : "w-full max-w-3xl items-start" %>">
+        <div class="<%= user_message ? "w-full rounded-[24px] bg-ink-700 px-4 py-3 text-zinc-100" : "w-full text-zinc-300" %>">
+          <% unless user_message %>
+            <div class="mb-1 text-xs font-medium text-zinc-500"><%= item[:label] || item[:role] %></div>
+          <% end %>
+          <div class="console-markdown text-sm leading-6"><%= console_markdown(item[:text].presence || "No text content.") %></div>
+        </div>
+        <div class="console-message-timestamp <%= "text-right" if user_message %>">
+          <%= local_time(item[:created_at]) if item[:created_at] %>
+        </div>
+      </div>
+    </div>
+  <% end %>
+<% end %>

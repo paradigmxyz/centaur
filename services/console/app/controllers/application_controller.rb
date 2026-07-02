@@ -166,25 +166,27 @@ class ApplicationController < ActionController::Base
   end
 
   def console_sidebar_threads_with_direct_selection(threads)
-    selected = console_sidebar_direct_selected_thread(threads)
-    selected ? [ selected, *threads ] : threads
+    selected = console_sidebar_direct_selected_threads(threads)
+    selected.any? ? [ *selected, *threads ] : threads
   end
 
-  def console_sidebar_direct_selected_thread(threads)
-    thread_key = console_sidebar_selected_thread_key
-    return if thread_key.blank?
-    return if threads.any? { |thread| thread.thread_key == thread_key }
+  def console_sidebar_direct_selected_threads(threads)
+    thread_keys = console_sidebar_selected_thread_keys - threads.map(&:thread_key)
+    return [] if thread_keys.empty?
 
     # Resolve through the owner scope, not a raw find_by, so a directly linked
     # thread only surfaces in the sidebar when the current user started it. This
     # mirrors Console::ThreadsController#selected_session.
-    console_sidebar_visible_thread_scope.where(thread_key: thread_key).first
+    console_sidebar_visible_thread_scope.where(thread_key: thread_keys).to_a
   end
 
-  def console_sidebar_selected_thread_key
-    return unless params[:controller] == "console/threads"
+  # The thread param carries up to PANEL_LIMIT comma-separated keys when the
+  # split view is open; every open thread should surface and highlight.
+  def console_sidebar_selected_thread_keys
+    return [] unless params[:controller] == "console/threads"
 
-    params[:thread].to_s.presence
+    params[:thread].to_s.split(",").map(&:strip).reject(&:blank?).uniq
+      .first(Console::ThreadsController::PANEL_LIMIT)
   end
 
   def console_sidebar_console_thread_owner_sql
