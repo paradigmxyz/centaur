@@ -40,6 +40,7 @@ import {
 } from './session-api'
 import {
   buildConsoleSessionContextBlock,
+  defaultModelForHarness,
   type SlackContextBlock
 } from './console-session-link'
 import { extractMessageOverrides } from './overrides'
@@ -650,12 +651,16 @@ async function syncThreadMessageToSession(
   // (`slack:CHANNEL:THREAD_TS`) is the exact value sent to the session API as
   // `thread_key`, which the Console indexes by.
   const isFirstAssistantMessage = shouldStartExecution && executedMessageIds.size === 0
+  const consoleSessionHarnessType =
+    effectiveOverrides.harnessType ?? input.options.defaultHarnessType ?? 'codex'
   const consoleSessionBlock = isFirstAssistantMessage
     ? buildConsoleSessionContextBlock({
         consoleBaseUrl: input.options.consolePublicUrl,
         threadKey: thread.id,
-        harnessType: effectiveOverrides.harnessType ?? input.options.defaultHarnessType ?? 'codex',
-        model: effectiveOverrides.model
+        harnessType: consoleSessionHarnessType,
+        // Without an explicit --model/--opus/... override the harness runs its
+        // baked-in default; show that instead of dropping the model segment.
+        model: effectiveOverrides.model ?? defaultModelForHarness(consoleSessionHarnessType)
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {

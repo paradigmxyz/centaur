@@ -3,6 +3,8 @@ require "test_helper"
 class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   TranscriptMessage = Struct.new(:role, :parts_array, :metadata_hash, :created_at, keyword_init: true)
   TranscriptSession = Struct.new(:metadata_hash, :harness_type, keyword_init: true)
+  ModelSession = Struct.new(:thread_key, :metadata_hash, :harness_type, keyword_init: true)
+  ModelExecution = Struct.new(:metadata, keyword_init: true)
   TranscriptEvent = Struct.new(:event_type, :payload_hash, :created_at, keyword_init: true)
   SelectedSession = Struct.new(:thread_key, keyword_init: true)
 
@@ -356,6 +358,51 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Slack", controller.send(:thread_source_label, session)
     assert_equal "slack", controller.send(:thread_source_icon, session)
     assert_equal "Codex", controller.send(:thread_harness_label, session)
+  end
+
+  test "thread model label prefers the latest execution's recorded model override" do
+    controller = Console::ThreadsController.new
+    session = ModelSession.new(
+      thread_key: "slack:C1:1",
+      metadata_hash: {},
+      harness_type: "claudecode"
+    )
+    execution = ModelExecution.new(metadata: { "model" => "claude-sonnet-4-6" })
+    controller.instance_variable_set(:@latest_executions, { "slack:C1:1" => execution })
+
+    assert_equal "claude-sonnet-4-6", controller.send(:thread_model_label, session)
+  end
+
+  test "thread model label reads session metadata before the harness default" do
+    controller = Console::ThreadsController.new
+    session = TranscriptSession.new(
+      metadata_hash: { "model" => "claude-fable-5" },
+      harness_type: "claudecode"
+    )
+
+    assert_equal "claude-fable-5", controller.send(:thread_model_label, session)
+  end
+
+  test "thread model label falls back to the harness default model" do
+    controller = Console::ThreadsController.new
+
+    assert_equal "claude-opus-4-8", controller.send(
+      :thread_model_label,
+      TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
+    )
+    assert_equal "gpt-5.5", controller.send(
+      :thread_model_label,
+      TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
+    )
+  end
+
+  test "thread model label is nil for harnesses without a fixed default" do
+    controller = Console::ThreadsController.new
+
+    assert_nil controller.send(
+      :thread_model_label,
+      TranscriptSession.new(metadata_hash: {}, harness_type: "amp")
+    )
   end
 
   test "visible thread scope matches Slack threads owned by the current user's Slack OAuth record" do

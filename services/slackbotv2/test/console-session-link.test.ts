@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildConsoleSessionContextBlock,
   consoleSessionUrl,
+  defaultModelForHarness,
   harnessDisplayName
 } from '../src/console-session-link'
 
@@ -27,6 +28,25 @@ describe('harnessDisplayName', () => {
     expect(harnessDisplayName(null)).toBeUndefined()
     expect(harnessDisplayName('')).toBeUndefined()
     expect(harnessDisplayName('   ')).toBeUndefined()
+  })
+})
+
+describe('defaultModelForHarness', () => {
+  test('maps harnesses to their baked-in default model', () => {
+    expect(defaultModelForHarness('claudecode')).toBe('claude-opus-4-8')
+    expect(defaultModelForHarness('codex')).toBe('gpt-5.5')
+  })
+
+  test('is case-insensitive and trims', () => {
+    expect(defaultModelForHarness(' CLAUDECODE ')).toBe('claude-opus-4-8')
+  })
+
+  test('returns undefined for harnesses without a fixed default', () => {
+    expect(defaultModelForHarness('amp')).toBeUndefined()
+    expect(defaultModelForHarness('gemini')).toBeUndefined()
+    expect(defaultModelForHarness(undefined)).toBeUndefined()
+    expect(defaultModelForHarness(null)).toBeUndefined()
+    expect(defaultModelForHarness('')).toBeUndefined()
   })
 })
 

@@ -1178,7 +1178,14 @@ async function executeSession(
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
-    metadata: sessionMetadata(message, { action: 'execute' }, requesterIdentity),
+    // `model` is recorded only when explicitly overridden (--model/--opus/...);
+    // otherwise the harness runs its baked-in default and readers (Console)
+    // fall back to the per-harness default model map.
+    metadata: sessionMetadata(
+      message,
+      { action: 'execute', ...(model ? { model } : {}) },
+      requesterIdentity
+    ),
     input_lines: toCodexInputLines(
       message,
       threadId,

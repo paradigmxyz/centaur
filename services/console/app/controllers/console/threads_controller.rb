@@ -16,6 +16,15 @@ class Console::ThreadsController < ApplicationController
   SLACK_MENTION_PATTERN = /<@([UW][A-Z0-9]+)(?:\|([^>]+))?>|@([UW][A-Z0-9]+)/.freeze
   READ_ONLY_REASON =
     "Threads are read-only while browsing a mirrored production snapshot.".freeze
+  # Default model each harness runs when no explicit override was recorded.
+  # Mirrors the models pinned in the harness images (harness/claude/settings.json
+  # and harness/codex/config.toml) and the map in
+  # services/slackbotv2/src/console-session-link.ts. Keep in sync when those
+  # change. Amp has no fixed default model, so it is intentionally absent.
+  HARNESS_DEFAULT_MODELS = {
+    "claudecode" => "claude-opus-4-8",
+    "codex" => "gpt-5.5"
+  }.freeze
 
   SlackThreadOwner = Struct.new(:user_id, :team_id, keyword_init: true)
 
@@ -23,6 +32,7 @@ class Console::ThreadsController < ApplicationController
                 :thread_source_icon,
                 :thread_source_label,
                 :thread_harness_label,
+                :thread_model_label,
                 :thread_user_label,
                 :thread_message_text,
                 :thread_text_preview,
@@ -416,6 +426,23 @@ class Console::ThreadsController < ApplicationController
     when "amp" then "Amp"
     else source_label(session.harness_type)
     end
+  end
+
+  # Model the thread most recently ran on. slackbotv2 records `model` in
+  # execution metadata only for explicit --model/--opus/... overrides; without
+  # one the harness ran its baked-in default, so fall back to the
+  # HARNESS_DEFAULT_MODELS map. Nil (segment omitted) for harnesses without a
+  # fixed default.
+  def thread_model_label(session)
+    recorded_model(@latest_executions&.[](session.thread_key)&.metadata) ||
+      recorded_model(session.metadata_hash) ||
+      HARNESS_DEFAULT_MODELS[session.harness_type.to_s]
+  end
+
+  def recorded_model(metadata)
+    return unless metadata.is_a?(Hash)
+
+    metadata["model"].presence
   end
 
   def thread_source_key(session)

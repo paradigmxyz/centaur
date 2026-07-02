@@ -15,6 +15,19 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   codex: 'Codex'
 }
 
+// Default model each harness runs when no --model/--opus/... override is set.
+// Mirrors the models pinned in this repo's harness images —
+// harness/claude/settings.json ("model") and harness/codex/config.toml
+// (`model`) — which slackbotv2 cannot read at runtime (they are baked into the
+// harness images, not this service's). Keep in sync when those change. Amp has
+// no fixed default model (deep/fast modes), so it is intentionally absent.
+// The Console mirrors this map in
+// services/console/app/controllers/console/threads_controller.rb.
+const HARNESS_DEFAULT_MODELS: Record<string, string> = {
+  claudecode: 'claude-opus-4-8',
+  codex: 'gpt-5.5'
+}
+
 /** Slack mrkdwn requires `&`, `<`, `>` to be escaped in free text. */
 function escapeSlackMrkdwn(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -38,6 +51,17 @@ export function harnessDisplayName(harnessType: string | null | undefined): stri
   const key = harnessType.trim().toLowerCase()
   if (!key) return undefined
   return HARNESS_DISPLAY_NAMES[key] ?? titleCase(key)
+}
+
+/**
+ * Returns the model a harness runs by default (no explicit override), or
+ * undefined for harnesses without a fixed default (amp, unknown harnesses).
+ */
+export function defaultModelForHarness(
+  harnessType: string | null | undefined
+): string | undefined {
+  if (!harnessType) return undefined
+  return HARNESS_DEFAULT_MODELS[harnessType.trim().toLowerCase()]
 }
 
 /**
