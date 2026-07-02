@@ -1203,7 +1203,13 @@
 
           const next = new URL(THREADS_PATH, window.location.origin);
           next.searchParams.set("thread", capped.join(","));
-          window.location.assign(next.toString());
+          // Turbo visit keeps the turbo-permanent sidebar list mounted; a
+          // plain location.assign would full-load and repaint it.
+          if (window.Turbo) {
+            window.Turbo.visit(next.toString());
+          } else {
+            window.location.assign(next.toString());
+          }
         });
       })();
     </script>
