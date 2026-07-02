@@ -82,13 +82,21 @@ class ApplicationController < ActionController::Base
       return redirect_to login_path, alert: "Your account is disabled."
     end
 
+    return_to = session[:return_to]
     reset_session
     session[:user_id] = user.id
+    session[:return_to] = return_to if return_to.present?
     if user.active?
-      redirect_to console_principals_path, notice: "Signed in as #{user.email}."
+      redirect_to post_login_redirect_path, notice: "Signed in as #{user.email}."
     else
       redirect_to pending_path, notice: "Your account is awaiting approval."
     end
+  end
+
+  def post_login_redirect_path
+    path = session.delete(:return_to).to_s
+    return console_principals_path unless path.start_with?("/") && !path.start_with?("//")
+    path
   end
 
   def render_not_found(e)

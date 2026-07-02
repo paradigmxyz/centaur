@@ -85,6 +85,9 @@ toolServer:
 console:
   enabled: false
   replicaCount: 1
+  # Public URL users reach in a browser. Set this when console is exposed behind
+  # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
+  publicUrl: ""
   image:
     repository: centaur-console
     tag: latest
@@ -304,6 +307,9 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Public/local MCP endpoint advertised through OAuth protected-resource
+  # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
+  mcpPublicUrl: ""
   runMigrations: true
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
@@ -418,6 +424,9 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Public/local MCP endpoint shown in MCP SSO setup messages. The default
+  # assumes users connect through `kubectl port-forward ... 3000:8080`.
+  mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
   metrics:

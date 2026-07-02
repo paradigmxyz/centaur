@@ -53,6 +53,30 @@ module Console
       assert target.reload.disabled?
     end
 
+    test "disable revokes outstanding MCP OAuth refresh tokens" do
+      sign_in users(:acme_admin)
+      target = users(:member_user)
+      refresh = McpOauthRefreshToken.create!(
+        mcp_oauth_client: McpOauthClient.create!(
+          name: "Amp",
+          redirect_uris: [ "http://127.0.0.1:49152/callback" ],
+          grant_types: McpOauthClient::DEFAULT_GRANT_TYPES,
+          response_types: McpOauthClient::DEFAULT_RESPONSE_TYPES,
+          scopes: McpOauthClient::DEFAULT_SCOPES
+        ),
+        user: target,
+        principal: principals(:acme_channel),
+        resource: "http://localhost:3000/mcp",
+        scopes: [ "mcp:tools" ]
+      )
+
+      post disable_console_user_url(target.oid)
+
+      assert_redirected_to console_users_path
+      assert target.reload.disabled?
+      assert refresh.reload.revoked_at.present?
+    end
+
     test "an admin cannot disable their own account" do
       admin = users(:acme_admin)
       sign_in admin

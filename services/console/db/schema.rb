@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_25_030000) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_30_090002) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -174,6 +174,57 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_25_030000) do
     t.index ["created_by_id"], name: "index_hmac_secrets_on_created_by_id"
     t.index ["labels"], name: "index_hmac_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_hmac_secrets_on_namespace_and_foreign_id", unique: true
+  end
+
+  create_table "mcp_oauth_authorization_codes", force: :cascade do |t|
+    t.string "code_challenge", null: false
+    t.string "code_hash", null: false
+    t.datetime "consumed_at"
+    t.datetime "created_at", null: false
+    t.datetime "expires_at", null: false
+    t.bigint "mcp_oauth_client_id", null: false
+    t.bigint "principal_id", null: false
+    t.string "redirect_uri", null: false
+    t.string "resource", null: false
+    t.jsonb "scopes", default: [], null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["code_hash"], name: "index_mcp_oauth_authorization_codes_on_code_hash", unique: true
+    t.index ["expires_at"], name: "index_mcp_oauth_authorization_codes_on_expires_at"
+    t.index ["mcp_oauth_client_id"], name: "index_mcp_oauth_authorization_codes_on_mcp_oauth_client_id"
+    t.index ["principal_id"], name: "index_mcp_oauth_authorization_codes_on_principal_id"
+    t.index ["user_id"], name: "index_mcp_oauth_authorization_codes_on_user_id"
+  end
+
+  create_table "mcp_oauth_clients", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.jsonb "grant_types", default: [], null: false
+    t.datetime "last_used_at"
+    t.jsonb "metadata", default: {}, null: false
+    t.string "name"
+    t.jsonb "redirect_uris", default: [], null: false
+    t.jsonb "response_types", default: [], null: false
+    t.jsonb "scopes", default: [], null: false
+    t.datetime "updated_at", null: false
+  end
+
+  create_table "mcp_oauth_refresh_tokens", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "expires_at", null: false
+    t.datetime "last_used_at"
+    t.bigint "mcp_oauth_client_id", null: false
+    t.bigint "principal_id", null: false
+    t.string "resource", null: false
+    t.datetime "revoked_at"
+    t.jsonb "scopes", default: [], null: false
+    t.string "token_hash", null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["expires_at"], name: "index_mcp_oauth_refresh_tokens_on_expires_at"
+    t.index ["mcp_oauth_client_id"], name: "index_mcp_oauth_refresh_tokens_on_mcp_oauth_client_id"
+    t.index ["principal_id"], name: "index_mcp_oauth_refresh_tokens_on_principal_id"
+    t.index ["token_hash"], name: "index_mcp_oauth_refresh_tokens_on_token_hash", unique: true
+    t.index ["user_id"], name: "index_mcp_oauth_refresh_tokens_on_user_id"
   end
 
   create_table "oauth_apps", force: :cascade do |t|
@@ -404,6 +455,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_25_030000) do
   add_foreign_key "grants", "static_secrets"
   add_foreign_key "grants", "users", column: "created_by_id"
   add_foreign_key "hmac_secrets", "users", column: "created_by_id"
+  add_foreign_key "mcp_oauth_authorization_codes", "mcp_oauth_clients"
+  add_foreign_key "mcp_oauth_authorization_codes", "principals"
+  add_foreign_key "mcp_oauth_authorization_codes", "users"
+  add_foreign_key "mcp_oauth_refresh_tokens", "mcp_oauth_clients"
+  add_foreign_key "mcp_oauth_refresh_tokens", "principals"
+  add_foreign_key "mcp_oauth_refresh_tokens", "users"
   add_foreign_key "oauth_apps", "users", column: "created_by_id"
   add_foreign_key "oauth_token_secrets", "users", column: "created_by_id"
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
