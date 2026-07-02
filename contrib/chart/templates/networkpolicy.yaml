@@ -189,13 +189,18 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/api-server-enabled: "true"
-        # Transitional compatibility: existing sandbox/proxy pods created
-        # before the API server capability label was introduced still carry only
-        # this label. Remove with the matching egress compatibility policy below
-        # after old api-rs-managed pods have aged out.
+        # Transitional compatibility: pre-deploy sandbox/proxy pods carry
+        # centaur.ai/managed-by=api-rs but no explicit API server capability
+        # label. New restricted pods carry centaur.ai/api-server-enabled=false
+        # and are excluded from this selector from day one. Remove with the
+        # matching egress compatibility policy below after old api-rs-managed
+        # pods have aged out.
         - podSelector:
             matchLabels:
               centaur.ai/managed-by: api-rs
+            matchExpressions:
+              - key: centaur.ai/api-server-enabled
+                operator: DoesNotExist
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -205,11 +210,11 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 ---
-# Transitional compatibility for pre-deploy sandbox/proxy pods. They do not
-# have centaur.ai/api-server-enabled=true, and resume/repair can recreate their
-# per-sandbox policies with the new restricted rule set while the old pods keep
-# running. Remove this with the matching api-rs ingress compatibility selector
-# once old api-rs-managed pods have aged out.
+# Transitional compatibility for pre-deploy sandbox/proxy pods. They have
+# centaur.ai/managed-by=api-rs but no explicit API server capability label.
+# New restricted pods carry centaur.ai/api-server-enabled=false and are excluded
+# from this selector from day one. Remove this with the matching api-rs ingress
+# compatibility selector once old api-rs-managed pods have aged out.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -220,6 +225,9 @@ spec:
   podSelector:
     matchLabels:
       centaur.ai/managed-by: api-rs
+    matchExpressions:
+      - key: centaur.ai/api-server-enabled
+        operator: DoesNotExist
   policyTypes:
     - Egress
   egress:
@@ -231,9 +239,10 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 ---
-# Sandboxes with the API server capability may call api-rs. The sandbox pod
-# receives this label from api-rs after resolving the principal's capability
-# flags, so default-deny still blocks ordinary sandbox pods.
+# Sandboxes with the API server capability may call api-rs. New sandbox and
+# proxy pods receive an explicit true/false label from api-rs after resolving
+# the principal's capability flags, so default-deny blocks new pods without the
+# capability.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

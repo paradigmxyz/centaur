@@ -575,9 +575,10 @@ fn build_agent_sandbox(
     if spec.capabilities.observability_enabled {
         labels.insert(OBSERVABILITY_ENABLED_LABEL.to_owned(), "true".to_owned());
     }
-    if spec.capabilities.api_server_enabled {
-        labels.insert(API_SERVER_ENABLED_LABEL.to_owned(), "true".to_owned());
-    }
+    labels.insert(
+        API_SERVER_ENABLED_LABEL.to_owned(),
+        spec.capabilities.api_server_enabled.to_string(),
+    );
 
     let mut pod_labels = labels.clone();
     pod_labels.insert(
@@ -964,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_capability_labels_for_restricted_sandboxes() {
+    fn labels_api_server_disabled_restricted_sandboxes() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
             repo_cache_enabled: true,
             observability_enabled: false,
@@ -990,21 +991,25 @@ mod tests {
                 .and_then(|metadata| metadata.labels.as_ref())
                 .is_none_or(|labels| !labels.contains_key(OBSERVABILITY_ENABLED_LABEL))
         );
-        assert!(
+        assert_eq!(
             sandbox
                 .metadata
                 .labels
                 .as_ref()
-                .is_none_or(|labels| !labels.contains_key(API_SERVER_ENABLED_LABEL))
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("false")
         );
-        assert!(
+        assert_eq!(
             sandbox
                 .spec
                 .pod_template
                 .metadata
                 .as_ref()
                 .and_then(|metadata| metadata.labels.as_ref())
-                .is_none_or(|labels| !labels.contains_key(API_SERVER_ENABLED_LABEL))
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("false")
         );
     }
 
