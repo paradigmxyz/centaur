@@ -1,5 +1,8 @@
 alter table sessions
-    add column if not exists sandbox_api_server_enabled boolean;
+    add column if not exists sandbox_api_server_enabled boolean default true;
+
+alter table sessions
+    alter column sandbox_api_server_enabled set default true;
 
 update sessions
 set sandbox_api_server_enabled = true
