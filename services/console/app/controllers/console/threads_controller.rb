@@ -571,9 +571,11 @@ class Console::ThreadsController < ApplicationController
   # config files when they are present. Nil (segment omitted) when none of
   # those sources know the model.
   def thread_model_label(session)
-    recorded_model(@latest_executions&.[](session.thread_key)&.metadata) ||
+    model = recorded_model(@latest_executions&.[](session.thread_key)&.metadata) ||
       recorded_model(session.metadata_hash) ||
       default_model_for_harness(session.harness_type.to_s)
+    # Uppercased for display, matching the Slack Console-link context line.
+    model&.upcase
   end
 
   def recorded_model(metadata)

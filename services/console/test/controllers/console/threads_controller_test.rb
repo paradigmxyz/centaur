@@ -371,7 +371,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     execution = ModelExecution.new(metadata: { "model" => "claude-sonnet-4-6" })
     controller.instance_variable_set(:@latest_executions, { "slack:C1:1" => execution })
 
-    assert_equal "claude-sonnet-4-6", controller.send(:thread_model_label, session)
+    assert_equal "CLAUDE-SONNET-4-6", controller.send(:thread_model_label, session)
   end
 
   test "thread model label reads session metadata before the harness default" do
@@ -381,18 +381,18 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       harness_type: "claudecode"
     )
 
-    assert_equal "claude-fable-5", controller.send(:thread_model_label, session)
+    assert_equal "CLAUDE-FABLE-5", controller.send(:thread_model_label, session)
   end
 
   test "thread model label falls back to the deployment's model env override" do
     controller = Console::ThreadsController.new
 
     with_env("CLAUDE_MODEL" => "claude-fable-5", "CODEX_MODEL" => "gpt-6") do
-      assert_equal "claude-fable-5", controller.send(
+      assert_equal "CLAUDE-FABLE-5", controller.send(
         :thread_model_label,
         TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
       )
-      assert_equal "gpt-6", controller.send(
+      assert_equal "GPT-6", controller.send(
         :thread_model_label,
         TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
       )
@@ -412,11 +412,11 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       TOML
 
       with_env("CLAUDE_MODEL" => nil, "CODEX_MODEL" => nil, "CENTAUR_HARNESS_CONFIG_DIR" => dir) do
-        assert_equal "claude-baked-1", controller.send(
+        assert_equal "CLAUDE-BAKED-1", controller.send(
           :thread_model_label,
           TranscriptSession.new(metadata_hash: {}, harness_type: "claudecode")
         )
-        assert_equal "gpt-baked-1", controller.send(
+        assert_equal "GPT-BAKED-1", controller.send(
           :thread_model_label,
           TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
         )
