@@ -161,6 +161,24 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_SECRET" $prefix }}
 {{- end }}
+{{- if $console.slackOauth.enabled }}
+            # Slack OIDC app credentials (console sign-in only — distinct from
+            # the DB-managed Slack OAuth app the bot/DM sync uses). Gated on
+            # console.slackOauth.enabled; the keys must exist in the shared
+            # infra Secret when enabled. Uses the modern CENTAUR_CONSOLE_*
+            # names (unlike the legacy IRON_CONTROL_* keys above) since this
+            # block postdates the rename.
+            - name: CENTAUR_CONSOLE_SLACK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_ID" $prefix }}
+            - name: CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_SECRET" $prefix }}
+{{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
 {{- with $console.slackDmSync.oauthAppSlug }}

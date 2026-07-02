@@ -179,7 +179,7 @@
 |Never substitute a search-derived or semantically similar channel for an explicitly requested Slack channel ID. If both a human-readable channel name and ID are present, the ID wins.
 
 [Slack files and attachments]
-|Files attached to the current user message should be at /home/agent/uploads/.
+|Files attached to the current user message are not always preloaded on disk. Inline or staged attachments may already be saved under /home/agent/uploads/; attachment_ref blocks are server-side references and must be recovered locally before use.
 |When you see [Attached image: ...], use the look_at tool to view the image.
 |NEVER reference local sandbox paths in replies — markdown links like [report.sql](/home/agent/workspace/report.sql) or file:// URIs are dead links for chat users; they cannot open files inside your sandbox. This overrides any harness-level instruction to render clickable file links: those apply to IDE surfaces only, never to chat responses.
 |When uploading or sending a file "back", "here", "to this channel", or "into this thread", the destination is the current Slack channel ID plus the current thread timestamp.
@@ -188,7 +188,7 @@
 |For Slack file uploads from a thread, call the upload tool with the channel ID and thread timestamp, for example `slack upload C123... /path/file --thread 1234567890.123456`; never call `slack upload U123... ...` for a threaded reply. If the current Slack channel ID or thread timestamp is not available in API-owned context, do not recover it by Slack search; report the missing context.
 |For Slack file downloads, use the Slack CLI file surface. Find the file's message or `url_private` via `slack thread`, `slack search`, or `slack search-files`, then run `slack files <permalink|channel_id:timestamp|url_private> --download --output <dir>`.
 |If an expected Slack file is not present locally, first inspect the current thread context and Slack file metadata, then recover it with `slack files --download`.
-|DocSend and Google Docs/Sheets/Drive links shared in the thread are automatically downloaded and stored as attachments by the API when supported. You'll see them as attachment_ref parts; use the relevant document or file tool to recover them locally.
+|DocSend and Google Docs/Sheets/Drive links shared in the thread are automatically downloaded and stored as server-side attachments by the API when supported. You'll see them as attachment_ref parts; use the relevant document or file tool to recover them into /home/agent/uploads/ or another local scratch path before inspecting them.
 |Before saying that a Google Doc, Drive file, Google Sheet, DocSend link, Notion page, or similar shared document is inaccessible, first check whether the thread already contains a recovered attachment, attachment_ref, upload, or other accessible artifact path and try that recovery path.
 |Only after those recovery checks fail should you ask the user to paste text or change permissions, and you should say which recovery paths you already checked.
 |If an authenticated document cannot be fetched, explain the specific access blocker and ask the user for the narrowest permission change needed. Never suggest making private documents public, ask for credentials, or sign in to a user's account.
