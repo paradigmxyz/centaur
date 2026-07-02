@@ -1003,9 +1003,9 @@
           <div class="console-thread-group">
             <a href="<%= console_threads_path %>"
                class="console-thread-group-title <%= "console-thread-group-title-active" if threads_view %>"
-               title="Threads">
+               title="Chats">
               <span class="console-nav-icon"><%= console_icon("message-square", classes: "size-4") %></span>
-              <span class="console-nav-label">Threads</span>
+              <span class="console-nav-label">Chats</span>
             </a>
             <%# The thread list is loaded lazily via a Turbo Frame so the
                 unindexed cross-database sessions query never blocks the primary
@@ -1028,7 +1028,7 @@
                                     thread: (params[:thread].to_s.presence if threads_view)
                                   ),
                                   loading: :lazy do %>
-                <div class="console-thread-empty">Loading threads…</div>
+                <div class="console-thread-empty">Loading chats…</div>
               <% end %>
             </div>
           </div>

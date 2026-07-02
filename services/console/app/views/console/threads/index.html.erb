@@ -1,8 +1,8 @@
-<% content_for :title, "Threads · Centaur Console" %>
+<% content_for :title, "Chats · Centaur Console" %>
 
 <% if @thread_db_unavailable %>
   <div class="mb-4 shrink-0 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
-    Thread database is unavailable. Set <span class="font-semibold">CENTAUR_CONSOLE_CENTAUR_DATABASE_URL</span>
+    Chat database is unavailable. Set <span class="font-semibold">CENTAUR_CONSOLE_CENTAUR_DATABASE_URL</span>
     so Console can read the API session database.
   </div>
 <% end %>
@@ -47,10 +47,17 @@
                        title_class: "truncate text-base font-semibold text-zinc-100",
                        subtitle_class: "mt-0.5 text-xs text-zinc-500",
                        class: "mb-0 min-h-16 items-center" %>
+          <% elsif @thread_not_found %>
+            <%= render "console/page_header",
+                       title: "Chat not found",
+                       subtitle: "This chat may not exist, or you may not have access to it.",
+                       title_class: "text-base font-semibold text-zinc-100",
+                       subtitle_class: "mt-0.5 text-xs text-zinc-500",
+                       class: "mb-0 min-h-16 items-center" %>
           <% else %>
             <%= render "console/page_header",
-                       title: "New thread",
-                       subtitle: "Select a mirrored thread from the sidebar.",
+                       title: "New chat",
+                       subtitle: "Select a mirrored chat from the sidebar.",
                        title_class: "text-base font-semibold text-zinc-100",
                        subtitle_class: "mt-0.5 text-xs text-zinc-500",
                        class: "mb-0 min-h-16 items-center" %>
@@ -63,17 +70,41 @@
           <div class="console-thread-content flex flex-col gap-6">
             <%= render "console/threads/transcript", items: @selected_transcript_items %>
           </div>
+        <% elsif @thread_not_found %>
+          <div class="flex h-full items-center justify-center px-6">
+            <div class="flex max-w-sm flex-col items-center gap-3 text-center">
+              <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
+                <%= console_icon("message-square", classes: "size-5") %>
+              </div>
+              <div class="text-sm font-semibold text-zinc-200">Chat not found</div>
+              <p class="text-sm leading-6 text-zinc-500">
+                This chat may not exist, or you may not have access to it.
+                Chats you start show up in the sidebar.
+              </p>
+              <a href="<%= console_threads_path %>"
+                 class="mt-1 text-sm font-medium text-centaur-300 hover:text-centaur-200">
+                Back to your chats
+              </a>
+            </div>
+          </div>
+        <% elsif @sessions.empty? %>
+          <div class="flex h-full items-center justify-center px-6">
+            <div class="flex max-w-sm flex-col items-center gap-3 text-center">
+              <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
+                <%= console_icon("message-square", classes: "size-5") %>
+              </div>
+              <div class="text-sm font-semibold text-zinc-200">No chats yet</div>
+              <p class="text-sm leading-6 text-zinc-500">
+                Chats you start — from Slack or the Console — will show up here.
+              </p>
+            </div>
+          </div>
         <% else %>
           <div class="flex h-full items-center justify-center text-sm text-zinc-600">
-            <% if @sessions.empty? %>
-              No threads yet.
-            <% else %>
-              Select a thread from the sidebar.
-            <% end %>
+            Select a chat from the sidebar.
           </div>
         <% end %>
       </div>
     </section>
   <% end %>
 </div>
-

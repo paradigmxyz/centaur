@@ -23,20 +23,20 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[name=q]", count: 0
     assert_select ".console-main-thread-frame aside", count: 0
     assert_select ".console-thread-detail-header .console-page-header"
-    assert_select "a[aria-label=?]", "New thread", count: 0
-    assert_select "span[aria-label=?]", "New thread disabled", count: 0
+    assert_select "a[aria-label=?]", "New chat", count: 0
+    assert_select "span[aria-label=?]", "New chat disabled", count: 0
     assert_select "textarea[name=prompt]", count: 0
     assert_select "select[name=harness_type]", count: 0
     assert_select "form[action=?]", console_threads_path, count: 0
-    assert_select "body", text: /No threads yet/
-    assert_select "body", text: /Thread database is unavailable/
+    assert_select "body", text: /No chats yet/
+    assert_select "body", text: /Chat database is unavailable/
   end
 
   test "blank prompt is blocked by read only mode" do
     post console_threads_url, params: { prompt: " " }
 
     assert_redirected_to console_threads_path
-    assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
   test "threads page hides composer controls" do
@@ -48,15 +48,15 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "textarea[name=prompt]", count: 0
     assert_select "form[action=?]", console_threads_path, count: 0
     assert_select "body", text: /Read-only snapshot/, count: 0
-    assert_select "span[aria-label=?]", "New thread disabled", count: 0
-    assert_select "a[aria-label=?]", "New thread", count: 0
+    assert_select "span[aria-label=?]", "New chat disabled", count: 0
+    assert_select "a[aria-label=?]", "New chat", count: 0
   end
 
   test "posts are blocked without calling the session api" do
     post console_threads_url, params: { prompt: "Do not run this." }
 
     assert_redirected_to console_threads_path
-    assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
   test "plain threads page redirects to first visible thread" do
@@ -70,7 +70,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to console_threads_path(thread: thread_key)
   end
 
-  test "direct selected thread is hidden when the current user did not start it" do
+  test "direct selected thread renders chat not found when the current user did not start it" do
     skip_unless_session_table
 
     thread_key = "slack:C0DIRECT:#{SecureRandom.hex(6)}"
@@ -81,13 +81,30 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     )
 
     # @operator has no Slack OAuth credential matching U_OTHER, so this thread is
-    # outside their owner scope. A direct ?thread= link must not surface it.
+    # outside their owner scope. A direct ?thread= link must render a 404 chat
+    # not found state instead of surfacing it or falling back to another chat.
     get console_threads_url(thread: thread_key)
 
-    assert_response :ok
+    assert_response :not_found
+    assert_select "body", text: /Chat not found/
+    assert_select "body", text: /may not exist, or you may not have access/
+    assert_select "[data-thread-panel]", count: 0
     assert_select ".console-thread-list a.console-thread-link-active[href=?]",
                   console_threads_path(thread: thread_key),
                   count: 0
+  end
+
+  test "direct link to a nonexistent thread renders chat not found" do
+    skip_unless_session_table
+
+    # Even with an owned chat present, a bogus key must 404 rather than fall
+    # back to the first visible chat.
+    insert_console_session("console:owned-#{SecureRandom.hex(6)}")
+
+    get console_threads_url(thread: "console:missing-#{SecureRandom.hex(6)}")
+
+    assert_response :not_found
+    assert_select "body", text: /Chat not found/
   end
 
   test "slack assistant-role messages from the current Slack user render as user authored" do
@@ -507,7 +524,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "amp" }
 
     assert_redirected_to console_threads_path
-    assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
   test "posting to an existing thread is blocked without calling the session api" do
@@ -519,7 +536,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
          }
 
     assert_redirected_to console_threads_path(thread: "console:existing")
-    assert_equal "Threads are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
   # Fix 6: the sidebar thread list is loaded lazily via a Turbo Frame so the
@@ -556,7 +573,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :ok
     assert_select "turbo-frame#console_sidebar_threads"
-    assert_select ".console-thread-empty", text: /No recent threads/
+    assert_select ".console-thread-empty", text: /No recent chats/
   end
 
   # Fix 5: selected_messages must return the NEWEST MESSAGE_LIMIT messages, in
