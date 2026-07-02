@@ -1,0 +1,39 @@
+[project]
+name = "interview-prep"
+description = "Generate permission-gated interview prep briefs from Ashby and Google Calendar"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.0.0",
+    "httplib2>=0.20.0",
+    "httpx>=0.27.0",
+    "pysocks>=1.7.1",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+interview-prep = "centaur_tool_interview_prep.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["centaur_tool_interview_prep"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "centaur_tool_interview_prep/client.py"
+hosts = [
+    "api.ashbyhq.com",
+    "slack.com",
+    "calendar.googleapis.com",
+    "www.googleapis.com",
+]
+secrets = [
+    {type = "http", name = "ASHBY_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = 'Basic {{ base64 .Value ":" }}', hosts = ["api.ashbyhq.com"]},
+    {type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]},
+    {type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = ["calendar.googleapis.com", "www.googleapis.com"], fields = { refresh_token = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "refresh_token" }, client_id = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_id" }, client_secret = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_secret" } } },
+]
