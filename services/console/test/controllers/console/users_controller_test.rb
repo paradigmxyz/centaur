@@ -16,7 +16,7 @@ module Console
     test "an active non-admin is forbidden" do
       sign_in users(:member_user)
       get console_users_url
-      assert_redirected_to root_path
+      assert_redirected_to console_threads_path
       assert_equal "That page is restricted to admins.", flash[:alert]
     end
 
@@ -110,7 +110,7 @@ module Console
       sign_in users(:member_user)
       target = users(:pending_user)
       post approve_console_user_url(target.oid)
-      assert_redirected_to root_path
+      assert_redirected_to console_threads_path
       assert target.reload.pending?
     end
   end

@@ -7,6 +7,7 @@ module Console
 
     layout "console"
 
+    before_action :require_admin
     before_action :set_role, only: %i[show edit update grant_secret revoke_grant]
 
     def index

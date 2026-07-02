@@ -60,6 +60,21 @@ class Console::EtlsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
+  test "an active non-admin is redirected away from the Data Sync page" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    get console_etls_url
+    assert_redirected_to console_threads_path
+    assert_equal "That page is restricted to admins.", flash[:alert]
+    # The gate fires before the action, so the api client is never touched.
+    assert_empty @client.calls
+
+    post console_slack_archive_imports_url, params: { filename: "export.zip" }
+    assert_redirected_to console_threads_path
+    assert_empty @client.calls
+  end
+
   test "renders Slack archive imports on the Data Sync page" do
     @client.imports = [
       {

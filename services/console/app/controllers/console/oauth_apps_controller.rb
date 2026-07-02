@@ -9,6 +9,7 @@ module Console
 
     layout "console"
 
+    before_action :require_admin
     before_action :set_app, only: %i[edit update]
 
     def new

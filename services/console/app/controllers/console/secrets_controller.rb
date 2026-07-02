@@ -7,6 +7,7 @@ module Console
 
     layout "console"
 
+    before_action :require_admin
     before_action :set_secret
 
     def grant_role

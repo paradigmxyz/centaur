@@ -14,6 +14,28 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: @operator.email, password: "password123456" }
   end
 
+  test "an admin sees the Control and Data Sync nav items" do
+    with_recent_first_error do
+      get console_threads_url
+    end
+
+    assert_response :ok
+    assert_select ".console-nav-link", text: "Control"
+    assert_select ".console-nav-link", text: "Data Sync"
+  end
+
+  test "a non-admin sees no Control or Data Sync nav items" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    with_recent_first_error do
+      get console_threads_url
+    end
+
+    assert_response :ok
+    assert_select ".console-nav-link", count: 0
+    assert_select ".console-thread-group-title", text: /Chats/
+  end
+
   test "threads page does not render composer when session database is unavailable" do
     with_recent_first_error do
       get console_threads_url

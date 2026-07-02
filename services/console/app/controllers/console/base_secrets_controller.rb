@@ -10,6 +10,7 @@ module Console
 
     layout "console"
 
+    before_action :require_admin
     before_action :assign_kind
     before_action :set_secret, only: %i[edit update destroy]
 

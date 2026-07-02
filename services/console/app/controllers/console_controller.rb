@@ -1,10 +1,13 @@
 # Operator console: a lightweight, server-rendered HTML view over principals,
 # their effective grants, and secrets. Read-only; gated behind a console session
-# via ApplicationController#require_login. Distinct from the JSON API.
+# (ApplicationController#require_login) and restricted to admins (require_admin),
+# like every Control/Data Sync page. Distinct from the JSON API.
 class ConsoleController < ApplicationController
   include SecretKinds
 
   layout "console"
+
+  before_action :require_admin
 
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
   # type). The secrets table shows only this -- the full reference lives on the

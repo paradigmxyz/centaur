@@ -964,12 +964,16 @@
   </head>
 
   <% threads_view = request.path.start_with?("/console/threads") %>
-  <% control_matches = [ "/console/principals", "/console/roles", "/console/secrets", "/console/credentials", "/console/oauth_apps" ] %>
-  <% control_matches << "/console/users" if current_user&.admin? %>
-  <% nav_items = [
-    { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true },
-    { label: "Data Sync", icon: "database", path: console_etls_path, matches: [ "/console/etls" ] }
-  ] %>
+  <%# The Control and Data Sync sections are admin-only (each controller enforces
+      require_admin server-side); non-admins only get the Chats view below. %>
+  <% nav_items = [] %>
+  <% if current_user&.admin? %>
+    <% control_matches = [ "/console/principals", "/console/roles", "/console/secrets", "/console/credentials", "/console/oauth_apps", "/console/users" ] %>
+    <% nav_items = [
+      { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true },
+      { label: "Data Sync", icon: "database", path: console_etls_path, matches: [ "/console/etls" ] }
+    ] %>
+  <% end %>
 
   <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased">
     <div id="console-shell" class="console-shell">

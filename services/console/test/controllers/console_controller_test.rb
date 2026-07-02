@@ -12,6 +12,28 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
+  test "an active non-admin is redirected away from every Control page" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    [ root_url, console_principals_url, console_roles_url, console_secrets_url,
+      console_credentials_url, console_oauth_apps_url ].each do |url|
+      get url
+      assert_redirected_to console_threads_path
+      assert_equal "That page is restricted to admins.", flash[:alert]
+    end
+  end
+
+  test "a non-admin cannot mutate through the Control form controllers" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    assert_no_difference -> { Role.count } do
+      post console_roles_url, params: { role: { foreign_id: "sneaky", namespace: "default" } }
+    end
+    assert_redirected_to console_threads_path
+  end
+
   test "secrets table shows backend labels (not refs) and links to detail" do
     secret = static_secrets(:acme_prod_api_key)
     get console_secrets_url

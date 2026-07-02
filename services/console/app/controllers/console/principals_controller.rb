@@ -8,6 +8,7 @@ module Console
 
     layout "console"
 
+    before_action :require_admin
     before_action :set_principal
 
     def update_sandbox_access

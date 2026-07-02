@@ -20,7 +20,7 @@ class SessionsController < ApplicationController
   # Holding page for a signed-in but not-yet-approved user. Active users have no
   # reason to be here, so send them to the console.
   def pending
-    redirect_to console_principals_path if current_user&.active?
+    redirect_to default_console_landing_path if current_user&.active?
   end
 
   def create

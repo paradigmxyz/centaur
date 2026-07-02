@@ -83,9 +83,17 @@ class ApplicationController < ActionController::Base
     end
   end
 
-  # Guard for admin-only controllers (e.g. user management). Not a global gate.
+  # Guard for admin-only controllers (the Control and Data Sync sections, user
+  # management). Not a global gate. Bounces to the threads view rather than root:
+  # root is the admin-only principals page, so redirecting there would loop.
   def require_admin
-    redirect_to root_path, alert: "That page is restricted to admins." unless current_user&.admin?
+    redirect_to console_threads_path, alert: "That page is restricted to admins." unless current_user&.admin?
+  end
+
+  # Where a signed-in user lands when no explicit destination applies: admins get
+  # the Control section, everyone else the threads view (their only section).
+  def default_console_landing_path
+    current_user&.admin? ? console_principals_path : console_threads_path
   end
 
   # Cheap default so every page renders the empty sidebar list without touching
@@ -138,11 +146,11 @@ class ApplicationController < ActionController::Base
 
   def post_login_redirect_path
     path = session.delete(:return_to).to_s
-    return console_principals_path unless path.start_with?("/") && !path.start_with?("//")
+    return default_console_landing_path unless path.start_with?("/") && !path.start_with?("//")
     path
   end
 
-  def safe_console_return_path(default: console_principals_path)
+  def safe_console_return_path(default: default_console_landing_path)
     raw = params[:return_to].presence || params[:next].presence
     return default if raw.blank?
 
