@@ -5,6 +5,10 @@ class Console::ThreadsController < ApplicationController
   MESSAGE_LIMIT = 80
   EXECUTION_LIMIT = 8
   TRANSCRIPT_EVENT_LIMIT = 80
+  PANEL_LIMIT = 4
+  THINKING_EVENT_LIMIT = 200
+  # Messages and thinking precede the terminal event for a same-timestamp tie.
+  TRANSCRIPT_SOURCE_ORDER = { message: 0, thinking: 1, event: 2 }.freeze
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
   SLACK_THREAD_OWNER_METADATA_KEYS = %w[slack_user_id actor_user_id user_id].freeze
   SLACK_THREAD_TEAM_METADATA_KEYS = %w[slack_team_id team_id home_team_id].freeze
@@ -47,7 +51,9 @@ class Console::ThreadsController < ApplicationController
 
   def index
     @query = params[:q].to_s.strip
-    @selected_thread_key = params[:thread].to_s
+    requested_keys = requested_thread_keys
+    @selected_thread_key = requested_keys.first.to_s
+    @pane_thread_keys = requested_keys.drop(1)
     @starting_new_thread = params[:new].present?
     @thread_db_unavailable = false
 
@@ -89,17 +95,18 @@ class Console::ThreadsController < ApplicationController
 
     @sessions = base_sessions.select { |session| matches_query?(session) }
     @selected_session = selected_session(session_scope, base_sessions)
+    @pane_sessions = resolve_pane_sessions(session_scope, base_sessions)
     load_selected_session_summaries(keys)
     @selected_thread_key = @selected_session&.thread_key.to_s
-    @selected_messages = selected_messages
-    @selected_executions = selected_executions
-    @selected_events = selected_events
-    @selected_transcript_items = selected_transcript_items
+    @thread_panels = build_thread_panels
+    @selected_transcript_items = @thread_panels.first&.dig(:transcript_items) || []
   end
 
   def empty_thread_state
     @sessions = []
     @selected_session = nil
+    @pane_sessions = []
+    @thread_panels = []
     @selected_messages = []
     @selected_executions = []
     @selected_events = []
@@ -141,19 +148,72 @@ class Console::ThreadsController < ApplicationController
     params[:thread].blank? && !@starting_new_thread && @query.blank? && @selected_session.present?
   end
 
+  # The thread param carries up to PANEL_LIMIT comma-separated thread keys; the
+  # first is the primary thread and the rest are extra split-view panes
+  # (Cmd/Ctrl-click on a sidebar thread appends its key).
+  def requested_thread_keys
+    params[:thread].to_s.split(",").map(&:strip).reject(&:blank?).uniq.first(PANEL_LIMIT)
+  end
+
+  # Extra split-view panes resolve through the same owner scope as the primary
+  # thread, so a crafted ?thread= list cannot surface another user's thread.
+  # Unowned keys are dropped silently.
+  def resolve_pane_sessions(session_scope, base_sessions)
+    keys = @pane_thread_keys - [ @selected_session&.thread_key ]
+    keys.filter_map do |key|
+      base_sessions.find { |session| session.thread_key == key } ||
+        session_scope.where(thread_key: key).first
+    end
+  end
+
+  def build_thread_panels
+    sessions = ([ @selected_session ] + Array(@pane_sessions)).compact
+      .uniq(&:thread_key)
+      .first(PANEL_LIMIT)
+    return [] if sessions.empty?
+
+    # Build the primary panel last so the @selected_* thread state (used by the
+    # page header and mention-resolution memos) ends on the primary thread.
+    extra_panels = sessions.drop(1).map { |session| thread_panel_for(session) }
+    [ thread_panel_for(sessions.first) ] + extra_panels
+  end
+
+  def thread_panel_for(session)
+    @selected_session = session
+    @selected_messages = selected_messages
+    @selected_executions = selected_executions
+    @selected_events = selected_events
+    reset_selected_thread_memos
+
+    {
+      session: session,
+      thread_key: session.thread_key,
+      transcript_items: selected_transcript_items
+    }
+  end
+
+  # Mention labels and inferred bot ids are memoized off the selected thread's
+  # messages and events, so they must be recomputed per panel.
+  def reset_selected_thread_memos
+    @slack_mention_labels_by_id = nil
+    @slack_bot_user_ids = nil
+  end
+
   def redirect_to_first_thread
     redirect_to console_threads_path(thread: @selected_session.thread_key)
   end
 
   def load_selected_session_summaries(loaded_keys)
-    return unless @selected_session
-    return if loaded_keys.include?(@selected_session.thread_key)
+    missing_keys = ([ @selected_session ] + Array(@pane_sessions)).compact
+      .map(&:thread_key)
+      .uniq
+      .reject { |key| loaded_keys.include?(key) }
+    return if missing_keys.empty?
 
-    selected_key = [ @selected_session.thread_key ]
-    @latest_messages.merge!(latest_messages_for(selected_key))
-    @latest_executions.merge!(latest_executions_for(selected_key))
-    @message_counts.merge!(count_records(CentaurSessionMessage, selected_key))
-    @execution_counts.merge!(count_records(CentaurSessionExecution, selected_key))
+    @latest_messages.merge!(latest_messages_for(missing_keys))
+    @latest_executions.merge!(latest_executions_for(missing_keys))
+    @message_counts.merge!(count_records(CentaurSessionMessage, missing_keys))
+    @execution_counts.merge!(count_records(CentaurSessionExecution, missing_keys))
   end
 
   def visible_thread_scope
@@ -353,9 +413,78 @@ class Console::ThreadsController < ApplicationController
 
     event_items = @selected_events.filter_map { |event| transcript_item_for_event(event) }
 
-    (message_items + event_items).sort_by do |item|
-      [ item[:created_at] || Time.zone.at(0), item[:source] == :event ? 1 : 0 ]
+    thinking_items = selected_thinking_items
+
+    (message_items + thinking_items + event_items).sort_by do |item|
+      [ item[:created_at] || Time.zone.at(0), TRANSCRIPT_SOURCE_ORDER[item[:source]] || 0 ]
     end
+  end
+
+  # The api-rs stdout pump persists every harness output line verbatim as a
+  # session.output.line event whose payload is a JSON-encoded string. Reasoning
+  # blocks arrive as item/completed notifications with item.type == "reasoning"
+  # carrying the full accumulated thinking text. The SQL LIKE filter keeps the
+  # query from paging through the whole firehose; exact matching happens here.
+  def selected_thinking_items
+    return [] unless @selected_session
+
+    CentaurSessionEvent
+      .where(thread_key: @selected_session.thread_key)
+      .where(event_type: "session.output.line")
+      .where("payload::text LIKE '%reasoning%'")
+      .order(event_id: :desc)
+      .limit(THINKING_EVENT_LIMIT)
+      .to_a
+      .reverse
+      .filter_map { |event| thinking_transcript_item(event) }
+  end
+
+  def thinking_transcript_item(event)
+    line = event.payload
+    return nil unless line.is_a?(String)
+
+    value = JSON.parse(line)
+    return nil unless value.is_a?(Hash)
+
+    method = (value["method"] || value["type"]).to_s.tr("/", ".")
+    return nil unless method == "item.completed"
+
+    item = value.dig("params", "item") || value["item"]
+    return nil unless item.is_a?(Hash) && item["type"].to_s == "reasoning"
+
+    text = reasoning_item_text(item)
+    return nil if text.blank?
+
+    {
+      role: "thinking",
+      label: "Thinking",
+      align: :start,
+      text: text,
+      created_at: event.created_at,
+      source: :thinking
+    }
+  rescue JSON::ParserError
+    nil
+  end
+
+  # Claude/Amp reasoning lands in content (full text); Codex-native reasoning
+  # may only carry a summary. Prefer the fullest field available.
+  def reasoning_item_text(item)
+    [
+      item["text"],
+      reasoning_part_text(item["content"]),
+      reasoning_part_text(item["summary"])
+    ].find(&:present?)
+  end
+
+  def reasoning_part_text(value)
+    entries = value.is_a?(Array) ? value : [ value ]
+    entries.filter_map do |part|
+      case part
+      when String then part
+      when Hash then part["text"].to_s
+      end
+    end.join("\n").strip.presence
   end
 
   def latest_messages_for(keys)

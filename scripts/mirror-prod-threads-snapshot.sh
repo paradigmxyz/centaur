@@ -35,6 +35,7 @@ Snapshot sizing:
   MESSAGE_LIMIT_PER_THREAD=120
   EXECUTION_LIMIT_PER_THREAD=20
   EVENT_LIMIT_PER_THREAD=40
+  THINKING_EVENT_LIMIT_PER_THREAD=200
 
 Safety:
   TRUNCATE_LOCAL_SESSION_TABLES=1
@@ -241,7 +242,7 @@ create_snapshot() {
     order by thread_key, created_at, execution_id
   "
 
-  info "exporting up to ${EVENT_LIMIT_PER_THREAD} terminal events per thread"
+  info "exporting up to ${EVENT_LIMIT_PER_THREAD} terminal events and ${THINKING_EVENT_LIMIT_PER_THREAD} reasoning lines per thread"
   copy_to_csv "$source_url" "$snapshot_dir/session_events.csv" "
     with recent_sessions as (${recent_sessions_sql}),
     ranked as (
@@ -262,10 +263,36 @@ create_snapshot() {
         'session.execution_failed',
         'session.execution_cancelled'
       )
+    ),
+    -- Reasoning traces live in the session.output.line firehose as
+    -- item/completed notifications for reasoning items. The LIKE filter keeps
+    -- the export from paging every stdout line; Console re-filters exactly.
+    ranked_thinking as (
+      select
+        ev.thread_key,
+        ev.execution_id,
+        ev.event_type,
+        ev.payload,
+        ev.created_at,
+        row_number() over (
+          partition by ev.thread_key
+          order by ev.event_id desc
+        ) as rn
+      from session_events ev
+      join recent_sessions r using (thread_key)
+      where ev.event_type = 'session.output.line'
+        and ev.payload::text like '%reasoning%'
     )
     select thread_key, execution_id, event_type, payload, created_at
-    from ranked
-    where rn <= ${EVENT_LIMIT_PER_THREAD}
+    from (
+      select thread_key, execution_id, event_type, payload, created_at
+      from ranked
+      where rn <= ${EVENT_LIMIT_PER_THREAD}
+      union all
+      select thread_key, execution_id, event_type, payload, created_at
+      from ranked_thinking
+      where rn <= ${THINKING_EVENT_LIMIT_PER_THREAD}
+    ) combined
     order by thread_key, created_at
   "
 
@@ -337,6 +364,7 @@ create_snapshot() {
     echo "message_limit_per_thread=${MESSAGE_LIMIT_PER_THREAD}"
     echo "execution_limit_per_thread=${EXECUTION_LIMIT_PER_THREAD}"
     echo "event_limit_per_thread=${EVENT_LIMIT_PER_THREAD}"
+    echo "thinking_event_limit_per_thread=${THINKING_EVENT_LIMIT_PER_THREAD}"
     echo "slack_sync_users=referenced"
   } > "$snapshot_dir/manifest.env"
 
@@ -667,6 +695,7 @@ main() {
   MESSAGE_LIMIT_PER_THREAD="${MESSAGE_LIMIT_PER_THREAD:-120}"
   EXECUTION_LIMIT_PER_THREAD="${EXECUTION_LIMIT_PER_THREAD:-20}"
   EVENT_LIMIT_PER_THREAD="${EVENT_LIMIT_PER_THREAD:-40}"
+  THINKING_EVENT_LIMIT_PER_THREAD="${THINKING_EVENT_LIMIT_PER_THREAD:-200}"
   TRUNCATE_LOCAL_SESSION_TABLES="${TRUNCATE_LOCAL_SESSION_TABLES:-1}"
 
   validate_integer THREAD_LIMIT "$THREAD_LIMIT"

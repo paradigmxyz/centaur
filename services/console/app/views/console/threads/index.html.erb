@@ -8,98 +8,72 @@
 <% end %>
 
 <div class="flex min-h-0 flex-1 overflow-hidden bg-ink-950/15">
-  <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-900/25">
-    <div class="console-thread-detail-header">
-      <div class="console-thread-content">
-        <% if @selected_session %>
-          <% selected_thread_title = thread_title(@selected_session) %>
-          <% thread_meta = capture do %>
-            <div class="flex min-w-0 items-center gap-2">
-              <span class="truncate"><%= thread_source_label(@selected_session) %></span>
-              <span>·</span>
-              <span><%= thread_harness_label(@selected_session) %></span>
-              <% if (model_label = thread_model_label(@selected_session)) %>
+  <% if @thread_panels.size > 1 %>
+    <% grid_classes =
+         case @thread_panels.size
+         when 2 then "grid-cols-2"
+         when 3 then "grid-cols-3"
+         else "grid-cols-2 grid-rows-2"
+         end %>
+    <section class="grid min-h-0 min-w-0 flex-1 gap-3 overflow-hidden pb-3 <%= grid_classes %>">
+      <% @thread_panels.each do |panel| %>
+        <%= render "console/threads/thread_panel", panel: panel, panels: @thread_panels %>
+      <% end %>
+    </section>
+  <% else %>
+    <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-900/25">
+      <div class="console-thread-detail-header">
+        <div class="console-thread-content">
+          <% if @selected_session %>
+            <% selected_thread_title = thread_title(@selected_session) %>
+            <% thread_meta = capture do %>
+              <div class="flex min-w-0 items-center gap-2">
+                <span class="truncate"><%= thread_source_label(@selected_session) %></span>
                 <span>·</span>
-                <span class="truncate"><%= model_label %></span>
-              <% end %>
-              <span>·</span>
-              <%= local_time(@selected_session.updated_at || @selected_session.created_at, relative: true, format: :compact) %>
-            </div>
-          <% end %>
+                <span><%= thread_harness_label(@selected_session) %></span>
+                <% if (model_label = thread_model_label(@selected_session)) %>
+                  <span>·</span>
+                  <span class="truncate"><%= model_label %></span>
+                <% end %>
+                <span>·</span>
+                <%= local_time(@selected_session.updated_at || @selected_session.created_at, relative: true, format: :compact) %>
+              </div>
+            <% end %>
 
-          <%= render "console/page_header",
-                     title: selected_thread_title,
-                     title_attr: selected_thread_title,
-                     subtitle: thread_meta,
-                     title_class: "truncate text-base font-semibold text-zinc-100",
-                     subtitle_class: "mt-0.5 text-xs text-zinc-500",
-                     class: "mb-0 min-h-16 items-center" %>
+            <%= render "console/page_header",
+                       title: selected_thread_title,
+                       title_attr: selected_thread_title,
+                       subtitle: thread_meta,
+                       title_class: "truncate text-base font-semibold text-zinc-100",
+                       subtitle_class: "mt-0.5 text-xs text-zinc-500",
+                       class: "mb-0 min-h-16 items-center" %>
+          <% else %>
+            <%= render "console/page_header",
+                       title: "New thread",
+                       subtitle: "Select a mirrored thread from the sidebar.",
+                       title_class: "text-base font-semibold text-zinc-100",
+                       subtitle_class: "mt-0.5 text-xs text-zinc-500",
+                       class: "mb-0 min-h-16 items-center" %>
+          <% end %>
+        </div>
+      </div>
+
+      <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6">
+        <% if @selected_session %>
+          <div class="console-thread-content flex flex-col gap-6">
+            <%= render "console/threads/transcript", items: @selected_transcript_items %>
+          </div>
         <% else %>
-          <%= render "console/page_header",
-                     title: "New thread",
-                     subtitle: "Select a mirrored thread from the sidebar.",
-                     title_class: "text-base font-semibold text-zinc-100",
-                     subtitle_class: "mt-0.5 text-xs text-zinc-500",
-                     class: "mb-0 min-h-16 items-center" %>
+          <div class="flex h-full items-center justify-center text-sm text-zinc-600">
+            <% if @sessions.empty? %>
+              No threads yet.
+            <% else %>
+              Select a thread from the sidebar.
+            <% end %>
+          </div>
         <% end %>
       </div>
-    </div>
-
-    <div id="thread-transcript-scroll" class="min-h-0 flex-1 overflow-y-auto py-6">
-      <% if @selected_session %>
-        <div class="console-thread-content flex flex-col gap-6">
-          <% if @selected_transcript_items.empty? %>
-            <div class="rounded-xl border border-dashed border-ink-800/80 bg-ink-850/40 px-5 py-6 text-sm text-zinc-600">
-              No messages have been persisted for this thread yet.
-            </div>
-          <% end %>
-
-          <% @selected_transcript_items.each do |item| %>
-            <% user_message = item[:align] == :end %>
-            <div class="group flex <%= user_message ? "justify-end" : "justify-start" %>">
-              <div class="console-message-stack flex flex-col <%= user_message ? "max-w-[72%] items-end" : "w-full max-w-3xl items-start" %>">
-                <div class="<%= user_message ? "w-full rounded-[24px] bg-ink-700 px-4 py-3 text-zinc-100" : "w-full text-zinc-300" %>">
-                  <% unless user_message %>
-                    <div class="mb-1 text-xs font-medium text-zinc-500"><%= item[:label] || item[:role] %></div>
-                  <% end %>
-                  <div class="console-markdown text-sm leading-6"><%= console_markdown(item[:text].presence || "No text content.") %></div>
-                </div>
-                <div class="console-message-timestamp <%= "text-right" if user_message %>">
-                  <%= local_time(item[:created_at]) if item[:created_at] %>
-                </div>
-              </div>
-            </div>
-          <% end %>
-
-        </div>
-      <% else %>
-        <div class="flex h-full items-center justify-center text-sm text-zinc-600">
-          <% if @sessions.empty? %>
-            No threads yet.
-          <% else %>
-            Select a thread from the sidebar.
-          <% end %>
-        </div>
-      <% end %>
-    </div>
-  </section>
+    </section>
+  <% end %>
 </div>
 
-<script>
-  (() => {
-    const scrollThreadTranscript = () => {
-      const transcript = document.getElementById("thread-transcript-scroll");
-      if (!transcript) return;
-
-      window.requestAnimationFrame(() => {
-        transcript.scrollTop = transcript.scrollHeight;
-      });
-    };
-
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", scrollThreadTranscript, { once: true });
-    } else {
-      scrollThreadTranscript();
-    }
-  })();
-</script>
