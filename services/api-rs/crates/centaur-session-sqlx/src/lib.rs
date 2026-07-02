@@ -13,7 +13,7 @@ use sqlx::{
     postgres::{PgListener, PgPoolOptions},
 };
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
 
 // The API binary embeds these migrations at compile time.
@@ -425,6 +425,121 @@ impl PgSessionStore {
         })
     }
 
+    pub async fn claim_stdout_owner(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+        lease: Duration,
+    ) -> Result<bool, SessionStoreError> {
+        let lease_expires_at = stdout_lease_expires_at(lease);
+        let result = sqlx::query(
+            r#"
+            update session_executions
+            set stdout_owner_id = $2,
+                stdout_owner_lease_expires_at = $3,
+                updated_at = now()
+            where execution_id = $1
+              and status in ($4, $5)
+              and (
+                stdout_owner_id is null
+                or stdout_owner_id = $2
+                or stdout_owner_lease_expires_at < now()
+              )
+            "#,
+        )
+        .bind(execution_id)
+        .bind(owner_id)
+        .bind(lease_expires_at)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn claim_expired_stdout_owner(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+        lease: Duration,
+    ) -> Result<bool, SessionStoreError> {
+        let lease_expires_at = stdout_lease_expires_at(lease);
+        let result = sqlx::query(
+            r#"
+            update session_executions
+            set stdout_owner_id = $2,
+                stdout_owner_lease_expires_at = $3,
+                updated_at = now()
+            where execution_id = $1
+              and status in ($4, $5)
+              and (
+                stdout_owner_id is null
+                or stdout_owner_lease_expires_at < now()
+              )
+            "#,
+        )
+        .bind(execution_id)
+        .bind(owner_id)
+        .bind(lease_expires_at)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn renew_stdout_owner(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+        lease: Duration,
+    ) -> Result<bool, SessionStoreError> {
+        let lease_expires_at = stdout_lease_expires_at(lease);
+        let result = sqlx::query(
+            r#"
+            update session_executions
+            set stdout_owner_lease_expires_at = $3,
+                updated_at = now()
+            where execution_id = $1
+              and stdout_owner_id = $2
+              and status in ($4, $5)
+            "#,
+        )
+        .bind(execution_id)
+        .bind(owner_id)
+        .bind(lease_expires_at)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn release_stdout_owner(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let result = sqlx::query(
+            r#"
+            update session_executions
+            set stdout_owner_id = null,
+                stdout_owner_lease_expires_at = null,
+                updated_at = now()
+            where execution_id = $1 and stdout_owner_id = $2
+            "#,
+        )
+        .bind(execution_id)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn complete_execution(
         &self,
         execution_id: &str,
@@ -463,6 +578,41 @@ impl PgSessionStore {
         .bind(ExecutionStatus::Completed.as_ref())
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.set_session_status(&row.thread_key, SessionStatus::Idle)
+            .await?;
+        row.try_into().map(Some)
+    }
+
+    pub async fn complete_execution_if_active_and_stdout_owner(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2,
+                completed_at = coalesce(completed_at, now()),
+                stdout_owner_id = null,
+                stdout_owner_lease_expires_at = null,
+                updated_at = now()
+            where execution_id = $1
+              and status in ($3, $4)
+              and stdout_owner_id = $5
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Completed.as_ref())
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .bind(owner_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -527,6 +677,44 @@ impl PgSessionStore {
         row.try_into().map(Some)
     }
 
+    pub async fn fail_execution_if_active_and_stdout_owner(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+        error: &str,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2,
+                error = $3,
+                completed_at = coalesce(completed_at, now()),
+                stdout_owner_id = null,
+                stdout_owner_lease_expires_at = null,
+                updated_at = now()
+            where execution_id = $1
+              and status in ($4, $5)
+              and stdout_owner_id = $6
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Failed.as_ref())
+        .bind(error)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.set_session_status(&row.thread_key, SessionStatus::Failed)
+            .await?;
+        row.try_into().map(Some)
+    }
+
     pub async fn append_event(
         &self,
         thread_key: &ThreadKey,
@@ -549,6 +737,60 @@ impl PgSessionStore {
         .await?;
 
         row.try_into()
+    }
+
+    pub async fn append_event_if_stdout_owner(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        owner_id: &str,
+        lease: Duration,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<Option<SessionEvent>, SessionStoreError> {
+        let lease_expires_at = stdout_lease_expires_at(lease);
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+            update session_executions
+            set stdout_owner_lease_expires_at = $3,
+                updated_at = now()
+            where execution_id = $1
+              and stdout_owner_id = $2
+              and status in ($4, $5)
+              and thread_key = $6
+            "#,
+        )
+        .bind(execution_id)
+        .bind(owner_id)
+        .bind(lease_expires_at)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .bind(thread_key.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        let row = sqlx::query_as::<_, SessionEventRow>(
+            r#"
+            insert into session_events (thread_key, execution_id, event_type, payload)
+            values ($1, $2, $3, $4)
+            returning event_id, thread_key, execution_id, event_type, payload, created_at
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(execution_id)
+        .bind(event_type)
+        .bind(payload)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        row.try_into().map(Some)
     }
 
     pub async fn list_events_after(
@@ -1471,6 +1713,11 @@ pub fn default_metadata(metadata: Option<Value>) -> Value {
     metadata.unwrap_or_else(empty_object)
 }
 
+fn stdout_lease_expires_at(lease: Duration) -> OffsetDateTime {
+    let seconds = i64::try_from(lease.as_secs()).unwrap_or(i64::MAX);
+    OffsetDateTime::now_utc() + TimeDuration::new(seconds, lease.subsec_nanos() as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1620,6 +1867,101 @@ mod tests {
         assert_eq!(candidate.sandbox_id, sandbox_id);
         assert_eq!(candidate.execution_id, execution_id);
         assert_eq!(candidate.idle_timeout, Duration::from_secs(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_owner_fences_output_and_terminal_updates() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:stdout-owner-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+        store
+            .mark_execution_running(&execution_id)
+            .await
+            .expect("mark running");
+
+        assert!(
+            store
+                .claim_stdout_owner(&execution_id, "owner-a", Duration::from_millis(25))
+                .await
+                .expect("owner-a claims stdout")
+        );
+        assert!(
+            store
+                .append_event_if_stdout_owner(
+                    &thread_key,
+                    &execution_id,
+                    "owner-a",
+                    Duration::from_millis(25),
+                    "session.output.line",
+                    json!("line-from-owner-a"),
+                )
+                .await
+                .expect("owner-a appends")
+                .is_some()
+        );
+        assert!(
+            store
+                .append_event_if_stdout_owner(
+                    &thread_key,
+                    &execution_id,
+                    "owner-b",
+                    Duration::from_millis(25),
+                    "session.output.line",
+                    json!("line-from-stale-owner-b"),
+                )
+                .await
+                .expect("owner-b append is fenced")
+                .is_none()
+        );
+        assert!(
+            store
+                .complete_execution_if_active_and_stdout_owner(&execution_id, "owner-b")
+                .await
+                .expect("owner-b terminal update is fenced")
+                .is_none()
+        );
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            store
+                .claim_expired_stdout_owner(&execution_id, "owner-b", Duration::from_secs(5))
+                .await
+                .expect("owner-b claims after lease expiry")
+        );
+        assert!(
+            store
+                .append_event_if_stdout_owner(
+                    &thread_key,
+                    &execution_id,
+                    "owner-a",
+                    Duration::from_secs(5),
+                    "session.output.line",
+                    json!("line-from-expired-owner-a"),
+                )
+                .await
+                .expect("expired owner-a append is fenced")
+                .is_none()
+        );
+        let completed = store
+            .complete_execution_if_active_and_stdout_owner(&execution_id, "owner-b")
+            .await
+            .expect("owner-b completes")
+            .expect("completion should be recorded");
+        assert_eq!(
+            completed.status,
+            centaur_session_core::ExecutionStatus::Completed
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

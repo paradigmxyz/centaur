@@ -139,7 +139,7 @@ struct ActivitySummaryArgs {
     #[arg(
         long = "session-activity-summary-min-interval-secs",
         env = "SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS",
-        default_value_t = 8,
+        default_value_t = 20,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     min_interval_secs: u64,
@@ -1037,11 +1037,10 @@ impl SandboxArgs {
             .collect()
     }
 
-    /// Per-sandbox OTLP egress NetworkPolicy target, derived from the OTLP
-    /// endpoint the codex sandbox env will carry. Only in-cluster service DNS
-    /// endpoints (`<service>.<namespace>.svc[...]`) map to a namespace
-    /// selector; anything else gets no rule and a warning, because a silently
-    /// missing rule means harness usage/cost spans never reach the collector.
+    /// Per-sandbox proxy OTLP egress NetworkPolicy target, derived from the
+    /// OTLP endpoint the codex sandbox env will carry. Only in-cluster service
+    /// DNS endpoints (`<service>.<namespace>.svc[...]`) map to a namespace
+    /// selector.
     fn sandbox_otlp_egress_target(&self) -> Result<Option<OtlpEgressTarget>, ServerError> {
         if !matches!(self.workload, SandboxWorkloadKind::CodexAppServer) {
             return Ok(None);
@@ -1066,7 +1065,7 @@ impl SandboxArgs {
                     namespace = %target.namespace,
                     port = target.port,
                     endpoint = %endpoint,
-                    "sandbox OTLP egress enabled"
+                    "sandbox proxy OTLP egress enabled"
                 );
                 Ok(Some(target))
             }
@@ -1074,7 +1073,7 @@ impl SandboxArgs {
                 warn!(
                     endpoint = %endpoint,
                     "sandbox OTLP endpoint is not an in-cluster service DNS name; \
-                     no sandbox egress NetworkPolicy rule will be created for it"
+                     no proxy egress NetworkPolicy rule will be created for it"
                 );
                 Ok(None)
             }
@@ -1312,9 +1311,8 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         }
         config.iron_control = args.iron_control.settings();
         config.tools = args.tools_source.to_config();
-        // Direct harness OTLP export (codex usage/cost spans) needs a hole in
-        // the per-sandbox egress NetworkPolicy; derived from the sandbox's own
-        // OTLP endpoint env so there is a single source of truth.
+        // The chart label policy handles sandbox OTLP egress; keep the
+        // per-sandbox proxy's own in-cluster OTLP egress explicit.
         config.otlp_egress = args.sandbox_otlp_egress_target()?;
         // iron-control is the only proxy mode: a per-sandbox proxy syncs its
         // secrets from the control plane, so configuring iron-proxy without
@@ -1852,8 +1850,8 @@ fn parse_host_port(value: &str) -> Option<u16> {
 }
 
 /// Map an OTLP endpoint URL onto a NetworkPolicy egress target. Only
-/// in-cluster service DNS hosts (`<service>.<namespace>.svc[.<cluster-domain>]`)
-/// are mapped; the namespace label is the policy's `kubernetes.io/metadata.name`
+/// in-cluster service DNS hosts (`<service>.<namespace>.svc[...]`) are mapped;
+/// the namespace label is the policy's `kubernetes.io/metadata.name`
 /// selector. Ports default by scheme when absent.
 fn parse_otlp_egress_target(endpoint: &str) -> Option<OtlpEgressTarget> {
     let trimmed = endpoint.trim();

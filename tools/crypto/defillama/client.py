@@ -317,6 +317,30 @@ class DefiLlamaClient:
         """
         return self._request(f"/summary/derivatives/{protocol}")
 
+    def get_open_interest_overview(self, chain: str | None = None) -> dict:
+        """Get perpetual-futures open interest overview.
+
+        Args:
+            chain: Optional chain name to filter
+
+        Returns:
+            Open interest overview data
+        """
+        if chain:
+            return self._request(f"/overview/open-interest/{chain}")
+        return self._request("/overview/open-interest")
+
+    def get_open_interest_summary(self, protocol: str) -> dict:
+        """Get open interest details for a specific perpetuals venue.
+
+        Args:
+            protocol: Protocol slug (e.g., "hyperliquid", "lighter", "dydx-v4")
+
+        Returns:
+            Protocol open interest details
+        """
+        return self._request(f"/summary/open-interest/{protocol}")
+
     # === Bridges ===
 
     def list_bridges(self) -> list[dict]:
