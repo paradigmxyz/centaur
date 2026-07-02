@@ -691,11 +691,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     get console_sidebar_threads_url(thread: keys.join(","))
 
     assert_response :ok
-    # Primary thread gets the filled pill; other open panes get the dot marker.
-    assert_select "a.console-thread-link-active[href=?]",
+    # Open threads carry their 1-based pane number in grid order; no filled
+    # pill on thread rows.
+    assert_select "a.console-thread-link-open[data-console-pane-index='1'][href=?]",
                   console_threads_path(thread: keys.first)
-    assert_select "a.console-thread-link-open[href=?]",
+    assert_select "a.console-thread-link-open[data-console-pane-index='2'][href=?]",
                   console_threads_path(thread: keys.last)
+    assert_select "a.console-thread-link-active", count: 0
   end
 
   test "split view close control drops one thread and keeps the rest open" do

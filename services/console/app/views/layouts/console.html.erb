@@ -240,22 +240,22 @@
         transition: background 120ms ease, color 120ms ease;
       }
 
-      /* A thread open as a non-primary split-view pane: bright title plus a
-         small dot in the indent gutter, instead of another filled pill. */
+      /* An open thread: bright title plus its pane number (grid order) as a
+         small numeral in the indent gutter — no filled pill on thread rows. */
       .console-thread-link-open {
         color: #f4f4f5;
       }
 
       .console-thread-link-open::before {
-        content: "";
+        content: attr(data-console-pane-index);
         position: absolute;
         top: 50%;
-        left: 1.35rem;
-        height: 0.3rem;
-        width: 0.3rem;
+        left: 1.05rem;
         transform: translateY(-50%);
-        border-radius: 999px;
-        background: #28c26a;
+        color: #3ace79;
+        font-size: 0.6875rem;
+        font-weight: 700;
+        line-height: 1;
       }
 
       .console-thread-link:hover {
@@ -700,7 +700,7 @@
       }
 
       html[data-console-theme="light"] .console-thread-link-open::before {
-        background: #28a65d;
+        color: #168f4a;
       }
 
       html[data-console-theme="light"] .console-thread-time,
@@ -1188,11 +1188,15 @@
 
           document.querySelectorAll("[data-console-thread-link]").forEach((link) => {
             const key = new URL(link.href, window.location.origin).searchParams.get("thread");
-            const primary = openKeys[0] === key;
-            const open = !primary && openKeys.includes(key);
-            link.classList.toggle("console-thread-link-active", primary);
+            const paneIndex = openKeys.indexOf(key);
+            const open = paneIndex !== -1;
             link.classList.toggle("console-thread-link-open", open);
-            if (primary || open) link.classList.remove("console-thread-link-hidden");
+            if (open) {
+              link.dataset.consolePaneIndex = String(paneIndex + 1);
+              link.classList.remove("console-thread-link-hidden");
+            } else {
+              delete link.dataset.consolePaneIndex;
+            }
           });
         };
 
@@ -1203,39 +1207,56 @@
       })();
 
       (() => {
-        // Cmd/Ctrl-click on a sidebar thread adds it to the split-view grid.
-        // The thread param carries up to PANEL_LIMIT comma-separated keys, the
-        // first being the primary thread. Delegated on document because the
-        // thread list arrives later via the lazy Turbo Frame; Turbo already
-        // ignores modified clicks, so only the browser's new-tab default needs
-        // preventing.
+        // Sidebar thread clicks against the split-view grid. The thread param
+        // carries up to PANEL_LIMIT comma-separated keys in grid order.
+        //   - click or Cmd/Ctrl-click on an already-open thread closes it
+        //   - Cmd/Ctrl-click on a closed thread adds it as a pane
+        //   - plain click on a closed thread falls through to Turbo (replaces
+        //     the selection with that single thread)
+        // Capture phase so the close case wins over Turbo's own link handling;
+        // delegated on document because the list arrives via a lazy frame.
         const THREADS_PATH = "<%= console_threads_path %>";
         const PANEL_LIMIT = <%= Console::ThreadsController::PANEL_LIMIT %>;
 
         document.addEventListener("click", (event) => {
-          if (!(event.metaKey || event.ctrlKey)) return;
-
           const link = event.target.closest("[data-console-thread-link]");
           if (!link) return;
 
           const key = new URL(link.href, window.location.origin).searchParams.get("thread");
           if (!key) return;
 
-          event.preventDefault();
-
           const current = new URL(window.location.href);
-          const open = current.pathname.startsWith(THREADS_PATH)
+          const openKeys = current.pathname.startsWith(THREADS_PATH)
             ? (current.searchParams.get("thread") || "").split(",").filter(Boolean)
             : [];
-          if (!open.includes(key)) open.push(key);
+          const isOpen = openKeys.includes(key);
+          const modified = event.metaKey || event.ctrlKey;
 
-          // Keep the primary thread and the newest panes when over the limit.
-          const capped = open.length > PANEL_LIMIT
-            ? [open[0], ...open.slice(-(PANEL_LIMIT - 1))]
-            : open;
+          let nextKeys;
+          if (isOpen) {
+            nextKeys = openKeys.filter((openKey) => openKey !== key);
+          } else if (modified) {
+            nextKeys = [...openKeys, key];
+            // Keep the primary thread and the newest panes when over the limit.
+            if (nextKeys.length > PANEL_LIMIT) {
+              nextKeys = [nextKeys[0], ...nextKeys.slice(-(PANEL_LIMIT - 1))];
+            }
+          } else {
+            return;
+          }
+
+          event.preventDefault();
+          event.stopPropagation();
 
           const next = new URL(THREADS_PATH, window.location.origin);
-          next.searchParams.set("thread", capped.join(","));
+          if (nextKeys.length) {
+            next.searchParams.set("thread", nextKeys.join(","));
+          } else {
+            // Closing the last open thread lands on the empty state instead of
+            // bouncing straight back via the auto-select redirect.
+            next.searchParams.set("new", "1");
+          }
+
           // Turbo visit keeps the turbo-permanent sidebar list mounted; a
           // plain location.assign would full-load and repaint it.
           if (window.Turbo) {
@@ -1243,7 +1264,7 @@
           } else {
             window.location.assign(next.toString());
           }
-        });
+        }, true);
       })();
     </script>
   </body>
