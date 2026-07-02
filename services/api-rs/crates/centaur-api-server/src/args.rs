@@ -459,7 +459,8 @@ pub(crate) struct ServerArgs {
     #[arg(
         long = "shutdown-execution-drain-timeout-secs",
         env = "SHUTDOWN_EXECUTION_DRAIN_TIMEOUT_SECS",
-        default_value_t = 20
+        default_value_t = 20,
+        value_parser = clap::value_parser!(u64).range(0..=600)
     )]
     shutdown_execution_drain_timeout_secs: u64,
 }

@@ -2059,6 +2059,30 @@ mod tests {
             );
             owned.push((execution_id, thread_key));
         }
+        // A bystander owner's lease must survive the release untouched.
+        let bystander_thread =
+            ThreadKey::parse(format!("test:handoff-bystander-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&bystander_thread, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create bystander session");
+        let bystander_execution = store
+            .create_execution(&bystander_thread, None, json!({}))
+            .await
+            .expect("create bystander execution")
+            .execution
+            .execution_id;
+        store
+            .mark_execution_running(&bystander_execution)
+            .await
+            .expect("mark bystander running");
+        let bystander = format!("bystander-{}", Uuid::new_v4().simple());
+        assert!(
+            store
+                .claim_stdout_owner(&bystander_execution, &bystander, Duration::from_secs(60))
+                .await
+                .expect("claim bystander lease")
+        );
         assert_eq!(
             store
                 .count_executions_with_stdout_owner(&owner)
@@ -2096,6 +2120,19 @@ mod tests {
                 .await
                 .expect("peer claims released lease")
         );
+
+        assert_eq!(
+            store
+                .count_executions_with_stdout_owner(&bystander)
+                .await
+                .expect("count bystander"),
+            1,
+            "release must be scoped to the requested owner"
+        );
+        store
+            .fail_execution_if_active(&bystander_execution, "test cleanup")
+            .await
+            .expect("terminalize bystander");
 
         // Terminal executions are never part of a release, even if a lease
         // column is still populated.

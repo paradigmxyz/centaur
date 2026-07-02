@@ -4,7 +4,10 @@ mod title_generator;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     future::Future,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -62,6 +65,7 @@ const SESSION_PIPE_REATTACH_DELAY: Duration = Duration::from_millis(500);
 const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
 const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 const EXECUTION_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const EXECUTION_HANDOFF_DB_TIMEOUT: Duration = Duration::from_secs(5);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
@@ -96,6 +100,10 @@ pub struct SessionRuntime {
     session_title_rerun_requested: SessionTitleThreadSet,
     capacity: Option<Arc<SandboxCapacityController>>,
     stdout_owner_id: String,
+    /// Set once a shutdown handoff begins; fences new stdout-owner claims
+    /// so an execution cannot start on a control plane that is about to
+    /// exit and release its leases.
+    shutting_down: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -743,6 +751,7 @@ impl SessionRuntime {
             session_title_rerun_requested: Arc::new(DashSet::new()),
             capacity: None,
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1092,6 +1101,9 @@ impl SessionRuntime {
     }
 
     async fn claim_stdout_owner(&self, execution_id: &str) -> Result<(), SessionRuntimeError> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(SessionRuntimeError::ShuttingDown);
+        }
         let claimed = self
             .store
             .claim_stdout_owner(execution_id, &self.stdout_owner_id, STDOUT_OWNER_LEASE)
@@ -3029,13 +3041,29 @@ impl SessionRuntime {
     /// not lost: adoption replays it from the sandbox backend's recorded
     /// output.
     pub async fn handoff_owned_executions(&self, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
+        // Fence new stdout-owner claims first: an execution accepted after
+        // this point would otherwise claim a lease that outlives the
+        // process, stranding it until the lease TTL expires.
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
         loop {
-            match self
-                .store
-                .count_executions_with_stdout_owner(&self.stdout_owner_id)
-                .await
-            {
+            let count = tokio::time::timeout(
+                EXECUTION_HANDOFF_DB_TIMEOUT,
+                self.store
+                    .count_executions_with_stdout_owner(&self.stdout_owner_id),
+            )
+            .await;
+            let Ok(count) = count else {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_handoff_count_timeout",
+                    "timed out counting in-flight executions; releasing leases now"
+                );
+                break;
+            };
+            match count {
                 Ok(0) => {
                     info!(
                         component = COMPONENT_SESSION_RUNTIME,
@@ -3067,11 +3095,21 @@ impl SessionRuntime {
             }
             sleep(EXECUTION_HANDOFF_POLL_INTERVAL).await;
         }
-        match self
-            .store
-            .release_stdout_owned_executions(&self.stdout_owner_id)
-            .await
-        {
+        let released = tokio::time::timeout(
+            EXECUTION_HANDOFF_DB_TIMEOUT,
+            self.store
+                .release_stdout_owned_executions(&self.stdout_owner_id),
+        )
+        .await;
+        let Ok(released) = released else {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_handoff_release_timeout",
+                "timed out releasing stdout-owner leases; peers must wait for lease expiry"
+            );
+            return;
+        };
+        match released {
             Ok(released) => {
                 for execution in &released {
                     info!(
@@ -5195,6 +5233,7 @@ fn execution_duration(execution: &SessionExecution) -> Option<Duration> {
 fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
     match error {
         SessionRuntimeError::BadRequest(_) => "bad_request",
+        SessionRuntimeError::ShuttingDown => "shutting_down",
         SessionRuntimeError::Store(_) => "store",
         SessionRuntimeError::Sandbox(SandboxError::NotFound(_)) => "sandbox_not_found",
         SessionRuntimeError::Sandbox(SandboxError::Unsupported { .. }) => "sandbox_unsupported",
@@ -6070,6 +6109,8 @@ fn terminal_output_from_lines(lines: &[String]) -> Option<TerminalOutput> {
 pub enum SessionRuntimeError {
     #[error("{0}")]
     BadRequest(String),
+    #[error("control plane is shutting down")]
+    ShuttingDown,
     #[error(transparent)]
     Store(#[from] SessionStoreError),
     #[error(transparent)]
@@ -8480,7 +8521,11 @@ mod adoption_tests {
         runtime
             .handoff_owned_executions(Duration::from_secs(5))
             .await;
-        completer.await.expect("completer task");
+        let completed = completer.await.expect("completer task");
+        assert!(
+            completed.is_some(),
+            "the completer, not the handoff, must terminalize the execution"
+        );
 
         let all = events(&store, &thread_key).await;
         assert!(
@@ -8488,5 +8533,35 @@ mod adoption_tests {
                 .all(|event| event.event_type != "session.stdout_owner_released"),
             "finished execution must not be handed off"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_fences_new_stdout_claims() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend);
+
+        // Nothing owned: the handoff returns immediately but still flips
+        // the shutdown fence.
+        runtime.handoff_owned_executions(Duration::ZERO).await;
+
+        let thread_key =
+            ThreadKey::parse(format!("test:handoff-fence-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+        let error = runtime
+            .claim_stdout_owner(&execution_id)
+            .await
+            .expect_err("claims after shutdown must be rejected");
+        assert!(
+            matches!(error, SessionRuntimeError::ShuttingDown),
+            "unexpected error: {error}"
+        );
+        store
+            .fail_execution_if_active(&execution_id, "test cleanup")
+            .await
+            .expect("terminalize execution");
     }
 }
