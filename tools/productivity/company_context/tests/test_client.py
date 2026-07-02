@@ -56,6 +56,11 @@ class _FakeConnection:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def _disable_lookup_metric_push(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED", "0")
+
+
 @pytest.mark.parametrize("query", ["", "   "])
 def test_search_rejects_empty_query(query):
     result = CompanyContextClient("postgresql://example").search(query)
@@ -144,6 +149,7 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
             "document_count": 42,
         },
     )
+
     async def fake_connect(*args, **kwargs):
         return fake
 
@@ -199,6 +205,145 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
         5,
     )
     assert fake.closed is True
+
+
+def test_search_emits_grouped_lookup_metrics(monkeypatch):
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack:thread:C123:1770000000.000000",
+                "source": "slack",
+                "source_type": "slack_thread",
+                "title": "Shopify launch",
+                "body": "Shopify launch details",
+                "occurred_at": dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC),
+                "source_updated_at": dt.datetime(2026, 5, 8, 12, 5, tzinfo=dt.UTC),
+                "metadata": {},
+                "score": 1.0,
+            },
+            {
+                "document_id": "slack:thread:C123:1770000001.000000",
+                "source": "slack",
+                "source_type": "slack_thread",
+                "title": "More Shopify launch",
+                "body": "More Shopify launch details",
+                "occurred_at": dt.datetime(2026, 5, 8, 13, 0, tzinfo=dt.UTC),
+                "source_updated_at": dt.datetime(2026, 5, 8, 13, 5, tzinfo=dt.UTC),
+                "metadata": {},
+                "score": 0.9,
+            },
+            {
+                "document_id": "google_drive:doc:launch-plan",
+                "source": "google_drive",
+                "source_type": "google_doc",
+                "title": "Launch plan",
+                "body": "Shopify launch plan",
+                "occurred_at": dt.datetime(2026, 5, 7, 12, 0, tzinfo=dt.UTC),
+                "source_updated_at": dt.datetime(2026, 5, 7, 12, 5, tzinfo=dt.UTC),
+                "metadata": {},
+                "score": 0.8,
+            },
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    pushed_lines = []
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setattr(company_context_client, "_include_google_docs_source", lambda *_args: False)
+    monkeypatch.setattr(
+        company_context_client,
+        "_push_company_context_lookup_metric_lines",
+        lambda lines: pushed_lines.extend(lines),
+    )
+
+    result = CompanyContextClient("postgresql://example").search("Shopify launch", limit=10)
+
+    assert result["status"] == "ok"
+    assert result["indexed_count"] == 3
+    assert any(
+        line.startswith(
+            'company_context_lookup_requests{requested_source="all",'
+            'requested_source_type="all",status="ok",time_window="false"} 1 '
+        )
+        for line in pushed_lines
+    )
+    assert any(
+        line.startswith(
+            'company_context_lookup_results{lane="indexed",source="google_drive",'
+            'source_type="google_doc"} 1 '
+        )
+        for line in pushed_lines
+    )
+    assert any(
+        line.startswith(
+            'company_context_lookup_results{lane="indexed",source="slack",'
+            'source_type="slack_thread"} 2 '
+        )
+        for line in pushed_lines
+    )
+    assert not any(line.startswith("company_context_lookup_zero_results") for line in pushed_lines)
+
+
+def test_search_emits_zero_result_lookup_metric(monkeypatch):
+    fake = _FakeConnection(rows=[])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    pushed_lines = []
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setattr(
+        company_context_client,
+        "_push_company_context_lookup_metric_lines",
+        lambda lines: pushed_lines.extend(lines),
+    )
+
+    result = CompanyContextClient("postgresql://example").search(
+        "missing launch",
+        source="slack",
+        source_type="slack_thread",
+        occurred_after="2026-05-01",
+    )
+
+    assert result["status"] == "ok"
+    assert result["indexed_count"] == 0
+    assert any(
+        line.startswith(
+            'company_context_lookup_zero_results{requested_source="slack",'
+            'requested_source_type="slack_thread",status="ok",time_window="true"} 1 '
+        )
+        for line in pushed_lines
+    )
+
+
+def test_search_emits_error_lookup_metric(monkeypatch):
+    async def fake_connect(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    pushed_lines = []
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setattr(
+        company_context_client,
+        "_push_company_context_lookup_metric_lines",
+        lambda lines: pushed_lines.extend(lines),
+    )
+
+    result = CompanyContextClient("postgresql://example").search(
+        "Shopify launch",
+        source="google_drive",
+    )
+
+    assert result == {"status": "error", "error": "database unavailable"}
+    assert pushed_lines
+    assert any(
+        line.startswith(
+            'company_context_lookup_requests{requested_source="google_drive",'
+            'requested_source_type="all",status="error",time_window="false"} 1 '
+        )
+        for line in pushed_lines
+    )
 
 
 def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):

@@ -6,6 +6,9 @@ import asyncio
 import json
 import os
 import re
+import time
+import urllib.request
+from collections import Counter
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -31,6 +34,14 @@ GOOGLE_DOCS_SOURCE_TYPE = "google_doc"
 COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
+COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED_ENV = "COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED"
+VICTORIAMETRICS_PUSH_ENABLED_ENV = "VICTORIAMETRICS_PUSH_ENABLED"
+VICTORIAMETRICS_URL_ENV = "VICTORIAMETRICS_URL"
+DEFAULT_VICTORIAMETRICS_URL = "http://victoriametrics:8428"
+METRICS_PUSH_TIMEOUT_SECONDS = 1.0
+LOOKUP_REQUEST_METRIC = "company_context_lookup_requests"
+LOOKUP_RESULT_METRIC = "company_context_lookup_results"
+LOOKUP_ZERO_RESULT_METRIC = "company_context_lookup_zero_results"
 
 _SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
 _STOP_WORDS = {
@@ -126,6 +137,135 @@ def _isoformat(value: Any) -> str | None:
     return None
 
 
+def _env_flag_enabled(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)  # noqa: TID251
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _first_nonempty_env(names: list[str]) -> str | None:
+    for name in names:
+        value = os.getenv(name, "").strip()  # noqa: TID251
+        if value:
+            return value
+    return None
+
+
+def _metric_runtime_labels() -> dict[str, str]:
+    labels: dict[str, str] = {}
+    environment = _first_nonempty_env(["CENTAUR_ENVIRONMENT", "DEPLOY_ENV", "ENVIRONMENT"])
+    namespace = _first_nonempty_env(["CENTAUR_NAMESPACE", "POD_NAMESPACE", "NAMESPACE"])
+    if environment:
+        labels["environment"] = environment
+    if namespace:
+        labels["namespace"] = namespace
+    return labels
+
+
+def _metric_label_value(value: str | None, *, empty: str = "all") -> str:
+    normalized = str(value or "").strip()
+    return normalized if normalized else empty
+
+
+def _format_metric_labels(labels: dict[str, str]) -> str:
+    if not labels:
+        return ""
+    parts = []
+    for key in sorted(labels):
+        value = labels[key].replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+        parts.append(f'{key}="{value}"')
+    return "{" + ",".join(parts) + "}"
+
+
+def _format_metric_sample(
+    metric: str,
+    value: int | float,
+    labels: dict[str, str],
+    timestamp_ms: int,
+) -> str:
+    return f"{metric}{_format_metric_labels(labels)} {value} {timestamp_ms}"
+
+
+def _company_context_lookup_metrics_enabled() -> bool:
+    return _env_flag_enabled(COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED_ENV, default=True) and (
+        _env_flag_enabled(VICTORIAMETRICS_PUSH_ENABLED_ENV, default=True)
+    )
+
+
+def _victoria_metrics_import_url() -> str:
+    base_url = os.getenv(VICTORIAMETRICS_URL_ENV, DEFAULT_VICTORIAMETRICS_URL).strip()  # noqa: TID251
+    if base_url and not base_url.startswith(("http://", "https://")):
+        base_url = f"http://{base_url}"
+    return f"{(base_url or DEFAULT_VICTORIAMETRICS_URL).rstrip('/')}/api/v1/import/prometheus"
+
+
+def _push_company_context_lookup_metric_lines(lines: list[str]) -> None:
+    if not lines or not _company_context_lookup_metrics_enabled():
+        return
+    try:
+        body = ("\n".join(lines) + "\n").encode()
+        request = urllib.request.Request(
+            _victoria_metrics_import_url(),
+            data=body,
+            headers={"Content-Type": "text/plain; version=0.0.4"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=METRICS_PUSH_TIMEOUT_SECONDS):
+            pass
+    except Exception:
+        return
+
+
+def _emit_company_context_lookup_metrics(
+    *,
+    status: str,
+    requested_source: str | None,
+    requested_source_type: str | None,
+    occurred_after: datetime | None,
+    occurred_before: datetime | None,
+    results: list[dict[str, Any]],
+) -> None:
+    """Emit event-style lookup samples; dashboards should sum them over a range."""
+    labels = {
+        **_metric_runtime_labels(),
+        "status": _metric_label_value(status, empty="unknown"),
+        "requested_source": _metric_label_value(requested_source),
+        "requested_source_type": _metric_label_value(requested_source_type),
+        "time_window": str(occurred_after is not None or occurred_before is not None).lower(),
+    }
+    timestamp_ms = int(time.time() * 1000)
+    lines = [_format_metric_sample(LOOKUP_REQUEST_METRIC, 1, labels, timestamp_ms)]
+
+    if status == "ok" and not results:
+        lines.append(_format_metric_sample(LOOKUP_ZERO_RESULT_METRIC, 1, labels, timestamp_ms))
+
+    grouped_results = Counter(
+        (
+            _metric_label_value(str(result.get("source") or "")),
+            _metric_label_value(str(result.get("source_type") or "")),
+            _metric_label_value(str(result.get("lane") or "indexed"), empty="indexed"),
+        )
+        for result in results
+    )
+    for (source, source_type, lane), count in sorted(grouped_results.items()):
+        lines.append(
+            _format_metric_sample(
+                LOOKUP_RESULT_METRIC,
+                count,
+                {
+                    **_metric_runtime_labels(),
+                    "source": source,
+                    "source_type": source_type,
+                    "lane": lane,
+                },
+                timestamp_ms,
+            )
+        )
+
+    _push_company_context_lookup_metric_lines(lines)
+
+
 def _parse_datetime_filter(value: str | datetime | None, *, name: str) -> datetime | None:
     """Parse optional date filters for tool calls."""
     if value is None:
@@ -187,8 +327,7 @@ def _search_where_clause(term_count: int) -> str:
     ]
     for index in range(2, term_count + 2):
         clauses.append(
-            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) "
-            f"OR body ||| ${index}::text)"
+            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index}::text)"
         )
     return " OR ".join(clauses)
 
@@ -476,6 +615,15 @@ class CompanyContextClient:
             )
             results = results[:limit]
 
+            _emit_company_context_lookup_metrics(
+                status="ok",
+                requested_source=source,
+                requested_source_type=source_type,
+                occurred_after=occurred_after,
+                occurred_before=occurred_before,
+                results=results,
+            )
+
             response = {
                 "status": "ok",
                 "query": query,
@@ -677,6 +825,8 @@ class CompanyContextClient:
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
 
+        normalized_source = source.strip() if source else None
+        normalized_source_type = source_type.strip() if source_type else None
         try:
             parsed_occurred_after = _parse_datetime_filter(
                 occurred_after,
@@ -691,13 +841,21 @@ class CompanyContextClient:
                 self._search_async(
                     query=normalized_query,
                     limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
-                    source=source.strip() if source else None,
-                    source_type=source_type.strip() if source_type else None,
+                    source=normalized_source,
+                    source_type=normalized_source_type,
                     occurred_after=parsed_occurred_after,
                     occurred_before=parsed_occurred_before,
                 )
             )
         except Exception as exc:
+            _emit_company_context_lookup_metrics(
+                status="error",
+                requested_source=normalized_source,
+                requested_source_type=normalized_source_type,
+                occurred_after=None,
+                occurred_before=None,
+                results=[],
+            )
             return {"status": "error", "error": str(exc)}
 
     async def _search_dm_conversations_async(
