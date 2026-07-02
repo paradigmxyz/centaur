@@ -12,6 +12,12 @@
 # (the first admin needs no existing approver):
 #   CENTAUR_CONSOLE_BOOTSTRAP_ADMINS="me@acme.com, you@acme.com"   (ENV)
 #   credentials.console_auth.bootstrap_admins                   (fallback: string or array)
+#
+# Auto-activate domains skip the admin-approval queue: a user whose IdP-verified
+# email is on a listed domain becomes active (not admin) on login and lands on
+# the console directly. Everyone else is still provisioned pending:
+#   CENTAUR_CONSOLE_AUTO_ACTIVATE_DOMAINS="acme.com, acme.dev"     (ENV)
+#   credentials.console_auth.auto_activate_domains              (fallback: string or array)
 module ConsoleAuth
   # The providers a Login::Providers strategy exists for. A provider must also be
   # `configured?` to actually appear on the login page.
@@ -41,6 +47,18 @@ module ConsoleAuth
     raw = ConsoleEnv["BOOTSTRAP_ADMINS"].presence || credentials_dig(:bootstrap_admins)
     list = raw.is_a?(Array) ? raw : raw.to_s.split(/[,\s]+/)
     list.map { |e| e.to_s.strip.downcase }.reject(&:empty?).uniq
+  end
+
+  def auto_activate?(email)
+    domain = email.to_s.strip.downcase.split("@").last
+    return false if domain.blank?
+    auto_activate_domains.include?(domain)
+  end
+
+  def auto_activate_domains
+    raw = ConsoleEnv["AUTO_ACTIVATE_DOMAINS"].presence || credentials_dig(:auto_activate_domains)
+    list = raw.is_a?(Array) ? raw : raw.to_s.split(/[,\s]+/)
+    list.map { |d| d.to_s.strip.downcase.delete_prefix("@") }.reject(&:empty?).uniq
   end
 
   # ENV first (CENTAUR_CONSOLE_GOOGLE_CLIENT_ID), then credentials

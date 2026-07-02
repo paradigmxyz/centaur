@@ -42,22 +42,26 @@ class User < ApplicationRecord
   # by the stable (provider, subject). A new identity links to an existing user
   # only when the IdP-verified email matches -- an unverified email must never
   # adopt an account -- otherwise a new user is created: active + admin when the
-  # email is on the bootstrap allowlist, pending otherwise. +identity+ is the
+  # email is on the bootstrap allowlist, active when the verified email's domain
+  # is on the auto-activate allowlist, pending otherwise. +identity+ is the
   # provider strategy's { subject:, email:, email_verified:, name: } hash.
   def self.link_or_provision(provider:, identity:)
     transaction do
-      if (existing = UserIdentity.find_by(provider: provider, subject: identity[:subject]))
-        existing.update!(email: identity[:email], email_verified: identity[:email_verified])
-        user = existing.user
-        user.update!(name: identity[:name]) if identity[:name].present? && user.name.blank?
-        next user
-      end
-
-      user = linkable_user(identity) || create!(provisioned_attributes(identity))
-      user.user_identities.create!(
-        provider: provider, subject: identity[:subject],
-        email: identity[:email], email_verified: identity[:email_verified]
-      )
+      user =
+        if (existing = UserIdentity.find_by(provider: provider, subject: identity[:subject]))
+          existing.update!(email: identity[:email], email_verified: identity[:email_verified])
+          existing.user.tap do |u|
+            u.update!(name: identity[:name]) if identity[:name].present? && u.name.blank?
+          end
+        else
+          (linkable_user(identity) || create!(provisioned_attributes(identity))).tap do |u|
+            u.user_identities.create!(
+              provider: provider, subject: identity[:subject],
+              email: identity[:email], email_verified: identity[:email_verified]
+            )
+          end
+        end
+      auto_activate(user, identity)
       user
     end
   end
@@ -71,12 +75,24 @@ class User < ApplicationRecord
   private_class_method :linkable_user
 
   # Attributes for a brand-new SSO user: active + admin when bootstrap-allowlisted
-  # by a verified IdP email, pending otherwise.
+  # by a verified IdP email, pending otherwise (auto_activate then flips
+  # allowlisted domains to active before the login completes).
   def self.provisioned_attributes(identity)
     admin = identity[:email_verified] == true && ConsoleAuth.bootstrap_admin?(identity[:email])
     { email: identity[:email], name: identity[:name], status: admin ? :active : :pending, admin: admin }
   end
   private_class_method :provisioned_attributes
+
+  # A pending user whose IdP-verified email domain is on the auto-activate
+  # allowlist becomes active on login, so allowlisted operators skip the approval
+  # queue -- including users provisioned pending before the domain was listed.
+  # Never touches disabled accounts and never grants admin.
+  def self.auto_activate(user, identity)
+    return unless user.pending?
+    return unless identity[:email_verified] == true && ConsoleAuth.auto_activate?(identity[:email])
+    user.update!(status: :active, approved_at: Time.current)
+  end
+  private_class_method :auto_activate
 
   private
 

@@ -97,6 +97,7 @@ The operator console always supports email and password sign-in. To add Google o
 | `CENTAUR_CONSOLE_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_SECRET`    | for Slack | Slack OpenID Connect client secret for console login.                                        |
 | `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other new SSO users are created as pending users. |
+| `CENTAUR_CONSOLE_AUTO_ACTIVATE_DOMAINS`  | no       | Comma- or whitespace-separated email-domain allowlist (for example `acme.com`). Users whose IdP-verified email is on a listed domain are activated on SSO login (without admin) and land on the console directly instead of waiting for approval. Existing pending users on a listed domain are activated on their next login. |
 
 Register these callback URLs with the provider:
 
