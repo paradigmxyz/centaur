@@ -52,6 +52,8 @@ const CENTAUR_POSTGRES_DSN_ENV: &str = "CENTAUR_POSTGRES_DSN";
 const PG_LISTEN_ENV: &str = "IRON_PROXY_PG_LISTEN";
 const PG_CLIENT_USER_ENV: &str = "IRON_PROXY_PG_CLIENT_USER";
 const PG_CLIENT_PASSWORD_ENV: &str = "IRON_PROXY_PG_CLIENT_PASSWORD";
+const VICTORIAMETRICS_PORT: u16 = 8428;
+const VICTORIALOGS_PORT: u16 = 9428;
 // Managed iron-proxy instances pick up principal/config changes on their next
 // /proxy/sync poll (5s cadence upstream). Claiming a warm sandbox must not
 // return before the proxy has applied the session principal's config: the
@@ -337,6 +339,7 @@ impl AgentSandboxBackend {
             id,
             resolved,
             iron_proxy,
+            &self.config.namespace,
             &control_target,
             self.config.otlp_egress.as_ref(),
             resolved.observability_enabled,
@@ -1302,6 +1305,7 @@ fn build_iron_proxy_network_policies(
     id: &SandboxId,
     resolved: &ResolvedIronProxy,
     iron_proxy: &IronProxyConfig,
+    namespace: &str,
     control_target: &ControlPlaneEgressTarget,
     otlp_egress: Option<&OtlpEgressTarget>,
     observability_enabled: bool,
@@ -1318,6 +1322,13 @@ fn build_iron_proxy_network_policies(
         sandbox_egress.push(egress_to(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
             vec![network_port(8000), network_port(8080)],
+        ));
+        sandbox_egress.push(egress_to(
+            vec![namespace_peer(namespace)],
+            vec![
+                network_port(VICTORIAMETRICS_PORT),
+                network_port(VICTORIALOGS_PORT),
+            ],
         ));
     }
     if observability_enabled && let Some(target) = otlp_egress {
@@ -2028,6 +2039,7 @@ mod tests {
             &id,
             &resolved(),
             &iron_proxy,
+            "centaur",
             &control_target,
             Some(&target),
             true,
@@ -2045,6 +2057,16 @@ mod tests {
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
+        assert!(sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
+            rule,
+            "centaur",
+            VICTORIAMETRICS_PORT
+        )));
+        assert!(sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
+            rule,
+            "centaur",
+            VICTORIALOGS_PORT
+        )));
         let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
         assert!(
             proxy_egress
@@ -2057,6 +2079,7 @@ mod tests {
             &id,
             &resolved(),
             &iron_proxy,
+            "centaur",
             &control_target,
             None,
             true,
@@ -2090,6 +2113,7 @@ mod tests {
             &id,
             &resolved(),
             &iron_proxy,
+            "centaur",
             &control_target,
             Some(&target),
             false,
@@ -2099,6 +2123,20 @@ mod tests {
             !sandbox_egress
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
+        );
+        assert!(
+            !sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
+                rule,
+                "centaur",
+                VICTORIAMETRICS_PORT
+            ))
+        );
+        assert!(
+            !sandbox_egress.iter().any(|rule| rule_allows_namespace_port(
+                rule,
+                "centaur",
+                VICTORIALOGS_PORT
+            ))
         );
         assert!(!sandbox_egress.iter().any(|rule| {
             rule.to.as_ref().is_some_and(|peers| {
@@ -2205,6 +2243,7 @@ mod tests {
             &id,
             &resolved(),
             &iron_proxy,
+            "centaur",
             &control_target,
             None,
             true,
