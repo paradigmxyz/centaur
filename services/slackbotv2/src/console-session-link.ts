@@ -98,9 +98,10 @@ export type SlackContextBlock = {
 }
 
 /**
- * Builds the "Open session in Console · {Harness} · {Model}" context block, or
+ * Builds the "Open session in Console · {MODEL} · {Harness}" context block, or
  * undefined when no Console base URL is configured (a bare "Open session in
- * Console" with no link is pointless, so the whole block is skipped).
+ * Console" with no link is pointless, so the whole block is skipped). The
+ * model id is uppercased for display.
  */
 export function buildConsoleSessionContextBlock(params: {
   consoleBaseUrl: string | null | undefined
@@ -111,10 +112,10 @@ export function buildConsoleSessionContextBlock(params: {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   if (!url) return undefined
   const segments = [`<${url}|Open session in Console>`]
+  const model = params.model?.trim()
+  if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
   const harness = harnessDisplayName(params.harnessType)
   if (harness) segments.push(escapeSlackMrkdwn(harness))
-  const model = params.model?.trim()
-  if (model) segments.push(escapeSlackMrkdwn(model))
   // Middot (U+00B7) with a space on each side, matching the bot's other
   // context lines.
   return {

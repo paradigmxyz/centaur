@@ -85,7 +85,7 @@ describe('consoleSessionUrl', () => {
 })
 
 describe('buildConsoleSessionContextBlock', () => {
-  test('builds a context block with harness and model separated by middots', () => {
+  test('builds a context block with uppercased model then harness, middot separated', () => {
     const block = buildConsoleSessionContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C123:1700000000.000100',
@@ -98,7 +98,7 @@ describe('buildConsoleSessionContextBlock', () => {
         {
           type: 'mrkdwn',
           text:
-            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open session in Console> · Codex · gpt-5.2'
+            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open session in Console> · GPT-5.2 · Codex'
         }
       ]
     })
