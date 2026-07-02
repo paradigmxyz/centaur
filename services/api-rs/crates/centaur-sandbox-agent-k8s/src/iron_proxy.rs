@@ -1315,12 +1315,12 @@ fn build_iron_proxy_network_policies(
             sandbox_to_proxy_ports.clone(),
         ),
         dns_egress_rule(),
-    ];
-    if observability_enabled {
-        sandbox_egress.push(egress_to(
+        egress_to(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
             vec![network_port(8000), network_port(8080)],
-        ));
+        ),
+    ];
+    if observability_enabled {
         sandbox_egress.extend(observability_egress.iter().map(|target| {
             egress_to(
                 vec![namespace_peer(&target.namespace)],
@@ -2155,7 +2155,7 @@ mod tests {
                 9428
             ))
         );
-        assert!(!sandbox_egress.iter().any(|rule| {
+        assert!(sandbox_egress.iter().any(|rule| {
             rule.to.as_ref().is_some_and(|peers| {
                 peers.iter().any(|peer| {
                     peer.pod_selector.as_ref().is_some_and(|selector| {
