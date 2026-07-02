@@ -492,24 +492,6 @@ struct SandboxArgs {
     )]
     k8s_namespace: String,
     #[arg(
-        long = "kubernetes-otlp-egress-namespace",
-        env = "KUBERNETES_OTLP_EGRESS_NAMESPACE",
-        default_value = ""
-    )]
-    otlp_egress_namespace: String,
-    #[arg(
-        long = "kubernetes-otlp-egress-port",
-        env = "KUBERNETES_OTLP_EGRESS_PORT",
-        default_value_t = 8000
-    )]
-    otlp_egress_port: u16,
-    #[arg(
-        long = "kubernetes-observability-namespace",
-        env = "KUBERNETES_OBSERVABILITY_NAMESPACE",
-        default_value = "observability"
-    )]
-    observability_namespace: String,
-    #[arg(
         long = "session-sandbox-image",
         alias = "kubernetes-agent-image",
         env = "SESSION_SANDBOX_IMAGE"
@@ -1059,31 +1041,95 @@ impl SandboxArgs {
             .collect()
     }
 
-    fn sandbox_otlp_egress_target(&self) -> Option<OtlpEgressTarget> {
+    /// Per-sandbox OTLP egress NetworkPolicy target, derived from the OTLP
+    /// endpoint the codex sandbox env will carry. Only in-cluster service DNS
+    /// endpoints (`<service>.<namespace>.svc[...]`) map to a namespace
+    /// selector; anything else gets no rule and a warning, because a silently
+    /// missing rule means harness usage/cost spans never reach the collector.
+    fn sandbox_otlp_egress_target(&self) -> Result<Option<OtlpEgressTarget>, ServerError> {
         if !matches!(self.workload, SandboxWorkloadKind::CodexAppServer) {
-            return None;
+            return Ok(None);
         }
-        clean_optional_value(Some(&self.otlp_egress_namespace)).map(|namespace| OtlpEgressTarget {
-            namespace,
-            port: self.otlp_egress_port,
-        })
+        let envs = self.codex_app_server_env_template()?;
+        let endpoint = [
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+        ]
+        .into_iter()
+        .find_map(|key| {
+            envs.iter()
+                .find(|(name, value)| name == key && !value.trim().is_empty())
+                .map(|(_, value)| value.trim().to_owned())
+        });
+        let Some(endpoint) = endpoint else {
+            return Ok(None);
+        };
+        match parse_otlp_egress_target(&endpoint) {
+            Some(target) => {
+                info!(
+                    namespace = %target.namespace,
+                    port = target.port,
+                    endpoint = %endpoint,
+                    "sandbox OTLP egress enabled"
+                );
+                Ok(Some(target))
+            }
+            None => {
+                warn!(
+                    endpoint = %endpoint,
+                    "sandbox OTLP endpoint is not an in-cluster service DNS name; \
+                     no sandbox egress NetworkPolicy rule will be created for it"
+                );
+                Ok(None)
+            }
+        }
     }
 
-    fn sandbox_observability_egress_targets(&self) -> Vec<OtlpEgressTarget> {
+    fn sandbox_observability_egress_targets(&self) -> Result<Vec<OtlpEgressTarget>, ServerError> {
         if !matches!(self.workload, SandboxWorkloadKind::CodexAppServer) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let Some(namespace) = clean_optional_value(Some(&self.observability_namespace)) else {
-            return Vec::new();
-        };
-
-        [8428, 9428]
-            .into_iter()
-            .map(|port| OtlpEgressTarget {
-                namespace: namespace.clone(),
-                port,
-            })
-            .collect()
+        let envs = self.codex_app_server_env_template()?;
+        Ok([
+            (
+                "VICTORIAMETRICS_URL",
+                "http://victoriametrics.observability.svc:8428",
+            ),
+            (
+                "VICTORIALOGS_URL",
+                "http://victorialogs.observability.svc:9428",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, default_endpoint)| {
+            let endpoint = envs
+                .iter()
+                .find(|(name, value)| name == key && !value.trim().is_empty())
+                .map(|(_, value)| value.trim().to_owned())
+                .unwrap_or_else(|| default_endpoint.to_owned());
+            match parse_otlp_egress_target(&endpoint) {
+                Some(target) => {
+                    info!(
+                        env = key,
+                        namespace = %target.namespace,
+                        port = target.port,
+                        endpoint = %endpoint,
+                        "sandbox observability egress enabled"
+                    );
+                    Some(target)
+                }
+                None => {
+                    warn!(
+                        env = key,
+                        endpoint = %endpoint,
+                        "sandbox observability endpoint is not an in-cluster service DNS name; \
+                         no sandbox egress NetworkPolicy rule will be created for it"
+                    );
+                    None
+                }
+            }
+        })
+        .collect())
     }
 
     fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
@@ -1318,8 +1364,8 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         config.iron_control = args.iron_control.settings();
         config.tools = args.tools_source.to_config();
         // Direct harness OTLP export needs a per-sandbox egress rule.
-        config.otlp_egress = args.sandbox_otlp_egress_target();
-        config.observability_egress = args.sandbox_observability_egress_targets();
+        config.otlp_egress = args.sandbox_otlp_egress_target()?;
+        config.observability_egress = args.sandbox_observability_egress_targets()?;
         // iron-control is the only proxy mode: a per-sandbox proxy syncs its
         // secrets from the control plane, so configuring iron-proxy without
         // iron-control would produce a non-functional proxy. Fail fast.
@@ -1853,6 +1899,32 @@ fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
 
 fn parse_host_port(value: &str) -> Option<u16> {
     value.rsplit_once(':')?.1.parse().ok()
+}
+
+/// Map an OTLP/observability endpoint URL onto a NetworkPolicy egress target.
+/// Only in-cluster service DNS hosts (`<service>.<namespace>.svc[...]`) are
+/// mapped; the namespace label is the policy's `kubernetes.io/metadata.name`
+/// selector. Ports default by scheme when absent.
+fn parse_otlp_egress_target(endpoint: &str) -> Option<OtlpEgressTarget> {
+    let trimmed = endpoint.trim();
+    let (scheme, rest) = trimmed.split_once("://").unwrap_or(("http", trimmed));
+    let authority = rest.split('/').next()?.trim();
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host_port)| host_port)
+        .unwrap_or(authority);
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse().ok()?),
+        None => (host_port, if scheme == "https" { 443 } else { 80 }),
+    };
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 3 || labels[2] != "svc" || labels[0].is_empty() || labels[1].is_empty() {
+        return None;
+    }
+    Some(OtlpEgressTarget {
+        namespace: labels[1].to_owned(),
+        port,
+    })
 }
 
 fn clean_optional_value(value: Option<&str>) -> Option<String> {
@@ -2439,31 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_otlp_egress_target_uses_configured_namespace_and_port() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-sandbox-workload",
-            "codex-app-server",
-            "--kubernetes-otlp-egress-namespace",
-            "laminar",
-            "--kubernetes-otlp-egress-port",
-            "4318",
-        ])
-        .unwrap();
-
-        assert_eq!(
-            args.sandbox.sandbox_otlp_egress_target(),
-            Some(OtlpEgressTarget {
-                namespace: "laminar".to_owned(),
-                port: 4318,
-            })
-        );
-    }
-
-    #[test]
-    fn sandbox_otlp_egress_target_absent_without_configured_namespace() {
+    fn sandbox_otlp_egress_target_derived_from_extra_env_endpoint() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2475,7 +2523,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(args.sandbox.sandbox_otlp_egress_target(), None);
+        assert_eq!(
+            args.sandbox.sandbox_otlp_egress_target().unwrap(),
+            Some(OtlpEgressTarget {
+                namespace: "laminar".to_owned(),
+                port: 8000,
+            })
+        );
     }
 
     #[test]
@@ -2484,36 +2538,65 @@ mod tests {
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
-            "--kubernetes-otlp-egress-namespace",
-            "laminar",
+            "--session-sandbox-extra-env",
+            r#"[{"name":"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT","value":"http://laminar-app-server.laminar.svc.cluster.local:8000/v1/traces"}]"#,
         ])
         .unwrap();
-        assert_eq!(mock.sandbox.sandbox_otlp_egress_target(), None);
+        assert_eq!(mock.sandbox.sandbox_otlp_egress_target().unwrap(), None);
     }
 
     #[test]
-    fn sandbox_observability_egress_uses_configured_namespace() {
+    fn sandbox_observability_egress_uses_default_endpoints() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
             "--session-sandbox-workload",
             "codex-app-server",
-            "--kubernetes-observability-namespace",
-            "telemetry",
         ])
         .unwrap();
 
         assert_eq!(
-            args.sandbox.sandbox_observability_egress_targets(),
+            args.sandbox.sandbox_observability_egress_targets().unwrap(),
             vec![
                 OtlpEgressTarget {
-                    namespace: "telemetry".to_owned(),
+                    namespace: "observability".to_owned(),
                     port: 8428,
                 },
                 OtlpEgressTarget {
-                    namespace: "telemetry".to_owned(),
+                    namespace: "observability".to_owned(),
                     port: 9428,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sandbox_observability_egress_uses_endpoint_env() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-workload",
+            "codex-app-server",
+            "--session-sandbox-extra-env",
+            r#"[
+                {"name":"VICTORIAMETRICS_URL","value":"http://victoriametrics.telemetry.svc:18428"},
+                {"name":"VICTORIALOGS_URL","value":"https://victorialogs.logs.svc.cluster.local"}
+            ]"#,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.sandbox_observability_egress_targets().unwrap(),
+            vec![
+                OtlpEgressTarget {
+                    namespace: "telemetry".to_owned(),
+                    port: 18428,
+                },
+                OtlpEgressTarget {
+                    namespace: "logs".to_owned(),
+                    port: 443,
                 },
             ]
         );
@@ -2525,14 +2608,15 @@ mod tests {
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
-            "--kubernetes-observability-namespace",
-            "telemetry",
+            "--session-sandbox-extra-env",
+            r#"[{"name":"VICTORIAMETRICS_URL","value":"http://victoriametrics.telemetry.svc:18428"}]"#,
         ])
         .unwrap();
 
         assert!(
             args.sandbox
                 .sandbox_observability_egress_targets()
+                .unwrap()
                 .is_empty()
         );
     }
@@ -2558,7 +2642,7 @@ mod tests {
         }
         let envs = args.sandbox.codex_app_server_env_template().unwrap();
         assert!(!envs.iter().any(|(name, _)| name.starts_with("OTEL_")));
-        assert_eq!(args.sandbox.sandbox_otlp_egress_target(), None);
+        assert_eq!(args.sandbox.sandbox_otlp_egress_target().unwrap(), None);
 
         unsafe {
             env::set_var(
@@ -2583,13 +2667,53 @@ mod tests {
             value("OTEL_EXPORTER_OTLP_HEADERS"),
             Some("authorization=Bearer test")
         );
-        // NetworkPolicy egress is configured independently from the OTLP URL.
-        assert_eq!(args.sandbox.sandbox_otlp_egress_target(), None);
+        // The egress target derives from the same forwarded endpoint.
+        assert_eq!(
+            args.sandbox.sandbox_otlp_egress_target().unwrap(),
+            Some(OtlpEgressTarget {
+                namespace: "laminar".to_owned(),
+                port: 8000,
+            })
+        );
         unsafe {
             for key in SANDBOX_OTLP_PASSTHROUGH_ENV_KEYS {
                 env::remove_var(key);
             }
         }
+    }
+
+    #[test]
+    fn parse_otlp_egress_target_accepts_only_in_cluster_service_dns() {
+        assert_eq!(
+            parse_otlp_egress_target(
+                "http://laminar-app-server.laminar.svc.cluster.local:8000/v1/traces"
+            ),
+            Some(OtlpEgressTarget {
+                namespace: "laminar".to_owned(),
+                port: 8000,
+            })
+        );
+        assert_eq!(
+            parse_otlp_egress_target("http://collector.observability.svc:4318"),
+            Some(OtlpEgressTarget {
+                namespace: "observability".to_owned(),
+                port: 4318,
+            })
+        );
+        assert_eq!(
+            parse_otlp_egress_target("https://collector.observability.svc.cluster.local"),
+            Some(OtlpEgressTarget {
+                namespace: "observability".to_owned(),
+                port: 443,
+            })
+        );
+        // External hosts and bare service names never map to a namespace rule.
+        assert_eq!(parse_otlp_egress_target("https://api.honeycomb.io"), None);
+        assert_eq!(parse_otlp_egress_target("http://laminar:8000"), None);
+        assert_eq!(
+            parse_otlp_egress_target("http://laminar-app-server.laminar:8000"),
+            None
+        );
     }
 
     #[test]

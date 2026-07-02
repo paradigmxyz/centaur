@@ -336,14 +336,6 @@ spec:
             # with the harness the sandbox image CMD actually runs.
             - name: KUBERNETES_IRON_PROXY_HARNESS_ENGINE
               value: {{ .Values.sandbox.harnessEngine | quote }}
-{{- if and .Values.networkPolicy.otlpEgress.enabled (not (hasKey .Values.apiRs.extraEnv "KUBERNETES_OTLP_EGRESS_NAMESPACE")) }}
-            - name: KUBERNETES_OTLP_EGRESS_NAMESPACE
-              value: {{ required "networkPolicy.otlpEgress.namespace is required when networkPolicy.otlpEgress.enabled" .Values.networkPolicy.otlpEgress.namespace | quote }}
-{{- end }}
-{{- if and .Values.networkPolicy.otlpEgress.enabled (not (hasKey .Values.apiRs.extraEnv "KUBERNETES_OTLP_EGRESS_PORT")) }}
-            - name: KUBERNETES_OTLP_EGRESS_PORT
-              value: {{ .Values.networkPolicy.otlpEgress.port | quote }}
-{{- end }}
 {{- $sandboxEnvList := list }}
 {{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_SKILL_DIRS" "value" (join ":" $skillDirs)) }}
