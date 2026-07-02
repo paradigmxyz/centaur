@@ -1,1 +1,0 @@
-"""Interview prep tool."""
