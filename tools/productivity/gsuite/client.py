@@ -145,25 +145,28 @@ def gmail_read(message_id: str) -> dict:
         message_id: The message ID
 
     Returns:
-        Dict with id, subject, from, to, date, body (plain text)
+        Dict with id, subject, from, to, date, body, html, and raw RFC822 content
     """
     service = get_gmail_service()
 
     msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    raw_msg = service.users().messages().get(userId="me", id=message_id, format="raw").execute()
 
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
-    def get_body(payload):
-        if payload.get("body", {}).get("data"):
-            return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
-        if payload.get("parts"):
-            for part in payload["parts"]:
-                if part.get("mimeType") == "text/plain":
-                    if part.get("body", {}).get("data"):
-                        return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8")
-                body = get_body(part)
-                if body:
-                    return body
+    def decode_body(data):
+        padded = data + "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(padded.encode()).decode("utf-8", errors="replace")
+
+    def get_body(payload, mime_type):
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("mimeType") == mime_type and payload.get("body", {}).get("data"):
+            return decode_body(payload["body"]["data"])
+        for part in payload.get("parts") or []:
+            body = get_body(part, mime_type)
+            if body:
+                return body
         return ""
 
     return {
@@ -174,7 +177,9 @@ def gmail_read(message_id: str) -> dict:
         "to": headers.get("To", ""),
         "cc": headers.get("Cc", ""),
         "date": headers.get("Date", ""),
-        "body": get_body(msg.get("payload", {})),
+        "body": get_body(msg.get("payload", {}), "text/plain"),
+        "html": get_body(msg.get("payload", {}), "text/html"),
+        "raw": raw_msg.get("raw", ""),
         "label_ids": msg.get("labelIds", []),
     }
 

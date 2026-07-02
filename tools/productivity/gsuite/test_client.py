@@ -46,6 +46,38 @@ class _FakeDriveService:
         return self.files_api
 
 
+class _FakeGmailMessagesApi:
+    def __init__(self, full_result: dict, raw_result: dict):
+        self.full_result = full_result
+        self.raw_result = raw_result
+        self.get_calls: list[dict] = []
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        if kwargs.get("format") == "full":
+            return _CreateRequest(self.full_result)
+        if kwargs.get("format") == "raw":
+            return _CreateRequest(self.raw_result)
+        raise AssertionError(f"Unexpected Gmail format: {kwargs.get('format')}")
+
+
+class _FakeGmailUsersApi:
+    def __init__(self, messages_api: _FakeGmailMessagesApi):
+        self.messages_api = messages_api
+
+    def messages(self):
+        return self.messages_api
+
+
+class _FakeGmailService:
+    def __init__(self, full_result: dict, raw_result: dict):
+        self.messages_api = _FakeGmailMessagesApi(full_result, raw_result)
+        self.users_api = _FakeGmailUsersApi(self.messages_api)
+
+    def users(self):
+        return self.users_api
+
+
 class _FakeSheetsValuesApi:
     def __init__(self):
         self.update_calls: list[dict] = []
@@ -151,6 +183,56 @@ def _tab(tab_id: str, content: list[dict], *, child_tabs: list[dict] | None = No
         "documentTab": {"body": {"content": content}},
         "childTabs": child_tabs or [],
     }
+
+
+def test_gmail_read_returns_plain_html_and_raw_content(monkeypatch):
+    plain = base64.urlsafe_b64encode(b"Plain body").decode().rstrip("=")
+    html = base64.urlsafe_b64encode(b"<html><body><p>HTML body</p></body></html>").decode().rstrip("=")
+    raw = (
+        b"From: sender@example.com\n"
+        b"To: recipient@example.com\n"
+        b"Subject: Newsletter\n"
+        b"MIME-Version: 1.0\n"
+        b"Content-Type: text/html\n\n"
+        b"<html><body><p>HTML body</p></body></html>"
+    )
+    raw_encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    full_result = {
+        "id": "msg-1",
+        "threadId": "thread-1",
+        "labelIds": ["INBOX"],
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": "Newsletter"},
+                {"name": "From", "value": "sender@example.com"},
+                {"name": "To", "value": "recipient@example.com"},
+                {"name": "Date", "value": "Thu, 02 Jul 2026 18:15:51 +0000"},
+            ],
+            "parts": [
+                {
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        {"mimeType": "text/plain", "body": {"data": plain}},
+                        {"mimeType": "text/html", "body": {"data": html}},
+                    ],
+                }
+            ],
+        },
+    }
+    fake_service = _FakeGmailService(full_result, {"raw": raw_encoded})
+    monkeypatch.setattr(client, "get_gmail_service", lambda: fake_service)
+
+    result = client.gmail_read("msg-1")
+
+    assert result["id"] == "msg-1"
+    assert result["subject"] == "Newsletter"
+    assert result["body"] == "Plain body"
+    assert result["html"] == "<html><body><p>HTML body</p></body></html>"
+    assert result["raw"] == raw_encoded
+    assert fake_service.messages_api.get_calls == [
+        {"userId": "me", "id": "msg-1", "format": "full"},
+        {"userId": "me", "id": "msg-1", "format": "raw"},
+    ]
 
 
 def test_drive_upload_sets_supports_all_drives(tmp_path, monkeypatch):
