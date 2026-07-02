@@ -1,5 +1,8 @@
 {
   "model": "claude-opus-4-8",
+  "env": {
+    "MAX_THINKING_TOKENS": "8192"
+  },
   "permissions": {
     "defaultMode": "bypassPermissions",
     "additionalDirectories": [
