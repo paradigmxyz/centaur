@@ -22,7 +22,9 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_select "input[name=q]", count: 0
     assert_select ".console-main-thread-frame aside", count: 0
-    assert_select ".console-thread-detail-header .console-page-header"
+    # No chat selected: like the not-found state, the page renders only the
+    # centered empty state — no detail header.
+    assert_select ".console-thread-detail-header", count: 0
     assert_select "a[aria-label=?]", "New chat", count: 0
     assert_select "span[aria-label=?]", "New chat disabled", count: 0
     assert_select "textarea[name=prompt]", count: 0

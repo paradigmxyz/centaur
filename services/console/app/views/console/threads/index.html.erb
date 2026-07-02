@@ -22,40 +22,31 @@
     </section>
   <% else %>
     <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-ink-900/25">
-      <% unless @thread_not_found %>
+      <% if @selected_session %>
       <div class="console-thread-detail-header">
         <div class="console-thread-content">
-          <% if @selected_session %>
-            <% selected_thread_title = thread_title(@selected_session) %>
-            <% thread_meta = capture do %>
-              <div class="flex min-w-0 items-center gap-2">
-                <span class="truncate"><%= thread_source_label(@selected_session) %></span>
-                <% if (model_label = thread_model_label(@selected_session)) %>
-                  <span>·</span>
-                  <span class="truncate"><%= model_label %></span>
-                <% end %>
+          <% selected_thread_title = thread_title(@selected_session) %>
+          <% thread_meta = capture do %>
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="truncate"><%= thread_source_label(@selected_session) %></span>
+              <% if (model_label = thread_model_label(@selected_session)) %>
                 <span>·</span>
-                <span><%= thread_harness_label(@selected_session) %></span>
-                <span>·</span>
-                <%= local_time(@selected_session.updated_at || @selected_session.created_at, relative: true, format: :compact) %>
-              </div>
-            <% end %>
-
-            <%= render "console/page_header",
-                       title: selected_thread_title,
-                       title_attr: selected_thread_title,
-                       subtitle: thread_meta,
-                       title_class: "truncate text-base font-semibold text-zinc-100",
-                       subtitle_class: "mt-0.5 text-xs text-zinc-500",
-                       class: "mb-0 min-h-16 items-center" %>
-          <% else %>
-            <%= render "console/page_header",
-                       title: "New chat",
-                       subtitle: "Select a mirrored chat from the sidebar.",
-                       title_class: "text-base font-semibold text-zinc-100",
-                       subtitle_class: "mt-0.5 text-xs text-zinc-500",
-                       class: "mb-0 min-h-16 items-center" %>
+                <span class="truncate"><%= model_label %></span>
+              <% end %>
+              <span>·</span>
+              <span><%= thread_harness_label(@selected_session) %></span>
+              <span>·</span>
+              <%= local_time(@selected_session.updated_at || @selected_session.created_at, relative: true, format: :compact) %>
+            </div>
           <% end %>
+
+          <%= render "console/page_header",
+                     title: selected_thread_title,
+                     title_attr: selected_thread_title,
+                     subtitle: thread_meta,
+                     title_class: "truncate text-base font-semibold text-zinc-100",
+                     subtitle_class: "mt-0.5 text-xs text-zinc-500",
+                     class: "mb-0 min-h-16 items-center" %>
         </div>
       </div>
       <% end %>
@@ -87,8 +78,13 @@
             </div>
           </div>
         <% else %>
-          <div class="flex h-full items-center justify-center text-sm text-zinc-600">
-            Select a chat from the sidebar.
+          <div class="flex h-full items-center justify-center px-6">
+            <div class="flex max-w-sm flex-col items-center gap-3 text-center">
+              <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
+                <%= console_icon("message-square", classes: "size-5") %>
+              </div>
+              <div class="text-sm font-semibold text-zinc-200">Select a chat from the sidebar</div>
+            </div>
           </div>
         <% end %>
       </div>
