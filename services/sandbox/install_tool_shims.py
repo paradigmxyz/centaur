@@ -472,6 +472,25 @@ PYTHONPATH_VALUE = {pythonpath!r}
 MAX_ANALYTICS_ARGS = 32
 MAX_ANALYTICS_ARGS_LENGTH = 512
 TRUNCATION_SUFFIX = "..."
+SENSITIVE_ARG_TOKENS = {{
+    "apikey",
+    "api",
+    "auth",
+    "authorization",
+    "bearer",
+    "cookie",
+    "credential",
+    "key",
+    "password",
+    "secret",
+    "session",
+    "token",
+}}
+RAW_ANALYTICS_ARG_MODES = {{"raw", "unsafe", "full"}}
+DISABLED_ANALYTICS_ARG_MODES = {{"0", "false", "none", "off"}}
+ARG_VALUE_PLACEHOLDER = "[arg]"
+JSON_ARG_PLACEHOLDER = "[json]"
+REDACTED_ARG_PLACEHOLDER = "[redacted]"
 
 
 def load():
@@ -588,7 +607,11 @@ def analytics_log_path():
     return "/proc/1/fd/2"
 
 
-def analytics_tool_args(args):
+def analytics_args_mode():
+    return os.environ.get("CENTAUR_TOOL_ANALYTICS_ARGS_MODE", "shape").strip().lower()
+
+
+def analytics_truncate_args(args):
     normalized = []
     truncated = False
     raw_args = list(args or [])
@@ -616,6 +639,101 @@ def analytics_tool_args(args):
     return normalized, len(raw_args), truncated
 
 
+def analytics_arg_name_tokens(name):
+    normalized = []
+    current = []
+    for ch in name.lower().lstrip("-"):
+        if ch.isalnum():
+            current.append(ch)
+        else:
+            if current:
+                normalized.append("".join(current))
+                current = []
+    if current:
+        normalized.append("".join(current))
+    return normalized
+
+
+def analytics_arg_name_is_sensitive(name):
+    tokens = analytics_arg_name_tokens(name)
+    return any(token in SENSITIVE_ARG_TOKENS for token in tokens)
+
+
+def analytics_arg_is_json(value):
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "{{[":
+        return False
+    try:
+        json.loads(stripped)
+    except Exception:
+        return False
+    return True
+
+
+def analytics_arg_is_safe_command_token(value):
+    if not value or len(value) > 48 or "://" in value or "=" in value:
+        return False
+    return all(ch.isalnum() or ch in "-_." for ch in value)
+
+
+def analytics_sanitize_args(args):
+    sanitized = []
+    redacted = False
+    redact_next = False
+    positional_index = 0
+    raw_args = [str(arg) for arg in list(args or [])]
+    for value in raw_args:
+        if redact_next:
+            sanitized.append(REDACTED_ARG_PLACEHOLDER)
+            redacted = True
+            redact_next = False
+            continue
+        if analytics_arg_is_json(value):
+            sanitized.append(JSON_ARG_PLACEHOLDER)
+            redacted = True
+            positional_index += 1
+            continue
+        if "=" in value:
+            name, _raw_value = value.split("=", 1)
+            if analytics_arg_name_is_sensitive(name):
+                sanitized.append(f"{{name}}={{REDACTED_ARG_PLACEHOLDER}}")
+            elif name.startswith("-"):
+                sanitized.append(f"{{name}}={{ARG_VALUE_PLACEHOLDER}}")
+            else:
+                sanitized.append(ARG_VALUE_PLACEHOLDER)
+            redacted = True
+            continue
+        if value.startswith("-"):
+            sanitized.append(value)
+            if analytics_arg_name_is_sensitive(value):
+                redact_next = True
+            continue
+        if (
+            positional_index == 0
+            and len(raw_args) > 1
+            and analytics_arg_is_safe_command_token(value)
+        ):
+            sanitized.append(value)
+        else:
+            sanitized.append(ARG_VALUE_PLACEHOLDER)
+            redacted = True
+        positional_index += 1
+    return sanitized, redacted
+
+
+def analytics_tool_args(args):
+    raw_args = list(args or [])
+    mode = analytics_args_mode()
+    if mode in DISABLED_ANALYTICS_ARG_MODES:
+        return [], len(raw_args), False, False, False
+    if mode in RAW_ANALYTICS_ARG_MODES:
+        normalized, arg_count, truncated = analytics_truncate_args(raw_args)
+        return normalized, arg_count, truncated, False, True
+    sanitized, redacted = analytics_sanitize_args(raw_args)
+    normalized, arg_count, truncated = analytics_truncate_args(sanitized)
+    return normalized, arg_count, truncated, redacted, True
+
+
 def emit_tool_call_event(event, tool, method, tool_args=None, started_at=None, returncode=None):
     path = analytics_log_path()
     if path.lower() in {{"", "0", "false", "none", "off"}}:
@@ -632,11 +750,20 @@ def emit_tool_call_event(event, tool, method, tool_args=None, started_at=None, r
         "tool_method": method,
     }}
     if tool_args is not None:
-        normalized_args, arg_count, args_truncated = analytics_tool_args(tool_args)
-        payload["tool_args"] = normalized_args
+        (
+            normalized_args,
+            arg_count,
+            args_truncated,
+            args_redacted,
+            args_captured,
+        ) = analytics_tool_args(tool_args)
         payload["tool_args_count"] = arg_count
+        if args_captured:
+            payload["tool_args"] = normalized_args
         if args_truncated:
             payload["tool_args_truncated"] = "true"
+        if args_redacted:
+            payload["tool_args_redacted"] = "true"
     thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
     if thread_key:
         payload["thread_key"] = thread_key

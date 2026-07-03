@@ -200,6 +200,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `CENTAUR_TOOLS_AUTO_RELOAD` | `repoCache.autoReload` via api-rs tools config; defaults to `true`. | Enables repo-cache-backed auto-refresh of local tool shims and copied skills in running sandboxes. Runtime catalog only; secret grants/proxy credentials reconcile separately. |
 | `CENTAUR_TOOLS_RELOAD_INTERVAL_SECONDS` | `sandbox.extraEnv`. | Poll interval for the repo-cache checkout watchdog. |
+| `CENTAUR_TOOL_ANALYTICS_ARGS_MODE` | `sandbox.extraEnv`; defaults to `shape`. | Controls `centaur-tools` audit argument capture. `shape` keeps command structure while redacting values and JSON payloads, `raw` records exact arguments, and `off` records only counts. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |

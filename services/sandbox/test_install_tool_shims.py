@@ -220,6 +220,7 @@ class GeneratedShimTest(unittest.TestCase):
             env["PYTHONPATH"] = "existing"
             env["CENTAUR_THREAD_KEY"] = "cli:test-thread"
             env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = str(analytics_log)
+            env["CENTAUR_TOOL_ANALYTICS_ARGS_MODE"] = "shape"
 
             result = subprocess.run(
                 [
@@ -262,17 +263,80 @@ class GeneratedShimTest(unittest.TestCase):
                 self.assertEqual(event["component"], "tool_shim")
                 self.assertEqual(event["tool_name"], "websearch")
                 self.assertEqual(event["tool_method"], "cli")
-                self.assertEqual(event["tool_args"], ["lookup", "sensitive-payload"])
+                self.assertEqual(event["tool_args"], ["lookup", "[arg]"])
                 self.assertEqual(event["tool_args_count"], 2)
+                self.assertEqual(event["tool_args_redacted"], "true")
                 self.assertEqual(event["thread_key"], "cli:test-thread")
             self.assertEqual(analytics_events[1]["exit_code"], 0)
             self.assertEqual(analytics_events[1]["success"], "true")
             self.assertIn("duration_ms", analytics_events[1])
             serialized_analytics = json.dumps(analytics_events, sort_keys=True)
             self.assertIn("lookup", serialized_analytics)
-            self.assertIn("sensitive-payload", serialized_analytics)
+            self.assertNotIn("sensitive-payload", serialized_analytics)
 
             analytics_log.write_text("")
+            result = subprocess.run(
+                [
+                    str(bin_dir / "centaur-tools"),
+                    "run",
+                    "websearch",
+                    "search",
+                    '{"token":"secret-value"}',
+                    "--api-key",
+                    "secret-value",
+                    "--limit=10",
+                ],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            analytics_events = [
+                json.loads(line) for line in analytics_log.read_text().splitlines()
+            ]
+            for event in analytics_events:
+                self.assertEqual(
+                    event["tool_args"],
+                    [
+                        "search",
+                        "[json]",
+                        "--api-key",
+                        "[redacted]",
+                        "--limit=[arg]",
+                    ],
+                )
+                self.assertEqual(event["tool_args_count"], 5)
+                self.assertEqual(event["tool_args_redacted"], "true")
+            self.assertNotIn("secret-value", json.dumps(analytics_events, sort_keys=True))
+
+            analytics_log.write_text("")
+            result = subprocess.run(
+                [
+                    str(bin_dir / "centaur-tools"),
+                    "run",
+                    "websearch",
+                    "sensitive-payload",
+                ],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            analytics_events = [
+                json.loads(line) for line in analytics_log.read_text().splitlines()
+            ]
+            for event in analytics_events:
+                self.assertEqual(event["tool_args"], ["[arg]"])
+                self.assertEqual(event["tool_args_count"], 1)
+                self.assertEqual(event["tool_args_redacted"], "true")
+            self.assertNotIn("sensitive-payload", json.dumps(analytics_events, sort_keys=True))
+
+            analytics_log.write_text("")
+            env["CENTAUR_TOOL_ANALYTICS_ARGS_MODE"] = "raw"
             first_arg = "a" * 400
             second_arg = "b" * 400
             result = subprocess.run(
