@@ -11,6 +11,12 @@ module Console
     before_action :require_admin
     before_action :set_principal
 
+    def destroy
+      label = principal_label(@principal)
+      @principal.destroy!
+      redirect_to console_principals_path, notice: "Deleted principal #{label}."
+    end
+
     def update_sandbox_access
       @principal.update!(
         sandbox_repo_cache_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_repo_cache_enabled]),
@@ -86,6 +92,10 @@ module Console
 
     def secret_label(secret)
       secret.try(:name).presence || secret.foreign_id.presence || secret.oid
+    end
+
+    def principal_label(principal)
+      principal.name.presence || principal.foreign_id.presence || principal.oid
     end
 
     def set_principal

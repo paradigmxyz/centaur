@@ -35,6 +35,44 @@ module Console
       assert_equal false, principal.sandbox_api_server_enabled
     end
 
+    test "destroy deletes the principal and dependent access records" do
+      principal = principals(:acme_channel)
+      proxy = proxies(:acme_proxy)
+      client = McpOauthClient.create!(redirect_uris: [ "http://localhost/callback" ])
+      McpOauthAuthorizationCode.create!(
+        mcp_oauth_client: client,
+        user: users(:acme_admin),
+        principal: principal,
+        redirect_uri: "http://localhost/callback",
+        code_challenge: "challenge",
+        resource: "https://api.example.test",
+        scopes: %w[mcp:tools]
+      )
+      McpOauthRefreshToken.create!(
+        mcp_oauth_client: client,
+        user: users(:acme_admin),
+        principal: principal,
+        resource: "https://api.example.test",
+        scopes: %w[mcp:tools]
+      )
+
+      assert_difference -> { Principal.count }, -1 do
+        assert_difference -> { Grant.where(principal: principal).count }, -3 do
+          assert_difference -> { PrincipalRole.where(principal: principal).count }, -1 do
+            assert_difference -> { McpOauthAuthorizationCode.where(principal: principal).count }, -1 do
+              assert_difference -> { McpOauthRefreshToken.where(principal: principal).count }, -1 do
+                delete console_delete_principal_url(principal.oid)
+              end
+            end
+          end
+        end
+      end
+
+      assert_redirected_to console_principals_path
+      assert_equal "Deleted principal #{principal.foreign_id}.", flash[:notice]
+      assert_nil proxy.reload.principal
+    end
+
     test "assign_role attaches the role and redirects with a notice" do
       principal = principals(:acme_user_bob)
       role = roles(:acme_admin_role)
