@@ -934,7 +934,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     normalizer: &mut CodexTurnNormalizer,
     request: JSONRPCRequest,
     stdout: &mut W,
-) -> Result<()> {
+) -> Result<bool> {
     match request.method.as_str() {
         "turn/steer" => {
             let params: TurnSteerParams = request_params(request.params)?;
@@ -945,7 +945,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(());
+                return Ok(false);
             }
             if params.expected_turn_id != normalizer.turn_id() {
                 write_error(
@@ -958,7 +958,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(());
+                return Ok(false);
             }
             process
                 .stdin
@@ -978,9 +978,10 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             {
                 write_value(stdout, &notification_to_wire_value(&notification)?)?;
             }
-            Ok(())
+            Ok(false)
         }
         "turn/interrupt" => {
+            process.kill_and_wait()?;
             write_client_response(
                 stdout,
                 ClientResponse::TurnInterrupt {
@@ -988,7 +989,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     response: TurnInterruptResponse {},
                 },
             )?;
-            Ok(())
+            Ok(true)
         }
         _ => {
             write_error(
@@ -997,7 +998,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 -32600,
                 format!("cannot handle {} while a turn is active", request.method),
             )?;
-            Ok(())
+            Ok(false)
         }
     }
 }
@@ -1033,7 +1034,10 @@ fn run_normalized_turn<H: HarnessServer, W: Write>(
     ) {
         Ok(Some(turn)) => state.completed_turns.push(turn),
         Ok(None) => {}
-        Err(error) => finish_turn_with_error(state, normalizer, stdout, error)?,
+        Err(error) => {
+            state.process = None;
+            finish_turn_with_error(state, normalizer, stdout, error)?;
+        }
     }
     Ok(())
 }
@@ -1076,12 +1080,14 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     let usage_span_input = usage_span_input_value(input);
     let mut usage_span_output = UsageSpanOutput::default();
     ensure_harness_process(harness, state)?;
-    let process = state
-        .process
-        .as_mut()
-        .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-    process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
-    process.stdin.flush()?;
+    {
+        let process = state
+            .process
+            .as_mut()
+            .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+        process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
+        process.stdin.flush()?;
+    }
 
     let mut last_session_id = state.harness_session_id.clone();
     let mut event_normalizer = H::EventNormalizer::default();
@@ -1089,14 +1095,34 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     let mut latest_usage = None;
     loop {
         while let Ok(request) = request_rx.try_recv() {
-            handle_active_turn_request(harness, process, normalizer, request, stdout)?;
+            let process = state
+                .process
+                .as_mut()
+                .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
+                state.process = None;
+                return Err(HarnessServerError::TurnInterrupted {
+                    kind: harness.kind(),
+                });
+            }
         }
 
-        let line = match process.stdout.recv_timeout(Duration::from_millis(50)) {
+        let line = match state
+            .process
+            .as_mut()
+            .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
+            .stdout
+            .recv_timeout(Duration::from_millis(50))
+        {
             Ok(line) => line?,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
-                let status = process.child.wait()?;
+                let status = state
+                    .process
+                    .as_mut()
+                    .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
+                    .child
+                    .wait()?;
                 return Err(HarnessServerError::HarnessExited {
                     kind: harness.kind(),
                     status,
@@ -1298,8 +1324,11 @@ fn append_usage_span_output(event: &NormalizedEvent, output: &mut UsageSpanOutpu
 }
 
 fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {
-    if state.process.is_some() {
-        return Ok(());
+    if let Some(process) = state.process.as_mut() {
+        if process.child.try_wait()?.is_none() {
+            return Ok(());
+        }
+        state.process = None;
     }
 
     let mut command = harness.command_for_turn(state);

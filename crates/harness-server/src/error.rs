@@ -49,6 +49,8 @@ pub enum HarnessServerError {
         status: ExitStatus,
         stderr: String,
     },
+    #[error("{kind:?} turn interrupted")]
+    TurnInterrupted { kind: HarnessKind },
     #[error("failed to spawn {bin} app-server: {source}")]
     SpawnCodex {
         bin: String,

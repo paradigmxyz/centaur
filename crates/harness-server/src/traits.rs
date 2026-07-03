@@ -41,6 +41,13 @@ impl Drop for HarnessChild {
     }
 }
 
+impl HarnessChild {
+    pub fn kill_and_wait(&mut self) -> io::Result<()> {
+        let _ = self.child.kill();
+        self.child.wait().map(|_| ())
+    }
+}
+
 pub trait AppServerRuntime {
     fn run_stdio(&self) -> Result<()>;
 }
