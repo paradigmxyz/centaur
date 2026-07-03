@@ -68,6 +68,7 @@ ARG CLAUDE_CODE_VERSION=2.1.154
 ARG CODEX_VERSION=0.139.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
+ARG POND_VERSION=0.11.2
 ARG KUBECTL_VERSION=v1.34.2
 ARG KACHE_VERSION=v0.7.0
 # Bootstrap pnpm for agents working in JS monorepos. The exact baked version
@@ -105,6 +106,28 @@ RUN set -eux; \
     install -m 0755 /tmp/nu/nu /usr/local/bin/nu; \
     rm -rf /tmp/nu /tmp/nu.tar.gz; \
     nu --version | grep -F "${NUSHELL_VERSION}"
+
+# ── pond (harness session archive: sync to shared store + search CLI) ───────
+RUN set -eux; \
+    pond_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo x86_64 ;; \
+      arm64) echo aarch64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    pond_asset="pond-${pond_arch}-unknown-linux-gnu.tar.xz"; \
+    cd /tmp; \
+    curl -fsSL \
+      "https://github.com/tenequm/pond/releases/download/v${POND_VERSION}/${pond_asset}" \
+      -o "${pond_asset}"; \
+    curl -fsSL \
+      "https://github.com/tenequm/pond/releases/download/v${POND_VERSION}/checksums.txt" \
+      -o pond-checksums.txt; \
+    grep " ${pond_asset}\$" pond-checksums.txt | sha256sum -c -; \
+    mkdir -p /tmp/pond-extract; \
+    tar -xJf "${pond_asset}" -C /tmp/pond-extract; \
+    install -m 0755 /tmp/pond-extract/pond /usr/local/bin/pond; \
+    rm -rf /tmp/pond-extract "${pond_asset}" pond-checksums.txt; \
+    pond --version | grep -F "${POND_VERSION}"
 
 # ── Global npm CLIs (root) ──────────────────────────────────────────────────
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \

@@ -64,6 +64,11 @@ The open-source tool inventory lives in this `tools/` tree and changes over time
 
 - `centaur_investigator`: parse Centaur Slack thread references and enrich them
   with best-effort vlogs/vmetrics context without exposing message context.
+- `pond`: cross-thread recall over archived harness sessions (`pond-recall`
+  CLI). Sandboxes sync their Claude Code / Codex / pi session logs into a
+  shared pond store when the deployment opts in via `POND_SYNC_ENABLED` +
+  `POND_STORAGE_PATH` (see `tools/infra/pond/.env.example`); agents then
+  search the archive and retrieve full transcripts by id.
 - `preqin`: query Preqin Operational API fund and fund-manager data, with
   redacted auth diagnostics for `PREQIN_*` credentials.
 

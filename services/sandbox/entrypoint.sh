@@ -405,6 +405,39 @@ if [ "$_centaur_tools_auto_reload" = "1" ] \
 fi
 unset _centaur_tools_auto_reload
 
+# ── Background: pond session archive sync (opt-in) ───────────────────────────
+# POND_SYNC_ENABLED=true periodically archives the harness-native session logs
+# (~/.claude, ~/.codex, ~/.pi - full reasoning/tool detail the transcript store
+# does not keep) into a shared pond store, so harness sessions survive pod
+# replacement and become searchable across threads via the pond-recall tool.
+# POND_STORAGE_PATH selects the store (any S3-compatible bucket; credential env
+# vars in tools/infra/pond/.env.example). No embedding model runs in-sandbox -
+# search is full-text; concurrent sandboxes writing one store is pond's
+# supported optimistic-concurrency multi-writer case.
+case "${POND_SYNC_ENABLED:-false}" in
+    1|true|True|TRUE|yes|Yes|YES|on|On|ON) _pond_sync_enabled=1 ;;
+    *) _pond_sync_enabled=0 ;;
+esac
+if [ "$_pond_sync_enabled" = "1" ] && [ -z "${POND_STORAGE_PATH:-}" ]; then
+    echo "warning: POND_SYNC_ENABLED is set but POND_STORAGE_PATH is empty; pond sync disabled" >&2
+    _pond_sync_enabled=0
+fi
+if [ "$_pond_sync_enabled" = "1" ] && command -v pond >/dev/null 2>&1; then
+    mkdir -p "$HOME_DIR/.claude/projects" "$HOME_DIR/.codex/sessions" "$HOME_DIR/.pi/agent/sessions"
+    for _pond_adapter in claude-code codex-cli pi-coding-agent; do
+        pond adapters enable "$_pond_adapter" >/dev/null 2>&1 \
+            || echo "warning: pond adapters enable $_pond_adapter failed" >&2
+    done
+    unset _pond_adapter
+    (
+        while :; do
+            pond sync -q || echo "warning: pond sync failed" >&2
+            sleep "${POND_SYNC_INTERVAL_SECONDS:-300}"
+        done
+    ) &
+fi
+unset _pond_sync_enabled
+
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
 # Org/persona overlays are mounted alongside the base prompt when present.
