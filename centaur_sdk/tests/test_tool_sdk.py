@@ -111,6 +111,22 @@ def test_current_session_context_fetches_api_context(monkeypatch: pytest.MonkeyP
         reset_tool_context(token)
 
 
+def test_current_session_context_requires_api_server_capability(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        registry,
+        "_backend",
+        MappingBackend({"CENTAUR_SANDBOX_API_SERVER_ENABLED": "false"}),
+    )
+    token = set_tool_context(ToolContext(name="fake-tool", thread_key="slack:C123:123.456"))
+    try:
+        with pytest.raises(RuntimeError, match="API server sandbox capability"):
+            current_session_context()
+    finally:
+        reset_tool_context(token)
+
+
 def test_current_slack_thread_returns_api_slack_destination(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -169,6 +185,23 @@ def test_save_attachment_writes_to_sandbox_uploads_dir(
         "source_url": "https://example.test/report",
         "size_bytes": 5,
     }
+
+
+def test_save_attachment_requires_api_server_capability_without_uploads_dir(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("CENTAUR_UPLOADS_DIR", raising=False)
+    monkeypatch.setattr(
+        registry,
+        "_backend",
+        MappingBackend({"CENTAUR_SANDBOX_API_SERVER_ENABLED": "false"}),
+    )
+    token = set_tool_context(ToolContext(name="fake-tool", thread_key="slack:C123:123.456"))
+    try:
+        with pytest.raises(RuntimeError, match="API server sandbox capability"):
+            save_attachment(name="report.txt", data=b"hello")
+    finally:
+        reset_tool_context(token)
 
 
 def test_save_attachment_uses_unique_local_name_on_collision(

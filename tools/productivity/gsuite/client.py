@@ -12,10 +12,11 @@ from urllib.parse import quote, urljoin, urlparse, urlsplit
 
 import httplib2
 import socks
-from centaur_sdk import current_thread_key, save_attachment, secret
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
+from centaur_sdk import current_thread_key, save_attachment, secret
 
 try:
     from api.integrations.gsuite.http import build_http as _shared_build_http
@@ -288,9 +289,9 @@ def gmail_reply(
         Dict with id, thread_id
     """
     import mimetypes
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.base import MIMEBase
     from email import encoders
+    from email.mime.base import MIMEBase
+    from email.mime.multipart import MIMEMultipart
 
     service = get_gmail_service()
 
@@ -746,6 +747,11 @@ def _download_attachment_bytes(
     attachment_url: str | None = None,
 ) -> bytes:
     """Fetch bytes from Centaur's thread-scoped attachment API."""
+    if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+        raise RuntimeError(
+            "Drive uploads from Centaur attachments require the API server sandbox capability, "
+            "but it is disabled for this principal."
+        )
     path = attachment_url
     if attachment_id:
         path = f"/agent/attachments/{attachment_id}/download"

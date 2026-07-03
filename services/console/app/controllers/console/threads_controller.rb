@@ -7,6 +7,47 @@ class Console::ThreadsController < ApplicationController
   TRANSCRIPT_EVENT_LIMIT = 80
   PANEL_LIMIT = 4
   THINKING_EVENT_LIMIT = 200
+  ACTIVITY_SUMMARY_EVENT_LIMIT = 200
+  RAW_TRACE_OUTPUT_LINE_PATTERNS = %w[
+    reasoning
+    thinking
+    tooluse
+    tool_use
+    toolresult
+    tool_result
+  ].freeze
+  COMPLETED_TRACE_METHOD_PATTERNS = %w[
+    item/completed
+    item.completed
+  ].freeze
+  COMPLETED_TRACE_ITEM_PATTERNS = %w[
+    commandexecution
+    command_execution
+    mcptoolcall
+    mcp_tool_call
+    toolcall
+    tool_call
+    tooluse
+    tool_use
+    functioncall
+    function_call
+    filechange
+    file_change
+  ].freeze
+  TOOL_TRACE_ITEM_TYPES = %w[
+    commandExecution
+    command_execution
+    mcpToolCall
+    mcp_tool_call
+    toolCall
+    tool_call
+    toolUse
+    tool_use
+    functionCall
+    function_call
+    fileChange
+    file_change
+  ].freeze
   # Messages and thinking precede the terminal event for a same-timestamp tie.
   TRANSCRIPT_SOURCE_ORDER = { message: 0, thinking: 1, event: 2 }.freeze
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
@@ -453,22 +494,60 @@ class Console::ThreadsController < ApplicationController
   # The api-rs stdout pump persists every harness output line verbatim as a
   # session.output.line event whose payload is a JSON-encoded string. Codex
   # reasoning arrives as item/completed notifications with item.type ==
-  # "reasoning" carrying the full accumulated thinking text; Claude Code
-  # stream-json persists each assistant API message whose content can include
-  # "thinking" blocks. The SQL LIKE filter keeps the query from paging through
+  # "reasoning" carrying the full accumulated thinking text; tool activity
+  # arrives as completed command/tool items. Claude Code stream-json persists
+  # each assistant API message whose content can include "thinking" and
+  # "tool_use" blocks. The SQL LIKE filter keeps the query from paging through
   # the whole firehose; exact matching happens here.
   def selected_thinking_items
     return [] unless @selected_session
 
-    CentaurSessionEvent
+    items = CentaurSessionEvent
       .where(thread_key: @selected_session.thread_key)
       .where(event_type: "session.output.line")
-      .where("payload::text LIKE '%reasoning%' OR payload::text LIKE '%thinking%'")
+      .where(trace_output_line_filter_sql, *trace_output_line_filter_values)
       .order(event_id: :desc)
       .limit(THINKING_EVENT_LIMIT)
       .to_a
       .reverse
       .filter_map { |event| thinking_transcript_item(event) }
+
+    apply_activity_summaries(compact_trace_items(items))
+  end
+
+  # api-rs's activity-summary worker condenses harness output into short
+  # first-person status lines persisted as session.activity_summary events,
+  # each pointing at the output-line event that triggered it via
+  # source_event_id. A summary belongs to the latest trace item at or before
+  # its source line, so each disclosure's collapsed preview shows the newest
+  # status generated during that block; items no summary covers keep the
+  # raw-text fallback rendered by the transcript partial.
+  def apply_activity_summaries(items)
+    anchored = items.select { |item| item[:event_id] }
+    return items if anchored.empty?
+
+    selected_activity_summaries.each do |event|
+      payload = event.payload_hash
+      summary = payload["summary"].to_s.strip
+      source_event_id = payload["source_event_id"]
+      next if summary.blank? || source_event_id.nil?
+
+      item = anchored.reverse_each.find { |candidate| candidate[:event_id] <= source_event_id.to_i }
+      item[:summary] = summary if item
+    end
+    items
+  end
+
+  def selected_activity_summaries
+    return [] unless @selected_session
+
+    CentaurSessionEvent
+      .where(thread_key: @selected_session.thread_key)
+      .where(event_type: "session.activity_summary")
+      .order(event_id: :desc)
+      .limit(ACTIVITY_SUMMARY_EVENT_LIMIT)
+      .to_a
+      .reverse
   end
 
   def thinking_transcript_item(event)
@@ -478,19 +557,122 @@ class Console::ThreadsController < ApplicationController
     value = JSON.parse(line)
     return nil unless value.is_a?(Hash)
 
-    text = reasoning_event_text(value) || claude_thinking_text(value)
-    return nil if text.blank?
+    trace = reasoning_trace(value) || claude_thinking_trace(value) || tool_trace(value)
+    return nil unless trace
 
     {
       role: "thinking",
-      label: "Thinking",
+      label: trace[:label],
       align: :start,
-      text: text,
+      text: trace[:text],
+      trace_kind: trace[:kind] || "thinking",
+      commands: trace[:commands],
+      tools: trace[:tools],
+      execution_id: event.execution_id,
+      event_id: event.event_id,
       created_at: event.created_at,
       source: :thinking
     }
   rescue JSON::ParserError
     nil
+  end
+
+  def compact_trace_items(items)
+    grouped = []
+    command_group = []
+
+    flush_command_group = lambda do
+      grouped << command_trace_group(command_group) if command_group.any?
+      command_group = []
+    end
+
+    items.each do |item|
+      if item[:trace_kind] == "command" &&
+          (command_group.empty? || same_trace_group?(command_group.last, item))
+        command_group << item
+      else
+        flush_command_group.call
+        item[:trace_kind] == "command" ? command_group << item : grouped << item
+      end
+    end
+
+    flush_command_group.call
+    grouped
+  end
+
+  def same_trace_group?(left, right)
+    left_execution = left[:execution_id].presence
+    right_execution = right[:execution_id].presence
+    return left_execution == right_execution if left_execution && right_execution
+
+    # Older imported fixtures can lack execution ids. Keep immediately adjacent
+    # command traces together, but avoid merging activity from distinct turns.
+    left_time = left[:created_at]
+    right_time = right[:created_at]
+    left_time.present? && right_time.present? && (right_time - left_time).abs <= 5.minutes
+  end
+
+  def command_trace_group(items)
+    commands = items.flat_map { |item| Array(item[:commands]) }
+    failed_count = commands.count { |command| command[:failed] }
+    command_count = commands.length
+
+    {
+      role: "thinking",
+      label: "Ran #{pluralized_count(command_count, "command")}",
+      failed_label: failed_count.positive? ? "#{failed_count} failed" : nil,
+      align: :start,
+      text: command_group_text(commands),
+      trace_kind: "commands",
+      commands: commands,
+      execution_id: items.first[:execution_id],
+      event_id: items.first[:event_id],
+      created_at: items.first[:created_at],
+      source: :thinking
+    }
+  end
+
+  def command_group_text(commands)
+    commands.map do |command|
+      [
+        "$ #{command[:command]}",
+        ("Status: #{command[:status]}" if command[:status].present?),
+        ("Exit code: #{command[:exit_code]}" if command[:exit_code].present?),
+        command[:output]
+      ].compact.join("\n")
+    end.join("\n\n").strip
+  end
+
+  def pluralized_count(count, singular)
+    "#{count} #{singular}#{count == 1 ? "" : "s"}"
+  end
+
+  def trace_output_line_filter_sql
+    @trace_output_line_filter_sql ||= begin
+      raw = RAW_TRACE_OUTPUT_LINE_PATTERNS.map { "lower(payload::text) LIKE ?" }.join(" OR ")
+      completed_methods =
+        COMPLETED_TRACE_METHOD_PATTERNS.map { "lower(payload::text) LIKE ?" }.join(" OR ")
+      completed_items =
+        COMPLETED_TRACE_ITEM_PATTERNS.map { "lower(payload::text) LIKE ?" }.join(" OR ")
+      "(#{raw}) OR ((#{completed_methods}) AND (#{completed_items}))"
+    end
+  end
+
+  def trace_output_line_filter_values
+    @trace_output_line_filter_values ||= begin
+      patterns =
+        RAW_TRACE_OUTPUT_LINE_PATTERNS +
+        COMPLETED_TRACE_METHOD_PATTERNS +
+        COMPLETED_TRACE_ITEM_PATTERNS
+      patterns.map { |pattern| "%#{pattern}%" }
+    end
+  end
+
+  def reasoning_trace(value)
+    text = reasoning_event_text(value)
+    return nil if text.blank?
+
+    { label: "Thinking", text: text }
   end
 
   def reasoning_event_text(value)
@@ -508,6 +690,13 @@ class Console::ThreadsController < ApplicationController
   # arrives in content blocks of type "thinking" (text under the "thinking"
   # key). Partial stream_event lines never carry type == "assistant", so each
   # thinking block surfaces exactly once.
+  def claude_thinking_trace(value)
+    text = claude_thinking_text(value)
+    return nil if text.blank?
+
+    { label: "Thinking", text: text }
+  end
+
   def claude_thinking_text(value)
     return nil unless value["type"].to_s == "assistant"
 
@@ -520,6 +709,170 @@ class Console::ThreadsController < ApplicationController
 
       part["thinking"].presence || part["text"].presence
     end.join("\n").strip.presence
+  end
+
+  def tool_trace(value)
+    completed_item_trace(value) || claude_tool_use_trace(value) || claude_tool_result_trace(value)
+  end
+
+  def completed_item_trace(value)
+    method = (value["method"] || value["type"]).to_s.tr("/", ".")
+    return nil unless method == "item.completed"
+
+    item = value.dig("params", "item") || value["item"]
+    return nil unless item.is_a?(Hash)
+
+    case item["type"].to_s
+    when "commandExecution", "command_execution"
+      command_execution_trace(item)
+    when *TOOL_TRACE_ITEM_TYPES
+      generic_tool_item_trace(item)
+    end
+  end
+
+  def command_execution_trace(item)
+    command = first_present(item["command"], item["cmd"])
+    output = first_present(
+      item["aggregatedOutput"],
+      item["aggregated_output"],
+      item["output"],
+      item["stdout"],
+      item["stderr"]
+    )
+    exit_code = first_present(item["exitCode"], item["exit_code"])
+    status = first_present(item["status"], exit_code.present? ? "completed" : nil)
+
+    sections = []
+    sections << "Status: #{status}" if status.present?
+    sections << "Exit code: #{exit_code}" if exit_code.present?
+    sections << markdown_code_block(command, language: shell_language_for_command(command)) if command.present?
+    sections << "Output:\n\n#{markdown_code_block(output, language: "text")}" if output.present?
+
+    text = sections.compact.join("\n\n").strip
+    return nil if text.blank?
+
+    {
+      kind: "command",
+      label: "Ran 1 command",
+      text: text,
+      commands: [
+        {
+          command: command.to_s,
+          output: output.to_s,
+          exit_code: exit_code,
+          status: status,
+          failed: command_failed?(status, exit_code)
+        }
+      ]
+    }
+  end
+
+  def command_failed?(status, exit_code)
+    status.to_s.match?(/\A(?:failed|error|cancelled|timed_out)\z/i) ||
+      (exit_code.present? && exit_code.to_i != 0)
+  end
+
+  def generic_tool_item_trace(item)
+    label = trace_label_for_item(item)
+    name = first_present(item["name"], item["tool"], item["toolName"], item["tool_name"])
+    input = item["input"] || item["arguments"] || item["args"]
+    output = item["output"] || item["result"]
+
+    sections = []
+    sections << "Status: #{item["status"]}" if item["status"].present?
+    sections << "Name: #{name}" if name.present?
+    sections << "Input:\n\n#{markdown_code_block(pretty_json(input))}" if input.present?
+    sections << "Output:\n\n#{markdown_code_block(pretty_json(output))}" if output.present?
+
+    text = sections.compact.join("\n\n").strip
+    return nil if text.blank?
+
+    { label: label, text: text }
+  end
+
+  def claude_tool_use_trace(value)
+    return nil unless value["type"].to_s == "assistant"
+
+    content = message_content(value)
+    return nil unless content.is_a?(Array)
+
+    traces = content.filter_map do |part|
+      next unless part.is_a?(Hash) && part["type"].to_s == "tool_use"
+
+      name = first_present(part["name"], part["tool"], "tool")
+      input = part["input"] || part["arguments"]
+      [
+        "Use #{name}",
+        ("Input:\n\n#{markdown_code_block(pretty_json(input))}" if input.present?)
+      ].compact.join("\n\n")
+    end
+
+    text = traces.join("\n\n").strip
+    return nil if text.blank?
+
+    { label: traces.size == 1 ? "Tool call" : "Tool calls", text: text }
+  end
+
+  def claude_tool_result_trace(value)
+    return nil unless %w[user tool].include?(value["type"].to_s)
+
+    content = message_content(value)
+    return nil unless content.is_a?(Array)
+
+    traces = content.filter_map do |part|
+      next unless part.is_a?(Hash)
+      next unless part["type"].to_s == "tool_result" || part["tool_use_id"].present?
+
+      body = first_present(part["content"], part["text"], part["result"])
+      next if body.blank?
+
+      [
+        ("Tool use: #{part["tool_use_id"]}" if part["tool_use_id"].present?),
+        markdown_code_block(pretty_json(body), language: "text")
+      ].compact.join("\n\n")
+    end
+
+    text = traces.join("\n\n").strip
+    return nil if text.blank?
+
+    { label: traces.size == 1 ? "Tool result" : "Tool results", text: text }
+  end
+
+  def message_content(value)
+    message = value["message"]
+    message.is_a?(Hash) ? message["content"] : value["content"]
+  end
+
+  def trace_label_for_item(item)
+    case item["type"].to_s
+    when "fileChange", "file_change" then "File change"
+    when "mcpToolCall", "mcp_tool_call" then "Tool call"
+    else "Tool call"
+    end
+  end
+
+  def markdown_code_block(value, language: nil)
+    body = value.to_s.rstrip
+    return nil if body.blank?
+
+    fence = "```"
+    fence += "`" while body.include?(fence)
+    "#{fence}#{language}\n#{body}\n#{fence}"
+  end
+
+  def pretty_json(value)
+    case value
+    when String
+      value
+    else
+      JSON.pretty_generate(value)
+    end
+  rescue JSON::GeneratorError
+    value.to_s
+  end
+
+  def shell_language_for_command(command)
+    command.to_s.match?(/\A(?:SELECT|WITH|INSERT|UPDATE|DELETE)\b/i) ? "sql" : "sh"
   end
 
   # Claude/Amp reasoning lands in content (full text); Codex-native reasoning

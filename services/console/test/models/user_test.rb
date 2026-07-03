@@ -103,14 +103,14 @@ class UserTest < ActiveSupport::TestCase
     { subject: "sub-1", email: "newcomer@example.com", email_verified: true, name: "New Comer" }.merge(overrides)
   end
 
-  test "link_or_provision creates a pending user + identity for an unknown email" do
+  test "link_or_provision creates an active user + identity for an unknown email" do
     user = nil
     assert_difference -> { User.count }, 1 do
       assert_difference -> { UserIdentity.count }, 1 do
         user = User.link_or_provision(provider: "google", identity: identity)
       end
     end
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
     assert_equal "New Comer", user.name
     assert_equal [ [ "google", "sub-1" ] ], user.user_identities.pluck(:provider, :subject)
@@ -160,9 +160,32 @@ class UserTest < ActiveSupport::TestCase
     user = User.link_or_provision(provider: "google",
                                   identity: identity(subject: "boss-sub", email: "boss@example.com",
                                                      email_verified: false))
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
   ensure
     ENV.delete("CENTAUR_CONSOLE_BOOTSTRAP_ADMINS")
+  end
+
+  test "link_or_provision activates a returning legacy-pending user" do
+    user = User.link_or_provision(provider: "slack",
+                                  identity: identity(subject: "late-sub", email: "worker@acme.example"))
+    user.update!(status: :pending)
+
+    returning = User.link_or_provision(provider: "slack",
+                                       identity: identity(subject: "late-sub", email: "worker@acme.example"))
+    assert_equal user, returning
+    assert returning.active?
+    assert_not returning.admin?
+    assert_not_nil returning.approved_at
+  end
+
+  test "link_or_provision never reactivates a disabled user" do
+    user = User.link_or_provision(provider: "slack",
+                                  identity: identity(subject: "gone-sub", email: "worker@acme.example"))
+    user.update!(status: :disabled)
+
+    returning = User.link_or_provision(provider: "slack",
+                                       identity: identity(subject: "gone-sub", email: "worker@acme.example"))
+    assert returning.disabled?
   end
 end

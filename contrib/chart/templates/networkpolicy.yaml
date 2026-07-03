@@ -150,7 +150,6 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 6 }}
   policyTypes:
     - Ingress
-    - Egress
   ingress:
     - from:
 {{- if .Values.slackbotv2.enabled }}
@@ -185,12 +184,22 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
 {{- end }}
 {{- end }}
-        # Sandboxes call back into the control plane. agent-k8s labels its pods
-        # centaur.ai/managed-by=api-rs (MANAGED_BY_VALUE in centaur-sandbox-agent-k8s),
-        # which also covers the per-sandbox iron-proxy pods.
+        # New sandboxes call back into the control plane only when their
+        # principal has the API server sandbox capability.
+        - podSelector:
+            matchLabels:
+              centaur.ai/api-server-enabled: "true"
+        # Transitional compatibility: pre-deploy sandbox/proxy pods carry only
+        # centaur.ai/managed-by=api-rs, so this also covers newly-created
+        # API-disabled pods while the rollout policy is present. Remove with the
+        # matching egress compatibility policy below after old api-rs-managed
+        # pods have aged out.
         - podSelector:
             matchLabels:
               centaur.ai/managed-by: api-rs
+            matchExpressions:
+              - key: centaur.ai/api-server-enabled
+                operator: DoesNotExist
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -199,6 +208,72 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
+---
+# Transitional compatibility for pre-deploy sandbox/proxy pods. They carry only
+# centaur.ai/managed-by=api-rs, so this also covers newly-created API-disabled
+# pods while the rollout policy is present. Remove this with the matching
+# api-rs ingress compatibility selector once old api-rs-managed pods have aged
+# out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-sandbox-api-server-compat
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/managed-by: api-rs
+    matchExpressions:
+      - key: centaur.ai/api-server-enabled
+        operator: DoesNotExist
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+---
+# Sandboxes with the API server capability may call api-rs. New sandbox and
+# proxy pods receive centaur.ai/api-server-enabled=true from api-rs only when
+# the principal has the capability, so default-deny blocks new pods without it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-sandbox-api-server
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/api-server-enabled: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "api-rs") }}-egress
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "api-rs") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 6 }}
+  policyTypes:
+    - Egress
   egress:
 {{- if .Values.postgres.enabled }}
     - to:

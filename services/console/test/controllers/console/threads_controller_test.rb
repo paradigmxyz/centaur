@@ -724,7 +724,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal indices, indices.sort
   end
 
-  OutputLineEvent = Struct.new(:payload, :created_at, keyword_init: true)
+  OutputLineEvent = Struct.new(:payload, :created_at, :execution_id, :event_id, keyword_init: true)
 
   test "thinking transcript item is extracted from a completed reasoning output line" do
     controller = Console::ThreadsController.new
@@ -762,17 +762,138 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Condensed thought.", item[:text]
   end
 
-  test "thinking extraction ignores non-reasoning and non-completed output lines" do
+  test "thinking extraction formats completed command execution output lines" do
+    controller = Console::ThreadsController.new
+    line = {
+      method: "item/completed",
+      params: {
+        item: {
+          id: "cmd-1",
+          type: "commandExecution",
+          command: "pnpm test",
+          status: "completed",
+          aggregatedOutput: "ok\n",
+          exitCode: 0
+        }
+      }
+    }.to_json
+    event = OutputLineEvent.new(payload: line, created_at: Time.zone.parse("2026-06-26 17:15:58 UTC"))
+
+    item = controller.send(:thinking_transcript_item, event)
+
+    assert_equal "thinking", item[:role]
+    assert_equal "Ran 1 command", item[:label]
+    assert_equal :thinking, item[:source]
+    assert_equal "command", item[:trace_kind]
+    assert_equal 1, item[:commands].length
+    assert_equal "pnpm test", item[:commands].first[:command]
+    assert_equal "ok\n", item[:commands].first[:output]
+    assert_equal 0, item[:commands].first[:exit_code]
+    assert_not item[:commands].first[:failed]
+    assert_includes item[:text], "Status: completed"
+    assert_includes item[:text], "Exit code: 0"
+    assert_includes item[:text], "```sh\npnpm test\n```"
+    assert_includes item[:text], "Output:"
+    assert_includes item[:text], "```text\nok\n```"
+  end
+
+  test "compact trace grouping combines adjacent command executions for one run" do
+    controller = Console::ThreadsController.new
+    now = Time.zone.now
+    first = {
+      role: "thinking",
+      label: "Ran 1 command",
+      text: "$ pnpm test",
+      trace_kind: "command",
+      commands: [ { command: "pnpm test", output: "ok\n", exit_code: 0, status: "completed", failed: false } ],
+      execution_id: "exe-1",
+      created_at: now,
+      source: :thinking
+    }
+    second = {
+      role: "thinking",
+      label: "Ran 1 command",
+      text: "$ curl bad",
+      trace_kind: "command",
+      commands: [ { command: "curl bad", output: "failed\n", exit_code: 22, status: "completed", failed: true } ],
+      execution_id: "exe-1",
+      created_at: now + 1.second,
+      source: :thinking
+    }
+    thought = {
+      role: "thinking",
+      label: "Thinking",
+      text: "Need one more check.",
+      trace_kind: "thinking",
+      created_at: now + 2.seconds,
+      source: :thinking
+    }
+
+    grouped = controller.send(:compact_trace_items, [ first, second, thought ])
+
+    assert_equal 2, grouped.length
+    assert_equal "commands", grouped.first[:trace_kind]
+    assert_equal "Ran 2 commands", grouped.first[:label]
+    assert_equal "1 failed", grouped.first[:failed_label]
+    assert_equal [ "pnpm test", "curl bad" ], grouped.first[:commands].map { |command| command[:command] }
+    assert_equal thought, grouped.second
+  end
+
+  test "activity summaries attach to the latest trace item at or before their source line" do
+    controller = Console::ThreadsController.new
+    items = [
+      { event_id: 10, text: "first" },
+      { event_id: 20, text: "second" }
+    ]
+    summaries = [
+      TranscriptEvent.new(event_type: "session.activity_summary", payload_hash: { "summary" => "I found the bug", "source_event_id" => 9 }),
+      TranscriptEvent.new(event_type: "session.activity_summary", payload_hash: { "summary" => "I'm reading the schema", "source_event_id" => 11 }),
+      TranscriptEvent.new(event_type: "session.activity_summary", payload_hash: { "summary" => "I'm writing the query", "source_event_id" => 15 }),
+      TranscriptEvent.new(event_type: "session.activity_summary", payload_hash: { "summary" => "", "source_event_id" => 21 })
+    ]
+    controller.define_singleton_method(:selected_activity_summaries) { summaries }
+
+    controller.send(:apply_activity_summaries, items)
+
+    # The newest summary in an item's window wins; blank summaries and
+    # summaries preceding every trace item are dropped.
+    assert_equal "I'm writing the query", items[0][:summary]
+    assert_nil items[1][:summary]
+  end
+
+  test "thinking extraction formats claude stream-json tool calls" do
+    controller = Console::ThreadsController.new
+    line = {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "toolu_1", name: "websearch", input: { query: "centaur" } }
+        ]
+      }
+    }.to_json
+    event = OutputLineEvent.new(payload: line, created_at: Time.zone.now)
+
+    item = controller.send(:thinking_transcript_item, event)
+
+    assert_equal "Tool call", item[:label]
+    assert_includes item[:text], "Use websearch"
+    assert_includes item[:text], '"query": "centaur"'
+  end
+
+  test "thinking extraction ignores partial and unrelated output lines" do
     controller = Console::ThreadsController.new
     now = Time.zone.now
 
     delta = { method: "item/reasoning/textDelta", params: { delta: "partial" } }.to_json
-    tool = { method: "item/completed", params: { item: { type: "mcpToolCall" } } }.to_json
+    started_tool = {
+      method: "item/started",
+      params: { item: { type: "commandExecution", command: "pnpm test" } }
+    }.to_json
     non_json = "plain stdout noise mentioning reasoning"
     non_string = { "result" => "reasoning" }
 
     assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: delta, created_at: now))
-    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: tool, created_at: now))
+    assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: started_tool, created_at: now))
     assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: non_json, created_at: now))
     assert_nil controller.send(:thinking_transcript_item, OutputLineEvent.new(payload: non_string, created_at: now))
   end
@@ -849,6 +970,70 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_select "details.console-thinking summary", text: /Thinking/
     assert_select "details.console-thinking", text: /compare the two schemas/
+  end
+
+  test "tool trace renders as a collapsed disclosure in the transcript" do
+    skip_unless_session_table
+
+    thread_key = "console:tool-trace-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 0)
+    insert_command_trace_event(thread_key, command: "pnpm test", output: "ok\n")
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "details.console-thinking summary", text: /Ran 1 command/
+    assert_select ".console-thinking-command-row", text: /pnpm test/
+    assert_select ".console-thinking-command-full", text: /\$ pnpm test/
+    assert_select ".console-thinking-command-result", text: /ok/
+    assert_select ".console-thinking-command-meta", count: 0
+    assert_select "details.console-thinking", text: /Status:/, count: 0
+    assert_select "details.console-thinking", text: /pnpm test/
+    assert_select "details.console-thinking", text: /ok/
+  end
+
+  test "thinking preview shows the activity summary covering its block" do
+    skip_unless_session_table
+
+    thread_key = "console:activity-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 0)
+    source_event_id = insert_reasoning_event(thread_key, text: "I should compare the two schemas before answering.")
+    insert_activity_summary_event(
+      thread_key,
+      summary: "I'm comparing the two schemas",
+      source_event_id: source_event_id
+    )
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "details.console-thinking .console-thinking-preview",
+                  text: /I'm comparing the two schemas/
+    # The full thinking text stays available in the disclosure body.
+    assert_select "details.console-thinking", text: /compare the two schemas before answering/
+  end
+
+  test "command trace group shows the activity summary as its collapsed preview" do
+    skip_unless_session_table
+
+    thread_key = "console:activity-cmd-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 0)
+    source_event_id = insert_command_trace_event(thread_key, command: "pnpm test", output: "ok\n")
+    insert_activity_summary_event(
+      thread_key,
+      summary: "I'm running the test suite",
+      source_event_id: source_event_id
+    )
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "details.console-thinking summary", text: /Ran 1 command/
+    assert_select "details.console-thinking .console-thinking-preview",
+                  text: /I'm running the test suite/
   end
 
   test "split view renders owned panes as panels and drops unowned keys" do
@@ -1049,17 +1234,55 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   # Mirrors how api-rs persists harness stdout: the payload column is a
   # JSON-encoded *string* holding one protocol notification line.
   def insert_reasoning_event(thread_key, text:)
-    connection = CentaurSession.connection
-    line = {
+    insert_output_line_event(
+      thread_key,
       method: "item/completed",
       params: { item: { type: "reasoning", content: [ text ] } }
-    }.to_json
-    connection.execute(<<~SQL.squish)
+    )
+  end
+
+  def insert_command_trace_event(thread_key, command:, output:)
+    insert_output_line_event(
+      thread_key,
+      method: "item/completed",
+      params: {
+        item: {
+          type: "commandExecution",
+          command: command,
+          status: "completed",
+          aggregatedOutput: output,
+          exitCode: 0
+        }
+      }
+    )
+  end
+
+  def insert_output_line_event(thread_key, method:, params:)
+    connection = CentaurSession.connection
+    line = { method: method, params: params }.to_json
+    connection.select_value(<<~SQL.squish).to_i
       insert into session_events (thread_key, event_type, payload, created_at)
       values (
         #{connection.quote(thread_key)},
         'session.output.line',
         #{connection.quote(line.to_json)}::jsonb,
+        now()
+      )
+      returning event_id
+    SQL
+  end
+
+  # Mirrors api-rs's activity-summary worker: the payload is a JSON object
+  # whose source_event_id points at the output line that triggered it.
+  def insert_activity_summary_event(thread_key, summary:, source_event_id:)
+    connection = CentaurSession.connection
+    payload = { summary: summary, source_event_id: source_event_id }.to_json
+    connection.execute(<<~SQL.squish)
+      insert into session_events (thread_key, event_type, payload, created_at)
+      values (
+        #{connection.quote(thread_key)},
+        'session.activity_summary',
+        #{connection.quote(payload)}::jsonb,
         now()
       )
     SQL

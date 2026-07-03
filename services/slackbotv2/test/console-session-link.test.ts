@@ -98,7 +98,7 @@ describe('buildConsoleSessionContextBlock', () => {
         {
           type: 'mrkdwn',
           text:
-            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open session in Console> · GPT-5.2 · Codex'
+            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex'
         }
       ]
     })
@@ -111,7 +111,7 @@ describe('buildConsoleSessionContextBlock', () => {
       harnessType: 'claudecode'
     })
     expect(block?.elements[0]?.text).toBe(
-      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open session in Console> · Claude Code'
+      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · Claude Code'
     )
   })
 

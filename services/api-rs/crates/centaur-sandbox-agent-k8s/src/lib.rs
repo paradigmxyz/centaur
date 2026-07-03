@@ -38,6 +38,7 @@ const DEFAULT_CONTAINER_NAME: &str = "agent";
 const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
+const API_SERVER_ENABLED_LABEL: &str = "centaur.ai/api-server-enabled";
 const MANAGED_BY_VALUE: &str = "api-rs";
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
@@ -574,6 +575,9 @@ fn build_agent_sandbox(
     if spec.capabilities.observability_enabled {
         labels.insert(OBSERVABILITY_ENABLED_LABEL.to_owned(), "true".to_owned());
     }
+    if spec.capabilities.api_server_enabled {
+        labels.insert(API_SERVER_ENABLED_LABEL.to_owned(), "true".to_owned());
+    }
 
     let mut pod_labels = labels.clone();
     pod_labels.insert(
@@ -911,6 +915,7 @@ mod tests {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
             repo_cache_enabled: true,
             observability_enabled: true,
+            api_server_enabled: true,
         });
         let config = AgentSandboxConfig::new("centaur");
 
@@ -933,16 +938,37 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.labels.as_ref())
                 .and_then(|labels| labels.get(OBSERVABILITY_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            sandbox
+                .spec
+                .pod_template
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.labels.as_ref())
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
                 .map(String::as_str),
             Some("true")
         );
     }
 
     #[test]
-    fn omits_observability_enabled_label_for_restricted_sandboxes() {
+    fn omits_api_server_label_for_restricted_sandboxes() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
             repo_cache_enabled: true,
             observability_enabled: false,
+            api_server_enabled: false,
         });
         let config = AgentSandboxConfig::new("centaur");
 
@@ -963,6 +989,22 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.labels.as_ref())
                 .is_none_or(|labels| !labels.contains_key(OBSERVABILITY_ENABLED_LABEL))
+        );
+        assert!(
+            sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .is_none_or(|labels| !labels.contains_key(API_SERVER_ENABLED_LABEL))
+        );
+        assert!(
+            sandbox
+                .spec
+                .pod_template
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.labels.as_ref())
+                .is_none_or(|labels| !labels.contains_key(API_SERVER_ENABLED_LABEL))
         );
     }
 
@@ -1021,6 +1063,7 @@ mod tests {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
             repo_cache_enabled: false,
             observability_enabled: true,
+            api_server_enabled: true,
         });
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "api:test");
         tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());

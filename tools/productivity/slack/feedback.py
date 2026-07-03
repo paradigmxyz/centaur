@@ -20,6 +20,8 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from centaur_sdk import secret
+
 from .client import (
     _retry_on_ratelimit,
     get_slack_client,
@@ -117,6 +119,11 @@ class CentaurAgentClient:
     """Minimal client for starting a background improvement agent session."""
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
+        if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+            raise RuntimeError(
+                "Dispatching feedback improvement runs requires the API server sandbox "
+                "capability, but it is disabled for this principal."
+            )
         self.base_url = (base_url or os.getenv("CENTAUR_API_URL") or "http://api:8000").rstrip("/")
         self.api_key = api_key or _load_centaur_api_key()
         if not self.api_key:

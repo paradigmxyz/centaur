@@ -56,6 +56,17 @@
           <span class="block text-xs text-zinc-500">Allow sandbox access to logs and metrics surfaces.</span>
         </span>
       </label>
+      <label class="flex items-start gap-3">
+        <%= hidden_field_tag :sandbox_api_server_enabled, "0" %>
+        <%= check_box_tag :sandbox_api_server_enabled,
+                          "1",
+                          @principal.sandbox_api_server_enabled,
+                          class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">API server</span>
+          <span class="block text-xs text-zinc-500">Allow sandbox access to the api-rs control plane.</span>
+        </span>
+      </label>
       <div>
         <%= submit_tag "Save sandbox access", class: "btn-primary" %>
       </div>

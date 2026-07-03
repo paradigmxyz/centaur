@@ -10,15 +10,49 @@
 <% items.each do |item| %>
   <% if item[:source] == :thinking %>
     <div class="flex justify-start">
-      <details class="console-thinking w-full max-w-3xl">
+      <details class="console-thinking <%= "console-thinking--commands" if item[:trace_kind] == "commands" %> w-full max-w-3xl">
         <summary class="console-thinking-summary">
+          <span class="console-thinking-title"><%= item[:label].presence || "Thinking" %></span>
+          <% if item[:failed_label].present? %>
+            <span class="console-thinking-failed"><%= item[:failed_label] %></span>
+          <% end %>
+          <% if item[:trace_kind] == "commands" %>
+            <% if item[:summary].present? %>
+              <span class="console-thinking-preview"><%= item[:summary].truncate(96) %></span>
+            <% end %>
+          <% else %>
+            <span class="console-thinking-preview"><%= (item[:summary].presence || item[:text].to_s.gsub(/\s+/, " ")).truncate(96) %></span>
+          <% end %>
           <span class="console-thinking-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
-          <span class="font-medium">Thinking</span>
-          <span class="console-thinking-preview"><%= item[:text].to_s.gsub(/\s+/, " ").truncate(96) %></span>
         </summary>
-        <div class="console-thinking-body console-markdown text-sm leading-6">
-          <%= console_markdown(item[:text]) %>
-        </div>
+        <% if item[:trace_kind] == "commands" %>
+          <div class="console-thinking-command-list">
+            <% item[:commands].to_a.each do |command| %>
+              <details class="console-thinking-command">
+                <summary class="console-thinking-command-row">
+                  <span class="console-command-prompt <%= "console-command-prompt--failed" if command[:failed] %>">$</span>
+                  <span class="console-command-text" title="<%= command[:command] %>"><%= command[:command].presence || "command" %></span>
+                  <% if command[:failed] %>
+                    <span class="console-command-status">failed</span>
+                  <% end %>
+                  <span class="console-thinking-command-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
+                </summary>
+                <div class="console-thinking-command-output">
+                  <pre class="console-thinking-command-full"><span class="console-command-prompt <%= "console-command-prompt--failed" if command[:failed] %>">$</span> <%= command[:command].presence || "command" %></pre>
+                  <% if command[:output].present? %>
+                    <pre class="console-thinking-command-result"><%= command[:output] %></pre>
+                  <% else %>
+                    <div class="console-thinking-command-empty">No output captured.</div>
+                  <% end %>
+                </div>
+              </details>
+            <% end %>
+          </div>
+        <% else %>
+          <div class="console-thinking-body console-markdown text-sm leading-6">
+            <%= console_markdown(item[:text]) %>
+          </div>
+        <% end %>
       </details>
     </div>
   <% else %>

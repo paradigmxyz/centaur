@@ -141,6 +141,7 @@ pub enum SessionStatus {
 pub struct SandboxCapabilities {
     pub repo_cache_enabled: bool,
     pub observability_enabled: bool,
+    pub api_server_enabled: bool,
 }
 
 impl SandboxCapabilities {
@@ -148,11 +149,12 @@ impl SandboxCapabilities {
         Self {
             repo_cache_enabled: true,
             observability_enabled: true,
+            api_server_enabled: true,
         }
     }
 
     pub const fn is_default_enabled(&self) -> bool {
-        self.repo_cache_enabled && self.observability_enabled
+        self.repo_cache_enabled && self.observability_enabled && self.api_server_enabled
     }
 }
 

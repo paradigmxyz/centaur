@@ -76,6 +76,7 @@ module Api
           labels: principal.labels,
           sandbox_repo_cache_enabled: principal.sandbox_repo_cache_enabled,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
+          sandbox_api_server_enabled: principal.sandbox_api_server_enabled,
           created_at: principal.created_at,
           updated_at: principal.updated_at
         }
@@ -86,6 +87,7 @@ module Api
           :name,
           :sandbox_repo_cache_enabled,
           :sandbox_observability_enabled,
+          :sandbox_api_server_enabled,
           labels: {}
         )
       end

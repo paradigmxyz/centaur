@@ -478,6 +478,8 @@ pub struct Principal {
     pub sandbox_repo_cache_enabled: bool,
     #[serde(default = "default_true")]
     pub sandbox_observability_enabled: bool,
+    #[serde(default = "default_true")]
+    pub sandbox_api_server_enabled: bool,
 }
 
 /// A principal's effective config — the same secrets/postgres the principal's

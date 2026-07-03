@@ -56,6 +56,7 @@ class PrincipalTest < ActiveSupport::TestCase
 
     assert_predicate principal, :sandbox_repo_cache_enabled
     assert_predicate principal, :sandbox_observability_enabled
+    assert_predicate principal, :sandbox_api_server_enabled
   end
 
   test "labels accepts arbitrary string map" do

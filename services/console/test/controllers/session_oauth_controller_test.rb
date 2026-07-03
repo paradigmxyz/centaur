@@ -101,13 +101,13 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
   # --- callback: provisioning ------------------------------------------------
 
-  test "callback provisions a pending user for a non-bootstrap email and signs them in" do
+  test "callback provisions an active user for a non-bootstrap email and lands on the console" do
     assert_difference -> { User.count }, 1 do
       run_callback(sub: "new-sub", email: "newcomer@example.com")
     end
-    assert_redirected_to pending_path
+    assert_redirected_to console_threads_path
     user = User.find_by(email: "newcomer@example.com")
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
     assert_equal "Test User", user.name
     assert_equal user.id, session[:user_id]
@@ -144,12 +144,12 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_nil session[:user_id]
   end
 
-  test "callback creates a pending user for an unverified, unrecognized email" do
+  test "callback creates an active user for an unverified, unrecognized email" do
     assert_difference -> { User.count }, 1 do
       run_callback(sub: "unv-sub", email: "stranger@example.com", email_verified: false)
     end
     user = User.find_by(email: "stranger@example.com")
-    assert user.pending?
+    assert user.active?
     assert_not user.user_identities.first.email_verified
   end
 
