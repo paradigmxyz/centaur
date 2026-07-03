@@ -363,10 +363,10 @@
         flex: 0 0 auto;
         margin-left: 0.125rem;
         place-items: center;
-        /* Optical centering: the drawn glyph reaches the text baseline, so a
-           geometric center reads ~1px low against cap-height glyphs. */
+        /* Optical centering: settle the arrow onto the lowercase x-band that
+           dominates the row text (geometric center reads slightly high). */
         position: relative;
-        top: -1px;
+        top: 1px;
         transition: transform 120ms ease;
       }
 
@@ -414,10 +414,12 @@
         color: #8b8b94;
       }
 
+      /* Roomy enough that adjacent rows' hover pills (which extend 0.2rem
+         beyond their row) don't touch. */
       .console-thinking-command-list {
         display: grid;
-        gap: 0.2rem;
-        margin-top: 0.45rem;
+        gap: 0.4rem;
+        margin-top: 0.55rem;
       }
 
       .console-thinking-command {
@@ -478,10 +480,10 @@
         margin-left: auto;
         place-items: center;
         color: #71717a;
-        /* Optical centering against the row's cap band (baseline alignment
-           floats the icon ~1px high). */
+        /* Optical centering onto the lowercase x-band (baseline alignment
+           floats the icon ~2px high). */
         position: relative;
-        top: 1px;
+        top: 2px;
         transition: transform 120ms ease;
       }
 
@@ -489,8 +491,11 @@
         transform: rotate(90deg);
       }
 
+      /* The box chrome hangs in the same 0.5rem gutter as the row hover
+         pills, so its inner text (and the $ prompt) sits on the same vertical
+         line as the command rows above it. */
       .console-thinking-command-output {
-        margin: 0.35rem 0 0.5rem;
+        margin: 0.45rem -0.5rem 0.6rem;
         max-height: 18rem;
         overflow: auto;
         border: 1px solid rgba(255, 255, 255, 0.06);
@@ -505,7 +510,7 @@
 
       .console-thinking-command-output pre {
         margin: 0;
-        padding: 0.65rem 0.75rem;
+        padding: 0.6rem calc(0.5rem - 1px);
         white-space: pre-wrap;
         word-break: break-word;
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -522,7 +527,7 @@
       }
 
       .console-thinking-command-empty {
-        padding: 0.65rem 0.75rem;
+        padding: 0.6rem calc(0.5rem - 1px);
         color: #71717a;
         font-size: 0.75rem;
       }
