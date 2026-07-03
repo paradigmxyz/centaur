@@ -363,6 +363,10 @@
         flex: 0 0 auto;
         margin-left: 0.125rem;
         place-items: center;
+        /* Optical centering: the drawn glyph reaches the text baseline, so a
+           geometric center reads ~1px low against cap-height glyphs. */
+        position: relative;
+        top: -1px;
         transition: transform 120ms ease;
       }
 
@@ -474,6 +478,10 @@
         margin-left: auto;
         place-items: center;
         color: #71717a;
+        /* Optical centering against the row's cap band (baseline alignment
+           floats the icon ~1px high). */
+        position: relative;
+        top: 1px;
         transition: transform 120ms ease;
       }
 
