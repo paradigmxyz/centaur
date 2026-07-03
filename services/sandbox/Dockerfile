@@ -90,6 +90,19 @@ RUN set -eux; \
     chmod +x /usr/local/bin/kubectl; \
     kubectl version --client=true | grep -F "${KUBECTL_VERSION#v}"
 
+# ── AWS CLI v2 ─────────────────────────────────────────────────────────────
+RUN set -eux; \
+    aws_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo x86_64 ;; \
+      arm64) echo aarch64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/aws; \
+    aws --version
+
 # ── Nushell ─────────────────────────────────────────────────────────────────
 RUN set -eux; \
     nu_arch="$(case "$(dpkg --print-architecture)" in \
