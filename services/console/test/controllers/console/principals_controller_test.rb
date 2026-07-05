@@ -25,7 +25,7 @@ module Console
         assert_select "input[name='principal[foreign_id]']"
         assert_select "input[name='principal[name]']"
         assert_select "button", "Add label"
-        assert_select "input[type=submit][value='Create principal']"
+        assert_select "input[type=submit][value='Add Principal']"
       end
     end
 

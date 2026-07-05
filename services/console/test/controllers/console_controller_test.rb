@@ -143,10 +143,10 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "div", text: /#{Regexp.escape(principal.oid)}.*#{Regexp.escape(principal.namespace)}/
   end
 
-  test "principals table links to create principal" do
+  test "principals table links to add principal" do
     get console_principals_url
     assert_response :ok
-    assert_select "a[href=?]", console_new_principal_path, text: "Create principal"
+    assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
   end
 
   test "principal detail page offers delete" do
