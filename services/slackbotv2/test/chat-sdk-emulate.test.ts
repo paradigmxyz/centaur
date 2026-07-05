@@ -352,7 +352,7 @@ describe('slackbotv2', () => {
 
     const parent = await postUserMessage('Thread default context.')
     const firstMention = await postUserMessage(
-      `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 first pass`,
+      `<@${BOT_USER_ID}> --claude --model=fable\nfirst pass`,
       parent.ts
     )
     const firstWaits: Promise<unknown>[] = []
@@ -367,7 +367,7 @@ describe('slackbotv2', () => {
           team: TEAM_ID,
           ts: firstMention.ts,
           thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> --claude --model claude-opus-4-8 first pass`
+          text: `<@${BOT_USER_ID}> --claude --model=fable\nfirst pass`
         }
       }),
       {},
@@ -414,10 +414,11 @@ describe('slackbotv2', () => {
       string,
       unknown
     >
-    expect(firstInput.model).toBe('claude-opus-4-8')
-    expect(secondInput.model).toBe('claude-opus-4-8')
+    expect(firstInput.model).toBe('claude-fable-5')
+    expect(secondInput.model).toBe('claude-fable-5')
     expect(JSON.stringify(firstInput)).not.toContain('--claude')
     expect(JSON.stringify(firstInput)).not.toContain('--model')
+    expect(JSON.stringify(firstInput)).toContain('first pass')
     expect(JSON.stringify(secondInput)).toContain('continue without flags')
 
     const state = await sharedState.get<Record<string, unknown>>(
@@ -426,7 +427,7 @@ describe('slackbotv2', () => {
     expect(state).toEqual(
       expect.objectContaining({
         harnessType: 'claudecode',
-        model: 'claude-opus-4-8'
+        model: 'claude-fable-5'
       })
     )
   })
