@@ -106,14 +106,14 @@ accordingly. See [Security](/security) for the full threat model.
 
 ### Codex Auth Modes
 
-:::warning[Dedicate the account to Centaur]
-Do not use this ChatGPT account for `codex` outside Centaur once its
-refresh token is in the broker. OpenAI's OAuth flow uses strict refresh
-token reuse detection: if you keep running `codex` locally with the same
-account, both clients will race to rotate the refresh token. Whichever
-side rotates second is treated as a stolen credential and the entire
-token family is revoked, logging both sides out at random. Use a separate
-ChatGPT account for any non-Centaur Codex work.
+:::warning[Use a fresh Codex auth token]
+Enable [device code login](https://developers.openai.com/codex/auth#preferred-device-code-authentication-beta)
+in ChatGPT security settings for a personal account, or in ChatGPT workspace
+permissions if you are a workspace admin. Then run `codex login --device-auth`
+to mint a fresh token for Centaur. Do not use the token in
+`~/.codex/auth.json`; those credentials belong to local Codex. If the broker
+and local CLI share one refresh token, their refreshes can invalidate each other
+and log both clients out.
 :::
 
 Codex supports two authentication modes, selected per deployment with the
@@ -145,20 +145,20 @@ Secret, etc.) when running in `access_token` mode:
   `chatgpt-account-id` header so the backend can route to the right
   workspace. Store it alongside the other two, not in code.
 
-To bootstrap, run `codex login` locally, then copy the refresh token and
-account id from `~/.codex/auth.json` into the matching secret items. Use
-the constant above for `OPENAI_CODEX_CLIENT_ID`.
+To bootstrap, enable [device code login](https://developers.openai.com/codex/auth#preferred-device-code-authentication-beta),
+then run `codex login --device-auth`. Store the fresh token from that flow as
+the `refresh_token` value inside `OPENAI_CODEX_BLOB`, and store the matching
+account id in `OPENAI_CODEX_ACCOUNT_ID`. Use the constant above for
+`OPENAI_CODEX_CLIENT_ID`.
 
 ### Claude Auth Modes
 
-:::warning[Dedicate the account to Centaur]
-Do not use this Claude.ai account for `claude` outside Centaur once its
-refresh token is in the broker. Anthropic's OAuth flow uses strict
-refresh token reuse detection: if you keep running `claude` locally with
-the same account, both clients will race to rotate the refresh token.
-Whichever side rotates second is treated as a stolen credential and the
-entire token family is revoked, logging both sides out at random. Use a
-separate Claude.ai account for any non-Centaur Claude Code work.
+:::warning[Use a fresh Claude auth token]
+Use `claude auth-token` to mint a fresh token for Centaur. Do not copy
+the token from `~/.claude/.credentials.json` or from the
+`Claude Code-credentials` keychain item on macOS; those credentials belong
+to local Claude Code. If the broker and local CLI share one refresh token,
+their refreshes can invalidate each other and log both clients out.
 :::
 
 Claude Code supports two authentication modes, selected per deployment
@@ -189,10 +189,9 @@ Secret, etc.) when running in `access_token` mode:
   broker rotates this in place on every refresh, so the backing item must be
   writable.
 
-To bootstrap, run `claude login` locally, then copy the refresh token from
-`~/.claude/.credentials.json` (or from the `Claude Code-credentials` keychain
-item on macOS) into `CLAUDE_CODE_BLOB`. Use the constant above for
-`CLAUDE_CODE_CLIENT_ID`.
+To bootstrap, run `claude auth-token` locally, then store the fresh token it
+prints as the `refresh_token` value inside `CLAUDE_CODE_BLOB`. Use the
+constant above for `CLAUDE_CODE_CLIENT_ID`.
 
 ## 4. Configure Slack
 
