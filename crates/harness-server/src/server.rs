@@ -1111,6 +1111,8 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         let event = harness.parse_stdout_line(trimmed)?;
         let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
         let mut terminal = false;
+        let mut native_terminal_in_batch = false;
+        let mut assistant_end_turn_terminal_in_batch = false;
         for normalized in normalized_events {
             if let Some(usage) = normalized.token_usage() {
                 latest_usage = Some(usage.clone());
@@ -1123,11 +1125,26 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
             for notification in normalizer.process_event(&normalized)? {
                 write_value(stdout, &notification_to_wire_value(&notification)?)?;
             }
-            terminal |= normalized.is_terminal()
-                || (harness.finish_turn_on_assistant_end_turn()
-                    && normalized.is_assistant_end_turn());
+            let native_terminal = normalized.is_terminal();
+            let assistant_end_turn_terminal =
+                harness.finish_turn_on_assistant_end_turn() && normalized.is_assistant_end_turn();
+            native_terminal_in_batch |= native_terminal;
+            assistant_end_turn_terminal_in_batch |= assistant_end_turn_terminal;
+            terminal |= native_terminal || assistant_end_turn_terminal;
         }
         if terminal {
+            if assistant_end_turn_terminal_in_batch
+                && !native_terminal_in_batch
+                && matches!(harness.kind(), HarnessKind::ClaudeCode)
+            {
+                eprintln!(
+                    "event=harness_turn_completed_on_assistant_end_turn harness_kind={:?} thread_id={} turn_id={} session_id={}",
+                    harness.kind(),
+                    state.id,
+                    normalizer.turn_id(),
+                    state.harness_session_id.as_deref().unwrap_or("")
+                );
+            }
             export_harness_usage_if_available(
                 trace_context,
                 harness.kind(),
