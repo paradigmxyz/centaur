@@ -34,6 +34,10 @@ Rails.application.routes.draw do
   # Operator console (server-rendered HTML UI).
   root "console#principals"
   get "console/principals", to: "console#principals", as: :console_principals
+  namespace :console do
+    get  "principals/new", to: "principals#new",    as: :new_principal
+    post "principals",     to: "principals#create", as: :create_principal
+  end
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
     resources :threads, only: %i[index create]
