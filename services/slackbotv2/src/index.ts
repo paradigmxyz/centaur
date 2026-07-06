@@ -1290,8 +1290,8 @@ async function renderFallbackFinalAnswer(
     for await (const _chunk of chatStream) {
       void _chunk
     }
-    const text = fallback.text()
-    if (!text) {
+    const capturedText = fallback.text()
+    if (!capturedText && !fallback.isInterrupted()) {
       outcome = 'empty'
       traceLog(options, 'slackbotv2_render_fallback_empty', trace, {
         last_event_id: lastEventId,
@@ -1299,6 +1299,7 @@ async function renderFallbackFinalAnswer(
       })
       return null
     }
+    const text = fallback.textOrDefault()
     const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
     if (replacement) {
       await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
@@ -2022,7 +2023,7 @@ async function renderPlainTextExecutionStream(
       void _chunk
     }
     const text = truncateSlackText(
-      fallback.text() || 'Execution completed, but no final text was captured.',
+      fallback.textOrDefault(),
       SLACK_FALLBACK_TEXT_MAX_CHARS,
       'Slack final answer'
     )
@@ -2038,6 +2039,7 @@ async function renderPlainTextExecutionStream(
 class SlackRenderFallback {
   private markdownText = ''
   private terminalText = ''
+  private interrupted = false
 
   async *collectSource(
     stream: AsyncIterable<SlackbotV2RendererSource>
@@ -2061,11 +2063,27 @@ class SlackRenderFallback {
     return (this.terminalText || this.markdownText).trim()
   }
 
+  textOrDefault(): string {
+    return (
+      this.text() ||
+      (this.interrupted
+        ? 'Execution interrupted'
+        : 'Execution completed, but no final text was captured.')
+    )
+  }
+
+  isInterrupted(): boolean {
+    return this.interrupted
+  }
+
   private captureTerminalText(event: SlackbotV2RendererSource): void {
     if (!event || typeof event !== 'object') return
     const eventKind = String(
       'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
     )
+    if (eventKind === 'session.execution_cancelled') {
+      this.interrupted = true
+    }
     if (
       eventKind !== 'session.execution_completed' &&
       eventKind !== 'session.execution_cancelled' &&

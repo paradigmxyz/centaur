@@ -194,6 +194,47 @@ describe('session event streaming', () => {
     })
     expect(seenEventIds).toEqual([1, 2])
   })
+
+  test('uses interrupted wording for cancelled executions without error text', async () => {
+    const encoded = new TextEncoder().encode(
+      [
+        'id: 1',
+        'event: session.execution_cancelled',
+        'data: {"status":"cancelled","reason":"turn_interrupted"}',
+        '',
+      ].join('\n')
+    )
+    const fetchFn: SlackbotV2Options['fetch'] = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded)
+            controller.close()
+          }
+        }),
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+    const seenEventIds: number[] = []
+
+    const stream = await openSessionEventStream(options(fetchFn), {
+      afterEventId: 0,
+      executionId: 'exec-1',
+      onEventId: eventId => seenEventIds.push(eventId),
+      threadId: 'slack:C1:1700000000.000100'
+    })
+    const events = []
+    for await (const event of stream) events.push(event)
+
+    expect(events).toEqual([
+      {
+        data: { error: 'Execution interrupted' },
+        event: 'session.execution_cancelled',
+        eventId: 1,
+        eventKind: 'session.execution_cancelled'
+      }
+    ])
+    expect(seenEventIds).toEqual([1])
+  })
 })
 
 describe('session interruption', () => {
