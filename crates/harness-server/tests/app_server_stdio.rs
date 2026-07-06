@@ -649,14 +649,14 @@ fn turn_interrupt_kills_harness_process_and_finishes_turn() {
         "printf 'start\\n' >> {start_log}; \
          trap 'printf \"killed\\n\" >> {start_log}; exit 143' TERM INT; \
          printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"fake-session\"}}'; \
-         if [ -f {marker} ]; then \
-           printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"content\":[{{\"type\":\"text\",\"text\":\"fresh turn\"}}]}}}}'; \
-           printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fresh turn\"}}'; \
-           sleep 1; \
-         else \
-           touch {marker}; \
-           while IFS= read -r _; do sleep 60; done; \
-         fi",
+         while IFS= read -r _; do \
+           if [ -f {marker} ]; then \
+             printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"content\":[{{\"type\":\"text\",\"text\":\"fresh turn\"}}]}}}}'; \
+             printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fresh turn\"}}'; \
+           else \
+             sleep 60; \
+           fi; \
+         done",
         start_log = shell_quote(start_log.as_path()),
         marker = shell_quote(marker.as_path())
     );
@@ -671,11 +671,57 @@ fn turn_interrupt_kills_harness_process_and_finishes_turn() {
         "hang until stopped",
         Duration::from_secs(10),
     );
-    assert_eq!(interrupted.terminal_status.as_deref(), Some("failed"));
+    assert_eq!(interrupted.terminal_status.as_deref(), Some("interrupted"));
+
+    std::fs::write(&marker, b"fresh turn ready").expect("write fresh-turn marker");
+    let fresh = bridge.run_turn(
+        &thread_id,
+        5,
+        "run after interrupt",
+        None,
+        Duration::from_secs(10),
+    );
+    assert_completed_turn(&fresh);
+    assert_eq!(fresh.text_from_deltas, "fresh turn");
     let _ = bridge.child.kill();
     let _ = bridge.child.wait();
     let _ = std::fs::remove_file(start_log);
     let _ = std::fs::remove_file(marker);
+}
+
+#[test]
+fn turn_interrupt_rejects_wrong_thread_and_turn_without_killing_process() {
+    let start_log = temp_path("harness-rejected-interrupt-starts.log");
+    let command = format!(
+        "printf 'start\\n' >> {start_log}; \
+         printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"fake-session\"}}'; \
+         while IFS= read -r _; do sleep 60; done",
+        start_log = shell_quote(start_log.as_path()),
+    );
+    let mut bridge = BridgeProcess::spawn_harness(Harness::ClaudeCode, Some(command), None);
+    let thread_id =
+        bridge.initialize_and_start_thread(Harness::ClaudeCode, Duration::from_secs(10));
+
+    let interrupted = bridge.run_turn_with_rejected_interrupts(
+        &thread_id,
+        3,
+        4,
+        5,
+        6,
+        "hang until stopped",
+        Duration::from_secs(10),
+    );
+    assert_eq!(interrupted.terminal_status.as_deref(), Some("interrupted"));
+
+    let starts = std::fs::read_to_string(&start_log).expect("read start log");
+    assert_eq!(
+        starts.lines().count(),
+        1,
+        "rejected interrupts must not kill and restart the harness before the valid interrupt"
+    );
+    let _ = bridge.child.kill();
+    let _ = bridge.child.wait();
+    let _ = std::fs::remove_file(start_log);
 }
 
 #[test]
@@ -1265,6 +1311,128 @@ impl BridgeProcess {
         capture
     }
 
+    fn run_turn_with_rejected_interrupts(
+        &mut self,
+        thread_id: &str,
+        request_id: i64,
+        wrong_thread_interrupt_request_id: i64,
+        wrong_turn_interrupt_request_id: i64,
+        valid_interrupt_request_id: i64,
+        prompt: &str,
+        timeout: Duration,
+    ) -> TurnCapture {
+        self.send(json!({
+            "id": request_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt, "text_elements": []}],
+            },
+        }));
+
+        let deadline = Instant::now() + timeout;
+        let mut capture = TurnCapture::default();
+        let mut wrong_thread_interrupt_sent = false;
+        let mut wrong_thread_interrupt_rejected = false;
+        let mut wrong_turn_interrupt_sent = false;
+        let mut wrong_turn_interrupt_rejected = false;
+        let mut valid_interrupt_sent = false;
+        let mut valid_interrupt_acknowledged = false;
+
+        loop {
+            let value = self.read_json_allowing_error(deadline);
+            if let Some(id) = response_id(&value) {
+                if id == request_id {
+                    capture.turn_id = value
+                        .pointer("/result/turn/id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| panic!("turn/start did not return turn id: {value}"))
+                        .to_string();
+                } else if id == wrong_thread_interrupt_request_id {
+                    assert!(
+                        value.get("error").is_some(),
+                        "wrong-thread interrupt should be rejected: {value}"
+                    );
+                    wrong_thread_interrupt_rejected = true;
+                    self.send(json!({
+                        "id": wrong_turn_interrupt_request_id,
+                        "method": "turn/interrupt",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": "wrong-turn",
+                        },
+                    }));
+                    wrong_turn_interrupt_sent = true;
+                } else if id == wrong_turn_interrupt_request_id {
+                    assert!(
+                        value.get("error").is_some(),
+                        "wrong-turn interrupt should be rejected: {value}"
+                    );
+                    wrong_turn_interrupt_rejected = true;
+                    self.send(json!({
+                        "id": valid_interrupt_request_id,
+                        "method": "turn/interrupt",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": capture.turn_id,
+                        },
+                    }));
+                    valid_interrupt_sent = true;
+                } else if id == valid_interrupt_request_id {
+                    assert!(
+                        value.get("error").is_none(),
+                        "valid interrupt should be acknowledged: {value}"
+                    );
+                    valid_interrupt_acknowledged = true;
+                }
+                continue;
+            }
+
+            if let Some(method) = value.get("method").and_then(Value::as_str) {
+                assert_notification_thread_id(&value, thread_id);
+                capture.consume_notification(method, &value);
+                if method == "turn/started"
+                    && capture.turn_id.is_empty()
+                    && let Some(turn_id) = value.pointer("/params/turn/id").and_then(Value::as_str)
+                {
+                    capture.turn_id = turn_id.to_string();
+                }
+                if method == "turn/started"
+                    && !wrong_thread_interrupt_sent
+                    && !capture.turn_id.is_empty()
+                {
+                    self.send(json!({
+                        "id": wrong_thread_interrupt_request_id,
+                        "method": "turn/interrupt",
+                        "params": {
+                            "threadId": "wrong-thread",
+                            "turnId": capture.turn_id,
+                        },
+                    }));
+                    wrong_thread_interrupt_sent = true;
+                }
+                if method == "turn/completed" {
+                    assert!(
+                        wrong_thread_interrupt_rejected,
+                        "turn completed before wrong-thread interrupt rejection"
+                    );
+                    assert!(
+                        wrong_turn_interrupt_sent && wrong_turn_interrupt_rejected,
+                        "turn completed before wrong-turn interrupt rejection"
+                    );
+                    assert!(valid_interrupt_sent, "valid interrupt was never sent");
+                    assert!(
+                        valid_interrupt_acknowledged,
+                        "turn completed before valid interrupt response"
+                    );
+                    break;
+                }
+            }
+        }
+
+        capture
+    }
+
     fn run_blocks_user_turn(&mut self, prompt: &str, timeout: Duration) -> TurnCapture {
         self.run_blocks_user_turn_with_model(prompt, None, timeout)
     }
@@ -1331,6 +1499,14 @@ impl BridgeProcess {
     }
 
     fn read_json(&mut self, deadline: Instant) -> Value {
+        self.read_json_checked(deadline, false)
+    }
+
+    fn read_json_allowing_error(&mut self, deadline: Instant) -> Value {
+        self.read_json_checked(deadline, true)
+    }
+
+    fn read_json_checked(&mut self, deadline: Instant, allow_error: bool) -> Value {
         loop {
             let now = Instant::now();
             assert!(now < deadline, "timed out waiting for app-server stdout");
@@ -1343,7 +1519,7 @@ impl BridgeProcess {
                     self.stdout_lines.push(line.clone());
                     let value: Value =
                         serde_json::from_str(line.trim()).expect("valid JSON stdout line");
-                    validate_jsonrpc_value(&value);
+                    validate_jsonrpc_value(&value, allow_error);
                     return value;
                 }
                 Ok(Err(error)) => panic!("read app-server stdout: {error}"),
@@ -1652,7 +1828,7 @@ impl RawProcess {
     }
 }
 
-fn validate_jsonrpc_value(value: &Value) {
+fn validate_jsonrpc_value(value: &Value, allow_error: bool) {
     let message: JSONRPCMessage =
         serde_json::from_value(value.clone()).expect("valid JSON-RPC message");
     match message {
@@ -1667,7 +1843,9 @@ fn validate_jsonrpc_value(value: &Value) {
             }
         }
         JSONRPCMessage::Response(_) => {}
-        JSONRPCMessage::Error(error) => panic!("app-server returned JSON-RPC error: {error:?}"),
+        JSONRPCMessage::Error(error) => {
+            assert!(allow_error, "app-server returned JSON-RPC error: {error:?}");
+        }
         JSONRPCMessage::Request(request) => {
             panic!("app-server emitted unexpected request: {request:?}")
         }

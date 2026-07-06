@@ -981,6 +981,29 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             Ok(false)
         }
         "turn/interrupt" => {
+            let params: TurnInterruptParams = request_params(request.params)?;
+            if params.thread_id != normalizer.thread_id() {
+                write_error(
+                    stdout,
+                    request.id,
+                    -32600,
+                    format!("unknown threadId {}", params.thread_id),
+                )?;
+                return Ok(false);
+            }
+            if params.turn_id != normalizer.turn_id() {
+                write_error(
+                    stdout,
+                    request.id,
+                    -32600,
+                    format!(
+                        "expected active turn id `{}` but found `{}`",
+                        params.turn_id,
+                        normalizer.turn_id()
+                    ),
+                )?;
+                return Ok(false);
+            }
             process.kill_and_wait()?;
             write_client_response(
                 stdout,
@@ -1034,10 +1057,28 @@ fn run_normalized_turn<H: HarnessServer, W: Write>(
     ) {
         Ok(Some(turn)) => state.completed_turns.push(turn),
         Ok(None) => {}
+        Err(HarnessServerError::TurnInterrupted { .. }) => {
+            state.process = None;
+            finish_turn_interrupted(state, normalizer, stdout)?;
+        }
         Err(error) => {
             state.process = None;
             finish_turn_with_error(state, normalizer, stdout, error)?;
         }
+    }
+    Ok(())
+}
+
+fn finish_turn_interrupted<W: Write>(
+    state: &mut ThreadState,
+    normalizer: &mut CodexTurnNormalizer,
+    stdout: &mut W,
+) -> Result<()> {
+    if let Some(notification) = normalizer.finish_turn_interrupted()? {
+        if let ServerNotification::TurnCompleted(completed) = &notification {
+            state.completed_turns.push(completed.turn.clone());
+        }
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
     }
     Ok(())
 }
