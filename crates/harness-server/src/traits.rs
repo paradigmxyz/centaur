@@ -2,6 +2,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command as ProcessCommand};
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use codex_app_server_protocol::{ThreadStartParams, Turn, UserInput};
 use serde_json::Value;
@@ -71,8 +72,17 @@ pub trait HarnessServer {
         normalizer: &mut Self::EventNormalizer,
         event: Self::Event,
     ) -> Result<Vec<NormalizedEvent>>;
-    fn finish_turn_on_terminal_assistant_stop(&self) -> bool {
-        false
+    /// How to treat an assistant message that stops with a terminal stop
+    /// reason (`end_turn`, ...) when no native terminal event has arrived.
+    /// `None` keeps the turn open until a native result/error (the default).
+    /// `Some(window)` completes the turn once the stream stays quiet for
+    /// `window` after the stop: a zero window completes immediately (for
+    /// streams with no native result event), a nonzero window gives the
+    /// harness's own `result` a chance to settle the turn first — and keeps
+    /// that trailing `result` from being read as the *next* turn's terminal —
+    /// while still completing when the result never comes.
+    fn terminal_assistant_stop_settle(&self) -> Option<Duration> {
+        None
     }
 
     fn thread_state(&self, params: &ThreadStartParams, cwd: PathBuf) -> ThreadState {

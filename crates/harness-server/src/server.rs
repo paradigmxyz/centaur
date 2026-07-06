@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, RecvTimeoutError},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -1211,10 +1211,21 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
             .process
             .as_mut()
             .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+        // Anything already buffered predates this turn's input: a previous
+        // turn completed via the terminal-stop fallback can leave the CLI's
+        // late `result` (and trailing rate-limit noise) behind, which would
+        // otherwise read as this turn's instant terminal.
+        while process.stdout.try_recv().is_ok() {}
         process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
         process.stdin.flush()?;
     }
 
+    let settle_window = harness.terminal_assistant_stop_settle();
+    // Armed after a terminal assistant stop with no native terminal event yet:
+    // once the stream stays quiet past this deadline the turn completes via
+    // the fallback. Any further output (the native result on its way, trailing
+    // noise, or a continuation of the turn) pushes the deadline back.
+    let mut settle_deadline: Option<Instant> = None;
     let mut last_session_id = state.harness_session_id.clone();
     let mut event_normalizer = H::EventNormalizer::default();
     let mut completed_turn = None;
@@ -1231,17 +1242,60 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                     kind: harness.kind(),
                 });
             }
+            // A steer re-opens the turn: the harness now owes a response whose
+            // first token can take longer than the settle window, so the
+            // pending fallback completion no longer applies. The response's
+            // own terminal stop re-arms it.
+            settle_deadline = None;
         }
 
-        let line = match state
+        let mut terminal = false;
+        match state
             .process
             .as_mut()
             .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
             .stdout
             .recv_timeout(Duration::from_millis(50))
         {
-            Ok(line) => line?,
-            Err(RecvTimeoutError::Timeout) => continue,
+            Ok(line) => {
+                let line = line?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let event = harness.parse_stdout_line(trimmed)?;
+                let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
+                let mut terminal_stop = false;
+                for normalized in normalized_events {
+                    if let Some(usage) = normalized.token_usage() {
+                        latest_usage = Some(usage.clone());
+                    }
+                    append_usage_span_output(&normalized, &mut usage_span_output);
+                    if let Some(session_id) = normalized.session_id() {
+                        last_session_id = Some(session_id.to_string());
+                        state.harness_session_id = Some(session_id.to_string());
+                    }
+                    for notification in normalizer.process_event(&normalized)? {
+                        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+                    }
+                    terminal |= normalized.is_terminal();
+                    terminal_stop |=
+                        settle_window.is_some() && normalized.is_terminal_assistant_stop();
+                }
+                if !terminal {
+                    match settle_window {
+                        Some(window) if terminal_stop && window.is_zero() => terminal = true,
+                        Some(window) if terminal_stop || settle_deadline.is_some() => {
+                            settle_deadline = Some(Instant::now() + window);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => match settle_deadline {
+                Some(deadline) if Instant::now() >= deadline => terminal = true,
+                _ => continue,
+            },
             Err(RecvTimeoutError::Disconnected) => {
                 let status = state
                     .process
@@ -1249,35 +1303,20 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                     .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
                     .child
                     .wait()?;
-                return Err(HarnessServerError::HarnessExited {
-                    kind: harness.kind(),
-                    status,
-                    stderr: String::new(),
-                });
+                // A clean exit while waiting out the settle window means the
+                // native result is never coming: the terminal stop already
+                // seen ends the turn.
+                if settle_deadline.is_some() && status.success() {
+                    state.process = None;
+                    terminal = true;
+                } else {
+                    return Err(HarnessServerError::HarnessExited {
+                        kind: harness.kind(),
+                        status,
+                        stderr: String::new(),
+                    });
+                }
             }
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let event = harness.parse_stdout_line(trimmed)?;
-        let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
-        let mut terminal = false;
-        for normalized in normalized_events {
-            if let Some(usage) = normalized.token_usage() {
-                latest_usage = Some(usage.clone());
-            }
-            append_usage_span_output(&normalized, &mut usage_span_output);
-            if let Some(session_id) = normalized.session_id() {
-                last_session_id = Some(session_id.to_string());
-                state.harness_session_id = Some(session_id.to_string());
-            }
-            for notification in normalizer.process_event(&normalized)? {
-                write_value(stdout, &notification_to_wire_value(&notification)?)?;
-            }
-            terminal |= normalized.is_terminal()
-                || (harness.finish_turn_on_terminal_assistant_stop()
-                    && normalized.is_terminal_assistant_stop());
         }
         if terminal {
             export_harness_usage_if_available(
@@ -1465,7 +1504,12 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         .take()
         .ok_or(HarnessServerError::HarnessStderrUnavailable)?;
     std::thread::spawn(move || {
-        let mut parent_stderr = io::stderr().lock();
+        // Copy through the unlocked handle (it locks per write): the harness
+        // process outlives each turn, so its stderr never EOFs, and holding
+        // the StderrLock here for the copy's lifetime deadlocks every other
+        // eprintln! in the server — including turn-completion paths, which
+        // then never emit turn/completed.
+        let mut parent_stderr = io::stderr();
         let _ = io::copy(&mut stderr, &mut parent_stderr);
     });
     let (stdout_tx, stdout_rx) = mpsc::channel();

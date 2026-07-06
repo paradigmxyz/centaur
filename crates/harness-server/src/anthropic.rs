@@ -19,13 +19,19 @@ pub enum AnthropicStreamEvent {
         #[serde(default)]
         is_partial: bool,
         message: AnthropicMessage,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     User {
         message: AnthropicMessage,
         tool_use_result: Option<Value>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     StreamEvent {
         event: AnthropicRawStreamEvent,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     Result {
         subtype: Option<String>,
@@ -61,9 +67,32 @@ impl AnthropicStreamEvent {
                     AnthropicRawStreamEvent::MessageDelta {
                         delta: Some(delta), ..
                     },
+                ..
             } => delta.stop_reason.as_deref(),
             _ => None,
         }
+    }
+
+    /// The Task tool-use id owning this event when it belongs to a subagent
+    /// sidechain. Sidechain messages stop with their own `end_turn` while the
+    /// parent turn keeps running, so they must never settle the turn.
+    pub fn parent_tool_use_id(&self) -> Option<&str> {
+        match self {
+            Self::Assistant {
+                parent_tool_use_id, ..
+            }
+            | Self::User {
+                parent_tool_use_id, ..
+            }
+            | Self::StreamEvent {
+                parent_tool_use_id, ..
+            } => parent_tool_use_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn is_sidechain(&self) -> bool {
+        self.parent_tool_use_id().is_some()
     }
 
     pub fn token_usage(&self) -> Option<NormalizedTokenUsage> {
@@ -140,7 +169,7 @@ pub struct AnthropicEventNormalizer {
 impl AnthropicEventNormalizer {
     pub fn normalize(&mut self, event: AnthropicStreamEvent) -> NormalizedEvent {
         match event {
-            AnthropicStreamEvent::StreamEvent { event } => self.normalize_stream_event(event),
+            AnthropicStreamEvent::StreamEvent { event, .. } => self.normalize_stream_event(event),
             event => self.normalize_message_event(event),
         }
     }
@@ -218,6 +247,7 @@ impl AnthropicEventNormalizer {
             AnthropicStreamEvent::Assistant {
                 is_partial,
                 message,
+                ..
             } => NormalizedEvent::AssistantMessage {
                 partial: is_partial,
                 stop_reason: message.stop_reason.clone(),
@@ -226,6 +256,7 @@ impl AnthropicEventNormalizer {
             AnthropicStreamEvent::User {
                 message,
                 tool_use_result,
+                ..
             } => {
                 let tool_use_result = tool_use_result.as_ref();
                 let results = message

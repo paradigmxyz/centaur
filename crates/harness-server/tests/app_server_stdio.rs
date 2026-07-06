@@ -131,6 +131,124 @@ fn fake_claude_app_server_completes_on_stop_sequence_without_result() {
 }
 
 #[test]
+fn fake_claude_completes_on_terminal_stop_while_process_outlives_the_turn() {
+    // The real CLI does not exit after a turn — harness-server keeps it (and
+    // its stdin) alive for the next one. When the stream stops at the
+    // message_delta stop reason with no trailing `result`, the settle window
+    // must complete the turn instead of waiting on the live process forever
+    // (the fable "thinking..." hang).
+    let fake_claude = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[]}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fable answer\"}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[{\"type\":\"text\",\"text\":\"fable answer\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}'",
+        "; sleep 60"
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude.to_string()),
+        prompt: "say hello".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "fable answer");
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
+fn fake_claude_trailing_result_settles_the_turn_and_does_not_poison_the_next() {
+    // The native `result` trails the message_delta stop reason in real CLI
+    // output. The stop must not complete the turn so eagerly that the result
+    // is left buffered, where the next turn would read it as its own instant
+    // terminal and complete with no content.
+    let fake_claude = concat!(
+        "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}'; ",
+        "IFS= read -r _; ",
+        "printf '%s\\n' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[]}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"first answer\"}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_stop\"}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"first answer\"}'; ",
+        "IFS= read -r _; ",
+        "printf '%s\\n' ",
+        "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_2\",\"content\":[{\"type\":\"text\",\"text\":\"second answer\"}]}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"second answer\"}'; ",
+        "sleep 60"
+    );
+
+    let run = run_bridge_two_turns(BridgeTwoTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude.to_string()),
+        first_prompt: "first".to_string(),
+        second_prompt: "second".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_completed_turn(&run.turns[0]);
+    assert_eq!(run.turns[0].text_from_deltas, "first answer");
+    assert_completed_turn(&run.turns[1]);
+    assert_eq!(run.turns[1].text_from_deltas, "second answer");
+}
+
+#[test]
+fn fake_claude_subagent_sidechain_stop_does_not_complete_the_turn() {
+    // A Task subagent's sidechain messages end with their own end_turn while
+    // the parent turn keeps running (here: 3s of quiet before the main chain
+    // resumes, longer than the settle window). The sidechain stop must not
+    // complete the turn or leak subagent text into it.
+    let fake_claude = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[]}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Delegating.\"}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[{\"type\":\"text\",\"text\":\"Delegating.\"},{\"type\":\"tool_use\",\"id\":\"toolu_task\",\"name\":\"Task\",\"input\":{\"prompt\":\"look it up\"}}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_sub\",\"stop_reason\":null,\"content\":[]}},\"parent_tool_use_id\":\"toolu_task\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}},\"parent_tool_use_id\":\"toolu_task\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"sub answer\"}},\"parent_tool_use_id\":\"toolu_task\"}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_sub\",\"stop_reason\":null,\"content\":[{\"type\":\"text\",\"text\":\"sub answer\"}]},\"parent_tool_use_id\":\"toolu_task\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}},\"parent_tool_use_id\":\"toolu_task\"}'",
+        "; sleep 3; printf '%s\\n' ",
+        "'{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_task\",\"content\":\"sub answer\",\"is_error\":false}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"stop_reason\":null,\"content\":[]}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"main answer\"}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"stop_reason\":null,\"content\":[{\"type\":\"text\",\"text\":\"main answer\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"main answer\"}'"
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude.to_string()),
+        prompt: "delegate then answer".to_string(),
+        timeout: Duration::from_secs(15),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert!(
+        run.turn.text_from_deltas.contains("main answer"),
+        "main-chain answer missing: {:?}",
+        run.turn.text_from_deltas
+    );
+    assert!(
+        !run.turn.text_from_deltas.contains("sub answer"),
+        "sidechain text leaked into the turn: {:?}",
+        run.turn.text_from_deltas
+    );
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
 fn fake_codex_blocks_mode_uses_openrouter_provider_when_model_is_configured() {
     let fake_codex = temp_path("fake-openrouter-codex.sh");
     let fake_codex_log = temp_path("fake-openrouter-codex-requests.jsonl");

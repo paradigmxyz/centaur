@@ -483,7 +483,10 @@ impl CodexJsonRpcChild {
             .take()
             .ok_or(HarnessServerError::CodexStderrUnavailable)?;
         thread::spawn(move || {
-            let mut parent_stderr = io::stderr().lock();
+            // Unlocked handle on purpose: this child lives across turns, so
+            // holding the StderrLock for the copy's lifetime would block every
+            // eprintln! in the server until the child exits.
+            let mut parent_stderr = io::stderr();
             let _ = io::copy(&mut stderr, &mut parent_stderr);
         });
 
