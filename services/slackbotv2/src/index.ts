@@ -18,6 +18,7 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
   codexAppServerToChatSdkStream,
+  EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
   type ChatSDKStreamChunk,
   type RendererEvent
@@ -2060,7 +2061,10 @@ class SlackRenderFallback {
   }
 
   text(): string {
-    return (this.terminalText || this.markdownText).trim()
+    const terminalText = this.terminalText.trim()
+    const markdownText = this.markdownText.trim()
+    if (this.interrupted && !terminalText && markdownText === EMPTY_FINAL_ANSWER_TEXT) return ''
+    return terminalText || markdownText
   }
 
   textOrDefault(): string {
@@ -2068,7 +2072,7 @@ class SlackRenderFallback {
       this.text() ||
       (this.interrupted
         ? 'Execution interrupted'
-        : 'Execution completed, but no final text was captured.')
+        : EMPTY_FINAL_ANSWER_TEXT)
     )
   }
 
