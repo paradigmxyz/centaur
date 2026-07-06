@@ -1850,16 +1850,13 @@ async function* parseSessionEventStream(
 
 async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterable<ParsedSessionEvent> {
   const reader = stream.getReader()
-  // Tracks the underlying network connection, NOT this generator's lifetime.
-  // Nothing cancels `reader` when a consumer abandons this generator early
-  // (e.g. parseSessionEventStream returning on a terminal event), so the
-  // connection stays open and keeps holding a slot in Bun's global fetch pool
-  // (BUN_CONFIG_MAX_HTTP_REQUESTS, default 256). A generator-finally here
-  // would hide exactly that leak, so the gauge is only decremented when the
-  // socket actually settles: server EOF or a read error.
+  // Tracks the underlying network connection. Each open stream occupies one
+  // slot of Bun's global fetch pool (BUN_CONFIG_MAX_HTTP_REQUESTS, default
+  // 256); the 2026-07-06 incident wedged Slackbot by leaking one abandoned
+  // stream per completed turn until the pool was exhausted.
   slackbotMetrics.sessionEventStreamsOpen.inc()
   let connectionReleased = false
-  const releaseConnection = (reason: 'done' | 'error') => {
+  const releaseConnection = (reason: 'cancelled' | 'done' | 'error') => {
     if (connectionReleased) return
     connectionReleased = true
     slackbotMetrics.sessionEventStreamsOpen.dec()
@@ -1871,42 +1868,52 @@ async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterabl
   let eventId: number | undefined
   let data: string[] = []
 
-  while (true) {
-    let done: boolean
-    let value: Uint8Array | undefined
-    try {
-      ;({ done, value } = await reader.read())
-    } catch (error) {
-      releaseConnection('error')
-      throw error
-    }
-    if (done) {
-      releaseConnection('done')
-      break
-    }
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split(/\r?\n/)
-    buffer = lines.pop() ?? ''
+  try {
+    while (true) {
+      let done: boolean
+      let value: Uint8Array | undefined
+      try {
+        ;({ done, value } = await reader.read())
+      } catch (error) {
+        releaseConnection('error')
+        throw error
+      }
+      if (done) {
+        releaseConnection('done')
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() ?? ''
 
-    for (const line of lines) {
-      const emitted = parseSseLine(line, { data, eventId, eventName })
+      for (const line of lines) {
+        const emitted = parseSseLine(line, { data, eventId, eventName })
+        data = emitted.state.data
+        eventId = emitted.state.eventId
+        eventName = emitted.state.eventName
+        if (emitted.event) yield emitted.event
+      }
+    }
+
+    buffer += decoder.decode()
+    if (buffer) {
+      const emitted = parseSseLine(buffer, { data, eventId, eventName })
       data = emitted.state.data
       eventId = emitted.state.eventId
       eventName = emitted.state.eventName
       if (emitted.event) yield emitted.event
     }
-  }
-
-  buffer += decoder.decode()
-  if (buffer) {
-    const emitted = parseSseLine(buffer, { data, eventId, eventName })
-    data = emitted.state.data
-    eventId = emitted.state.eventId
-    eventName = emitted.state.eventName
-    if (emitted.event) yield emitted.event
-  }
-  if (data.length > 0) {
-    yield { data: data.join('\n'), event: eventName, id: eventId }
+    if (data.length > 0) {
+      yield { data: data.join('\n'), event: eventName, id: eventId }
+    }
+  } finally {
+    // Runs when a consumer abandons this generator early — typically
+    // parseSessionEventStream returning on a terminal event. Cancelling the
+    // reader closes the connection, freeing its fetch-pool slot and letting
+    // api-rs drop the stream's server-side resources. Without this, every
+    // completed turn leaked one connection until all outbound HTTP wedged.
+    releaseConnection('cancelled')
+    await reader.cancel().catch(() => {})
   }
 }
 

@@ -3695,6 +3695,20 @@ fn session_event_stream(
                     if let Some(event) = state.pending.pop_front() {
                         state.after_event_id = event.event_id;
                         state.emitted_count += 1;
+                        // Execution-scoped streams are per-turn: after the
+                        // execution's terminal event nothing else will ever
+                        // arrive, so complete the response instead of parking
+                        // forever. Abandoned client connections otherwise pin
+                        // this stream's dedicated LISTEN connection until the
+                        // TCP peer is proven dead (the 2026-07-06 incident
+                        // exhausted both the Slackbot fetch pool and staging
+                        // Postgres this way). The 30s safety tick makes this
+                        // robust even when the notify is missed.
+                        if state.execution_id.is_some()
+                            && is_terminal_execution_event(&event.event_type)
+                        {
+                            state.done = true;
+                        }
                         return Some((Ok(event), state));
                     }
                     if state.done {
@@ -3747,6 +3761,15 @@ fn session_event_stream(
             }
             .instrument(span)
         },
+    )
+}
+
+/// Terminal event types for a single execution: once one of these is emitted
+/// on an execution-scoped stream, the stream has nothing left to deliver.
+fn is_terminal_execution_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "session.execution_completed" | "session.execution_failed" | "session.execution_cancelled"
     )
 }
 
@@ -7750,6 +7773,84 @@ mod adoption_tests {
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execution_scoped_event_stream_completes_after_terminal_event() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:stream-close-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, None, false).await;
+        store
+            .append_event(
+                &thread_key,
+                Some(&execution_id),
+                "session.output.line",
+                json!({ "line": "working" }),
+            )
+            .await
+            .expect("append output event");
+        store
+            .append_event(
+                &thread_key,
+                Some(&execution_id),
+                "session.execution_completed",
+                json!({ "execution_id": execution_id }),
+            )
+            .await
+            .expect("append terminal event");
+
+        // Execution-scoped: the stream must end on its own after emitting the
+        // terminal event, releasing the response and its listener connection.
+        let listener = store.listen_session_events().await.expect("listener");
+        let scoped = session_event_stream(
+            store.clone(),
+            thread_key.clone(),
+            0,
+            Some(execution_id.clone()),
+            listener,
+            tracing::Span::none(),
+        );
+        let emitted = tokio::time::timeout(Duration::from_secs(10), scoped.collect::<Vec<_>>())
+            .await
+            .expect("execution-scoped stream should complete after the terminal event");
+        let kinds: Vec<_> = emitted
+            .into_iter()
+            .map(|result| result.expect("stream event").event_type)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["session.output.line", "session.execution_completed"]
+        );
+
+        // Control: an unscoped stream over the same events stays open for
+        // future events instead of completing.
+        let listener = store.listen_session_events().await.expect("listener");
+        let unscoped = session_event_stream(
+            store.clone(),
+            thread_key.clone(),
+            0,
+            None,
+            listener,
+            tracing::Span::none(),
+        );
+        let mut unscoped = std::pin::pin!(unscoped);
+        for _ in 0..2 {
+            unscoped
+                .next()
+                .await
+                .expect("buffered event")
+                .expect("stream event");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), unscoped.next())
+                .await
+                .is_err(),
+            "unscoped stream should stay open after a terminal event"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

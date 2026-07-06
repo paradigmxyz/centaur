@@ -22,6 +22,7 @@ import {
   type SlackbotV2SessionMessage
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
+import { slackbotMetrics } from '../src/metrics'
 import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
@@ -5666,3 +5667,109 @@ async function isPortOpen(port: number): Promise<boolean> {
     })
   })
 }
+
+// Regression coverage for the 2026-07-06 incident: every execute turn opens a
+// GET /api/session/{key}/events SSE stream; abandoning it after the terminal
+// event without cancelling the reader leaked one connection per turn. At
+// Bun's global fetch cap (BUN_CONFIG_MAX_HTTP_REQUESTS, default 256) every
+// outbound fetch queued forever and all handoffs failed. parseSseEvents now
+// cancels the reader when the consumer stops, so connections are released.
+describe('session event stream connection lifecycle', () => {
+  function openEventStreamGauge(): number {
+    const match = /^slackbotv2_session_event_streams_open (\d+)$/m.exec(slackbotMetrics.expose())
+    return match?.[1] ? Number.parseInt(match[1], 10) : 0
+  }
+
+  function cancelledClosures(): number {
+    const match = /^slackbotv2_session_event_stream_closures_total\{reason="cancelled"\} (\d+)$/m
+      .exec(slackbotMetrics.expose())
+    return match?.[1] ? Number.parseInt(match[1], 10) : 0
+  }
+
+  async function waitForGaugeAtMost(limit: number): Promise<number> {
+    const deadline = Date.now() + 5_000
+    let open = openEventStreamGauge()
+    while (open > limit && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+      open = openEventStreamGauge()
+    }
+    return open
+  }
+
+  async function deliverMention(bot: SlackbotV2, turn: number, threadTs: string, ts: string) {
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: `Ev-stream-lifecycle-${threadTs}-${turn}`,
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts,
+          thread_ts: threadTs,
+          text: `<@${BOT_USER_ID}> stream lifecycle turn ${turn}`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    await Promise.all(waits).catch(() => {})
+    return response
+  }
+
+  it('cancels the events connection once a turn reaches its terminal event', async () => {
+    const gaugeBefore = openEventStreamGauge()
+    const closuresBefore = cancelledClosures()
+    const parent = await postUserMessage('Stream lifecycle thread.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> stream lifecycle turn 0`, parent.ts)
+
+    const response = await deliverMention(bot, 0, parent.ts, mention.ts)
+    expect(response.status).toBe(200)
+
+    const open = await waitForGaugeAtMost(gaugeBefore)
+    expect(open).toBeLessThanOrEqual(gaugeBefore)
+    expect(cancelledClosures()).toBeGreaterThan(closuresBefore)
+  })
+
+  // Drives past Bun's 256-request cap to prove the wedge is gone. `bun test`
+  // ignores the BUN_CONFIG_MAX_HTTP_REQUESTS override but still enforces the
+  // built-in 256 cap, so crossing 260 turns exercises the real limit. Takes
+  // ~30s, so it is opt-in:
+  //
+  //   SLACKBOTV2_POOL_WEDGE_REPRO=1 bun test test/chat-sdk-emulate.test.ts -t 'pool cap'
+  const runCapCrossing = process.env.SLACKBOTV2_POOL_WEDGE_REPRO === '1' ? it : it.skip
+  runCapCrossing(
+    'keeps handing off past the 256-connection pool cap without wedging',
+    async () => {
+      const poolCap = 256
+      const gaugeBefore = openEventStreamGauge()
+      const repro = createTestBot({
+        sessionApiTimeoutMs: 5_000,
+        slackApiTimeoutMs: 2_000
+      })
+
+      let peak = 0
+      for (let turn = 0; turn < poolCap + 4; turn++) {
+        // One thread per turn, like production traffic: reusing a single
+        // thread makes per-turn context collection grow quadratically.
+        const parent = await postUserMessage(`Pool cap crossing thread ${turn + 1}.`)
+        const mention = await postUserMessage(
+          `<@${BOT_USER_ID}> stream lifecycle turn ${turn + 1}`,
+          parent.ts
+        )
+        const response = await deliverMention(repro, turn + 1, parent.ts, mention.ts)
+        expect(response.status).toBe(200)
+        const open = await waitForGaugeAtMost(gaugeBefore)
+        peak = Math.max(peak, open)
+        if ((turn + 1) % 64 === 0 || turn >= poolCap) {
+          console.log(`turn ${turn + 1}/${poolCap + 4}: ok, open streams settled at ${open}`)
+        }
+        expect(open).toBeLessThanOrEqual(gaugeBefore)
+      }
+      console.log(`peak settled gauge: ${peak}; cancelled closures: ${cancelledClosures()}`)
+    },
+    480_000
+  )
+})
