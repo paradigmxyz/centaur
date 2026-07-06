@@ -1850,6 +1850,21 @@ async function* parseSessionEventStream(
 
 async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterable<ParsedSessionEvent> {
   const reader = stream.getReader()
+  // Tracks the underlying network connection, NOT this generator's lifetime.
+  // Nothing cancels `reader` when a consumer abandons this generator early
+  // (e.g. parseSessionEventStream returning on a terminal event), so the
+  // connection stays open and keeps holding a slot in Bun's global fetch pool
+  // (BUN_CONFIG_MAX_HTTP_REQUESTS, default 256). A generator-finally here
+  // would hide exactly that leak, so the gauge is only decremented when the
+  // socket actually settles: server EOF or a read error.
+  slackbotMetrics.sessionEventStreamsOpen.inc()
+  let connectionReleased = false
+  const releaseConnection = (reason: 'done' | 'error') => {
+    if (connectionReleased) return
+    connectionReleased = true
+    slackbotMetrics.sessionEventStreamsOpen.dec()
+    slackbotMetrics.sessionEventStreamClosures.inc({ reason })
+  }
   const decoder = new TextDecoder()
   let buffer = ''
   let eventName: string | undefined
@@ -1857,8 +1872,18 @@ async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterabl
   let data: string[] = []
 
   while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+    let done: boolean
+    let value: Uint8Array | undefined
+    try {
+      ;({ done, value } = await reader.read())
+    } catch (error) {
+      releaseConnection('error')
+      throw error
+    }
+    if (done) {
+      releaseConnection('done')
+      break
+    }
     buffer += decoder.decode(value, { stream: true })
     const lines = buffer.split(/\r?\n/)
     buffer = lines.pop() ?? ''
