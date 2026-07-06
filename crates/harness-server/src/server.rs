@@ -105,6 +105,15 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                             break;
                         }
                     }
+                    Ok(command @ BlocksCommand::User { .. }) => {
+                        turn_active.store(true, Ordering::SeqCst);
+                        if command_tx
+                            .send(BlocksReaderInput::Command(command))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Ok(command) => {
                         if command_tx
                             .send(BlocksReaderInput::Command(command))
@@ -142,7 +151,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 if let Some(model) = model {
                     state.model = model;
                 }
-                if let Err(error) = run_blocks_turn(
+                let result = run_blocks_turn(
                     harness,
                     &mut state,
                     input,
@@ -151,7 +160,9 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     &mut stdout,
                     &request_rx,
                     &turn_active,
-                ) {
+                );
+                drain_active_turn_requests(&request_rx);
+                if let Err(error) = result {
                     eprintln!("blocks turn failed: {error:#}");
                     write_blocks_error(&mut stdout, &state.id, "turn", error.to_string())?;
                 }
@@ -263,6 +274,10 @@ enum BlocksReaderInput {
 enum ActiveTurnRequest {
     JsonRpc(JSONRPCRequest),
     BlocksInterrupt,
+}
+
+fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) {
+    while rx.try_recv().is_ok() {}
 }
 
 #[derive(Debug)]

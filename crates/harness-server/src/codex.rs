@@ -153,6 +153,15 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                             break;
                         }
                     }
+                    Ok(command @ BlocksCommand::User { .. }) => {
+                        turn_active.store(true, Ordering::SeqCst);
+                        if command_tx
+                            .send(CodexBlocksReaderInput::Command(command))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Ok(command) => {
                         if command_tx
                             .send(CodexBlocksReaderInput::Command(command))
@@ -185,7 +194,6 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 trace_context,
             }) => {
                 let traceparent = trace_context.effective_traceparent();
-                drain_codex_active_turn_requests(&active_turn_rx);
                 turn_active.store(true, Ordering::SeqCst);
                 let result = (|| -> Result<()> {
                     if codex.is_none() {

@@ -386,6 +386,35 @@ fn fake_amp_blocks_mode_accepts_user_blocks_by_default() {
 }
 
 #[test]
+fn fake_claude_blocks_mode_interrupts_back_to_back_stop() {
+    let fake_claude = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}'; ",
+        "while IFS= read -r _; do sleep 60; done"
+    );
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::ClaudeCode,
+        Some(fake_claude.to_string()),
+        None,
+    );
+    let turn = bridge.run_blocks_interrupted_turn("hang until stopped", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_eq!(turn.terminal_status.as_deref(), Some("interrupted"));
+    assert!(
+        turn.methods.contains(&"turn/started".to_string()),
+        "missing turn/started; got {:?}",
+        turn.methods
+    );
+    assert!(
+        turn.methods.contains(&"turn/completed".to_string()),
+        "missing turn/completed; got {:?}",
+        turn.methods
+    );
+}
+
+#[test]
 fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
     let fake_codex = temp_path("fake-codex.sh");
     let fake_codex_log = temp_path("fake-codex-requests.jsonl");
@@ -1570,10 +1599,17 @@ impl BridgeProcess {
                 "content": [{"type": "text", "text": prompt}],
             },
         }));
+        self.send(json!({
+            "type": "interrupt",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "test",
+                "action": "interrupt_active_execution"
+            }
+        }));
 
         let deadline = Instant::now() + timeout;
         let mut capture = TurnCapture::default();
-        let mut interrupt_sent = false;
 
         loop {
             let value = self.read_json(deadline);
@@ -1589,19 +1625,7 @@ impl BridgeProcess {
                 {
                     capture.turn_id = turn_id.to_string();
                 }
-                if method == "turn/started" && !interrupt_sent {
-                    self.send(json!({
-                        "type": "interrupt",
-                        "thread_key": "slack:C123:123.456",
-                        "trace_metadata": {
-                            "source": "test",
-                            "action": "interrupt_active_execution"
-                        }
-                    }));
-                    interrupt_sent = true;
-                }
                 if method == "turn/completed" {
-                    assert!(interrupt_sent, "turn completed before interrupt was sent");
                     break;
                 }
             }
