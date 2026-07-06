@@ -149,11 +149,13 @@ ARG BUN_VERSION=bun-v1.3.13
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --component rustfmt --component clippy \
+      | sh -s -- -y --profile minimal --default-toolchain nightly --component rustfmt --component clippy \
+    && rustup toolchain install stable --profile minimal \
     && rustc --version \
     && cargo --version \
-    && rustfmt --version \
-    && clippy-driver --version \
+    && cargo +stable --version \
+    && cargo +nightly fmt --version \
+    && cargo +nightly clippy --version \
     && rm -rf "$HOME/.rustup/toolchains"/*/share/doc "$HOME/.rustup/toolchains"/*/share/man
 RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \

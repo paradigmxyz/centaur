@@ -70,6 +70,11 @@
 |*NEVER run git commit/push inside* ~/github/ — it is read-only. Always use git-branch first.
 |Prefer `rg` (ripgrep) over `grep` for all codebase operations.
 
+[Rust policy — ALWAYS use nightly for formatting and clippy]
+|ALWAYS install both the Rust stable and nightly toolchains when provisioning Rust tooling, with nightly as the default toolchain.
+|ALWAYS run Rust formatting and clippy through nightly: use `cargo +nightly fmt <args>` and `cargo +nightly clippy <args>` instead of `cargo fmt` or `cargo clippy`.
+|For other cargo commands, prefer the repository's pinned/default toolchain unless the repo or user asks for nightly.
+
 [GitHub PR Attribution]
 |When opening a GitHub PR for a Slack request, attribute the requester in the PR body with one standalone `Prompted by: ...` line.
 |Use the [Requester Context] block when present: prefer the verified GitHub handle resolved from the requester's Slack profile; if none is configured, use the requester's Slack display name or username.
