@@ -1,0 +1,118 @@
+<% title = @latest_run&.workflow_name_label || @workflow_name %>
+<% content_for :title, "#{title} · Centaur Console" %>
+
+<div class="mb-5">
+  <%= link_to "Back to Workflows", console_workflows_path, class: "back-link" %>
+</div>
+
+<% if @workflow_db_unavailable %>
+  <div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
+    Workflow database is unavailable. Console needs the API workflow read-only views to show runs.
+  </div>
+<% elsif @latest_run.blank? %>
+  <div class="empty-state">
+    No workflow runs found for <span class="text-zinc-300"><%= @workflow_name %></span>.
+  </div>
+<% else %>
+  <% status = @latest_run.display_status %>
+  <section class="mb-6 grid gap-6 lg:grid-cols-2">
+    <dl class="divide-y divide-ink-700 border-y border-ink-700">
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Workflow</dt>
+        <dd class="min-w-0 text-zinc-100" title="<%= @latest_run.workflow_name_label %>">
+          <%= truncate_middle(@latest_run.workflow_name_label, max: 72) %>
+        </dd>
+      </div>
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Queue</dt>
+        <dd class="min-w-0 text-zinc-100"><%= @latest_run.queue_label %></dd>
+      </div>
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Duration</dt>
+        <dd class="min-w-0 text-zinc-100"><%= workflow_duration_label(@latest_run) %></dd>
+      </div>
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Engine</dt>
+        <dd class="min-w-0 text-zinc-100"><%= @latest_run.harness_type.presence || "—" %></dd>
+      </div>
+    </dl>
+
+    <dl class="divide-y divide-ink-700 border-y border-ink-700">
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Status</dt>
+        <dd class="min-w-0">
+          <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= workflow_status_classes(status) %>">
+            <%= status.tr("_", " ") %>
+          </span>
+        </dd>
+      </div>
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Started</dt>
+        <dd class="min-w-0 text-zinc-100"><%= local_time(@latest_run.started_or_created_at) %></dd>
+      </div>
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Attempts</dt>
+        <dd class="min-w-0 text-zinc-100">
+          <%= @latest_run.attempts || 0 %><span class="text-zinc-600"> / <%= @latest_run.max_attempts.presence || "unlimited" %></span>
+        </dd>
+      </div>
+      <div class="flex gap-5 px-5 py-4">
+        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Runs</dt>
+        <dd class="min-w-0 text-zinc-100"><%= pluralize(@workflow_runs.size, "run") %></dd>
+      </div>
+    </dl>
+  </section>
+
+  <h1 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Historical Runs</h1>
+
+  <section class="console-scroll-panel">
+    <table class="console-table">
+      <thead class="console-table-head">
+        <tr>
+          <th class="console-th">Status</th>
+          <th class="console-th">Queue</th>
+          <th class="console-th">Attempts</th>
+          <th class="console-th">Started</th>
+          <th class="console-th">Finished</th>
+          <th class="console-th">Run</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-ink-700">
+        <% @workflow_runs.each do |run| %>
+          <% run_status = run.display_status %>
+          <tr class="console-row-hover align-top">
+            <td class="console-td-nowrap">
+              <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= workflow_status_classes(run_status) %>">
+                <%= run_status.tr("_", " ") %>
+              </span>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= run.queue_label %>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= run.attempts || 0 %><span class="text-zinc-600"> / <%= run.max_attempts.presence || "unlimited" %></span>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= local_time(run.started_or_created_at, relative: true) %>
+              <% if run.created_at.present? && run.started_or_created_at != run.created_at %>
+                <div class="mt-1 text-zinc-600">queued <%= local_time(run.created_at, relative: true, format: :compact) %></div>
+              <% end %>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= local_time(run.terminal_at, relative: true) %>
+            </td>
+
+            <td class="console-td text-xs text-zinc-500">
+              <div title="<%= run.run_id %>"><%= truncate_middle(run.run_id, max: 34) %></div>
+              <div class="mt-1 text-zinc-600" title="<%= run.task_id %>"><%= truncate_middle(run.task_id, max: 34) %></div>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </section>
+<% end %>

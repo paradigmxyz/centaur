@@ -1195,6 +1195,7 @@
   </head>
 
   <% threads_view = request.path.start_with?("/console/threads") %>
+  <% workflows_view = request.path.start_with?("/console/workflows") %>
   <%# The Control and Data Sync sections are admin-only (each controller enforces
       require_admin server-side); non-admins only get the Chats view below. %>
   <% nav_items = [] %>
@@ -1234,6 +1235,17 @@
               </a>
             <% end %>
           </nav>
+
+          <% if current_user&.admin? %>
+            <div class="console-thread-group">
+              <a href="<%= console_workflows_path %>"
+                 class="console-thread-group-title <%= "console-thread-group-title-active" if workflows_view %>"
+                 title="Workflows">
+                <span class="console-nav-icon"><%= console_icon("workflow", classes: "size-4") %></span>
+                <span class="console-nav-label">Workflows</span>
+              </a>
+            </div>
+          <% end %>
 
           <div class="console-thread-group">
             <a href="<%= console_threads_path %>"

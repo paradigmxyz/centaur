@@ -31,6 +31,26 @@ module ApplicationHelper
     end
   end
 
+  def workflow_status_classes(status)
+    case status.to_s
+    when "completed" then "border-centaur-500/30 bg-centaur-500/10 text-centaur-300"
+    when "running" then "border-sky-500/40 bg-sky-500/10 text-sky-300"
+    when "failed" then "border-red-500/40 bg-red-500/10 text-red-300"
+    when "cancelled" then "border-zinc-600 bg-zinc-700/40 text-zinc-400"
+    when "pending", "sleeping" then "border-amber-500/40 bg-amber-500/10 text-amber-300"
+    else "border-ink-600 bg-ink-800/80 text-zinc-400"
+    end
+  end
+
+  def workflow_duration_label(run)
+    started_at = run.started_or_created_at
+    finished_at = run.terminal_at
+    return "running" if started_at.present? && finished_at.blank? && run.display_status == "running"
+    return "—" if started_at.blank? || finished_at.blank?
+
+    distance_of_time_in_words(started_at, finished_at)
+  end
+
   def console_icon(name, classes: "size-4")
     case name
     when "arrow-up"
@@ -136,6 +156,11 @@ module ApplicationHelper
       outline_icon(
         classes,
         "M15.75 9.75a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 19.5a8.25 8.25 0 1 1 15 0 9.72 9.72 0 0 0-15 0Z"
+      )
+    when "workflow"
+      outline_icon(
+        classes,
+        "M6 6h3.75v3.75H6V6Zm8.25 8.25H18V18h-3.75v-3.75ZM6 14.25h3.75V18H6v-3.75Zm3.75-6.375H12a3 3 0 0 1 3 3v3.375M9.75 16.125H12a3 3 0 0 0 3-3V9.75"
       )
     when "users"
       outline_icon(
