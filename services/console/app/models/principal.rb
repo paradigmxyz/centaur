@@ -12,6 +12,8 @@ class Principal < ApplicationRecord
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
   has_many :sync_config_snapshots, class_name: "PrincipalSyncConfigSnapshot", dependent: :destroy
+  has_many :mcp_oauth_authorization_codes, dependent: :destroy
+  has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]

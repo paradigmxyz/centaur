@@ -4,12 +4,33 @@ module Console
   # controller only handles the POST/DELETE actions wired from that page. Gated by
   # the app-wide require_login (not admin -- mirrors the secret/credential forms).
   class PrincipalsController < ApplicationController
+    include KvRowParams
     include SecretKinds
 
     layout "console"
 
     before_action :require_admin
-    before_action :set_principal
+    before_action :set_principal, except: %i[new create]
+
+    def new
+      @principal = Principal.new(namespace: "default")
+    end
+
+    def create
+      @principal = Principal.new(created_by: current_user)
+      assign_form(@principal)
+      if @principal.save
+        redirect_to console_principal_path(@principal.oid), notice: "Principal created."
+      else
+        render :new, status: :unprocessable_entity
+      end
+    end
+
+    def destroy
+      label = principal_label(@principal)
+      @principal.destroy!
+      redirect_to console_principals_path, notice: "Deleted principal #{label}."
+    end
 
     def update_sandbox_access
       @principal.update!(
@@ -65,6 +86,18 @@ module Console
 
     private
 
+    def assign_form(principal)
+      fields = principal_params.permit(:namespace, :foreign_id, :name)
+      fields[:namespace] = fields[:namespace].presence || "default"
+      fields[:foreign_id] = fields[:foreign_id].presence
+      principal.assign_attributes(fields)
+      principal.labels = label_params
+    end
+
+    def principal_params
+      params.fetch(:principal, ActionController::Parameters.new)
+    end
+
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.
     # Returns nil for a blank/unknown selection so the action can flash and bail.
     def resolve_grantable(value)
@@ -86,6 +119,10 @@ module Console
 
     def secret_label(secret)
       secret.try(:name).presence || secret.foreign_id.presence || secret.oid
+    end
+
+    def principal_label(principal)
+      principal.name.presence || principal.foreign_id.presence || principal.oid
     end
 
     def set_principal

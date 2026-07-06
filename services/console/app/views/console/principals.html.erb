@@ -4,7 +4,8 @@
 
 <%= render "console/page_header",
            title: "Principals",
-           subtitle: "#{pluralize(@principals.size, "principal")} across all namespaces. Click a row to inspect its grants." %>
+           subtitle: "#{pluralize(@principals.size, "principal")} across all namespaces. Click a row to inspect its grants.",
+           actions: link_to("Add Principal", console_new_principal_path, class: "btn-primary") %>
 
 <div class="console-panel">
   <table class="console-table">

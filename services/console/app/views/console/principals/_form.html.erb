@@ -1,0 +1,48 @@
+<%= render "errors", principal: principal %>
+
+<%= form_with url: console_create_principal_path, method: :post, data: { turbo: false }, class: "space-y-6" do %>
+  <section class="form-section">
+    <h2 class="form-section-heading">Identity</h2>
+    <div class="grid gap-5 sm:grid-cols-2">
+      <div>
+        <label class="form-label" for="principal_namespace">Namespace</label>
+        <%= text_field_tag "principal[namespace]", principal.namespace.presence || "default", id: "principal_namespace", class: "form-input #{field_error_class(principal, :namespace)}" %>
+        <%= field_error(principal, :namespace) %>
+      </div>
+      <div>
+        <label class="form-label" for="principal_foreign_id">Foreign ID</label>
+        <%= text_field_tag "principal[foreign_id]", principal.foreign_id, id: "principal_foreign_id", class: "form-input #{field_error_class(principal, :foreign_id)}", placeholder: "slack-channel-T123-C456" %>
+        <%= field_error(principal, :foreign_id) %>
+        <p class="form-hint">Optional. A stable, URL-safe handle for the chat or service identity.</p>
+      </div>
+      <div>
+        <label class="form-label" for="principal_name">Display name</label>
+        <%= text_field_tag "principal[name]", principal.name, id: "principal_name", class: "form-input #{field_error_class(principal, :name)}" %>
+        <%= field_error(principal, :name) %>
+      </div>
+    </div>
+    <%= field_error(principal, :labels) %>
+  </section>
+
+  <section data-controller="nested-fields" class="form-section">
+    <div class="mb-2 flex items-center justify-between">
+      <h2 class="form-section-heading mb-0">Labels</h2>
+      <button type="button" data-action="nested-fields#add" class="btn-secondary">Add label</button>
+    </div>
+
+    <div class="space-y-2" data-nested-fields-target="container">
+      <% (principal.labels.presence || {}).each_with_index do |(k, v), i| %>
+        <%= render "console/base_secrets/label_row", index: i, key: k, value: v %>
+      <% end %>
+    </div>
+
+    <template data-nested-fields-target="template">
+      <%= render "console/base_secrets/label_row", index: "NEW_RECORD", key: "", value: "" %>
+    </template>
+  </section>
+
+  <div class="flex items-center gap-3">
+    <%= submit_tag "Add Principal", class: "btn-primary" %>
+    <a href="<%= console_principals_path %>" class="btn-secondary">Cancel</a>
+  </div>
+<% end %>

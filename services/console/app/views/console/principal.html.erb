@@ -2,9 +2,16 @@
 
 <div class="mb-8">
   <a href="<%= console_principals_path %>" class="back-link">← back to principals</a>
-  <h1 class="mt-2 page-title">
-    <%= @principal.name.presence || @principal.foreign_id.presence || "Principal" %>
-  </h1>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <h1 class="page-title">
+      <%= @principal.name.presence || @principal.foreign_id.presence || "Principal" %>
+    </h1>
+    <div class="ml-auto">
+      <%= button_to "Delete", console_delete_principal_path(@principal.oid), method: :delete,
+            class: "cursor-pointer rounded border border-red-500/40 px-3 py-1.5 text-sm text-red-300 transition-colors hover:border-red-500/60 hover:bg-red-500/10",
+            data: { turbo_confirm: "Delete this principal? Direct grants, role assignments, MCP tokens, and sync snapshots are removed. Proxies are unassigned. This cannot be undone." } %>
+    </div>
+  </div>
   <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
     <span class="text-centaur-400 glow"><%= @principal.oid %></span>
     <span class="text-zinc-600">·</span>

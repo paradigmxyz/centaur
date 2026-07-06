@@ -44,7 +44,15 @@ const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
     ]),
   );
 
-const MODEL_FLAG_PATTERN = /(?:^|\s)--model[=\s]+([A-Za-z0-9._/-]+)(?=\s|$)/i;
+// Values are one horizontal-whitespace-delimited token; a newline after the
+// value starts the user's prompt, not part of the model value.
+const MODEL_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`;
+const FLAG_VALUE_BOUNDARY = String.raw`(?=[^\S\r\n]|\r?\n|\r|<br\s*/?>|$)`;
+
+const MODEL_FLAG_PATTERN = new RegExp(
+  String.raw`(?:^|\s)--model${MODEL_VALUE_SEPARATOR}([A-Za-z0-9._/-]+)${FLAG_VALUE_BOUNDARY}`,
+  "i",
+);
 
 export function extractMessageOverrides(text: string): MessageOverrides {
   let cleaned = text;
@@ -88,5 +96,11 @@ function flagPattern(flag: string): RegExp {
 }
 
 function stripMatch(text: string, match: RegExpExecArray): string {
-  return `${text.slice(0, match.index)}${text.slice(match.index + match[0].length)}`;
+  const before = text.slice(0, match.index);
+  const after = text
+    .slice(match.index + match[0].length)
+    .replace(/^(?:(?:\r\n?|\n)+|<br\s*\/?>)+/i, "");
+  const separator =
+    before && after && !/\s$/.test(before) && !/^\s/.test(after) ? " " : "";
+  return `${before}${separator}${after}`;
 }
