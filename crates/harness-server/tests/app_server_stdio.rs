@@ -1758,3 +1758,31 @@ fn shell_quote(path: &Path) -> String {
 fn shell_quote_str(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
 }
+
+#[test]
+fn claude_turn_completes_while_harness_process_outlives_the_turn() {
+    // Real `claude --print --input-format stream-json --output-format stream-json
+    // --verbose --include-partial-messages` output (CLI 2.1.154), captured live.
+    // Unlike the printf fakes above, the real CLI process does NOT exit after the
+    // turn — harness-server keeps it (and its stdin) in ThreadState for the next
+    // turn. `sleep 60` reproduces that. Before the stderr-lock fix this deadlocks:
+    // the child-stderr copy thread holds io::stderr().lock() until child EOF, and
+    // the end_turn completion diagnostic eprintln! blocks on it forever.
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/real-claude-2.1.154.jsonl");
+    let fake_claude = format!(
+        "cat {}; sleep 60",
+        fixture.to_str().expect("utf-8 fixture path")
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude),
+        prompt: "Reply with exactly: PROBE-OK".to_string(),
+        timeout: Duration::from_secs(15),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "PROBE-OK");
+    assert_codex_v2_turn(&run.turn);
+}

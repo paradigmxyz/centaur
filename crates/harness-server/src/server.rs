@@ -1327,7 +1327,12 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         .take()
         .ok_or(HarnessServerError::HarnessStderrUnavailable)?;
     std::thread::spawn(move || {
-        let mut parent_stderr = io::stderr().lock();
+        // Write through the unlocked handle (it locks per write): the harness
+        // process outlives each turn, so its stderr never EOFs, and holding the
+        // StderrLock here for the copy's lifetime deadlocks every other
+        // eprintln! in the server — notably the turn-completion diagnostic,
+        // which then blocks turn completion itself until the harness dies.
+        let mut parent_stderr = io::stderr();
         let _ = io::copy(&mut stderr, &mut parent_stderr);
     });
     let (stdout_tx, stdout_rx) = mpsc::channel();
