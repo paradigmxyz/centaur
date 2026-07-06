@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+message_file="${1:?commit message file is required}"
+
+if rg -i -q \
+  -e 'generated with (claude|codex|amp)' \
+  -e 'co-authored-by:.*(claude|codex|anthropic|openai|amp)' \
+  "$message_file"; then
+  cat >&2 <<'EOF'
+Commit message contains generated-by or AI co-author attribution.
+
+Remove the generated attribution footer and commit again.
+EOF
+  exit 1
+fi
