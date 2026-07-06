@@ -451,6 +451,73 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_interrupts_active_turn() {
+    let fake_codex = temp_path("fake-interruptible-codex.sh");
+    let fake_codex_log = temp_path("fake-interruptible-codex-requests.jsonl");
+    let script = fake_codex_interruptible_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+    );
+    let turn = bridge.run_blocks_interrupted_turn("hang until stopped", Duration::from_secs(10));
+    let stdout_lines = bridge.finish_successfully();
+
+    assert_eq!(turn.terminal_status.as_deref(), Some("interrupted"));
+    assert!(
+        turn.methods.contains(&"turn/started".to_string()),
+        "missing turn/started; got {:?}",
+        turn.methods
+    );
+    assert!(
+        turn.methods.contains(&"turn/completed".to_string()),
+        "missing turn/completed; got {:?}",
+        turn.methods
+    );
+    assert!(
+        stdout_lines
+            .iter()
+            .all(|line| response_id(&serde_json::from_str(line).expect("JSON stdout")).is_none()),
+        "blocks mode should emit notifications only, not JSON-RPC responses"
+    );
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    let interrupt = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/interrupt"))
+        .unwrap_or_else(|| {
+            panic!("blocks mode did not send turn/interrupt; requests={requests:?}")
+        });
+    assert_eq!(
+        interrupt
+            .pointer("/params/threadId")
+            .and_then(Value::as_str),
+        Some("thread-1")
+    );
+    assert_eq!(
+        interrupt.pointer("/params/turnId").and_then(Value::as_str),
+        Some("turn-1")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_codex_blocks_mode_forwards_traceparent_to_app_server_requests() {
     let fake_codex = temp_path("fake-codex-trace.sh");
     let fake_codex_log = temp_path("fake-codex-trace-requests.jsonl");
@@ -1490,6 +1557,59 @@ impl BridgeProcess {
         capture
     }
 
+    fn run_blocks_interrupted_turn(&mut self, prompt: &str, timeout: Duration) -> TurnCapture {
+        self.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "slackbotv2",
+                "action": "execute"
+            },
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+        }));
+
+        let deadline = Instant::now() + timeout;
+        let mut capture = TurnCapture::default();
+        let mut interrupt_sent = false;
+
+        loop {
+            let value = self.read_json(deadline);
+            assert!(
+                response_id(&value).is_none(),
+                "blocks mode emitted JSON-RPC response: {value}"
+            );
+            if let Some(method) = value.get("method").and_then(Value::as_str) {
+                capture.consume_notification(method, &value);
+                if method == "turn/started"
+                    && capture.turn_id.is_empty()
+                    && let Some(turn_id) = value.pointer("/params/turn/id").and_then(Value::as_str)
+                {
+                    capture.turn_id = turn_id.to_string();
+                }
+                if method == "turn/started" && !interrupt_sent {
+                    self.send(json!({
+                        "type": "interrupt",
+                        "thread_key": "slack:C123:123.456",
+                        "trace_metadata": {
+                            "source": "test",
+                            "action": "interrupt_active_execution"
+                        }
+                    }));
+                    interrupt_sent = true;
+                }
+                if method == "turn/completed" {
+                    assert!(interrupt_sent, "turn completed before interrupt was sent");
+                    break;
+                }
+            }
+        }
+
+        capture
+    }
+
     fn send(&mut self, value: Value) {
         eprintln!("stdin JSON: {value}");
         let stdin = self.stdin.as_mut().expect("stdin still open");
@@ -2015,6 +2135,59 @@ while IFS= read -r line; do
       printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"answer-1","delta":"codex blocks"}}'
       printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null},"completedAtMs":2}}'
       printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null}],"itemsView":"full","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}'
+      ;;
+    *)
+      printf '%s\n' "unexpected request: $line" >&2
+      exit 65
+      ;;
+  esac
+done
+"#,
+    );
+    script
+}
+
+fn fake_codex_interruptible_app_server_script(log_path: &Path) -> String {
+    let mut script = String::new();
+    script.push_str("#!/bin/sh\n");
+    script.push_str("log=");
+    script.push_str(&shell_quote(log_path));
+    script.push_str(
+        r#"
+touch "$log"
+if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "--help" ]; then
+  printf '%s\n' '--listen stdio://'
+  exit 0
+fi
+if [ "${1:-}" != "app-server" ]; then
+  printf '%s\n' 'expected app-server command' >&2
+  exit 64
+fi
+
+request_id() {
+  printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'
+}
+
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  case "$line" in
+    *'"method":"initialize"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"userAgent":"fake-codex"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}'
+      ;;
+    *'"method":"turn/interrupt"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":"full","status":"interrupted","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}'
       ;;
     *)
       printf '%s\n' "unexpected request: $line" >&2
