@@ -277,10 +277,6 @@ impl HarnessServer for ClaudeCodeHarness {
     ) -> Result<Vec<NormalizedEvent>> {
         Ok(normalizer.normalize(event))
     }
-
-    fn finish_turn_on_assistant_end_turn(&self) -> bool {
-        true
-    }
 }
 
 #[cfg(test)]
