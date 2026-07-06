@@ -58,8 +58,9 @@ use crate::{
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
-        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
-        SlackThreadContext, stream_error_sse,
+        InterruptSessionExecutionRequest, InterruptSessionExecutionResponse, ListWorkflowRunsQuery,
+        OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
+        stream_error_sse,
     },
 };
 
@@ -218,6 +219,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route(
             "/api/session/{thread_key}/execute",
             post(execute_session).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/session/{thread_key}/interrupt",
+            post(interrupt_session_execution),
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
@@ -511,6 +516,30 @@ async fn execute_session(
         execution_id: execution.execution_id,
         thread_key: execution.thread_key,
         status: execution.status.to_string(),
+    }))
+}
+
+async fn interrupt_session_execution(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+    Json(request): Json<InterruptSessionExecutionRequest>,
+) -> Result<Json<InterruptSessionExecutionResponse>, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Interrupted from Slack");
+    let outcome = state
+        .runtime()?
+        .interrupt_active_execution(&thread_key, reason)
+        .await?;
+    Ok(Json(InterruptSessionExecutionResponse {
+        ok: true,
+        interrupted: outcome.interrupted,
+        execution_id: outcome.execution_id,
+        thread_key,
     }))
 }
 

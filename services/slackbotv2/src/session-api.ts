@@ -13,6 +13,7 @@ import type {
   SlackbotV2ExecuteSessionRequest,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2Fetch,
+  SlackbotV2InterruptSessionResponse,
   SlackbotV2Options,
   SlackbotV2RendererSource,
   SlackbotV2SessionMessage
@@ -555,6 +556,19 @@ export async function openSessionEventStream(
     phase_ms: elapsedMs(streamStartedAtMs)
   })
   return stream
+}
+
+export async function interruptSessionExecution(
+  options: SlackbotV2Options,
+  threadId: string,
+  reason: string
+): Promise<SlackbotV2InterruptSessionResponse> {
+  return recordSessionApiOperation(
+    'interrupt_session',
+    () => postInterruptSessionExecution(options, threadId, reason),
+    sessionApiTimeoutMs(options),
+    'interrupt session'
+  )
 }
 
 const RESTART_CONTEXT_MAX_CHARS = 24_000
@@ -1226,6 +1240,27 @@ async function executeSession(
   )
   await ensureApiOk(response, 'execute session')
   return (await response.json()) as SlackbotV2ExecuteSessionResponse
+}
+
+async function postInterruptSessionExecution(
+  options: SlackbotV2Options,
+  threadId: string,
+  reason: string
+): Promise<SlackbotV2InterruptSessionResponse> {
+  const fetchFn = options.fetch ?? fetch
+  const response = await fetchWithTimeout(
+    fetchFn,
+    apiSessionUrl(options.apiUrl, threadId, 'interrupt'),
+    {
+      method: 'POST',
+      headers: apiHeaders(options),
+      body: JSON.stringify({ reason })
+    },
+    sessionApiTimeoutMs(options),
+    'interrupt session'
+  )
+  await ensureApiOk(response, 'interrupt session')
+  return (await response.json()) as SlackbotV2InterruptSessionResponse
 }
 
 async function ensureApiOk(response: Response, action: string): Promise<void> {

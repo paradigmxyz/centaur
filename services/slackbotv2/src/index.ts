@@ -30,6 +30,7 @@ import {
   collectInitialContext,
   forwardToSessionApi,
   harnessRestartPreamble,
+  interruptSessionExecution,
   isRetryableSessionApiError,
   openSessionEventStream,
   serializeAttachment,
@@ -45,6 +46,7 @@ import {
 } from './console-session-link'
 import { extractMessageOverrides } from './overrides'
 import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
+import { isSlackStopCommand } from './stop-command'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -361,6 +363,9 @@ async function handleSlackMessageHandoff(
     backgroundWaitUntil(assistantStatus.then(() => undefined).catch(() => undefined))
   }
   try {
+    if (await handleStopCommand(thread, message, input.options, input.trigger)) {
+      return
+    }
     if (input.subscribe) {
       await subscribeSlackThreadForHandoff(thread, input.options, trace, input.trigger)
     }
@@ -393,6 +398,40 @@ async function handleSlackMessageHandoff(
         .then(() => undefined)
         .catch(() => undefined)
     )
+    throw error
+  }
+}
+
+async function handleStopCommand(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  options: SlackbotV2Options,
+  trigger: string
+): Promise<boolean> {
+  if (!isSlackStopCommand(message)) return false
+  const trace = createHandoffTrace(thread, message, 'append')
+  traceLog(options, 'slackbotv2_stop_command_started', trace, { trigger })
+  const latest = (await thread.state) ?? {}
+  const reason = `Interrupted from Slack by ${slackUserIdForMessage(message) ?? 'unknown user'}`
+  try {
+    const response = await interruptSessionExecution(options, thread.id, reason)
+    await thread.setState({
+      activeExecution: false,
+      lastEventId: latest.lastEventId ?? latest.renderObligation?.afterEventId ?? 0,
+      renderObligation: null
+    })
+    await setAssistantStatus(thread, '', options, trace)
+    traceLog(options, 'slackbotv2_stop_command_complete', trace, {
+      execution_id: response.execution_id,
+      interrupted: response.interrupted,
+      trigger
+    })
+    return true
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_stop_command_failed', trace, {
+      error: errorMessage(error),
+      trigger
+    })
     throw error
   }
 }

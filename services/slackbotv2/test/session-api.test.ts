@@ -5,6 +5,7 @@ import {
   DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   forwardToSessionApi,
   harnessRestartPreamble,
+  interruptSessionExecution,
   openSessionEventStream,
   serializeAttachment,
   serializeMessage
@@ -80,6 +81,14 @@ function fakeApi(responses: { createSession?: Array<{ body?: unknown; status: nu
         execution_id: 'exec-1',
         ok: true,
         status: 'running',
+        thread_key: 'slack:C1:1700000000.000100'
+      })
+    }
+    if (url.endsWith('/interrupt')) {
+      return Response.json({
+        execution_id: 'exec-1',
+        interrupted: true,
+        ok: true,
         thread_key: 'slack:C1:1700000000.000100'
       })
     }
@@ -184,6 +193,25 @@ describe('session event streaming', () => {
       eventKind: 'session.execution_completed'
     })
     expect(seenEventIds).toEqual([1, 2])
+  })
+})
+
+describe('session interruption', () => {
+  test('posts interruption reason to the thread interrupt endpoint', async () => {
+    const { fetchFn, requests } = fakeApi()
+
+    const response = await interruptSessionExecution(
+      options(fetchFn),
+      'slack:C1:1700000000.000100',
+      'Interrupted from Slack by U1'
+    )
+
+    expect(response.interrupted).toBe(true)
+    const interrupt = requests.find(request => request.url.endsWith('/interrupt'))
+    expect(interrupt?.url).toBe(
+      'http://api.test/api/session/slack%3AC1%3A1700000000.000100/interrupt'
+    )
+    expect(interrupt?.body).toEqual({ reason: 'Interrupted from Slack by U1' })
   })
 })
 

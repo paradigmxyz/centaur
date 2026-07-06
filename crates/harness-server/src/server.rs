@@ -4,7 +4,11 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, RecvTimeoutError},
+};
 use std::time::Duration;
 
 use base64::Engine;
@@ -75,21 +79,56 @@ pub fn run_validate_jsonrpc() -> Result<()> {
 }
 
 pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
-    let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     let mut state = initial_blocks_thread_state(harness)?;
-    let mut blocks_state = BlocksState::default();
-    let (_request_tx, request_rx) = mpsc::channel();
+    let (command_tx, command_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+    let turn_active = Arc::new(AtomicBool::new(false));
 
-    for raw in stdin.lock().lines() {
-        let line = raw?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+    {
+        let turn_active = Arc::clone(&turn_active);
+        std::thread::spawn(move || {
+            let stdin = io::stdin();
+            let mut blocks_state = BlocksState::default();
+            for raw in stdin.lock().lines() {
+                let Ok(line) = raw else {
+                    break;
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
 
-        match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
-            Ok(BlocksCommand::User {
+                match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
+                    Ok(BlocksCommand::Interrupt) if turn_active.load(Ordering::SeqCst) => {
+                        if request_tx.send(ActiveTurnRequest::BlocksInterrupt).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(command) => {
+                        if command_tx
+                            .send(BlocksReaderInput::Command(command))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        if command_tx
+                            .send(BlocksReaderInput::Error(error.to_string()))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    while let Ok(input) = command_rx.recv() {
+        match input {
+            BlocksReaderInput::Command(BlocksCommand::User {
                 input,
                 client_user_message_id,
                 model,
@@ -111,18 +150,19 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     &trace_context,
                     &mut stdout,
                     &request_rx,
+                    &turn_active,
                 ) {
                     eprintln!("blocks turn failed: {error:#}");
                     write_blocks_error(&mut stdout, &state.id, "turn", error.to_string())?;
                 }
             }
-            Ok(BlocksCommand::Interrupt) => {
-                eprintln!("blocks interrupt ignored: no active stdin reader while a turn runs");
+            BlocksReaderInput::Command(BlocksCommand::Interrupt) => {
+                eprintln!("blocks interrupt ignored: no active turn runs");
             }
-            Ok(BlocksCommand::AttachmentChunk) => {}
-            Err(error) => {
-                eprintln!("invalid blocks input: {error:#}");
-                write_blocks_error(&mut stdout, &state.id, "input", error.to_string())?;
+            BlocksReaderInput::Command(BlocksCommand::AttachmentChunk) => {}
+            BlocksReaderInput::Error(error) => {
+                eprintln!("invalid blocks input: {error}");
+                write_blocks_error(&mut stdout, &state.id, "input", error)?;
             }
         }
     }
@@ -152,7 +192,10 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
             let JSONRPCMessage::Request(request) = message else {
                 continue;
             };
-            if request_tx.send(request).is_err() {
+            if request_tx
+                .send(ActiveTurnRequest::JsonRpc(request))
+                .is_err()
+            {
                 break;
             }
         }
@@ -162,9 +205,17 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
     let mut threads: HashMap<String, ThreadState> = HashMap::new();
 
     while let Ok(request) = request_rx.recv() {
-        if let Err(error) = handle_request(harness, request, &request_rx, &mut threads, &mut stdout)
-        {
-            eprintln!("request failed: {error:#}");
+        match request {
+            ActiveTurnRequest::JsonRpc(request) => {
+                if let Err(error) =
+                    handle_request(harness, request, &request_rx, &mut threads, &mut stdout)
+                {
+                    eprintln!("request failed: {error:#}");
+                }
+            }
+            ActiveTurnRequest::BlocksInterrupt => {
+                eprintln!("blocks interrupt ignored: no active turn runs");
+            }
         }
     }
 
@@ -184,11 +235,13 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
     client_user_message_id: Option<String>,
     trace_context: &TraceContext,
     stdout: &mut W,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
+    turn_active: &AtomicBool,
 ) -> Result<()> {
     let turn_id = format!("turn-{}", Uuid::new_v4().simple());
     let mut normalizer = normalizer_for(harness, state, &turn_id);
-    run_normalized_turn(
+    turn_active.store(true, Ordering::SeqCst);
+    let result = run_normalized_turn(
         harness,
         state,
         &input,
@@ -197,7 +250,19 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
         &mut normalizer,
         stdout,
         request_rx,
-    )
+    );
+    turn_active.store(false, Ordering::SeqCst);
+    result
+}
+
+enum BlocksReaderInput {
+    Command(BlocksCommand),
+    Error(String),
+}
+
+enum ActiveTurnRequest {
+    JsonRpc(JSONRPCRequest),
+    BlocksInterrupt,
 }
 
 #[derive(Debug)]
@@ -707,7 +772,7 @@ fn clean_string(value: Option<&str>) -> Option<String> {
 fn handle_request<H: HarnessServer, W: Write>(
     harness: &H,
     request: JSONRPCRequest,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
     threads: &mut HashMap<String, ThreadState>,
     stdout: &mut W,
 ) -> Result<()> {
@@ -932,9 +997,14 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     harness: &H,
     process: &mut HarnessChild,
     normalizer: &mut CodexTurnNormalizer,
-    request: JSONRPCRequest,
+    request: ActiveTurnRequest,
     stdout: &mut W,
 ) -> Result<bool> {
+    let ActiveTurnRequest::JsonRpc(request) = request else {
+        process.kill_and_wait()?;
+        return Ok(true);
+    };
+
     match request.method.as_str() {
         "turn/steer" => {
             let params: TurnSteerParams = request_params(request.params)?;
@@ -1034,7 +1104,7 @@ fn run_normalized_turn<H: HarnessServer, W: Write>(
     trace_context: Option<&TraceContext>,
     normalizer: &mut CodexTurnNormalizer,
     stdout: &mut W,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
 ) -> Result<()> {
     for notification in normalizer.start_notifications(!state.thread_started_sent)? {
         if matches!(notification, ServerNotification::ThreadStarted(_)) {
@@ -1112,7 +1182,7 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     trace_context: Option<&TraceContext>,
     normalizer: &mut CodexTurnNormalizer,
     stdout: &mut W,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
 ) -> Result<Option<codex_app_server_protocol::Turn>> {
     let usage_span_start = otel::unix_time_nanos();
     let usage_span_model = state.model.clone();
