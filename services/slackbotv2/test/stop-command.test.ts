@@ -7,6 +7,7 @@ describe('Slack stop command detection', () => {
     expect(isSlackStopCommand({ text: 'please <@UCENTAUR> STOP now' })).toBe(true)
     expect(isSlackStopCommand({ text: '<@UCENTAUR> Stop' })).toBe(true)
     expect(isSlackStopCommand({ text: '<@UCENTAUR> stoppp' })).toBe(true)
+    expect(isSlackStopCommand({ text: '<@UCENTAUR> could you stop the execution?' })).toBe(true)
   })
 
   test('matches kill, end, cancel, and common variants', () => {
@@ -35,5 +36,9 @@ describe('Slack stop command detection', () => {
     expect(isSlackStopCommand({ text: '<@UCENTAUR> stopping by to ask' })).toBe(false)
     expect(isSlackStopCommand({ text: '<@UCENTAUR> run an end-to-end test' })).toBe(false)
     expect(isSlackStopCommand({ text: '<@UCENTAUR> cancellation policy' })).toBe(false)
+    expect(isSlackStopCommand({ text: '<@UCENTAUR> if so, stop.' })).toBe(false)
+    expect(
+      isSlackStopCommand({ text: '<@UCENTAUR> please check the service; if it is broken, stop.' })
+    ).toBe(false)
   })
 })
