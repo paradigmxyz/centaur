@@ -165,7 +165,7 @@ impl HarnessServer for AmpHarness {
         Ok(normalizer.normalize(event))
     }
 
-    fn finish_turn_on_assistant_end_turn(&self) -> bool {
+    fn finish_turn_on_terminal_assistant_stop(&self) -> bool {
         true
     }
 }

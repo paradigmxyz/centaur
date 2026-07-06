@@ -1276,8 +1276,8 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                 write_value(stdout, &notification_to_wire_value(&notification)?)?;
             }
             terminal |= normalized.is_terminal()
-                || (harness.finish_turn_on_assistant_end_turn()
-                    && normalized.is_assistant_end_turn());
+                || (harness.finish_turn_on_terminal_assistant_stop()
+                    && normalized.is_terminal_assistant_stop());
         }
         if terminal {
             export_harness_usage_if_available(

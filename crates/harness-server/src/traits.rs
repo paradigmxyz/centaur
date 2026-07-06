@@ -71,7 +71,7 @@ pub trait HarnessServer {
         normalizer: &mut Self::EventNormalizer,
         event: Self::Event,
     ) -> Result<Vec<NormalizedEvent>>;
-    fn finish_turn_on_assistant_end_turn(&self) -> bool {
+    fn finish_turn_on_terminal_assistant_stop(&self) -> bool {
         false
     }
 
@@ -153,16 +153,23 @@ impl NormalizedEvent {
         }
     }
 
-    pub(crate) fn is_assistant_end_turn(&self) -> bool {
+    pub(crate) fn is_terminal_assistant_stop(&self) -> bool {
         matches!(
             self,
             Self::AssistantMessage {
                 partial: false,
                 stop_reason: Some(stop_reason),
                 ..
-            } if stop_reason == "end_turn"
+            } if is_terminal_assistant_stop_reason(stop_reason)
         )
     }
+}
+
+fn is_terminal_assistant_stop_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "end_turn" | "stop_sequence" | "max_tokens" | "refusal"
+    )
 }
 
 #[derive(Debug, Clone)]
