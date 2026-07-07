@@ -1774,7 +1774,14 @@ impl IronProxyHarnessArgs {
     /// so sessions restarted onto another harness still get working
     /// credentials through the proxy.
     fn fragments(&self) -> Result<Vec<ProxyFragment>, ServerError> {
-        let mut fragments = vec![self.fragment()?];
+        let mut fragments = Vec::new();
+        // Engines with no auth-mode source (amp, omp — credentials reach the
+        // sandbox as plain env, not proxy-injected) have no infra fragment to
+        // require. An explicit KUBERNETES_IRON_PROXY_HARNESS_AUTH_MODE still
+        // forces resolution (and fails loudly on an unknown pair).
+        if self.auth_mode.is_some() || harness_auth_mode_env(&self.engine).is_some() {
+            fragments.push(self.fragment()?);
+        }
         for engine in [
             HarnessType::Codex,
             HarnessType::ClaudeCode,
