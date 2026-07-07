@@ -2,6 +2,7 @@
  * Inline message directives, cloned from slackbotv2 (which restored them from
  * the v1 slackbot):
  *   --claude | --claude-code | --amp | --codex   pick the harness for the thread
+ *   --meta                                       codex via Meta AI direct
  *   --model <name> (or --model=<name>)           pick the model within that harness
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
@@ -16,6 +17,7 @@ export type MessageOverrides = {
   cleanedText: string;
   harnessType?: string;
   model?: string;
+  provider?: string;
 };
 
 // Flag name -> HarnessType wire value (serde lowercase of the Rust enum).
@@ -25,6 +27,10 @@ const HARNESS_FLAGS: Record<string, string> = {
   "claude-code": "claudecode",
   claudecode: "claudecode",
   codex: "codex",
+};
+
+const PROVIDER_FLAGS: Record<string, { provider: string; harnessType: string }> = {
+  meta: { provider: "responses", harnessType: "codex" },
 };
 
 // Claude model aliases, usable both as bare flags (--opus) and as --model
@@ -58,6 +64,7 @@ export function extractMessageOverrides(text: string): MessageOverrides {
   let cleaned = text;
   let harnessType: string | undefined;
   let model: string | undefined;
+  let provider: string | undefined;
 
   const modelMatch = MODEL_FLAG_PATTERN.exec(cleaned);
   if (modelMatch) {
@@ -81,10 +88,19 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     cleaned = stripMatch(cleaned, match);
   }
 
+  for (const [flag, mapping] of Object.entries(PROVIDER_FLAGS)) {
+    const match = flagPattern(flag).exec(cleaned);
+    if (!match) continue;
+    provider ??= mapping.provider;
+    harnessType ??= mapping.harnessType;
+    cleaned = stripMatch(cleaned, match);
+  }
+
   return {
     cleanedText: cleaned === text ? text : cleaned.trim(),
     harnessType,
     model,
+    provider,
   };
 }
 

@@ -520,6 +520,7 @@ function handleCommentMention(
         overrides: {
           harnessType: overrides.harnessType,
           model: overrides.model,
+          provider: overrides.provider,
         },
         parentCommentId: rootCommentId,
         reactCommentId: event.commentId,
@@ -728,7 +729,7 @@ async function runThreadTurn(input: {
   executeMessage: LinearbotApiMessage;
   issueId: string;
   options: LinearbotOptions;
-  overrides: { harnessType?: string; model?: string };
+  overrides: { harnessType?: string; model?: string; provider?: string };
   parentCommentId?: string;
   /** Comment to react to (👀 → ✅/❌); the triggering mention, if any. */
   reactCommentId?: string;
@@ -831,6 +832,7 @@ async function runThreadTurn(input: {
     harnessType: overrides.harnessType,
     messages: [],
     model: overrides.model,
+    provider: overrides.provider,
     onEventId: (eventId) => {
       lastEventId = Math.max(lastEventId, eventId);
       // Keep afterEventId in sync so a mid-stream retry resumes after the last

@@ -31,5 +31,12 @@ env_key = "OPENROUTER_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 
+[model_providers.responses]
+name = "Meta AI direct"
+base_url = "https://api.ai.meta.com/v1"
+env_key = "META_AI_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+
 [projects."/"]
 trust_level = "trusted"

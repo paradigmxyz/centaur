@@ -975,6 +975,12 @@ impl SandboxArgs {
                 "OPENROUTER_API_KEY".to_owned(),
             ));
         }
+        if !envs
+            .iter()
+            .any(|(existing, _)| existing == "META_AI_API_KEY")
+        {
+            envs.push(("META_AI_API_KEY".to_owned(), "META_AI_API_KEY".to_owned()));
+        }
         // When Bedrock is enabled, codex's `amazon-bedrock` provider signs with
         // these placeholder AWS credentials and iron-proxy re-signs (SigV4) with
         // the real IAM keys. `aws_auth` is not a `secrets` transform, so the
@@ -1793,6 +1799,9 @@ impl IronProxyHarnessArgs {
         if let Some(fragment) = harness_auth_fragment("openrouter", "api_key")? {
             fragments.push(fragment);
         }
+        if let Some(fragment) = harness_auth_fragment("meta-ai", "api_key")? {
+            fragments.push(fragment);
+        }
         // Bedrock is opt-in (not the default codex provider): only register its
         // SigV4 re-signing fragment when the operator has set CODEX_BEDROCK_REGION,
         // since the fragment expects AWS keys in the secrets backend.
@@ -2487,6 +2496,10 @@ mod tests {
         assert!(
             env.iter()
                 .any(|(name, value)| name == "OPENROUTER_API_KEY" && value == "OPENROUTER_API_KEY")
+        );
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == "META_AI_API_KEY" && value == "META_AI_API_KEY")
         );
     }
 
