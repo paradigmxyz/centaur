@@ -97,6 +97,47 @@
         background: #050506;
       }
 
+      /* While descoped, the body becomes a column: banner on top, shell
+         filling the rest. Scoped so the normal layout is untouched. */
+      .console-descoped {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .console-descoped .console-shell {
+        flex: 1 1 auto;
+        min-height: 0;
+        height: auto;
+      }
+
+      .console-descope-banner {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        padding: 0.5rem 1rem;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #1c1205;
+        background: #f59e0b;
+      }
+
+      .console-descope-restore {
+        cursor: pointer;
+        border-radius: 0.25rem;
+        border: 1px solid #1c1205;
+        padding: 0.125rem 0.625rem;
+        font-weight: 700;
+        color: #fbbf24;
+        background: #1c1205;
+        transition: opacity 120ms ease;
+      }
+
+      .console-descope-restore:hover {
+        opacity: 0.85;
+      }
+
       .console-sidebar {
         width: 18rem;
         flex: 0 0 auto;
@@ -839,6 +880,16 @@
         background: #fbfbf8;
       }
 
+      /* Amber notice boxes (thread-DB unavailable, managed secret) keep their
+         translucent amber-on-dark look in dark mode, but that washes out on the
+         light background; match the solid descope-banner treatment instead. */
+      html[data-console-theme="light"] .console-amber-note {
+        background: #f59e0b;
+        border-color: #b45309;
+        color: #1c1205;
+        font-weight: 600;
+      }
+
       html[data-console-theme="light"] .console-sidebar-account {
         border-top-color: #deded7;
       }
@@ -1199,7 +1250,7 @@
   <%# The Control and Data Sync sections are admin-only (each controller enforces
       require_admin server-side); non-admins only get the Chats view below. %>
   <% nav_items = [] %>
-  <% if current_user&.admin? %>
+  <% if acting_admin? %>
     <% control_matches = [ "/console/principals", "/console/roles", "/console/secrets", "/console/credentials", "/console/oauth_apps", "/console/users" ] %>
     <% nav_items = [
       { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true },
@@ -1207,7 +1258,14 @@
     ] %>
   <% end %>
 
-  <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased">
+  <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased <%= "console-descoped" if descoped? %>">
+    <% if descoped? %>
+      <div class="console-descope-banner" role="status">
+        <span>Admin permissions paused — viewing the console as an operator</span>
+        <%= button_to "Restore admin", console_descope_path, method: :delete,
+              class: "console-descope-restore" %>
+      </div>
+    <% end %>
     <div id="console-shell" class="console-shell">
       <aside class="console-sidebar" aria-label="Console navigation">
         <div class="console-sidebar-top">
@@ -1236,7 +1294,7 @@
             <% end %>
           </nav>
 
-          <% if current_user&.admin? %>
+          <% if acting_admin? %>
             <div class="console-thread-group">
               <a href="<%= console_workflows_path %>"
                  class="console-thread-group-title <%= "console-thread-group-title-active" if workflows_view %>"
@@ -1309,6 +1367,18 @@
                 <span data-console-theme-action-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
                 <span data-console-theme-label>Light mode</span>
               </button>
+              <% if acting_admin? %>
+                <%= button_to console_descope_path,
+                      method: :post,
+                      class: "console-signout-button",
+                      form: { class: "console-signout-form" },
+                      role: "menuitem",
+                      title: "Temporarily pause your admin permissions",
+                      aria: { label: "View as operator" } do %>
+                  <%= console_icon("user-circle", classes: "size-4") %>
+                  <span class="console-signout-label">View as operator</span>
+                <% end %>
+              <% end %>
               <%= button_to logout_path,
                     method: :delete,
                     class: "console-signout-button",

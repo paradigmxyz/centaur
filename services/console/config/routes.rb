@@ -119,6 +119,9 @@ Rails.application.routes.draw do
         post :promote
       end
     end
+    # Admin self-descope ("view as operator"): pause (admin-only) and restore
+    # admin permissions. A singular resource because it's a per-session flag.
+    resource :descope, only: %i[create destroy]
   end
 
   namespace :api do

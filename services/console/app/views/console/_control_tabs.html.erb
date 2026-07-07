@@ -5,7 +5,7 @@
   { label: "Credentials", path: console_credentials_path, match: "/console/credentials" },
   { label: "Apps", path: console_oauth_apps_path, match: "/console/oauth_apps" }
 ] %>
-<% control_tabs << { label: "Users", path: console_users_path, match: "/console/users" } if current_user&.admin? %>
+<% control_tabs << { label: "Users", path: console_users_path, match: "/console/users" } if acting_admin? %>
 
 <nav class="console-control-tabs" aria-label="Control sections">
   <% control_tabs.each do |tab| %>
