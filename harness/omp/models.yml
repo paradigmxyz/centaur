@@ -1,0 +1,13 @@
+# Baked omp (oh-my-pi) model-provider registry. Copied next to config.yml by
+# entrypoint.sh (same __OMP_LITELLM_BASE_URL__ substitution). `discovery:
+# litellm` probes the proxy's management endpoints (/model_group/info,
+# /v2/model/info, then /models) so the gateway's model list, context windows,
+# and reasoning flags load automatically. Requires LITELLM_API_KEY in the
+# environment.
+providers:
+  litellm:
+    baseUrl: __OMP_LITELLM_BASE_URL__
+    apiKey: LITELLM_API_KEY
+    api: openai-completions
+    discovery:
+      type: litellm

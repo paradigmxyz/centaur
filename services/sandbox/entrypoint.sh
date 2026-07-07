@@ -355,6 +355,20 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
 }
 EOF
 
+# ── omp (oh-my-pi) settings ──────────────────────────────────────────────────
+# Baked harness/omp/{config.yml,models.yml} land in $PI_CODING_AGENT_DIR with
+# the LiteLLM base URL substituted (OMP_LITELLM_BASE_URL, default the public
+# darkmatter gateway) so in-cluster deployments can point at a local Service.
+export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME_DIR/.omp/agent}"
+mkdir -p "$PI_CODING_AGENT_DIR"
+OMP_LITELLM_BASE_URL="${OMP_LITELLM_BASE_URL:-https://litellm.drkmttr.dev/v1}"
+for omp_cfg in config.yml models.yml; do
+    if [ -f "$HARNESS_CONFIG_DIR/omp/$omp_cfg" ]; then
+        sed "s|__OMP_LITELLM_BASE_URL__|$OMP_LITELLM_BASE_URL|g" \
+            "$HARNESS_CONFIG_DIR/omp/$omp_cfg" > "$PI_CODING_AGENT_DIR/$omp_cfg"
+    fi
+done
+
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
     WORKSPACE_DIR="$STATE_DIR/workspace"

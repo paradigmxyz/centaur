@@ -67,6 +67,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 ARG CLAUDE_CODE_VERSION=2.1.154
 ARG CODEX_VERSION=0.139.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
+ARG OMP_VERSION=16.3.5
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
 ARG KACHE_VERSION=v0.7.0
@@ -112,6 +113,7 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
       "@mariozechner/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
+      "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
       agent-browser@0.26.0 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
@@ -145,7 +147,9 @@ ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin
 ARG FOUNDRY_VERSION=v1.7.0
 ARG AMP_CLI_VERSION=0.0.1774529752-g94f44d
 ARG MANIM_VERSION=0.20.1
-ARG BUN_VERSION=bun-v1.3.13
+# omp (@oh-my-pi/pi-coding-agent) requires bun >= 1.3.14 (its bin shim is a
+# `#!/usr/bin/env bun` script); keep this pin at or above that.
+ARG BUN_VERSION=bun-v1.3.14
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -165,6 +169,9 @@ RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,shar
     && kache --version
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN curl -fsSL https://bun.sh/install | bash -s "${BUN_VERSION}"
+# omp's npm bin shim runs dist/cli.js under bun (shebang), so it can only be
+# verified once bun is on PATH — not in the root npm install layer above.
+RUN omp --version | grep -F "${OMP_VERSION}"
 RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1001,gid=1001,sharing=locked \
     uv tool install "manim==${MANIM_VERSION}" \
     && manim --version
@@ -197,7 +204,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
     npx -y skills add vercel-labs/agent-browser
-RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/github ~/workspace \
+RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/.omp/agent ~/github ~/workspace \
     && git config --global init.defaultBranch main \
     && git config --global push.autoSetupRemote true \
     && git config --global --add safe.directory '*' \

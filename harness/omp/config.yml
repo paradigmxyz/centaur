@@ -1,0 +1,29 @@
+# Baked omp (oh-my-pi) agent config. Copied to $PI_CODING_AGENT_DIR/config.yml
+# at container start by entrypoint.sh, which substitutes __OMP_LITELLM_BASE_URL__
+# (default https://litellm.drkmttr.dev/v1) so in-cluster deployments can point
+# at a local LiteLLM Service.
+#
+# Model roles default to the gateway's `glm-local` alias (hosted_vllm
+# glm-5.2-fp8 on the dedicated LiteLLM instance). Deliberately NOT
+# `glm-5.2-fp8`: omp's discovery fuzzy-merges gateway model ids against the
+# live models.dev catalog, and that id collides with the fireworks-ai
+# `glm-5p2-fp8` entry — the SDK then puts the catalog's canonical wire id in
+# the request body, which LiteLLM 400s. `glm-local` matches nothing in the
+# catalog, so the alias goes on the wire unchanged (diagnosed 2026-07-06).
+providers:
+  litellm:
+    baseUrl: __OMP_LITELLM_BASE_URL__
+    apiKey: LITELLM_API_KEY
+    auth: apiKey
+    api: openai-completions
+
+modelRoles:
+  default: "litellm/glm-local"
+  smol: "litellm/glm-local"
+  commit: "litellm/glm-local"
+  task: "litellm/glm-local"
+  slow: "anthropic/claude-fable-5"
+  plan: "anthropic/claude-fable-5"
+  advisor: "anthropic/claude-fable-5"
+
+defaultThinkingLevel: medium

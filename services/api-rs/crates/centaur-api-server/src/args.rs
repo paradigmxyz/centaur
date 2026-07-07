@@ -1779,6 +1779,7 @@ impl IronProxyHarnessArgs {
             HarnessType::Codex,
             HarnessType::ClaudeCode,
             HarnessType::Amp,
+            HarnessType::Omp,
         ] {
             if engine == self.engine {
                 continue;
@@ -1859,6 +1860,7 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
+        HarnessType::Omp => "omp",
     }
 }
 
@@ -1876,6 +1878,9 @@ fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
         HarnessType::Codex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
+        // omp gets its upstream key through the plain sandbox env (LiteLLM
+        // gateway), not an iron-proxy auth fragment — the amp pattern.
+        HarnessType::Omp => None,
     }
 }
 

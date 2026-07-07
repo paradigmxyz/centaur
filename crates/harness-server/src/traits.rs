@@ -15,6 +15,7 @@ pub enum HarnessKind {
     Codex,
     ClaudeCode,
     Amp,
+    Omp,
 }
 
 pub struct ThreadState {
@@ -61,7 +62,11 @@ pub trait HarnessServer {
     fn cli_version(&self) -> &'static str;
     fn default_model(&self) -> String;
     fn default_model_provider(&self) -> &'static str;
-    fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand;
+    /// The process to spawn for a turn. `input` is this turn's user input:
+    /// one-shot harnesses that take the prompt as a command argument (omp)
+    /// build it into the argv; stream-stdin harnesses (claude, amp) ignore it
+    /// and receive the input through `stdin_for_turn`.
+    fn command_for_turn(&self, state: &ThreadState, input: &[UserInput]) -> ProcessCommand;
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>>;
     fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         self.stdin_for_turn(input)
