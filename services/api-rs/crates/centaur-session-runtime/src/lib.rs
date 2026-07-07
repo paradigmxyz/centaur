@@ -3836,6 +3836,80 @@ fn remove_pipe_if_current(sandbox_pipes: &SessionPipeMap, sandbox_id: &str, pipe
     });
 }
 
+/// Hands a still-active execution to the adoption scan after its pump died.
+///
+/// The pump is gone, but the fire-and-forget lease renewer keeps this
+/// process's stdout-owner claim alive for as long as the process lives. With
+/// the lease active, this process's own adoption scan skips the execution
+/// (own lease) and peers defer to it — so a running execution whose pump
+/// failed would record no further output and reach no terminal event until
+/// its max-duration budget burns down. Releasing the lease lets the next
+/// adoption scan reclaim the execution and recover its output from the
+/// sandbox backend instead.
+async fn release_stdout_owner_after_pump_failure(
+    store: &PgSessionStore,
+    stdout_owner_id: &str,
+    thread_key: &ThreadKey,
+    sandbox_id: &str,
+) {
+    let execution = match store.active_execution_for_thread(thread_key).await {
+        Ok(Some(execution)) => execution,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_stdout_owner_release_failed",
+                thread_key = %thread_key,
+                sandbox_id = %sandbox_id,
+                %error,
+                "failed to look up the active execution after a stdout pump failure"
+            );
+            return;
+        }
+    };
+    match store
+        .release_stdout_owner(&execution.execution_id, stdout_owner_id)
+        .await
+    {
+        Ok(true) => {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_stdout_owner_released",
+                thread_key = %thread_key,
+                execution_id = %execution.execution_id,
+                sandbox_id = %sandbox_id,
+                "released stdout-owner lease after a pump failure for adoption"
+            );
+            let _ = store
+                .append_event(
+                    thread_key,
+                    Some(&execution.execution_id),
+                    "session.stdout_owner_released",
+                    json!({
+                        "execution_id": execution.execution_id,
+                        "reason": "stdout_pump_failed",
+                        "sandbox_id": sandbox_id,
+                    }),
+                )
+                .await;
+        }
+        // Not ours to release: another process already owns (or released)
+        // the lease, and its pump is the one responsible for the execution.
+        Ok(false) => {}
+        Err(error) => {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_stdout_owner_release_failed",
+                thread_key = %thread_key,
+                execution_id = %execution.execution_id,
+                sandbox_id = %sandbox_id,
+                %error,
+                "failed to release the stdout-owner lease after a pump failure"
+            );
+        }
+    }
+}
+
 /// Runs the stdout pump and reattaches when Kubernetes closes the attach
 /// stream before the active execution emits terminal output.
 fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
@@ -3882,6 +3956,17 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
                             }),
                         )
                         .await;
+                    // The renewer keeps this process's lease alive even with
+                    // the pump gone; release it so the adoption scan can
+                    // reclaim the execution instead of leaving it wedged
+                    // until its max-duration budget expires.
+                    release_stdout_owner_after_pump_failure(
+                        &ctx.store,
+                        &ctx.stdout_owner_id,
+                        &thread_key,
+                        &sandbox_id,
+                    )
+                    .await;
                     break;
                 }
             };
@@ -8581,6 +8666,95 @@ mod adoption_tests {
         first.expect("first pipe ensure should succeed");
         second.expect("second pipe ensure should reuse the first pipe");
         assert_eq!(backend.opens(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_pump_failure_release_hands_the_execution_to_adoption() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:pump-release-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-pump"), true).await;
+        assert!(
+            store
+                .claim_stdout_owner(&execution_id, "owner-a", STDOUT_OWNER_LEASE)
+                .await
+                .expect("claim owner")
+        );
+
+        release_stdout_owner_after_pump_failure(&store, "owner-a", &thread_key, "sbx-pump").await;
+
+        // The lease is gone: the renewer stops on its next tick instead of
+        // keeping the wedged execution alive...
+        assert!(
+            !store
+                .renew_stdout_owner(&execution_id, "owner-a", STDOUT_OWNER_LEASE)
+                .await
+                .expect("renew after release")
+        );
+        // ...and an adoption scan can claim the execution immediately,
+        // without waiting out the 45s lease TTL.
+        assert!(
+            store
+                .claim_expired_stdout_owner(&execution_id, "owner-peer", STDOUT_OWNER_LEASE)
+                .await
+                .expect("peer adoption claim")
+        );
+        let events = store
+            .list_events_after(&thread_key, 0, None, 1000)
+            .await
+            .expect("list events");
+        let released = events
+            .iter()
+            .find(|event| event.event_type == "session.stdout_owner_released")
+            .expect("release event appended");
+        assert_eq!(
+            released.payload.get("reason").and_then(Value::as_str),
+            Some("stdout_pump_failed")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_pump_failure_release_leaves_another_owners_lease_alone() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        // The pump fails in a process that no longer owns the lease (the
+        // execution was already adopted elsewhere): the release must not
+        // steal the new owner's lease or announce a handoff.
+        let thread_key =
+            ThreadKey::parse(format!("test:pump-bystander-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-bystander"), true).await;
+        assert!(
+            store
+                .claim_stdout_owner(&execution_id, "owner-b", STDOUT_OWNER_LEASE)
+                .await
+                .expect("claim owner")
+        );
+
+        release_stdout_owner_after_pump_failure(&store, "owner-a", &thread_key, "sbx-bystander")
+            .await;
+
+        assert!(
+            store
+                .renew_stdout_owner(&execution_id, "owner-b", STDOUT_OWNER_LEASE)
+                .await
+                .expect("owner-b lease intact")
+        );
+        let events = store
+            .list_events_after(&thread_key, 0, None, 1000)
+            .await
+            .expect("list events");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event_type != "session.stdout_owner_released"),
+            "a non-owner must not announce a release"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
