@@ -63,6 +63,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 
 ARG CLAUDE_CODE_VERSION=2.1.154
 ARG CODEX_VERSION=0.139.0
+ARG FLUE_CLI_VERSION=1.0.0-beta.9
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
@@ -107,12 +108,14 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm install -g --prefer-online --force \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
+      "@flue/cli@${FLUE_CLI_VERSION}" \
       "@mariozechner/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
       agent-browser@0.26.0 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
+    && flue --version | grep -F "${FLUE_CLI_VERSION}" \
     && pnpm --version | grep -F "${PNPM_VERSION}"
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────

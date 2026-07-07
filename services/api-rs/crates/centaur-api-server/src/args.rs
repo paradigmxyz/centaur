@@ -1723,6 +1723,7 @@ impl IronProxyHarnessArgs {
             HarnessType::Codex,
             HarnessType::ClaudeCode,
             HarnessType::Amp,
+            HarnessType::Flue,
         ] {
             if engine == self.engine {
                 continue;
@@ -1803,6 +1804,7 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
+        HarnessType::Flue => "flue",
     }
 }
 
@@ -1820,6 +1822,7 @@ fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
         HarnessType::Codex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
+        HarnessType::Flue => None,
     }
 }
 

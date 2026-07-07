@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
+use crate::flue::FlueHarnessServer;
 use crate::otel::TraceContext;
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
@@ -38,6 +39,7 @@ pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
         HarnessKind::Codex => Box::new(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
+        HarnessKind::Flue => Box::new(FlueHarnessServer),
     }
 }
 
@@ -50,6 +52,7 @@ pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
         HarnessKind::Codex => crate::codex::run_codex_blocks_server(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
+        HarnessKind::Flue => crate::flue::run_flue_blocks_server(),
     }
 }
 

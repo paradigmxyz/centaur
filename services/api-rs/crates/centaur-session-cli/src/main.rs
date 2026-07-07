@@ -573,6 +573,7 @@ impl FromStr for ThreadKeyArg {
 enum HarnessTypeArg {
     Codex,
     Amp,
+    Flue,
     #[value(name = "claudecode")]
     ClaudeCode,
 }
@@ -582,6 +583,7 @@ impl From<HarnessTypeArg> for HarnessType {
         match value {
             HarnessTypeArg::Codex => Self::Codex,
             HarnessTypeArg::Amp => Self::Amp,
+            HarnessTypeArg::Flue => Self::Flue,
             HarnessTypeArg::ClaudeCode => Self::ClaudeCode,
         }
     }
