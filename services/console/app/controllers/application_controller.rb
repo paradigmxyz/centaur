@@ -102,10 +102,11 @@ class ApplicationController < ActionController::Base
   end
 
   # Guard for admin-only controllers (the Control and Data Sync sections, user
-  # management). Not a global gate. Bounces to the threads view rather than root:
-  # root is the admin-only principals page, so redirecting there would loop.
+  # management). Not a global gate. Bounces non-admins to their only available
+  # section. Keep this redirect silent: direct/admin-default URLs are not
+  # actionable errors for non-admin operators, especially on a fresh visit.
   def require_admin
-    redirect_to console_threads_path, alert: "That page is restricted to admins." unless acting_admin?
+    redirect_to console_threads_path unless acting_admin?
   end
 
   # Where a signed-in user lands when no explicit destination applies: admins get

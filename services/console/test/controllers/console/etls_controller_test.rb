@@ -66,7 +66,7 @@ class Console::EtlsControllerTest < ActionDispatch::IntegrationTest
 
     get console_etls_url
     assert_redirected_to console_threads_path
-    assert_equal "That page is restricted to admins.", flash[:alert]
+    assert_nil flash[:alert]
     # The gate fires before the action, so the api client is never touched.
     assert_empty @client.calls
 

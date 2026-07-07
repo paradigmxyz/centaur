@@ -54,7 +54,7 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     get console_workflows_url
 
     assert_redirected_to console_threads_path
-    assert_equal "That page is restricted to admins.", flash[:alert]
+    assert_nil flash[:alert]
   end
 
   test "a non-admin does not see the workflows tab" do

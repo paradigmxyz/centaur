@@ -17,7 +17,7 @@ module Console
       sign_in users(:member_user)
       get console_users_url
       assert_redirected_to console_threads_path
-      assert_equal "That page is restricted to admins.", flash[:alert]
+      assert_nil flash[:alert]
     end
 
     test "an admin sees the index with pending users listed" do

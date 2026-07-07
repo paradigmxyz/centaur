@@ -20,7 +20,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       console_credentials_url, console_oauth_apps_url ].each do |url|
       get url
       assert_redirected_to console_threads_path
-      assert_equal "That page is restricted to admins.", flash[:alert]
+      assert_nil flash[:alert]
     end
   end
 

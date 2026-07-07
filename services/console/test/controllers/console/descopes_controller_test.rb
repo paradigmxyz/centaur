@@ -13,7 +13,7 @@ module Console
       sign_in users(:member_user)
       post console_descope_url
       assert_redirected_to console_threads_path
-      assert_equal "That page is restricted to admins.", flash[:alert]
+      assert_nil flash[:alert]
     end
 
     test "a descoped admin loses admin pages and chrome, and sees the banner" do
@@ -23,7 +23,7 @@ module Console
 
       get console_users_url
       assert_redirected_to console_threads_path
-      assert_equal "That page is restricted to admins.", flash[:alert]
+      assert_nil flash[:alert]
 
       get console_threads_url
       assert_response :ok
