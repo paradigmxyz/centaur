@@ -133,6 +133,15 @@ export type SlackbotV2Options = {
    * harness config files (see console-session-link.ts).
    */
   harnessDefaultModels?: Record<string, string>
+  /**
+   * Backoff delays between in-process retries of a Slack handoff after a
+   * retryable session API failure. Slack's own webhook redelivery cannot
+   * drive these retries: Slack times deliveries out after ~3s, so its
+   * redelivery races the still-running original attempt, is deduped, and is
+   * acknowledged before the original attempt fails. The bot retries locally
+   * instead and posts a visible error once the delays are exhausted.
+   */
+  handoffRetryDelaysMs?: readonly number[]
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
