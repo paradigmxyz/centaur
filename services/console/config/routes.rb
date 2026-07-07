@@ -34,6 +34,10 @@ Rails.application.routes.draw do
   # Operator console (server-rendered HTML UI).
   root "console#principals"
   get "console/principals", to: "console#principals", as: :console_principals
+  namespace :console do
+    get  "principals/new", to: "principals#new",    as: :new_principal
+    post "principals",     to: "principals#create", as: :create_principal
+  end
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
     resources :threads, only: %i[index create]
@@ -54,6 +58,7 @@ Rails.application.routes.draw do
   # extra /roles and /grants path segments keep these clear of the show route above
   # and avoid clobbering the console_principal_path helper.
   namespace :console do
+    delete "principals/:id",                  to: "principals#destroy", as: :delete_principal
     patch  "principals/:id/sandbox_access",   to: "principals#update_sandbox_access", as: :principal_sandbox_access
     post   "principals/:id/roles",            to: "principals#assign_role",   as: :principal_assign_role
     delete "principals/:id/roles/:role_id",   to: "principals#unassign_role", as: :principal_unassign_role

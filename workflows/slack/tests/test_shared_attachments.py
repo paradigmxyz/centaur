@@ -308,6 +308,83 @@ def test_serialize_message_skips_oversized_slack_file(monkeypatch):
     assert message["files"][0]["content_bytes"] is None
 
 
+def test_serialize_message_preserves_bot_attachments_and_blocks():
+    client = object.__new__(shared.SlackEtlClient)
+    attachments = [
+        {
+            "fallback": "Deployment approved by <@U04ABCDEF>",
+            "title": "unused when fallback is present",
+            "color": "36a64f",
+        }
+    ]
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "hi"}}]
+
+    message = client._serialize_message(
+        {
+            "bot_id": "B02T451BQRK",
+            "text": "",
+            "ts": "1770000000.000600",
+            "attachments": attachments,
+            "blocks": blocks,
+        },
+        "C123",
+        {"U04ABCDEF": "artur"},
+    )
+
+    assert message["attachments"] == attachments
+    assert message["blocks"] == blocks
+    # Fallback text is mention-resolved, same as the primary text path.
+    assert message["text"] == "Deployment approved by @artur"
+
+    row = shared.message_row(message, "run_123")
+    assert row["raw_payload"]["attachments"] == attachments
+    assert row["raw_payload"]["blocks"] == blocks
+    assert row["text"] == "Deployment approved by @artur"
+    # Slack legacy attachments are message content, not file rows.
+    assert row["attachments"] == []
+
+
+def test_serialize_message_keeps_user_text_over_attachment_fallback():
+    client = object.__new__(shared.SlackEtlClient)
+
+    message = client._serialize_message(
+        {
+            "user": "U123",
+            "text": "see the graph below",
+            "ts": "1770000000.000700",
+            "attachments": [{"fallback": "graph.png"}],
+            "blocks": [{"type": "rich_text", "elements": []}],
+        },
+        "C123",
+        {"U123": "alice"},
+    )
+
+    assert message["text"] == "see the graph below"
+    assert message["attachments"] == [{"fallback": "graph.png"}]
+    # Human rich_text blocks mirror the text; not persisted.
+    assert message["blocks"] == []
+
+
+def test_attachment_fallback_text_prefers_fallback_then_joins_fields():
+    assert shared._attachment_fallback_text(None) == ""
+    assert shared._attachment_fallback_text("not-a-list") == ""
+    assert (
+        shared._attachment_fallback_text(
+            [
+                "not-a-dict",
+                {"fallback": "  first alert  "},
+                {
+                    "pretext": "PR merged",
+                    "title": "moonwell-fi/mamo",
+                    "text": "fix: handle empty originTx",
+                },
+                {"color": "dddddd"},
+            ]
+        )
+        == "first alert\nPR merged\nmoonwell-fi/mamo\nfix: handle empty originTx"
+    )
+
+
 class FakeConn:
     """Records statements issued inside ``upsert_messages``/attachment batch."""
 
@@ -501,6 +578,7 @@ def test_backfill_handler_terminally_skips_permanent_slack_errors(monkeypatch):
     monkeypatch.setattr(backfill, "_emit_backfill_job_metrics", fake_noop)
     monkeypatch.setattr(backfill, "emit_slack_checkpoint_metrics", fake_noop)
     monkeypatch.setattr(backfill, "claim_backfill_jobs", fake_claim_jobs)
+    monkeypatch.setattr(backfill, "touch_backfill_job_started", fake_noop)
     monkeypatch.setattr(backfill, "shared_client", lambda **_kwargs: FakeClient())
     monkeypatch.setattr(backfill, "record_run_start", fake_noop)
     monkeypatch.setattr(backfill, "record_run_finish", fake_record_finish)
@@ -673,3 +751,221 @@ def test_upsert_messages_dedupes_duplicate_message_keys_last_row_wins():
     assert len(conn.execute_calls) == 1
     _delete_sql, delete_args = conn.execute_calls[0]
     assert delete_args == (["C123"], ["1770000000.000500"], [], [], [])
+
+
+def test_enqueue_backfill_job_refresh_guards():
+    pool = FakeExecutePool()
+    base = {
+        "job_key": "continuation:C123:1770000000.000100:",
+        "job_type": shared.BACKFILL_JOB_CHANNEL_CONTINUATION,
+        "channel_id": "C123",
+        "payload": {"cursor": "abc"},
+        "run_id": "run_123",
+    }
+
+    asyncio.run(shared.enqueue_backfill_job(pool, **base))
+    asyncio.run(shared.enqueue_backfill_job(pool, **base, refresh_completed=False))
+    asyncio.run(shared.enqueue_backfill_job(pool, **base, refresh_pending=False))
+    asyncio.run(
+        shared.enqueue_backfill_job(
+            pool, **base, refresh_completed=False, refresh_pending=False
+        )
+    )
+
+    sqls = [sql for sql, _args in pool.execute_calls]
+    assert len(sqls) == 4
+    # Default: unconditional refresh (the backfill worker saving its progress).
+    assert "WHERE slack_sync_backfill_jobs.status" not in sqls[0]
+    assert sqls[1].endswith("WHERE slack_sync_backfill_jobs.status <> 'completed'")
+    # refresh_pending=False must never touch in-flight pending/running rows.
+    assert sqls[2].endswith(
+        "WHERE slack_sync_backfill_jobs.status IN ('completed', 'failed')"
+    )
+    assert sqls[3].endswith("WHERE slack_sync_backfill_jobs.status = 'failed'")
+
+
+class FakeClaimConn(FakeConn):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetch_calls: list[tuple] = []
+
+    async def fetch(self, sql, *args):
+        self.fetch_calls.append((sql, args))
+        return []
+
+
+def test_claim_backfill_jobs_reclaims_stale_running_rows():
+    conn = FakeClaimConn()
+    pool = FakePool(conn)
+
+    result = asyncio.run(shared.claim_backfill_jobs(pool, 5))
+
+    assert result == []
+    assert len(conn.fetch_calls) == 1
+    sql = " ".join(conn.fetch_calls[0][0].split())
+    assert "status IN ('pending', 'failed')" in sql
+    assert (
+        "status = 'running' AND last_started_at < "
+        f"NOW() - INTERVAL '{shared.BACKFILL_JOB_STALE_RUNNING_HOURS} hours'"
+    ) in sql
+
+
+def test_touch_backfill_job_started_restamps_running_row():
+    pool = FakeExecutePool()
+
+    asyncio.run(shared.touch_backfill_job_started(pool, 42))
+
+    assert len(pool.execute_calls) == 1
+    sql, args = pool.execute_calls[0]
+    assert "SET last_started_at = NOW()" in sql
+    assert "status = 'running'" in sql
+    assert args == (42,)
+
+
+def test_sync_etl_channel_history_watermark_never_regresses(monkeypatch):
+    client = object.__new__(shared.SlackEtlClient)
+
+    def fake_page(**kwargs):
+        return {
+            "channel": "busy",
+            "channel_id": "C123",
+            "messages": [{"timestamp": "100.000000"}],
+            "count": 1,
+            "has_more": False,
+            "next_cursor": None,
+            "window": {
+                "oldest": kwargs.get("oldest"),
+                "latest": kwargs.get("latest"),
+                "inclusive": True,
+            },
+            "order": "desc",
+        }
+
+    monkeypatch.setattr(
+        client, "_get_etl_channel_history_page", lambda **kw: fake_page(**kw)
+    )
+
+    out = client._sync_etl_channel_history(
+        "C123", state={"watermark": "200.000000"}, limit=10
+    )
+
+    # An oldest-anchored page below the prior watermark must not regress it.
+    assert out["sync_state"]["watermark"] == "200.000000"
+
+
+def test_backfill_handler_drains_continuation_pages_then_completes(monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.setenv("SLACK_BACKFILL_ENABLED", "true")
+    backfill = _load_backfill()
+    calls: dict[str, list] = {"enqueued": [], "completed": [], "upserted": []}
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.history_calls: list[dict] = []
+
+        def _etl_access_mode(self):
+            return "test"
+
+        def _sync_etl_channel_history(self, channel_id, *, state, limit, lookback_days):
+            self.history_calls.append(dict(state))
+            if state.get("cursor") == "cursor-0":
+                return {
+                    "messages": [
+                        {
+                            "channel_id": channel_id,
+                            "timestamp": "1770000001.000100",
+                            "text": "page one",
+                        }
+                    ],
+                    "sync_state": {
+                        "cursor": "cursor-1",
+                        "watermark": "1770000001.000100",
+                        "oldest": state.get("oldest"),
+                        "latest": None,
+                    },
+                }
+            return {
+                "messages": [
+                    {
+                        "channel_id": channel_id,
+                        "timestamp": "1770000002.000100",
+                        "text": "page two",
+                    }
+                ],
+                "sync_state": {
+                    "cursor": None,
+                    "watermark": "1770000002.000100",
+                    "oldest": None,
+                    "latest": None,
+                },
+            }
+
+    class FakeContext:
+        run_id = "wfr_drain"
+        _pool = object()
+
+        def __init__(self) -> None:
+            self.logs: list[tuple] = []
+
+        def log(self, name, **fields):
+            self.logs.append((name, fields))
+
+    async def fake_claim_jobs(_pool, _limit):
+        return [
+            {
+                "job_id": 586,
+                "job_key": "continuation:C123:1770000000.000100:",
+                "job_type": shared.BACKFILL_JOB_CHANNEL_CONTINUATION,
+                "payload_version": shared.BACKFILL_JOB_PAYLOAD_VERSION,
+                "channel_id": "C123",
+                "payload_json": {
+                    "cursor": "cursor-0",
+                    "oldest": "1770000000.000100",
+                    "latest": None,
+                    "lookback_days": 30,
+                    "thread_lookback_days": 3,
+                },
+                "priority": 100,
+                "attempt_count": 1,
+            }
+        ]
+
+    async def fake_noop(*_args, **_kwargs):
+        return None
+
+    async def fake_upsert_messages(_pool, rows):
+        calls["upserted"].extend(rows)
+        return len(rows)
+
+    async def fake_enqueue(_pool, **kwargs):
+        calls["enqueued"].append(kwargs)
+
+    async def fake_completed(_pool, **kwargs):
+        calls["completed"].append(kwargs)
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(backfill, "_emit_backfill_job_metrics", fake_noop)
+    monkeypatch.setattr(backfill, "emit_slack_checkpoint_metrics", fake_noop)
+    monkeypatch.setattr(backfill, "claim_backfill_jobs", fake_claim_jobs)
+    monkeypatch.setattr(backfill, "touch_backfill_job_started", fake_noop)
+    monkeypatch.setattr(backfill, "shared_client", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(backfill, "upsert_messages", fake_upsert_messages)
+    monkeypatch.setattr(backfill, "enqueue_backfill_job", fake_enqueue)
+    monkeypatch.setattr(backfill, "mark_backfill_job_completed", fake_completed)
+    monkeypatch.setattr(backfill, "record_run_start", fake_noop)
+    monkeypatch.setattr(backfill, "record_run_finish", fake_noop)
+
+    result = asyncio.run(backfill.handler(backfill.Input(channel_batch_limit=1), FakeContext()))
+
+    assert result["status"] == "completed"
+    # The drain advanced through the cursor chain instead of refetching page one.
+    assert [call.get("cursor") for call in fake_client.history_calls] == [
+        "cursor-0",
+        "cursor-1",
+    ]
+    assert len(calls["upserted"]) == 2
+    # Exhausted cursor => the job completes; nothing requeues it.
+    assert calls["enqueued"] == []
+    assert len(calls["completed"]) == 1
+    assert calls["completed"][0]["job_id"] == 586
+    assert calls["completed"][0]["payload"]["cursor"] is None

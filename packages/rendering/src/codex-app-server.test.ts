@@ -735,6 +735,30 @@ describe('CodexAppServerRendererEventMapper', () => {
       error: 'sandbox exited'
     })
   })
+
+  it('emits interrupted final text for cancelled Rust sessions', async () => {
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            type: 'item.started',
+            item: { id: 'cmd-1', type: 'commandExecution', command: 'sleep 60' }
+          },
+          {
+            eventKind: 'session.execution_cancelled',
+            data: { error: 'Execution interrupted' }
+          }
+        ])
+      )
+    )
+
+    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([
+      {
+        type: 'markdown_text',
+        text: 'Execution interrupted'
+      }
+    ])
+  })
 })
 
 async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {

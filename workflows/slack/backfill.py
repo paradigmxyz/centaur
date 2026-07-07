@@ -55,6 +55,7 @@ from workflows.slack.shared import (
     record_run_finish,
     record_run_start,
     replace_thread_replies,
+    touch_backfill_job_started,
     upsert_messages,
     workflow_run_id_to_sync_run_id,
 )
@@ -295,6 +296,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         job_type = str(job.get("job_type") or "backfill")
         record_slack_retention_backfill_job(job_type, "claimed")
         try:
+            await touch_backfill_job_started(ctx._pool, job_id)
             if job_type == BACKFILL_JOB_THREAD_REFRESH:
                 payload = _thread_refresh_payload(job)
                 thread_ts = str(payload["thread_ts"])
@@ -444,6 +446,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                         run_id=run_id,
                         priority=200,
                         refresh_completed=False,
+                        refresh_pending=False,
                     )
                     record_etl_items_enqueued(
                         "slack", "channel", "thread_refresh_job", 1

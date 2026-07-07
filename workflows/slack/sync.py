@@ -192,6 +192,23 @@ def _watermark_lag_seconds(ts: str | None) -> float | None:
     return max((dt.datetime.now(dt.timezone.utc) - occurred_at).total_seconds(), 0.0)
 
 
+def _max_slack_ts(*values: Any) -> str | None:
+    """Return the numerically greatest Slack ts string, ignoring empty/invalid."""
+    best: str | None = None
+    best_value = float("-inf")
+    for value in values:
+        if not value:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric > best_value:
+            best_value = numeric
+            best = str(value)
+    return best
+
+
 async def _upsert_channels(pool, channels: list[dict[str, Any]]) -> None:
     """Refresh public Slack sync channel rows and mark absent channels out of scope."""
     async with pool.acquire() as conn:
@@ -504,6 +521,45 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             )
             record_slack_retention_api_request("fetch_history", "success")
             messages = page.get("messages") or []
+            head_page: dict[str, Any] | None = None
+            if (
+                page.get("has_more")
+                and inp.latest is None
+                # Jumping the watermark to the head is only safe when the
+                # continuation jobs that cover the middle actually drain.
+                and env_flag_enabled("SLACK_BACKFILL_ENABLED", default=True)
+            ):
+                # An overflowing window anchors at `oldest`, so this page holds
+                # the oldest slice and the live head stays unfetched — on a busy
+                # channel the watermark would otherwise freeze below the backlog
+                # forever. Probe the head with a default (newest-first) fetch;
+                # the middle is drained by the continuation job. Best-effort:
+                # a probe failure must not discard the window page already
+                # fetched (the likeliest failure is a rate limit, on exactly
+                # the busy channels that probe every tick).
+                try:
+                    head_page = client._sync_etl_channel_history(
+                        channel_id,
+                        state={
+                            "cursor": None,
+                            "watermark": None,
+                            "oldest": None,
+                            "latest": None,
+                        },
+                        limit=limit,
+                        lookback_days=0,
+                    )
+                except Exception as exc:  # noqa: BLE001 — degrade to window-only
+                    head_page = None
+                    ctx.log(
+                        "slack_sync_head_probe_failed",
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                        error=str(exc),
+                    )
+                else:
+                    record_slack_retention_api_request("fetch_history", "success")
+                    messages = messages + (head_page.get("messages") or [])
             message_rows = [message_row(msg, run_id) for msg in messages]
             counts["messages_fetched"] += len(message_rows)
             record_slack_retention_messages_processed(
@@ -555,6 +611,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     payload={"thread_ts": thread_ts},
                     run_id=run_id,
                     priority=200,
+                    refresh_pending=False,
                 )
                 record_etl_items_enqueued("slack", "channel", "thread_refresh_job", 1)
                 ctx.log(
@@ -595,13 +652,24 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                         window_oldest_ts=desired_oldest,
                     )
             if next_state.get("cursor"):
-                await enqueue_backfill_job(
-                    ctx._pool,
-                    job_key=_continuation_backfill_job_key(
+                # The standing incremental continuation uses ONE stable key per
+                # channel: the window's `oldest` tracks the (now advancing)
+                # watermark, so keying on it would mint a new, almost fully
+                # overlapping job every tick on a persistently busy channel.
+                # With refresh_pending=False a pending/running row keeps its
+                # older (wider) window; a completed/failed row reopens with the
+                # fresh cursor. Explicitly bounded runs keep the windowed key.
+                if inp.oldest is None and inp.latest is None:
+                    continuation_job_key = f"continuation:{channel_id}:incremental"
+                else:
+                    continuation_job_key = _continuation_backfill_job_key(
                         channel_id,
                         oldest_ts=str(next_state.get("oldest") or "") or None,
                         latest_ts=str(next_state.get("latest") or "") or None,
-                    ),
+                    )
+                await enqueue_backfill_job(
+                    ctx._pool,
+                    job_key=continuation_job_key,
                     job_type=BACKFILL_JOB_CHANNEL_CONTINUATION,
                     channel_id=channel_id,
                     payload={
@@ -613,11 +681,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     },
                     run_id=run_id,
                     priority=100,
-                )
-                continuation_job_key = _continuation_backfill_job_key(
-                    channel_id,
-                    oldest_ts=str(next_state.get("oldest") or "") or None,
-                    latest_ts=str(next_state.get("latest") or "") or None,
+                    # Never clobber a pending/running continuation: the backfill
+                    # worker owns its cursor progress under this job_key.
+                    refresh_pending=False,
                 )
                 record_etl_items_enqueued(
                     "slack", "channel", "channel_continuation_job", 1
@@ -632,13 +698,21 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     latest_ts=next_state.get("latest"),
                     has_cursor=True,
                 )
+            # Monotonic watermark: an oldest-anchored window page can carry a
+            # max ts *below* the stored watermark; never let it regress. The
+            # head probe (when it ran) contributes the true live head.
+            watermark_ts = _max_slack_ts(
+                next_state.get("watermark"),
+                ((head_page or {}).get("sync_state") or {}).get("watermark"),
+                checkpoint_watermark,
+            )
             await _update_checkpoint_success(
                 ctx._pool,
                 channel_id=channel_id,
-                watermark_ts=next_state.get("watermark"),
+                watermark_ts=watermark_ts,
                 run_id=run_id,
             )
-            lag_s = _watermark_lag_seconds(next_state.get("watermark"))
+            lag_s = _watermark_lag_seconds(watermark_ts)
             if lag_s is not None:
                 set_slack_retention_watermark_lag_seconds(mode, lag_s)
             synced.append(channel_ref(channel))

@@ -72,6 +72,12 @@ export type CodexAppServerRendererEventMapperOptions = {
   logInfo?: RendererLogInfo
   unknownAgentMessagePhase?: AgentMessagePhase
   taskOutput?: 'full' | 'omit'
+  // How long buffered assistant text waits for plan/tasks to arrive before it
+  // streams anyway. The check is event-driven — with no tasks and no further
+  // events, buffered text sits until the next event or stream end — so
+  // consumers that stream text into their own surface (discordbot) pass 0 to
+  // emit deltas immediately. Default 500ms (Slack card-first rendering).
+  preStreamGraceMs?: number
 }
 
 export type CodexAppServerToChatStreamOptions = CodexAppServerRendererEventMapperOptions & {
@@ -87,12 +93,14 @@ export class CodexAppServerRendererEventMapper
   private readonly logInfo?: RendererLogInfo
   private readonly unknownAgentMessagePhase: AgentMessagePhase
   private readonly includeTaskOutput: boolean
+  private readonly preStreamGraceMs: number
 
   constructor(options: CodexAppServerRendererEventMapperOptions = {}) {
     this.sessionId = options.sessionId ?? ''
     this.logInfo = options.logInfo
     this.unknownAgentMessagePhase = options.unknownAgentMessagePhase ?? 'final_answer'
     this.includeTaskOutput = options.taskOutput === 'full'
+    this.preStreamGraceMs = options.preStreamGraceMs ?? PRE_STREAM_GRACE_MS
   }
 
   process(source: ServerNotification | RustSessionStreamEvent | unknown): RendererEvent[] {
@@ -387,7 +395,7 @@ export class CodexAppServerRendererEventMapper
     const hasPlan = this.state.taskByUseId.size > 0
     const graceExpired =
       this.state.firstBufferedTextAt !== null &&
-      Date.now() - this.state.firstBufferedTextAt >= PRE_STREAM_GRACE_MS
+      Date.now() - this.state.firstBufferedTextAt >= this.preStreamGraceMs
     const canStream = hasPlan || opts.force || graceExpired
     if (!canStream) return
 
@@ -668,10 +676,17 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
     return { kind: 'failed', error: String(data.error ?? 'Execution failed') }
   }
 
-  if (
-    eventKind === 'session.execution_completed' ||
-    eventKind === 'session.execution_cancelled'
-  ) {
+  if (eventKind === 'session.execution_cancelled') {
+    const data = isRecord(source.data) ? source.data : source
+    const resultText =
+      terminalResultText(data).trim() || String(data.error ?? 'Execution interrupted').trim()
+    return {
+      kind: 'completed',
+      ...(resultText ? { resultText } : {})
+    }
+  }
+
+  if (eventKind === 'session.execution_completed') {
     const data = isRecord(source.data) ? source.data : source
     const resultText = terminalResultText(data).trim()
     return {

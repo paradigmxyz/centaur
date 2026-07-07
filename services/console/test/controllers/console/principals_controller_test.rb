@@ -17,6 +17,53 @@ module Console
       assert_redirected_to login_path
     end
 
+    test "new renders the create form" do
+      get console_new_principal_url
+      assert_response :ok
+      assert_select "form[action=?][method=?]", console_create_principal_path, "post" do
+        assert_select "input[name='principal[namespace]'][value=default]"
+        assert_select "input[name='principal[foreign_id]']"
+        assert_select "input[name='principal[name]']"
+        assert_select "button", "Add label"
+        assert_select "input[type=submit][value='Add Principal']"
+      end
+    end
+
+    test "create persists a principal and redirects to its detail page" do
+      assert_difference -> { Principal.count }, 1 do
+        post console_create_principal_url,
+             params: {
+               principal: { namespace: "acme", foreign_id: "C-new-console", name: "New console principal" },
+               labels: {
+                 "0" => { key: "kind", value: "slack_channel" },
+                 "1" => { key: "team", value: "platform" }
+               }
+             }
+      end
+
+      principal = Principal.find_by!(namespace: "acme", foreign_id: "C-new-console")
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal "Principal created.", flash[:notice]
+      assert_equal "New console principal", principal.name
+      assert_equal({ "kind" => "slack_channel", "team" => "platform" }, principal.labels)
+      assert_equal @operator, principal.created_by
+    end
+
+    test "create re-renders validation errors" do
+      existing = principals(:acme_channel)
+
+      assert_no_difference -> { Principal.count } do
+        post console_create_principal_url,
+             params: {
+               principal: { namespace: existing.namespace, foreign_id: existing.foreign_id, name: "Duplicate" }
+             }
+      end
+
+      assert_response :unprocessable_entity
+      assert_select ".alert-error", text: /Principal could not be saved/
+      assert_select ".field-error", text: /has already been taken/
+    end
+
     test "update_sandbox_access toggles sandbox capabilities" do
       principal = principals(:acme_user_bob)
 
@@ -33,6 +80,44 @@ module Console
       assert_equal false, principal.sandbox_repo_cache_enabled
       assert_equal false, principal.sandbox_observability_enabled
       assert_equal false, principal.sandbox_api_server_enabled
+    end
+
+    test "destroy deletes the principal and dependent access records" do
+      principal = principals(:acme_channel)
+      proxy = proxies(:acme_proxy)
+      client = McpOauthClient.create!(redirect_uris: [ "http://localhost/callback" ])
+      McpOauthAuthorizationCode.create!(
+        mcp_oauth_client: client,
+        user: users(:acme_admin),
+        principal: principal,
+        redirect_uri: "http://localhost/callback",
+        code_challenge: "challenge",
+        resource: "https://api.example.test",
+        scopes: %w[mcp:tools]
+      )
+      McpOauthRefreshToken.create!(
+        mcp_oauth_client: client,
+        user: users(:acme_admin),
+        principal: principal,
+        resource: "https://api.example.test",
+        scopes: %w[mcp:tools]
+      )
+
+      assert_difference -> { Principal.count }, -1 do
+        assert_difference -> { Grant.where(principal: principal).count }, -3 do
+          assert_difference -> { PrincipalRole.where(principal: principal).count }, -1 do
+            assert_difference -> { McpOauthAuthorizationCode.where(principal: principal).count }, -1 do
+              assert_difference -> { McpOauthRefreshToken.where(principal: principal).count }, -1 do
+                delete console_delete_principal_url(principal.oid)
+              end
+            end
+          end
+        end
+      end
+
+      assert_redirected_to console_principals_path
+      assert_equal "Deleted principal #{principal.foreign_id}.", flash[:notice]
+      assert_nil proxy.reload.principal
     end
 
     test "assign_role attaches the role and redirects with a notice" do

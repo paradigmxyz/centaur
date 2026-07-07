@@ -566,6 +566,31 @@ networkPolicy:
     # kubernetes.io/metadata.name of the collector's namespace, e.g. "laminar".
     namespace: ""
     port: 8000
+  # Egress to observability backends such as VictoriaLogs or VictoriaMetrics.
+  # This policy selects only pods labeled centaur.ai/observability-enabled=true.
+  # Sandboxes receive that label only when their principal has the observability
+  # sandbox capability.
+  observabilityEgress:
+    enabled: false
+    destinations: []
+    # Example:
+    # destinations:
+    #   - namespace: observability
+    #     podSelector:
+    #       matchLabels:
+    #         app.kubernetes.io/instance: vls
+    #         app.kubernetes.io/name: victoria-logs-single
+    #     ports:
+    #       - port: 9428
+    #         protocol: TCP
+    #   - namespace: observability
+    #     podSelector:
+    #       matchLabels:
+    #         app.kubernetes.io/instance: vms
+    #         app.kubernetes.io/name: victoria-metrics-single
+    #     ports:
+    #       - port: 8428
+    #         protocol: TCP
 
 podSecurityContext:
   fsGroupChangePolicy: OnRootMismatch

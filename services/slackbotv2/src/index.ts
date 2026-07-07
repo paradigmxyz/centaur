@@ -18,6 +18,7 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
   codexAppServerToChatSdkStream,
+  EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
   type ChatSDKStreamChunk,
   type RendererEvent
@@ -30,6 +31,7 @@ import {
   collectInitialContext,
   forwardToSessionApi,
   harnessRestartPreamble,
+  interruptSessionExecution,
   isRetryableSessionApiError,
   openSessionEventStream,
   serializeAttachment,
@@ -45,6 +47,7 @@ import {
 } from './console-session-link'
 import { extractMessageOverrides } from './overrides'
 import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
+import { isSlackStopCommand } from './stop-command'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -103,7 +106,6 @@ type SlackAssistantAdapter = {
 const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 
 type SlackbotV2RequestContext = {
-  retryableErrors: unknown[]
   waitUntil(promise: Promise<unknown>): void
 }
 
@@ -123,6 +125,7 @@ const SLACK_TASK_DETAILS_MAX_CHARS = 500
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
 const POSTGRES_CONNECT_MAX_DELAY_MS = 10_000
+const HANDOFF_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000, 120_000]
 const LATE_SLACK_FILE_MATCH_WINDOW_MS = 15_000
 const LATE_SLACK_FILE_PENDING_TTL_MS = 60_000
 const LATE_SLACK_FILE_CONSUMED_TTL_MS = 5 * 60_000
@@ -250,7 +253,6 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       const webhookFields = slackWebhookLogFields(rawBody)
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
-        retryableErrors: [],
         waitUntil: promise => waitUntil(c, promise)
       }
       const response = await requestContext.run(context, () => {
@@ -284,23 +286,13 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           await Promise.all(handoffTasks)
         } catch (error) {
           waitError = error
-          if (isRetryableSessionApiError(error)) context.retryableErrors.push(error)
         } finally {
           stopPendingLog()
           traceLog(options, 'slackbotv2_webhook_handoff_wait_complete', undefined, {
             ...waitFields,
             error: waitError ? errorMessage(waitError) : undefined,
-            phase_ms: elapsedMs(waitStartedAtMs),
-            retryable_error_count: context.retryableErrors.length
+            phase_ms: elapsedMs(waitStartedAtMs)
           })
-        }
-        if (context.retryableErrors.length > 0) {
-          outcome = 'retry_requested'
-          slackbotMetrics.webhookRetryRequests.inc()
-          traceLog(options, 'slackbotv2_webhook_retry_requested', undefined, {
-            error: errorMessage(context.retryableErrors[0])
-          })
-          return new globalThis.Response('temporary upstream unavailable', { status: 503 })
         }
       }
       const lateFileTask = lateSlackFiles.repairFromWebhook(rawBody)
@@ -361,6 +353,9 @@ async function handleSlackMessageHandoff(
     backgroundWaitUntil(assistantStatus.then(() => undefined).catch(() => undefined))
   }
   try {
+    if (await handleStopCommand(thread, message, input.options, input.trigger)) {
+      return
+    }
     if (input.subscribe) {
       await subscribeSlackThreadForHandoff(thread, input.options, trace, input.trigger)
     }
@@ -393,6 +388,40 @@ async function handleSlackMessageHandoff(
         .then(() => undefined)
         .catch(() => undefined)
     )
+    throw error
+  }
+}
+
+async function handleStopCommand(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  options: SlackbotV2Options,
+  trigger: string
+): Promise<boolean> {
+  if (!isSlackStopCommand(message)) return false
+  const trace = createHandoffTrace(thread, message, 'append')
+  traceLog(options, 'slackbotv2_stop_command_started', trace, { trigger })
+  const latest = (await thread.state) ?? {}
+  const reason = `Interrupted from Slack by ${slackUserIdForMessage(message) ?? 'unknown user'}`
+  try {
+    const response = await interruptSessionExecution(options, thread.id, reason)
+    await thread.setState({
+      activeExecution: false,
+      lastEventId: latest.lastEventId ?? latest.renderObligation?.afterEventId ?? 0,
+      renderObligation: null
+    })
+    await setAssistantStatus(thread, '', options, trace)
+    traceLog(options, 'slackbotv2_stop_command_complete', trace, {
+      execution_id: response.execution_id,
+      interrupted: response.interrupted,
+      trigger
+    })
+    return true
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_stop_command_failed', trace, {
+      error: errorMessage(error),
+      trigger
+    })
     throw error
   }
 }
@@ -577,6 +606,68 @@ async function ensureStateConnected(state: StateAdapter, options: SlackbotV2Opti
   }
 }
 
+type SyncThreadMessageInput = {
+  initialAssistantStatusRequested?: boolean
+  initialAssistantStatusVisible?: boolean
+  mode: SlackbotV2MessageMode
+  options: SlackbotV2Options
+  /** Number of in-process retries already spent on this message's handoff. */
+  retryAttempt?: number
+  state: StateAdapter
+}
+
+/**
+ * Schedules an in-process retry of a Slack→session handoff after a retryable
+ * session API failure. Slack's own webhook redelivery cannot drive retries:
+ * Slack times deliveries out after ~3s, so its redelivery races the
+ * still-running original attempt, is deduped by the chat SDK, and is
+ * acknowledged before the original attempt fails. Retrying locally keeps the
+ * dedupe intact and never depends on Slack redelivering.
+ *
+ * Returns false when the retry budget is exhausted; the caller then surfaces
+ * the failure instead of retrying.
+ */
+function scheduleHandoffRetry(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  input: SyncThreadMessageInput,
+  error: unknown,
+  trace: SlackbotV2Trace
+): boolean {
+  const delays = input.options.handoffRetryDelaysMs ?? HANDOFF_RETRY_DELAYS_MS
+  const attempt = input.retryAttempt ?? 0
+  if (attempt >= delays.length) return false
+  const delayMs = delays[attempt] ?? 0
+  slackbotMetrics.handoffRetries.inc({ outcome: 'scheduled' })
+  traceLog(input.options, 'slackbotv2_handoff_retry_scheduled', trace, {
+    attempt: attempt + 1,
+    delay_ms: delayMs,
+    error: errorMessage(error),
+    max_attempts: delays.length
+  })
+  backgroundWaitUntil(
+    (async () => {
+      await sleep(delayMs)
+      await syncThreadMessageToSession(thread, message, { ...input, retryAttempt: attempt + 1 })
+    })().catch(async retryError => {
+      traceWarn(input.options, 'slackbotv2_handoff_retry_failed', trace, {
+        attempt: attempt + 1,
+        error: errorMessage(retryError)
+      })
+      // A retry chain that dies outside the normal failure paths (which clear
+      // the status themselves) must not leave "Thinking..." stuck on the thread.
+      if (input.mode === 'execute') {
+        try {
+          await setAssistantStatus(thread, '', input.options, trace)
+        } catch {
+          // Best-effort; the original failure is already logged.
+        }
+      }
+    })
+  )
+  return true
+}
+
 /**
  * Persists a Slack thread update into the session API. In execute mode the create/append/execute
  * handoff completes before Slack is acknowledged; SSE rendering continues in background.
@@ -584,13 +675,7 @@ async function ensureStateConnected(state: StateAdapter, options: SlackbotV2Opti
 async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
-  input: {
-    initialAssistantStatusRequested?: boolean
-    initialAssistantStatusVisible?: boolean
-    mode: SlackbotV2MessageMode
-    options: SlackbotV2Options
-    state: StateAdapter
-  }
+  input: SyncThreadMessageInput
 ): Promise<void> {
   const traceStartedAtMs = nowMs()
   const state = (await thread.state) ?? {}
@@ -840,30 +925,21 @@ async function syncThreadMessageToSession(
       }
     } catch (error) {
       if (isRetryableSessionApiError(error)) {
-        const context = requestContext.getStore()
-        if (context) {
-          context.retryableErrors.push(error)
-          try {
-            await input.state.delete(`dedupe:slack:${message.id}`)
-          } catch (deleteError) {
-            traceLog(input.options, 'slackbotv2_webhook_retry_dedupe_clear_failed', trace, {
-              error: errorMessage(deleteError)
-            })
-          }
-          traceLog(input.options, 'slackbotv2_webhook_retry_marked', trace, {
-            error: errorMessage(error)
-          })
+        if (scheduleHandoffRetry(thread, message, input, error, trace)) {
+          recordForward(input.mode, 'retry_scheduled', traceStartedAtMs)
+          return
         }
+        slackbotMetrics.handoffRetries.inc({ outcome: 'exhausted' })
+        traceWarn(input.options, 'slackbotv2_handoff_retry_exhausted', trace, {
+          error: errorMessage(error)
+        })
       }
-      recordForward(
-        input.mode,
-        isRetryableSessionApiError(error) ? 'retry_requested' : 'error',
-        traceStartedAtMs
-      )
+      recordForward(input.mode, 'error', traceStartedAtMs)
       throw error
     }
     traceLog(input.options, 'slackbotv2_forward_complete', trace)
     recordForward(input.mode, 'complete', traceStartedAtMs)
+    if (input.retryAttempt) slackbotMetrics.handoffRetries.inc({ outcome: 'succeeded' })
     return
   }
 
@@ -890,6 +966,7 @@ async function syncThreadMessageToSession(
       last_event_id: lastEventId
     })
     recordForward(input.mode, 'complete', traceStartedAtMs)
+    if (input.retryAttempt) slackbotMetrics.handoffRetries.inc({ outcome: 'succeeded' })
   } catch (error) {
     // The live render is not happening; let the recovery sweep claim the
     // obligation (if one was committed) as soon as it scans.
@@ -900,23 +977,24 @@ async function syncThreadMessageToSession(
       lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId)
     })
     if (isRetryableSessionApiError(error)) {
-      const context = requestContext.getStore()
-      if (context) {
-        context.retryableErrors.push(error)
-        try {
-          await input.state.delete(`dedupe:slack:${message.id}`)
-        } catch (deleteError) {
-          traceLog(input.options, 'slackbotv2_webhook_retry_dedupe_clear_failed', trace, {
-            error: errorMessage(deleteError)
-          })
-        }
-        traceLog(input.options, 'slackbotv2_webhook_retry_marked', trace, {
-          error: errorMessage(error)
-        })
-        if (assistantStatusVisible) await setAssistantStatus(thread, '', input.options, trace)
-        recordForward(input.mode, 'retry_requested', traceStartedAtMs)
-        throw error
+      // The assistant status stays visible through the retry window; a
+      // successful retry replaces it with the live render, and exhaustion
+      // falls through to the visible error notice below (which clears it).
+      //
+      // If another mention starts an execution before the retry fires, the
+      // retry recomputes eligibility and downgrades to append/no-op. That is
+      // intentional: this message was already appended (or will be appended)
+      // to the session, so the newer execution sees it — the same conflation
+      // that happens when two mentions arrive seconds apart on a healthy
+      // system. The thread is never left silent in that case.
+      if (scheduleHandoffRetry(thread, message, input, error, trace)) {
+        recordForward(input.mode, 'retry_scheduled', traceStartedAtMs)
+        return
       }
+      slackbotMetrics.handoffRetries.inc({ outcome: 'exhausted' })
+      traceWarn(input.options, 'slackbotv2_handoff_retry_exhausted', trace, {
+        error: errorMessage(error)
+      })
     }
     try {
       await renderExecutionStream(
@@ -1251,8 +1329,8 @@ async function renderFallbackFinalAnswer(
     for await (const _chunk of chatStream) {
       void _chunk
     }
-    const text = fallback.text()
-    if (!text) {
+    const capturedText = fallback.text()
+    if (!capturedText && !fallback.isInterrupted()) {
       outcome = 'empty'
       traceLog(options, 'slackbotv2_render_fallback_empty', trace, {
         last_event_id: lastEventId,
@@ -1260,6 +1338,7 @@ async function renderFallbackFinalAnswer(
       })
       return null
     }
+    const text = fallback.textOrDefault()
     const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
     if (replacement) {
       await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
@@ -1983,7 +2062,7 @@ async function renderPlainTextExecutionStream(
       void _chunk
     }
     const text = truncateSlackText(
-      fallback.text() || 'Execution completed, but no final text was captured.',
+      fallback.textOrDefault(),
       SLACK_FALLBACK_TEXT_MAX_CHARS,
       'Slack final answer'
     )
@@ -1999,6 +2078,7 @@ async function renderPlainTextExecutionStream(
 class SlackRenderFallback {
   private markdownText = ''
   private terminalText = ''
+  private interrupted = false
 
   async *collectSource(
     stream: AsyncIterable<SlackbotV2RendererSource>
@@ -2019,7 +2099,23 @@ class SlackRenderFallback {
   }
 
   text(): string {
-    return (this.terminalText || this.markdownText).trim()
+    const terminalText = this.terminalText.trim()
+    const markdownText = this.markdownText.trim()
+    if (this.interrupted && !terminalText && markdownText === EMPTY_FINAL_ANSWER_TEXT) return ''
+    return terminalText || markdownText
+  }
+
+  textOrDefault(): string {
+    return (
+      this.text() ||
+      (this.interrupted
+        ? 'Execution interrupted'
+        : EMPTY_FINAL_ANSWER_TEXT)
+    )
+  }
+
+  isInterrupted(): boolean {
+    return this.interrupted
   }
 
   private captureTerminalText(event: SlackbotV2RendererSource): void {
@@ -2027,6 +2123,9 @@ class SlackRenderFallback {
     const eventKind = String(
       'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
     )
+    if (eventKind === 'session.execution_cancelled') {
+      this.interrupted = true
+    }
     if (
       eventKind !== 'session.execution_completed' &&
       eventKind !== 'session.execution_cancelled' &&
