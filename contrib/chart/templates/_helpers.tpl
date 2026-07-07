@@ -75,6 +75,11 @@ app.kubernetes.io/component: {{ .component }}
 {{- $storageType -}}
 {{- end -}}
 
+{{- define "centaur.repositoryVisibility" -}}
+{{- $visibility := lower (default "private" .) -}}
+{{- if eq $visibility "public" -}}public{{- else -}}private{{- end -}}
+{{- end -}}
+
 {{- define "centaur.overlaySources" -}}
 {{- $sources := list -}}
 {{- with .Values.overlays.sources -}}
@@ -82,6 +87,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- if .repo -}}
 {{- $source := dict "repo" .repo -}}
 {{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .visibility) -}}
 {{- /*
 Subdir defaults: an omitted key falls back to the conventional layout
 (tools, workflows, .agents/skills); a key explicitly set to "" disables
@@ -112,11 +118,13 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- if and .Values.toolServer.enabled .Values.toolServer.repo -}}
 {{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "skillsSubdir" ".agents/skills" -}}
 {{- with .Values.toolServer.ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .Values.toolServer.visibility) -}}
 {{- $sources = append $sources $source -}}
 {{- range .Values.toolServer.extraSources -}}
 {{- if .repo -}}
 {{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) -}}
 {{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
+{{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .visibility) -}}
 {{- $sources = append $sources $source -}}
 {{- end -}}
 {{- end -}}

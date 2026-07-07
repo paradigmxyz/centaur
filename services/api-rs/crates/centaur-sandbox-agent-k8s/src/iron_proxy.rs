@@ -41,6 +41,7 @@ const PROXY_TLS_MODE: &str = "mitm";
 const PROXY_TLS_CA_CERT_PATH: &str = "/etc/iron-proxy/ca.crt";
 const PROXY_TLS_CA_KEY_PATH: &str = "/etc/iron-proxy/ca.key";
 const PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT: &str = "120s";
+const PROXY_UPSTREAM_DENY_CIDRS_ENV: &str = "IRON_PROXY_UPSTREAM_DENY_CIDRS";
 const PROXY_LOG_LEVEL: &str = "info";
 // iron-control multiplexes every Postgres upstream through a single listener,
 // routing by database name; the control plane owns each upstream DSN/role/
@@ -80,6 +81,7 @@ pub struct IronProxyConfig {
     pub ca_key_secret_name: String,
     pub env_from_secret_names: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
+    pub upstream_deny_cidrs: Vec<String>,
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
@@ -101,6 +103,7 @@ impl IronProxyConfig {
             ca_key_secret_name: ca_key_secret_name.into(),
             env_from_secret_names: Vec::new(),
             extra_env: BTreeMap::new(),
+            upstream_deny_cidrs: Vec::new(),
             op_connect_app_name: "onepassword-connect".to_owned(),
             op_connect_port: 8080,
             api_pod_labels: BTreeMap::from([(
@@ -1258,6 +1261,15 @@ fn iron_proxy_env_vars(
     ] {
         env.insert(name.to_owned(), env_var(name, &value));
     }
+    if !iron_proxy.upstream_deny_cidrs.is_empty() {
+        env.insert(
+            PROXY_UPSTREAM_DENY_CIDRS_ENV.to_owned(),
+            env_var(
+                PROXY_UPSTREAM_DENY_CIDRS_ENV,
+                &iron_proxy.upstream_deny_cidrs.join(","),
+            ),
+        );
+    }
     for (name, value) in &iron_proxy.extra_env {
         env.insert(name.clone(), env_var(name, value));
     }
@@ -2219,6 +2231,33 @@ mod tests {
             .and_then(|var| var.value.as_deref());
 
         assert_eq!(timeout, Some("120s"));
+    }
+
+    #[test]
+    fn managed_proxy_env_sets_upstream_deny_cidrs() {
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.upstream_deny_cidrs = vec![
+            "169.254.169.254/32".to_owned(),
+            "127.0.0.0/8".to_owned(),
+            "10.42.0.0/16".to_owned(),
+            "10.43.0.0/16".to_owned(),
+        ];
+        let sync = ProxySyncEnv {
+            proxy_id: "proxy-id".to_owned(),
+            control_url: "http://iron-control".to_owned(),
+            token: "proxy-token".to_owned(),
+        };
+
+        let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
+        let deny_cidrs = env
+            .iter()
+            .find(|var| var.name == PROXY_UPSTREAM_DENY_CIDRS_ENV)
+            .and_then(|var| var.value.as_deref());
+
+        assert_eq!(
+            deny_cidrs,
+            Some("169.254.169.254/32,127.0.0.0/8,10.42.0.0/16,10.43.0.0/16")
+        );
     }
 
     #[test]

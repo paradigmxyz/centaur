@@ -182,10 +182,15 @@ def describe_table(
                         print(
                             f"| `{col.get('name', '')}` | {col.get('type', '')} | {col.get('description', '')} |"
                         )
+                elif "content" in schema:
+                    # search_schemas(id=...) returns schema docs as markdown
+                    print(f"\n{schema['content']}")
             else:
                 console.print(f"[bold]{table_id}[/]")
                 if "description" in schema:
                     console.print(f"[dim]{schema['description']}[/]\n")
+                if "content" in schema and "columns" not in schema:
+                    console.print(schema["content"])
                 if "columns" in schema:
                     table = Table()
                     table.add_column("Column", style="cyan")

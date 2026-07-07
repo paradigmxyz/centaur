@@ -11,23 +11,33 @@
 {{- end -}}
 {{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- $toolSources := list -}}
+{{- $publicToolSources := list -}}
 {{- $apiWorkflowDirList := list -}}
 {{- $sandboxWorkflowDirList := list -}}
 {{- $skillDirs := list -}}
+{{- $publicSkillDirs := list -}}
 {{- range $source := $overlaySources -}}
 {{- $repo := get $source "repo" | default "" -}}
+{{- $visibility := get $source "visibility" | default "private" -}}
 {{- if $repo -}}
 {{- with (get $source "toolsSubdir") -}}
-{{- $toolSource := dict "repo" $repo "subdir" . -}}
+{{- $toolSource := dict "repo" $repo "subdir" . "visibility" $visibility -}}
 {{- with (get $source "ref") }}{{- $_ := set $toolSource "ref" . -}}{{- end -}}
 {{- $toolSources = append $toolSources $toolSource -}}
+{{- if eq $visibility "public" -}}
+{{- $publicToolSources = append $publicToolSources $toolSource -}}
+{{- end -}}
 {{- end -}}
 {{- with (get $source "workflowsSubdir") -}}
 {{- $apiWorkflowDirList = append $apiWorkflowDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
 {{- $sandboxWorkflowDirList = append $sandboxWorkflowDirList (printf "/home/agent/github/%s/%s" $repo .) -}}
 {{- end -}}
 {{- with (get $source "skillsSubdir") -}}
-{{- $skillDirs = append $skillDirs (printf "/home/agent/github/%s/%s" $repo .) -}}
+{{- $skillDir := printf "/home/agent/github/%s/%s" $repo . -}}
+{{- $skillDirs = append $skillDirs $skillDir -}}
+{{- if eq $visibility "public" -}}
+{{- $publicSkillDirs = append $publicSkillDirs $skillDir -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -39,6 +49,12 @@
 {{- $toolDirs = list -}}
 {{- range $source := $toolSources }}
 {{- $toolDirs = append $toolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
+{{- end -}}
+{{- end -}}
+{{- $publicToolDirs := list -}}
+{{- if and .Values.repoCache.enabled (gt (len $publicToolSources) 0) -}}
+{{- range $source := $publicToolSources }}
+{{- $publicToolDirs = append $publicToolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.repoCache.enabled (gt (len $apiWorkflowDirList) 0) -}}
@@ -213,6 +229,10 @@ spec:
               value: info
             - name: TOOL_DIRS
               value: {{ join ":" $toolDirs | quote }}
+{{- if gt (len $publicToolDirs) 0 }}
+            - name: KUBERNETES_PUBLIC_TOOL_DIRS
+              value: {{ join ":" $publicToolDirs | quote }}
+{{- end }}
             - name: WORKFLOW_DIRS
               value: {{ $workflowDirs | quote }}
 {{- if $sandboxWorkflowDirs }}
@@ -311,6 +331,8 @@ spec:
               value: {{ printf "%s:%s" .Values.ironProxy.image.repository .Values.ironProxy.image.tag | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
+            - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
+              value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
             - name: KUBERNETES_FIREWALL_CA_SECRET_NAME
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
@@ -353,6 +375,9 @@ spec:
 {{- $sandboxEnvList := list }}
 {{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_SKILL_DIRS" "value" (join ":" $skillDirs)) }}
+{{- end }}
+{{- if and .Values.repoCache.enabled (gt (len $publicSkillDirs) 0) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_PUBLIC_SKILL_DIRS" "value" (join ":" $publicSkillDirs)) }}
 {{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}
@@ -403,6 +428,8 @@ spec:
 {{- end }}
             - name: KUBERNETES_TOOLS_SUBDIR
               value: {{ get $firstToolSource "subdir" | quote }}
+            - name: KUBERNETES_TOOLS_VISIBILITY
+              value: {{ get $firstToolSource "visibility" | default "private" | quote }}
 {{- if $extraToolSources }}
             - name: KUBERNETES_TOOLS_EXTRA_SOURCES
               value: {{ toJson $extraToolSources | quote }}

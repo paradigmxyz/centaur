@@ -1,12 +1,37 @@
 {{- if .Values.repoCache.enabled }}
 {{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- $repoCacheRepositories := list -}}
+{{- $repoCacheRepositoryVisibilities := dict -}}
+{{- $repoCacheRepositoryRefs := list -}}
+{{- $repoCacheRepositoryRefRepos := list -}}
+{{- range $repo, $ref := .Values.repoCache.repositoryRefs }}
+{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
+{{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
+{{- end }}
 {{- range .Values.repoCache.repositories }}
-{{- $repoCacheRepositories = append $repoCacheRepositories . -}}
+{{- if kindIs "string" . -}}
+{{- $repo := . -}}
+{{- if $repo -}}
+{{- $repoCacheRepositories = append $repoCacheRepositories $repo -}}
+{{- $_ := set $repoCacheRepositoryVisibilities $repo "private" -}}
+{{- end -}}
+{{- else -}}
+{{- $repo := get . "repo" | default "" -}}
+{{- if $repo -}}
+{{- $repoCacheRepositories = append $repoCacheRepositories $repo -}}
+{{- $_ := set $repoCacheRepositoryVisibilities $repo (include "centaur.repositoryVisibility" (get . "visibility")) -}}
+{{- $ref := get . "ref" | default "" -}}
+{{- if and $ref (not (has $repo $repoCacheRepositoryRefRepos)) -}}
+{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
+{{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 {{- range $source := $overlaySources }}
 {{- with (get $source "repo") }}
 {{- $repoCacheRepositories = append $repoCacheRepositories . -}}
+{{- $_ := set $repoCacheRepositoryVisibilities . (get $source "visibility" | default "private") -}}
 {{- end }}
 {{- end }}
 {{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
@@ -19,12 +44,6 @@
 {{- $repoCacheUsePvc := eq $repoCacheStorageType "persistentVolumeClaim" -}}
 {{- $repoCachePvcName := include "centaur.repoCachePvcName" . -}}
 {{- $repoCacheCreatePvc := and $repoCacheUsePvc .Values.repoCache.storage.persistentVolumeClaim.create (not .Values.repoCache.storage.persistentVolumeClaim.existingClaim) -}}
-{{- $repoCacheRepositoryRefs := list -}}
-{{- $repoCacheRepositoryRefRepos := list -}}
-{{- range $repo, $ref := .Values.repoCache.repositoryRefs }}
-{{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
-{{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
-{{- end }}
 {{- range $source := $overlaySources }}
 {{- $repo := get $source "repo" | default "" -}}
 {{- $ref := get $source "ref" | default "" -}}
@@ -32,6 +51,10 @@
 {{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
 {{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
 {{- end }}
+{{- end }}
+{{- $repoCacheRepositoryVisibilityEntries := list -}}
+{{- range $repo := $repoCacheRepositories }}
+{{- $repoCacheRepositoryVisibilityEntries = append $repoCacheRepositoryVisibilityEntries (printf "%s=%s" $repo (get $repoCacheRepositoryVisibilities $repo | default "private")) -}}
 {{- end }}
 {{- if $repoCacheCreatePvc }}
 apiVersion: v1
@@ -97,6 +120,8 @@ spec:
               value: {{ join " " $repoCacheRepositories | quote }}
             - name: REPOSITORY_REFS
               value: {{ join " " $repoCacheRepositoryRefs | quote }}
+            - name: REPOSITORY_VISIBILITIES
+              value: {{ join " " $repoCacheRepositoryVisibilityEntries | quote }}
             - name: SYNC_INTERVAL_SECONDS
               value: {{ .Values.repoCache.syncIntervalSeconds | quote }}
             - name: GIT_TERMINAL_PROMPT

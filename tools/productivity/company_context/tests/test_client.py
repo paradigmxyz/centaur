@@ -346,6 +346,48 @@ def test_search_emits_error_lookup_metric(monkeypatch):
     )
 
 
+def test_lookup_metrics_use_metrics_runtime_labels(monkeypatch):
+    monkeypatch.setenv("METRICS_ENVIRONMENT", "staging")
+    monkeypatch.setenv("METRICS_NAMESPACE", "stg-centaur-system")
+    pushed_lines = []
+    monkeypatch.setattr(
+        company_context_client,
+        "_push_company_context_lookup_metric_lines",
+        lambda lines: pushed_lines.extend(lines),
+    )
+
+    company_context_client._emit_company_context_lookup_metrics(
+        status="ok",
+        requested_source="slack",
+        requested_source_type=None,
+        occurred_after=None,
+        occurred_before=None,
+        results=[
+            {
+                "source": "slack",
+                "source_type": "slack_thread",
+                "lane": "indexed",
+            }
+        ],
+    )
+
+    assert any(
+        line.startswith(
+            'company_context_lookup_requests{environment="staging",namespace="stg-centaur-system",'
+            'requested_source="slack",requested_source_type="all",status="ok",'
+            'time_window="false"} 1 '
+        )
+        for line in pushed_lines
+    )
+    assert any(
+        line.startswith(
+            'company_context_lookup_results{environment="staging",lane="indexed",'
+            'namespace="stg-centaur-system",source="slack",source_type="slack_thread"} 1 '
+        )
+        for line in pushed_lines
+    )
+
+
 def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
     fake = _FakeConnection(rows=[])
 

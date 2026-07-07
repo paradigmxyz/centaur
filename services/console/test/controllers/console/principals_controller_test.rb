@@ -69,7 +69,7 @@ module Console
 
       patch console_principal_sandbox_access_url(principal.oid),
             params: {
-              sandbox_repo_cache_enabled: "0",
+              sandbox_repo_cache: "public",
               sandbox_observability_enabled: "0",
               sandbox_api_server_enabled: "0"
             }
@@ -77,6 +77,7 @@ module Console
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Updated sandbox access.", flash[:notice]
       principal.reload
+      assert_equal "public", principal.sandbox_repo_cache
       assert_equal false, principal.sandbox_repo_cache_enabled
       assert_equal false, principal.sandbox_observability_enabled
       assert_equal false, principal.sandbox_api_server_enabled

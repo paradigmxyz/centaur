@@ -154,8 +154,12 @@ def _first_nonempty_env(names: list[str]) -> str | None:
 
 def _metric_runtime_labels() -> dict[str, str]:
     labels: dict[str, str] = {}
-    environment = _first_nonempty_env(["CENTAUR_ENVIRONMENT", "DEPLOY_ENV", "ENVIRONMENT"])
-    namespace = _first_nonempty_env(["CENTAUR_NAMESPACE", "POD_NAMESPACE", "NAMESPACE"])
+    environment = _first_nonempty_env(
+        ["METRICS_ENVIRONMENT", "CENTAUR_ENVIRONMENT", "DEPLOY_ENV", "ENVIRONMENT"]
+    )
+    namespace = _first_nonempty_env(
+        ["METRICS_NAMESPACE", "CENTAUR_NAMESPACE", "POD_NAMESPACE", "NAMESPACE"]
+    )
     if environment:
         labels["environment"] = environment
     if namespace:

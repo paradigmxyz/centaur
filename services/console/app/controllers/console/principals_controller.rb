@@ -34,7 +34,7 @@ module Console
 
     def update_sandbox_access
       @principal.update!(
-        sandbox_repo_cache_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_repo_cache_enabled]),
+        sandbox_repo_cache: params[:sandbox_repo_cache],
         sandbox_observability_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_observability_enabled]),
         sandbox_api_server_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_api_server_enabled])
       )

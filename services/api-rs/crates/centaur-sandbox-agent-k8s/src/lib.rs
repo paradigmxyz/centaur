@@ -611,11 +611,14 @@ fn build_agent_sandbox(
         .iter()
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
-    let repo_cache_tools = config
+    let repo_cache_enabled = spec.capabilities.repo_cache.enabled();
+    let scoped_tools = config
         .tools
         .as_ref()
-        .filter(|_| spec.capabilities.repo_cache_enabled);
-    let baked_base_tools = config.tools.is_some() && !spec.capabilities.repo_cache_enabled;
+        .filter(|_| repo_cache_enabled)
+        .map(|tools| tools.scoped_for_repo_cache_access(&spec.capabilities.repo_cache));
+    let repo_cache_tools = scoped_tools.as_ref().filter(|tools| tools.has_sources());
+    let baked_base_tools = config.tools.is_some() && repo_cache_tools.is_none();
 
     if repo_cache_tools.is_some() {
         for (name, value) in tools::agent_env(repo_cache_tools) {
@@ -761,6 +764,11 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
             "mountPath": mount.target_path,
             "readOnly": mount.read_only,
         }));
+        if let Some(sub_path) = &mount.sub_path
+            && let Some(mount_obj) = mounts.last_mut().and_then(Value::as_object_mut)
+        {
+            mount_obj.insert("subPath".to_owned(), json!(sub_path));
+        }
         volumes.push(match &mount.kind {
             MountKind::EmptyDir => json!({
                 "name": name,
@@ -864,7 +872,7 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{ResourceLimits, SandboxCapabilities, SandboxSpec};
+    use centaur_sandbox_core::{RepoCacheAccess, ResourceLimits, SandboxCapabilities, SandboxSpec};
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
 
     use super::*;
@@ -913,7 +921,7 @@ mod tests {
     #[test]
     fn labels_observability_enabled_sandboxes_for_chart_policy() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-            repo_cache_enabled: true,
+            repo_cache: RepoCacheAccess::All,
             observability_enabled: true,
             api_server_enabled: true,
         });
@@ -966,7 +974,7 @@ mod tests {
     #[test]
     fn omits_api_server_label_for_restricted_sandboxes() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-            repo_cache_enabled: true,
+            repo_cache: RepoCacheAccess::All,
             observability_enabled: false,
             api_server_enabled: false,
         });
@@ -1061,7 +1069,7 @@ mod tests {
     #[test]
     fn disabled_repo_cache_uses_baked_base_tools_without_bootstrap() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-            repo_cache_enabled: false,
+            repo_cache: RepoCacheAccess::None,
             observability_enabled: true,
             api_server_enabled: true,
         });

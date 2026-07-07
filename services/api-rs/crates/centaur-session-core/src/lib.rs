@@ -137,9 +137,46 @@ pub enum SessionStatus {
     Archived,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxRepoCacheAccess {
+    None,
+    Public,
+    #[default]
+    All,
+}
+
+impl SandboxRepoCacheAccess {
+    pub const fn enabled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Public => "public",
+            Self::All => "all",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "public" => Some(Self::Public),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub const fn from_legacy_enabled(enabled: bool) -> Self {
+        if enabled { Self::All } else { Self::None }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SandboxCapabilities {
-    pub repo_cache_enabled: bool,
+    #[serde(default)]
+    pub repo_cache: SandboxRepoCacheAccess,
     pub observability_enabled: bool,
     pub api_server_enabled: bool,
 }
@@ -147,14 +184,20 @@ pub struct SandboxCapabilities {
 impl SandboxCapabilities {
     pub const fn default_enabled() -> Self {
         Self {
-            repo_cache_enabled: true,
+            repo_cache: SandboxRepoCacheAccess::All,
             observability_enabled: true,
             api_server_enabled: true,
         }
     }
 
     pub const fn is_default_enabled(&self) -> bool {
-        self.repo_cache_enabled && self.observability_enabled && self.api_server_enabled
+        matches!(self.repo_cache, SandboxRepoCacheAccess::All)
+            && self.observability_enabled
+            && self.api_server_enabled
+    }
+
+    pub const fn repo_cache_enabled(&self) -> bool {
+        self.repo_cache.enabled()
     }
 }
 

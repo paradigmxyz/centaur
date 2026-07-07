@@ -90,16 +90,22 @@ impl SessionRegistrar {
             metadata.slack_team_id,
             metadata.conversation_name,
         );
-        let input = principal.to_identity_input(&self.namespace);
-        let exists = match self
+        let mut input = principal.to_identity_input(&self.namespace);
+        let existing = match self
             .client
             .get_principal(&self.namespace, &input.foreign_id)
             .await
         {
-            Ok(_) => true,
-            Err(error) if is_status(&error, 404) => false,
+            Ok(existing) => Some(existing),
+            Err(error) if is_status(&error, 404) => None,
             Err(error) => return Err(error),
         };
+        let exists = existing.is_some();
+        if let Some(existing) = existing {
+            let mut labels = existing.labels;
+            labels.extend(input.labels);
+            input.labels = labels;
+        }
         let record = self.client.upsert_principal(&input).await?;
         if !exists {
             for role_id in &self.assign_role_ids {

@@ -215,6 +215,7 @@ impl ToolGitSource {
                 repo: tools.repo.clone(),
                 git_ref: tools.git_ref.clone(),
                 source_subdir: tools.source_subdir.clone(),
+                visibility: tools.visibility.clone(),
             },
             tools.repo_cache_path.clone(),
         )];
@@ -728,10 +729,14 @@ impl SandboxArgs {
 
     fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
         let default_persona_id = clean_optional_value(self.default_persona.as_deref());
-        Ok(discover_persona_registry(
-            &self.tools.resolve_tool_dirs()?,
-            default_persona_id,
-        )?)
+        let public_source_roots = self
+            .tools
+            .resolve_public_tool_dirs()
+            .into_iter()
+            .map(|path| path.display().to_string());
+        let registry =
+            discover_persona_registry(&self.tools.resolve_tool_dirs()?, default_persona_id)?;
+        Ok(registry.with_public_source_roots(public_source_roots))
     }
 
     async fn runtime(&self) -> Result<SandboxRuntime, ServerError> {
@@ -1300,6 +1305,8 @@ fn should_retry_iron_control_register(error: &RegisterError) -> bool {
 struct ToolDiscoveryArgs {
     #[arg(long = "tool-dirs", env = "TOOL_DIRS")]
     tool_dirs: Option<String>,
+    #[arg(long = "public-tool-dirs", env = "KUBERNETES_PUBLIC_TOOL_DIRS")]
+    public_tool_dirs: Option<String>,
     #[arg(long = "tools-path", env = "TOOLS_PATH")]
     tools_path: Option<PathBuf>,
     #[arg(long = "tools-overlay-path", env = "TOOLS_OVERLAY_PATH")]
@@ -1314,12 +1321,25 @@ impl ToolDiscoveryArgs {
     fn resolve_tool_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
         Ok(ToolDiscoveryConfig {
             tool_dirs: self.tool_dirs.clone(),
+            public_tool_dirs: self.public_tool_dirs.clone(),
             tools_path: self.tools_path.clone(),
             tools_overlay_path: self.tools_overlay_path.clone(),
             plugins_dir: self.plugins_dir.clone(),
             tools_config: self.tools_config.clone(),
         }
         .resolve_tool_dirs()?)
+    }
+
+    fn resolve_public_tool_dirs(&self) -> Vec<PathBuf> {
+        ToolDiscoveryConfig {
+            tool_dirs: self.tool_dirs.clone(),
+            public_tool_dirs: self.public_tool_dirs.clone(),
+            tools_path: self.tools_path.clone(),
+            tools_overlay_path: self.tools_overlay_path.clone(),
+            plugins_dir: self.plugins_dir.clone(),
+            tools_config: self.tools_config.clone(),
+        }
+        .resolve_public_tool_dirs()
     }
 }
 
@@ -1436,6 +1456,13 @@ struct ToolsArgs {
     )]
     repo_cache_pvc: Option<String>,
     #[arg(
+        id = "tools_visibility",
+        long = "kubernetes-tools-visibility",
+        env = "KUBERNETES_TOOLS_VISIBILITY",
+        default_value = "private"
+    )]
+    visibility: Option<String>,
+    #[arg(
         id = "tools_auto_reload",
         long = "kubernetes-tools-auto-reload",
         env = "KUBERNETES_TOOLS_AUTO_RELOAD",
@@ -1484,6 +1511,7 @@ impl ToolsArgs {
         let mut config = ToolsConfig::new(repo, image);
         config.image_pull_policy = self.image_pull_policy.clone();
         config.git_ref = clean_optional_value(self.git_ref.as_deref());
+        config.visibility = repository_visibility(self.visibility.as_deref());
         if let Some(subdir) = clean_optional_value(Some(self.source_subdir.as_str())) {
             config.source_subdir = subdir;
         }
@@ -1509,6 +1537,8 @@ struct ToolSourceArg {
     git_ref: Option<String>,
     #[serde(default)]
     subdir: Option<String>,
+    #[serde(default)]
+    visibility: Option<String>,
 }
 
 impl ToolSourceArg {
@@ -1524,7 +1554,15 @@ impl ToolSourceArg {
                 .as_deref()
                 .and_then(|value| clean_optional_value(Some(value)))
                 .unwrap_or_else(|| "tools".to_owned()),
+            visibility: repository_visibility(self.visibility.as_deref()),
         })
+    }
+}
+
+fn repository_visibility(value: Option<&str>) -> String {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("public") => "public".to_owned(),
+        _ => "private".to_owned(),
     }
 }
 
@@ -1548,6 +1586,12 @@ struct IronProxyArgs {
         env = "KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY"
     )]
     image_pull_policy: Option<String>,
+    #[arg(
+        long = "kubernetes-iron-proxy-upstream-deny-cidrs",
+        env = "KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS",
+        value_delimiter = ','
+    )]
+    upstream_deny_cidrs: Vec<String>,
     #[command(flatten)]
     ca: IronProxyCaArgs,
     #[command(flatten)]
@@ -1584,6 +1628,12 @@ impl IronProxyArgs {
         let mut config =
             IronProxyConfig::new(self.image.clone(), ca_cert_secret_name, ca_key_secret_name);
         config.image_pull_policy = self.image_pull_policy.clone();
+        config.upstream_deny_cidrs = self
+            .upstream_deny_cidrs
+            .iter()
+            .filter_map(|cidr| non_empty(Some(cidr.as_str())))
+            .map(ToOwned::to_owned)
+            .collect();
         self.source.apply_to_config(&mut config);
         config.fragments = harness_fragments;
         config.env_from_secret_names = self.env_from_secret_names();
@@ -2236,6 +2286,8 @@ mod tests {
             "centaur-agent:test",
             "--kubernetes-tools-repo-cache-path",
             "/var/lib/centaur/repos",
+            "--kubernetes-tools-visibility",
+            "public",
             "--kubernetes-tools-github-token-secret",
             "centaur-repo-cache-github-token",
         ])
@@ -2245,6 +2297,7 @@ mod tests {
         assert_eq!(tools.repo, "paradigmxyz/centaur");
         assert_eq!(tools.git_ref.as_deref(), Some("main"));
         assert_eq!(tools.source_subdir, "tools");
+        assert_eq!(tools.visibility, "public");
         assert_eq!(tools.image, "centaur-agent:test");
         assert_eq!(
             tools.repo_cache_path.as_deref(),
@@ -2739,6 +2792,34 @@ mod tests {
         .unwrap();
 
         assert!(!args.sandbox.iron_control_sync_infra_secrets);
+    }
+
+    #[test]
+    fn iron_proxy_upstream_deny_cidrs_are_parsed() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "enabled",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-iron-proxy-upstream-deny-cidrs",
+            "127.0.0.0/8,10.42.0.0/16,10.43.0.0/16",
+        ])
+        .unwrap();
+
+        let config = args.sandbox.iron_proxy.to_config().unwrap().unwrap();
+        assert_eq!(
+            config.upstream_deny_cidrs,
+            vec![
+                "127.0.0.0/8".to_owned(),
+                "10.42.0.0/16".to_owned(),
+                "10.43.0.0/16".to_owned(),
+            ]
+        );
     }
 
     #[test]
