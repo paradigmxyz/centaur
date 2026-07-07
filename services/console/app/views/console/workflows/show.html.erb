@@ -1,71 +1,59 @@
 <% title = @latest_run&.workflow_name_label || @workflow_name %>
 <% content_for :title, "#{title} · Centaur Console" %>
 
-<div class="mb-5">
-  <%= link_to "Back to Workflows", console_workflows_path, class: "back-link" %>
-</div>
-
 <% if @workflow_db_unavailable %>
+  <div class="mb-8">
+    <a href="<%= console_workflows_path %>" class="back-link">← back to workflows</a>
+  </div>
   <div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
     Workflow database is unavailable. Console needs the API workflow read-only views to show runs.
   </div>
 <% elsif @latest_run.blank? %>
+  <div class="mb-8">
+    <a href="<%= console_workflows_path %>" class="back-link">← back to workflows</a>
+  </div>
   <div class="empty-state">
     No workflow runs found for <span class="text-zinc-300"><%= @workflow_name %></span>.
   </div>
 <% else %>
   <% status = @latest_run.display_status %>
-  <section class="mb-6 grid gap-6 lg:grid-cols-2">
-    <dl class="divide-y divide-ink-700 border-y border-ink-700">
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Workflow</dt>
-        <dd class="min-w-0 text-zinc-100" title="<%= @latest_run.workflow_name_label %>">
-          <%= truncate_middle(@latest_run.workflow_name_label, max: 72) %>
-        </dd>
-      </div>
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Queue</dt>
-        <dd class="min-w-0 text-zinc-100">
-          <%= @queue_names.map { |queue_name| CentaurWorkflowRun.queue_label_for(queue_name) }.join(", ").presence || @latest_run.queue_label %>
-        </dd>
-      </div>
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Duration</dt>
-        <dd class="min-w-0 text-zinc-100"><%= workflow_duration_label(@latest_run) %></dd>
-      </div>
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Engine</dt>
-        <dd class="min-w-0 text-zinc-100"><%= @latest_run.harness_type.presence || "—" %></dd>
-      </div>
-    </dl>
+  <div class="mb-8">
+    <a href="<%= console_workflows_path %>" class="back-link">← back to workflows</a>
+    <div class="mt-2 flex flex-wrap items-center gap-3">
+      <h1 class="page-title" title="<%= @latest_run.workflow_name_label %>">
+        <%= truncate_middle(@latest_run.workflow_name_label, max: 72) %>
+      </h1>
+      <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= workflow_status_classes(status) %>">
+        <%= status.tr("_", " ") %>
+      </span>
+    </div>
+    <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+      <span class="text-zinc-400"><%= @latest_run.task_name.presence || "workflow" %></span>
+      <span class="text-zinc-600">·</span>
+      <span class="text-zinc-400"><%= pluralize(number_with_delimiter(@total_runs), "run") %></span>
+    </div>
+  </div>
 
-    <dl class="divide-y divide-ink-700 border-y border-ink-700">
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Status</dt>
-        <dd class="min-w-0">
-          <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= workflow_status_classes(status) %>">
-            <%= status.tr("_", " ") %>
-          </span>
-        </dd>
-      </div>
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Started</dt>
-        <dd class="min-w-0 text-zinc-100"><%= local_time(@latest_run.started_or_created_at) %></dd>
-      </div>
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Attempts</dt>
-        <dd class="min-w-0 text-zinc-100">
-          <%= @latest_run.attempts || 0 %><span class="text-zinc-600"> / <%= @latest_run.max_attempts.presence || "unlimited" %></span>
-        </dd>
-      </div>
-      <div class="flex gap-5 px-5 py-4">
-        <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Runs</dt>
-        <dd class="min-w-0 text-zinc-100"><%= pluralize(number_with_delimiter(@total_runs), "run") %></dd>
-      </div>
+  <section class="mb-8">
+    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Latest Run</h2>
+    <dl class="console-panel divide-y divide-ink-700">
+      <% [
+        [ "Queue", @queue_names.map { |queue_name| CentaurWorkflowRun.queue_label_for(queue_name) }.join(", ").presence || @latest_run.queue_label ],
+        [ "Engine", @latest_run.harness_type.presence ],
+        [ "Started", local_time(@latest_run.started_or_created_at) ],
+        [ "Duration", workflow_duration_label(@latest_run) ],
+        [ "Attempts", safe_join([ (@latest_run.attempts || 0).to_s, tag.span(" / #{@latest_run.max_attempts.presence || "unlimited"}", class: "text-zinc-600") ]) ],
+        [ "Runs", pluralize(number_with_delimiter(@total_runs), "run") ]
+      ].each do |label, value| %>
+        <div class="flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4">
+          <dt class="w-48 shrink-0 text-xs uppercase tracking-wider text-zinc-500"><%= label %></dt>
+          <dd class="min-w-0 text-xs text-zinc-200"><%= value.presence || tag.span("—", class: "text-zinc-600") %></dd>
+        </div>
+      <% end %>
     </dl>
   </section>
 
-  <h1 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Historical Runs</h1>
+  <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Historical Runs</h2>
 
   <%# Filter tabs. Changing a filter resets to page 1; the pager keeps filters. %>
   <% filter_url = ->(status: @status, queue: @queue) {

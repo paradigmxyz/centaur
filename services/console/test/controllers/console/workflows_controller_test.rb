@@ -119,11 +119,10 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :ok
-    assert_select "dt", text: "Workflow"
-    assert_select "dd", text: /slack_sync/
+    assert_select "h1.page-title", text: /slack_sync/
     assert_select "dt", text: "Engine"
     assert_select "dd", text: "codex"
-    assert_select "h1", "Historical Runs"
+    assert_select "h2", "Historical Runs"
     assert_select "tbody tr", count: 1
   end
 
