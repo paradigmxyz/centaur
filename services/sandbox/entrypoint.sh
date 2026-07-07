@@ -369,6 +369,26 @@ for omp_cfg in config.yml models.yml; do
     fi
 done
 
+# ── GitHub App installation token (darkmatter deployments) ──────────────────
+# When the App credentials are passed through, mint a short-lived installation
+# token at boot so the agent can clone/push and reply on GitHub — legacy
+# github-executor parity (the App key lived in the agent's trust domain there
+# too). Fail-soft: a mint failure leaves GITHUB_TOKEN as whatever stub the
+# runtime provided.
+if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then
+    if minted_token="$(bun /usr/local/bin/mint-github-token.mjs 2>/tmp/mint-github-token.err)"; then
+        export GITHUB_TOKEN="$minted_token"
+        export GH_TOKEN="$minted_token"
+        # Scoped to github.com, kept out of URLs/reflog (legacy configureGit).
+        printf 'https://x-access-token:%s@github.com\n' "$minted_token" > "$HOME_DIR/.git-credentials"
+        chmod 600 "$HOME_DIR/.git-credentials"
+        git config --global credential.helper store
+        echo "github installation token minted"
+    else
+        echo "github token mint failed: $(head -c 200 /tmp/mint-github-token.err 2>/dev/null)" >&2
+    fi
+fi
+
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
     WORKSPACE_DIR="$STATE_DIR/workspace"

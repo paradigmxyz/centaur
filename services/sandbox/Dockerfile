@@ -237,6 +237,7 @@ COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/in
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
+COPY --link --chmod=755 services/sandbox/mint-github-token.mjs /usr/local/bin/mint-github-token.mjs
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 COPY --link --chown=1001:1001 crates/harness-server/ /opt/centaur/harness-server-src/
 
