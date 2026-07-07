@@ -1,13 +1,20 @@
 # Baked omp (oh-my-pi) model-provider registry. Copied next to config.yml by
-# entrypoint.sh (same __OMP_LITELLM_BASE_URL__ substitution). `discovery:
-# litellm` probes the proxy's management endpoints (/model_group/info,
-# /v2/model/info, then /models) so the gateway's model list, context windows,
-# and reasoning flags load automatically. Requires LITELLM_API_KEY in the
-# environment.
+# entrypoint.sh (same __OMP_LITELLM_BASE_URL__ substitution).
+#
+# The gateway model is defined STATICALLY, not via discovery: omp resolves
+# model roles once per process, and on a cold cache LiteLLM discovery races
+# that resolution — the session then silently falls back to the built-in
+# default provider (the github-executor learned this the hard way; its
+# warm-models.mjs exists solely to work around it). A static definition
+# resolves immediately and deterministically on first boot.
 providers:
   litellm:
     baseUrl: __OMP_LITELLM_BASE_URL__
     apiKey: LITELLM_API_KEY
     api: openai-completions
-    discovery:
-      type: litellm
+    models:
+      - id: glm-local
+        name: GLM 5.2 (darkmatter gateway)
+        reasoning: true
+        contextWindow: 1048576
+        maxTokens: 131072
