@@ -52,7 +52,7 @@
             <% if queue_runs.size == 1 %>
               <div class="mt-1.5 text-zinc-500"><%= run.queue_label %></div>
             <% else %>
-              <div class="mt-1.5 space-y-1.5">
+              <div class="mt-2 space-y-2.5">
                 <% queue_runs.each_with_index do |queue_run, index| %>
                   <div class="flex items-center gap-2">
                     <span class="text-zinc-600"><%= index == queue_runs.size - 1 ? "└" : "├" %></span>

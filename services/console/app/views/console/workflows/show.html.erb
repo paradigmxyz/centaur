@@ -30,9 +30,9 @@
         <%= status.tr("_", " ") %>
       </span>
       <div class="ml-auto">
-        <%= button_to "Run now", run_console_workflow_path(@workflow_name), method: :post,
+        <%= button_to "Manually Trigger", run_console_workflow_path(@workflow_name), method: :post,
               class: "btn-primary",
-              data: { turbo_confirm: "Queue a #{@workflow_name} run now?#{schedule ? " It starts with the registered schedule input." : ""}" } %>
+              data: { turbo_confirm: "Manually trigger a #{@workflow_name} run?#{schedule ? " It starts with the registered schedule input." : ""}" } %>
       </div>
     </div>
     <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
