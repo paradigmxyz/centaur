@@ -3286,7 +3286,6 @@ describe('slackbotv2', () => {
     expect(logData(logs, 'slackbotv2_webhook_handoff_wait_complete')).toEqual(
       expect.objectContaining({
         phase_ms: expect.any(Number),
-        retryable_error_count: 0,
         slack_event_id: 'Ev-slackbotv2-slow-execute'
       })
     )
@@ -3908,7 +3907,8 @@ describe('slackbotv2', () => {
     expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)
   })
 
-  it('returns 503 for retryable execute failure and lets Slack retry without duplicate append', async () => {
+  it('locally retries a retryable execute failure without duplicate append', async () => {
+    bot = createTestBot({ handoffRetryDelaysMs: [50] })
     codexApi.failNextExecute = true
 
     const parent = await postUserMessage('History that must not be lost.')
@@ -3925,40 +3925,46 @@ describe('slackbotv2', () => {
         text: `<@${BOT_USER_ID}> first try`
       }
     })
-    const failedWaits: Promise<unknown>[] = []
-    const failedResponse = await bot.app.request(
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
       '/api/webhooks/slack',
       retryableEvent,
       {},
-      waitUntilContext(failedWaits)
+      waitUntilContext(waits)
     )
-    expect(failedResponse.status).toBe(503)
-    await Promise.all(failedWaits)
+    // The retryable failure is retried in-process; Slack is acknowledged so
+    // its own redelivery (which would be deduped anyway) is never needed.
+    expect(response.status).toBe(200)
     expect(codexApi.appends).toHaveLength(1)
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.eventRequests).toHaveLength(0)
-    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
 
-    const retryWaits: Promise<unknown>[] = []
-    const retryResponse = await bot.app.request(
-      '/api/webhooks/slack',
-      retryableEvent,
-      {},
-      waitUntilContext(retryWaits)
-    )
-    expect(retryResponse.status).toBe(200)
-    await Promise.all(retryWaits)
+    await waitFor(() => codexApi.executes.length === 2, 3000)
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
+    await Promise.all(waits)
 
-    expect(codexApi.executes).toHaveLength(2)
     expect(codexApi.appends).toHaveLength(1)
     const retryContextTexts = sessionMessageTexts(codexApi.appends[0]?.body.messages ?? [])
     expect(retryContextTexts).toContain('History that must not be lost.')
     expect(retryContextTexts.some(text => text.includes('first try'))).toBe(true)
     expect(codexApi.eventRequests).toHaveLength(1)
-    expect(await threadText(parent.ts)).toContain('Executed request 1.')
+
+    // A late Slack redelivery of the same event stays deduped and adds no work.
+    const redeliveryWaits: Promise<unknown>[] = []
+    const redeliveryResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      retryableEvent,
+      {},
+      waitUntilContext(redeliveryWaits)
+    )
+    expect(redeliveryResponse.status).toBe(200)
+    await Promise.all(redeliveryWaits)
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.appends).toHaveLength(1)
   })
 
-  it('reuses an accepted execution when Slack retries after a lost execute response', async () => {
+  it('reuses an accepted execution when the local retry follows a lost execute response', async () => {
+    bot = createTestBot({ handoffRetryDelaysMs: [50] })
     codexApi.failNextExecuteAfterAccept = true
 
     const parent = await postUserMessage('History before response loss.')
@@ -3975,38 +3981,141 @@ describe('slackbotv2', () => {
         text: `<@${BOT_USER_ID}> first try accepted`
       }
     })
-    const failedWaits: Promise<unknown>[] = []
-    const failedResponse = await bot.app.request(
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
       '/api/webhooks/slack',
       retryableEvent,
       {},
-      waitUntilContext(failedWaits)
+      waitUntilContext(waits)
     )
-    expect(failedResponse.status).toBe(503)
-    await Promise.all(failedWaits)
+    expect(response.status).toBe(200)
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.eventRequests).toHaveLength(0)
-    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
 
-    const retryWaits: Promise<unknown>[] = []
-    const retryResponse = await bot.app.request(
-      '/api/webhooks/slack',
-      retryableEvent,
-      {},
-      waitUntilContext(retryWaits)
-    )
-    expect(retryResponse.status).toBe(200)
-    await Promise.all(retryWaits)
+    await waitFor(() => codexApi.executes.length === 2, 3000)
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
+    await Promise.all(waits)
 
-    expect(codexApi.executes).toHaveLength(2)
     expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([
       mention.ts,
       mention.ts
     ])
     expect(codexApi.appends).toHaveLength(1)
     expect(codexApi.eventRequests).toHaveLength(1)
-    expect(await threadText(parent.ts)).toContain('Executed request 1.')
     expect(await threadText(parent.ts)).not.toContain('Executed request 2.')
+  })
+
+  it('conflates a pending execute retry into an execution started meanwhile', async () => {
+    bot = createTestBot({ handoffRetryDelaysMs: [300] })
+    codexApi.failNextExecute = true
+
+    const parent = await postUserMessage('History before conflation.')
+    const firstMention = await postUserMessage(`<@${BOT_USER_ID}> first conflated mention`, parent.ts)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-conflate-1',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> first conflated mention`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    expect(codexApi.executes).toHaveLength(1)
+
+    // A second mention lands while the first message's retry is still pending
+    // and starts the thread's execution. Keep it running (no auto response)
+    // across the retry window.
+    codexApi.autoRespond = false
+    const secondMention = await postUserMessage(
+      `<@${BOT_USER_ID}> second conflated mention`,
+      parent.ts
+    )
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-conflate-2',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> second conflated mention`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    expect(codexApi.executes).toHaveLength(2)
+
+    // The first message's retry fires into the active execution and must not
+    // start a third execution; its text is already in the session, so the
+    // running execution sees it.
+    await sleep(500)
+    expect(codexApi.executes).toHaveLength(2)
+    const appendedTexts = codexApi.appends.flatMap(append =>
+      sessionMessageTexts(append.body.messages ?? [])
+    )
+    expect(appendedTexts.some(text => text.includes('first conflated mention'))).toBe(true)
+    expect(appendedTexts.some(text => text.includes('second conflated mention'))).toBe(true)
+
+    codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('Conflated answer.'))
+    await Promise.all([...firstWaits, ...secondWaits])
+    expect(await threadText(parent.ts)).toContain('Conflated answer.')
+    expect(await threadText(parent.ts)).not.toContain(BROKEN_STREAM_TEXT)
+  })
+
+  it('renders a visible error once local retries are exhausted', async () => {
+    bot = createTestBot({ handoffRetryDelaysMs: [200] })
+    codexApi.failNextExecute = true
+
+    const parent = await postUserMessage('History before exhaustion.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> exhaust retries`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-retry-exhausted',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> exhaust retries`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    expect(codexApi.executes).toHaveLength(1)
+
+    // Fail the scheduled retry too so the budget of one retry is exhausted.
+    codexApi.failNextExecute = true
+    await waitFor(() => codexApi.executes.length === 2, 3000)
+    await waitFor(async () => (await threadText(parent.ts)).includes('Execution failed'), 3000)
+    await Promise.all(waits)
+
+    expect(codexApi.eventRequests).toHaveLength(0)
+    const threadState = await bot.chat
+      .thread(threadKey(parent.ts))
+      .state
+    expect(threadState).toEqual(expect.objectContaining({ activeExecution: false }))
   })
 
   it('keeps v1 external org and trigger-bot allowlist behavior', async () => {
