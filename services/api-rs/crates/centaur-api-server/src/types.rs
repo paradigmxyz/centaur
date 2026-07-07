@@ -77,6 +77,19 @@ pub struct ExecuteSessionResponse {
     pub status: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InterruptSessionExecutionRequest {
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InterruptSessionExecutionResponse {
+    pub ok: bool,
+    pub interrupted: bool,
+    pub execution_id: Option<String>,
+    pub thread_key: ThreadKey,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct EventsQuery {
     pub after_event_id: Option<i64>,

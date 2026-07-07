@@ -1246,7 +1246,7 @@ async function renderSplitExecutionStreams(
   try {
     for await (const chunk of codexAppServerToChatSdkStream(
       stream,
-      rendererOptions(options),
+      rendererOptions(options, narrator),
     )) {
       if (chunk.type === "markdown_text") {
         if (!answerPost) {
@@ -1613,17 +1613,29 @@ function backgroundWaitUntil(promise: Promise<unknown>): void {
   void promise.catch(() => undefined);
 }
 
-// Vestigial wrapper kept so call sites diff cleanly against slackbotv2, whose
-// rendererOptions hooks onRendererEvent to update the Slack assistant title
-// (no Discord analog). Today it only forwards the configured mapper.
+// Mirrors slackbotv2's rendererOptions: forwards the configured mapper and
+// hooks onRendererEvent. Slack routes renderer.status (server-side activity
+// summaries) to its native assistant status; Discord has no such surface, so
+// they post as the narrator's append-only subtext blurbs. Paths without a
+// narrator (plain-text runs) drop status events by design.
 function rendererOptions(
   options: DiscordbotOptions,
+  narrator?: DiscordNarrator,
 ): CodexAppServerToChatStreamOptions {
   const mapper = options.mapper;
   return {
     ...mapper,
+    // Discord streams answer text into its own append-only messages, so
+    // there is no card to wait for: stream deltas immediately. Non-zero
+    // grace here can strand an answer-only turn's deltas entirely — the
+    // grace check is event-driven, and with no tasks and no later events
+    // the buffered text only flushes at stream end.
+    preStreamGraceMs: 0,
     async onRendererEvent(event: RendererEvent) {
       await mapper?.onRendererEvent?.(event);
+      if (event.type === "renderer.status") {
+        narrator?.status(event.status);
+      }
     },
   };
 }

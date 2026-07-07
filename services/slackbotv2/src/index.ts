@@ -18,6 +18,7 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
   codexAppServerToChatSdkStream,
+  EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
   type ChatSDKStreamChunk,
   type RendererEvent
@@ -30,6 +31,7 @@ import {
   collectInitialContext,
   forwardToSessionApi,
   harnessRestartPreamble,
+  interruptSessionExecution,
   isRetryableSessionApiError,
   openSessionEventStream,
   serializeAttachment,
@@ -45,6 +47,7 @@ import {
 } from './console-session-link'
 import { extractMessageOverrides } from './overrides'
 import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
+import { isSlackStopCommand } from './stop-command'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -361,6 +364,9 @@ async function handleSlackMessageHandoff(
     backgroundWaitUntil(assistantStatus.then(() => undefined).catch(() => undefined))
   }
   try {
+    if (await handleStopCommand(thread, message, input.options, input.trigger)) {
+      return
+    }
     if (input.subscribe) {
       await subscribeSlackThreadForHandoff(thread, input.options, trace, input.trigger)
     }
@@ -393,6 +399,40 @@ async function handleSlackMessageHandoff(
         .then(() => undefined)
         .catch(() => undefined)
     )
+    throw error
+  }
+}
+
+async function handleStopCommand(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  options: SlackbotV2Options,
+  trigger: string
+): Promise<boolean> {
+  if (!isSlackStopCommand(message)) return false
+  const trace = createHandoffTrace(thread, message, 'append')
+  traceLog(options, 'slackbotv2_stop_command_started', trace, { trigger })
+  const latest = (await thread.state) ?? {}
+  const reason = `Interrupted from Slack by ${slackUserIdForMessage(message) ?? 'unknown user'}`
+  try {
+    const response = await interruptSessionExecution(options, thread.id, reason)
+    await thread.setState({
+      activeExecution: false,
+      lastEventId: latest.lastEventId ?? latest.renderObligation?.afterEventId ?? 0,
+      renderObligation: null
+    })
+    await setAssistantStatus(thread, '', options, trace)
+    traceLog(options, 'slackbotv2_stop_command_complete', trace, {
+      execution_id: response.execution_id,
+      interrupted: response.interrupted,
+      trigger
+    })
+    return true
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_stop_command_failed', trace, {
+      error: errorMessage(error),
+      trigger
+    })
     throw error
   }
 }
@@ -1251,8 +1291,8 @@ async function renderFallbackFinalAnswer(
     for await (const _chunk of chatStream) {
       void _chunk
     }
-    const text = fallback.text()
-    if (!text) {
+    const capturedText = fallback.text()
+    if (!capturedText && !fallback.isInterrupted()) {
       outcome = 'empty'
       traceLog(options, 'slackbotv2_render_fallback_empty', trace, {
         last_event_id: lastEventId,
@@ -1260,6 +1300,7 @@ async function renderFallbackFinalAnswer(
       })
       return null
     }
+    const text = fallback.textOrDefault()
     const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
     if (replacement) {
       await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
@@ -1983,7 +2024,7 @@ async function renderPlainTextExecutionStream(
       void _chunk
     }
     const text = truncateSlackText(
-      fallback.text() || 'Execution completed, but no final text was captured.',
+      fallback.textOrDefault(),
       SLACK_FALLBACK_TEXT_MAX_CHARS,
       'Slack final answer'
     )
@@ -1999,6 +2040,7 @@ async function renderPlainTextExecutionStream(
 class SlackRenderFallback {
   private markdownText = ''
   private terminalText = ''
+  private interrupted = false
 
   async *collectSource(
     stream: AsyncIterable<SlackbotV2RendererSource>
@@ -2019,7 +2061,23 @@ class SlackRenderFallback {
   }
 
   text(): string {
-    return (this.terminalText || this.markdownText).trim()
+    const terminalText = this.terminalText.trim()
+    const markdownText = this.markdownText.trim()
+    if (this.interrupted && !terminalText && markdownText === EMPTY_FINAL_ANSWER_TEXT) return ''
+    return terminalText || markdownText
+  }
+
+  textOrDefault(): string {
+    return (
+      this.text() ||
+      (this.interrupted
+        ? 'Execution interrupted'
+        : EMPTY_FINAL_ANSWER_TEXT)
+    )
+  }
+
+  isInterrupted(): boolean {
+    return this.interrupted
   }
 
   private captureTerminalText(event: SlackbotV2RendererSource): void {
@@ -2027,6 +2085,9 @@ class SlackRenderFallback {
     const eventKind = String(
       'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
     )
+    if (eventKind === 'session.execution_cancelled') {
+      this.interrupted = true
+    }
     if (
       eventKind !== 'session.execution_completed' &&
       eventKind !== 'session.execution_cancelled' &&

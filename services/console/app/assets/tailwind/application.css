@@ -81,7 +81,11 @@
   }
 
   .console-table {
-    @apply min-w-full divide-y divide-ink-600 text-sm;
+    @apply min-w-full text-sm;
+  }
+
+  .console-table > thead {
+    @apply border-b border-ink-600;
   }
 
   .console-table-head {

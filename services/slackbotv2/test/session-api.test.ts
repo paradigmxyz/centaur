@@ -5,6 +5,7 @@ import {
   DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   forwardToSessionApi,
   harnessRestartPreamble,
+  interruptSessionExecution,
   openSessionEventStream,
   serializeAttachment,
   serializeMessage
@@ -80,6 +81,14 @@ function fakeApi(responses: { createSession?: Array<{ body?: unknown; status: nu
         execution_id: 'exec-1',
         ok: true,
         status: 'running',
+        thread_key: 'slack:C1:1700000000.000100'
+      })
+    }
+    if (url.endsWith('/interrupt')) {
+      return Response.json({
+        execution_id: 'exec-1',
+        interrupted: true,
+        ok: true,
         thread_key: 'slack:C1:1700000000.000100'
       })
     }
@@ -184,6 +193,66 @@ describe('session event streaming', () => {
       eventKind: 'session.execution_completed'
     })
     expect(seenEventIds).toEqual([1, 2])
+  })
+
+  test('uses interrupted wording for cancelled executions without error text', async () => {
+    const encoded = new TextEncoder().encode(
+      [
+        'id: 1',
+        'event: session.execution_cancelled',
+        'data: {"status":"cancelled","reason":"turn_interrupted"}',
+        '',
+      ].join('\n')
+    )
+    const fetchFn: SlackbotV2Options['fetch'] = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded)
+            controller.close()
+          }
+        }),
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+    const seenEventIds: number[] = []
+
+    const stream = await openSessionEventStream(options(fetchFn), {
+      afterEventId: 0,
+      executionId: 'exec-1',
+      onEventId: eventId => seenEventIds.push(eventId),
+      threadId: 'slack:C1:1700000000.000100'
+    })
+    const events = []
+    for await (const event of stream) events.push(event)
+
+    expect(events).toEqual([
+      {
+        data: { error: 'Execution interrupted' },
+        event: 'session.execution_cancelled',
+        eventId: 1,
+        eventKind: 'session.execution_cancelled'
+      }
+    ])
+    expect(seenEventIds).toEqual([1])
+  })
+})
+
+describe('session interruption', () => {
+  test('posts interruption reason to the thread interrupt endpoint', async () => {
+    const { fetchFn, requests } = fakeApi()
+
+    const response = await interruptSessionExecution(
+      options(fetchFn),
+      'slack:C1:1700000000.000100',
+      'Interrupted from Slack by U1'
+    )
+
+    expect(response.interrupted).toBe(true)
+    const interrupt = requests.find(request => request.url.endsWith('/interrupt'))
+    expect(interrupt?.url).toBe(
+      'http://api.test/api/session/slack%3AC1%3A1700000000.000100/interrupt'
+    )
+    expect(interrupt?.body).toEqual({ reason: 'Interrupted from Slack by U1' })
   })
 })
 

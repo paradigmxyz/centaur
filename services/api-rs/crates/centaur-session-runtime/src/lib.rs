@@ -302,6 +302,12 @@ pub struct ExecuteSessionInput {
     pub max_duration_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct InterruptExecutionOutcome {
+    pub interrupted: bool,
+    pub execution_id: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct ToolHostCallInput {
     pub principal_id: String,
@@ -2080,6 +2086,63 @@ impl SessionRuntime {
         }
     }
 
+    pub async fn interrupt_active_execution(
+        &self,
+        thread_key: &ThreadKey,
+        reason: &str,
+    ) -> Result<InterruptExecutionOutcome, SessionRuntimeError> {
+        let Some(execution) = self.store.active_execution_for_thread(thread_key).await? else {
+            return Ok(InterruptExecutionOutcome {
+                interrupted: false,
+                execution_id: None,
+            });
+        };
+
+        let execution_span = self
+            .execution_spans
+            .lock()
+            .await
+            .get(&execution.execution_id)
+            .cloned();
+        let trace = SessionTraceContext::new(thread_key, execution_span.as_ref());
+        let input_lines = input_lines_with_session_context(
+            thread_key,
+            &trace,
+            &[interrupt_input_line(thread_key, reason)],
+        );
+
+        let pipe = self
+            .wait_for_active_steering_pipe(thread_key, &execution.execution_id)
+            .await
+            .map_err(SessionRuntimeError::BadRequest)?;
+        write_input_lines(
+            &pipe,
+            &input_lines,
+            thread_key,
+            &execution.execution_id,
+            None,
+        )
+        .await?;
+
+        self.store
+            .append_event(
+                thread_key,
+                Some(&execution.execution_id),
+                "session.interrupt_delivered",
+                json!({
+                    "execution_id": execution.execution_id,
+                    "thread_key": thread_key.as_str(),
+                    "reason": reason,
+                }),
+            )
+            .await?;
+
+        Ok(InterruptExecutionOutcome {
+            interrupted: true,
+            execution_id: Some(execution.execution_id),
+        })
+    }
+
     async fn wait_for_active_steering_pipe(
         &self,
         thread_key: &ThreadKey,
@@ -3632,6 +3695,20 @@ fn session_event_stream(
                     if let Some(event) = state.pending.pop_front() {
                         state.after_event_id = event.event_id;
                         state.emitted_count += 1;
+                        // Execution-scoped streams are per-turn: after the
+                        // execution's terminal event nothing else will ever
+                        // arrive, so complete the response instead of parking
+                        // forever. Abandoned client connections otherwise pin
+                        // this stream's dedicated LISTEN connection until the
+                        // TCP peer is proven dead (the 2026-07-06 incident
+                        // exhausted both the Slackbot fetch pool and staging
+                        // Postgres this way). The 30s safety tick makes this
+                        // robust even when the notify is missed.
+                        if state.execution_id.is_some()
+                            && is_terminal_execution_event(&event.event_type)
+                        {
+                            state.done = true;
+                        }
                         return Some((Ok(event), state));
                     }
                     if state.done {
@@ -3684,6 +3761,15 @@ fn session_event_stream(
             }
             .instrument(span)
         },
+    )
+}
+
+/// Terminal event types for a single execution: once one of these is emitted
+/// on an execution-scoped stream, the stream has nothing left to deliver.
+fn is_terminal_execution_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "session.execution_completed" | "session.execution_failed" | "session.execution_cancelled"
     )
 }
 
@@ -4893,6 +4979,9 @@ enum TerminalOutput {
         reason: &'static str,
         result_text: Option<String>,
     },
+    Cancelled {
+        reason: &'static str,
+    },
     Failed {
         error: String,
     },
@@ -4937,6 +5026,32 @@ async fn record_terminal_output(
                 )
                 .await?;
             (execution, "completed")
+        }
+        TerminalOutput::Cancelled { reason } => {
+            let Some(execution) = ctx
+                .store
+                .cancel_execution_if_active_and_stdout_owner(
+                    execution_id,
+                    &ctx.stdout_owner_id,
+                    reason,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            ctx.store
+                .append_event(
+                    thread_key,
+                    Some(execution_id),
+                    "session.execution_cancelled",
+                    json!({
+                        "execution_id": execution_id,
+                        "thread_key": thread_key.as_str(),
+                        "reason": reason,
+                    }),
+                )
+                .await?;
+            (execution, "cancelled")
         }
         TerminalOutput::Failed { error } => {
             failure_class = Some(terminal_failure_class(&error));
@@ -5506,6 +5621,11 @@ fn completed_turn_terminal_output(value: &Value, prior_final_answer_text: &str) 
                 prior_final_answer_text,
             )
         }
+        Some("interrupted") if prior_final_answer_text.trim().is_empty() => {
+            TerminalOutput::Cancelled {
+                reason: "turn_interrupted",
+            }
+        }
         Some(_status) if !prior_final_answer_text.trim().is_empty() => {
             completed_terminal_output_with_fallback(
                 value,
@@ -5920,6 +6040,19 @@ fn steering_input_line(
         },
     }))
     .ok()
+}
+
+fn interrupt_input_line(thread_key: &ThreadKey, reason: &str) -> String {
+    serde_json::to_string(&json!({
+        "type": "interrupt",
+        "thread_key": thread_key.as_str(),
+        "trace_metadata": {
+            "source": "session.interrupt_active_execution",
+            "action": "interrupt_active_execution",
+            "reason": reason,
+        },
+    }))
+    .expect("interrupt input line serializes")
 }
 
 async fn append_output_line(
@@ -6424,7 +6557,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_turn_completed_without_answer_is_failure() {
+    fn interrupted_turn_completed_without_answer_is_cancelled() {
         let event = json!({
             "type": "turn.completed",
             "turn": {"id": "turn-1", "status": "interrupted"},
@@ -6432,8 +6565,8 @@ mod tests {
 
         assert_eq!(
             terminal_output(&event, ""),
-            Some(TerminalOutput::Failed {
-                error: "turn completed with status interrupted before final answer".to_owned()
+            Some(TerminalOutput::Cancelled {
+                reason: "turn_interrupted"
             })
         );
     }
@@ -7640,6 +7773,84 @@ mod adoption_tests {
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execution_scoped_event_stream_completes_after_terminal_event() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:stream-close-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, None, false).await;
+        store
+            .append_event(
+                &thread_key,
+                Some(&execution_id),
+                "session.output.line",
+                json!({ "line": "working" }),
+            )
+            .await
+            .expect("append output event");
+        store
+            .append_event(
+                &thread_key,
+                Some(&execution_id),
+                "session.execution_completed",
+                json!({ "execution_id": execution_id }),
+            )
+            .await
+            .expect("append terminal event");
+
+        // Execution-scoped: the stream must end on its own after emitting the
+        // terminal event, releasing the response and its listener connection.
+        let listener = store.listen_session_events().await.expect("listener");
+        let scoped = session_event_stream(
+            store.clone(),
+            thread_key.clone(),
+            0,
+            Some(execution_id.clone()),
+            listener,
+            tracing::Span::none(),
+        );
+        let emitted = tokio::time::timeout(Duration::from_secs(10), scoped.collect::<Vec<_>>())
+            .await
+            .expect("execution-scoped stream should complete after the terminal event");
+        let kinds: Vec<_> = emitted
+            .into_iter()
+            .map(|result| result.expect("stream event").event_type)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["session.output.line", "session.execution_completed"]
+        );
+
+        // Control: an unscoped stream over the same events stays open for
+        // future events instead of completing.
+        let listener = store.listen_session_events().await.expect("listener");
+        let unscoped = session_event_stream(
+            store.clone(),
+            thread_key.clone(),
+            0,
+            None,
+            listener,
+            tracing::Span::none(),
+        );
+        let mut unscoped = std::pin::pin!(unscoped);
+        for _ in 0..2 {
+            unscoped
+                .next()
+                .await
+                .expect("buffered event")
+                .expect("stream event");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), unscoped.next())
+                .await
+                .is_err(),
+            "unscoped stream should stay open after a terminal event"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

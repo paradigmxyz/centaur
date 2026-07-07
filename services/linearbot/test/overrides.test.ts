@@ -90,6 +90,33 @@ describe("extractMessageOverrides", () => {
     );
   });
 
+  test("--model accepts a newline immediately after the value", () => {
+    expect(
+      extractMessageOverrides("--claude --model=fable\nwhat model are you"),
+    ).toEqual({
+      cleanedText: "what model are you",
+      harnessType: "claudecode",
+      model: "claude-fable-5",
+    });
+    expect(
+      extractMessageOverrides("@Centaur AI --claude --model=fable\r\nwhat model are you"),
+    ).toEqual({
+      cleanedText: "@Centaur AI what model are you",
+      harnessType: "claudecode",
+      model: "claude-fable-5",
+    });
+  });
+
+  test("--model accepts a rendered line break immediately after the value", () => {
+    expect(
+      extractMessageOverrides("--claude --model=fable<br>what model are you"),
+    ).toEqual({
+      cleanedText: "what model are you",
+      harnessType: "claudecode",
+      model: "claude-fable-5",
+    });
+  });
+
   test("--model passes non-alias values through verbatim", () => {
     expect(
       extractMessageOverrides("--codex --model gpt-5.2-codex go").model,
@@ -129,6 +156,11 @@ describe("extractMessageOverrides", () => {
   test("--model without a value is left untouched", () => {
     expect(extractMessageOverrides("what does --model do?")).toEqual({
       cleanedText: "what does --model do?",
+      harnessType: undefined,
+      model: undefined,
+    });
+    expect(extractMessageOverrides("--model\nwhat model are you")).toEqual({
+      cleanedText: "--model\nwhat model are you",
       harnessType: undefined,
       model: undefined,
     });

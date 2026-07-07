@@ -321,6 +321,18 @@ export const slackbotMetrics = {
     labelNames: ['operation', 'outcome'],
     name: 'slackbotv2_session_api_operations_total'
   }),
+  sessionEventStreamClosures: counter({
+    help: 'Session API /events stream network connections released, by reason.',
+    labelNames: ['reason'],
+    name: 'slackbotv2_session_event_stream_closures_total'
+  }),
+  sessionEventStreamsOpen: gauge({
+    help:
+      'Session API /events SSE connections Slackbot currently holds open. Each one occupies a '
+      + 'slot in Bun\'s global fetch pool (BUN_CONFIG_MAX_HTTP_REQUESTS, default 256); at the cap '
+      + 'every outbound HTTP request from this process queues forever.',
+    name: 'slackbotv2_session_event_streams_open'
+  }),
   webhookDuration: histogram({
     help: 'Slack webhook request handling duration, in seconds.',
     labelNames: ['route', 'event_type', 'outcome'],

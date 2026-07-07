@@ -13,6 +13,7 @@ import type {
   SlackbotV2ExecuteSessionRequest,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2Fetch,
+  SlackbotV2InterruptSessionResponse,
   SlackbotV2Options,
   SlackbotV2RendererSource,
   SlackbotV2SessionMessage
@@ -555,6 +556,19 @@ export async function openSessionEventStream(
     phase_ms: elapsedMs(streamStartedAtMs)
   })
   return stream
+}
+
+export async function interruptSessionExecution(
+  options: SlackbotV2Options,
+  threadId: string,
+  reason: string
+): Promise<SlackbotV2InterruptSessionResponse> {
+  return recordSessionApiOperation(
+    'interrupt_session',
+    () => postInterruptSessionExecution(options, threadId, reason),
+    sessionApiTimeoutMs(options),
+    'interrupt session'
+  )
 }
 
 const RESTART_CONTEXT_MAX_CHARS = 24_000
@@ -1228,6 +1242,27 @@ async function executeSession(
   return (await response.json()) as SlackbotV2ExecuteSessionResponse
 }
 
+async function postInterruptSessionExecution(
+  options: SlackbotV2Options,
+  threadId: string,
+  reason: string
+): Promise<SlackbotV2InterruptSessionResponse> {
+  const fetchFn = options.fetch ?? fetch
+  const response = await fetchWithTimeout(
+    fetchFn,
+    apiSessionUrl(options.apiUrl, threadId, 'interrupt'),
+    {
+      method: 'POST',
+      headers: apiHeaders(options),
+      body: JSON.stringify({ reason })
+    },
+    sessionApiTimeoutMs(options),
+    'interrupt session'
+  )
+  await ensureApiOk(response, 'interrupt session')
+  return (await response.json()) as SlackbotV2InterruptSessionResponse
+}
+
 async function ensureApiOk(response: Response, action: string): Promise<void> {
   if (response.ok) return
   let body = ''
@@ -1278,7 +1313,7 @@ async function streamSessionNotifications(
 function apiSessionUrl(
   apiUrl: string,
   threadId: string,
-  suffix?: 'messages' | 'execute' | 'events'
+  suffix?: 'messages' | 'execute' | 'events' | 'interrupt'
 ): string {
   const path = `/api/session/${encodeURIComponent(threadId)}${suffix ? `/${suffix}` : ''}`
   return new URL(path, ensureTrailingSlash(apiUrl)).toString()
@@ -1794,7 +1829,7 @@ async function* parseSessionEventStream(
     }
     if (event.event === 'session.execution_cancelled') {
       yield {
-        data: { error: sessionErrorMessage(event, 'Execution cancelled') },
+        data: { error: sessionErrorMessage(event, 'Execution interrupted') },
         event: event.event,
         eventId: event.id,
         eventKind: event.event
@@ -1815,38 +1850,70 @@ async function* parseSessionEventStream(
 
 async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterable<ParsedSessionEvent> {
   const reader = stream.getReader()
+  // Tracks the underlying network connection. Each open stream occupies one
+  // slot of Bun's global fetch pool (BUN_CONFIG_MAX_HTTP_REQUESTS, default
+  // 256); the 2026-07-06 incident wedged Slackbot by leaking one abandoned
+  // stream per completed turn until the pool was exhausted.
+  slackbotMetrics.sessionEventStreamsOpen.inc()
+  let connectionReleased = false
+  const releaseConnection = (reason: 'cancelled' | 'done' | 'error') => {
+    if (connectionReleased) return
+    connectionReleased = true
+    slackbotMetrics.sessionEventStreamsOpen.dec()
+    slackbotMetrics.sessionEventStreamClosures.inc({ reason })
+  }
   const decoder = new TextDecoder()
   let buffer = ''
   let eventName: string | undefined
   let eventId: number | undefined
   let data: string[] = []
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split(/\r?\n/)
-    buffer = lines.pop() ?? ''
+  try {
+    while (true) {
+      let done: boolean
+      let value: Uint8Array | undefined
+      try {
+        ;({ done, value } = await reader.read())
+      } catch (error) {
+        releaseConnection('error')
+        throw error
+      }
+      if (done) {
+        releaseConnection('done')
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() ?? ''
 
-    for (const line of lines) {
-      const emitted = parseSseLine(line, { data, eventId, eventName })
+      for (const line of lines) {
+        const emitted = parseSseLine(line, { data, eventId, eventName })
+        data = emitted.state.data
+        eventId = emitted.state.eventId
+        eventName = emitted.state.eventName
+        if (emitted.event) yield emitted.event
+      }
+    }
+
+    buffer += decoder.decode()
+    if (buffer) {
+      const emitted = parseSseLine(buffer, { data, eventId, eventName })
       data = emitted.state.data
       eventId = emitted.state.eventId
       eventName = emitted.state.eventName
       if (emitted.event) yield emitted.event
     }
-  }
-
-  buffer += decoder.decode()
-  if (buffer) {
-    const emitted = parseSseLine(buffer, { data, eventId, eventName })
-    data = emitted.state.data
-    eventId = emitted.state.eventId
-    eventName = emitted.state.eventName
-    if (emitted.event) yield emitted.event
-  }
-  if (data.length > 0) {
-    yield { data: data.join('\n'), event: eventName, id: eventId }
+    if (data.length > 0) {
+      yield { data: data.join('\n'), event: eventName, id: eventId }
+    }
+  } finally {
+    // Runs when a consumer abandons this generator early — typically
+    // parseSessionEventStream returning on a terminal event. Cancelling the
+    // reader closes the connection, freeing its fetch-pool slot and letting
+    // api-rs drop the stream's server-side resources. Without this, every
+    // completed turn leaked one connection until all outbound HTTP wedged.
+    releaseConnection('cancelled')
+    await reader.cancel().catch(() => {})
   }
 }
 

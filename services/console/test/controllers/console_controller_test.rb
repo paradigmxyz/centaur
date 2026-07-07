@@ -143,6 +143,22 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "div", text: /#{Regexp.escape(principal.oid)}.*#{Regexp.escape(principal.namespace)}/
   end
 
+  test "principals table links to add principal" do
+    get console_principals_url
+    assert_response :ok
+    assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
+  end
+
+  test "principal detail page offers delete" do
+    principal = principals(:acme_channel)
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    assert_select "form[action=?][method=?]", console_delete_principal_path(principal.oid), "post" do
+      assert_select "input[name=_method][value=delete]"
+      assert_select "button[type=submit]", "Delete"
+    end
+  end
+
   test "credentials table combines id, shows status, and links to detail" do
     credential = broker_credentials(:acme_managed_gmail)
     get console_credentials_url

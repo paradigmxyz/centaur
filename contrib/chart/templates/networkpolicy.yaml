@@ -189,51 +189,11 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/api-server-enabled: "true"
-        # Transitional compatibility: pre-deploy sandbox/proxy pods carry only
-        # centaur.ai/managed-by=api-rs, so this also covers newly-created
-        # API-disabled pods while the rollout policy is present. Remove with the
-        # matching egress compatibility policy below after old api-rs-managed
-        # pods have aged out.
-        - podSelector:
-            matchLabels:
-              centaur.ai/managed-by: api-rs
-            matchExpressions:
-              - key: centaur.ai/api-server-enabled
-                operator: DoesNotExist
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ . | quote }}
 {{- end }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.apiRs.port }}
----
-# Transitional compatibility for pre-deploy sandbox/proxy pods. They carry only
-# centaur.ai/managed-by=api-rs, so this also covers newly-created API-disabled
-# pods while the rollout policy is present. Remove this with the matching
-# api-rs ingress compatibility selector once old api-rs-managed pods have aged
-# out.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "centaur.fullname" . }}-sandbox-api-server-compat
-  labels:
-{{ include "centaur.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      centaur.ai/managed-by: api-rs
-    matchExpressions:
-      - key: centaur.ai/api-server-enabled
-        operator: DoesNotExist
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
@@ -262,6 +222,49 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 ---
+{{- if .Values.networkPolicy.observabilityEgress.enabled }}
+{{- if not .Values.networkPolicy.observabilityEgress.destinations }}
+{{- fail "networkPolicy.observabilityEgress.destinations must contain at least one destination when networkPolicy.observabilityEgress.enabled is true" }}
+{{- end }}
+# Sandboxes with the observability capability may call the configured
+# in-cluster observability backends.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-observability-egress
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/observability-enabled: "true"
+  policyTypes:
+    - Egress
+  egress:
+{{- range $index, $destination := .Values.networkPolicy.observabilityEgress.destinations }}
+{{- if not $destination.ports }}
+{{- fail (printf "networkPolicy.observabilityEgress.destinations[%d].ports must contain at least one port" $index) }}
+{{- end }}
+    - to:
+        - namespaceSelector:
+{{- if $destination.namespaceSelector }}
+{{ toYaml $destination.namespaceSelector | nindent 12 }}
+{{- else }}
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required (printf "networkPolicy.observabilityEgress.destinations[%d].namespace is required when namespaceSelector is unset" $index) $destination.namespace | quote }}
+{{- end }}
+{{- with $destination.podSelector }}
+          podSelector:
+{{ toYaml . | nindent 12 }}
+{{- end }}
+      ports:
+{{- range $portIndex, $port := $destination.ports }}
+        - protocol: {{ default "TCP" $port.protocol }}
+          port: {{ required (printf "networkPolicy.observabilityEgress.destinations[%d].ports[%d].port is required" $index $portIndex) $port.port }}
+{{- end }}
+{{- end }}
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

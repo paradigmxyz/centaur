@@ -37,16 +37,17 @@ impl TraceContext {
     pub(crate) fn effective_trace_id(&self) -> Option<String> {
         self.trace_id
             .clone()
-            .or_else(|| self.traceparent.as_deref().and_then(trace_id_from_traceparent))
+            .or_else(|| {
+                self.traceparent
+                    .as_deref()
+                    .and_then(trace_id_from_traceparent)
+            })
             .or_else(|| clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref()))
     }
 
     pub(crate) fn effective_traceparent(&self) -> Option<String> {
         let trace_id = self.effective_trace_id()?;
-        if let Some(traceparent) = self
-            .traceparent
-            .as_deref()
-            .and_then(validate_traceparent)
+        if let Some(traceparent) = self.traceparent.as_deref().and_then(validate_traceparent)
             && trace_id_from_traceparent(traceparent).as_deref() == Some(trace_id.as_str())
         {
             return Some(traceparent.to_owned());
@@ -1306,10 +1307,7 @@ trust_level = "trusted"
             metadata: BTreeMap::new(),
         };
 
-        assert_eq!(
-            trace.effective_trace_id().as_deref(),
-            Some(thread_trace_id)
-        );
+        assert_eq!(trace.effective_trace_id().as_deref(), Some(thread_trace_id));
         let effective_traceparent = trace.effective_traceparent().expect("traceparent");
         assert_ne!(effective_traceparent, execution_traceparent);
         assert_eq!(
