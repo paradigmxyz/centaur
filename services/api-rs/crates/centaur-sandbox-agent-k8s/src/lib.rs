@@ -764,10 +764,10 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
             "mountPath": mount.target_path,
             "readOnly": mount.read_only,
         }));
-        if let Some(sub_path) = &mount.sub_path {
-            if let Some(mount_obj) = mounts.last_mut().and_then(Value::as_object_mut) {
-                mount_obj.insert("subPath".to_owned(), json!(sub_path));
-            }
+        if let Some(sub_path) = &mount.sub_path
+            && let Some(mount_obj) = mounts.last_mut().and_then(Value::as_object_mut)
+        {
+            mount_obj.insert("subPath".to_owned(), json!(sub_path));
         }
         volumes.push(match &mount.kind {
             MountKind::EmptyDir => json!({

@@ -137,11 +137,12 @@ pub enum SessionStatus {
     Archived,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxRepoCacheAccess {
     None,
     Public,
+    #[default]
     All,
 }
 
@@ -169,12 +170,6 @@ impl SandboxRepoCacheAccess {
 
     pub const fn from_legacy_enabled(enabled: bool) -> Self {
         if enabled { Self::All } else { Self::None }
-    }
-}
-
-impl Default for SandboxRepoCacheAccess {
-    fn default() -> Self {
-        Self::All
     }
 }
 

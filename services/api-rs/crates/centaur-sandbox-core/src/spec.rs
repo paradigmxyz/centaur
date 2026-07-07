@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoCacheAccess {
     None,
     Public,
+    #[default]
     All,
 }
 
@@ -19,12 +20,6 @@ impl RepoCacheAccess {
             Self::Public => "public",
             Self::All => "all",
         }
-    }
-}
-
-impl Default for RepoCacheAccess {
-    fn default() -> Self {
-        Self::All
     }
 }
 
