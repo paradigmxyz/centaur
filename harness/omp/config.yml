@@ -1,15 +1,13 @@
 # Baked omp (oh-my-pi) agent config. Copied to $PI_CODING_AGENT_DIR/config.yml
 # at container start by entrypoint.sh, which substitutes __OMP_LITELLM_BASE_URL__
-# (default https://litellm.drkmttr.dev/v1) so in-cluster deployments can point
-# at a local LiteLLM Service.
+# (default https://litellm.drkmttr.dev/v1) so deployments can point elsewhere.
 #
-# Model roles default to the gateway's `glm-local` alias (hosted_vllm
-# glm-5.2-fp8 on the dedicated LiteLLM instance). Deliberately NOT
-# `glm-5.2-fp8`: omp's discovery fuzzy-merges gateway model ids against the
-# live models.dev catalog, and that id collides with the fireworks-ai
-# `glm-5p2-fp8` entry — the SDK then puts the catalog's canonical wire id in
-# the request body, which LiteLLM 400s. `glm-local` matches nothing in the
-# catalog, so the alias goes on the wire unchanged (diagnosed 2026-07-06).
+# Model id is glm-5.2-fp8 — the gateway name with a working OpenRouter fallback
+# when the hosted_vllm upstream is down (the `glm-local` alias has NO fallback;
+# verified during the 2026-07-07 vLLM outage). The models.dev fuzzy-merge trap
+# that motivated the alias (skills presets/omp, 2026-07-06) only affects
+# DISCOVERY-based registries; models.yml here defines the model STATICALLY, and
+# the id goes on the wire unchanged (verified empirically both ways).
 providers:
   litellm:
     baseUrl: __OMP_LITELLM_BASE_URL__
@@ -18,16 +16,16 @@ providers:
     api: openai-completions
 
 modelRoles:
-  default: "litellm/glm-local"
-  smol: "litellm/glm-local"
-  commit: "litellm/glm-local"
-  task: "litellm/glm-local"
+  default: "litellm/glm-5.2-fp8"
+  smol: "litellm/glm-5.2-fp8"
+  commit: "litellm/glm-5.2-fp8"
+  task: "litellm/glm-5.2-fp8"
   # v1 posture: EVERY role stays on the internal gateway — sandboxes carry no
   # frontier-provider keys (credential-safe injection via iron-proxy is the
   # tracked follow-up). Point slow/plan/advisor at a frontier model only in
   # deployments that actually inject its key.
-  slow: "litellm/glm-local"
-  plan: "litellm/glm-local"
-  advisor: "litellm/glm-local"
+  slow: "litellm/glm-5.2-fp8"
+  plan: "litellm/glm-5.2-fp8"
+  advisor: "litellm/glm-5.2-fp8"
 
 defaultThinkingLevel: medium
