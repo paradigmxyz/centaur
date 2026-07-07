@@ -13,6 +13,8 @@ import subprocess
 import sys
 import time
 
+REPOSITORY_VISIBILITIES = {"private", "public"}
+
 
 def _split_words(value: str) -> list[str]:
     return [part for part in value.split() if part]
@@ -27,6 +29,22 @@ def _repository_refs(value: str) -> dict[str, str]:
         if repo and ref:
             refs[repo] = ref
     return refs
+
+
+def _normalize_repository_visibility(value: str | None) -> str:
+    visibility = (value or "").strip().lower()
+    return visibility if visibility in REPOSITORY_VISIBILITIES else "private"
+
+
+def _repository_visibilities(value: str, repositories: list[str]) -> dict[str, str]:
+    visibilities = {repo: "private" for repo in repositories}
+    for entry in _split_words(value):
+        if "=" not in entry:
+            continue
+        repo, visibility = entry.split("=", 1)
+        if repo:
+            visibilities[repo] = _normalize_repository_visibility(visibility)
+    return visibilities
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -50,12 +68,14 @@ class RepoCacheSync:
         cache_dir: Path,
         repositories: list[str],
         repository_refs: dict[str, str],
+        repository_visibilities: dict[str, str],
         sync_interval_seconds: float,
         github_token_file: Path,
     ) -> None:
         self.cache_dir = cache_dir
         self.repositories = repositories
         self.repository_refs = repository_refs
+        self.repository_visibilities = repository_visibilities
         self.sync_interval_seconds = sync_interval_seconds
         self.github_token_file = github_token_file
         self.git_env: dict[str, str] | None = None
@@ -70,11 +90,15 @@ class RepoCacheSync:
             sync_interval_seconds = 30.0
         if sync_interval_seconds <= 0:
             sync_interval_seconds = 30.0
+        repositories = _split_words(os.environ.get("REPOSITORIES", ""))
 
         return cls(
             cache_dir=Path(os.environ.get("REPO_CACHE_DIR", "/cache")),
-            repositories=_split_words(os.environ.get("REPOSITORIES", "")),
+            repositories=repositories,
             repository_refs=_repository_refs(os.environ.get("REPOSITORY_REFS", "")),
+            repository_visibilities=_repository_visibilities(
+                os.environ.get("REPOSITORY_VISIBILITIES", ""), repositories
+            ),
             sync_interval_seconds=sync_interval_seconds,
             github_token_file=Path(
                 os.environ.get("GITHUB_TOKEN_FILE", "/github-token/token")
@@ -265,9 +289,15 @@ class RepoCacheSync:
         tmp.replace(target)
 
     def repository_fingerprint(self) -> str:
+        refs = " ".join(f"{repo}={ref}" for repo, ref in self.repository_refs.items())
+        visibilities = " ".join(
+            f"{repo}={self.repository_visibilities.get(repo, 'private')}"
+            for repo in self.repositories
+        )
         return (
             f"repositories={' '.join(self.repositories)}\n"
-            f"repository_refs={' '.join(f'{repo}={ref}' for repo, ref in self.repository_refs.items())}\n"
+            f"repository_refs={refs}\n"
+            f"repository_visibilities={visibilities}\n"
         )
 
     def write_ready(self) -> None:

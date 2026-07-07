@@ -41,16 +41,18 @@
                   method: :patch,
                   data: { turbo: false },
                   class: "space-y-4" do %>
-      <label class="flex items-start gap-3">
-        <%= hidden_field_tag :sandbox_repo_cache_enabled, "0" %>
-        <%= check_box_tag :sandbox_repo_cache_enabled,
-                          "1",
-                          @principal.sandbox_repo_cache_enabled,
-                          class: checkbox_class %>
+      <label class="block">
         <span>
           <span class="block text-sm font-medium text-zinc-100">Repo cache</span>
           <span class="block text-xs text-zinc-500">Mount repo-cache backed workspace and tool sources.</span>
         </span>
+        <%= select_tag :sandbox_repo_cache,
+                       options_for_select([
+                         [ "None", "none" ],
+                         [ "Public", "public" ],
+                         [ "All", "all" ]
+                       ], @principal.sandbox_repo_cache),
+                       class: "mt-2 w-full rounded border border-ink-500 bg-ink-900 px-3 py-2 text-sm text-zinc-100" %>
       </label>
       <label class="flex items-start gap-3">
         <%= hidden_field_tag :sandbox_observability_enabled, "0" %>

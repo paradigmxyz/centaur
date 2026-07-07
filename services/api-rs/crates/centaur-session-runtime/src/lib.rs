@@ -13,8 +13,8 @@ use std::{
 
 use centaur_iron_control::SessionRegistrar;
 use centaur_sandbox_core::{
-    Mount, SandboxBackend, SandboxCapabilities as BackendSandboxCapabilities, SandboxError,
-    SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
+    Mount, RepoCacheAccess, SandboxBackend, SandboxCapabilities as BackendSandboxCapabilities,
+    SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
@@ -75,6 +75,7 @@ const EXECUTION_HANDOFF_DB_TIMEOUT: Duration = Duration::from_secs(5);
 const QUEUED_ORPHAN_GRACE: Duration = Duration::from_secs(120);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
+const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
     "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
 
@@ -2644,7 +2645,7 @@ impl SessionRuntime {
         };
         let principal = registrar.get_principal(principal_id).await?;
         Ok(SessionSandboxCapabilities {
-            repo_cache_enabled: principal.sandbox_repo_cache_enabled,
+            repo_cache_enabled: sandbox_repo_cache_enabled_from_principal(&principal),
             observability_enabled: principal.sandbox_observability_enabled,
             api_server_enabled: principal.sandbox_api_server_enabled,
         })
@@ -5396,9 +5397,25 @@ fn sandbox_capabilities_match(
     )
 }
 
+fn sandbox_repo_cache_enabled_from_principal(principal: &centaur_iron_control::Principal) -> bool {
+    match principal
+        .labels
+        .get(SANDBOX_REPO_CACHE_LABEL)
+        .map(|value| value.trim().to_ascii_lowercase())
+    {
+        Some(value) if value == "all" => true,
+        Some(_) => false,
+        None => principal.sandbox_repo_cache_enabled,
+    }
+}
+
 fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSandboxCapabilities) {
     spec.capabilities = BackendSandboxCapabilities {
-        repo_cache_enabled: capabilities.repo_cache_enabled,
+        repo_cache: if capabilities.repo_cache_enabled {
+            RepoCacheAccess::All
+        } else {
+            RepoCacheAccess::None
+        },
         observability_enabled: capabilities.observability_enabled,
         api_server_enabled: capabilities.api_server_enabled,
     };
@@ -6439,6 +6456,50 @@ mod tests {
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
+
+    #[test]
+    fn sandbox_repo_cache_label_overrides_legacy_boolean() {
+        assert!(sandbox_repo_cache_enabled_from_principal(&test_principal(
+            true,
+            std::collections::BTreeMap::new()
+        )));
+        assert!(!sandbox_repo_cache_enabled_from_principal(&test_principal(
+            false,
+            std::collections::BTreeMap::new()
+        )));
+        for value in ["none", "public", "pub", "private", "bogus"] {
+            assert!(!sandbox_repo_cache_enabled_from_principal(&test_principal(
+                true,
+                std::collections::BTreeMap::from([(
+                    SANDBOX_REPO_CACHE_LABEL.to_owned(),
+                    value.to_owned(),
+                )])
+            )));
+        }
+        assert!(sandbox_repo_cache_enabled_from_principal(&test_principal(
+            false,
+            std::collections::BTreeMap::from([(
+                SANDBOX_REPO_CACHE_LABEL.to_owned(),
+                "all".to_owned(),
+            )])
+        )));
+    }
+
+    fn test_principal(
+        sandbox_repo_cache_enabled: bool,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> centaur_iron_control::Principal {
+        centaur_iron_control::Principal {
+            id: "prn_test".to_owned(),
+            namespace: "default".to_owned(),
+            foreign_id: Some("slack-channel-t-c".to_owned()),
+            name: "Test".to_owned(),
+            labels,
+            sandbox_repo_cache_enabled,
+            sandbox_observability_enabled: true,
+            sandbox_api_server_enabled: true,
+        }
+    }
 
     #[test]
     fn persona_registry_validates_default_and_summarizes_without_prompt() {
@@ -8072,7 +8133,7 @@ mod adoption_tests {
             Some(restricted_capabilities())
         );
         let spec = backend.created_specs().pop().expect("created cold spec");
-        assert!(!spec.capabilities.repo_cache_enabled);
+        assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
         assert!(!spec.capabilities.api_server_enabled);
         assert_eq!(
@@ -8161,7 +8222,7 @@ mod adoption_tests {
             Some(restricted_capabilities())
         );
         let spec = backend.created_specs().pop().expect("created cold spec");
-        assert!(!spec.capabilities.repo_cache_enabled);
+        assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
         assert!(!spec.capabilities.api_server_enabled);
     }

@@ -104,6 +104,7 @@
         "port": { "type": "integer" },
         "repo": { "type": "string" },
         "ref": { "type": "string" },
+        "visibility": { "type": "string" },
         "subdir": { "type": "string" },
         "extraSources": {
           "type": "array",
@@ -112,6 +113,7 @@
             "properties": {
               "repo": { "type": "string" },
               "ref": { "type": "string" },
+              "visibility": { "type": "string" },
               "subdir": { "type": "string" }
             },
             "required": ["repo"]
@@ -144,6 +146,7 @@
             "properties": {
               "repo": { "type": "string" },
               "ref": { "type": "string" },
+              "visibility": { "type": "string" },
               "toolsSubdir": { "type": "string" },
               "workflowsSubdir": { "type": "string" },
               "skillsSubdir": { "type": "string" },
@@ -171,7 +174,20 @@
         "hostPath": { "type": "string" },
         "repositories": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "anyOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "properties": {
+                  "repo": { "type": "string" },
+                  "ref": { "type": "string" },
+                  "visibility": { "type": "string" }
+                },
+                "required": ["repo"]
+              }
+            ]
+          }
         },
         "repositoryRefs": {
           "type": "object",

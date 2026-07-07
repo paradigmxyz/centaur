@@ -54,9 +54,48 @@ class PrincipalTest < ActiveSupport::TestCase
     principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-sandbox-access"))
     principal.reload
 
+    assert_equal "all", principal.sandbox_repo_cache
     assert_predicate principal, :sandbox_repo_cache_enabled
     assert_predicate principal, :sandbox_observability_enabled
     assert_predicate principal, :sandbox_api_server_enabled
+  end
+
+  test "sandbox repo-cache enum syncs compatibility boolean" do
+    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-setting"))
+
+    principal.update!(sandbox_repo_cache: "public")
+    principal.reload
+
+    assert_equal "public", principal.sandbox_repo_cache
+    assert_equal false, principal.sandbox_repo_cache_enabled
+    assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
+
+    principal.update!(sandbox_repo_cache_enabled: true)
+    principal.reload
+
+    assert_equal "all", principal.sandbox_repo_cache
+    assert_equal true, principal.sandbox_repo_cache_enabled
+  end
+
+  test "sandbox repo-cache enum survives labels assigned in the same update" do
+    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-label-order"))
+
+    principal.update!(sandbox_repo_cache: "public", labels: { "team" => "platform" })
+    principal.reload
+
+    assert_equal "public", principal.sandbox_repo_cache
+    assert_equal "platform", principal.labels["team"]
+    assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
+  end
+
+  test "sandbox repo-cache accepts pub as public alias" do
+    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-pub-alias"))
+
+    principal.update!(sandbox_repo_cache: "pub")
+    principal.reload
+
+    assert_equal "public", principal.sandbox_repo_cache
+    assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
   end
 
   test "labels accepts arbitrary string map" do

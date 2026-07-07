@@ -611,11 +611,9 @@ fn build_agent_sandbox(
         .iter()
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
-    let repo_cache_tools = config
-        .tools
-        .as_ref()
-        .filter(|_| spec.capabilities.repo_cache_enabled);
-    let baked_base_tools = config.tools.is_some() && !spec.capabilities.repo_cache_enabled;
+    let repo_cache_enabled = spec.capabilities.repo_cache.enabled();
+    let repo_cache_tools = config.tools.as_ref().filter(|_| repo_cache_enabled);
+    let baked_base_tools = config.tools.is_some() && !repo_cache_enabled;
 
     if repo_cache_tools.is_some() {
         for (name, value) in tools::agent_env(repo_cache_tools) {
@@ -864,7 +862,7 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{ResourceLimits, SandboxCapabilities, SandboxSpec};
+    use centaur_sandbox_core::{RepoCacheAccess, ResourceLimits, SandboxCapabilities, SandboxSpec};
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
 
     use super::*;
@@ -913,7 +911,7 @@ mod tests {
     #[test]
     fn labels_observability_enabled_sandboxes_for_chart_policy() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-            repo_cache_enabled: true,
+            repo_cache: RepoCacheAccess::All,
             observability_enabled: true,
             api_server_enabled: true,
         });
@@ -966,7 +964,7 @@ mod tests {
     #[test]
     fn omits_api_server_label_for_restricted_sandboxes() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-            repo_cache_enabled: true,
+            repo_cache: RepoCacheAccess::All,
             observability_enabled: false,
             api_server_enabled: false,
         });
@@ -1061,7 +1059,7 @@ mod tests {
     #[test]
     fn disabled_repo_cache_uses_baked_base_tools_without_bootstrap() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-            repo_cache_enabled: false,
+            repo_cache: RepoCacheAccess::None,
             observability_enabled: true,
             api_server_enabled: true,
         });

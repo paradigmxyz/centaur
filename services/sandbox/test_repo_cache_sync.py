@@ -15,6 +15,41 @@ class RepoCacheSyncTest(unittest.TestCase):
             {"acme/one": "main", "acme/two": "abc123"},
         )
 
+    def test_repository_visibilities_default_invalid_values_to_private(self) -> None:
+        self.assertEqual(
+            repo_cache_sync._repository_visibilities(
+                "acme/public=public acme/private=private acme/typo=internal",
+                ["acme/public", "acme/private", "acme/missing", "acme/typo"],
+            ),
+            {
+                "acme/public": "public",
+                "acme/private": "private",
+                "acme/missing": "private",
+                "acme/typo": "private",
+            },
+        )
+
+    def test_from_env_loads_repository_visibilities(self) -> None:
+        old_env = os.environ.copy()
+        try:
+            os.environ.update(
+                {
+                    "REPOSITORIES": "acme/public acme/private",
+                    "REPOSITORY_VISIBILITIES": "acme/public=public acme/private=bogus",
+                    "SYNC_INTERVAL_SECONDS": "10",
+                }
+            )
+
+            sync = repo_cache_sync.RepoCacheSync.from_env()
+
+            self.assertEqual(
+                sync.repository_visibilities,
+                {"acme/public": "public", "acme/private": "private"},
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
     def test_write_ready_preserves_readiness_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -23,6 +58,7 @@ class RepoCacheSyncTest(unittest.TestCase):
                 cache_dir=root / "cache",
                 repositories=["acme/centaur"],
                 repository_refs={"acme/centaur": "main"},
+                repository_visibilities={"acme/centaur": "public"},
                 sync_interval_seconds=30,
                 github_token_file=root / "missing-token",
             )
@@ -32,7 +68,8 @@ class RepoCacheSyncTest(unittest.TestCase):
             lines = (root / "cache" / ".repo-cache-ready").read_text().splitlines()
             self.assertEqual(lines[0], "repositories=acme/centaur")
             self.assertEqual(lines[1], "repository_refs=acme/centaur=main")
-            self.assertRegex(lines[2], r"^synced_at=\d{4}-\d{2}-\d{2}T")
+            self.assertEqual(lines[2], "repository_visibilities=acme/centaur=public")
+            self.assertRegex(lines[3], r"^synced_at=\d{4}-\d{2}-\d{2}T")
 
     def test_check_ready_validates_fingerprint_and_repos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -43,6 +80,7 @@ class RepoCacheSyncTest(unittest.TestCase):
                 cache_dir=root / "cache",
                 repositories=["acme/centaur"],
                 repository_refs={"acme/centaur": "main"},
+                repository_visibilities={"acme/centaur": "private"},
                 sync_interval_seconds=30,
                 github_token_file=root / "missing-token",
             )
@@ -50,7 +88,9 @@ class RepoCacheSyncTest(unittest.TestCase):
 
             self.assertEqual(sync.check_ready(), 0)
             (root / "cache" / ".repo-cache-ready").write_text(
-                "repositories=wrong\nrepository_refs=acme/centaur=main\n"
+                "repositories=wrong\n"
+                "repository_refs=acme/centaur=main\n"
+                "repository_visibilities=acme/centaur=private\n"
             )
             self.assertEqual(sync.check_ready(), 1)
 
@@ -65,6 +105,7 @@ class RepoCacheSyncTest(unittest.TestCase):
                 cache_dir=Path("/tmp"),
                 repositories=["acme/centaur"],
                 repository_refs={},
+                repository_visibilities={},
                 sync_interval_seconds=30,
                 github_token_file=Path("/tmp/missing-token"),
             )

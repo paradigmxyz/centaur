@@ -48,6 +48,9 @@ toolServer:
   # this to the tool set the api-rs image was built with so the creds api-rs
   # grants match the tools the sandbox installs.
   ref: ""
+  # Repo visibility for sandbox repo-cache access. Defaults to private; set to
+  # public only for repos safe to expose to principals with sandbox_repo_cache=public.
+  visibility: private
   # Subdirectory in the repo holding the tools tree (mounted at /app/tools).
   subdir: tools
   # Additional repo/subdir sources copied after the base tools source. Duplicate
@@ -56,6 +59,7 @@ toolServer:
   extraSources: []
   # - repo: tempoxyz/centaur-tempo
   #   ref: ""
+  #   visibility: private
   #   subdir: tools
   # Image the tools-bootstrap init container runs in; empty fields fall back to
   # sandbox.image, which carries git and install-tool-shims.
@@ -193,14 +197,19 @@ overlay:
 # only need `repo`; set `ref` to a branch, tag, or commit when you do not want
 # the repo's default branch. Directories missing from a repo are skipped at
 # runtime. Set a subdir to "" to explicitly disable that surface for a source.
+# Repo visibility defaults to private; set visibility: public only for repos
+# safe to expose to principals with sandbox_repo_cache=public.
 overlays:
   sources: []
   # - repo: paradigmxyz/centaur
   #   ref: ""
+  #   visibility: public
   # - repo: your-org/centaur-overlay
   #   ref: main
+  #   visibility: private
   # - repo: your-org/workflows-only
   #   ref: main
+  #   visibility: private
   #   toolsSubdir: ""
   #   skillsSubdir: ""
 
@@ -262,9 +271,14 @@ repoCache:
         - ReadWriteMany
       storageClassName: ""
       size: 20Gi
-  # Additional repos to cache. toolServer.repo is cached automatically when the
-  # tool server is enabled.
+  # Additional repos to cache. Entries can be strings (visibility defaults to
+  # private) or objects with repo/ref/visibility. toolServer.repo is cached
+  # automatically when the tool server is enabled.
   repositories: []
+  # - paradigmxyz/public-docs
+  # - repo: your-org/public-docs
+  #   ref: main
+  #   visibility: public
   repositoryRefs: {}
   syncIntervalSeconds: 30
   image:

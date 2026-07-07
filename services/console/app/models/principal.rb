@@ -17,6 +17,8 @@ class Principal < ApplicationRecord
   belongs_to :created_by, class_name: "User"
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  before_validation :apply_sandbox_repo_cache_setting
+  after_save :clear_sandbox_repo_cache_setting
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
@@ -29,6 +31,9 @@ class Principal < ApplicationRecord
   # Stand-in for an inline secret value in redacted config: effective_config
   # reports that a control_plane source carries a value without revealing it.
   REDACTED = "[redacted]".freeze
+  SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
+  SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
+  SANDBOX_REPO_CACHE_ALIASES = { "pub" => "public" }.freeze
 
   # The config of a principal with no effective grants; also what an unassigned
   # proxy resolves to.
@@ -123,6 +128,26 @@ class Principal < ApplicationRecord
     redact_secrets ? self.class.redact_live_secrets(config) : config
   end
 
+  def sandbox_repo_cache
+    raw = labels.to_h[SANDBOX_REPO_CACHE_LABEL].to_s.strip.downcase
+    raw = SANDBOX_REPO_CACHE_ALIASES.fetch(raw, raw)
+    SANDBOX_REPO_CACHE_VALUES.include?(raw) ? raw : (sandbox_repo_cache_enabled? ? "all" : "none")
+  end
+
+  def sandbox_repo_cache=(value)
+    normalized = value.to_s.strip.downcase
+    normalized = SANDBOX_REPO_CACHE_ALIASES.fetch(normalized, normalized)
+    normalized = "none" unless SANDBOX_REPO_CACHE_VALUES.include?(normalized)
+    @sandbox_repo_cache_setting = normalized
+    apply_sandbox_repo_cache_setting
+  end
+
+  def sandbox_repo_cache_enabled=(value)
+    enabled = ActiveModel::Type::Boolean.new.cast(value)
+    super(enabled)
+    self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => (enabled ? "all" : "none"))
+  end
+
   def self.bump_sync_config_cache_versions(ids)
     ids = Array(ids).compact.uniq
     return if ids.empty?
@@ -158,6 +183,16 @@ class Principal < ApplicationRecord
 
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)
+  end
+
+  def apply_sandbox_repo_cache_setting
+    return if @sandbox_repo_cache_setting.blank?
+    self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => @sandbox_repo_cache_setting)
+    self[:sandbox_repo_cache_enabled] = @sandbox_repo_cache_setting == "all"
+  end
+
+  def clear_sandbox_repo_cache_setting
+    @sandbox_repo_cache_setting = nil
   end
 
   # The credentials actually delivered to the proxy, grouped by type, after

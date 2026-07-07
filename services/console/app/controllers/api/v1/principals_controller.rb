@@ -74,7 +74,7 @@ module Api
           foreign_id: principal.foreign_id,
           name: principal.name,
           labels: principal.labels,
-          sandbox_repo_cache_enabled: principal.sandbox_repo_cache_enabled,
+          sandbox_repo_cache: principal.sandbox_repo_cache,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
           sandbox_api_server_enabled: principal.sandbox_api_server_enabled,
           created_at: principal.created_at,
@@ -85,7 +85,7 @@ module Api
       def principal_params
         data_params.permit(
           :name,
-          :sandbox_repo_cache_enabled,
+          :sandbox_repo_cache,
           :sandbox_observability_enabled,
           :sandbox_api_server_enabled,
           labels: {}
