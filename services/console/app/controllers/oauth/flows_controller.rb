@@ -6,8 +6,8 @@ module Oauth
   # The OAuth consent flow, keyed by an app's well-known slug:
   # /oauth/:slug/start sends a team member to the IdP's consent screen, and
   # /oauth/:slug/callback turns the returned authorization code into a managed
-  # BrokerCredential linked to the OauthApp, then renders an centaur-console result
-  # page.
+  # BrokerCredential linked to the OauthApp, then sends the user back to the
+  # console Integrations page (or renders a result page on failure).
   #
   # Deliberately unauthenticated -- a team member connects an integration by
   # clicking a well-known link; there is no external app to integrate with, so
@@ -91,7 +91,10 @@ module Oauth
       @credential = upsert_credential(state, result, identity)
       enqueue_identity_enrichment(@credential)
 
-      render_result(:success, identity: identity)
+      # Back to the Integrations page the user started from; failures below
+      # still render the standalone result page, which offers a retry link.
+      connected_as = " as #{identity[:email]}" if identity[:email].present?
+      redirect_to console_integrations_path, notice: "#{@app.slug} connected#{connected_as}."
     rescue Broker::ExchangeError => e
       render_result(:error, message: "Connecting the integration failed (#{e.reason}).")
     rescue ActiveRecord::RecordInvalid => e
@@ -242,14 +245,13 @@ module Oauth
       nil
     end
 
-    # Renders the team-facing result page. +kind+ is :success, :denied, or
-    # :error; the matching HTTP status defaults sensibly but callers override it
-    # for the 4xx pre-consent rejections.
-    def render_result(kind, status: nil, message: nil, identity: nil, **)
+    # Renders the team-facing failure page. +kind+ is :denied or :error; the
+    # status defaults to 422 but callers override it for the 4xx pre-consent
+    # rejections. Success does not come through here -- the happy path
+    # redirects back to the console Integrations page.
+    def render_result(kind, status: :unprocessable_entity, message: nil)
       @kind = kind
       @message = message
-      @identity = identity
-      status ||= (kind == :success ? :ok : :unprocessable_entity)
       render :result, status: status
     end
   end
