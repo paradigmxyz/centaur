@@ -228,6 +228,10 @@ spec:
             - name: CENTAUR_CONSOLE_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
 {{- end }}
+{{- range $name, $value := $console.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | toString | quote }}
+{{- end }}
           ports:
             - containerPort: {{ $console.service.httpPort }}
               name: http

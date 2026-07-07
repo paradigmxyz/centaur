@@ -152,6 +152,12 @@ console:
     # host.
     host: ""
     tls: []
+  # Extra plain env vars for the console web container (not the worker) —
+  # e.g. Puma sizing knobs WEB_CONCURRENCY (processes, default 1) and
+  # RAILS_MAX_THREADS (threads per process and Active Record pool size per
+  # database, default 3). Raising these multiplies Postgres connections:
+  # replicas x WEB_CONCURRENCY x pools x RAILS_MAX_THREADS worst case.
+  extraEnv: {}
   resources: {}
   # Solid Queue worker (`bin/jobs`) that runs the console's background jobs —
   # most importantly the broker-credential OAuth refresh loop that mints and
