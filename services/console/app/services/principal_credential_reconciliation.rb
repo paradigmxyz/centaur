@@ -164,6 +164,17 @@ class PrincipalCredentialReconciliation
     )
   end
 
+  # TODO(perf): this loads every oauth-flow credential in the system -- O(C)
+  # rows per Principal create/update, since apply_for_principal runs in an
+  # after_commit. Negligible while C is in the hundreds. Add the optimization
+  # when oauth-flow credential count reaches the low thousands or principal
+  # writes show up in latency traces, whichever comes first: replace the
+  # single-principal path with a candidate query (namespace-scoped
+  # `LOWER(provider_email) IN (...) OR provider_subject IN (...)`, backed by
+  # indexes on (namespace, LOWER(provider_email)) and (namespace,
+  # provider_subject)), which is O(K) in the credentials of the one matched
+  # human. Keep the SQL normalization identical to normalize_email /
+  # normalize_key. entries/apply_all legitimately need the full load.
   def credential_indexes
     providers.index_with do |provider|
       credentials = provider_credentials(provider)
