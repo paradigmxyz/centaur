@@ -311,6 +311,25 @@ module Oauth
       assert_equal "operator-renamed", secret.reload.name
     end
 
+    test "callback records the signed-in user on the credential and keeps the original owner on re-consent" do
+      user = users(:member_user)
+      sign_in user
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+
+      cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
+      assert_equal user, cred.created_by
+
+      # Someone else re-consenting for the same provider account does not steal
+      # the credential.
+      sign_in users(:acme_admin)
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+      assert_equal user, cred.reload.created_by
+    end
+
     test "callback works with a disabled console session" do
       user = users(:member_user)
       sign_in user

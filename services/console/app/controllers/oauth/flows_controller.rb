@@ -163,6 +163,12 @@ module Oauth
     def upsert_credential(state, result, identity)
       BrokerCredential.transaction do
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
+        # When the consenting browser carries a signed-in console session,
+        # remember which user connected this account. The Integrations page
+        # matches on it, so the card flips to "Connected" even when the
+        # provider account's email differs from the console login email.
+        # Never overwritten: the first linked user keeps the credential.
+        credential.created_by ||= current_user
         if credential.new_record?
           credential.namespace = @app.credential_namespace
           credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
@@ -217,8 +223,8 @@ module Oauth
     #
     # Created once per credential (keyed on the broker_credential association, which
     # a unique index enforces) and left untouched on re-consent, so any operator
-    # edits -- a different header, extra rules -- survive. Has no created_by: the
-    # unauthenticated flow has no current user, like the credential it wraps. Left
+    # edits -- a different header, extra rules -- survive. Has no created_by:
+    # unlike the credential, no console feature keys off the secret's owner. Left
     # without a foreign_id: it is found by association, and copying the credential's
     # would risk colliding with an operator-created secret.
     def ensure_wrapping_secret(credential)
