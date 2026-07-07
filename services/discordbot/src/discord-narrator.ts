@@ -62,6 +62,7 @@ export class DiscordNarrator {
   // concatenate; a commentary item re-uses its id and replaces its body.
   private pendingParts = new Map<string, string>();
   private queuedBlurbs: string[] = [];
+  private lastStatus = "";
   private postedCount = 0;
   private droppedBlurbs = 0;
   private lastPostAtMs = 0;
@@ -99,6 +100,23 @@ export class DiscordNarrator {
     const narrator = new DiscordNarrator(thread, message, botOptions, options);
     narrator.enqueueReaction("PUT", REACTION_WORKING);
     return narrator;
+  }
+
+  /**
+   * Server-side activity summaries (renderer.status events) — the Discord
+   * analog of Slack's assistant status. Discord has no ephemeral status
+   * surface, so summaries post as append-only subtext blurbs, like thoughts
+   * did before reasoning synthesis moved out of the renderer. Empty statuses
+   * (the end-of-run clear) and consecutive repeats are dropped.
+   */
+  status(text: string): void {
+    if (this.finished) return;
+    const trimmed = text.trim();
+    if (!trimmed || trimmed === this.lastStatus) return;
+    this.lastStatus = trimmed;
+    if (trimmed.length < NARRATOR_MIN_BLURB_CHARS) return;
+    this.queuedBlurbs.push(truncateBlurb(trimmed));
+    this.schedulePost();
   }
 
   update(chunk: DiscordNarratorChunk): void {
