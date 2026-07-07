@@ -1008,16 +1008,27 @@ fn apply_resume_overrides(state: &mut ThreadState, params: &ThreadResumeParams) 
     Ok(())
 }
 
+/// What handling a mid-turn JSON-RPC request did to the harness.
+enum ActiveTurnRequestOutcome {
+    /// The harness process was killed; the turn is over.
+    Interrupted,
+    /// Steer input was written to the harness, which now owes a response.
+    Steered,
+    /// The request was rejected without reaching the harness: the turn's
+    /// state is untouched.
+    Rejected,
+}
+
 fn handle_active_turn_request<H: HarnessServer, W: Write>(
     harness: &H,
     process: &mut HarnessChild,
     normalizer: &mut CodexTurnNormalizer,
     request: ActiveTurnRequest,
     stdout: &mut W,
-) -> Result<bool> {
+) -> Result<ActiveTurnRequestOutcome> {
     let ActiveTurnRequest::JsonRpc(request) = request else {
         process.kill_and_wait()?;
-        return Ok(true);
+        return Ok(ActiveTurnRequestOutcome::Interrupted);
     };
 
     match request.method.as_str() {
@@ -1030,7 +1041,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnRequestOutcome::Rejected);
             }
             if params.expected_turn_id != normalizer.turn_id() {
                 write_error(
@@ -1043,7 +1054,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnRequestOutcome::Rejected);
             }
             process
                 .stdin
@@ -1063,7 +1074,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             {
                 write_value(stdout, &notification_to_wire_value(&notification)?)?;
             }
-            Ok(false)
+            Ok(ActiveTurnRequestOutcome::Steered)
         }
         "turn/interrupt" => {
             let params: TurnInterruptParams = request_params(request.params)?;
@@ -1074,7 +1085,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnRequestOutcome::Rejected);
             }
             if params.turn_id != normalizer.turn_id() {
                 write_error(
@@ -1087,7 +1098,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnRequestOutcome::Rejected);
             }
             process.kill_and_wait()?;
             write_client_response(
@@ -1097,7 +1108,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     response: TurnInterruptResponse {},
                 },
             )?;
-            Ok(true)
+            Ok(ActiveTurnRequestOutcome::Interrupted)
         }
         _ => {
             write_error(
@@ -1106,7 +1117,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 -32600,
                 format!("cannot handle {} while a turn is active", request.method),
             )?;
-            Ok(false)
+            Ok(ActiveTurnRequestOutcome::Rejected)
         }
     }
 }
@@ -1236,17 +1247,24 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                 .process
                 .as_mut()
                 .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
-                state.process = None;
-                return Err(HarnessServerError::TurnInterrupted {
-                    kind: harness.kind(),
-                });
+            match handle_active_turn_request(harness, process, normalizer, request, stdout)? {
+                ActiveTurnRequestOutcome::Interrupted => {
+                    state.process = None;
+                    return Err(HarnessServerError::TurnInterrupted {
+                        kind: harness.kind(),
+                    });
+                }
+                // A steer re-opens the turn: the harness now owes a response
+                // whose first token can take longer than the settle window, so
+                // the pending fallback completion no longer applies. The
+                // response's own terminal stop re-arms it.
+                ActiveTurnRequestOutcome::Steered => settle_deadline = None,
+                // A rejected request never reached the harness: no response is
+                // owed, so a pending fallback completion must survive it —
+                // with the stream already quiet, disarming here would leave
+                // nothing to complete the turn.
+                ActiveTurnRequestOutcome::Rejected => {}
             }
-            // A steer re-opens the turn: the harness now owes a response whose
-            // first token can take longer than the settle window, so the
-            // pending fallback completion no longer applies. The response's
-            // own terminal stop re-arms it.
-            settle_deadline = None;
         }
 
         let mut terminal = false;

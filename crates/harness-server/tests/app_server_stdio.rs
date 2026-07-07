@@ -199,6 +199,42 @@ fn fake_claude_trailing_result_settles_the_turn_and_does_not_poison_the_next() {
 }
 
 #[test]
+fn fake_claude_rejected_steer_during_settle_window_does_not_hang_the_turn() {
+    // A steer racing the turn boundary carries a stale turn id and is
+    // rejected without any input reaching the harness. With the stream
+    // already quiet after the terminal stop, the rejection must leave the
+    // settle fallback armed — it is the only thing left that can complete
+    // the turn.
+    let fake_claude = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[]}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fable answer\"}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"stop_reason\":null,\"content\":[{\"type\":\"text\",\"text\":\"fable answer\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}'",
+        "; sleep 60"
+    );
+
+    let mut bridge =
+        BridgeProcess::spawn_harness(Harness::ClaudeCode, Some(fake_claude.to_string()), None);
+    let thread_id =
+        bridge.initialize_and_start_thread(Harness::ClaudeCode, Duration::from_secs(10));
+    let turn = bridge.run_turn_with_rejected_steers_during_settle(
+        &thread_id,
+        3,
+        4,
+        5,
+        "say hello",
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "fable answer");
+}
+
+#[test]
 fn fake_claude_subagent_sidechain_stop_does_not_complete_the_turn() {
     // A Task subagent's sidechain messages end with their own end_turn while
     // the parent turn keeps running (here: 3s of quiet before the main chain
@@ -1638,6 +1674,107 @@ impl BridgeProcess {
                     assert!(
                         valid_interrupt_acknowledged,
                         "turn completed before valid interrupt response"
+                    );
+                    break;
+                }
+            }
+        }
+
+        capture
+    }
+
+    fn run_turn_with_rejected_steers_during_settle(
+        &mut self,
+        thread_id: &str,
+        request_id: i64,
+        wrong_thread_steer_request_id: i64,
+        wrong_turn_steer_request_id: i64,
+        prompt: &str,
+        timeout: Duration,
+    ) -> TurnCapture {
+        self.send(json!({
+            "id": request_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt, "text_elements": []}],
+            },
+        }));
+
+        let deadline = Instant::now() + timeout;
+        let mut capture = TurnCapture::default();
+        let mut steers_sent = false;
+        let mut wrong_thread_steer_rejected = false;
+        let mut wrong_turn_steer_rejected = false;
+
+        loop {
+            let value = self.read_json_allowing_error(deadline);
+            if let Some(id) = response_id(&value) {
+                if id == request_id {
+                    capture.turn_id = value
+                        .pointer("/result/turn/id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| panic!("turn/start did not return turn id: {value}"))
+                        .to_string();
+                } else if id == wrong_thread_steer_request_id {
+                    assert!(
+                        value.get("error").is_some(),
+                        "wrong-thread steer should be rejected: {value}"
+                    );
+                    wrong_thread_steer_rejected = true;
+                } else if id == wrong_turn_steer_request_id {
+                    assert!(
+                        value.get("error").is_some(),
+                        "wrong-turn steer should be rejected: {value}"
+                    );
+                    wrong_turn_steer_rejected = true;
+                }
+                continue;
+            }
+
+            if let Some(method) = value.get("method").and_then(Value::as_str) {
+                assert_notification_thread_id(&value, thread_id);
+                capture.consume_notification(method, &value);
+                if method == "turn/started"
+                    && capture.turn_id.is_empty()
+                    && let Some(turn_id) = value.pointer("/params/turn/id").and_then(Value::as_str)
+                {
+                    capture.turn_id = turn_id.to_string();
+                }
+                if method == "item/completed" && !steers_sent && !capture.turn_id.is_empty() {
+                    // The terminal stop trails the completed message by one
+                    // line; give the server time to process it so the steers
+                    // land inside the armed settle window, not before it.
+                    thread::sleep(Duration::from_millis(500));
+                    self.send(json!({
+                        "id": wrong_thread_steer_request_id,
+                        "method": "turn/steer",
+                        "params": {
+                            "threadId": "wrong-thread",
+                            "expectedTurnId": capture.turn_id,
+                            "input": [{"type": "text", "text": "steer astray", "text_elements": []}],
+                        },
+                    }));
+                    self.send(json!({
+                        "id": wrong_turn_steer_request_id,
+                        "method": "turn/steer",
+                        "params": {
+                            "threadId": thread_id,
+                            "expectedTurnId": "wrong-turn",
+                            "input": [{"type": "text", "text": "steer astray", "text_elements": []}],
+                        },
+                    }));
+                    steers_sent = true;
+                }
+                if method == "turn/completed" {
+                    assert!(steers_sent, "steers were never sent");
+                    assert!(
+                        wrong_thread_steer_rejected,
+                        "turn completed before wrong-thread steer rejection"
+                    );
+                    assert!(
+                        wrong_turn_steer_rejected,
+                        "turn completed before wrong-turn steer rejection"
                     );
                     break;
                 }
