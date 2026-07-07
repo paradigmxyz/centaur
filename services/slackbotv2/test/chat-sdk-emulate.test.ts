@@ -5733,6 +5733,93 @@ describe('session event stream connection lifecycle', () => {
     expect(cancelledClosures()).toBeGreaterThan(closuresBefore)
   })
 
+  it('cancels the events connection when the Slack stream fails mid-render', async () => {
+    // Abandoning the live render must also release the connection while the
+    // execution is still producing output. The render wrapper drives the
+    // conflated stream manually, so an adapter.stream teardown has to forward
+    // the close down the chain — otherwise the conflate pump keeps the SSE
+    // connection open (and buffers every remaining chunk) until the turn ends.
+    const gaugeBefore = openEventStreamGauge()
+    const closuresBefore = cancelledClosures()
+    codexApi.autoRespond = false
+    // First append succeeds, then Slack expires the streaming message and the
+    // next append tears down the live render mid-turn.
+    slackApi.failStreamAppendsAfter(1, 'message_not_in_streaming_state')
+
+    const parent = await postUserMessage('Stream abandoned mid-render.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> stream lifecycle turn 0`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: `Ev-stream-lifecycle-midrender-${parent.ts}`,
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> stream lifecycle turn 0`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-midrender-1',
+          type: 'commandExecution',
+          // Large enough to flush the Slack SDK's client-side stream buffer
+          // so the first append carries content.
+          command: `sleep 1 # ${'x'.repeat(300)}`,
+          status: 'completed',
+          aggregatedOutput: 'first'
+        }
+      })
+    )
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-midrender-2',
+          type: 'commandExecution',
+          command: `sleep 1 # ${'y'.repeat(300)}`,
+          status: 'completed',
+          aggregatedOutput: 'second'
+        }
+      })
+    )
+
+    // The execution has not completed: the abandoned render must cancel its
+    // events connection now instead of holding it (and buffering the rest of
+    // the turn) until the terminal event. The gauge is churned by render
+    // recovery reopening a fresh stream, so assert on the monotonic
+    // cancelled-closures counter, which only the abandoned render increments.
+    await waitFor(() => cancelledClosures() > closuresBefore, 5_000)
+    expect(cancelledClosures()).toBeGreaterThan(closuresBefore)
+
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-midrender-cancel',
+      status: 'completed',
+      result_text: 'MIDRENDER_CANCEL_FINAL'
+    })
+    await Promise.all(waits).catch(() => {})
+    const open = await waitForGaugeAtMost(gaugeBefore)
+    expect(open).toBeLessThanOrEqual(gaugeBefore)
+  })
+
   // Drives past Bun's 256-request cap to prove the wedge is gone. `bun test`
   // ignores the BUN_CONFIG_MAX_HTTP_REQUESTS override but still enforces the
   // built-in 256 cap, so crossing 260 turns exercises the real limit. Takes

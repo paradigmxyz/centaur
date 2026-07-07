@@ -537,7 +537,7 @@ export async function forwardToSessionApi(
 export async function openSessionEventStream(
   options: SlackbotV2Options,
   input: Pick<ForwardSessionInput, 'afterEventId' | 'executionId' | 'onEventId' | 'threadId' | 'trace'>
-): Promise<AsyncIterable<SlackbotV2RendererSource>> {
+): Promise<SessionEventStream> {
   const streamStartedAtMs = nowMs()
   const stream = await recordSessionApiOperation('open_event_stream', () =>
     streamSessionNotifications(
@@ -1284,13 +1284,30 @@ function isRetryableApiStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500
 }
 
+/**
+ * An events stream whose underlying connection can be released out of band.
+ * Generator teardown alone cannot do that mid-execution: every layer of the
+ * render chain is parked on an internal await, and a queued `return()` waits
+ * for the next event — which never comes once the render is abandoned.
+ * `close()` settles the connection's pending read immediately (idempotent).
+ */
+export type SessionEventStream = AsyncIterable<SlackbotV2RendererSource> & {
+  close(): void
+}
+
+type SessionEventConnection = {
+  reader: ReadableStreamDefaultReader<Uint8Array>
+  /** True once close() settled the connection: its end is a cancellation, not stream completion. */
+  wasClosed: () => boolean
+}
+
 async function streamSessionNotifications(
   options: SlackbotV2Options,
   threadId: string,
   afterEventId: number,
   executionId: string | undefined,
   onEventId: (eventId: number) => void
-): Promise<AsyncIterable<SlackbotV2RendererSource>> {
+): Promise<SessionEventStream> {
   const fetchFn = options.fetch ?? fetch
   const url = new URL(apiSessionUrl(options.apiUrl, threadId, 'events'))
   url.searchParams.set('after_event_id', String(afterEventId))
@@ -1306,8 +1323,20 @@ async function streamSessionNotifications(
     'stream events'
   )
   await ensureApiOk(response, 'stream events')
-  if (!response.body) return toAsyncIterable([])
-  return parseSessionEventStream(response.body, onEventId)
+  if (!response.body) {
+    return Object.assign(toAsyncIterable<SlackbotV2RendererSource>([]), { close: () => {} })
+  }
+  const reader = response.body.getReader()
+  let closed = false
+  return Object.assign(
+    parseSessionEventStream({ reader, wasClosed: () => closed }, onEventId),
+    {
+      close: () => {
+        closed = true
+        void reader.cancel().catch(() => undefined)
+      }
+    }
+  )
 }
 
 function apiSessionUrl(
@@ -1794,10 +1823,10 @@ type ParsedSessionEvent = {
 }
 
 async function* parseSessionEventStream(
-  stream: ReadableStream<Uint8Array>,
+  connection: SessionEventConnection,
   onEventId: (eventId: number) => void
 ): AsyncIterable<SlackbotV2RendererSource> {
-  for await (const event of parseSseEvents(stream)) {
+  for await (const event of parseSseEvents(connection)) {
     if (typeof event.id === 'number') onEventId(event.id)
     if (event.event === 'session.output.line') {
       yield {
@@ -1848,8 +1877,10 @@ async function* parseSessionEventStream(
   }
 }
 
-async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterable<ParsedSessionEvent> {
-  const reader = stream.getReader()
+async function* parseSseEvents(
+  connection: SessionEventConnection
+): AsyncIterable<ParsedSessionEvent> {
+  const { reader } = connection
   // Tracks the underlying network connection. Each open stream occupies one
   // slot of Bun's global fetch pool (BUN_CONFIG_MAX_HTTP_REQUESTS, default
   // 256); the 2026-07-06 incident wedged Slackbot by leaking one abandoned
@@ -1879,7 +1910,9 @@ async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterabl
         throw error
       }
       if (done) {
-        releaseConnection('done')
+        // A read settled by close() ends the stream from the consumer side —
+        // record it as a cancellation, not as the execution's own completion.
+        releaseConnection(connection.wasClosed() ? 'cancelled' : 'done')
         break
       }
       buffer += decoder.decode(value, { stream: true })

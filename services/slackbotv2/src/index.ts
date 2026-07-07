@@ -38,7 +38,8 @@ import {
   serializeMessageLinks,
   serializeMessage,
   sessionStreamError,
-  withSlackApiTimeout
+  withSlackApiTimeout,
+  type SessionEventStream
 } from './session-api'
 import {
   buildConsoleSessionContextBlock,
@@ -1057,10 +1058,11 @@ async function renderExecutionAttempt(
   let rendered = false
   let retry = false
   let fallbackLastEventId = 0
+  const eventsConnection: { close?: () => void } = {}
   try {
     const streamResult = await renderExecutionStream(
       thread,
-      streamSessionAfterHandoff(options, input),
+      streamSessionAfterHandoff(options, input, eventsConnection),
       message,
       options,
       trace,
@@ -1099,6 +1101,13 @@ async function renderExecutionAttempt(
     })
     return 'complete'
   } catch (error) {
+    // The live render is over the moment it throws: release its events
+    // connection before anything else. The retry and fallback paths below
+    // open their own streams — and the fallback blocks until the execution's
+    // terminal event, which is exactly how long an unreleased connection
+    // would otherwise stay parked, holding a fetch-pool slot and buffering
+    // the rest of the turn with no consumer.
+    eventsConnection.close?.()
     // Check the Slack adapter's delivery annotation before retryability:
     // Slack network failures can surface as TypeError/AbortError, which would
     // otherwise be misclassified as retryable session API errors and re-render
@@ -1186,6 +1195,8 @@ async function renderExecutionAttempt(
     }
     throw error
   } finally {
+    // Idempotent backstop for the non-throwing exits.
+    eventsConnection.close?.()
     const latest = (await thread.state) ?? {}
     await thread.setState({
       activeExecution: retry,
@@ -1608,7 +1619,7 @@ async function recoverRenderObligation(
   const renderStartedAtMs = nowMs()
   let renderOutcome = 'failure'
 
-  let openedStream: AsyncIterable<SlackbotV2RendererSource>
+  let openedStream: SessionEventStream
   try {
     openedStream = await openSessionEventStream(options, input)
   } catch (error) {
@@ -1733,6 +1744,9 @@ async function recoverRenderObligation(
       lastEventId = Math.max(lastEventId, fallback.lastEventId)
     }
   } finally {
+    // Same connection release as the live path: an abandoned recovery render
+    // must not hold its events connection until the turn's terminal event.
+    openedStream.close()
     const latest = (await thread.state) ?? {}
     await thread.setState({
       activeExecution: false,
@@ -2171,11 +2185,21 @@ async function streamAfterFirstChunk(
 
   return {
     async *[Symbol.asyncIterator](): AsyncIterator<ChatSDKStreamChunk> {
-      yield first.value
-      for (;;) {
-        const next = await iterator.next()
-        if (next.done) return
-        yield next.value
+      try {
+        yield first.value
+        for (;;) {
+          const next = await iterator.next()
+          if (next.done) return
+          yield next.value
+        }
+      } finally {
+        // A consumer that stops early (a failed Slack stream call tears down
+        // the live render) closes this wrapper, not the iterator it drives.
+        // Forward the close so the conflate layer can stop its pump and
+        // cancel the underlying events connection instead of pulling — and
+        // buffering — the rest of the turn with no consumer. Do not await
+        // it: a silent source keeps the close unsettled until its next event.
+        void Promise.resolve(iterator.return?.()).catch(() => undefined)
       }
     }
   }
@@ -2200,9 +2224,10 @@ function terminalResultText(event: unknown): string {
 
 async function* streamSessionAfterHandoff(
   options: SlackbotV2Options,
-  input: ForwardSessionInput
+  input: ForwardSessionInput,
+  connection?: { close?: () => void }
 ): AsyncIterable<SlackbotV2RendererSource> {
-  let stream: AsyncIterable<SlackbotV2RendererSource>
+  let stream: SessionEventStream
   try {
     stream = await openSessionEventStream(options, input)
   } catch (error) {
@@ -2213,6 +2238,9 @@ async function* streamSessionAfterHandoff(
     yield sessionStreamError(error)
     return
   }
+  // Hand the caller the connection release: it owns the render attempt and is
+  // the only scope that still runs when the render is torn down mid-turn.
+  if (connection) connection.close = () => stream.close()
 
   for await (const event of stream) yield event
 }
