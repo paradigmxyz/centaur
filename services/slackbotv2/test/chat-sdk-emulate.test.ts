@@ -346,6 +346,9 @@ describe('slackbotv2', () => {
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
+  // The paragraph break (`\n\n`) after the model value is deliberate: the
+  // unpatched chat SDK dropped it, gluing the value to the next word
+  // (`fablefirst`); this exercises the patched extractPlainText end to end.
   it('keeps harness and model flags sticky within a Slack thread', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -353,7 +356,7 @@ describe('slackbotv2', () => {
 
     const parent = await postUserMessage('Thread default context.')
     const firstMention = await postUserMessage(
-      `<@${BOT_USER_ID}> --claude --model=fable\nfirst pass`,
+      `<@${BOT_USER_ID}> --claude --model=fable\n\nfirst pass`,
       parent.ts
     )
     const firstWaits: Promise<unknown>[] = []
@@ -368,7 +371,7 @@ describe('slackbotv2', () => {
           team: TEAM_ID,
           ts: firstMention.ts,
           thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> --claude --model=fable\nfirst pass`
+          text: `<@${BOT_USER_ID}> --claude --model=fable\n\nfirst pass`
         }
       }),
       {},
