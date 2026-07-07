@@ -729,10 +729,14 @@ impl SandboxArgs {
 
     fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
         let default_persona_id = clean_optional_value(self.default_persona.as_deref());
-        Ok(discover_persona_registry(
-            &self.tools.resolve_tool_dirs()?,
-            default_persona_id,
-        )?)
+        let public_source_roots = self
+            .tools
+            .resolve_public_tool_dirs()
+            .into_iter()
+            .map(|path| path.display().to_string());
+        let registry =
+            discover_persona_registry(&self.tools.resolve_tool_dirs()?, default_persona_id)?;
+        Ok(registry.with_public_source_roots(public_source_roots))
     }
 
     async fn runtime(&self) -> Result<SandboxRuntime, ServerError> {
@@ -1295,6 +1299,8 @@ fn should_retry_iron_control_register(error: &RegisterError) -> bool {
 struct ToolDiscoveryArgs {
     #[arg(long = "tool-dirs", env = "TOOL_DIRS")]
     tool_dirs: Option<String>,
+    #[arg(long = "public-tool-dirs", env = "KUBERNETES_PUBLIC_TOOL_DIRS")]
+    public_tool_dirs: Option<String>,
     #[arg(long = "tools-path", env = "TOOLS_PATH")]
     tools_path: Option<PathBuf>,
     #[arg(long = "tools-overlay-path", env = "TOOLS_OVERLAY_PATH")]
@@ -1309,12 +1315,25 @@ impl ToolDiscoveryArgs {
     fn resolve_tool_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
         Ok(ToolDiscoveryConfig {
             tool_dirs: self.tool_dirs.clone(),
+            public_tool_dirs: self.public_tool_dirs.clone(),
             tools_path: self.tools_path.clone(),
             tools_overlay_path: self.tools_overlay_path.clone(),
             plugins_dir: self.plugins_dir.clone(),
             tools_config: self.tools_config.clone(),
         }
         .resolve_tool_dirs()?)
+    }
+
+    fn resolve_public_tool_dirs(&self) -> Vec<PathBuf> {
+        ToolDiscoveryConfig {
+            tool_dirs: self.tool_dirs.clone(),
+            public_tool_dirs: self.public_tool_dirs.clone(),
+            tools_path: self.tools_path.clone(),
+            tools_overlay_path: self.tools_overlay_path.clone(),
+            plugins_dir: self.plugins_dir.clone(),
+            tools_config: self.tools_config.clone(),
+        }
+        .resolve_public_tool_dirs()
     }
 }
 

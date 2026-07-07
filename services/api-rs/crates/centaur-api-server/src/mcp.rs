@@ -301,6 +301,7 @@ fn mcp_centaur_tool_catalog() -> Result<Vec<DiscoveredTool>, ApiError> {
 
     let dirs = ToolDiscoveryConfig {
         tool_dirs: env::var("TOOL_DIRS").ok(),
+        public_tool_dirs: env::var("KUBERNETES_PUBLIC_TOOL_DIRS").ok(),
         tools_path: env::var("TOOLS_PATH").ok().map(PathBuf::from),
         tools_overlay_path: env::var("TOOLS_OVERLAY_PATH").ok().map(PathBuf::from),
         plugins_dir: env::var("PLUGINS_DIR").ok().map(PathBuf::from),
