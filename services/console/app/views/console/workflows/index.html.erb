@@ -12,7 +12,7 @@
       <tr>
         <th class="console-th">Workflow</th>
         <th class="console-th">Status</th>
-        <th class="console-th">Queue</th>
+        <th class="console-th">Queues</th>
         <th class="console-th">Attempts</th>
         <th class="console-th">Started</th>
         <th class="console-th">Finished</th>
@@ -31,6 +31,7 @@
       <% @workflow_runs.each do |run| %>
         <% status = run.display_status %>
         <% workflow_key = run.workflow_key %>
+        <% queue_runs = @queue_breakdown[workflow_key].presence || [ run ] %>
         <tr class="console-row-hover align-top">
           <td class="console-td">
             <% if workflow_key.present? %>
@@ -53,7 +54,25 @@
           </td>
 
           <td class="console-td-nowrap text-xs text-zinc-400">
-            <%= run.queue_label %>
+            <% if queue_runs.size == 1 %>
+              <%= run.queue_label %>
+            <% else %>
+              <div class="space-y-1.5">
+                <% queue_runs.each_with_index do |queue_run, index| %>
+                  <div class="flex items-center gap-2">
+                    <span class="text-zinc-600"><%= index == queue_runs.size - 1 ? "└" : "├" %></span>
+                    <span><%= queue_run.queue_label %></span>
+                    <span class="inline-flex rounded border px-1.5 py-px text-[11px] font-medium <%= workflow_status_classes(queue_run.display_status) %>">
+                      <%= queue_run.display_status.tr("_", " ") %>
+                    </span>
+                    <span class="text-zinc-600">
+                      <%= local_time(queue_run.recency_at, relative: true, format: :compact) %>
+                      · <%= queue_run.queue_run_count.to_i %> runs
+                    </span>
+                  </div>
+                <% end %>
+              </div>
+            <% end %>
           </td>
 
           <td class="console-td-nowrap text-xs text-zinc-400">
@@ -79,4 +98,12 @@
       <% end %>
     </tbody>
   </table>
+
+  <% unless @workflow_db_unavailable %>
+    <%= render "pagination",
+               page: @page,
+               total_pages: @total_pages,
+               total_count: @total_workflows.to_i,
+               unit: "workflow" %>
+  <% end %>
 </section>

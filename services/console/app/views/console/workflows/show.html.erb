@@ -25,7 +25,9 @@
       </div>
       <div class="flex gap-5 px-5 py-4">
         <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Queue</dt>
-        <dd class="min-w-0 text-zinc-100"><%= @latest_run.queue_label %></dd>
+        <dd class="min-w-0 text-zinc-100">
+          <%= @queue_names.map { |queue_name| CentaurWorkflowRun.queue_label_for(queue_name) }.join(", ").presence || @latest_run.queue_label %>
+        </dd>
       </div>
       <div class="flex gap-5 px-5 py-4">
         <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Duration</dt>
@@ -58,12 +60,42 @@
       </div>
       <div class="flex gap-5 px-5 py-4">
         <dt class="w-36 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Runs</dt>
-        <dd class="min-w-0 text-zinc-100"><%= pluralize(@workflow_runs.size, "run") %></dd>
+        <dd class="min-w-0 text-zinc-100"><%= pluralize(number_with_delimiter(@total_runs), "run") %></dd>
       </div>
     </dl>
   </section>
 
   <h1 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Historical Runs</h1>
+
+  <%# Filter tabs. Changing a filter resets to page 1; the pager keeps filters. %>
+  <% filter_url = ->(status: @status, queue: @queue) {
+       query = { status: status, queue: queue }.compact
+       query.empty? ? request.path : "#{request.path}?#{query.to_query}"
+     } %>
+  <% status_order = %w[running pending sleeping completed failed cancelled] %>
+  <% status_tabs = (status_order & @status_counts.keys) + (@status_counts.keys - status_order).sort %>
+  <div class="mb-3 flex flex-wrap items-center gap-1.5">
+    <%= link_to filter_url.call(status: nil), class: "chip #{'chip-on' if @status.blank?}" do %>
+      all <span class="ml-1 text-zinc-500"><%= number_with_delimiter(@total_runs) %></span>
+    <% end %>
+    <% status_tabs.each do |status_tab| %>
+      <%= link_to filter_url.call(status: status_tab), class: "chip #{'chip-on' if @status == status_tab}" do %>
+        <%= status_tab.tr("_", " ") %> <span class="ml-1 text-zinc-500"><%= number_with_delimiter(@status_counts[status_tab]) %></span>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if @queue_names.size > 1 %>
+    <div class="mb-3 flex flex-wrap items-center gap-1.5">
+      <span class="mr-1 text-xs uppercase tracking-wider text-zinc-500">Queue</span>
+      <%= link_to "all", filter_url.call(queue: nil), class: "chip #{'chip-on' if @queue.blank?}" %>
+      <% @queue_names.each do |queue_name| %>
+        <%= link_to CentaurWorkflowRun.queue_label_for(queue_name),
+                    filter_url.call(queue: queue_name),
+                    class: "chip #{'chip-on' if @queue == queue_name}" %>
+      <% end %>
+    </div>
+  <% end %>
 
   <section class="console-scroll-panel">
     <table class="console-table">
@@ -78,6 +110,14 @@
         </tr>
       </thead>
       <tbody class="divide-y divide-ink-700">
+        <% if @workflow_runs.empty? %>
+          <tr>
+            <td colspan="6" class="px-5 py-10 text-center text-zinc-600">
+              No runs match the selected filters.
+            </td>
+          </tr>
+        <% end %>
+
         <% @workflow_runs.each do |run| %>
           <% run_status = run.display_status %>
           <tr class="console-row-hover align-top">
@@ -114,5 +154,11 @@
         <% end %>
       </tbody>
     </table>
+
+    <%= render "pagination",
+               page: @page,
+               total_pages: @total_pages,
+               total_count: @filtered_count.to_i,
+               unit: "run" %>
   </section>
 <% end %>

@@ -1136,6 +1136,27 @@
         color: #5f656c;
       }
 
+      /* Toggle chips (filter tabs, HTTP methods): the component's @apply'd
+         ink colors compile to raw values, so the utility-class remaps above
+         don't reach them -- restyle the component classes directly. */
+      html[data-console-theme="light"] .chip {
+        border-color: #d2d3cc;
+        background: #ffffff;
+        color: #5f656c;
+      }
+
+      html[data-console-theme="light"] .chip:hover {
+        border-color: #168f4a80;
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .chip-on,
+      html[data-console-theme="light"] .chip-on:hover {
+        border-color: #168f4a;
+        background: rgba(22, 143, 74, 0.08);
+        color: #168f4a;
+      }
+
       html[data-console-theme="light"] .empty-state {
         border-color: #d8d8d0;
         background: #f0f0eb;

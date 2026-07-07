@@ -36,7 +36,7 @@ module ApplicationHelper
     when "completed" then "border-centaur-500/30 bg-centaur-500/10 text-centaur-300"
     when "running" then "border-sky-500/40 bg-sky-500/10 text-sky-300"
     when "failed" then "border-red-500/40 bg-red-500/10 text-red-300"
-    when "cancelled" then "border-zinc-600 bg-zinc-700/40 text-zinc-400"
+    when "cancelled" then "border-ink-600 bg-ink-800/80 text-zinc-400"
     when "pending", "sleeping" then "border-amber-500/40 bg-amber-500/10 text-amber-300"
     else "border-ink-600 bg-ink-800/80 text-zinc-400"
     end

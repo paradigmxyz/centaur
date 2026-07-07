@@ -6,15 +6,18 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     :workflow_name_label,
     :task_name,
     :display_status,
+    :queue_name,
     :queue_label,
     :attempts,
     :max_attempts,
     :started_or_created_at,
     :created_at,
     :terminal_at,
+    :recency_at,
     :run_id,
     :task_id,
     :harness_type,
+    :queue_run_count,
     keyword_init: true
   ) do
     def workflow_name_label
@@ -24,6 +27,10 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     def workflow_key
       workflow_name.presence || task_name.presence
     end
+
+    def recency_at
+      self[:recency_at] || terminal_at || started_or_created_at
+    end
   end
 
   setup do
@@ -31,10 +38,10 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: @operator.email, password: "password123456" }
   end
 
-  test "an admin sees workflow runs" do
+  test "an admin sees one row per workflow" do
     run = fake_run(workflow_name: "slack_sync", display_status: "running")
 
-    with_workflow_runs(run) do
+    with_workflow_index(runs: [ run ]) do
       get console_workflows_url
     end
 
@@ -45,6 +52,40 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select "span", text: "running"
     assert_select "a[href=?]", console_workflows_path
     assert response.body.index('href="/console/workflows"') < response.body.index('href="/console/threads"')
+  end
+
+  test "a workflow with runs in several queues lists each queue on its own line" do
+    run = fake_run(workflow_name: "slack_backfill", queue_name: "centaur_workflows_etl_backfill", queue_label: "etl backfill")
+    queue_runs = [
+      fake_run(workflow_name: "slack_backfill", queue_name: "centaur_workflows_etl_backfill", queue_label: "etl backfill", queue_run_count: 7),
+      fake_run(workflow_name: "slack_backfill", queue_name: "centaur_workflows_slack_live", queue_label: "slack live", display_status: "running", queue_run_count: 2)
+    ]
+
+    with_workflow_index(runs: [ run ], queue_breakdown: { "slack_backfill" => queue_runs }) do
+      get console_workflows_url
+    end
+
+    assert_response :ok
+    assert_select "tbody tr", count: 1
+    assert_match "etl backfill", response.body
+    assert_match "slack live", response.body
+    assert_match "├", response.body
+    assert_match "└", response.body
+    assert_match "7 runs", response.body
+  end
+
+  test "the workflow index is paginated" do
+    runs = 3.times.map { |i| fake_run(workflow_name: "wf_#{i}") }
+
+    with_workflow_index(runs: runs, workflow_count: 120) do
+      get console_workflows_url, params: { page: 2 }
+    end
+
+    assert_response :ok
+    assert_match "120 workflows", response.body
+    assert_match "page 2 of 3", response.body
+    assert_select "a", text: "Previous"
+    assert_select "a", text: "Next"
   end
 
   test "a non-admin is redirected away from the workflow dashboard" do
@@ -73,7 +114,7 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
   test "workflow show page lists core metadata and historical runs" do
     run = fake_run(workflow_name: "slack_sync", display_status: "completed", harness_type: "codex")
 
-    with_workflow_history("slack_sync", run) do
+    with_workflow_history("slack_sync", runs: [ run ]) do
       get console_workflow_url("slack_sync")
     end
 
@@ -84,6 +125,70 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select "dd", text: "codex"
     assert_select "h1", "Historical Runs"
     assert_select "tbody tr", count: 1
+  end
+
+  test "workflow show page renders status filter tabs with counts" do
+    run = fake_run(workflow_name: "slack_sync", display_status: "completed")
+
+    with_workflow_history(
+      "slack_sync",
+      runs: [ run ],
+      status_counts: { "completed" => 9, "failed" => 1 }
+    ) do
+      get console_workflow_url("slack_sync")
+    end
+
+    assert_response :ok
+    assert_select "a.chip", text: /all\s*10/
+    assert_select "a.chip", text: /completed\s*9/
+    assert_select "a.chip", text: /failed\s*1/
+    assert_select "dd", text: /10 runs/
+  end
+
+  test "workflow show page marks the active status tab and passes the filter through" do
+    run = fake_run(workflow_name: "slack_sync", display_status: "failed")
+    seen = {}
+
+    with_workflow_history(
+      "slack_sync",
+      runs: [ run ],
+      status_counts: { "completed" => 9, "failed" => 1 },
+      capture: seen
+    ) do
+      get console_workflow_url("slack_sync"), params: { status: "failed" }
+    end
+
+    assert_response :ok
+    assert_equal "failed", seen[:status]
+    assert_select "a.chip-on", text: /failed\s*1/
+  end
+
+  test "workflow show page renders queue tabs when several queues exist" do
+    run = fake_run(workflow_name: "slack_sync")
+
+    with_workflow_history(
+      "slack_sync",
+      runs: [ run ],
+      queue_names: %w[centaur_workflows_etl centaur_workflows_slack_live]
+    ) do
+      get console_workflow_url("slack_sync"), params: { queue: "centaur_workflows_slack_live" }
+    end
+
+    assert_response :ok
+    assert_select "a.chip", text: "etl"
+    assert_select "a.chip-on", text: "slack live"
+  end
+
+  test "workflow show page paginates historical runs" do
+    runs = 2.times.map { |i| fake_run(workflow_name: "slack_sync", run_id: "run-#{i}") }
+
+    with_workflow_history("slack_sync", runs: runs, run_count: 130) do
+      get console_workflow_url("slack_sync"), params: { page: 2 }
+    end
+
+    assert_response :ok
+    assert_match "130 runs", response.body
+    assert_match "page 2 of 3", response.body
   end
 
   test "workflow show page returns not found for unknown workflow" do
@@ -114,35 +219,43 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
       workflow_name_label: nil,
       task_name: "centaur_workflow",
       display_status: "completed",
+      queue_name: "centaur_workflows",
       queue_label: "default",
       attempts: 1,
       max_attempts: 3,
       started_or_created_at: now,
       created_at: now,
       terminal_at: now + 2.minutes,
+      recency_at: nil,
       run_id: "00000000-0000-0000-0000-000000000001",
       task_id: "00000000-0000-0000-0000-000000000002",
-      harness_type: nil
+      harness_type: nil,
+      queue_run_count: 1
     }.merge(attrs))
   end
 
-  def with_workflow_runs(*runs)
+  def with_workflow_index(runs:, queue_breakdown: {}, workflow_count: nil)
     with_centaur_workflow_run_methods(
       available?: -> { true },
-      recent: ->(limit:) {
-        runs
-      }
+      workflow_count: -> { workflow_count || runs.size },
+      latest_per_workflow: ->(limit:, offset: 0) { runs },
+      latest_per_queue: ->(keys) { queue_breakdown }
     ) do
       yield
     end
   end
 
-  def with_workflow_history(workflow_name, *runs)
+  def with_workflow_history(workflow_name, runs: [], status_counts: nil, queue_names: [], run_count: nil, capture: nil)
+    status_counts ||= runs.group_by(&:display_status).transform_values(&:size)
     with_centaur_workflow_run_methods(
       available?: -> { true },
-      for_workflow: ->(name, limit:) {
+      for_workflow: ->(name, limit:, offset: 0, status: nil, queue: nil) {
+        capture&.merge!(status: status, queue: queue, offset: offset)
         name == workflow_name && limit.positive? ? runs : []
-      }
+      },
+      status_counts: ->(name) { name == workflow_name ? status_counts : {} },
+      queue_names: ->(name) { name == workflow_name ? queue_names : [] },
+      run_count: ->(name, status: nil, queue: nil) { run_count || runs.size }
     ) do
       yield
     end
