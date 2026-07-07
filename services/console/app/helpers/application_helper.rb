@@ -42,6 +42,57 @@ module ApplicationHelper
     end
   end
 
+  # Engine names rendered the way the Chats page renders harness types
+  # (Console::ThreadsController#thread_harness_label): known harnesses get
+  # their product names, anything else is capitalized word-wise.
+  def workflow_engine_label(harness_type)
+    case harness_type.to_s
+    when "codex" then "Codex"
+    when "claudecode" then "Claude Code"
+    when "amp" then "Amp"
+    when "" then nil
+    else harness_type.to_s.tr("_-", " ").squish.split.map(&:capitalize).join(" ")
+    end
+  end
+
+  # GitHub URL for a workflow source path reported by the workflow host.
+  # Paths are repo-relative; an overlay-repo prefix ("centaur-tempo/...") maps
+  # to the tempo overlay repo, everything else to the main centaur repo.
+  def workflow_source_url(source_path)
+    path = source_path.to_s
+    return nil if path.blank?
+
+    if path.start_with?("centaur-tempo/")
+      "https://github.com/tempoxyz/centaur-tempo/blob/main/#{path.delete_prefix("centaur-tempo/")}"
+    else
+      "https://github.com/paradigmxyz/centaur/blob/main/#{path}"
+    end
+  end
+
+  # Human label for a workflow schedule from the workflows API, e.g.
+  # "cron */5 * * * *" or "every 5m". The kind is the serde-tagged enum
+  # {"type":"cron","cron":...} | {"type":"interval","interval_seconds":...}.
+  def workflow_schedule_label(schedule)
+    kind = schedule.is_a?(Hash) ? schedule["kind"] : nil
+    return nil unless kind.is_a?(Hash)
+
+    case kind["type"]
+    when "cron"
+      "cron #{kind["cron"]}"
+    when "interval"
+      seconds = kind["interval_seconds"].to_i
+      "every #{seconds % 60 == 0 && seconds >= 60 ? "#{seconds / 60}m" : "#{seconds}s"}"
+    end
+  end
+
+  # Pretty-printed JSON for workflow run payloads (input/result/failure).
+  # Falls back to to_s for values the generator refuses.
+  def workflow_debug_json(value)
+    JSON.pretty_generate(value)
+  rescue JSON::GeneratorError
+    value.to_s
+  end
+
   def workflow_duration_label(run)
     started_at = run.started_or_created_at
     finished_at = run.terminal_at

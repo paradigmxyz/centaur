@@ -41,7 +41,11 @@ Rails.application.routes.draw do
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
     resources :threads, only: %i[index create]
-    resources :workflows, only: %i[index show]
+    resources :workflows, only: %i[index show] do
+      member do
+        post :run, action: :force_start
+      end
+    end
     # Lazily-loaded sidebar thread list (Turbo Frame src). Kept off the main
     # page render so the unindexed cross-database sessions query does not block
     # every console page. See ApplicationController#load_console_sidebar_threads.

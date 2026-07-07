@@ -33,9 +33,47 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  # Stands in for CentaurApiClient: schedules/run details for show-page
+  # enrichment, plus a capture of force-started runs.
+  class FakeApiClient
+    attr_reader :created_runs
+
+    def initialize(schedules: [], run_details: {}, create_result: nil, create_error: nil)
+      @schedules = schedules
+      @run_details = run_details
+      @create_result = create_result || { "ok" => true, "run_id" => "run-new", "created" => true }
+      @create_error = create_error
+      @created_runs = []
+    end
+
+    def list_workflow_schedules
+      { "ok" => true, "schedules" => @schedules }
+    end
+
+    def get_workflow_run(run_id)
+      detail = @run_details[run_id]
+      raise CentaurApiClient::Error, "run not found" unless detail
+
+      { "ok" => true, "run" => detail }
+    end
+
+    def create_workflow_run(workflow_name:, input: nil)
+      raise CentaurApiClient::Error, @create_error if @create_error
+
+      @created_runs << { workflow_name: workflow_name, input: input }
+      @create_result
+    end
+  end
+
   setup do
+    @original_client_factory = Console::WorkflowsController.client_factory
+    with_api_client(FakeApiClient.new)
     @operator = users(:acme_admin)
     post login_url, params: { email: @operator.email, password: "password123456" }
+  end
+
+  teardown do
+    Console::WorkflowsController.client_factory = @original_client_factory
   end
 
   test "an admin sees one row per workflow" do
@@ -72,6 +110,18 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_match "├", response.body
     assert_match "└", response.body
     assert_match "7 runs", response.body
+  end
+
+  test "the workflow index does not show run ids" do
+    run = fake_run(workflow_name: "slack_sync")
+
+    with_workflow_index(runs: [ run ]) do
+      get console_workflows_url
+    end
+
+    assert_response :ok
+    assert_no_match run.run_id, response.body
+    assert_no_match run.task_id, response.body
   end
 
   test "the workflow index is paginated" do
@@ -121,9 +171,10 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_select "h1.page-title", text: /slack_sync/
     assert_select "dt", text: "Engine"
-    assert_select "dd", text: "codex"
+    assert_select "dd", text: "Codex"
     assert_select "h2", "Historical Runs"
     assert_select "tbody tr", count: 1
+    assert_select "form[action=?]", run_console_workflow_path("slack_sync")
   end
 
   test "workflow show page renders status filter tabs with counts" do
@@ -190,6 +241,109 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_match "page 2 of 3", response.body
   end
 
+  test "workflow show page shows the schedule and source link when registered" do
+    run = fake_run(workflow_name: "slack_sync", harness_type: "codex")
+    with_api_client(FakeApiClient.new(schedules: [ slack_sync_schedule ]))
+
+    with_workflow_history("slack_sync", runs: [ run ]) do
+      get console_workflow_url("slack_sync")
+    end
+
+    assert_response :ok
+    assert_select "dt", text: "Schedule"
+    assert_select "dd", text: /cron \*\/5 \* \* \* \* · America\/Los_Angeles/
+    assert_select "a[href=?]",
+                  "https://github.com/paradigmxyz/centaur/blob/main/workflows/slack/sync.py",
+                  text: /workflows\/slack\/sync\.py/
+  end
+
+  test "workflow show page links overlay-repo workflow sources to the overlay repo" do
+    run = fake_run(workflow_name: "consensus_ci_triage")
+    schedule = slack_sync_schedule.merge(
+      "workflow_name" => "consensus_ci_triage",
+      "source_path" => "centaur-tempo/workflows/consensus_ci_triage.py"
+    )
+    with_api_client(FakeApiClient.new(schedules: [ schedule ]))
+
+    with_workflow_history("consensus_ci_triage", runs: [ run ]) do
+      get console_workflow_url("consensus_ci_triage")
+    end
+
+    assert_response :ok
+    assert_select "a[href=?]",
+                  "https://github.com/tempoxyz/centaur-tempo/blob/main/workflows/consensus_ci_triage.py"
+  end
+
+  test "workflow show page surfaces the latest run's input and failure for debugging" do
+    run = fake_run(workflow_name: "slack_sync", display_status: "failed")
+    with_api_client(
+      FakeApiClient.new(
+        run_details: {
+          run.run_id => {
+            "run_id" => run.run_id,
+            "input" => { "mode" => "full" },
+            "failure" => { "error" => "boom exploded" }
+          }
+        }
+      )
+    )
+
+    with_workflow_history("slack_sync", runs: [ run ]) do
+      get console_workflow_url("slack_sync")
+    end
+
+    assert_response :ok
+    assert_select "h2", text: "Debugging"
+    assert_select "dt", text: "Input"
+    assert_select "dt", text: "Failure"
+    assert_match "boom exploded", response.body
+  end
+
+  test "workflow show page renders without api enrichment when the api is down" do
+    run = fake_run(workflow_name: "slack_sync")
+    with_api_client(FakeApiClient.new(run_details: {}))
+
+    with_workflow_history("slack_sync", runs: [ run ]) do
+      get console_workflow_url("slack_sync")
+    end
+
+    assert_response :ok
+    assert_select "h2", text: "Debugging", count: 0
+    assert_select "dt", text: "Schedule", count: 0
+  end
+
+  test "force starting a workflow queues a run with the schedule input" do
+    client = FakeApiClient.new(schedules: [ slack_sync_schedule ])
+    with_api_client(client)
+
+    post run_console_workflow_url("slack_sync")
+
+    assert_redirected_to console_workflow_path("slack_sync")
+    assert_match(/Run queued \(run-new\)/, flash[:notice])
+    assert_equal [ { workflow_name: "slack_sync", input: { "mode" => "incremental" } } ], client.created_runs
+  end
+
+  test "force starting a workflow surfaces api errors" do
+    with_api_client(FakeApiClient.new(create_error: "workflow runtime is not enabled"))
+
+    post run_console_workflow_url("slack_sync")
+
+    assert_redirected_to console_workflow_path("slack_sync")
+    assert_match(/workflow runtime is not enabled/, flash[:alert])
+  end
+
+  test "a non-admin cannot force start a workflow" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    client = FakeApiClient.new
+    with_api_client(client)
+
+    post run_console_workflow_url("slack_sync")
+
+    assert_redirected_to console_threads_path
+    assert_empty client.created_runs
+  end
+
   test "workflow show page returns not found for unknown workflow" do
     with_workflow_history("missing") do
       get console_workflow_url("missing")
@@ -210,6 +364,23 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  def with_api_client(client)
+    Console::WorkflowsController.client_factory = -> { client }
+  end
+
+  def slack_sync_schedule
+    {
+      "schedule_id" => "slack_sync",
+      "workflow_name" => "slack_sync",
+      "source_path" => "workflows/slack/sync.py",
+      "kind" => { "type" => "cron", "cron" => "*/5 * * * *" },
+      "timezone" => "America/Los_Angeles",
+      "input" => { "mode" => "incremental" },
+      "enabled" => true,
+      "no_delivery" => false
+    }
+  end
 
   def fake_run(attrs = {})
     now = Time.zone.parse("2026-07-06 12:00:00 UTC")

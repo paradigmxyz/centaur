@@ -162,4 +162,36 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     assert_equal [ '{"type":"user"}' ], body["input_lines"]
     assert_equal "idem-1", body["idempotency_key"]
   end
+
+  test "lists workflow schedules and fetches run details" do
+    http = StubHTTP.new(status: 200, body: { ok: true, schedules: [] }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.list_workflow_schedules
+    client.get_workflow_run("run:1")
+
+    schedules = http.requests.first
+    assert_equal :get, schedules[:method]
+    assert_equal "http://api.internal:8080/api/workflows/schedules", schedules[:url]
+
+    run = http.requests.second
+    assert_equal :get, run[:method]
+    assert_equal "http://api.internal:8080/api/workflows/runs/run%3A1", run[:url]
+  end
+
+  test "creates workflow runs with optional input" do
+    http = StubHTTP.new(status: 200, body: { ok: true, run_id: "r1" }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.create_workflow_run(workflow_name: "slack_sync")
+    client.create_workflow_run(workflow_name: "slack_sync", input: { "mode" => "full" })
+
+    bare = http.requests.first
+    assert_equal :post, bare[:method]
+    assert_equal "http://api.internal:8080/api/workflows/runs", bare[:url]
+    assert_equal({ "workflow_name" => "slack_sync" }, JSON.parse(bare[:body]))
+
+    with_input = http.requests.second
+    assert_equal({ "workflow_name" => "slack_sync", "input" => { "mode" => "full" } }, JSON.parse(with_input[:body]))
+  end
 end
