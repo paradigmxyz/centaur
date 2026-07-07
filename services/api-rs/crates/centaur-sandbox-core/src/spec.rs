@@ -10,7 +10,15 @@ pub enum RepoCacheAccess {
 
 impl RepoCacheAccess {
     pub fn enabled(&self) -> bool {
-        matches!(self, Self::All)
+        !matches!(self, Self::None)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Public => "public",
+            Self::All => "all",
+        }
     }
 }
 
@@ -150,6 +158,8 @@ pub struct Mount {
     pub kind: MountKind,
     pub target_path: String,
     pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
 }
 
 impl Mount {
@@ -158,11 +168,17 @@ impl Mount {
             kind,
             target_path: target_path.into(),
             read_only: false,
+            sub_path: None,
         }
     }
 
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
+        self
+    }
+
+    pub fn sub_path(mut self, sub_path: impl Into<String>) -> Self {
+        self.sub_path = Some(sub_path.into());
         self
     }
 }

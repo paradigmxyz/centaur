@@ -22,7 +22,8 @@ use centaur_sandbox_manager::{
 };
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, SandboxCapabilities as SessionSandboxCapabilities,
-    Session, SessionEvent, SessionExecution, SessionMessageInput, ThreadKey,
+    SandboxRepoCacheAccess as SessionRepoCacheAccess, Session, SessionEvent, SessionExecution,
+    SessionMessageInput, ThreadKey,
 };
 use centaur_session_sqlx::{
     PgSessionStore, SandboxCapacityCandidate, SessionEventListener, SessionStoreError,
@@ -75,6 +76,7 @@ const EXECUTION_HANDOFF_DB_TIMEOUT: Duration = Duration::from_secs(5);
 const QUEUED_ORPHAN_GRACE: Duration = Duration::from_secs(120);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
+const PUBLIC_REPO_CACHE_SUBPATH: &str = "public";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
     "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
@@ -2287,7 +2289,8 @@ impl SessionRuntime {
             iron_control_principal_present = iron_control_principal.is_some(),
             persona_id = persona_id.unwrap_or(""),
             sandbox_boot_mode = boot_mode.as_str(),
-            sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled,
+            sandbox_repo_cache_access = desired_capabilities.repo_cache.as_str(),
+            sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled(),
             sandbox_observability_enabled = desired_capabilities.observability_enabled,
             sandbox_api_server_enabled = desired_capabilities.api_server_enabled,
         );
@@ -2324,7 +2327,8 @@ impl SessionRuntime {
                         thread_key = %thread_key,
                         execution_id,
                         sandbox_id,
-                        sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled,
+                        sandbox_repo_cache_access = desired_capabilities.repo_cache.as_str(),
+                        sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled(),
                         sandbox_observability_enabled = desired_capabilities.observability_enabled,
                         sandbox_api_server_enabled = desired_capabilities.api_server_enabled,
                         "replacing existing sandbox whose capabilities do not match"
@@ -2645,7 +2649,7 @@ impl SessionRuntime {
         };
         let principal = registrar.get_principal(principal_id).await?;
         Ok(SessionSandboxCapabilities {
-            repo_cache_enabled: sandbox_repo_cache_enabled_from_principal(&principal),
+            repo_cache: sandbox_repo_cache_access_from_principal(&principal),
             observability_enabled: principal.sandbox_observability_enabled,
             api_server_enabled: principal.sandbox_api_server_enabled,
         })
@@ -5397,24 +5401,27 @@ fn sandbox_capabilities_match(
     )
 }
 
-fn sandbox_repo_cache_enabled_from_principal(principal: &centaur_iron_control::Principal) -> bool {
+fn sandbox_repo_cache_access_from_principal(
+    principal: &centaur_iron_control::Principal,
+) -> SessionRepoCacheAccess {
     match principal
         .labels
         .get(SANDBOX_REPO_CACHE_LABEL)
         .map(|value| value.trim().to_ascii_lowercase())
     {
-        Some(value) if value == "all" => true,
-        Some(_) => false,
-        None => principal.sandbox_repo_cache_enabled,
+        Some(value) if value == "all" => SessionRepoCacheAccess::All,
+        Some(value) if value == "public" => SessionRepoCacheAccess::Public,
+        Some(_) => SessionRepoCacheAccess::None,
+        None => SessionRepoCacheAccess::from_legacy_enabled(principal.sandbox_repo_cache_enabled),
     }
 }
 
 fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSandboxCapabilities) {
     spec.capabilities = BackendSandboxCapabilities {
-        repo_cache: if capabilities.repo_cache_enabled {
-            RepoCacheAccess::All
-        } else {
-            RepoCacheAccess::None
+        repo_cache: match capabilities.repo_cache {
+            SessionRepoCacheAccess::None => RepoCacheAccess::None,
+            SessionRepoCacheAccess::Public => RepoCacheAccess::Public,
+            SessionRepoCacheAccess::All => RepoCacheAccess::All,
         },
         observability_enabled: capabilities.observability_enabled,
         api_server_enabled: capabilities.api_server_enabled,
@@ -5422,7 +5429,12 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
     upsert_spec_env(
         spec,
         "CENTAUR_SANDBOX_REPO_CACHE_ENABLED",
-        capabilities.repo_cache_enabled.to_string(),
+        capabilities.repo_cache_enabled().to_string(),
+    );
+    upsert_spec_env(
+        spec,
+        "CENTAUR_SANDBOX_REPO_CACHE_ACCESS",
+        capabilities.repo_cache.as_str().to_owned(),
     );
     upsert_spec_env(
         spec,
@@ -5434,12 +5446,38 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
         "CENTAUR_SANDBOX_API_SERVER_ENABLED",
         capabilities.api_server_enabled.to_string(),
     );
-    if !capabilities.repo_cache_enabled {
-        spec.mounts
-            .retain(|mount| mount.target_path != SANDBOX_REPOS_MOUNT_PATH);
+    match capabilities.repo_cache {
+        SessionRepoCacheAccess::None => {
+            spec.mounts
+                .retain(|mount| mount.target_path != SANDBOX_REPOS_MOUNT_PATH);
+        }
+        SessionRepoCacheAccess::Public => scope_repo_cache_mounts_to_public(spec),
+        SessionRepoCacheAccess::All => {}
     }
     if !capabilities.observability_enabled {
         append_spec_env_csv(spec, "TOOL_BLOCKLIST", OBSERVABILITY_TOOL_BLOCKLIST);
+    }
+}
+
+fn scope_repo_cache_mounts_to_public(spec: &mut SandboxSpec) {
+    for mount in spec
+        .mounts
+        .iter_mut()
+        .filter(|mount| mount.target_path == SANDBOX_REPOS_MOUNT_PATH)
+    {
+        match &mut mount.kind {
+            centaur_sandbox_core::MountKind::Bind { source_path } => {
+                *source_path = format!(
+                    "{}/{}",
+                    source_path.trim_end_matches('/'),
+                    PUBLIC_REPO_CACHE_SUBPATH
+                );
+            }
+            centaur_sandbox_core::MountKind::NamedVolume(_) => {
+                mount.sub_path = Some(PUBLIC_REPO_CACHE_SUBPATH.to_owned());
+            }
+            centaur_sandbox_core::MountKind::EmptyDir => {}
+        }
     }
 }
 
@@ -6459,30 +6497,126 @@ mod tests {
 
     #[test]
     fn sandbox_repo_cache_label_overrides_legacy_boolean() {
-        assert!(sandbox_repo_cache_enabled_from_principal(&test_principal(
-            true,
-            std::collections::BTreeMap::new()
-        )));
-        assert!(!sandbox_repo_cache_enabled_from_principal(&test_principal(
-            false,
-            std::collections::BTreeMap::new()
-        )));
-        for value in ["none", "public", "pub", "private", "bogus"] {
-            assert!(!sandbox_repo_cache_enabled_from_principal(&test_principal(
+        assert_eq!(
+            sandbox_repo_cache_access_from_principal(&test_principal(
+                true,
+                std::collections::BTreeMap::new()
+            )),
+            SessionRepoCacheAccess::All
+        );
+        assert_eq!(
+            sandbox_repo_cache_access_from_principal(&test_principal(
+                false,
+                std::collections::BTreeMap::new()
+            )),
+            SessionRepoCacheAccess::None
+        );
+        for value in ["none", "private", "bogus"] {
+            assert_eq!(
+                sandbox_repo_cache_access_from_principal(&test_principal(
+                    true,
+                    std::collections::BTreeMap::from([(
+                        SANDBOX_REPO_CACHE_LABEL.to_owned(),
+                        value.to_owned(),
+                    )])
+                )),
+                SessionRepoCacheAccess::None
+            );
+        }
+        assert_eq!(
+            sandbox_repo_cache_access_from_principal(&test_principal(
                 true,
                 std::collections::BTreeMap::from([(
                     SANDBOX_REPO_CACHE_LABEL.to_owned(),
-                    value.to_owned(),
+                    "public".to_owned(),
                 )])
-            )));
-        }
-        assert!(sandbox_repo_cache_enabled_from_principal(&test_principal(
-            false,
-            std::collections::BTreeMap::from([(
-                SANDBOX_REPO_CACHE_LABEL.to_owned(),
-                "all".to_owned(),
-            )])
-        )));
+            )),
+            SessionRepoCacheAccess::Public
+        );
+        assert_eq!(
+            sandbox_repo_cache_access_from_principal(&test_principal(
+                false,
+                std::collections::BTreeMap::from([(
+                    SANDBOX_REPO_CACHE_LABEL.to_owned(),
+                    "all".to_owned(),
+                )])
+            )),
+            SessionRepoCacheAccess::All
+        );
+    }
+
+    #[test]
+    fn public_repo_cache_scopes_bind_mount_to_public_projection() {
+        let mut spec = SandboxSpec::new("mock").mount(Mount::new(
+            MountKind::Bind {
+                source_path: "/var/lib/centaur/repos".to_owned(),
+            },
+            SANDBOX_REPOS_MOUNT_PATH,
+        ));
+        let capabilities = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::Public,
+            observability_enabled: true,
+            api_server_enabled: true,
+        };
+
+        apply_sandbox_capabilities(&mut spec, &capabilities);
+
+        assert_eq!(spec.capabilities.repo_cache, RepoCacheAccess::Public);
+        assert_eq!(
+            env_value(&spec, "CENTAUR_SANDBOX_REPO_CACHE_ACCESS"),
+            Some("public")
+        );
+        assert_eq!(
+            spec.mounts[0].kind,
+            MountKind::Bind {
+                source_path: "/var/lib/centaur/repos/public".to_owned(),
+            }
+        );
+        assert_eq!(spec.mounts[0].sub_path, None);
+    }
+
+    #[test]
+    fn public_repo_cache_scopes_named_volume_to_public_subpath() {
+        let mut spec = SandboxSpec::new("mock").mount(Mount::new(
+            MountKind::NamedVolume("centaur-repo-cache".to_owned()),
+            SANDBOX_REPOS_MOUNT_PATH,
+        ));
+        let capabilities = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::Public,
+            observability_enabled: true,
+            api_server_enabled: true,
+        };
+
+        apply_sandbox_capabilities(&mut spec, &capabilities);
+
+        assert_eq!(
+            spec.mounts[0].kind,
+            MountKind::NamedVolume("centaur-repo-cache".to_owned())
+        );
+        assert_eq!(spec.mounts[0].sub_path.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn disabled_repo_cache_removes_repo_mount() {
+        let mut spec = SandboxSpec::new("mock")
+            .mount(Mount::new(
+                MountKind::Bind {
+                    source_path: "/var/lib/centaur/repos".to_owned(),
+                },
+                SANDBOX_REPOS_MOUNT_PATH,
+            ))
+            .mount(Mount::new(MountKind::EmptyDir, "/workspace"));
+        let capabilities = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::None,
+            observability_enabled: true,
+            api_server_enabled: true,
+        };
+
+        apply_sandbox_capabilities(&mut spec, &capabilities);
+
+        assert_eq!(spec.capabilities.repo_cache, RepoCacheAccess::None);
+        assert_eq!(spec.mounts.len(), 1);
+        assert_eq!(spec.mounts[0].target_path, "/workspace");
     }
 
     fn test_principal(
@@ -8037,7 +8171,7 @@ mod adoption_tests {
 
     fn restricted_capabilities() -> SessionSandboxCapabilities {
         SessionSandboxCapabilities {
-            repo_cache_enabled: false,
+            repo_cache: SessionRepoCacheAccess::None,
             observability_enabled: false,
             api_server_enabled: false,
         }

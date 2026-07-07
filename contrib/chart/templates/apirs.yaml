@@ -18,7 +18,7 @@
 {{- $repo := get $source "repo" | default "" -}}
 {{- if $repo -}}
 {{- with (get $source "toolsSubdir") -}}
-{{- $toolSource := dict "repo" $repo "subdir" . -}}
+{{- $toolSource := dict "repo" $repo "subdir" . "visibility" (get $source "visibility" | default "private") -}}
 {{- with (get $source "ref") }}{{- $_ := set $toolSource "ref" . -}}{{- end -}}
 {{- $toolSources = append $toolSources $toolSource -}}
 {{- end -}}
@@ -403,6 +403,8 @@ spec:
 {{- end }}
             - name: KUBERNETES_TOOLS_SUBDIR
               value: {{ get $firstToolSource "subdir" | quote }}
+            - name: KUBERNETES_TOOLS_VISIBILITY
+              value: {{ get $firstToolSource "visibility" | default "private" | quote }}
 {{- if $extraToolSources }}
             - name: KUBERNETES_TOOLS_EXTRA_SOURCES
               value: {{ toJson $extraToolSources | quote }}

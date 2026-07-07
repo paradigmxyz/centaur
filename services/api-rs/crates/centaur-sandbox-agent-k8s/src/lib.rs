@@ -612,8 +612,13 @@ fn build_agent_sandbox(
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
     let repo_cache_enabled = spec.capabilities.repo_cache.enabled();
-    let repo_cache_tools = config.tools.as_ref().filter(|_| repo_cache_enabled);
-    let baked_base_tools = config.tools.is_some() && !repo_cache_enabled;
+    let scoped_tools = config
+        .tools
+        .as_ref()
+        .filter(|_| repo_cache_enabled)
+        .map(|tools| tools.scoped_for_repo_cache_access(&spec.capabilities.repo_cache));
+    let repo_cache_tools = scoped_tools.as_ref().filter(|tools| tools.has_sources());
+    let baked_base_tools = config.tools.is_some() && repo_cache_tools.is_none();
 
     if repo_cache_tools.is_some() {
         for (name, value) in tools::agent_env(repo_cache_tools) {
@@ -759,6 +764,11 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
             "mountPath": mount.target_path,
             "readOnly": mount.read_only,
         }));
+        if let Some(sub_path) = &mount.sub_path {
+            if let Some(mount_obj) = mounts.last_mut().and_then(Value::as_object_mut) {
+                mount_obj.insert("subPath".to_owned(), json!(sub_path));
+            }
+        }
         volumes.push(match &mount.kind {
             MountKind::EmptyDir => json!({
                 "name": name,

@@ -74,8 +74,10 @@ class RepoCacheSyncTest(unittest.TestCase):
     def test_check_ready_validates_fingerprint_and_repos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            repo_path = root / "cache" / "acme" / "centaur" / ".git"
+            repo_path = root / "cache" / "private" / "acme" / "centaur" / ".git"
             repo_path.mkdir(parents=True)
+            (root / "cache" / "acme").mkdir()
+            (root / "cache" / "acme" / "centaur").symlink_to("../private/acme/centaur")
             sync = repo_cache_sync.RepoCacheSync(
                 cache_dir=root / "cache",
                 repositories=["acme/centaur"],
@@ -93,6 +95,70 @@ class RepoCacheSyncTest(unittest.TestCase):
                 "repository_visibilities=acme/centaur=private\n"
             )
             self.assertEqual(sync.check_ready(), 1)
+
+    def test_repository_targets_use_visibility_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=root / "cache",
+                repositories=["acme/public", "acme/private"],
+                repository_refs={},
+                repository_visibilities={
+                    "acme/public": "public",
+                    "acme/private": "private",
+                },
+                sync_interval_seconds=30,
+                github_token_file=root / "missing-token",
+            )
+
+            self.assertEqual(
+                sync.repository_target("acme/public"),
+                root / "cache" / "public" / "acme" / "public",
+            )
+            self.assertEqual(
+                sync.repository_target("acme/private"),
+                root / "cache" / "private" / "acme" / "private",
+            )
+
+    def test_legacy_link_points_to_visibility_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "cache" / "public" / "acme" / "docs"
+            (target / ".git").mkdir(parents=True)
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=root / "cache",
+                repositories=["acme/docs"],
+                repository_refs={},
+                repository_visibilities={"acme/docs": "public"},
+                sync_interval_seconds=30,
+                github_token_file=root / "missing-token",
+            )
+
+            sync.update_legacy_link("acme/docs", target)
+
+            link = root / "cache" / "acme" / "docs"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), target.resolve())
+
+    def test_migrate_existing_checkout_moves_old_root_to_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "cache" / "acme" / "docs"
+            (old / ".git").mkdir(parents=True)
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=root / "cache",
+                repositories=["acme/docs"],
+                repository_refs={},
+                repository_visibilities={"acme/docs": "public"},
+                sync_interval_seconds=30,
+                github_token_file=root / "missing-token",
+            )
+
+            target = sync.repository_target("acme/docs")
+            sync.migrate_existing_checkout("acme/docs", target)
+
+            self.assertTrue((target / ".git").is_dir())
+            self.assertFalse(old.exists())
 
     def test_run_forever_restores_repo_cache_umask(self) -> None:
         class StopAfterUmask(repo_cache_sync.RepoCacheSync):

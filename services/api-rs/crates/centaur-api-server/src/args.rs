@@ -215,6 +215,7 @@ impl ToolGitSource {
                 repo: tools.repo.clone(),
                 git_ref: tools.git_ref.clone(),
                 source_subdir: tools.source_subdir.clone(),
+                visibility: tools.visibility.clone(),
             },
             tools.repo_cache_path.clone(),
         )];
@@ -1430,6 +1431,13 @@ struct ToolsArgs {
     )]
     repo_cache_pvc: Option<String>,
     #[arg(
+        id = "tools_visibility",
+        long = "kubernetes-tools-visibility",
+        env = "KUBERNETES_TOOLS_VISIBILITY",
+        default_value = "private"
+    )]
+    visibility: Option<String>,
+    #[arg(
         id = "tools_auto_reload",
         long = "kubernetes-tools-auto-reload",
         env = "KUBERNETES_TOOLS_AUTO_RELOAD",
@@ -1478,6 +1486,7 @@ impl ToolsArgs {
         let mut config = ToolsConfig::new(repo, image);
         config.image_pull_policy = self.image_pull_policy.clone();
         config.git_ref = clean_optional_value(self.git_ref.as_deref());
+        config.visibility = repository_visibility(self.visibility.as_deref());
         if let Some(subdir) = clean_optional_value(Some(self.source_subdir.as_str())) {
             config.source_subdir = subdir;
         }
@@ -1503,6 +1512,8 @@ struct ToolSourceArg {
     git_ref: Option<String>,
     #[serde(default)]
     subdir: Option<String>,
+    #[serde(default)]
+    visibility: Option<String>,
 }
 
 impl ToolSourceArg {
@@ -1518,7 +1529,15 @@ impl ToolSourceArg {
                 .as_deref()
                 .and_then(|value| clean_optional_value(Some(value)))
                 .unwrap_or_else(|| "tools".to_owned()),
+            visibility: repository_visibility(self.visibility.as_deref()),
         })
+    }
+}
+
+fn repository_visibility(value: Option<&str>) -> String {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("public") => "public".to_owned(),
+        _ => "private".to_owned(),
     }
 }
 
@@ -2227,6 +2246,8 @@ mod tests {
             "centaur-agent:test",
             "--kubernetes-tools-repo-cache-path",
             "/var/lib/centaur/repos",
+            "--kubernetes-tools-visibility",
+            "public",
             "--kubernetes-tools-github-token-secret",
             "centaur-repo-cache-github-token",
         ])
@@ -2236,6 +2257,7 @@ mod tests {
         assert_eq!(tools.repo, "paradigmxyz/centaur");
         assert_eq!(tools.git_ref.as_deref(), Some("main"));
         assert_eq!(tools.source_subdir, "tools");
+        assert_eq!(tools.visibility, "public");
         assert_eq!(tools.image, "centaur-agent:test");
         assert_eq!(
             tools.repo_cache_path.as_deref(),
