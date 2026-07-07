@@ -157,6 +157,47 @@ module Mcp
       assert_equal "mcp:tools", jwt_payload.fetch("scope")
     end
 
+    test "authorization approval seeds new console principals with the user-mcp role" do
+      client = create_client
+
+      code = authorize_code(client)
+
+      principal = McpOauthAuthorizationCode.find_usable(code).principal
+      role = Role.find_by(namespace: principal.namespace, foreign_id: "user-mcp")
+      assert role, "expected the user-mcp role to be created"
+      assert_equal "User MCP", role.name
+      assert_equal "centaur", role.labels["managed-by"]
+      assert_includes principal.roles, role
+    end
+
+    test "authorization approval reuses an existing user-mcp role" do
+      existing = Role.create!(
+        namespace: "default",
+        foreign_id: "user-mcp",
+        name: "Custom user role",
+        created_by: @operator
+      )
+      client = create_client
+
+      assert_no_difference -> { Role.count } do
+        code = authorize_code(client)
+        principal = McpOauthAuthorizationCode.find_usable(code).principal
+        assert_includes principal.roles, existing
+      end
+    end
+
+    test "authorization approval does not restore a removed user-mcp role on existing principals" do
+      client = create_client
+      code = authorize_code(client)
+      principal = McpOauthAuthorizationCode.find_usable(code).principal
+      principal.principal_roles.destroy_all
+
+      post "/mcp/oauth/authorize", params: authorize_params(client).merge(decision: "approve")
+
+      assert_response :redirect
+      assert_empty principal.reload.roles
+    end
+
     test "authorization code exchange rejects users disabled after consent" do
       client = create_client
       code = authorize_code(client)

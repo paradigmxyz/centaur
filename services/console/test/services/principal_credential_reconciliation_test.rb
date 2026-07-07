@@ -26,8 +26,8 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
       candidate.principal == principal
     end
     assert_not_nil entry
-    assert_equal [ slack ], entry.slack_credentials
-    assert_equal [ google ], entry.google_credentials
+    assert_equal [ slack ], entry.credentials_for("slack")
+    assert_equal [ google ], entry.credentials_for("google")
     assert_empty entry.actionable_credentials
   end
 
@@ -74,8 +74,8 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     end
 
     assert_not_nil entry
-    assert_equal [ slack ], entry.slack_credentials
-    assert_equal [ google ], entry.google_credentials
+    assert_equal [ slack ], entry.credentials_for("slack")
+    assert_equal [ google ], entry.credentials_for("google")
     assert principal.grants.exists?(static_secret: slack.static_secret)
     assert principal.grants.exists?(static_secret: google.static_secret)
     assert_equal "google-sub-alice", principal.reload.labels["google_subject"]
@@ -163,7 +163,82 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     end
   end
 
+  test "console user principal is granted matching credentials across providers on create" do
+    slack = create_credential(oauth_apps(:acme_slack), "slack-sub-carol", "carol@acme.example")
+    google = create_credential(oauth_apps(:acme_google), "google-sub-carol", "carol@acme.example")
+    github = create_credential(oauth_apps(:acme_github), "12345", "carol@acme.example")
+    secrets = [ slack, google, github ].map { |credential| wrap(credential) }
+
+    principal = create_console_user_principal(
+      users(:member_user),
+      email: "carol@acme.example",
+      foreign_id: "console-user-carol"
+    )
+
+    secrets.each do |secret|
+      assert principal.grants.exists?(static_secret: secret),
+             "expected grant for #{secret.name}"
+    end
+  end
+
+  test "console user principal matches credentials via verified identity emails" do
+    user = users(:member_user)
+    user.user_identities.create!(
+      provider: "google", subject: "google-sub-member",
+      email: "member.alt@acme.example", email_verified: true
+    )
+    credential = create_credential(oauth_apps(:acme_slack), "slack-sub-alt", "member.alt@acme.example")
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(user, foreign_id: "console-user-member")
+
+    assert principal.grants.exists?(static_secret: secret)
+  end
+
+  test "console user principal ignores unverified identity emails" do
+    user = users(:member_user)
+    user.user_identities.create!(
+      provider: "google", subject: "google-sub-unverified",
+      email: "victim@acme.example", email_verified: false
+    )
+    credential = create_credential(oauth_apps(:acme_slack), "slack-sub-victim", "victim@acme.example")
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(user, foreign_id: "console-user-member-2")
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "github credential identity enrichment grants an existing wrapper when it becomes a match" do
+    principal = principals(:acme_user_alice)
+    principal.update!(labels: principal.labels.merge("email" => "alice@example.com"))
+    credential = create_credential(oauth_apps(:acme_github), "gh-pending", nil)
+    secret = wrap(credential)
+    refute principal.grants.exists?(static_secret: secret)
+
+    assert_difference -> { principal.grants.count }, 1 do
+      credential.update!(provider_email: "alice@example.com")
+    end
+    assert principal.grants.exists?(static_secret: secret)
+  end
+
   private
+
+  # Mirrors the principal shape minted by Mcp::OauthController#principal_for_current_user.
+  def create_console_user_principal(user, foreign_id:, email: nil)
+    Principal.create!(
+      namespace: "acme",
+      foreign_id: foreign_id,
+      name: user.name.presence || user.email,
+      labels: {
+        "managed-by" => "centaur",
+        "kind" => "console_user",
+        "console-user-id" => user.oid,
+        "email" => email || user.email
+      },
+      created_by: user
+    )
+  end
 
   def create_credential(app, subject, email)
     BrokerCredential.create!(

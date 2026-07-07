@@ -12,6 +12,10 @@ module Mcp
 
     ACCESS_TOKEN_TTL_SECONDS = 1.hour.to_i
 
+    # The shared role seeded onto new console-user principals. Admins attach
+    # tool secrets to this role to define what every MCP user gets by default.
+    USER_MCP_ROLE_FOREIGN_ID = "user-mcp"
+
     # GET /.well-known/oauth-authorization-server
     def metadata
       render json: {
@@ -435,19 +439,43 @@ module Mcp
 
     def principal_for_current_user
       foreign_id = principal_foreign_id(current_user.email)
-      Principal
-        .find_or_initialize_by(namespace: mcp_principal_namespace, foreign_id: foreign_id)
-        .tap do |principal|
-        principal.created_by ||= current_user
-        principal.name = current_user.name.presence || current_user.email
-        principal.labels = principal.labels.merge(
-          "managed-by" => "centaur",
-          "kind" => "console_user",
-          "console-user-id" => current_user.oid,
-          "email" => current_user.email
+      principal = Principal.find_or_initialize_by(
+        namespace: mcp_principal_namespace, foreign_id: foreign_id
+      )
+      newly_created = principal.new_record?
+      principal.created_by ||= current_user
+      principal.name = current_user.name.presence || current_user.email
+      principal.labels = principal.labels.merge(
+        "managed-by" => "centaur",
+        "kind" => "console_user",
+        "console-user-id" => current_user.oid,
+        "email" => current_user.email
+      )
+      principal.save!
+      assign_user_mcp_role(principal) if newly_created
+      principal
+    end
+
+    # New console-user principals start with the shared user-mcp role. Seeded
+    # only at creation so an operator removing the role from a principal
+    # sticks, mirroring SessionRegistrar's seeding of the infra role for
+    # session principals.
+    def assign_user_mcp_role(principal)
+      role = Role
+        .create_with(
+          name: "User MCP",
+          labels: { "managed-by" => "centaur" },
+          created_by: current_user
         )
-        principal.save!
-      end
+        .find_or_create_by!(
+          namespace: principal.namespace,
+          foreign_id: USER_MCP_ROLE_FOREIGN_ID
+        )
+      principal.principal_roles.find_or_create_by!(role: role)
+    rescue ActiveRecord::RecordNotUnique
+      # Concurrent authorize requests raced the role or assignment into
+      # existence; the requested end state is true.
+      retry
     end
 
     def principal_foreign_id(email)
