@@ -2,6 +2,7 @@
  * Inline message directives, restored from the v1 slackbot:
  *   --claude | --claude-code | --amp | --codex   pick the harness for the thread
  *   --bedrock                                    codex via the AWS Bedrock provider
+ *   --meta                                       codex via Meta AI direct
  *   --model <name> (or --model=<name>)           pick the model within that harness
  *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
@@ -15,9 +16,8 @@
  * (fable/opus/sonnet/haiku) which expands to the full id. Reasoning effort only
  * affects the codex harness (it maps to codex's `turn/start` `effort`) and stays
  * per-turn; other harnesses ignore it. The provider rides the blocks-protocol
- * `provider` field and is fixed when the codex thread starts; `--bedrock`
- * selects codex's built-in `amazon-bedrock` provider (and implies the codex
- * harness). Pair it with `--model <bedrock-id>` to choose the Bedrock model.
+ * `provider` field and is fixed when the codex thread starts. Provider
+ * shortcuts imply the codex harness.
  */
 
 export type MessageOverrides = {
@@ -41,7 +41,8 @@ const HARNESS_FLAGS: Record<string, string> = {
 // it). Bedrock rides codex's built-in `amazon-bedrock` provider, whose wire
 // value is passed through as the blocks-protocol `provider` field.
 const PROVIDER_FLAGS: Record<string, { provider: string; harnessType: string }> = {
-  bedrock: { provider: 'amazon-bedrock', harnessType: 'codex' }
+  bedrock: { provider: 'amazon-bedrock', harnessType: 'codex' },
+  meta: { provider: 'responses', harnessType: 'codex' }
 }
 
 // Claude model aliases, usable both as bare flags (--opus) and as --model

@@ -311,6 +311,43 @@ module Oauth
       assert_equal "operator-renamed", secret.reload.name
     end
 
+    test "callback records the signed-in user on the credential and keeps the original owner on re-consent" do
+      user = users(:member_user)
+      sign_in user
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+
+      cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
+      assert_equal user, cred.created_by
+
+      # Someone else re-consenting for the same provider account does not steal
+      # the credential.
+      sign_in users(:acme_admin)
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+      assert_equal user, cred.reload.created_by
+    end
+
+    test "a Slack consent with no email in the token response still shows connected on Integrations" do
+      user = users(:member_user)
+      sign_in user
+      state = start_flow(slug: "slack", scopes: "chat:write")
+      stub_exchange(status: 200, body: slack_token_body)
+      get oauth_callback_url(slug: "slack"), params: { state: state, code: "auth-code" }
+      assert_redirected_to console_integrations_path
+
+      # Slack's token response carries no email (enrichment fills it in later),
+      # so the connected state must come from the created_by link.
+      cred = BrokerCredential.find_by(oauth_app: oauth_apps(:acme_slack), provider_subject: "U0R7MFMJM")
+      assert_nil cred.provider_email
+      assert_equal user, cred.created_by
+
+      get console_integrations_url
+      assert_select "a.btn-secondary[href=?]", "http://www.example.com/oauth/slack/start", text: "Reconnect"
+    end
+
     test "callback works with a disabled console session" do
       user = users(:member_user)
       sign_in user

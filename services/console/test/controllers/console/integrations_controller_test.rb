@@ -52,6 +52,27 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Needs reconnecting", response.body
   end
 
+  test "a credential the user minted shows connected even when the provider email differs" do
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    BrokerCredential.create!(
+      oauth_app: oauth_apps(:acme_google),
+      namespace: "acme",
+      foreign_id: "google-google-personal-sub",
+      name: "Google – Personal",
+      token_endpoint: "https://oauth2.googleapis.com/token",
+      client_id: "google-client-id",
+      provider_subject: "personal-sub",
+      provider_email: "personal@gmail.example",
+      external_user_key: "personal-key",
+      created_by: users(:member_user)
+    )
+
+    get console_integrations_url
+    assert_response :ok
+    assert_select "a.btn-secondary[href=?]", "http://www.example.com/oauth/google/start", text: "Reconnect"
+  end
+
   test "a credential minted for someone else's email does not mark the app connected" do
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 

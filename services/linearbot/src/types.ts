@@ -188,6 +188,8 @@ export type ForwardSessionInput = {
   messages: LinearbotApiMessage[];
   /** Per-turn model override parsed from message flags (--model/--opus/...). */
   model?: string;
+  /** Per-turn model provider override parsed from message flags (--meta). */
+  provider?: string;
   onEventId(eventId: number): void;
   openStream: boolean;
   threadId: string;

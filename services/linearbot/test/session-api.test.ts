@@ -158,6 +158,37 @@ describe("forwardToSessionApi overrides", () => {
     expect("model" in line).toBe(false);
   });
 
+  test("includes provider override on the execute input line", async () => {
+    const { fetchFn, requests } = fakeApi();
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage("review this"), {
+        model: "custom-model",
+        provider: "responses",
+      }),
+    );
+    const execute = requests.find((request) =>
+      request.url.endsWith("/execute"),
+    );
+    const line = JSON.parse(
+      (execute?.body as { input_lines: string[] }).input_lines[0]!,
+    );
+    expect(line.model).toBe("custom-model");
+    expect(line.provider).toBe("responses");
+  });
+
+  test("omits provider field when no override is set", async () => {
+    const { fetchFn, requests } = fakeApi();
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage("hi")));
+    const execute = requests.find((request) =>
+      request.url.endsWith("/execute"),
+    );
+    const line = JSON.parse(
+      (execute?.body as { input_lines: string[] }).input_lines[0]!,
+    );
+    expect("provider" in line).toBe(false);
+  });
+
   test("retries session creation with existing harness on 409 conflict", async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [

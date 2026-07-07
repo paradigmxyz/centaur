@@ -27,6 +27,17 @@ fn harness_auth_fragments_are_baked_in() {
         Some("OPENROUTER_API_KEY")
     );
 
+    let meta_ai = harness_auth_fragment("meta-ai", "api_key")
+        .unwrap()
+        .unwrap();
+    let meta_ai_placeholders = placeholder_env(&[meta_ai]);
+    assert_eq!(
+        meta_ai_placeholders
+            .get("META_AI_API_KEY")
+            .map(String::as_str),
+        Some("META_AI_API_KEY")
+    );
+
     assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
 
     let infra = infra_fragment().unwrap();

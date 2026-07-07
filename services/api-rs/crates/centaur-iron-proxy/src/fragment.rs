@@ -32,6 +32,7 @@ pub fn harness_auth_fragment(engine: &str, auth_mode: &str) -> Result<Option<Pro
         ("codex", "api_key") => CODEX_API_KEY_FRAGMENT,
         ("codex", "access_token") => CODEX_ACCESS_TOKEN_FRAGMENT,
         ("openrouter", "api_key") => OPENROUTER_API_KEY_FRAGMENT,
+        ("meta-ai", "api_key") => META_AI_API_KEY_FRAGMENT,
         ("claude-code", "api_key") => CLAUDE_CODE_API_KEY_FRAGMENT,
         ("claude-code", "access_token") => CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT,
         _ => return Ok(None),
@@ -178,6 +179,18 @@ transforms:
             proxy_value: OPENROUTER_API_KEY
             match_headers: ["Authorization"]
           rules: [{ host: openrouter.ai }]
+"#;
+
+const META_AI_API_KEY_FRAGMENT: &str = r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: META_AI_API_KEY_AUTHORIZATION
+          replace:
+            proxy_value: META_AI_API_KEY
+            match_headers: ["Authorization"]
+          rules: [{ host: api.ai.meta.com }]
 "#;
 
 // The `openai-codex` broker credential this references is managed by
