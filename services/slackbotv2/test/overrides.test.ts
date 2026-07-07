@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { SlackFormatConverter } from '@chat-adapter/slack'
 import { extractMessageOverrides } from '../src/overrides'
 
 describe('extractMessageOverrides', () => {
@@ -221,5 +222,46 @@ describe('extractMessageOverrides', () => {
   test('--bedrock does not match flags embedded in words', () => {
     expect(extractMessageOverrides('--bedrocky hi').provider).toBeUndefined()
     expect(extractMessageOverrides('the --bedrock flag').provider).toBe('amazon-bedrock')
+  })
+})
+
+// The adapter's plain-text extraction feeds extractMessageOverrides. The
+// unpatched @chat-adapter/slack flattened the parsed AST with
+// mdast-util-to-string, which joins sibling paragraphs with NO separator —
+// `--model=fable\n\nexamine ...` reached the parser as `--model=fableexamine
+// ...` and the harness got a nonexistent model. The patched converter
+// preserves block boundaries; these tests exercise the real pipeline.
+describe('SlackFormatConverter.extractPlainText + extractMessageOverrides', () => {
+  const converter = new SlackFormatConverter()
+
+  test('paragraph break after --model survives plain-text extraction', () => {
+    const mrkdwn =
+      '--claude --model=fable\n\nexamine <https://github.com/paradigmxyz/centaur/pull/921|github.com/paradigmxyz/centaur/pull/921>. cross reference that PR.'
+    const text = converter.extractPlainText(mrkdwn)
+    expect(text).toBe(
+      '--claude --model=fable\n\nexamine github.com/paradigmxyz/centaur/pull/921. cross reference that PR.'
+    )
+    expect(extractMessageOverrides(text)).toEqual({
+      cleanedText: 'examine github.com/paradigmxyz/centaur/pull/921. cross reference that PR.',
+      harnessType: 'claudecode',
+      model: 'claude-fable-5',
+      reasoning: undefined
+    })
+  })
+
+  test('single newlines and paragraph breaks are both preserved', () => {
+    expect(converter.extractPlainText('--model=fable\nexamine this')).toBe(
+      '--model=fable\nexamine this'
+    )
+    expect(converter.extractPlainText('line1\n\nline2\nline3')).toBe('line1\n\nline2\nline3')
+  })
+
+  test('list items and blockquotes keep line boundaries', () => {
+    expect(converter.extractPlainText('- item1\n- item2\n\nafter list')).toBe(
+      'item1\nitem2\n\nafter list'
+    )
+    expect(converter.extractPlainText('> quoted line\n\nafter quote')).toBe(
+      'quoted line\n\nafter quote'
+    )
   })
 })
