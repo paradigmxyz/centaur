@@ -1189,8 +1189,11 @@
         --tw-ring-color: #d8d8d0;
       }
 
-      html[data-console-theme="light"] .divide-ink-600 > :not([hidden]) ~ :not([hidden]),
-      html[data-console-theme="light"] .divide-ink-700 > :not([hidden]) ~ :not([hidden]) {
+      /* Tailwind v4 puts divide-y borders on `> :not(:last-child)` (border-bottom),
+         not on the v3 `~` sibling selector — the first child carries a divider too,
+         so the recolor must cover it or the first row's border stays ink-dark. */
+      html[data-console-theme="light"] .divide-ink-600 > :not(:last-child),
+      html[data-console-theme="light"] .divide-ink-700 > :not(:last-child) {
         border-block-color: #deded7;
         border-color: #deded7;
       }
