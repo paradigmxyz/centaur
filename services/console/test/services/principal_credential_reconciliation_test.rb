@@ -164,21 +164,53 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   end
 
   test "console user principal is granted matching credentials across providers on create" do
-    slack = create_credential(oauth_apps(:acme_slack), "slack-sub-carol", "carol@acme.example")
-    google = create_credential(oauth_apps(:acme_google), "google-sub-carol", "carol@acme.example")
-    github = create_credential(oauth_apps(:acme_github), "12345", "carol@acme.example")
+    slack = create_credential(oauth_apps(:acme_slack), "slack-sub-member", "member@acme.example")
+    google = create_credential(oauth_apps(:acme_google), "google-sub-member", "member@acme.example")
+    github = create_credential(oauth_apps(:acme_github), "12345", "member@acme.example")
     secrets = [ slack, google, github ].map { |credential| wrap(credential) }
 
-    principal = create_console_user_principal(
-      users(:member_user),
-      email: "carol@acme.example",
-      foreign_id: "console-user-carol"
-    )
+    principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-member-0")
 
     secrets.each do |secret|
       assert principal.grants.exists?(static_secret: secret),
              "expected grant for #{secret.name}"
     end
+  end
+
+  test "console user principal ignores a spoofed email label" do
+    credential = create_credential(oauth_apps(:acme_slack), "slack-sub-carol", "carol@acme.example")
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(
+      users(:member_user),
+      email: "carol@acme.example",
+      foreign_id: "console-user-spoofed-email"
+    )
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "console user principal ignores provider subject labels" do
+    credential = create_credential(oauth_apps(:acme_google), "google-sub-carol", "carol@acme.example")
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(
+      users(:member_user),
+      extra_labels: { "google_subject" => "google-sub-carol" },
+      foreign_id: "console-user-spoofed-subject"
+    )
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "console user principal does not accumulate provider labels from matched credentials" do
+    create_credential(oauth_apps(:acme_google), "google-sub-member", "member@acme.example")
+
+    principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-labels")
+
+    labels = principal.reload.labels
+    assert_nil labels["google_subject"]
+    assert_nil labels["google_email"]
   end
 
   test "console user principal matches credentials via verified identity emails" do
@@ -225,7 +257,9 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   private
 
   # Mirrors the principal shape minted by Mcp::OauthController#principal_for_current_user.
-  def create_console_user_principal(user, foreign_id:, email: nil)
+  # The email/extra_labels overrides simulate tampered or stale labels, which
+  # matching must ignore for console-user principals.
+  def create_console_user_principal(user, foreign_id:, email: nil, extra_labels: {})
     Principal.create!(
       namespace: "acme",
       foreign_id: foreign_id,
@@ -235,7 +269,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
         "kind" => "console_user",
         "console-user-id" => user.oid,
         "email" => email || user.email
-      },
+      }.merge(extra_labels),
       created_by: user
     )
   end

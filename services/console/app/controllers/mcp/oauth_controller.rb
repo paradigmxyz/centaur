@@ -437,23 +437,33 @@ module Mcp
       nil
     end
 
+    # Principal creation and role seeding share a transaction: seeding is
+    # create-only, so a principal that committed without its role would stay
+    # unseeded forever. The RecordNotUnique retry sits outside the transaction
+    # because a unique violation aborts the enclosing Postgres transaction;
+    # every violation source (principal, role, or assignment race) converges
+    # to the find path on the next pass.
     def principal_for_current_user
-      foreign_id = principal_foreign_id(current_user.email)
-      principal = Principal.find_or_initialize_by(
-        namespace: mcp_principal_namespace, foreign_id: foreign_id
-      )
-      newly_created = principal.new_record?
-      principal.created_by ||= current_user
-      principal.name = current_user.name.presence || current_user.email
-      principal.labels = principal.labels.merge(
-        "managed-by" => "centaur",
-        "kind" => "console_user",
-        "console-user-id" => current_user.oid,
-        "email" => current_user.email
-      )
-      principal.save!
-      assign_user_mcp_role(principal) if newly_created
-      principal
+      Principal.transaction do
+        foreign_id = principal_foreign_id(current_user.email)
+        principal = Principal.find_or_initialize_by(
+          namespace: mcp_principal_namespace, foreign_id: foreign_id
+        )
+        newly_created = principal.new_record?
+        principal.created_by ||= current_user
+        principal.name = current_user.name.presence || current_user.email
+        principal.labels = principal.labels.merge(
+          "managed-by" => "centaur",
+          "kind" => "console_user",
+          "console-user-id" => current_user.oid,
+          "email" => current_user.email
+        )
+        principal.save!
+        assign_user_mcp_role(principal) if newly_created
+        principal
+      end
+    rescue ActiveRecord::RecordNotUnique
+      retry
     end
 
     # New console-user principals start with the shared user-mcp role. Seeded
@@ -472,10 +482,6 @@ module Mcp
           foreign_id: USER_MCP_ROLE_FOREIGN_ID
         )
       principal.principal_roles.find_or_create_by!(role: role)
-    rescue ActiveRecord::RecordNotUnique
-      # Concurrent authorize requests raced the role or assignment into
-      # existence; the requested end state is true.
-      retry
     end
 
     def principal_foreign_id(email)

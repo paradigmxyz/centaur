@@ -27,7 +27,11 @@ class PrincipalCredentialReconciliation
 
   USER_KIND = "user"
   # Minted by the MCP OAuth flow (Mcp::OauthController#principal_for_current_user)
-  # for a console user connecting an MCP client.
+  # for a console user connecting an MCP client. These principals match
+  # credentials only through their console User record (primary email plus
+  # verified identity emails) -- never through mutable principal labels or
+  # provider-subject labels, which would widen the trust boundary beyond the
+  # authenticated user.
   CONSOLE_USER_KIND = "console_user"
   CONSOLE_USER_ID_LABEL = "console-user-id"
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
@@ -104,6 +108,10 @@ class PrincipalCredentialReconciliation
   end
 
   def sync_principal_provider_labels(principal, credentials)
+    # Console-user principals never match by label, so stamping provider
+    # identity labels on them would only create stale, unused inputs.
+    return if console_user_principal?(principal)
+
     google_credentials = credentials.select do |credential|
       credential.oauth_app&.provider == GOOGLE_PROVIDER
     end
@@ -207,6 +215,8 @@ class PrincipalCredentialReconciliation
   end
 
   def credentials_for_subject_labels(principal, provider, subject_index)
+    return [] if console_user_principal?(principal)
+
     labels = principal.labels || {}
     subjects = subject_label_keys(provider).filter_map { |key| normalize_key(labels[key]) }.uniq
     subjects
@@ -227,6 +237,9 @@ class PrincipalCredentialReconciliation
     return false unless supported_provider?(credential)
     return false unless credential.namespace == principal.namespace
     return false if provider == SLACK_PROVIDER && !slack_team_matches?(principal, credential)
+    if console_user_principal?(principal)
+      return principal_emails(principal).include?(normalize_email(credential.provider_email))
+    end
 
     subjects = subject_label_keys(provider)
       .filter_map { |key| normalize_key(principal.labels&.[](key)) }
@@ -258,10 +271,17 @@ class PrincipalCredentialReconciliation
     principal_team.present? && principal_team == credential_team
   end
 
+  def console_user_principal?(principal)
+    (principal.labels || {})["kind"] == CONSOLE_USER_KIND
+  end
+
   def principal_emails(principal)
+    if console_user_principal?(principal)
+      return console_user_emails(principal).filter_map { |email| normalize_email(email) }.uniq
+    end
+
     labels = principal.labels || {}
-    label_emails = EMAIL_LABELS.map { |key| labels[key] }
-    (label_emails + console_user_emails(principal))
+    EMAIL_LABELS.map { |key| labels[key] }
       .filter_map { |email| normalize_email(email) }
       .uniq
   end
