@@ -11,5 +11,13 @@ class Console::IntegrationsController < ApplicationController
 
   def index
     @oauth_apps = OauthApp.where(enabled: true).order(:slug)
+    # The user's existing connections, matched by the email the IdP reported
+    # during consent (the flow itself is unauthenticated, so provider_email is
+    # the only link back to a console user). Newest wins if the user somehow
+    # consented with several provider accounts sharing the email.
+    @credentials_by_app_id = BrokerCredential
+      .where(oauth_app_id: @oauth_apps.select(:id), provider_email: current_user.email)
+      .order(:updated_at)
+      .index_by(&:oauth_app_id)
   end
 end

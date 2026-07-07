@@ -26,8 +26,17 @@
         <% if app.description.present? %>
           <p class="line-clamp-2 text-xs text-zinc-500" title="<%= app.description %>"><%= app.description %></p>
         <% end %>
-        <div class="mt-auto pt-1">
-          <a href="<%= start_url %>" class="btn-primary inline-block">Connect</a>
+        <div class="mt-auto flex items-center justify-between gap-3 pt-1">
+          <% credential = @credentials_by_app_id[app.id] %>
+          <% if credential %>
+            <a href="<%= start_url %>" class="btn-secondary inline-block">Reconnect</a>
+            <span class="flex items-center gap-1.5 text-xs <%= credential.dead? ? "text-amber-300" : "text-emerald-300" %>">
+              <span class="size-1.5 rounded-full <%= credential.dead? ? "bg-amber-400" : "bg-emerald-400" %>"></span>
+              <%= credential.dead? ? "Needs reconnecting" : "Connected" %>
+            </span>
+          <% else %>
+            <a href="<%= start_url %>" class="btn-primary inline-block">Connect</a>
+          <% end %>
         </div>
       </div>
     <% end %>
