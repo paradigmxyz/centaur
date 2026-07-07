@@ -22,8 +22,12 @@ modelRoles:
   smol: "litellm/glm-local"
   commit: "litellm/glm-local"
   task: "litellm/glm-local"
-  slow: "anthropic/claude-fable-5"
-  plan: "anthropic/claude-fable-5"
-  advisor: "anthropic/claude-fable-5"
+  # v1 posture: EVERY role stays on the internal gateway — sandboxes carry no
+  # frontier-provider keys (credential-safe injection via iron-proxy is the
+  # tracked follow-up). Point slow/plan/advisor at a frontier model only in
+  # deployments that actually inject its key.
+  slow: "litellm/glm-local"
+  plan: "litellm/glm-local"
+  advisor: "litellm/glm-local"
 
 defaultThinkingLevel: medium
