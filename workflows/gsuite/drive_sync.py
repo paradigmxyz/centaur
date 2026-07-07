@@ -373,6 +373,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     for scope_id, query in [(scope_id, query)]:
         successful_watermark: dt.datetime | None = None
+        earliest_failed: dt.datetime | None = None
+        failed_without_time = False
         try:
             page_token: str | None = None
             while True:
@@ -407,6 +409,10 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     except Exception as exc:
                         error = str(exc)
                         failed.append(_scope_ref(scope_id, f"file:{file_id}:{error}"))
+                        if modified_at is None:
+                            failed_without_time = True
+                        elif earliest_failed is None or modified_at < earliest_failed:
+                            earliest_failed = modified_at
                         record_etl_items_failed(
                             "google_drive",
                             "doc",
@@ -431,6 +437,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 page_token = page.get("nextPageToken")
                 if not page_token:
                     break
+            # The watermark must not advance past a document whose fetch
+            # failed: the next run only queries files modified after
+            # (watermark - overlap), so a failed file left below it would
+            # never be fetched again. Clamp to the earliest failure so the
+            # next run retries it; if a failure has no usable modifiedTime,
+            # keep the previous watermark (NULL preserves the stored value)
+            # and rescan the window instead.
+            if failed_without_time:
+                successful_watermark = None
+            elif earliest_failed is not None and (
+                successful_watermark is None or earliest_failed < successful_watermark
+            ):
+                successful_watermark = earliest_failed
             await _update_checkpoint_success(
                 ctx._pool,
                 scope_id=scope_id,
