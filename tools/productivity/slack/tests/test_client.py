@@ -887,7 +887,7 @@ def test_native_search_uses_dedicated_search_client() -> None:
     assert fake_bot_client.api_calls == []
 
 
-def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
+def test_search_messages_proxy_uses_api_proxy_for_channel_scoped_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import urllib.request
@@ -925,11 +925,10 @@ def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    result = client.search_messages(
+    result = client.search_messages_proxy(
         "deploy from:<@UGZCSQTPE> in:#other",
         max_results=5,
         channels=["paradigm-pulse"],
-        messages_per_channel=25,
     )
 
     assert result[0]["text"] == "deploy complete"
@@ -937,7 +936,49 @@ def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
     assert fake_web_client.history_calls == []
 
 
-def test_search_messages_proxy_failure_falls_back_to_local_scan(
+def test_search_messages_proxy_defaults_to_current_slack_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.request
+
+    import centaur_sdk.tool_sdk
+
+    client, _ = _make_client()
+    client._get_user_cache = lambda: {"U1": "alice"}  # type: ignore[method-assign]
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api")
+    monkeypatch.setattr(
+        centaur_sdk.tool_sdk,
+        "current_slack_thread",
+        lambda: {"channel_id": "C777", "thread_ts": "123.456"},
+    )
+
+    def fake_urlopen(req, *args, **kwargs):
+        assert req.full_url == "http://api/api/slack/search?query=deploy&channels=C777&count=5"
+        body = json.dumps({"ok": True, "messages": {"matches": []}}).encode()
+        return _FakeHTTPResponse(body, "application/json")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert client.search_messages_proxy("deploy", max_results=5) == []
+
+
+def test_search_messages_proxy_fails_without_current_slack_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import centaur_sdk.tool_sdk
+
+    client, _ = _make_client()
+    monkeypatch.setattr(
+        centaur_sdk.tool_sdk,
+        "current_slack_thread",
+        lambda: (_ for _ in ()).throw(RuntimeError("not a Slack thread")),
+    )
+
+    with pytest.raises(RuntimeError, match="not a Slack thread"):
+        client.search_messages_proxy("deploy")
+
+
+def test_search_messages_proxy_failure_does_not_fall_back_to_local_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import urllib.error
@@ -961,15 +1002,10 @@ def test_search_messages_proxy_failure_falls_back_to_local_scan(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    result = client.search_messages(
-        "deploy",
-        max_results=5,
-        channels=["C123"],
-        messages_per_channel=25,
-    )
+    with pytest.raises(RuntimeError, match="Slack search proxy failed with status 403"):
+        client.search_messages_proxy("deploy", max_results=5, channels=["C123"])
 
-    assert result[0]["text"] == "deploy fallback"
-    assert fake_web_client.history_calls == [{"channel": "C123", "limit": 25}]
+    assert fake_web_client.history_calls == []
 
 
 def test_slack_search_from_filter_uses_documented_forms() -> None:

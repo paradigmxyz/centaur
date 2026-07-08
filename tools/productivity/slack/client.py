@@ -705,13 +705,6 @@ class SlackClient:
             search_query += f" {self._slack_search_from_filter(from_user)}"
         search_query = " ".join(search_query.split())
 
-        proxy_channels = local_channels or self._default_search_proxy_channels()
-        if proxy_channels:
-            try:
-                return self._search_messages_proxy(search_query, max_results, proxy_channels)
-            except (RuntimeError, ValueError):
-                pass
-
         if local_channels:
             return self._search_messages_local(
                 local_query,
@@ -728,6 +721,27 @@ class SlackClient:
             return self._search_messages_local(
                 local_query, max_results, local_channels, local_from_user, messages_per_channel
             )
+
+    def search_messages_proxy(
+        self,
+        query: str,
+        max_results: int = 20,
+        channels: list[str] | None = None,
+        from_user: str | None = None,
+    ) -> list[dict]:
+        """Search messages through the Centaur Slack search proxy.
+
+        Defaults to the current Slack thread's channel. Unlike ``search_messages``,
+        this method does not fall back to Slack native search or local history
+        scanning.
+        """
+        _, local_channels, _ = self._extract_local_search_filters(query, channels, from_user)
+        search_query = query
+        if from_user:
+            search_query += f" {self._slack_search_from_filter(from_user)}"
+        search_query = " ".join(search_query.split())
+        proxy_channels = local_channels or self._current_slack_channel()
+        return self._search_messages_proxy(search_query, max_results, proxy_channels)
 
     def _search_messages_native(
         self,
@@ -796,13 +810,12 @@ class SlackClient:
         value = str(secret("CENTAUR_API_URL", default="") or "").strip()
         return value.rstrip("/") or None
 
-    def _default_search_proxy_channels(self) -> list[str] | None:
-        try:
-            from centaur_sdk.tool_sdk import current_slack_thread
+    def _current_slack_channel(self) -> list[str]:
+        from centaur_sdk.tool_sdk import current_slack_thread
 
-            channel_id = current_slack_thread()["channel_id"]
-        except RuntimeError:
-            return None
+        channel_id = current_slack_thread().get("channel_id")
+        if not channel_id:
+            raise RuntimeError("Slack search proxy requires a current Slack channel")
         return [channel_id]
 
     def _search_proxy_channel_ids(self, channels: list[str]) -> list[str]:
@@ -2151,6 +2164,10 @@ def resolve_mentions(
 
 def search_messages(*args, **kwargs):
     return _client().search_messages(*args, **kwargs)
+
+
+def search_messages_proxy(*args, **kwargs):
+    return _client().search_messages_proxy(*args, **kwargs)
 
 
 def get_channel_history_page(*args, **kwargs):
