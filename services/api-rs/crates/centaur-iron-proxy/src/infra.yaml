@@ -3,3 +3,23 @@ proxy:
   # default 30s response-header timeout. Keep model-provider calls from being
   # cut off while OpenAI is still computing the first response byte.
   upstream_response_header_timeout: "120s"
+
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        # gh/git read GITHUB_TOKEN straight from the environment, so sandboxes
+        # need the replace-mode placeholder env (`GITHUB_TOKEN=GITHUB_TOKEN`)
+        # that placeholder_env derives from this entry; iron-proxy swaps the
+        # placeholder for the real token at the edge. Same placeholder-swap
+        # contract for the slack tool's SLACK_BOT_TOKEN.
+        - replace:
+            proxy_value: GITHUB_TOKEN
+            match_headers: ["Authorization"]
+          rules:
+            - { host: github.com }
+            - { host: api.github.com }
+        - replace:
+            proxy_value: SLACK_BOT_TOKEN
+            match_headers: ["Authorization"]
+          rules: [{ host: "*.slack.com" }]

@@ -958,7 +958,8 @@ impl SandboxArgs {
         // consumers send the proxy_value iron-proxy replaces with the real
         // secret: codex's OPENAI_API_KEY (api_key mode -> codex logs in and
         // hits api.openai.com instead of falling back to the ChatGPT
-        // auth.json), and the rest of the model-provider infra set.
+        // auth.json), git/gh's GITHUB_TOKEN, the slack tool's
+        // SLACK_BOT_TOKEN, and the rest of the infra set.
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             if !envs.iter().any(|(existing, _)| existing == &name) {
                 envs.push((name, value));
