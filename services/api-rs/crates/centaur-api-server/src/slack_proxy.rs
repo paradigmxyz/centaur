@@ -35,6 +35,7 @@ fn http_client() -> &'static reqwest::Client {
 
 pub(crate) fn slack_proxy_router() -> Router<AppState> {
     Router::new()
+        .route("/api/slack/search", get(search_slack_messages))
         .route(
             "/api/slack/files/upload",
             post(upload_slack_file).layer(DefaultBodyLimit::disable()),
@@ -69,6 +70,14 @@ struct SlackFileDownloadQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct SlackSearchQuery {
+    query: String,
+    channels: String,
+    #[serde(default)]
+    count: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
     slack: SlackProxyClaims,
 }
@@ -79,6 +88,8 @@ struct SlackProxyClaims {
     upload_channels: Vec<String>,
     #[serde(default)]
     download_channels: Vec<String>,
+    #[serde(default)]
+    search_channels: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,12 +101,48 @@ struct SlackFileUploadResponse {
     file: Value,
 }
 
+async fn search_slack_messages(
+    headers: HeaderMap,
+    Query(query): Query<SlackSearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_slack_proxy(&headers)?;
+    let search_query = strip_slack_search_in_operators(&query.query);
+    if search_query.is_empty() {
+        return Err(ApiError::BadRequest(
+            "query must include search terms outside Slack in: filters".to_owned(),
+        ));
+    }
+    let channels = slack_search_requested_channels(&query.channels)?;
+    ensure_search_channels_allowed(&claims, &channels)?;
+
+    let count = query.count.unwrap_or(20).clamp(1, 100) as usize;
+    let config = slack_proxy_config()?;
+    let client = http_client();
+    let mut matches = Vec::new();
+    for channel in &channels {
+        let scoped_query = format!("{search_query} in:{channel}");
+        let value = slack_search_messages(client, config, &scoped_query, count).await?;
+        matches.extend(slack_search_matches(&value));
+    }
+    sort_slack_search_matches(&mut matches);
+    matches.truncate(count);
+
+    Ok(Json(json!({
+        "ok": true,
+        "query": search_query,
+        "channels": channels,
+        "messages": {
+            "matches": matches,
+        },
+    })))
+}
+
 async fn upload_slack_file(
     headers: HeaderMap,
     Query(query): Query<SlackFileUploadQuery>,
     body: Body,
 ) -> Result<Json<SlackFileUploadResponse>, ApiError> {
-    let claims = authorize_slack_file_proxy(&headers)?;
+    let claims = authorize_slack_proxy(&headers)?;
     ensure_upload_channel_allowed(&claims, &query.channel_id)?;
     validate_slack_channel_id(&query.channel_id)?;
     validate_filename(&query.filename)?;
@@ -151,7 +198,7 @@ async fn download_slack_file(
     Path(file_id): Path<String>,
     Query(query): Query<SlackFileDownloadQuery>,
 ) -> Result<Response, ApiError> {
-    let claims = authorize_slack_file_proxy(&headers)?;
+    let claims = authorize_slack_proxy(&headers)?;
     ensure_download_channel_allowed(&claims, &query.channel_id)?;
     validate_slack_channel_id(&query.channel_id)?;
     validate_slack_file_id(&file_id)?;
@@ -378,6 +425,25 @@ async fn slack_file_info(
     })
 }
 
+async fn slack_search_messages(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    query: &str,
+    count: usize,
+) -> Result<Value, ApiError> {
+    slack_api_get(
+        client,
+        config,
+        "search.messages",
+        &[
+            ("query", query.to_owned()),
+            ("count", count.to_string()),
+            ("sort", "timestamp".to_owned()),
+        ],
+    )
+    .await
+}
+
 async fn slack_api_post_form(
     client: &reqwest::Client,
     config: &SlackFileProxyConfig,
@@ -408,7 +474,41 @@ async fn slack_api_post_form(
     Ok(value)
 }
 
-fn authorize_slack_file_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
+async fn slack_api_get(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    method: &str,
+    params: &[(&str, String)],
+) -> Result<Value, ApiError> {
+    let query = params
+        .iter()
+        .map(|(key, value)| format!("{key}={}", urlencoding::encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let response = client
+        .get(format!("{}/{}?{}", config.api_url, method, query))
+        .bearer_auth(&config.bot_token)
+        .send()
+        .await
+        .map_err(|error| ApiError::Internal(format!("Slack API request failed: {error}")))?;
+    let status = response.status();
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|error| ApiError::Internal(format!("Slack API response was not JSON: {error}")))?;
+    if !status.is_success() || value.get("ok") != Some(&Value::Bool(true)) {
+        let slack_error = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown_error");
+        return Err(ApiError::BadRequest(format!(
+            "Slack {method} failed: {slack_error}"
+        )));
+    }
+    Ok(value)
+}
+
+fn authorize_slack_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
     let token = bearer_token(headers)?;
     verify_console_jwt(token)
 }
@@ -435,6 +535,24 @@ fn ensure_download_channel_allowed(
     )
 }
 
+fn ensure_search_channels_allowed(
+    claims: &SlackFileProxyClaims,
+    channels: &[String],
+) -> Result<(), ApiError> {
+    let allowed = claims
+        .slack
+        .search_channels
+        .iter()
+        .filter_map(|channel| normalize_slack_search_channel(channel))
+        .collect::<BTreeSet<_>>();
+    if channels.iter().all(|channel| allowed.contains(channel)) {
+        return Ok(());
+    }
+    Err(ApiError::Forbidden(
+        "JWT is not authorized to search this Slack channel".to_owned(),
+    ))
+}
+
 fn ensure_channel_allowed(
     allowed_channels: &[String],
     channel_id: &str,
@@ -444,6 +562,89 @@ fn ensure_channel_allowed(
         return Ok(());
     }
     Err(ApiError::Forbidden(message.to_owned()))
+}
+
+fn slack_search_requested_channels(channels: &str) -> Result<Vec<String>, ApiError> {
+    let mut deduped = BTreeSet::new();
+    for channel in channels.split(',') {
+        let Some(channel) = normalize_slack_search_channel(channel) else {
+            return Err(ApiError::BadRequest(
+                "invalid Slack search channel".to_owned(),
+            ));
+        };
+        deduped.insert(channel);
+    }
+    if deduped.is_empty() {
+        return Err(ApiError::BadRequest(
+            "at least one Slack search channel is required".to_owned(),
+        ));
+    }
+    Ok(deduped.into_iter().collect())
+}
+
+fn normalize_slack_search_channel(channel: &str) -> Option<String> {
+    let mut value = channel.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(inner) = value
+        .strip_prefix("<#")
+        .and_then(|value| value.strip_suffix('>'))
+    {
+        value = inner.split_once('|').map_or(inner, |(_, name)| name);
+    }
+    value = value.trim_start_matches('#');
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
+
+fn strip_slack_search_in_operators(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|term| !is_slack_search_in_operator(term))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_slack_search_in_operator(term: &str) -> bool {
+    let term = term.trim();
+    let lower = term.to_ascii_lowercase();
+    let Some(value) = lower.strip_prefix("in:") else {
+        return false;
+    };
+    if value.is_empty() {
+        return false;
+    }
+    if value.starts_with("<#") && value.ends_with('>') {
+        return true;
+    }
+    value
+        .trim_start_matches('#')
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn slack_search_matches(value: &Value) -> Vec<Value> {
+    value
+        .get("messages")
+        .and_then(|messages| messages.get("matches"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn sort_slack_search_matches(matches: &mut [Value]) {
+    matches.sort_by(|left, right| {
+        let left_ts = left.get("ts").and_then(Value::as_str).unwrap_or_default();
+        let right_ts = right.get("ts").and_then(Value::as_str).unwrap_or_default();
+        right_ts.cmp(left_ts)
+    });
 }
 
 fn slack_file_in_channel(file: &Value, channel_id: &str) -> bool {
@@ -594,7 +795,8 @@ mod tests {
                 "exp": 4_102_444_800i64,
                 "slack": {
                     "upload_channels": ["C123456789"],
-                    "download_channels": ["C987654321"]
+                    "download_channels": ["C987654321"],
+                    "search_channels": ["eng-oncall"]
                 }
             }),
         );
@@ -607,6 +809,7 @@ mod tests {
         .unwrap();
         ensure_upload_channel_allowed(&claims, "C123456789").unwrap();
         ensure_download_channel_allowed(&claims, "C987654321").unwrap();
+        ensure_search_channels_allowed(&claims, &["eng-oncall".to_owned()]).unwrap();
         assert!(matches!(
             ensure_upload_channel_allowed(&claims, "C987654321").unwrap_err(),
             ApiError::Forbidden(_)
@@ -615,6 +818,40 @@ mod tests {
             ensure_download_channel_allowed(&claims, "C123456789").unwrap_err(),
             ApiError::Forbidden(_)
         ));
+        assert!(matches!(
+            ensure_search_channels_allowed(&claims, &["general".to_owned()]).unwrap_err(),
+            ApiError::Forbidden(_)
+        ));
+    }
+
+    #[test]
+    fn search_channels_are_normalized_and_authorized() {
+        let claims = SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: vec![],
+                download_channels: vec![],
+                search_channels: vec!["Eng-Oncall".to_owned(), "#platform".to_owned()],
+            },
+        };
+        let channels = slack_search_requested_channels("eng-oncall,#PLATFORM").unwrap();
+        assert_eq!(channels, vec!["eng-oncall", "platform"]);
+        ensure_search_channels_allowed(&claims, &channels).unwrap();
+        assert!(matches!(
+            slack_search_requested_channels("eng oncall").unwrap_err(),
+            ApiError::BadRequest(_)
+        ));
+    }
+
+    #[test]
+    fn search_query_strips_user_supplied_in_operators() {
+        assert_eq!(
+            strip_slack_search_in_operators("deploy in:#general in:<#C123456789|eng-oncall>"),
+            "deploy"
+        );
+        assert_eq!(
+            strip_slack_search_in_operators("within:limits deploy IN:random after:2026-01-01"),
+            "within:limits deploy after:2026-01-01"
+        );
     }
 
     #[test]

@@ -886,6 +886,51 @@ def test_native_search_uses_dedicated_search_client() -> None:
     assert fake_bot_client.api_calls == []
 
 
+def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.request
+
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda: {"U1": "alice"}  # type: ignore[method-assign]
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api")
+
+    def fake_urlopen(req, *args, **kwargs):
+        assert req.full_url == (
+            "http://api/api/slack/search?query=deploy&channels=paradigm-pulse&count=5"
+        )
+        body = json.dumps(
+            {
+                "ok": True,
+                "messages": {
+                    "matches": [
+                        {
+                            "user": "U1",
+                            "text": "deploy complete",
+                            "ts": "200.000000",
+                            "permalink": "https://slack.com/archives/C123/p200000000",
+                            "channel": {"id": "C123", "name": "paradigm-pulse"},
+                        }
+                    ]
+                },
+            }
+        ).encode()
+        return _FakeHTTPResponse(body, "application/json")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.search_messages(
+        "deploy in:#other",
+        max_results=5,
+        channels=["paradigm-pulse"],
+        messages_per_channel=25,
+    )
+
+    assert result[0]["text"] == "deploy complete"
+    assert fake_web_client.api_calls == []
+    assert fake_web_client.history_calls == []
+
+
 def test_sync_channel_history_uses_watermark_lookback() -> None:
     client, _ = _make_client()
     captured: dict = {}

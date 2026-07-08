@@ -18,6 +18,12 @@ module ApiServer
 
       issued_at = window_start_for(principal, now.to_i)
       expires_at = issued_at + DEFAULT_TTL_SECONDS
+      slack_claims = {
+        "upload_channels" => [ channel_id ],
+        "download_channels" => [ channel_id ]
+      }
+      search_channel = slack_search_channel_name(principal)
+      slack_claims["search_channels"] = [ search_channel ] if search_channel.present?
       CentaurJwt::Hs256.encode(
         {
           "iss" => issuer,
@@ -25,10 +31,7 @@ module ApiServer
           "aud" => audience,
           "iat" => issued_at,
           "exp" => expires_at,
-          "slack" => {
-            "upload_channels" => [ channel_id ],
-            "download_channels" => [ channel_id ]
-          }
+          "slack" => slack_claims
         },
         signing_secret: signing_secret
       )
@@ -52,6 +55,22 @@ module ApiServer
 
     def issuer
       ENV["CENTAUR_API_JWT_ISSUER"].presence || DEFAULT_ISSUER
+    end
+
+    def slack_search_channel_name(principal)
+      labels = principal.labels.to_h
+      explicit = labels[Principal::SLACK_CHANNEL_NAME_LABEL].to_s.strip.delete_prefix("#")
+      return explicit.downcase if slack_channel_name?(explicit)
+
+      match = principal.name.to_s.match(/\ASlack Channel #(?<name>[A-Za-z0-9_-]+)\z/)
+      name = match && match[:name].to_s
+      return name.downcase if slack_channel_name?(name)
+
+      nil
+    end
+
+    def slack_channel_name?(value)
+      value.to_s.match?(/\A[A-Za-z0-9_-]+\z/)
     end
   end
 end

@@ -6,13 +6,14 @@ import mimetypes
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import structlog
 from slack_sdk import WebClient
@@ -699,6 +700,21 @@ class SlackClient:
         local_query, local_channels, local_from_user = self._extract_local_search_filters(
             query, channels, from_user
         )
+        proxy_query, _query_channels, proxy_from_user = self._extract_local_search_filters(
+            query, None, from_user
+        )
+        explicit_channels = self._dedupe_channel_refs(channels or [])
+        proxy_search_query = proxy_query
+        if proxy_from_user:
+            proxy_search_query += f" from:@{proxy_from_user.lstrip('@')}"
+        search_query = local_query
+        if local_from_user:
+            search_query += f" from:@{local_from_user.lstrip('@')}"
+
+        proxy_channels = explicit_channels or self._default_search_proxy_channels()
+        if proxy_channels and self._search_proxy_base_url():
+            return self._search_messages_proxy(proxy_search_query, max_results, proxy_channels)
+
         if local_channels:
             return self._search_messages_local(
                 local_query,
@@ -707,11 +723,6 @@ class SlackClient:
                 local_from_user,
                 messages_per_channel,
             )
-
-        # Build the search query with modifiers
-        search_query = query
-        if from_user:
-            search_query += f" from:@{from_user.lstrip('@')}"
 
         try:
             return self._search_messages_native(search_query, max_results)
@@ -737,6 +748,80 @@ class SlackClient:
         if not response.get("ok"):
             raise RuntimeError(response.get("error", "search.messages failed"))
 
+        return self._search_results_from_response(response)
+
+    def _search_messages_proxy(
+        self,
+        query: str,
+        max_results: int,
+        channels: list[str],
+    ) -> list[dict]:
+        """Search through the Centaur API Slack proxy with channel-scoped JWT auth."""
+        base_url = self._search_proxy_base_url()
+        if not base_url:
+            raise RuntimeError("CENTAUR_API_URL is not configured")
+        channel_names = self._search_proxy_channel_names(channels)
+        params = urlencode(
+            {
+                "query": query,
+                "channels": ",".join(channel_names),
+                "count": max_results,
+            }
+        )
+        request = urllib.request.Request(
+            f"{base_url}/api/slack/search?{params}",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
+                payload = response.read()
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Slack search proxy request failed: {exc}") from exc
+
+        data = json.loads(payload.decode("utf-8"))
+        if not data.get("ok"):
+            raise RuntimeError(data.get("error", "Slack search proxy failed"))
+        return self._search_results_from_response(data)
+
+    def _search_proxy_base_url(self) -> str | None:
+        value = os.getenv("CENTAUR_API_URL", "").strip()
+        return value.rstrip("/") or None
+
+    def _default_search_proxy_channels(self) -> list[str] | None:
+        if not self._search_proxy_base_url():
+            return None
+        try:
+            from centaur_sdk.tool_sdk import current_slack_thread
+
+            channel_id = current_slack_thread()["channel_id"]
+            channel_name = self._resolve_channel_name(channel_id, channel_id)
+        except RuntimeError:
+            return None
+        if self._looks_like_channel_id(channel_name):
+            return None
+        return [channel_name]
+
+    def _search_proxy_channel_names(self, channels: list[str]) -> list[str]:
+        names = []
+        seen = set()
+        for channel in channels:
+            normalized = self._clean_channel_ref(channel)
+            if not normalized:
+                continue
+            if self._looks_like_channel_id(normalized):
+                normalized = self._resolve_channel_name(normalized, normalized)
+            if self._looks_like_channel_id(normalized):
+                raise ValueError(f"Slack search proxy requires channel names, got {channel!r}")
+            name = normalized.lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        if not names:
+            raise ValueError("Slack search proxy requires at least one channel")
+        return names
+
+    def _search_results_from_response(self, response: dict) -> list[dict]:
         matches = response.get("messages", {}).get("matches", [])
         user_cache = self._get_user_cache()
 
@@ -797,9 +882,13 @@ class SlackClient:
             query,
         )
 
+        deduped_channels = self._dedupe_channel_refs(local_channels)
+        return " ".join(query.split()), deduped_channels or None, local_from_user
+
+    def _dedupe_channel_refs(self, channels: list[str]) -> list[str]:
         deduped_channels = []
         seen = set()
-        for channel in local_channels:
+        for channel in channels:
             normalized = self._clean_channel_ref(channel)
             if not normalized:
                 continue
@@ -808,8 +897,7 @@ class SlackClient:
                 continue
             seen.add(key)
             deduped_channels.append(normalized)
-
-        return " ".join(query.split()), deduped_channels or None, local_from_user
+        return deduped_channels
 
     def _channel_refs_for_search(self, channels: list[str]) -> list[dict]:
         """Resolve channel filters without listing channels when IDs are provided."""
