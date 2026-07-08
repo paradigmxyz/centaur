@@ -645,21 +645,7 @@ fn strip_slack_search_in_operators(query: &str) -> String {
 }
 
 fn is_slack_search_in_operator(term: &str) -> bool {
-    let term = term.trim();
-    let lower = term.to_ascii_lowercase();
-    let Some(value) = lower.strip_prefix("in:") else {
-        return false;
-    };
-    if value.is_empty() {
-        return false;
-    }
-    if value.starts_with("<#") && value.ends_with('>') {
-        return true;
-    }
-    value
-        .trim_start_matches('#')
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    term.trim().to_ascii_lowercase().starts_with("in:")
 }
 
 fn slack_search_matches(value: &Value) -> Vec<Value> {
@@ -882,7 +868,9 @@ mod tests {
             "deploy"
         );
         assert_eq!(
-            strip_slack_search_in_operators("within:limits deploy IN:random after:2026-01-01"),
+            strip_slack_search_in_operators(
+                "within:limits deploy IN:random in: in:not/a/channel after:2026-01-01"
+            ),
             "within:limits deploy after:2026-01-01"
         );
     }
