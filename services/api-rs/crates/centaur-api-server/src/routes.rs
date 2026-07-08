@@ -2331,14 +2331,14 @@ fn slack_archive_upload_config() -> Result<SlackArchiveUploadConfig, ApiError> {
     })
 }
 
-fn non_empty_env(name: &str) -> Option<String> {
+pub(crate) fn non_empty_env(name: &str) -> Option<String> {
     env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
-fn positive_env_u64(name: &str, default: u64) -> u64 {
+pub(crate) fn positive_env_u64(name: &str, default: u64) -> u64 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())

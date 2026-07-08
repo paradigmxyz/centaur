@@ -751,7 +751,7 @@ fn static_env(cell: &'static OnceLock<Option<String>>, name: &str) -> Option<Str
     cell.get_or_init(|| env::var(name).ok()).clone()
 }
 
-fn jwt_signing_secret() -> Option<String> {
+pub(crate) fn jwt_signing_secret() -> Option<String> {
     static CELL: OnceLock<Option<String>> = OnceLock::new();
     static_env(&CELL, "CENTAUR_JWT_SIGNING_SECRET")
 }

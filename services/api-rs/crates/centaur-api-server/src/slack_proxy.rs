@@ -1,10 +1,10 @@
-use std::{collections::BTreeSet, env};
+use std::{collections::BTreeSet, sync::OnceLock, time::Duration};
 
 use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path, Query},
-    http::{HeaderMap, header},
+    http::{HeaderMap, HeaderValue, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -12,12 +12,30 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{ApiError, routes::AppState};
+use crate::{
+    ApiError,
+    mcp::jwt_signing_secret,
+    routes::{AppState, non_empty_env, positive_env_u64},
+};
 
 const DEFAULT_SLACK_API_URL: &str = "https://slack.com/api";
 const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
+const DEFAULT_API_JWT_ISSUER: &str = "centaur-console";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const JWT_CLOCK_SKEW_SECONDS: i64 = 30;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .read_timeout(HTTP_READ_TIMEOUT)
+            .build()
+            .expect("reqwest client configuration is valid")
+    })
+}
 
 pub(crate) fn slack_proxy_router() -> Router<AppState> {
     Router::new()
@@ -29,8 +47,6 @@ pub(crate) fn slack_proxy_router() -> Router<AppState> {
             "/api/slack/files/{file_id}/download",
             get(download_slack_file),
         )
-        .route("/api/slack/search/messages", get(search_slack_messages))
-        .route("/api/slack/search/files", get(search_slack_files))
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,30 +73,8 @@ struct SlackFileDownloadQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct SlackSearchQuery {
-    query: String,
-    #[serde(default)]
-    channel_id: Option<String>,
-    #[serde(default)]
-    count: Option<u32>,
-    #[serde(default)]
-    highlight: Option<bool>,
-    #[serde(default)]
-    page: Option<u32>,
-    #[serde(default)]
-    cursor: Option<String>,
-    #[serde(default)]
-    sort: Option<String>,
-    #[serde(default)]
-    sort_dir: Option<String>,
-    #[serde(default)]
-    team_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
     iat: i64,
-    iss: String,
     slack: SlackProxyClaims,
     #[serde(default)]
     sub: Option<String>,
@@ -92,8 +86,6 @@ struct SlackProxyClaims {
     upload_channels: Vec<String>,
     #[serde(default)]
     download_channels: Vec<String>,
-    #[serde(default)]
-    search_channels: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,13 +109,16 @@ async fn upload_slack_file(
     if let Some(thread_ts) = query.thread_ts.as_deref() {
         validate_slack_thread_ts(thread_ts)?;
     }
-    let config = SlackFileProxyConfig::from_env()?;
+    if let Some(content_type) = query.content_type.as_deref() {
+        validate_content_type(content_type)?;
+    }
+    let config = slack_proxy_config()?;
     let content_length = content_length(&headers)?;
     ensure_upload_size(content_length, config.max_upload_bytes)?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let upload_ticket = get_upload_url(
-        &client,
-        &config,
+        client,
+        config,
         &query.filename,
         content_length,
         query.alt_txt.as_deref(),
@@ -131,7 +126,7 @@ async fn upload_slack_file(
     )
     .await?;
     upload_file_bytes(
-        &client,
+        client,
         &upload_ticket.upload_url,
         body,
         content_length,
@@ -139,8 +134,8 @@ async fn upload_slack_file(
     )
     .await?;
     let file = complete_upload(
-        &client,
-        &config,
+        client,
+        config,
         &upload_ticket.file_id,
         &query.channel_id,
         query.thread_ts.as_deref(),
@@ -168,9 +163,9 @@ async fn download_slack_file(
     validate_slack_channel_id(&query.channel_id)?;
     validate_slack_file_id(&file_id)?;
 
-    let config = SlackFileProxyConfig::from_env()?;
-    let client = reqwest::Client::new();
-    let file = slack_file_info(&client, &config, &file_id).await?;
+    let config = slack_proxy_config()?;
+    let client = http_client();
+    let file = slack_file_info(client, config, &file_id).await?;
     if !slack_file_in_channel(&file, &query.channel_id) {
         return Err(ApiError::Forbidden(
             "file is not shared in an allowed Slack channel".to_owned(),
@@ -195,87 +190,71 @@ async fn download_slack_file(
         )));
     }
 
-    let upstream_headers = upstream.headers().clone();
+    let file_mimetype = file.get("mimetype").and_then(Value::as_str);
+    // Slack's file host serves login/error pages with a 200 status; without this
+    // check they would stream through labeled as the file's real mimetype.
+    let upstream_content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    if upstream_body_is_unexpected_html(upstream_content_type, file_mimetype) {
+        return Err(ApiError::Internal(
+            "Slack file download returned an HTML page instead of the file contents".to_owned(),
+        ));
+    }
+
+    let upstream_content_length = upstream.headers().get(header::CONTENT_LENGTH).cloned();
     let mut response = Body::from_stream(upstream.bytes_stream()).into_response();
     let headers = response.headers_mut();
-    if let Some(value) = file
-        .get("mimetype")
-        .and_then(Value::as_str)
-        .and_then(|value| value.parse().ok())
-    {
+    if let Some(value) = file_mimetype.and_then(|value| value.parse().ok()) {
         headers.insert(header::CONTENT_TYPE, value);
     }
-    if let Some(value) = upstream_headers.get(header::CONTENT_LENGTH).cloned() {
+    if let Some(value) = upstream_content_length {
         headers.insert(header::CONTENT_LENGTH, value);
     }
-    if let Some(filename) = file
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    let filename = file
         .get("name")
         .or_else(|| file.get("title"))
         .and_then(Value::as_str)
-        .map(content_disposition_filename)
-        .and_then(|value| value.parse().ok())
-    {
-        headers.insert(header::CONTENT_DISPOSITION, filename);
+        .unwrap_or(&file_id);
+    if let Ok(value) = content_disposition_filename(filename).parse::<HeaderValue>() {
+        headers.insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
 }
 
-async fn search_slack_messages(
-    headers: HeaderMap,
-    Query(query): Query<SlackSearchQuery>,
-) -> Result<Json<Value>, ApiError> {
-    search_slack(headers, query, SlackSearchKind::Messages).await
+fn upstream_body_is_unexpected_html(
+    upstream_content_type: Option<&str>,
+    file_mimetype: Option<&str>,
+) -> bool {
+    let upstream_is_html = upstream_content_type.is_some_and(|value| {
+        value
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("text/html")
+    });
+    let file_is_html = file_mimetype.is_some_and(|value| value.eq_ignore_ascii_case("text/html"));
+    upstream_is_html && !file_is_html
 }
 
-async fn search_slack_files(
-    headers: HeaderMap,
-    Query(query): Query<SlackSearchQuery>,
-) -> Result<Json<Value>, ApiError> {
-    search_slack(headers, query, SlackSearchKind::Files).await
-}
-
-#[derive(Clone, Copy, Debug)]
-enum SlackSearchKind {
-    Messages,
-    Files,
-}
-
-impl SlackSearchKind {
-    fn method(self) -> &'static str {
-        match self {
-            Self::Messages => "search.messages",
-            Self::Files => "search.files",
-        }
-    }
-
-    fn result_key(self) -> &'static str {
-        match self {
-            Self::Messages => "messages",
-            Self::Files => "files",
-        }
-    }
-}
-
-async fn search_slack(
-    headers: HeaderMap,
-    query: SlackSearchQuery,
-    kind: SlackSearchKind,
-) -> Result<Json<Value>, ApiError> {
-    let claims = authorize_slack_file_proxy(&headers)?;
-    let channels = search_channels(&claims, query.channel_id.as_deref())?;
-    let config = SlackFileProxyConfig::from_env()?;
-    let client = reqwest::Client::new();
-    let form = slack_search_form(&query, &channels)?;
-    let mut response = slack_api_get_form(&client, &config, kind.method(), &form).await?;
-    filter_search_response(&mut response, kind, &channels);
-    Ok(Json(response))
-}
-
-#[derive(Debug)]
+// No Debug derive: bot_token must not end up in logs via {:?} formatting.
 struct SlackFileProxyConfig {
     api_url: String,
     bot_token: String,
     max_upload_bytes: u64,
+}
+
+fn slack_proxy_config() -> Result<&'static SlackFileProxyConfig, ApiError> {
+    static CELL: OnceLock<SlackFileProxyConfig> = OnceLock::new();
+    if let Some(config) = CELL.get() {
+        return Ok(config);
+    }
+    let config = SlackFileProxyConfig::from_env()?;
+    Ok(CELL.get_or_init(|| config))
 }
 
 impl SlackFileProxyConfig {
@@ -436,43 +415,16 @@ async fn slack_api_post_form(
     Ok(value)
 }
 
-async fn slack_api_get_form(
-    client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
-    method: &str,
-    form: &[(&str, String)],
-) -> Result<Value, ApiError> {
-    let response = client
-        .get(format!("{}/{}", config.api_url, method))
-        .bearer_auth(&config.bot_token)
-        .query(form)
-        .send()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Slack API request failed: {error}")))?;
-    let status = response.status();
-    let value = response
-        .json::<Value>()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Slack API response was not JSON: {error}")))?;
-    if !status.is_success() || value.get("ok") != Some(&Value::Bool(true)) {
-        let slack_error = value
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown_error");
-        return Err(ApiError::BadRequest(format!(
-            "Slack {method} failed: {slack_error}"
-        )));
-    }
-    Ok(value)
-}
-
 fn authorize_slack_file_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
     let token = bearer_token(headers)?;
-    let secret = non_empty_env("CENTAUR_API_JWT_SECRET")
-        .ok_or_else(|| ApiError::Internal("CENTAUR_API_JWT_SECRET is not configured".to_owned()))?;
+    let secret = jwt_signing_secret().ok_or_else(|| {
+        ApiError::Internal("CENTAUR_JWT_SIGNING_SECRET is not configured".to_owned())
+    })?;
     let audience = non_empty_env("CENTAUR_API_JWT_AUDIENCE")
         .unwrap_or_else(|| DEFAULT_API_JWT_AUDIENCE.to_owned());
-    verify_hs256_jwt(token, secret.as_bytes(), &audience)
+    let issuer = non_empty_env("CENTAUR_API_JWT_ISSUER")
+        .unwrap_or_else(|| DEFAULT_API_JWT_ISSUER.to_owned());
+    verify_hs256_jwt(token, secret.as_bytes(), &audience, &issuer)
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -481,8 +433,10 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::Unauthorized("missing bearer token".to_owned()))?;
     value
-        .strip_prefix("Bearer ")
-        .filter(|token| !token.trim().is_empty())
+        .split_once(' ')
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| token.trim())
+        .filter(|token| !token.is_empty())
         .ok_or_else(|| ApiError::Unauthorized("missing bearer token".to_owned()))
 }
 
@@ -490,11 +444,13 @@ fn verify_hs256_jwt(
     token: &str,
     secret: &[u8],
     expected_audience: &str,
+    expected_issuer: &str,
 ) -> Result<SlackFileProxyClaims, ApiError> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = JWT_CLOCK_SKEW_SECONDS as u64;
     validation.validate_nbf = true;
     validation.set_audience(&[expected_audience]);
+    validation.set_issuer(&[expected_issuer]);
     validation.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
     let token_data =
         decode::<SlackFileProxyClaims>(token, &DecodingKey::from_secret(secret), &validation)
@@ -509,9 +465,6 @@ fn validate_claims(claims: &SlackFileProxyClaims) -> Result<(), ApiError> {
         return Err(ApiError::Unauthorized(
             "JWT issued-at is in the future".to_owned(),
         ));
-    }
-    if claims.iss.trim().is_empty() {
-        return Err(ApiError::Unauthorized("JWT issuer is required".to_owned()));
     }
     if claims.sub.as_deref().unwrap_or_default().trim().is_empty() {
         return Err(ApiError::Unauthorized("JWT subject is required".to_owned()));
@@ -541,34 +494,6 @@ fn ensure_download_channel_allowed(
     )
 }
 
-fn search_channels(
-    claims: &SlackFileProxyClaims,
-    requested_channel_id: Option<&str>,
-) -> Result<Vec<String>, ApiError> {
-    if let Some(channel_id) = requested_channel_id {
-        validate_slack_channel_id(channel_id)?;
-        ensure_channel_allowed(
-            &claims.slack.search_channels,
-            channel_id,
-            "JWT is not authorized to search this Slack channel",
-        )?;
-        return Ok(vec![channel_id.to_owned()]);
-    }
-
-    let mut channels = claims.slack.search_channels.clone();
-    channels.sort();
-    channels.dedup();
-    for channel in &channels {
-        validate_slack_channel_id(channel)?;
-    }
-    if channels.is_empty() {
-        return Err(ApiError::Forbidden(
-            "JWT is not authorized to search any Slack channels".to_owned(),
-        ));
-    }
-    Ok(channels)
-}
-
 fn ensure_channel_allowed(
     allowed_channels: &[String],
     channel_id: &str,
@@ -578,106 +503,6 @@ fn ensure_channel_allowed(
         return Ok(());
     }
     Err(ApiError::Forbidden(message.to_owned()))
-}
-
-fn slack_search_form(
-    query: &SlackSearchQuery,
-    channels: &[String],
-) -> Result<Vec<(&'static str, String)>, ApiError> {
-    let locked_query = locked_search_query(&query.query, channels)?;
-    let mut form = vec![
-        ("query", locked_query),
-        (
-            "count",
-            query
-                .count
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        ),
-        (
-            "highlight",
-            query
-                .highlight
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        ),
-        (
-            "page",
-            query
-                .page
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        ),
-        ("cursor", query.cursor.clone().unwrap_or_default()),
-        ("sort", query.sort.clone().unwrap_or_default()),
-        ("sort_dir", query.sort_dir.clone().unwrap_or_default()),
-        ("team_id", query.team_id.clone().unwrap_or_default()),
-    ];
-    form.retain(|(_, value)| !value.is_empty());
-    Ok(form)
-}
-
-fn locked_search_query(query: &str, channels: &[String]) -> Result<String, ApiError> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err(ApiError::BadRequest("query must not be empty".to_owned()));
-    }
-    if channels.is_empty() {
-        return Err(ApiError::Forbidden(
-            "JWT is not authorized to search any Slack channels".to_owned(),
-        ));
-    }
-    let filters = channels
-        .iter()
-        .map(|channel| format!("in:<#{channel}>"))
-        .collect::<Vec<_>>();
-    if filters.len() == 1 {
-        Ok(format!("{query} {}", filters[0]))
-    } else {
-        Ok(format!("{query} ({})", filters.join(" OR ")))
-    }
-}
-
-fn filter_search_response(response: &mut Value, kind: SlackSearchKind, channels: &[String]) {
-    let allowed = channels.iter().cloned().collect::<BTreeSet<_>>();
-    let Some(container) = response
-        .get_mut(kind.result_key())
-        .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    let Some(matches) = container.get_mut("matches").and_then(Value::as_array_mut) else {
-        return;
-    };
-    matches.retain(|entry| search_match_in_allowed_channels(entry, kind, &allowed));
-    let filtered_count = u64::try_from(matches.len()).unwrap_or(u64::MAX);
-    container.insert("total".to_owned(), json!(filtered_count));
-    if let Some(pagination) = container
-        .get_mut("pagination")
-        .and_then(Value::as_object_mut)
-    {
-        pagination.insert("total_count".to_owned(), json!(filtered_count));
-    }
-    if let Some(paging) = container.get_mut("paging").and_then(Value::as_object_mut) {
-        paging.insert("total".to_owned(), json!(filtered_count));
-    }
-}
-
-fn search_match_in_allowed_channels(
-    entry: &Value,
-    kind: SlackSearchKind,
-    allowed: &BTreeSet<String>,
-) -> bool {
-    match kind {
-        SlackSearchKind::Messages => entry
-            .get("channel")
-            .and_then(|channel| channel.get("id"))
-            .and_then(Value::as_str)
-            .is_some_and(|channel_id| allowed.contains(channel_id)),
-        SlackSearchKind::Files => slack_file_channel_ids(entry)
-            .iter()
-            .any(|channel_id| allowed.contains(channel_id)),
-    }
 }
 
 fn slack_file_in_channel(file: &Value, channel_id: &str) -> bool {
@@ -781,6 +606,13 @@ fn validate_filename(filename: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn validate_content_type(content_type: &str) -> Result<(), ApiError> {
+    if content_type.trim().is_empty() || content_type.parse::<HeaderValue>().is_err() {
+        return Err(ApiError::BadRequest("invalid content_type".to_owned()));
+    }
+    Ok(())
+}
+
 fn content_disposition_filename(filename: &str) -> String {
     let sanitized = filename
         .chars()
@@ -793,21 +625,6 @@ fn content_disposition_filename(filename: &str) -> String {
         })
         .collect::<String>();
     format!("attachment; filename=\"{sanitized}\"")
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
-fn positive_env_u64(name: &str, default: u64) -> u64 {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -836,28 +653,19 @@ mod tests {
                 "exp": 4_102_444_800i64,
                 "slack": {
                     "upload_channels": ["C123456789"],
-                    "download_channels": ["C987654321"],
-                    "search_channels": ["G123456789"]
+                    "download_channels": ["C987654321"]
                 }
             }),
         );
-        let claims = verify_hs256_jwt(&token, b"secret", "centaur-api").unwrap();
+        let claims = verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap();
         ensure_upload_channel_allowed(&claims, "C123456789").unwrap();
         ensure_download_channel_allowed(&claims, "C987654321").unwrap();
-        assert_eq!(
-            search_channels(&claims, Some("G123456789")).unwrap(),
-            vec!["G123456789".to_owned()]
-        );
         assert!(matches!(
             ensure_upload_channel_allowed(&claims, "C987654321").unwrap_err(),
             ApiError::Forbidden(_)
         ));
         assert!(matches!(
             ensure_download_channel_allowed(&claims, "C123456789").unwrap_err(),
-            ApiError::Forbidden(_)
-        ));
-        assert!(matches!(
-            search_channels(&claims, Some("C123456789")).unwrap_err(),
             ApiError::Forbidden(_)
         ));
     }
@@ -879,7 +687,8 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"other-secret", "centaur-api").unwrap_err(),
+            verify_hs256_jwt(&token, b"other-secret", "centaur-api", "centaur-console")
+                .unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -901,7 +710,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"secret", "centaur-api").unwrap_err(),
+            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -923,7 +732,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"secret", "centaur-api").unwrap_err(),
+            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -944,7 +753,7 @@ mod tests {
                 }
             }),
         );
-        let claims = verify_hs256_jwt(&token, b"secret", "centaur-api").unwrap();
+        let claims = verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap();
         ensure_upload_channel_allowed(&claims, "C123456789").unwrap();
         ensure_download_channel_allowed(&claims, "C123456789").unwrap();
     }
@@ -963,7 +772,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"secret", "centaur-api").unwrap_err(),
+            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -1005,6 +814,76 @@ mod tests {
     }
 
     #[test]
+    fn rejects_wrong_jwt_issuer() {
+        let token = test_jwt(
+            b"secret",
+            json!({
+                "iss": "other-issuer",
+                "sub": "user_123",
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+                "slack": {
+                    "upload_channels": ["C123456789"],
+                    "download_channels": ["C123456789"]
+                }
+            }),
+        );
+        assert!(matches!(
+            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
+            ApiError::Unauthorized(_)
+        ));
+    }
+
+    #[test]
+    fn bearer_token_scheme_is_case_insensitive() {
+        for value in ["Bearer token-1", "bearer token-1", "BEARER token-1"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+            assert_eq!(bearer_token(&headers).unwrap(), "token-1");
+        }
+
+        for value in ["Bearer ", "token-1", "Basic token-1"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+            assert!(matches!(
+                bearer_token(&headers).unwrap_err(),
+                ApiError::Unauthorized(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn detects_unexpected_html_download_body() {
+        assert!(upstream_body_is_unexpected_html(
+            Some("text/html; charset=utf-8"),
+            Some("image/png"),
+        ));
+        assert!(upstream_body_is_unexpected_html(Some("TEXT/HTML"), None));
+        assert!(!upstream_body_is_unexpected_html(
+            Some("text/html"),
+            Some("text/html"),
+        ));
+        assert!(!upstream_body_is_unexpected_html(
+            Some("image/png"),
+            Some("image/png"),
+        ));
+        assert!(!upstream_body_is_unexpected_html(None, Some("image/png")));
+    }
+
+    #[test]
+    fn validates_content_type() {
+        validate_content_type("application/pdf").unwrap();
+        validate_content_type("text/plain; charset=utf-8").unwrap();
+        for content_type in ["", " ", "a\nb", "a\rb", "a\0b"] {
+            assert!(matches!(
+                validate_content_type(content_type).unwrap_err(),
+                ApiError::BadRequest(_)
+            ));
+        }
+    }
+
+    #[test]
     fn upload_url_form_includes_alt_text_and_snippet_type() {
         let form = slack_get_upload_url_form("notes.txt", 42, Some("Release notes"), Some("text"));
         assert_eq!(
@@ -1025,122 +904,5 @@ mod tests {
                 ("length", "42".to_owned()),
             ]
         );
-    }
-
-    #[test]
-    fn search_form_locks_query_to_allowed_channels() {
-        let query = SlackSearchQuery {
-            query: "release notes".to_owned(),
-            channel_id: None,
-            count: Some(10),
-            highlight: Some(true),
-            page: None,
-            cursor: Some("cursor-1".to_owned()),
-            sort: Some("timestamp".to_owned()),
-            sort_dir: Some("desc".to_owned()),
-            team_id: Some("T12345678".to_owned()),
-        };
-        let form =
-            slack_search_form(&query, &["C123456789".to_owned(), "G123456789".to_owned()]).unwrap();
-        assert_eq!(
-            form,
-            vec![
-                (
-                    "query",
-                    "release notes (in:<#C123456789> OR in:<#G123456789>)".to_owned(),
-                ),
-                ("count", "10".to_owned()),
-                ("highlight", "true".to_owned()),
-                ("cursor", "cursor-1".to_owned()),
-                ("sort", "timestamp".to_owned()),
-                ("sort_dir", "desc".to_owned()),
-                ("team_id", "T12345678".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn search_channels_uses_requested_channel_or_full_claim_list() {
-        let claims = SlackFileProxyClaims {
-            iat: 1,
-            iss: "centaur-console".to_owned(),
-            slack: SlackProxyClaims {
-                upload_channels: vec![],
-                download_channels: vec![],
-                search_channels: vec![
-                    "G123456789".to_owned(),
-                    "C123456789".to_owned(),
-                    "C123456789".to_owned(),
-                ],
-            },
-            sub: Some("user_123".to_owned()),
-        };
-
-        assert_eq!(
-            search_channels(&claims, Some("G123456789")).unwrap(),
-            vec!["G123456789".to_owned()]
-        );
-        assert_eq!(
-            search_channels(&claims, None).unwrap(),
-            vec!["C123456789".to_owned(), "G123456789".to_owned()]
-        );
-        assert!(matches!(
-            search_channels(&claims, Some("D123456789")).unwrap_err(),
-            ApiError::Forbidden(_)
-        ));
-    }
-
-    #[test]
-    fn search_response_filter_removes_disallowed_message_matches() {
-        let mut response = json!({
-            "ok": true,
-            "messages": {
-                "matches": [
-                    {"channel": {"id": "C123456789"}, "text": "allowed"},
-                    {"channel": {"id": "C987654321"}, "text": "denied"}
-                ],
-                "pagination": {"total_count": 2},
-                "paging": {"total": 2},
-                "total": 2
-            }
-        });
-
-        filter_search_response(
-            &mut response,
-            SlackSearchKind::Messages,
-            &["C123456789".to_owned()],
-        );
-
-        assert_eq!(response["messages"]["matches"].as_array().unwrap().len(), 1);
-        assert_eq!(response["messages"]["matches"][0]["text"], "allowed");
-        assert_eq!(response["messages"]["total"], json!(1));
-        assert_eq!(response["messages"]["pagination"]["total_count"], json!(1));
-        assert_eq!(response["messages"]["paging"]["total"], json!(1));
-    }
-
-    #[test]
-    fn search_response_filter_removes_disallowed_file_matches() {
-        let mut response = json!({
-            "ok": true,
-            "files": {
-                "matches": [
-                    {"id": "F123456789", "channels": ["C123456789"]},
-                    {"id": "F987654321", "groups": ["G987654321"]}
-                ],
-                "pagination": {"total_count": 2},
-                "paging": {"total": 2},
-                "total": 2
-            }
-        });
-
-        filter_search_response(
-            &mut response,
-            SlackSearchKind::Files,
-            &["C123456789".to_owned()],
-        );
-
-        assert_eq!(response["files"]["matches"].as_array().unwrap().len(), 1);
-        assert_eq!(response["files"]["matches"][0]["id"], "F123456789");
-        assert_eq!(response["files"]["total"], json!(1));
     }
 }
