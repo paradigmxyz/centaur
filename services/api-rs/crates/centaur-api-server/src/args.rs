@@ -956,9 +956,9 @@ impl SandboxArgs {
 
         // Inject the infra/harness placeholder credentials so env-based
         // consumers send the proxy_value iron-proxy replaces with the real
-        // secret: codex's OPENAI_API_KEY (api_key mode → codex logs in and
+        // secret: codex's OPENAI_API_KEY (api_key mode -> codex logs in and
         // hits api.openai.com instead of falling back to the ChatGPT
-        // auth.json), git's GITHUB_TOKEN, and the rest of the infra set.
+        // auth.json), and the rest of the model-provider infra set.
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             if !envs.iter().any(|(existing, _)| existing == &name) {
                 envs.push((name, value));
@@ -1671,7 +1671,7 @@ impl IronProxyArgs {
 
     /// Placeholder env (`PLACEHOLDER=PLACEHOLDER`) for the infra/harness
     /// secrets, whose consumers read credentials straight from the environment
-    /// (codex's `OPENAI_API_KEY`, git's `GITHUB_TOKEN`, …). Discovered tool
+    /// (for example codex's `OPENAI_API_KEY`). Discovered tool
     /// secrets contribute nothing here: tools read credentials through the SDK,
     /// whose `StubBackend` already returns the key name iron-proxy matches on,
     /// and the cloudwatch tool embeds its own throwaway SigV4 credentials.

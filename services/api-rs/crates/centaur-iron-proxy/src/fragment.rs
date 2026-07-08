@@ -250,10 +250,10 @@ fn normalize_auth_mode(value: &str) -> String {
 }
 
 /// The `PLACEHOLDER=PLACEHOLDER` env for replace-mode secrets whose consumers
-/// read credentials straight from the environment (codex's `OPENAI_API_KEY`,
-/// git's `GITHUB_TOKEN`, …) rather than through the tool SDK, whose
-/// `StubBackend` already hands back the key name. Only the infra/harness
-/// fragments have such consumers; tool fragments are excluded at the call site.
+/// read credentials straight from the environment (for example codex's
+/// `OPENAI_API_KEY`) rather than through the tool SDK, whose `StubBackend`
+/// already hands back the key name. Only the infra/harness fragments have such
+/// consumers; tool fragments are excluded at the call site.
 pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> {
     fragments
         .iter()

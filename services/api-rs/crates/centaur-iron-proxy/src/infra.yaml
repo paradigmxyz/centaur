@@ -20,13 +20,3 @@ transforms:
             proxy_value: AMP_API_KEY
             match_headers: ["Authorization"]
           rules: [{ host: ampcode.com }]
-        - replace:
-            proxy_value: GITHUB_TOKEN
-            match_headers: ["Authorization"]
-          rules:
-            - { host: github.com }
-            - { host: api.github.com }
-        - replace:
-            proxy_value: SLACK_BOT_TOKEN
-            match_headers: ["Authorization"]
-          rules: [{ host: "*.slack.com" }]
