@@ -79,8 +79,12 @@ class FakeWatermarkPool:
         self.args = args
         return {
             "completed_payload": {
-                "status": "completed",
-                "watermark": "2026-06-18T22:59:36+00:00",
+                "steps": ["python_host"],
+                "output": {
+                    "status": "completed",
+                    "watermark": "2026-06-18T22:59:36+00:00",
+                },
+                "workflow_name": "company_context_documents",
             }
         }
 

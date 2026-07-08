@@ -191,6 +191,8 @@ async def _latest_successful_watermark(pool, current_run_id: str) -> dt.datetime
     if not row:
         return None
     output = decode_jsonb(row["completed_payload"], {})
+    if isinstance(output, dict) and isinstance(output.get("output"), dict):
+        output = output["output"]
     return _parse_datetime(str(output.get("watermark") or ""))
 
 
