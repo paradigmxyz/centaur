@@ -760,11 +760,11 @@ class SlackClient:
         base_url = self._search_proxy_base_url()
         if not base_url:
             raise RuntimeError("CENTAUR_API_URL is not configured")
-        channel_names = self._search_proxy_channel_names(channels)
+        channel_ids = self._search_proxy_channel_ids(channels)
         params = urlencode(
             {
                 "query": query,
-                "channels": ",".join(channel_names),
+                "channels": ",".join(channel_ids),
                 "count": max_results,
             }
         )
@@ -794,32 +794,35 @@ class SlackClient:
             from centaur_sdk.tool_sdk import current_slack_thread
 
             channel_id = current_slack_thread()["channel_id"]
-            channel_name = self._resolve_channel_name(channel_id, channel_id)
         except RuntimeError:
             return None
-        if self._looks_like_channel_id(channel_name):
-            return None
-        return [channel_name]
+        return [channel_id]
 
-    def _search_proxy_channel_names(self, channels: list[str]) -> list[str]:
-        names = []
+    def _search_proxy_channel_ids(self, channels: list[str]) -> list[str]:
+        channel_ids = []
         seen = set()
+        resolved_by_name: dict[str, str] | None = None
         for channel in channels:
             normalized = self._clean_channel_ref(channel)
             if not normalized:
                 continue
             if self._looks_like_channel_id(normalized):
-                normalized = self._resolve_channel_name(normalized, normalized)
-            if self._looks_like_channel_id(normalized):
-                raise ValueError(f"Slack search proxy requires channel names, got {channel!r}")
-            name = normalized.lower()
-            if name in seen:
+                channel_id = normalized.upper()
+            else:
+                if resolved_by_name is None:
+                    resolved_by_name = {
+                        item["name"].lower(): item["id"] for item in self.list_bot_channels()
+                    }
+                channel_id = resolved_by_name.get(normalized.lower())
+                if not channel_id:
+                    raise ValueError(f"unknown Slack channel for search proxy: {channel!r}")
+            if channel_id in seen:
                 continue
-            seen.add(name)
-            names.append(name)
-        if not names:
+            seen.add(channel_id)
+            channel_ids.append(channel_id)
+        if not channel_ids:
             raise ValueError("Slack search proxy requires at least one channel")
-        return names
+        return channel_ids
 
     def _search_results_from_response(self, response: dict) -> list[dict]:
         matches = response.get("messages", {}).get("matches", [])

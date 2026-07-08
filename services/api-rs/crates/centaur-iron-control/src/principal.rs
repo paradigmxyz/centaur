@@ -184,9 +184,6 @@ pub fn derive_principal_with_slack_team(
 
     if let Some(conversation_id) = conversation_id {
         labels.insert("slack_channel_id".to_owned(), conversation_id.to_owned());
-        if let Some(name) = display_name {
-            labels.insert("slack_channel_name".to_owned(), name.to_owned());
-        }
         return PrincipalRef {
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
             name: display_name
@@ -390,13 +387,6 @@ mod tests {
         // Key stays derived from ids so renames never split the principal.
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
         assert_eq!(principal.name, "Slack Channel #eng-oncall");
-        assert_eq!(
-            principal
-                .labels
-                .get("slack_channel_name")
-                .map(String::as_str),
-            Some("eng-oncall")
-        );
     }
 
     #[test]

@@ -35,7 +35,6 @@ class Principal < ApplicationRecord
   REDACTED = "[redacted]".freeze
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SLACK_CHANNEL_ID_LABEL = "slack_channel_id".freeze
-  SLACK_CHANNEL_NAME_LABEL = "slack_channel_name".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   SANDBOX_REPO_CACHE_ALIASES = { "pub" => "public" }.freeze
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/

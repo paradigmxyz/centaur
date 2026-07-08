@@ -897,7 +897,7 @@ def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
 
     def fake_urlopen(req, *args, **kwargs):
         assert req.full_url == (
-            "http://api/api/slack/search?query=deploy&channels=paradigm-pulse&count=5"
+            "http://api/api/slack/search?query=deploy&channels=C123&count=5"
         )
         body = json.dumps(
             {
