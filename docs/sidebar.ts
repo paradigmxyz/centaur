@@ -38,6 +38,7 @@ export const sidebar = [
       { text: 'Environment Variables', link: '/secrets/environment' },
       { text: 'Per-User Permissions', link: '/secrets/advanced-permissioning' },
       { text: 'OAuth Apps', link: '/secrets/oauth-apps' },
+      { text: 'Console OAuth Integrations', link: '/secrets/console-oauth-integrations' },
       { text: '🚧 AWS KMS', disabled: true },
       { text: '🚧 GCP Secret Manager', disabled: true },
     ],
