@@ -710,13 +710,7 @@ class SlackClient:
             try:
                 return self._search_messages_proxy(search_query, max_results, proxy_channels)
             except (RuntimeError, ValueError):
-                return self._search_messages_local(
-                    local_query,
-                    max_results,
-                    local_channels,
-                    local_from_user,
-                    messages_per_channel,
-                )
+                pass
 
         if local_channels:
             return self._search_messages_local(
