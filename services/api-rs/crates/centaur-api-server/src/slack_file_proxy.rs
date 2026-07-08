@@ -170,6 +170,7 @@ async fn download_slack_file(
         )));
     }
 
+    let upstream_headers = upstream.headers().clone();
     let mut response = Body::from_stream(upstream.bytes_stream()).into_response();
     let headers = response.headers_mut();
     if let Some(value) = file
@@ -179,10 +180,8 @@ async fn download_slack_file(
     {
         headers.insert(header::CONTENT_TYPE, value);
     }
-    if let Some(value) = file.get("size").and_then(Value::as_u64) {
-        if let Ok(value) = value.to_string().parse() {
-            headers.insert(header::CONTENT_LENGTH, value);
-        }
+    if let Some(value) = upstream_headers.get(header::CONTENT_LENGTH).cloned() {
+        headers.insert(header::CONTENT_LENGTH, value);
     }
     if let Some(filename) = file
         .get("name")
@@ -206,7 +205,7 @@ struct SlackFileProxyConfig {
 impl SlackFileProxyConfig {
     fn from_env() -> Result<Self, ApiError> {
         let bot_token = non_empty_env("SLACK_BOT_TOKEN")
-            .ok_or_else(|| ApiError::BadRequest("SLACK_BOT_TOKEN is not configured".to_owned()))?;
+            .ok_or_else(|| ApiError::Internal("SLACK_BOT_TOKEN is not configured".to_owned()))?;
         Ok(Self {
             api_url: non_empty_env("SLACK_API_URL")
                 .unwrap_or_else(|| DEFAULT_SLACK_API_URL.to_owned())
@@ -363,9 +362,8 @@ async fn slack_api_post_form(
 
 fn authorize_slack_file_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
     let token = bearer_token(headers)?;
-    let secret = non_empty_env("CENTAUR_API_JWT_SECRET").ok_or_else(|| {
-        ApiError::BadRequest("CENTAUR_API_JWT_SECRET is not configured".to_owned())
-    })?;
+    let secret = non_empty_env("CENTAUR_API_JWT_SECRET")
+        .ok_or_else(|| ApiError::Internal("CENTAUR_API_JWT_SECRET is not configured".to_owned()))?;
     let audience = non_empty_env("CENTAUR_API_JWT_AUDIENCE")
         .unwrap_or_else(|| DEFAULT_API_JWT_AUDIENCE.to_owned());
     verify_hs256_jwt(token, secret.as_bytes(), &audience)
