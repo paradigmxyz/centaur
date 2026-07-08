@@ -78,7 +78,7 @@ struct SlackSearchQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct SlackFileProxyClaims {
+struct SlackProxyJwtClaims {
     slack: SlackProxyClaims,
 }
 
@@ -120,8 +120,8 @@ async fn search_slack_messages(
     let client = http_client();
     let mut matches = Vec::new();
     for channel_id in &channel_ids {
-        let channel_name = slack_channel_name(client, config, channel_id).await?;
-        let scoped_query = format!("{search_query} in:{channel_name}");
+        let search_filter = slack_conversation_search_filter(client, config, channel_id).await?;
+        let scoped_query = format!("{search_query} {search_filter}");
         let value = slack_search_messages(client, config, &scoped_query, count).await?;
         matches.extend(slack_search_matches(&value));
     }
@@ -283,22 +283,22 @@ fn upstream_body_is_unexpected_html(
 }
 
 // No Debug derive: bot_token must not end up in logs via {:?} formatting.
-struct SlackFileProxyConfig {
+struct SlackProxyConfig {
     api_url: String,
     bot_token: String,
     max_upload_bytes: u64,
 }
 
-fn slack_proxy_config() -> Result<&'static SlackFileProxyConfig, ApiError> {
-    static CELL: OnceLock<SlackFileProxyConfig> = OnceLock::new();
+fn slack_proxy_config() -> Result<&'static SlackProxyConfig, ApiError> {
+    static CELL: OnceLock<SlackProxyConfig> = OnceLock::new();
     if let Some(config) = CELL.get() {
         return Ok(config);
     }
-    let config = SlackFileProxyConfig::from_env()?;
+    let config = SlackProxyConfig::from_env()?;
     Ok(CELL.get_or_init(|| config))
 }
 
-impl SlackFileProxyConfig {
+impl SlackProxyConfig {
     fn from_env() -> Result<Self, ApiError> {
         let bot_token = non_empty_env("SLACK_BOT_TOKEN")
             .ok_or_else(|| ApiError::Internal("SLACK_BOT_TOKEN is not configured".to_owned()))?;
@@ -324,7 +324,7 @@ struct SlackUploadTicket {
 
 async fn get_upload_url(
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
+    config: &SlackProxyConfig,
     filename: &str,
     length: u64,
     alt_txt: Option<&str>,
@@ -383,7 +383,7 @@ async fn upload_file_bytes(
 
 async fn complete_upload(
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
+    config: &SlackProxyConfig,
     file_id: &str,
     channel_id: &str,
     thread_ts: Option<&str>,
@@ -411,7 +411,7 @@ async fn complete_upload(
 
 async fn slack_file_info(
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
+    config: &SlackProxyConfig,
     file_id: &str,
 ) -> Result<Value, ApiError> {
     let value = slack_api_post_form(
@@ -428,7 +428,7 @@ async fn slack_file_info(
 
 async fn slack_search_messages(
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
+    config: &SlackProxyConfig,
     query: &str,
     count: usize,
 ) -> Result<Value, ApiError> {
@@ -445,9 +445,9 @@ async fn slack_search_messages(
     .await
 }
 
-async fn slack_channel_name(
+async fn slack_conversation_search_filter(
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
+    config: &SlackProxyConfig,
     channel_id: &str,
 ) -> Result<String, ApiError> {
     let value = slack_api_get(
@@ -457,22 +457,34 @@ async fn slack_channel_name(
         &[("channel", channel_id.to_owned())],
     )
     .await?;
-    let name = value
+    let channel = value
         .get("channel")
-        .and_then(|channel| channel.get("name"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ApiError::BadRequest("Slack channel info response did not include channel".to_owned())
+        })?;
+    if channel_id.starts_with('D') {
+        let user_id = channel
+            .get("user")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::BadRequest("Slack DM has no user id".to_owned()))?;
+        return Ok(format!("in:<@{user_id}>"));
+    }
+    let name = channel
+        .get("name")
         .and_then(Value::as_str)
-        .and_then(normalize_slack_search_channel_name)
+        .and_then(normalize_slack_search_filter_value)
         .ok_or_else(|| {
             ApiError::BadRequest(
                 "Slack channel info response did not include a searchable name".to_owned(),
             )
         })?;
-    Ok(name)
+    Ok(format!("in:{name}"))
 }
 
 async fn slack_api_post_form(
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
+    config: &SlackProxyConfig,
     method: &str,
     form: &[(&str, String)],
 ) -> Result<Value, ApiError> {
@@ -502,7 +514,7 @@ async fn slack_api_post_form(
 
 async fn slack_api_get(
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
+    config: &SlackProxyConfig,
     method: &str,
     params: &[(&str, String)],
 ) -> Result<Value, ApiError> {
@@ -534,13 +546,13 @@ async fn slack_api_get(
     Ok(value)
 }
 
-fn authorize_slack_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
+fn authorize_slack_proxy(headers: &HeaderMap) -> Result<SlackProxyJwtClaims, ApiError> {
     let token = bearer_token(headers)?;
     verify_console_jwt(token)
 }
 
 fn ensure_upload_channel_allowed(
-    claims: &SlackFileProxyClaims,
+    claims: &SlackProxyJwtClaims,
     channel_id: &str,
 ) -> Result<(), ApiError> {
     ensure_channel_allowed(
@@ -551,7 +563,7 @@ fn ensure_upload_channel_allowed(
 }
 
 fn ensure_download_channel_allowed(
-    claims: &SlackFileProxyClaims,
+    claims: &SlackProxyJwtClaims,
     channel_id: &str,
 ) -> Result<(), ApiError> {
     ensure_channel_allowed(
@@ -562,7 +574,7 @@ fn ensure_download_channel_allowed(
 }
 
 fn ensure_search_channels_allowed(
-    claims: &SlackFileProxyClaims,
+    claims: &SlackProxyJwtClaims,
     channel_ids: &[String],
 ) -> Result<(), ApiError> {
     if channel_ids.iter().all(|channel_id| {
@@ -624,16 +636,12 @@ fn normalize_slack_search_channel_id(channel: &str) -> Option<String> {
     Some(value)
 }
 
-fn normalize_slack_search_channel_name(channel: &str) -> Option<String> {
-    let value = channel.trim().trim_start_matches('#');
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
+fn normalize_slack_search_filter_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
         return None;
     }
-    Some(value.to_ascii_lowercase())
+    Some(value.to_owned())
 }
 
 fn strip_slack_search_in_operators(query: &str) -> String {
@@ -818,7 +826,7 @@ mod tests {
                 }
             }),
         );
-        let claims = crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+        let claims = crate::api_jwt::verify_hs256_jwt::<SlackProxyJwtClaims>(
             &token,
             b"secret",
             "centaur-api",
@@ -844,16 +852,21 @@ mod tests {
 
     #[test]
     fn search_channels_are_normalized_and_authorized() {
-        let claims = SlackFileProxyClaims {
+        let claims = SlackProxyJwtClaims {
             slack: SlackProxyClaims {
                 upload_channels: vec![],
                 download_channels: vec![],
-                search_channels: vec!["C123456789".to_owned(), "G987654321".to_owned()],
+                search_channels: vec![
+                    "C123456789".to_owned(),
+                    "D111111111".to_owned(),
+                    "G987654321".to_owned(),
+                ],
             },
         };
         let channels =
-            slack_search_requested_channels("c123456789,<#G987654321|eng-oncall>").unwrap();
-        assert_eq!(channels, vec!["C123456789", "G987654321"]);
+            slack_search_requested_channels("c123456789,D111111111,<#G987654321|eng-oncall>")
+                .unwrap();
+        assert_eq!(channels, vec!["C123456789", "D111111111", "G987654321"]);
         ensure_search_channels_allowed(&claims, &channels).unwrap();
         assert!(matches!(
             slack_search_requested_channels("eng-oncall").unwrap_err(),
@@ -876,6 +889,15 @@ mod tests {
     }
 
     #[test]
+    fn slack_search_filter_values_allow_non_ascii_names() {
+        assert_eq!(
+            normalize_slack_search_filter_value("チーム-通知").as_deref(),
+            Some("チーム-通知")
+        );
+        assert!(normalize_slack_search_filter_value("team alerts").is_none());
+    }
+
+    #[test]
     fn rejects_invalid_jwt_signature() {
         let token = test_jwt(
             b"secret",
@@ -892,7 +914,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+            crate::api_jwt::verify_hs256_jwt::<SlackProxyJwtClaims>(
                 &token,
                 b"other-secret",
                 "centaur-api",
@@ -920,7 +942,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+            crate::api_jwt::verify_hs256_jwt::<SlackProxyJwtClaims>(
                 &token,
                 b"secret",
                 "centaur-api",
@@ -948,7 +970,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+            crate::api_jwt::verify_hs256_jwt::<SlackProxyJwtClaims>(
                 &token,
                 b"secret",
                 "centaur-api",
@@ -975,7 +997,7 @@ mod tests {
                 }
             }),
         );
-        let claims = crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+        let claims = crate::api_jwt::verify_hs256_jwt::<SlackProxyJwtClaims>(
             &token,
             b"secret",
             "centaur-api",
@@ -1000,7 +1022,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+            crate::api_jwt::verify_hs256_jwt::<SlackProxyJwtClaims>(
                 &token,
                 b"secret",
                 "centaur-api",
@@ -1064,7 +1086,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+            crate::api_jwt::verify_hs256_jwt::<SlackProxyJwtClaims>(
                 &token,
                 b"secret",
                 "centaur-api",

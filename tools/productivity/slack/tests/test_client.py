@@ -1,4 +1,5 @@
 import email.message
+import io
 import json
 
 import pytest
@@ -897,7 +898,7 @@ def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
 
     def fake_urlopen(req, *args, **kwargs):
         assert req.full_url == (
-            "http://api/api/slack/search?query=deploy&channels=C123&count=5"
+            "http://api/api/slack/search?query=deploy+from%3A%3C%40UGZCSQTPE%3E&channels=C123&count=5"
         )
         body = json.dumps(
             {
@@ -920,7 +921,7 @@ def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     result = client.search_messages(
-        "deploy in:#other",
+        "deploy from:<@UGZCSQTPE> in:#other",
         max_results=5,
         channels=["paradigm-pulse"],
         messages_per_channel=25,
@@ -929,6 +930,48 @@ def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
     assert result[0]["text"] == "deploy complete"
     assert fake_web_client.api_calls == []
     assert fake_web_client.history_calls == []
+
+
+def test_search_messages_proxy_failure_falls_back_to_local_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.error
+    import urllib.request
+
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda: {"U1": "alice"}  # type: ignore[method-assign]
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api")
+    fake_web_client.history_pages = [
+        {"messages": [{"user": "U1", "text": "deploy fallback", "ts": "300.000000"}]}
+    ]
+
+    def fake_urlopen(req, *args, **kwargs):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"forbidden"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.search_messages(
+        "deploy",
+        max_results=5,
+        channels=["C123"],
+        messages_per_channel=25,
+    )
+
+    assert result[0]["text"] == "deploy fallback"
+    assert fake_web_client.history_calls == [{"channel": "C123", "limit": 25}]
+
+
+def test_slack_search_from_filter_uses_documented_forms() -> None:
+    client, _ = _make_client()
+
+    assert client._slack_search_from_filter("<@UGZCSQTPE>") == "from:<@UGZCSQTPE>"
+    assert client._slack_search_from_filter("@deploybot") == "from:deploybot"
 
 
 def test_sync_channel_history_uses_watermark_lookback() -> None:
