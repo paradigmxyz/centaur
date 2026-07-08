@@ -700,21 +700,20 @@ class SlackClient:
         local_query, local_channels, local_from_user = self._extract_local_search_filters(
             query, channels, from_user
         )
-        explicit_channels = self._dedupe_channel_refs(channels or [])
-        search_query = self._strip_search_channel_filters(query)
+        search_query = query
         if from_user:
             search_query += f" {self._slack_search_from_filter(from_user)}"
         search_query = " ".join(search_query.split())
 
-        proxy_channels = explicit_channels or self._default_search_proxy_channels()
-        if proxy_channels and self._search_proxy_base_url():
+        proxy_channels = local_channels or self._default_search_proxy_channels()
+        if proxy_channels:
             try:
                 return self._search_messages_proxy(search_query, max_results, proxy_channels)
             except (RuntimeError, ValueError):
                 return self._search_messages_local(
                     local_query,
                     max_results,
-                    proxy_channels,
+                    local_channels,
                     local_from_user,
                     messages_per_channel,
                 )
@@ -753,11 +752,6 @@ class SlackClient:
             raise RuntimeError(response.get("error", "search.messages failed"))
 
         return self._search_results_from_response(response)
-
-    def _strip_search_channel_filters(self, query: str) -> str:
-        return " ".join(
-            term for term in query.split() if not term.strip().lower().startswith("in:")
-        )
 
     def _slack_search_from_filter(self, from_user: str) -> str:
         user = self._clean_user_ref(from_user)
@@ -809,8 +803,6 @@ class SlackClient:
         return value.rstrip("/") or None
 
     def _default_search_proxy_channels(self) -> list[str] | None:
-        if not self._search_proxy_base_url():
-            return None
         try:
             from centaur_sdk.tool_sdk import current_slack_thread
 

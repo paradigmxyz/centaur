@@ -123,7 +123,11 @@ async fn search_slack_messages(
         let search_filter = slack_conversation_search_filter(client, config, channel_id).await?;
         let scoped_query = format!("{search_query} {search_filter}");
         let value = slack_search_messages(client, config, &scoped_query, count).await?;
-        matches.extend(slack_search_matches(&value));
+        matches.extend(
+            slack_search_matches(&value)
+                .into_iter()
+                .filter(|slack_match| slack_search_match_in_channel(slack_match, channel_id)),
+        );
     }
     sort_slack_search_matches(&mut matches);
     matches.truncate(count);
@@ -665,6 +669,14 @@ fn slack_search_matches(value: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn slack_search_match_in_channel(slack_match: &Value, channel_id: &str) -> bool {
+    slack_match
+        .get("channel")
+        .and_then(|channel| channel.get("id"))
+        .and_then(Value::as_str)
+        == Some(channel_id)
+}
+
 fn sort_slack_search_matches(matches: &mut [Value]) {
     matches.sort_by(|left, right| {
         let left_ts = left.get("ts").and_then(Value::as_str).unwrap_or_default();
@@ -886,6 +898,21 @@ mod tests {
             ),
             "within:limits deploy after:2026-01-01"
         );
+    }
+
+    #[test]
+    fn slack_search_match_filter_keeps_only_requested_channel() {
+        let requested = json!({
+            "channel": {"id": "C123456789", "name": "general"},
+            "text": "deploy"
+        });
+        let other = json!({
+            "channel": {"id": "C987654321", "name": "random"},
+            "text": "deploy"
+        });
+
+        assert!(slack_search_match_in_channel(&requested, "C123456789"));
+        assert!(!slack_search_match_in_channel(&other, "C123456789"));
     }
 
     #[test]

@@ -894,11 +894,16 @@ def test_search_messages_uses_api_proxy_for_channel_scoped_native_search(
 
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {"U1": "alice"}  # type: ignore[method-assign]
+    client.list_bot_channels = lambda **_: [  # type: ignore[method-assign]
+        {"id": "C123", "name": "paradigm-pulse"},
+        {"id": "C999", "name": "other"},
+    ]
     monkeypatch.setenv("CENTAUR_API_URL", "http://api")
 
     def fake_urlopen(req, *args, **kwargs):
         assert req.full_url == (
-            "http://api/api/slack/search?query=deploy+from%3A%3C%40UGZCSQTPE%3E&channels=C123&count=5"
+            "http://api/api/slack/search?query=deploy+from%3A%3C%40UGZCSQTPE%3E+"
+            "in%3A%23other&channels=C123%2CC999&count=5"
         )
         body = json.dumps(
             {
