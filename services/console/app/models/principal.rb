@@ -1,3 +1,5 @@
+require "uri"
+
 class Principal < ApplicationRecord
   oid_prefix "prn"
 
@@ -32,8 +34,10 @@ class Principal < ApplicationRecord
   # reports that a control_plane source carries a value without revealing it.
   REDACTED = "[redacted]".freeze
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
+  SLACK_CHANNEL_ID_LABEL = "slack_channel_id".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   SANDBOX_REPO_CACHE_ALIASES = { "pub" => "public" }.freeze
+  SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
 
   # The config of a principal with no effective grants; also what an unassigned
   # proxy resolves to.
@@ -121,7 +125,7 @@ class Principal < ApplicationRecord
   def effective_config(redact_secrets: true)
     served = served_credentials
     config = {
-      "secrets" => proxy_secrets_for(served),
+      "secrets" => proxy_secrets_for(served) + generated_proxy_secrets,
       "transforms" => proxy_transforms_for(served),
       "postgres" => sync_postgres
     }
@@ -224,6 +228,37 @@ class Principal < ApplicationRecord
     served[:static].map(&:to_proxy_secret)
   end
 
+  def generated_proxy_secrets
+    secret = api_server_jwt_secret
+    secret ? [ secret ] : []
+  end
+
+  def api_server_jwt_secret
+    channel_id = labels.to_h[SLACK_CHANNEL_ID_LABEL].to_s.strip
+    return nil unless channel_id.match?(SLACK_CHANNEL_ID_FORMAT)
+
+    token = ApiServer::Jwt.encode_for_principal(self)
+    return nil if token.blank?
+
+    rules = api_server_hosts.map { |host| { "host" => host } }
+    return nil if rules.empty?
+
+    {
+      "source" => { "type" => "control_plane", "value" => token },
+      "inject" => { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
+      "rules" => rules
+    }
+  end
+
+  def api_server_hosts
+    configured = ENV["CENTAUR_API_SERVER_PROXY_HOSTS"].to_s.split(",")
+    from_url = self.class.host_from_url(ENV["CENTAUR_API_URL"])
+    (configured + [ from_url, "centaur-api-rs", "api" ])
+      .map { |host| host.to_s.strip.downcase.delete_suffix(".") }
+      .reject(&:blank?)
+      .uniq
+  end
+
   def proxy_transforms_for(served)
     transforms = served[:gcp_auth].map(&:to_proxy_transform)
     transforms += served[:gcp_id_token].map(&:to_proxy_transform)
@@ -234,6 +269,12 @@ class Principal < ApplicationRecord
     transforms << { "name" => "oauth_token", "config" => { "tokens" => oauth_entries } } if oauth_entries.any?
 
     transforms
+  end
+
+  def self.host_from_url(value)
+    URI.parse(value.to_s).host
+  rescue URI::InvalidURIError
+    nil
   end
 
   # Cross-type conflict resolution. The wire protocol applies the `secrets` array
