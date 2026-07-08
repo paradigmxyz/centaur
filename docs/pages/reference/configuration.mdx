@@ -35,7 +35,7 @@ These must exist for the normal Helm deployment. For local development,
 | `DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap generates it. | API and Slackbot Postgres connection. |
 | `SLACK_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack request signature verification. |
 | `SLACKBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Static API key bootstrapped for Slackbot. |
-| `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot. |
+| `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot and api-rs Slack helpers. |
 | `SANDBOX_SIGNING_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Signing key for short-lived sandbox API tokens. |
 | `IRON_MANAGEMENT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Management key for API-created iron-proxy pods. |
 | `IRON_BROKER_TOKEN` | `secretManager.existingSecretName`; required when `tokenBroker.enabled=true`. | Bearer token iron-proxy presents to iron-token-broker and the broker enforces on its HTTP API. |
@@ -85,6 +85,7 @@ Optional required-by-mode variables:
 | `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
 | `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |
 | `apiRs.activitySummary.*` | Helm values, default disabled. | Enables API-RS to summarize live session activity into durable `session.activity_summary` events. |
+| `SLACK_BOT_TOKEN` | Explicit `secretKeyRef` from `secretManager.existingSecretName`. | Slack Web API access for api-rs Slack proxy and workflow Slack helpers. |
 | `OPENAI_API_KEY` | Secret mounted into api-rs, or `apiRs.extraEnv` for local/dev overrides. | OpenAI credential for activity summaries; the feature stays disabled when no key is present. |
 | `SESSION_ACTIVITY_SUMMARY_MODEL` | `apiRs.activitySummary.model`, default `gpt-5.4-nano`. | Model used for the short live activity sentence. |
 

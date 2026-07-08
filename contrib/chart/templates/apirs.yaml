@@ -214,6 +214,12 @@ spec:
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
             - name: BIND_ADDR
               value: {{ printf "0.0.0.0:%v" .Values.apiRs.port | quote }}
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" .Values.secretManager.envPrefix }}
+                  optional: true
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
               value: {{ $mcpPublicUrl | quote }}
