@@ -50,8 +50,9 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   test "fetch_for rebuilds api server JWT snapshots when the jwt window advances" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       @principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
-      current_time = Time.zone.at(1_700_001_060)
-      previous_window_time = Time.zone.at(1_700_000_940)
+      boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
+      current_time = Time.zone.at(boundary + 60)
+      previous_window_time = Time.zone.at(boundary - 60)
       proxy = proxies(:acme_proxy)
 
       snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)

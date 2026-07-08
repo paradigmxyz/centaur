@@ -1,3 +1,5 @@
+require "zlib"
+
 module ApiServer
   module Jwt
     DEFAULT_AUDIENCE = "centaur-api".freeze
@@ -14,7 +16,7 @@ module ApiServer
       signing_secret = ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s
       return nil if signing_secret.blank?
 
-      issued_at = window_start(now.to_i)
+      issued_at = window_start_for(principal, now.to_i)
       expires_at = issued_at + DEFAULT_TTL_SECONDS
       CentaurJwt::Hs256.encode(
         {
@@ -32,8 +34,16 @@ module ApiServer
       )
     end
 
-    def window_start(timestamp)
-      timestamp - (timestamp % DEFAULT_WINDOW_SECONDS)
+    # Rotation boundaries are offset per principal (deterministically, from
+    # the oid) so the fleet's tokens don't all roll over — and force snapshot
+    # rebuilds — at the same instant.
+    def window_start_for(principal, timestamp)
+      offset = rotation_offset(principal)
+      timestamp - ((timestamp - offset) % DEFAULT_WINDOW_SECONDS)
+    end
+
+    def rotation_offset(principal)
+      Zlib.crc32(principal.oid.to_s) % DEFAULT_WINDOW_SECONDS
     end
 
     def audience

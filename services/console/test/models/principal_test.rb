@@ -133,7 +133,8 @@ class PrincipalTest < ActiveSupport::TestCase
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "download_channels")
       assert_equal 1.hour.to_i, claims.fetch("exp") - claims.fetch("iat")
-      assert_equal 0, claims.fetch("iat") % 15.minutes.to_i
+      assert_equal ApiServer::Jwt.rotation_offset(principal),
+                   claims.fetch("iat") % ApiServer::Jwt::DEFAULT_WINDOW_SECONDS
     end
   end
 
@@ -142,17 +143,20 @@ class PrincipalTest < ActiveSupport::TestCase
       principal = principals(:acme_channel)
       principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
 
+      window = ApiServer::Jwt::DEFAULT_WINDOW_SECONDS
+      boundary = 1_700_000_100 + ApiServer::Jwt.rotation_offset(principal)
+
       first = ApiServer::Jwt.encode_for_principal(
         principal,
-        now: Time.zone.at(1_700_000_123)
+        now: Time.zone.at(boundary + 23)
       )
       second = ApiServer::Jwt.encode_for_principal(
         principal,
-        now: Time.zone.at(1_700_000_899)
+        now: Time.zone.at(boundary + window - 1)
       )
       third = ApiServer::Jwt.encode_for_principal(
         principal,
-        now: Time.zone.at(1_700_001_000)
+        now: Time.zone.at(boundary + window)
       )
 
       assert_equal first, second

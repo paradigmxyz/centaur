@@ -8,7 +8,7 @@ module CentaurJwt
 
     def encode(payload, signing_secret:)
       signing_secret = signing_secret.to_s
-      raise KeyError, "CENTAUR_JWT_SIGNING_SECRET is not configured" if signing_secret.empty?
+      raise KeyError, "CENTAUR_JWT_SIGNING_SECRET is not configured" if signing_secret.blank?
 
       header = { "alg" => "HS256", "typ" => "JWT" }
       signing_input = [ base64url_json(header), base64url_json(payload) ].join(".")

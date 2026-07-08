@@ -93,6 +93,6 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     return false unless channel_id.match?(Principal::SLACK_CHANNEL_ID_FORMAT)
     return false if ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s.blank?
 
-    updated_at.to_i < ApiServer::Jwt.window_start(Time.current.to_i)
+    updated_at.to_i < ApiServer::Jwt.window_start_for(principal, Time.current.to_i)
   end
 end
