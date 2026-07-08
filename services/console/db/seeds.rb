@@ -16,6 +16,14 @@ unless Rails.env.production?
 
   [
     {
+      slug: "attio",
+      provider: "attio",
+      description: "Attio workspace access for CRM records and object configuration",
+      # Attio scopes are configured in the Attio developer dashboard; these
+      # representative scopes keep the sample app's allowlist non-empty.
+      allowed_scopes: %w[record_permission:read object_configuration:read]
+    },
+    {
       slug: "google",
       provider: "google",
       description: "Google Workspace (Gmail, Calendar, Drive)",

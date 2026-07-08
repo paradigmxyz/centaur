@@ -207,6 +207,8 @@ module Oauth
 
     def enqueue_identity_enrichment(credential)
       case @app.provider
+      when Oauth::Providers::Attio::KEY
+        Oauth::EnrichAttioCredentialIdentityJob.perform_later(credential.id)
       when Oauth::Providers::Slack::KEY
         Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
       when Oauth::Providers::Github::KEY

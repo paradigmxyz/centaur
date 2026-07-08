@@ -12,12 +12,14 @@ module Oauth
     CLIENT_ID = "acme-google-client-id".freeze
     SLACK_CLIENT_ID = "acme-slack-client-id".freeze
     GITHUB_CLIENT_ID = "acme-github-client-id".freeze
+    ATTIO_CLIENT_ID = "acme-attio-client-id".freeze
 
     setup do
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
       oauth_apps(:acme_github).update!(client_secret: "github-secret")
+      oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
       clear_enqueued_jobs
     end
 
@@ -78,6 +80,13 @@ module Oauth
       }.merge(overrides).to_json
     end
 
+    def attio_token_body(**overrides)
+      {
+        access_token: "attio-user-token",
+        token_type: "Bearer"
+      }.merge(overrides).to_json
+    end
+
     def sign_in(user)
       post login_url, params: { email: user.email, password: "password123456" }
     end
@@ -92,6 +101,23 @@ module Oauth
     end
 
     # --- start ----------------------------------------------------------------
+
+    test "start redirects to Attio with dashboard-configured scopes" do
+      get oauth_start_url(slug: "attio")
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "app.attio.com", uri.host
+      assert_equal "/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal ATTIO_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/attio/callback", q["redirect_uri"]
+      assert_equal "code", q["response_type"]
+      assert_equal "S256", q["code_challenge_method"]
+      assert q["code_challenge"].present?
+      # The Attio developer dashboard owns the effective scopes; the generic
+      # flow still sends the sample app allowlist as a harmless scope param.
+      assert_equal "record_permission:read object_configuration:read", q["scope"]
+    end
 
     test "start redirects to Google with the right params and sets the flow cookie" do
       get oauth_start_url(slug: "google")
@@ -241,6 +267,35 @@ module Oauth
       assert_equal "xoxe-1-refresh", cred.refresh_token
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Slack – grace token", cred.static_secret.name
+    end
+
+    test "callback happy path supports Attio workspace tokens" do
+      state = start_flow(slug: "attio", scopes: "record_permission:read")
+      stub_exchange(status: 200, body: attio_token_body)
+
+      assert_enqueued_with(job: Oauth::EnrichAttioCredentialIdentityJob) do
+        assert_difference -> { BrokerCredential.count } => 1 do
+          get oauth_callback_url(slug: "attio"), params: { state: state, code: "auth-code" }
+        end
+      end
+      assert_redirected_to console_integrations_path
+      assert_match(/\Aattio connected/, flash[:notice])
+
+      app = oauth_apps(:acme_attio)
+      cred = BrokerCredential.find_by(oauth_app: app)
+      assert_equal "acme", cred.namespace
+      assert_match(/\Aattio-attio-pending-[a-f0-9]{32}\z/, cred.foreign_id)
+      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
+      assert_equal "Attio – Pending Attio workspace", cred.name
+      assert_equal "https://app.attio.com/oauth/token", cred.token_endpoint
+      assert_nil cred.provider_email
+      assert_equal %w[record_permission:read], cred.scopes
+      assert_equal "attio-user-token", cred.access_token
+      assert_nil cred.refresh_token
+      assert_nil cred.next_attempt_at
+      assert_equal [ "api.attio.com" ], cred.static_secret.rules.map(&:host)
+      assert_equal "Attio – Pending Attio workspace token", cred.static_secret.name
+      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports GitHub OAuth app tokens" do

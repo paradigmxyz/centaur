@@ -10,6 +10,7 @@ module Oauth
     # stateless, so sharing one instance across flows is safe.
     def self.registry
       @registry ||= {
+        Attio::KEY => Attio.new,
         Github::KEY => Github.new,
         Google::KEY => Google.new,
         Granola::KEY => Granola.new,
