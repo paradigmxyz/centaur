@@ -19,9 +19,23 @@ unless Rails.env.production?
       slug: "attio",
       provider: "attio",
       description: "Attio workspace access for CRM records and object configuration",
-      # Attio scopes are configured in the Attio developer dashboard; these
-      # representative scopes keep the sample app's allowlist non-empty.
-      allowed_scopes: %w[record_permission:read object_configuration:read]
+      # Attio scopes are configured in the Attio developer dashboard; this
+      # allowlist mirrors the dashboard configuration we expect: user
+      # management read-only, everything else read-write.
+      allowed_scopes: %w[
+        user_management:read
+        record_permission:read-write
+        object_configuration:read-write
+        list_entry:read-write
+        list_configuration:read-write
+        comment:read-write
+        note:read-write
+        task:read-write
+        meeting:read-write
+        call_recording:read-write
+        webhook:read-write
+        file:read-write
+      ]
     },
     {
       slug: "google",
