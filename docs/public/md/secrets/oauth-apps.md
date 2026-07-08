@@ -39,6 +39,29 @@ Centaur Console.
 Re-consenting with the same account updates the existing credential instead of
 creating another one.
 
+## Provider-Specific Setup
+
+### Granola
+
+Granola has no app dashboard; obtain the OAuth client once via dynamic client
+registration, then use the returned `client_id` and `client_secret` when adding
+the app in the console:
+
+```bash
+curl -sS -X POST https://mcp-auth.granola.ai/oauth2/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Centaur Console",
+    "redirect_uris": ["<CENTAUR_CONSOLE_PUBLIC_URL>/oauth/granola/callback"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "token_endpoint_auth_method": "client_secret_post",
+    "scope": "openid email profile offline_access mcp"
+  }'
+```
+
+Use `mcp` as the allowed scope for the app.
+
 ## Grant The Credential
 
 Consent does not automatically grant the token to every session. In the
