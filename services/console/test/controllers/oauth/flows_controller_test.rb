@@ -13,6 +13,7 @@ module Oauth
     SLACK_CLIENT_ID = "acme-slack-client-id".freeze
     GITHUB_CLIENT_ID = "acme-github-client-id".freeze
     ATTIO_CLIENT_ID = "acme-attio-client-id".freeze
+    LINEAR_CLIENT_ID = "acme-linear-client-id".freeze
 
     setup do
       @app = oauth_apps(:acme_google) # slug "google"
@@ -20,6 +21,7 @@ module Oauth
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
       oauth_apps(:acme_github).update!(client_secret: "github-secret")
       oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
+      oauth_apps(:acme_linear).update!(client_secret: "linear-secret")
       clear_enqueued_jobs
     end
 
@@ -84,6 +86,16 @@ module Oauth
       {
         access_token: "attio-user-token",
         token_type: "Bearer"
+      }.merge(overrides).to_json
+    end
+
+    def linear_token_body(scope: "read write", **overrides)
+      {
+        access_token: "lin-user-token",
+        refresh_token: "lin-refresh-token",
+        token_type: "Bearer",
+        expires_in: 86_399,
+        scope: scope
       }.merge(overrides).to_json
     end
 
@@ -177,6 +189,24 @@ module Oauth
       scopes = q["scope"].split
       assert_includes scopes, "repo"
       assert_includes scopes, "read:user"
+    end
+
+    test "start redirects to Linear with comma separated scopes" do
+      get oauth_start_url(slug: "linear")
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "linear.app", uri.host
+      assert_equal "/oauth/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal LINEAR_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/linear/callback", q["redirect_uri"]
+      assert_equal "code", q["response_type"]
+      assert_equal "S256", q["code_challenge_method"]
+      assert_nil q["user_scope"]
+      assert_nil q["prompt"]
+      scopes = q["scope"].split(",")
+      assert_includes scopes, "read"
+      assert_includes scopes, "write"
     end
 
     test "start works without any session" do
@@ -325,6 +355,34 @@ module Oauth
       assert_equal [ "api.github.com", "github.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "GitHub – Pending GitHub account token", cred.static_secret.name
       refute_includes BrokerCredential.refreshable, cred
+    end
+
+    test "callback happy path supports Linear OAuth app tokens" do
+      state = start_flow(slug: "linear", scopes: "read write")
+      stub_exchange(status: 200, body: linear_token_body)
+
+      assert_enqueued_with(job: Oauth::EnrichLinearCredentialIdentityJob) do
+        assert_difference -> { BrokerCredential.count } => 1 do
+          get oauth_callback_url(slug: "linear"), params: { state: state, code: "auth-code" }
+        end
+      end
+      assert_redirected_to console_integrations_path
+      assert_match(/\Alinear connected/, flash[:notice])
+
+      app = oauth_apps(:acme_linear)
+      cred = BrokerCredential.find_by(oauth_app: app)
+      assert_equal "acme", cred.namespace
+      assert_match(/\Alinear-linear-pending-[a-f0-9]{32}\z/, cred.foreign_id)
+      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
+      assert_equal "Linear – Pending Linear account", cred.name
+      assert_equal "https://api.linear.app/oauth/token", cred.token_endpoint
+      assert_nil cred.provider_email
+      assert_equal %w[read write], cred.scopes
+      assert_equal "lin-user-token", cred.access_token
+      assert_equal "lin-refresh-token", cred.refresh_token
+      assert cred.next_attempt_at.present?
+      assert_equal [ "api.linear.app" ], cred.static_secret.rules.map(&:host)
+      assert_equal "Linear – Pending Linear account token", cred.static_secret.name
     end
 
     test "callback wraps the minted credential in a grantable static secret" do

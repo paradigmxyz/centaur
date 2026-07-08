@@ -61,3 +61,15 @@ acme_github:
   credential_namespace: acme
   enabled: true
   created_by: acme_admin
+
+acme_linear:
+  slug: linear
+  description: Acme Linear integration
+  provider: linear
+  client_id: acme-linear-client-id
+  allowed_scopes:
+    - read
+    - write
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin

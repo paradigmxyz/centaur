@@ -66,6 +66,12 @@ unless Rails.env.production?
       # A real client_id/client_secret comes from one-time dynamic registration:
       # POST https://mcp-auth.granola.ai/oauth2/register
       allowed_scopes: %w[mcp]
+    },
+    {
+      slug: "linear",
+      provider: "linear",
+      description: "Linear workspace access for issues and comments",
+      allowed_scopes: %w[read write]
     }
   ].each do |attrs|
     OauthApp.find_or_create_by!(slug: attrs[:slug]) do |app|

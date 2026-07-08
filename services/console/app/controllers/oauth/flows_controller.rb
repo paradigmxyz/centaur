@@ -213,6 +213,8 @@ module Oauth
         Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
       when Oauth::Providers::Github::KEY
         Oauth::EnrichGithubCredentialIdentityJob.perform_later(credential.id)
+      when Oauth::Providers::Linear::KEY
+        Oauth::EnrichLinearCredentialIdentityJob.perform_later(credential.id)
       end
     end
 
