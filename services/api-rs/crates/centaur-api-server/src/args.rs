@@ -40,6 +40,8 @@ use tracing::{info, warn};
 use crate::{ServerError, activity_summary::ActivitySummaryConfig};
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
+const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
+const SLACK_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 
 /// OTLP env always forwarded from the api-rs process into codex sandboxes,
 /// mirroring the Python control plane's `_SANDBOX_PASSTHROUGH_ENV_KEYS`. The
@@ -1677,9 +1679,12 @@ impl IronProxyArgs {
     /// whose `StubBackend` already returns the key name iron-proxy matches on,
     /// and the cloudwatch tool embeds its own throwaway SigV4 credentials.
     fn sandbox_placeholder_env(&self) -> Result<BTreeMap<String, String>, ServerError> {
-        Ok(centaur_iron_proxy::placeholder_env(&[
-            self.infra_fragment()?
-        ]))
+        let mut env = centaur_iron_proxy::placeholder_env(&[self.infra_fragment()?]);
+        env.entry(GITHUB_TOKEN_ENV.to_owned())
+            .or_insert_with(|| GITHUB_TOKEN_ENV.to_owned());
+        env.entry(SLACK_BOT_TOKEN_ENV.to_owned())
+            .or_insert_with(|| SLACK_BOT_TOKEN_ENV.to_owned());
+        Ok(env)
     }
 
     fn env_from_secret_names(&self) -> Vec<String> {
@@ -2513,6 +2518,20 @@ mod tests {
                 .map(|env| env.value.as_str()),
             Some("true")
         );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == GITHUB_TOKEN_ENV)
+                .map(|env| env.value.as_str()),
+            Some(GITHUB_TOKEN_ENV)
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == SLACK_BOT_TOKEN_ENV)
+                .map(|env| env.value.as_str()),
+            Some(SLACK_BOT_TOKEN_ENV)
+        );
     }
 
     #[test]
@@ -2546,6 +2565,14 @@ mod tests {
         assert!(
             env.iter()
                 .any(|(name, value)| name == "OPENAI_API_KEY" && value == "OPENAI_API_KEY")
+        );
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == GITHUB_TOKEN_ENV && value == GITHUB_TOKEN_ENV)
+        );
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == SLACK_BOT_TOKEN_ENV && value == SLACK_BOT_TOKEN_ENV)
         );
         assert!(
             env.iter()
