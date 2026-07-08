@@ -43,6 +43,10 @@ struct SlackFileUploadQuery {
     initial_comment: Option<String>,
     #[serde(default)]
     content_type: Option<String>,
+    #[serde(default)]
+    alt_txt: Option<String>,
+    #[serde(default)]
+    snippet_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,7 +96,15 @@ async fn upload_slack_file(
     let content_length = content_length(&headers)?;
     ensure_upload_size(content_length, config.max_upload_bytes)?;
     let client = reqwest::Client::new();
-    let upload_ticket = get_upload_url(&client, &config, &query.filename, content_length).await?;
+    let upload_ticket = get_upload_url(
+        &client,
+        &config,
+        &query.filename,
+        content_length,
+        query.alt_txt.as_deref(),
+        query.snippet_type.as_deref(),
+    )
+    .await?;
     upload_file_bytes(
         &client,
         &upload_ticket.upload_url,
@@ -220,21 +232,31 @@ async fn get_upload_url(
     config: &SlackFileProxyConfig,
     filename: &str,
     length: u64,
+    alt_txt: Option<&str>,
+    snippet_type: Option<&str>,
 ) -> Result<SlackUploadTicket, ApiError> {
-    let value = slack_api_post_form(
-        client,
-        config,
-        "files.getUploadURLExternal",
-        &[
-            ("filename", filename.to_owned()),
-            ("length", length.to_string()),
-        ],
-    )
-    .await?;
+    let form = slack_get_upload_url_form(filename, length, alt_txt, snippet_type);
+    let value = slack_api_post_form(client, config, "files.getUploadURLExternal", &form).await?;
     Ok(SlackUploadTicket {
         upload_url: required_slack_string(&value, "upload_url")?,
         file_id: required_slack_string(&value, "file_id")?,
     })
+}
+
+fn slack_get_upload_url_form(
+    filename: &str,
+    length: u64,
+    alt_txt: Option<&str>,
+    snippet_type: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        ("filename", filename.to_owned()),
+        ("length", length.to_string()),
+        ("alt_txt", alt_txt.unwrap_or("").to_owned()),
+        ("snippet_type", snippet_type.unwrap_or("").to_owned()),
+    ];
+    form.retain(|(_, value)| !value.is_empty());
+    form
 }
 
 async fn upload_file_bytes(
@@ -318,11 +340,7 @@ async fn slack_api_post_form(
     let response = client
         .post(format!("{}/{}", config.api_url, method))
         .bearer_auth(&config.bot_token)
-        .header(
-            header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded; charset=utf-8",
-        )
-        .body(form_urlencoded(form))
+        .form(form)
         .send()
         .await
         .map_err(|error| ApiError::Internal(format!("Slack API request failed: {error}")))?;
@@ -341,19 +359,6 @@ async fn slack_api_post_form(
         )));
     }
     Ok(value)
-}
-
-fn form_urlencoded(form: &[(&str, String)]) -> String {
-    form.iter()
-        .map(|(key, value)| {
-            format!(
-                "{}={}",
-                urlencoding::encode(key),
-                urlencoding::encode(value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("&")
 }
 
 fn authorize_slack_file_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
@@ -756,5 +761,28 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_LENGTH, "42".parse().unwrap());
         assert_eq!(content_length(&headers).unwrap(), 42);
+    }
+
+    #[test]
+    fn upload_url_form_includes_alt_text_and_snippet_type() {
+        let form = slack_get_upload_url_form("notes.txt", 42, Some("Release notes"), Some("text"));
+        assert_eq!(
+            form,
+            vec![
+                ("filename", "notes.txt".to_owned()),
+                ("length", "42".to_owned()),
+                ("alt_txt", "Release notes".to_owned()),
+                ("snippet_type", "text".to_owned()),
+            ]
+        );
+
+        let form = slack_get_upload_url_form("notes.txt", 42, None, None);
+        assert_eq!(
+            form,
+            vec![
+                ("filename", "notes.txt".to_owned()),
+                ("length", "42".to_owned()),
+            ]
+        );
     }
 }
