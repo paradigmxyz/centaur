@@ -8,21 +8,17 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
     ApiError,
-    mcp::jwt_signing_secret,
+    api_jwt::{bearer_token, verify_console_jwt},
     routes::{AppState, non_empty_env, positive_env_u64},
 };
 
 const DEFAULT_SLACK_API_URL: &str = "https://slack.com/api";
-const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
-const DEFAULT_API_JWT_ISSUER: &str = "centaur-console";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
-const JWT_CLOCK_SKEW_SECONDS: i64 = 30;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -74,10 +70,7 @@ struct SlackFileDownloadQuery {
 
 #[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
-    iat: i64,
     slack: SlackProxyClaims,
-    #[serde(default)]
-    sub: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -417,59 +410,7 @@ async fn slack_api_post_form(
 
 fn authorize_slack_file_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
     let token = bearer_token(headers)?;
-    let secret = jwt_signing_secret().ok_or_else(|| {
-        ApiError::Internal("CENTAUR_JWT_SIGNING_SECRET is not configured".to_owned())
-    })?;
-    let audience = non_empty_env("CENTAUR_API_JWT_AUDIENCE")
-        .unwrap_or_else(|| DEFAULT_API_JWT_AUDIENCE.to_owned());
-    let issuer = non_empty_env("CENTAUR_API_JWT_ISSUER")
-        .unwrap_or_else(|| DEFAULT_API_JWT_ISSUER.to_owned());
-    verify_hs256_jwt(token, secret.as_bytes(), &audience, &issuer)
-}
-
-fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
-    let value = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| ApiError::Unauthorized("missing bearer token".to_owned()))?;
-    value
-        .split_once(' ')
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-        .map(|(_, token)| token.trim())
-        .filter(|token| !token.is_empty())
-        .ok_or_else(|| ApiError::Unauthorized("missing bearer token".to_owned()))
-}
-
-fn verify_hs256_jwt(
-    token: &str,
-    secret: &[u8],
-    expected_audience: &str,
-    expected_issuer: &str,
-) -> Result<SlackFileProxyClaims, ApiError> {
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.leeway = JWT_CLOCK_SKEW_SECONDS as u64;
-    validation.validate_nbf = true;
-    validation.set_audience(&[expected_audience]);
-    validation.set_issuer(&[expected_issuer]);
-    validation.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
-    let token_data =
-        decode::<SlackFileProxyClaims>(token, &DecodingKey::from_secret(secret), &validation)
-            .map_err(|_| ApiError::Unauthorized("invalid JWT".to_owned()))?;
-    validate_claims(&token_data.claims)?;
-    Ok(token_data.claims)
-}
-
-fn validate_claims(claims: &SlackFileProxyClaims) -> Result<(), ApiError> {
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    if claims.iat > now + JWT_CLOCK_SKEW_SECONDS {
-        return Err(ApiError::Unauthorized(
-            "JWT issued-at is in the future".to_owned(),
-        ));
-    }
-    if claims.sub.as_deref().unwrap_or_default().trim().is_empty() {
-        return Err(ApiError::Unauthorized("JWT subject is required".to_owned()));
-    }
-    Ok(())
+    verify_console_jwt(token)
 }
 
 fn ensure_upload_channel_allowed(
@@ -630,7 +571,7 @@ fn content_disposition_filename(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
     fn test_jwt(secret: &[u8], claims: Value) -> String {
         encode(
@@ -657,7 +598,13 @@ mod tests {
                 }
             }),
         );
-        let claims = verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap();
+        let claims = crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+            &token,
+            b"secret",
+            "centaur-api",
+            "centaur-console",
+        )
+        .unwrap();
         ensure_upload_channel_allowed(&claims, "C123456789").unwrap();
         ensure_download_channel_allowed(&claims, "C987654321").unwrap();
         assert!(matches!(
@@ -687,8 +634,13 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"other-secret", "centaur-api", "centaur-console")
-                .unwrap_err(),
+            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+                &token,
+                b"other-secret",
+                "centaur-api",
+                "centaur-console"
+            )
+            .unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -710,7 +662,13 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
+            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+                &token,
+                b"secret",
+                "centaur-api",
+                "centaur-console"
+            )
+            .unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -732,7 +690,13 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
+            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+                &token,
+                b"secret",
+                "centaur-api",
+                "centaur-console"
+            )
+            .unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -753,7 +717,13 @@ mod tests {
                 }
             }),
         );
-        let claims = verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap();
+        let claims = crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+            &token,
+            b"secret",
+            "centaur-api",
+            "centaur-console",
+        )
+        .unwrap();
         ensure_upload_channel_allowed(&claims, "C123456789").unwrap();
         ensure_download_channel_allowed(&claims, "C123456789").unwrap();
     }
@@ -772,7 +742,13 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
+            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+                &token,
+                b"secret",
+                "centaur-api",
+                "centaur-console"
+            )
+            .unwrap_err(),
             ApiError::Unauthorized(_)
         ));
     }
@@ -830,27 +806,15 @@ mod tests {
             }),
         );
         assert!(matches!(
-            verify_hs256_jwt(&token, b"secret", "centaur-api", "centaur-console").unwrap_err(),
+            crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
+                &token,
+                b"secret",
+                "centaur-api",
+                "centaur-console"
+            )
+            .unwrap_err(),
             ApiError::Unauthorized(_)
         ));
-    }
-
-    #[test]
-    fn bearer_token_scheme_is_case_insensitive() {
-        for value in ["Bearer token-1", "bearer token-1", "BEARER token-1"] {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
-            assert_eq!(bearer_token(&headers).unwrap(), "token-1");
-        }
-
-        for value in ["Bearer ", "token-1", "Basic token-1"] {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
-            assert!(matches!(
-                bearer_token(&headers).unwrap_err(),
-                ApiError::Unauthorized(_)
-            ));
-        }
     }
 
     #[test]

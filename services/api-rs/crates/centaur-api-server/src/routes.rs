@@ -54,6 +54,7 @@ use uuid::Uuid;
 
 use crate::{
     ApiError,
+    api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_proxy::slack_proxy_router,
     types::{
@@ -336,8 +337,30 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn healthz() -> Json<Value> {
-    Json(json!({"ok": true}))
+async fn healthz(headers: HeaderMap) -> Json<Value> {
+    let mut body = json!({"ok": true});
+    if let Some(token) = bearer_jwt_from_headers(&headers) {
+        body["slack_client_jwt"] = match decode_jwt_payload(token) {
+            Ok(claims) => {
+                let mut jwt = json!({ "claims": claims });
+                match verify_console_jwt::<Value>(token) {
+                    Ok(_) => {
+                        jwt["valid"] = json!(true);
+                    }
+                    Err(error) => {
+                        jwt["valid"] = json!(false);
+                        jwt["error"] = json!(error.to_string());
+                    }
+                }
+                jwt
+            }
+            Err(error) => json!({
+                "valid": false,
+                "error": error,
+            }),
+        };
+    }
+    Json(body)
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
