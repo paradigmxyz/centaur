@@ -330,7 +330,8 @@
               "type": "object",
               "properties": {
                 "enabled": { "type": "boolean" },
-                "intervalSeconds": { "type": "integer" }
+                "intervalSeconds": { "type": "integer" },
+                "maxWindowSeconds": { "type": "integer" }
               }
             }
           }

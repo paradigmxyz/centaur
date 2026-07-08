@@ -89,6 +89,7 @@ apiRs:
 | `SLACK_DM_RETENTION_DAYS` | `0` | Deletes Slack DM messages, stale empty DM conversations, and terminal DM run/job rows older than this many days. `0` disables DM retention. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `true` | Enables projection from Slack sync rows into company context documents. |
 | `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `14400` | How often to project changed Slack rows into documents. |
+| `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `21600` | Maximum source `updated_at` window projected by one company context documents run. |
 
 Example exclusion list:
 
