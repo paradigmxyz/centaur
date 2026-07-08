@@ -12,6 +12,7 @@ module Oauth
       @registry ||= {
         Github::KEY => Github.new,
         Google::KEY => Google.new,
+        Granola::KEY => Granola.new,
         Slack::KEY => Slack.new
       }.freeze
     end

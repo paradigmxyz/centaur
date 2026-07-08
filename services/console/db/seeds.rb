@@ -36,6 +36,14 @@ unless Rails.env.production?
       provider: "github",
       description: "GitHub repositories and user profile",
       allowed_scopes: %w[repo read:user]
+    },
+    {
+      slug: "granola",
+      provider: "granola",
+      description: "Granola MCP access",
+      # A real client_id/client_secret comes from one-time dynamic registration:
+      # POST https://mcp-auth.granola.ai/oauth2/register
+      allowed_scopes: %w[mcp]
     }
   ].each do |attrs|
     OauthApp.find_or_create_by!(slug: attrs[:slug]) do |app|
