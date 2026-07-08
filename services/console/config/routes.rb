@@ -5,9 +5,12 @@ Rails.application.routes.draw do
   # Can be used by load balancers and uptime monitors to verify that the app is live.
   get "up" => "rails/health#show", as: :rails_health_check
 
-  # Render dynamic PWA files from app/views/pwa/* (remember to link manifest in application.html.erb)
-  # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
-  # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
+  # PWA manifest + service worker, rendered from app/views/pwa/*. Served by
+  # Rails::PwaController (framework controller, no console session required) so
+  # the browser can fetch them outside an authenticated page load. Both layouts
+  # link the manifest and register the worker.
+  get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
+  get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
 
   # Operator console session login (cookie-based, separate from the API key auth).
   get "login", to: "sessions#new", as: :login
@@ -93,6 +96,10 @@ Rails.application.routes.draw do
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
+  # Local file workbench. Browses/edits files on the operator's machine via the
+  # File System Access API, entirely client-side. Also the manifest
+  # file_handlers target: files opened with the installed PWA land here.
+  get "console/files", to: "console/local_files#index", as: :console_local_files
   get "console/etls", to: "console/etls#index", as: :console_etls
   namespace :console do
     post "etls/slack_archive_imports",

@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta charset="utf-8">
     <%= csrf_meta_tags %>
+    <%= tag.link rel: "manifest", href: pwa_manifest_path(format: :json) %>
+    <meta name="theme-color" content="#050506">
     <link rel="icon" href="/icon-dark.svg" type="image/svg+xml" data-console-favicon>
+    <link rel="apple-touch-icon" href="/pwa-icon-192.png">
     <script>
       (() => {
         const storageKey = "centaur-console-theme";
@@ -1291,6 +1294,7 @@
     ] %>
   <% end %>
   <% nav_items << { label: "Integrations", icon: "link", path: console_integrations_path, matches: [ "/console/integrations" ] } %>
+  <% nav_items << { label: "Files", icon: "folder", path: console_local_files_path, matches: [ "/console/files" ] } %>
 
   <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased <%= "console-descoped" if descoped? %>">
     <% if descoped? %>

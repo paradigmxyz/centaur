@@ -1,0 +1,81 @@
+<% content_for :title, "Files · Centaur Console" %>
+
+<%= render "console/page_header",
+           title: "Files",
+           subtitle: "Browse, preview, and edit files on this machine — saved straight back to disk. Nothing is uploaded." %>
+
+<div data-controller="pwa-install"
+     data-pwa-install-target="banner"
+     hidden
+     class="console-panel mb-4 flex flex-wrap items-center justify-between gap-4 p-4">
+  <div class="min-w-0">
+    <div class="text-sm font-semibold text-zinc-100">Install Centaur Console</div>
+    <p class="mt-0.5 text-xs text-zinc-500">
+      Run the console as a standalone app: its own window and dock icon, plus
+      &ldquo;Open with&rdquo; support for logs, JSON, Markdown, and YAML.
+    </p>
+  </div>
+  <button type="button" class="btn-primary shrink-0" data-action="pwa-install#install">Install app</button>
+</div>
+
+<div data-controller="local-files">
+  <div data-local-files-target="unsupported" hidden class="alert-error">
+    This browser does not expose the File System Access API, so folders cannot be
+    opened or edited here. Use Chrome, Edge, or the installed app for the full
+    workbench — the picker below still gives read-only previews.
+  </div>
+
+  <div class="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+    <section class="console-panel flex min-h-[28rem] flex-col"
+             aria-label="Local file browser"
+             data-local-files-target="dropzone"
+             data-action="dragover->local-files#dragover drop->local-files#drop">
+      <div class="flex flex-wrap items-center gap-2 border-b border-ink-600 bg-ink-800/80 px-4 py-3">
+        <button type="button" class="btn-secondary" data-local-files-target="dirButton"
+                data-action="local-files#openDirectory">Open folder</button>
+        <button type="button" class="btn-secondary" data-local-files-target="fileButton"
+                data-action="local-files#openFile">Open file</button>
+        <button type="button" class="btn-secondary" hidden data-local-files-target="restoreButton"
+                data-action="local-files#restore"></button>
+        <label class="btn-secondary" hidden data-local-files-target="fallbackLabel">
+          Choose files
+          <input type="file" multiple class="hidden" data-local-files-target="fallbackInput"
+                 data-action="change->local-files#fallbackChange">
+        </label>
+      </div>
+      <div class="flex flex-wrap items-center gap-1 px-4 pt-3 font-mono text-xs text-zinc-500"
+           hidden data-local-files-target="breadcrumbs"></div>
+      <ul class="min-h-0 flex-1 overflow-y-auto px-2 py-2" data-local-files-target="entries"></ul>
+      <p class="empty-state m-4" data-local-files-target="empty">
+        Open a folder to browse it here, or drop files anywhere on this panel.
+        Once the app is installed, files launch straight from the OS via
+        &ldquo;Open with&rdquo; &rarr; Centaur Console.
+      </p>
+    </section>
+
+    <section class="console-panel flex min-h-[28rem] flex-col" aria-label="File preview and editor">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-600 bg-ink-800/80 px-4 py-3">
+        <div class="min-w-0">
+          <div class="truncate font-mono text-sm font-semibold text-zinc-100"
+               data-local-files-target="filename">No file open</div>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500" data-local-files-target="meta"></div>
+        </div>
+        <button type="button" class="btn-primary shrink-0" hidden data-local-files-target="saveButton"
+                data-action="local-files#save">Save to disk</button>
+      </div>
+      <div class="flex min-h-0 flex-1 flex-col p-4">
+        <textarea hidden spellcheck="false"
+                  class="form-input min-h-[22rem] flex-1 resize-y font-mono text-xs leading-relaxed"
+                  data-local-files-target="editor"
+                  data-action="input->local-files#markDirty"></textarea>
+        <div hidden class="flex min-h-0 flex-1 items-center justify-center overflow-auto"
+             data-local-files-target="preview"></div>
+        <p class="empty-state" data-local-files-target="placeholder">
+          Select a file to preview it. Text files open in an editor and write
+          straight back to disk.
+        </p>
+        <div class="pt-3 font-mono text-xs text-zinc-500" data-local-files-target="status"></div>
+      </div>
+    </section>
+  </div>
+</div>
