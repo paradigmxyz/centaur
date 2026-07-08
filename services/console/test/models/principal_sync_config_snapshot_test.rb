@@ -76,6 +76,27 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
+  test "fetch_for does not rebuild api server JWT snapshots when sandbox api access is disabled" do
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+      @principal.update!(
+        labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" },
+        sandbox_api_server_enabled: false
+      )
+      boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
+      current_time = Time.zone.at(boundary + 60)
+      previous_window_time = Time.zone.at(boundary - 60)
+
+      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+      snapshot.update_columns(updated_at: previous_window_time)
+
+      travel_to current_time do
+        assert_no_changes -> { snapshot.reload.updated_at } do
+          assert_equal snapshot, PrincipalSyncConfigSnapshot.fetch_for(@principal)
+        end
+      end
+    end
+  end
+
   test "fetch_for builds a new snapshot after a cache version bump" do
     old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
     Principal.bump_sync_config_cache_versions(@principal.id)

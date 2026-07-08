@@ -89,6 +89,8 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   end
 
   def api_server_jwt_window_stale?(principal)
+    return false unless principal.sandbox_api_server_enabled?
+
     channel_id = principal.labels.to_h[Principal::SLACK_CHANNEL_ID_LABEL].to_s.strip
     return false unless channel_id.match?(Principal::SLACK_CHANNEL_ID_FORMAT)
     return false if ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s.blank?

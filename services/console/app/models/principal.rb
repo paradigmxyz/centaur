@@ -234,6 +234,8 @@ class Principal < ApplicationRecord
   end
 
   def api_server_jwt_secret
+    return nil unless sandbox_api_server_enabled?
+
     channel_id = labels.to_h[SLACK_CHANNEL_ID_LABEL].to_s.strip
     return nil unless channel_id.match?(SLACK_CHANNEL_ID_FORMAT)
 

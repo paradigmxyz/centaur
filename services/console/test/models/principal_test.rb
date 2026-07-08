@@ -138,6 +138,24 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
+  test "effective_config omits api server JWT when sandbox api access is disabled" do
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+      principal = principals(:acme_channel)
+      principal.update!(
+        labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" },
+        sandbox_api_server_enabled: false
+      )
+
+      config = principal.effective_config(redact_secrets: false)
+      entry = config.fetch("secrets").find do |secret|
+        secret.dig("inject", "header") == "Authorization" &&
+          secret.dig("source", "type") == "control_plane"
+      end
+
+      assert_nil entry
+    end
+  end
+
   test "api server JWT is deterministic inside the rotation window" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
