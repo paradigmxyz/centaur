@@ -2,6 +2,7 @@ pub mod client;
 mod error;
 mod mcp;
 mod routes;
+mod slack_file_proxy;
 mod tool_discovery;
 pub mod types;
 

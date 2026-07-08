@@ -55,6 +55,7 @@ use uuid::Uuid;
 use crate::{
     ApiError,
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
+    slack_file_proxy::slack_file_proxy_router,
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
@@ -226,6 +227,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
+        .merge(slack_file_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
             "/api/workflows/runs",
