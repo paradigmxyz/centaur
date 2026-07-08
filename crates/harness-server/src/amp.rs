@@ -116,33 +116,35 @@ impl HarnessServer for AmpHarness {
         "amp"
     }
 
-    fn command_for_turn(&self, state: &ThreadState, _input: &[UserInput]) -> ProcessCommand { if let Some(command) = command_from_override("CENTAUR_AMP_APP_BRIDGE_COMMAND") {
-        return command;
+    fn command_for_turn(&self, state: &ThreadState, _input: &[UserInput]) -> ProcessCommand {
+        if let Some(command) = command_from_override("CENTAUR_AMP_APP_BRIDGE_COMMAND") {
+            return command;
+        }
+
+        let bin = env::var("AMP_BIN").unwrap_or_else(|_| "amp".to_string());
+        let mut command = ProcessCommand::new(bin);
+        command.args([
+            "--no-ide",
+            "--no-notifications",
+            "--no-color",
+            "--dangerously-allow-all",
+            "--execute",
+            "--stream-json",
+            "--stream-json-input",
+            "--stream-json-thinking",
+            "--mode",
+            &state.model,
+        ]);
+        if let Ok(visibility) = env::var("AMP_THREAD_VISIBILITY")
+            && !visibility.trim().is_empty()
+        {
+            command.args(["--visibility", visibility.trim()]);
+        }
+        if let Some(session_id) = &state.harness_session_id {
+            command.args(["threads", "continue", session_id]);
+        }
+        command
     }
-    
-    let bin = env::var("AMP_BIN").unwrap_or_else(|_| "amp".to_string());
-    let mut command = ProcessCommand::new(bin);
-    command.args([
-        "--no-ide",
-        "--no-notifications",
-        "--no-color",
-        "--dangerously-allow-all",
-        "--execute",
-        "--stream-json",
-        "--stream-json-input",
-        "--stream-json-thinking",
-        "--mode",
-        &state.model,
-    ]);
-    if let Ok(visibility) = env::var("AMP_THREAD_VISIBILITY")
-        && !visibility.trim().is_empty()
-    {
-        command.args(["--visibility", visibility.trim()]);
-    }
-    if let Some(session_id) = &state.harness_session_id {
-        command.args(["threads", "continue", session_id]);
-    }
-    command }
 
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         amp_user_stdin(input, false)

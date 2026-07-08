@@ -221,36 +221,38 @@ impl HarnessServer for ClaudeCodeHarness {
         "anthropic"
     }
 
-    fn command_for_turn(&self, state: &ThreadState, _input: &[UserInput]) -> ProcessCommand { if let Some(command) = command_from_override("CENTAUR_CLAUDE_APP_BRIDGE_COMMAND") {
-        return command;
+    fn command_for_turn(&self, state: &ThreadState, _input: &[UserInput]) -> ProcessCommand {
+        if let Some(command) = command_from_override("CENTAUR_CLAUDE_APP_BRIDGE_COMMAND") {
+            return command;
+        }
+
+        let bin = env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+        let mut command = ProcessCommand::new(bin);
+        command.args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--dangerously-skip-permissions",
+            "--permission-mode",
+            "bypassPermissions",
+        ]);
+        if !state.model.is_empty() {
+            command.args(["--model", &state.model]);
+        }
+        if PathBuf::from("AGENTS.md").is_file() {
+            command.args(["--append-system-prompt-file", "AGENTS.md"]);
+        }
+        if let Some(session_id) = &state.harness_session_id {
+            command.args(["--resume", session_id]);
+        } else {
+            command.args(["--session-id", &state.id]);
+        }
+        command
     }
-    
-    let bin = env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
-    let mut command = ProcessCommand::new(bin);
-    command.args([
-        "--print",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--dangerously-skip-permissions",
-        "--permission-mode",
-        "bypassPermissions",
-    ]);
-    if !state.model.is_empty() {
-        command.args(["--model", &state.model]);
-    }
-    if PathBuf::from("AGENTS.md").is_file() {
-        command.args(["--append-system-prompt-file", "AGENTS.md"]);
-    }
-    if let Some(session_id) = &state.harness_session_id {
-        command.args(["--resume", session_id]);
-    } else {
-        command.args(["--session-id", &state.id]);
-    }
-    command }
 
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         let payload = json!({

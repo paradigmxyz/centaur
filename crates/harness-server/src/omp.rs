@@ -268,7 +268,10 @@ impl OmpEventNormalizer {
                 is_error,
             } => vec![NormalizedEvent::ToolResults(vec![NormalizedToolResult {
                 tool_use_id: tool_call_id,
-                content: result.as_ref().map(OmpToolExecutionResult::text).unwrap_or_default(),
+                content: result
+                    .as_ref()
+                    .map(OmpToolExecutionResult::text)
+                    .unwrap_or_default(),
                 is_error,
                 exit_code: None,
             }])],

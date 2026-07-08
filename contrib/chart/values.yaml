@@ -222,12 +222,13 @@ sandbox:
   #                  subscription token (proxy injects the brokered credential).
   codexAuthMode: api_key
   claudeCodeAuthMode: api_key
-  # The deployment's default harness: codex | amp | claudecode. Decides what
-  # warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
-  # fragment is required at startup (the other harnesses' fragments are
-  # registered too when available, so per-session --claude/--amp/--codex
-  # overrides keep working credentials). Per-session sandboxes always run
-  # their session's harness via container args; the sandbox image CMD only
+  # The deployment's default harness: codex | amp | claudecode | omp. Decides
+  # what warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
+  # fragment is required at startup (engines with no auth-mode source — amp,
+  # omp — require none; the other harnesses' fragments are registered too when
+  # available, so per-session --claude/--amp/--codex/--omp overrides keep
+  # working credentials). Per-session sandboxes always run their session's
+  # harness via container args; the sandbox image CMD only
   # matters for containers started outside api-rs.
   harnessEngine: codex
   # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here (the
