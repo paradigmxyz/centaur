@@ -19,7 +19,7 @@ const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const JWT_CLOCK_SKEW_SECONDS: i64 = 30;
 
-pub(crate) fn slack_file_proxy_router() -> Router<AppState> {
+pub(crate) fn slack_proxy_router() -> Router<AppState> {
     Router::new()
         .route(
             "/api/slack/files/upload",
