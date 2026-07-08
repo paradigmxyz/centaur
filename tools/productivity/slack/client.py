@@ -382,7 +382,21 @@ class SlackClient:
         return items, next_cursor, bool(next_cursor)
 
     def _resolve_channel(self, channel: str) -> str:
-        """Resolve a channel name to its ID using cached channel list."""
+        """Resolve a channel name, channel ID, user ID, or @user DM to a conversation ID.
+
+        User references (``U123``, ``<@U123>``, or ``@username``) resolve to the
+        bot's one-on-one DM channel with that user, opening it if needed.
+        """
+        raw = str(channel).strip()
+        if self._looks_like_user_id(raw):
+            return self._open_dm_channel(raw)
+        if raw.startswith("@"):
+            username = raw[1:].strip()
+            user_cache = self._get_user_cache()
+            for user_id, name in user_cache.items():
+                if name == username:
+                    return self._open_dm_channel(user_id)
+            raise RuntimeError(f"User '{channel}' not found in workspace")
         normalized = self._clean_channel_ref(channel)
         if self._looks_like_channel_id(normalized):
             return normalized.upper()

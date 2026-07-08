@@ -197,6 +197,45 @@ def test_send_dm_opens_dm_and_posts_message() -> None:
     assert fake_web_client.last_kwargs["unfurl_links"] is False
 
 
+def _restore_real_resolve_channel(client: SlackClient) -> None:
+    client._resolve_channel = SlackClient._resolve_channel.__get__(client)  # type: ignore[method-assign]
+
+
+def test_resolve_channel_opens_dm_for_user_id() -> None:
+    client, fake_web_client = _make_client()
+    _restore_real_resolve_channel(client)
+
+    assert client._resolve_channel("<@U123ABC>") == "D123"
+    assert fake_web_client.open_calls == [{"users": "U123ABC"}]
+
+
+def test_resolve_channel_opens_dm_for_at_username() -> None:
+    client, fake_web_client = _make_client()
+    _restore_real_resolve_channel(client)
+    client._get_user_cache = lambda: {"U123ABC": "georgios"}  # type: ignore[method-assign]
+
+    assert client._resolve_channel("@georgios") == "D123"
+    assert fake_web_client.open_calls == [{"users": "U123ABC"}]
+
+
+def test_resolve_channel_rejects_unknown_at_username() -> None:
+    client, _ = _make_client()
+    _restore_real_resolve_channel(client)
+    client._get_user_cache = lambda: {"U123ABC": "georgios"}  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="not found in workspace"):
+        client._resolve_channel("@nobody")
+
+
+def test_resolve_channel_still_resolves_channel_names() -> None:
+    client, fake_web_client = _make_client()
+    _restore_real_resolve_channel(client)
+
+    assert client._resolve_channel("paradigm-pulse") == "C123"
+    assert client._resolve_channel("C456DEF") == "C456DEF"
+    assert fake_web_client.open_calls == []
+
+
 def test_retry_on_ratelimit_honors_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _make_client()
     now = {"value": 100.0}
