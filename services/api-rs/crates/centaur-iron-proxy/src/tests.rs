@@ -38,6 +38,17 @@ fn harness_auth_fragments_are_baked_in() {
         Some("META_AI_API_KEY")
     );
 
+    let claude_code = harness_auth_fragment("claude-code", "api_key")
+        .unwrap()
+        .unwrap();
+    let claude_code_placeholders = placeholder_env(&[claude_code]);
+    assert_eq!(
+        claude_code_placeholders
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
+        Some("ANTHROPIC_API_KEY")
+    );
+
     assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
 
     let infra = infra_fragment().unwrap();
@@ -46,12 +57,7 @@ fn harness_auth_fragments_are_baked_in() {
         Some("120s")
     );
     let placeholders = placeholder_env(&[infra]);
-    for name in ["XAI_API_KEY", "GEMINI_API_KEY", "AMP_API_KEY"] {
-        assert_eq!(placeholders.get(name).map(String::as_str), Some(name));
-    }
-    for name in ["GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
-        assert!(!placeholders.contains_key(name));
-    }
+    assert!(placeholders.is_empty());
 }
 
 #[test]
