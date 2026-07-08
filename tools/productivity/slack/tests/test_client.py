@@ -892,18 +892,21 @@ def test_search_messages_proxy_uses_api_proxy_for_channel_scoped_search(
 ) -> None:
     import urllib.request
 
+    import centaur_sdk.tool_sdk
+
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {"U1": "alice"}  # type: ignore[method-assign]
-    client.list_bot_channels = lambda **_: [  # type: ignore[method-assign]
-        {"id": "C123", "name": "paradigm-pulse"},
-        {"id": "C999", "name": "other"},
-    ]
     monkeypatch.setenv("CENTAUR_API_URL", "http://api")
+    monkeypatch.setattr(
+        centaur_sdk.tool_sdk,
+        "current_slack_thread",
+        lambda: {"channel_id": "C777", "thread_ts": "123.456"},
+    )
 
     def fake_urlopen(req, *args, **kwargs):
         assert req.full_url == (
             "http://api/api/slack/search?query=deploy+from%3A%3C%40UGZCSQTPE%3E+"
-            "in%3A%23other&channels=C123%2CC999&count=5"
+            "in%3A%23other&channels=C777&count=5"
         )
         body = json.dumps(
             {
@@ -914,8 +917,8 @@ def test_search_messages_proxy_uses_api_proxy_for_channel_scoped_search(
                             "user": "U1",
                             "text": "deploy complete",
                             "ts": "200.000000",
-                            "permalink": "https://slack.com/archives/C123/p200000000",
-                            "channel": {"id": "C123", "name": "paradigm-pulse"},
+                            "permalink": "https://slack.com/archives/C777/p200000000",
+                            "channel": {"id": "C777", "name": "paradigm-pulse"},
                         }
                     ]
                 },
@@ -928,7 +931,6 @@ def test_search_messages_proxy_uses_api_proxy_for_channel_scoped_search(
     result = client.search_messages_proxy(
         "deploy from:<@UGZCSQTPE> in:#other",
         max_results=5,
-        channels=["paradigm-pulse"],
     )
 
     assert result[0]["text"] == "deploy complete"
@@ -984,9 +986,16 @@ def test_search_messages_proxy_failure_does_not_fall_back_to_local_scan(
     import urllib.error
     import urllib.request
 
+    import centaur_sdk.tool_sdk
+
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {"U1": "alice"}  # type: ignore[method-assign]
     monkeypatch.setenv("CENTAUR_API_URL", "http://api")
+    monkeypatch.setattr(
+        centaur_sdk.tool_sdk,
+        "current_slack_thread",
+        lambda: {"channel_id": "C777", "thread_ts": "123.456"},
+    )
     fake_web_client.history_pages = [
         {"messages": [{"user": "U1", "text": "deploy fallback", "ts": "300.000000"}]}
     ]
@@ -1003,7 +1012,7 @@ def test_search_messages_proxy_failure_does_not_fall_back_to_local_scan(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with pytest.raises(RuntimeError, match="Slack search proxy failed with status 403"):
-        client.search_messages_proxy("deploy", max_results=5, channels=["C123"])
+        client.search_messages_proxy("deploy", max_results=5)
 
     assert fake_web_client.history_calls == []
 

@@ -173,23 +173,15 @@ def search_proxy(
     query: str = typer.Argument(..., help="Text to search for"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
-    channels: str = typer.Option(
-        None,
-        "--channels",
-        "-c",
-        help="Comma-separated channel names or IDs. Defaults to the current Slack channel.",
-    ),
     from_user: str = typer.Option(None, "--from", help="Filter by username"),
 ):
     """Search messages through the Centaur Slack search proxy."""
     from .client import search_messages_proxy
 
-    channel_list = [c.strip() for c in channels.split(",")] if channels else None
     try:
         results = search_messages_proxy(
             query,
             max_results=limit,
-            channels=channel_list,
             from_user=from_user,
         )
     except (RuntimeError, ValueError) as e:

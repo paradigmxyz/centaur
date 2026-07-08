@@ -98,7 +98,7 @@ def test_search_proxy_command_calls_proxy_search(monkeypatch) -> None:
 
     result = CliRunner().invoke(
         app,
-        ["search-proxy", "deploy", "--limit", "3", "--channels", "eng-oncall", "--from", "alice"],
+        ["search-proxy", "deploy", "--limit", "3", "--from", "alice"],
     )
 
     assert result.exit_code == 0
@@ -107,7 +107,6 @@ def test_search_proxy_command_calls_proxy_search(monkeypatch) -> None:
             ("deploy",),
             {
                 "max_results": 3,
-                "channels": ["eng-oncall"],
                 "from_user": "alice",
             },
         )
