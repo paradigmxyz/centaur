@@ -24,10 +24,17 @@ OAuth apps are separate from console login. Console SSO uses
 |----------|-----|
 | `google` | Google API credentials, such as Gmail or Drive scopes. |
 | `slack` | Slack user-token credentials with normal Slack API scopes. |
+| `github` | GitHub OAuth app user tokens for `api.github.com`. |
+| `granola` | Granola MCP access tokens for `mcp.granola.ai`. |
+| `linear` | Linear API tokens for `api.linear.app`. |
+| `attio` | Attio workspace tokens for `api.attio.com`. |
 
 Google flows request offline access and force consent so the token response
 includes a refresh token. Slack OAuth apps should enable token rotation so the
-callback also receives a refresh token.
+callback also receives a refresh token. Granola and Linear also refresh; the
+Granola client id and secret come from Dynamic Client Registration at
+`https://mcp-auth.granola.ai/oauth2/register`. GitHub and Attio tokens are
+long-lived and are replaced by re-running consent.
 
 ## Create The Provider App
 
@@ -59,7 +66,7 @@ In the console, open **OAuth Apps**, then create an app with:
 | Field | Meaning |
 |-------|---------|
 | `Slug` | Globally unique consent-link name, for example `google-drive`. |
-| `Provider` | `google` or `slack`. |
+| `Provider` | One of the supported providers above, for example `google` or `linear`. |
 | `Client ID` | OAuth client id from the provider. |
 | `Client Secret` | OAuth client secret from the provider. Stored encrypted. |
 | `Credential Namespace` | Namespace for broker credentials minted by this app. |
