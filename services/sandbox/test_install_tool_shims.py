@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
+from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-import install_tool_shims
+INSTALL_TOOL_SHIMS_PATH = Path(__file__).resolve().parent / "install_tool_shims.py"
+INSTALL_TOOL_SHIMS_SPEC = importlib.util.spec_from_file_location(
+    "install_tool_shims", INSTALL_TOOL_SHIMS_PATH
+)
+if INSTALL_TOOL_SHIMS_SPEC is None or INSTALL_TOOL_SHIMS_SPEC.loader is None:
+    raise RuntimeError(f"failed to load {INSTALL_TOOL_SHIMS_PATH}")
+install_tool_shims = importlib.util.module_from_spec(INSTALL_TOOL_SHIMS_SPEC)
+INSTALL_TOOL_SHIMS_SPEC.loader.exec_module(install_tool_shims)
 
 
 class CopyPublishedToolsTest(unittest.TestCase):
@@ -65,6 +73,66 @@ class CopyPublishedToolsTest(unittest.TestCase):
             # Allowlisted tool installed; unconfigured tool skipped.
             self.assertTrue((target / "research" / "websearch" / "pyproject.toml").exists())
             self.assertFalse((target / "productivity" / "linear").exists())
+
+    def test_tool_allowlist_matches_project_name_when_copying_published_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            published = root / "published"
+            target = root / "target"
+
+            composio = published / "productivity" / "composio"
+            composio.mkdir(parents=True)
+            (composio / "pyproject.toml").write_text(
+                '[project]\nname = "centaur-composio-tool"\n'
+            )
+            linear = published / "productivity" / "linear"
+            linear.mkdir(parents=True)
+            (linear / "pyproject.toml").write_text('[project]\nname = "linear"\n')
+
+            with mock.patch.dict("os.environ", {"TOOL_ALLOWLIST": "centaur-composio-tool"}):
+                install_tool_shims._copy_published_tools(target, published)
+
+            self.assertTrue((target / "productivity" / "composio" / "pyproject.toml").exists())
+            self.assertFalse((target / "productivity" / "linear").exists())
+
+    def test_tool_blocklist_matches_project_name_when_copying_published_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            published = root / "published"
+            target = root / "target"
+
+            composio = published / "productivity" / "composio"
+            composio.mkdir(parents=True)
+            (composio / "pyproject.toml").write_text(
+                '[project]\nname = "centaur-composio-tool"\n'
+            )
+            linear = published / "productivity" / "linear"
+            linear.mkdir(parents=True)
+            (linear / "pyproject.toml").write_text('[project]\nname = "linear"\n')
+
+            with mock.patch.dict("os.environ", {"TOOL_BLOCKLIST": "centaur-composio-tool"}):
+                install_tool_shims._copy_published_tools(target, published)
+
+            self.assertFalse((target / "productivity" / "composio").exists())
+            self.assertTrue((target / "productivity" / "linear" / "pyproject.toml").exists())
+
+    def test_malformed_project_table_falls_back_to_directory_matching(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            published = root / "published"
+            target = root / "target"
+
+            broken = published / "research" / "broken"
+            broken.mkdir(parents=True)
+            (broken / "pyproject.toml").write_text('project = "not-a-table"\n')
+
+            stderr = io.StringIO()
+            with mock.patch.dict("os.environ", {"TOOL_ALLOWLIST": "broken"}):
+                with contextlib.redirect_stderr(stderr):
+                    install_tool_shims._copy_published_tools(target, published)
+
+            self.assertTrue((target / "research" / "broken" / "pyproject.toml").exists())
+            self.assertIn("warning: invalid [project] table", stderr.getvalue())
 
     def test_unset_allowlist_installs_all_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

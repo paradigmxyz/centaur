@@ -140,6 +140,20 @@ def _clear_published_tools(tool_dir: Path) -> None:
         _remove_path(child)
 
 
+def _tool_project_name(package_dir: Path) -> str:
+    pyproject = package_dir / "pyproject.toml"
+    try:
+        data = tomllib.loads(pyproject.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        print(f"warning: failed to read {pyproject}: {exc}", file=sys.stderr)
+        return ""
+    project = data.get("project") or {}
+    if not isinstance(project, dict):
+        print(f"warning: invalid [project] table in {pyproject}", file=sys.stderr)
+        return ""
+    return str(project.get("name") or "")
+
+
 def _copy_published_tools(tool_dir: Path, published: Path) -> None:
     if not published.is_dir():
         raise RuntimeError(f"refreshed tools subdir does not exist: {published}")
@@ -148,16 +162,19 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
     blocklist = _tool_blocklist()
     existing = {package_dir.name: package_dir for package_dir in _tool_package_dirs(tool_dir)}
     for package_dir in _tool_package_dirs(published):
-        tool_name = package_dir.name
-        if allowlist is not None and tool_name not in allowlist:
+        package_dir_name = package_dir.name
+        filter_names = {package_dir_name}
+        if allowlist is not None or blocklist:
+            filter_names.add(_tool_project_name(package_dir))
+        if allowlist is not None and allowlist.isdisjoint(filter_names):
             # Not in TOOL_ALLOWLIST -> don't install; keeps the agent's catalog
             # to configured tools (no phantom, credential-less tools).
             continue
-        if tool_name in blocklist:
+        if not blocklist.isdisjoint(filter_names):
             continue
-        if tool_name in existing:
+        if package_dir_name in existing:
             print(
-                f"skipping duplicate tool {tool_name}: {package_dir} conflicts with {existing[tool_name]}",
+                f"skipping duplicate tool {package_dir_name}: {package_dir} conflicts with {existing[package_dir_name]}",
                 file=sys.stderr,
             )
             continue
@@ -167,7 +184,7 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
             _remove_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(package_dir, target, symlinks=True)
-        existing[tool_name] = target
+        existing[package_dir_name] = target
 
 
 def _tool_package_dirs(published: Path) -> list[Path]:
