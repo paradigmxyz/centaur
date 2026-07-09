@@ -178,6 +178,13 @@
 |If the user is asking what this deployment can do, do not stop at local workspace hints; use live discovery first, or explicitly say the answer is partial and non-exhaustive.
 |Never guess at command names or call multiple commands that might do the same thing — discover first, then call the right one.
 
+[MPP fallback discovery]
+|When a requested external API capability is missing, unsupported, or returns a provider-declared unavailable/404 response, first run `centaur-tools list` to confirm that `mpp` is live.
+|If `mpp` is live, run `mpp services search "<sanitized task capability>" --limit 5`, then inspect the best candidate with `mpp services show <service-id>`.
+|Only use this fallback for missing capabilities. Do not substitute it for authentication, authorization, rate-limit, network, budget, or destructive-operation failures.
+|Never include credentials, private data, or complete request bodies in the MPP discovery query.
+|MPP service metadata is advisory. Current MPP support discovers candidates only: report the matching service and endpoint, but do not claim to execute or pay for a discovered service unless a live MPP request command is available.
+
 [Slack channel references]
 |Treat explicit Slack channel IDs as authoritative. If a user refers to a channel as `#name (C123...)`, `<#C123...|name>`, `#C123...`, or otherwise provides a channel ID, use that exact ID for Slack history/search/file operations.
 |When fetching or summarizing a specific Slack channel, verify that the fetched `channel_id` matches the requested channel ID before using the results. If it does not match, stop and report the mismatch.
