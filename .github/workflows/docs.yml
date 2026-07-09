@@ -50,6 +50,9 @@ jobs:
       - name: Check committed md mirrors are in sync
         run: |
           bash scripts/build-md.sh
+          # Intent-add so mirrors for newly added pages (untracked files)
+          # also register as drift; git diff ignores untracked paths.
+          git add -N public/md
           if ! git diff --exit-code --stat -- public/md; then
             echo "docs/public/md is out of sync with docs/pages;" \
               "run 'bash docs/scripts/build-md.sh' and commit the result." >&2
