@@ -43,6 +43,10 @@ pub(crate) fn slack_proxy_router() -> Router<AppState> {
             "/api/slack/files/{file_id}/download",
             get(download_slack_file),
         )
+        .route(
+            "/api/slack/channels/{channel_id}/history",
+            get(get_slack_channel_history),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +73,22 @@ struct SlackFileDownloadQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct SlackChannelHistoryQuery {
+    #[serde(default)]
+    latest: Option<String>,
+    #[serde(default)]
+    oldest: Option<String>,
+    #[serde(default)]
+    inclusive: Option<bool>,
+    #[serde(default)]
+    include_all_metadata: Option<bool>,
+    #[serde(default)]
+    limit: Option<u16>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
     slack: SlackProxyClaims,
 }
@@ -79,6 +99,8 @@ struct SlackProxyClaims {
     upload_channels: Vec<String>,
     #[serde(default)]
     download_channels: Vec<String>,
+    #[serde(default)]
+    history_channels: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -218,6 +240,21 @@ async fn download_slack_file(
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
+}
+
+async fn get_slack_channel_history(
+    headers: HeaderMap,
+    Path(channel_id): Path<String>,
+    Query(query): Query<SlackChannelHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_slack_file_proxy(&headers)?;
+    ensure_history_channel_allowed(&claims, &channel_id)?;
+    validate_slack_channel_id(&channel_id)?;
+    validate_slack_channel_history_query(&query)?;
+
+    let config = slack_proxy_config()?;
+    let value = slack_channel_history(http_client(), config, &channel_id, &query).await?;
+    Ok(Json(value))
 }
 
 fn upstream_body_is_unexpected_html(
@@ -378,6 +415,51 @@ async fn slack_file_info(
     })
 }
 
+async fn slack_channel_history(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+    query: &SlackChannelHistoryQuery,
+) -> Result<Value, ApiError> {
+    let form = slack_channel_history_form(channel_id, query);
+    slack_api_post_form(client, config, "conversations.history", &form).await
+}
+
+fn slack_channel_history_form(
+    channel_id: &str,
+    query: &SlackChannelHistoryQuery,
+) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        ("channel", channel_id.to_owned()),
+        ("latest", query.latest.clone().unwrap_or_default()),
+        ("oldest", query.oldest.clone().unwrap_or_default()),
+        (
+            "inclusive",
+            query
+                .inclusive
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "include_all_metadata",
+            query
+                .include_all_metadata
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "limit",
+            query
+                .limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        ("cursor", query.cursor.clone().unwrap_or_default()),
+    ];
+    form.retain(|(_, value)| !value.is_empty());
+    form
+}
+
 async fn slack_api_post_form(
     client: &reqwest::Client,
     config: &SlackFileProxyConfig,
@@ -432,6 +514,17 @@ fn ensure_download_channel_allowed(
         &claims.slack.download_channels,
         channel_id,
         "JWT is not authorized to download from this Slack channel",
+    )
+}
+
+fn ensure_history_channel_allowed(
+    claims: &SlackFileProxyClaims,
+    channel_id: &str,
+) -> Result<(), ApiError> {
+    ensure_channel_allowed(
+        &claims.slack.history_channels,
+        channel_id,
+        "JWT is not authorized to read history from this Slack channel",
     )
 }
 
@@ -525,6 +618,26 @@ fn validate_slack_file_id(file_id: &str) -> Result<(), ApiError> {
     Err(ApiError::BadRequest("invalid Slack file ID".to_owned()))
 }
 
+fn validate_slack_channel_history_query(query: &SlackChannelHistoryQuery) -> Result<(), ApiError> {
+    if let Some(latest) = query.latest.as_deref() {
+        validate_slack_timestamp(latest)?;
+    }
+    if let Some(oldest) = query.oldest.as_deref() {
+        validate_slack_timestamp(oldest)?;
+    }
+    if let Some(limit) = query.limit
+        && !(1..=999).contains(&limit)
+    {
+        return Err(ApiError::BadRequest(
+            "Slack history limit must be between 1 and 999".to_owned(),
+        ));
+    }
+    if let Some(cursor) = query.cursor.as_deref() {
+        validate_slack_cursor(cursor)?;
+    }
+    Ok(())
+}
+
 fn validate_slack_thread_ts(thread_ts: &str) -> Result<(), ApiError> {
     let Some((seconds, micros)) = thread_ts.split_once('.') else {
         return Err(ApiError::BadRequest("invalid Slack thread_ts".to_owned()));
@@ -537,6 +650,30 @@ fn validate_slack_thread_ts(thread_ts: &str) -> Result<(), ApiError> {
         return Ok(());
     }
     Err(ApiError::BadRequest("invalid Slack thread_ts".to_owned()))
+}
+
+fn validate_slack_timestamp(timestamp: &str) -> Result<(), ApiError> {
+    if !timestamp.is_empty()
+        && timestamp
+            .split_once('.')
+            .map(|(seconds, micros)| {
+                !seconds.is_empty()
+                    && !micros.is_empty()
+                    && seconds.bytes().all(|byte| byte.is_ascii_digit())
+                    && micros.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            .unwrap_or_else(|| timestamp.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest("invalid Slack timestamp".to_owned()))
+}
+
+fn validate_slack_cursor(cursor: &str) -> Result<(), ApiError> {
+    if cursor.is_empty() || cursor.len() > 4096 || cursor.chars().any(|ch| ch.is_ascii_control()) {
+        return Err(ApiError::BadRequest("invalid Slack cursor".to_owned()));
+    }
+    Ok(())
 }
 
 fn validate_filename(filename: &str) -> Result<(), ApiError> {
@@ -594,7 +731,8 @@ mod tests {
                 "exp": 4_102_444_800i64,
                 "slack": {
                     "upload_channels": ["C123456789"],
-                    "download_channels": ["C987654321"]
+                    "download_channels": ["C987654321"],
+                    "history_channels": ["C111111111"]
                 }
             }),
         );
@@ -607,12 +745,17 @@ mod tests {
         .unwrap();
         ensure_upload_channel_allowed(&claims, "C123456789").unwrap();
         ensure_download_channel_allowed(&claims, "C987654321").unwrap();
+        ensure_history_channel_allowed(&claims, "C111111111").unwrap();
         assert!(matches!(
             ensure_upload_channel_allowed(&claims, "C987654321").unwrap_err(),
             ApiError::Forbidden(_)
         ));
         assert!(matches!(
             ensure_download_channel_allowed(&claims, "C123456789").unwrap_err(),
+            ApiError::Forbidden(_)
+        ));
+        assert!(matches!(
+            ensure_history_channel_allowed(&claims, "C123456789").unwrap_err(),
             ApiError::Forbidden(_)
         ));
     }
@@ -866,6 +1009,81 @@ mod tests {
             vec![
                 ("filename", "notes.txt".to_owned()),
                 ("length", "42".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn validates_slack_channel_history_query() {
+        validate_slack_channel_history_query(&SlackChannelHistoryQuery {
+            latest: Some("1700000000.000002".to_owned()),
+            oldest: Some("0".to_owned()),
+            inclusive: Some(true),
+            include_all_metadata: Some(true),
+            limit: Some(999),
+            cursor: Some("next_cursor".to_owned()),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            validate_slack_channel_history_query(&SlackChannelHistoryQuery {
+                latest: None,
+                oldest: None,
+                inclusive: None,
+                include_all_metadata: None,
+                limit: Some(1000),
+                cursor: None,
+            })
+            .unwrap_err(),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            validate_slack_channel_history_query(&SlackChannelHistoryQuery {
+                latest: Some("not-a-ts".to_owned()),
+                oldest: None,
+                inclusive: None,
+                include_all_metadata: None,
+                limit: None,
+                cursor: None,
+            })
+            .unwrap_err(),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            validate_slack_channel_history_query(&SlackChannelHistoryQuery {
+                latest: None,
+                oldest: None,
+                inclusive: None,
+                include_all_metadata: None,
+                limit: None,
+                cursor: Some("bad\ncursor".to_owned()),
+            })
+            .unwrap_err(),
+            ApiError::BadRequest(_)
+        ));
+    }
+
+    #[test]
+    fn channel_history_form_omits_empty_query_params() {
+        let form = slack_channel_history_form(
+            "C123456789",
+            &SlackChannelHistoryQuery {
+                latest: Some("1700000000.000002".to_owned()),
+                oldest: None,
+                inclusive: Some(false),
+                include_all_metadata: Some(true),
+                limit: Some(15),
+                cursor: None,
+            },
+        );
+        assert_eq!(
+            form,
+            vec![
+                ("channel", "C123456789".to_owned()),
+                ("latest", "1700000000.000002".to_owned()),
+                ("inclusive", "false".to_owned()),
+                ("include_all_metadata", "true".to_owned()),
+                ("limit", "15".to_owned()),
             ]
         );
     }

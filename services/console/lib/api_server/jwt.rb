@@ -27,7 +27,8 @@ module ApiServer
           "exp" => expires_at,
           "slack" => {
             "upload_channels" => [ channel_id ],
-            "download_channels" => [ channel_id ]
+            "download_channels" => [ channel_id ],
+            "history_channels" => [ channel_id ]
           }
         },
         signing_secret: signing_secret

@@ -1,11 +1,14 @@
 """Slack API client for bot-token Slack tool operations."""
 
 import base64
+import binascii
 import json
 import mimetypes
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -84,6 +87,7 @@ class SlackClient:
     _CHANNEL_CACHE_TTL = 300  # 5 minutes
     _USER_CACHE_TTL = 600  # 10 minutes
     _MAX_PAGE_SIZE = 200
+    _MAX_SLACK_HISTORY_PROXY_PAGE_SIZE = 999
     _DEFAULT_THREAD_REPLY_LIMIT = 50
     _DEFAULT_DUMP_MESSAGE_LIMIT = 100
     _DEFAULT_DUMP_THREAD_LIMIT = 25
@@ -92,6 +96,7 @@ class SlackClient:
     _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
     _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
+    _FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
     _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
     _AUTH_ERROR_CODES: ClassVar[frozenset[str]] = frozenset(
         {
@@ -301,6 +306,119 @@ class SlackClient:
             parsed = parsed.replace(tzinfo=UTC)
         return self._format_ts(parsed.timestamp())
 
+    def _centaur_api_url(self) -> str:
+        """Return the Centaur API base URL available inside agent sandboxes."""
+        return secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
+
+    def _centaur_api_headers(self) -> dict[str, str]:
+        """Return headers for API-server calls.
+
+        In sandboxes, iron-proxy injects the principal-scoped Authorization
+        header for the API host. A local bearer can be supplied for tests or
+        manual CLI use.
+        """
+        headers = {"Accept": "application/json"}
+        bearer = secret("CENTAUR_API_BEARER_TOKEN", "").strip()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        return headers
+
+    def _centaur_api_query_value(self, value: Any) -> str:
+        """Format query values for axum/serde query extraction."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    def _centaur_api_url_for(self, path: str, params: dict[str, Any]) -> str:
+        """Build a Centaur API URL with query parameters."""
+        query = urllib.parse.urlencode(
+            {
+                key: self._centaur_api_query_value(value)
+                for key, value in params.items()
+                if value is not None
+            }
+        )
+        url = f"{self._centaur_api_url()}{path}"
+        if query:
+            url = f"{url}?{query}"
+        return url
+
+    def _centaur_api_get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        """GET a Centaur API JSON endpoint."""
+        url = self._centaur_api_url_for(path, params)
+        request = urllib.request.Request(url, headers=self._centaur_api_headers(), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw
+            try:
+                body = json.loads(raw)
+                detail = body.get("message") or body.get("detail") or raw
+            except json.JSONDecodeError:
+                pass
+            raise RuntimeError(f"Centaur API error {exc.code} on {path}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
+        return json.loads(raw) if raw else {}
+
+    def _centaur_api_post_bytes_json(
+        self,
+        path: str,
+        params: dict[str, Any],
+        body: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        """POST bytes to a Centaur API endpoint and parse a JSON response."""
+        url = self._centaur_api_url_for(path, params)
+        headers = self._centaur_api_headers()
+        headers["Content-Type"] = content_type
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw
+            try:
+                error_body = json.loads(raw)
+                detail = error_body.get("message") or error_body.get("detail") or raw
+            except json.JSONDecodeError:
+                pass
+            raise RuntimeError(f"Centaur API error {exc.code} on {path}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
+        return json.loads(raw) if raw else {}
+
+    def _centaur_api_get_bytes(
+        self,
+        path: str,
+        params: dict[str, Any],
+        max_bytes: int,
+    ) -> tuple[bytes, dict[str, str]]:
+        """GET bytes from a Centaur API endpoint."""
+        url = self._centaur_api_url_for(path, params)
+        request = urllib.request.Request(url, headers=self._centaur_api_headers(), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
+                body = response.read(max_bytes + 1)
+                headers = {key.lower(): value for key, value in response.headers.items()}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw
+            try:
+                error_body = json.loads(raw)
+                detail = error_body.get("message") or error_body.get("detail") or raw
+            except json.JSONDecodeError:
+                pass
+            raise RuntimeError(f"Centaur API error {exc.code} on {path}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
+        if len(body) > max_bytes:
+            raise ValueError(f"Slack file exceeds the {max_bytes}-byte download limit")
+        return body, headers
+
     def _message_permalink(self, channel_id: str, ts: str) -> str:
         """Build a Slack permalink from channel and timestamp."""
         return f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
@@ -317,6 +435,34 @@ class SlackClient:
             if item["id"] == channel_id:
                 return item["name"]
         return channel_id
+
+    def _normalize_explicit_channel_id(self, channel_id: str) -> str:
+        """Normalize and validate an explicit Slack conversation ID."""
+        normalized_channel_id = self._clean_channel_ref(channel_id).upper()
+        if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(
+            normalized_channel_id
+        ):
+            raise ValueError("channel_id must be a Slack conversation ID like C123456789")
+        return normalized_channel_id
+
+    def _normalize_file_id(self, file_id: str) -> str:
+        """Normalize and validate a Slack file ID."""
+        normalized_file_id = str(file_id).strip().upper()
+        if len(normalized_file_id) < 9 or not self._FILE_ID_RE.fullmatch(normalized_file_id):
+            raise ValueError("file_id must be a Slack file ID like F123456789")
+        return normalized_file_id
+
+    def _content_disposition_filename(self, value: str | None) -> str | None:
+        """Extract a simple filename value from Content-Disposition."""
+        if not value:
+            return None
+        match = re.search(r'filename="([^"]+)"', value)
+        if match:
+            return match.group(1)
+        match = re.search(r"filename=([^;]+)", value)
+        if match:
+            return match.group(1).strip()
+        return None
 
     def _serialize_message(
         self,
@@ -986,6 +1132,53 @@ class SlackClient:
             },
             "order": "desc",
         }
+
+    def get_channel_history_proxy(
+        self,
+        channel_id: str,
+        cursor: str | None = None,
+        include_all_metadata: bool | None = None,
+        inclusive: bool | None = None,
+        latest: str | int | float | None = None,
+        limit: int | None = None,
+        oldest: str | int | float | None = None,
+    ) -> dict[str, Any]:
+        """Fetch Slack channel history through the Centaur API server proxy.
+
+        This maps to Slack's documented `conversations.history` arguments,
+        except `token` is intentionally omitted because the API server supplies
+        Slack credentials. `channel_id` must be an explicit Slack conversation
+        ID authorized by the principal's `slack.history_channels` claim.
+        """
+        if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+            raise RuntimeError(
+                "Slack channel history proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        normalized_channel_id = self._clean_channel_ref(channel_id).upper()
+        if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(normalized_channel_id):
+            raise ValueError("channel_id must be a Slack conversation ID like C123456789")
+
+        params: dict[str, Any] = {
+            "cursor": cursor,
+            "include_all_metadata": include_all_metadata,
+            "inclusive": inclusive,
+            "latest": self._normalize_ts(latest),
+            "limit": None,
+            "oldest": self._normalize_ts(oldest),
+        }
+        if limit is not None:
+            requested_limit = int(limit)
+            if not 1 <= requested_limit <= self._MAX_SLACK_HISTORY_PROXY_PAGE_SIZE:
+                raise ValueError("limit must be between 1 and 999")
+            params["limit"] = requested_limit
+
+        channel_path = urllib.parse.quote(normalized_channel_id, safe="")
+        return self._centaur_api_get_json(
+            f"/api/slack/channels/{channel_path}/history",
+            params,
+        )
 
     def get_channel_history(
         self,
@@ -1682,6 +1875,88 @@ class SlackClient:
                 resolved_channel=resolved_channel,
             )
 
+    def upload_file_proxy(
+        self,
+        channel_id: str,
+        content_base64: str,
+        filename: str,
+        thread_ts: str | None = None,
+        title: str | None = None,
+        initial_comment: str | None = None,
+        content_type: str | None = None,
+        alt_txt: str | None = None,
+        snippet_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload a file through the Centaur API server Slack proxy.
+
+        This maps to `/api/slack/files/upload`. The caller supplies file bytes
+        as base64, and the API server handles Slack credentials and channel
+        authorization through the principal-scoped JWT.
+        """
+        if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+            raise RuntimeError(
+                "Slack file upload proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        effective_filename = str(filename).strip()
+        if not effective_filename:
+            raise ValueError("filename is required")
+        try:
+            body = base64.b64decode(content_base64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("content_base64 must be valid base64") from exc
+        if not body:
+            raise ValueError("content_base64 must not be empty")
+
+        params = {
+            "channel_id": normalized_channel_id,
+            "filename": effective_filename,
+            "thread_ts": self._normalize_ts(thread_ts),
+            "title": title,
+            "initial_comment": initial_comment,
+            "content_type": content_type,
+            "alt_txt": alt_txt,
+            "snippet_type": snippet_type,
+        }
+        return self._centaur_api_post_bytes_json(
+            "/api/slack/files/upload",
+            params,
+            body,
+            content_type or "application/octet-stream",
+        )
+
+    def download_file_proxy(self, file_id: str, channel_id: str) -> dict[str, Any]:
+        """Download a Slack file through the Centaur API server Slack proxy.
+
+        Returns base64-encoded file bytes plus filename, content type, and size.
+        """
+        if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+            raise RuntimeError(
+                "Slack file download proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+        normalized_file_id = self._normalize_file_id(file_id)
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        body, headers = self._centaur_api_get_bytes(
+            f"/api/slack/files/{urllib.parse.quote(normalized_file_id, safe='')}/download",
+            {"channel_id": normalized_channel_id},
+            self._MAX_DOWNLOAD_BYTES,
+        )
+        filename = (
+            self._content_disposition_filename(headers.get("content-disposition"))
+            or normalized_file_id
+        )
+        content_type = headers.get("content-type") or "application/octet-stream"
+        return {
+            "file_id": normalized_file_id,
+            "channel_id": normalized_channel_id,
+            "filename": filename,
+            "content_type": content_type,
+            "size_bytes": len(body),
+            "content_base64": base64.b64encode(body).decode(),
+        }
+
     def list_usergroups(self) -> list[dict]:
         """List all user groups in the workspace."""
         try:
@@ -2059,6 +2334,10 @@ def get_channel_history_page(*args, **kwargs):
     return _client().get_channel_history_page(*args, **kwargs)
 
 
+def get_channel_history_proxy(*args, **kwargs):
+    return _client().get_channel_history_proxy(*args, **kwargs)
+
+
 def get_channel_history(*args, **kwargs):
     return _client().get_channel_history(*args, **kwargs)
 
@@ -2105,6 +2384,14 @@ def send_dm(*args, **kwargs):
 
 def upload_file(*args, **kwargs):
     return _client().upload_file(*args, **kwargs)
+
+
+def upload_file_proxy(*args, **kwargs):
+    return _client().upload_file_proxy(*args, **kwargs)
+
+
+def download_file_proxy(*args, **kwargs):
+    return _client().download_file_proxy(*args, **kwargs)
 
 
 def list_usergroups(*args, **kwargs):

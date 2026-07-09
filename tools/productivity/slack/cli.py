@@ -215,7 +215,7 @@ def channel(
         )
     except (RuntimeError, ValueError) as e:
         stderr_console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     messages = page["messages"]
 
@@ -244,6 +244,74 @@ def channel(
 
         thread_info = f" [dim]({msg['reply_count']} replies)[/]" if msg.get("reply_count") else ""
         console.print(f"[green]{msg['user']}[/]{thread_info}: {text}")
+
+
+@app.command("channel-proxy")
+def channel_proxy(
+    channel_id: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max messages"),
+    cursor: str = typer.Option(None, "--cursor", help="Slack pagination cursor for the next page"),
+    oldest: str = typer.Option(None, "--oldest", help="Oldest Slack timestamp boundary"),
+    latest: str = typer.Option(None, "--latest", help="Latest Slack timestamp boundary"),
+    inclusive: bool | None = typer.Option(
+        None,
+        "--inclusive/--exclusive",
+        help="Include messages exactly on the oldest/latest boundary",
+    ),
+    include_all_metadata: bool | None = typer.Option(
+        None,
+        "--include-all-metadata/--metadata-default",
+        help="Ask Slack to return all message metadata",
+    ),
+    full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
+    json_output: bool = typer.Option(False, "--json", help="Output raw proxy response as JSON"),
+):
+    """Get channel history through the Centaur API server proxy."""
+    import sys
+
+    from .client import get_channel_history_proxy
+
+    try:
+        page = get_channel_history_proxy(
+            channel_id,
+            cursor=cursor,
+            include_all_metadata=include_all_metadata,
+            inclusive=inclusive,
+            latest=latest,
+            limit=limit,
+            oldest=oldest,
+        )
+    except (RuntimeError, ValueError) as e:
+        stderr_console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+    if json_output:
+        print(json.dumps(page, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    messages = page.get("messages", [])
+    if not messages:
+        console.print("[yellow]No messages found.[/]")
+        raise typer.Exit()
+
+    header = f"[bold]#{channel_id}[/] - {len(messages)} messages"
+    if page.get("has_more"):
+        header += " [dim](more available)[/]"
+    console.print(f"{header}\n")
+
+    next_cursor = page.get("response_metadata", {}).get("next_cursor")
+    if next_cursor:
+        console.print(f"[dim]next_cursor={next_cursor}[/]\n")
+
+    for msg in messages:
+        user = msg.get("user") or msg.get("bot_id") or msg.get("username") or "unknown"
+        text = str(msg.get("text") or "")
+        if not full:
+            text = text[:120].replace("\n", " ")
+            if len(str(msg.get("text") or "")) > 120:
+                text += "..."
+        thread_info = f" [dim]({msg['reply_count']} replies)[/]" if msg.get("reply_count") else ""
+        console.print(f"[green]{user}[/]{thread_info}: {text}")
 
 
 @app.command()
@@ -570,6 +638,62 @@ def upload(
         except (RuntimeError, ValueError) as e:
             console.print(f"[red]Error uploading {path.name}: {e}[/]")
             raise typer.Exit(1)
+
+
+@app.command("upload-proxy")
+def upload_proxy(
+    channel_id: str = typer.Argument(
+        ..., help="Slack channel/conversation ID to upload into, e.g. C123 or D123"
+    ),
+    files: list[str] = typer.Argument(..., help="File path(s) to upload"),  # noqa: B008
+    comment: str = typer.Option(None, "--comment", "-c", help="Comment to post with files"),
+    thread: str = typer.Option(None, "--thread", "-t", help="Slack thread timestamp to reply to"),
+    content_type: str = typer.Option(
+        None, "--content-type", help="Content-Type to send for all files"
+    ),
+    alt_text: str = typer.Option(None, "--alt-text", help="Alt text for all files"),
+    snippet_type: str = typer.Option(None, "--snippet-type", help="Slack snippet type"),
+):
+    """Upload file(s) through the Centaur API server Slack proxy."""
+    import base64
+    import mimetypes
+    from pathlib import Path
+
+    from .client import upload_file_proxy
+
+    if not _channel_arg_is_id(channel_id):
+        console.print(
+            "[red]Error: upload-proxy channel must be a Slack conversation ID like C123 or D123[/]"
+        )
+        raise typer.Exit(1)
+
+    first_upload_path = files[0] if files else None
+    for file_path in files:
+        path = Path(file_path)
+        if not path.exists():
+            console.print(f"[red]File not found: {file_path}[/]")
+            raise typer.Exit(1)
+
+        effective_content_type = content_type or mimetypes.guess_type(path.name)[0]
+        try:
+            result = upload_file_proxy(
+                channel_id=channel_id,
+                content_base64=base64.b64encode(path.read_bytes()).decode(),
+                filename=path.name,
+                title=path.name,
+                initial_comment=comment if file_path == first_upload_path else None,
+                thread_ts=thread,
+                content_type=effective_content_type,
+                alt_txt=alt_text,
+                snippet_type=snippet_type,
+            )
+            console.print(f"[green]✓ Uploaded {path.name}[/]")
+            console.print(
+                f"[dim]{result.get('file_id') or result.get('file', {}).get('id', '')}[/]"
+            )
+        except (RuntimeError, ValueError) as e:
+            console.print(f"[red]Error uploading {path.name}: {e}[/]")
+            raise typer.Exit(1) from e
 
 
 @app.command()
@@ -908,6 +1032,41 @@ def files(
             size_kb = f["size"] / 1024
             console.print(f"[cyan]{f['name']}[/] ({f['filetype']}, {size_kb:.1f} KB)")
             console.print(f"  [dim]{f['url_private']}[/]")
+
+
+@app.command("download-proxy")
+def download_proxy(
+    file_id: str = typer.Argument(..., help="Slack file ID, e.g. F1234567890"),
+    channel_id: str = typer.Argument(
+        ..., help="Slack channel/conversation ID that the file is shared in"
+    ),
+    output: str = typer.Option(".", "--output", "-o", help="Output directory for downloads"),
+    json_output: bool = typer.Option(False, "--json", help="Print metadata as JSON"),
+):
+    """Download a Slack file through the Centaur API server Slack proxy."""
+    import base64
+    import sys
+    from pathlib import Path
+
+    from .client import download_file_proxy
+
+    try:
+        result = download_file_proxy(file_id=file_id, channel_id=channel_id)
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]Error downloading Slack file: {e}[/]")
+        raise typer.Exit(1) from e
+
+    if json_output:
+        metadata = {key: value for key, value in result.items() if key != "content_base64"}
+        print(json.dumps(metadata, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / result["filename"]
+    out_path.write_bytes(base64.b64decode(result["content_base64"]))
+    console.print(f"[green]✓ Downloaded {result['filename']}[/] ({result['size_bytes']} bytes)")
+    console.print(f"[dim]{out_path.absolute()}[/]")
 
 
 # === Feedback Commands ===

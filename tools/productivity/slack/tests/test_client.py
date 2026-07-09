@@ -1,3 +1,4 @@
+import base64
 import email.message
 import json
 
@@ -410,6 +411,184 @@ def test_get_channel_history_page_preserves_non_auth_error_shape() -> None:
         client.get_channel_history_page("paradigm-pulse")
 
 
+def test_get_channel_history_proxy_calls_centaur_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.parse
+    import urllib.request
+
+    client, _ = _make_client()
+    request_info: dict[str, str | None] = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        request_info["url"] = req.full_url
+        request_info["authorization"] = req.get_header("Authorization")
+        body = json.dumps(
+            {
+                "ok": True,
+                "messages": [{"type": "message", "ts": "1700000000.000001"}],
+                "has_more": False,
+            }
+        ).encode()
+        return _FakeHTTPResponse(body, "application/json")
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080")
+    monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "test-jwt")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.get_channel_history_proxy(
+        "<#C123456789|general>",
+        cursor="next",
+        include_all_metadata=True,
+        inclusive=False,
+        latest="1700000000.000002",
+        limit=999,
+        oldest=0,
+    )
+
+    assert result["ok"] is True
+    assert request_info["authorization"] == "Bearer test-jwt"
+    parsed = urllib.parse.urlparse(request_info["url"])
+    assert parsed.scheme == "http"
+    assert parsed.netloc == "api.internal:8080"
+    assert parsed.path == "/api/slack/channels/C123456789/history"
+    query = urllib.parse.parse_qs(parsed.query)
+    assert query == {
+        "cursor": ["next"],
+        "include_all_metadata": ["true"],
+        "inclusive": ["false"],
+        "latest": ["1700000000.000002"],
+        "limit": ["999"],
+        "oldest": ["0.000000"],
+    }
+
+
+def test_get_channel_history_proxy_validates_inputs() -> None:
+    client, _ = _make_client()
+
+    with pytest.raises(ValueError, match="channel_id"):
+        client.get_channel_history_proxy("general")
+
+    with pytest.raises(ValueError, match="between 1 and 999"):
+        client.get_channel_history_proxy("C123456789", limit=1000)
+
+
+def test_upload_file_proxy_posts_file_bytes_to_centaur_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.parse
+    import urllib.request
+
+    client, _ = _make_client()
+    request_info: dict[str, object] = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        request_info["url"] = req.full_url
+        request_info["headers"] = {key.lower(): value for key, value in req.header_items()}
+        request_info["data"] = req.data
+        body = json.dumps(
+            {
+                "ok": True,
+                "file_id": "F123456789",
+                "channel_id": "C123456789",
+                "file": {"id": "F123456789"},
+            }
+        ).encode()
+        return _FakeHTTPResponse(body, "application/json")
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080")
+    monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "test-jwt")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.upload_file_proxy(
+        channel_id="C123456789",
+        content_base64=base64.b64encode(b"hello").decode(),
+        filename="hello.txt",
+        thread_ts="1700000000.000001",
+        title="Hello",
+        initial_comment="uploaded",
+        content_type="text/plain",
+        alt_txt="hello file",
+        snippet_type="text",
+    )
+
+    assert result["file_id"] == "F123456789"
+    assert request_info["data"] == b"hello"
+    headers = request_info["headers"]
+    assert isinstance(headers, dict)
+    assert headers["authorization"] == "Bearer test-jwt"
+    assert headers["content-type"] == "text/plain"
+    parsed = urllib.parse.urlparse(request_info["url"])
+    assert parsed.path == "/api/slack/files/upload"
+    assert urllib.parse.parse_qs(parsed.query) == {
+        "channel_id": ["C123456789"],
+        "filename": ["hello.txt"],
+        "thread_ts": ["1700000000.000001"],
+        "title": ["Hello"],
+        "initial_comment": ["uploaded"],
+        "content_type": ["text/plain"],
+        "alt_txt": ["hello file"],
+        "snippet_type": ["text"],
+    }
+
+
+def test_download_file_proxy_returns_base64_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.parse
+    import urllib.request
+
+    client, _ = _make_client()
+    request_info: dict[str, str | None] = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        request_info["url"] = req.full_url
+        request_info["authorization"] = req.get_header("Authorization")
+        return _FakeHTTPResponse(
+            b"%PDF",
+            "application/pdf",
+            {"Content-Disposition": 'attachment; filename="report.pdf"'},
+        )
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080")
+    monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "test-jwt")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.download_file_proxy(file_id="F123456789", channel_id="C123456789")
+
+    assert result == {
+        "file_id": "F123456789",
+        "channel_id": "C123456789",
+        "filename": "report.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 4,
+        "content_base64": base64.b64encode(b"%PDF").decode(),
+    }
+    assert request_info["authorization"] == "Bearer test-jwt"
+    parsed = urllib.parse.urlparse(request_info["url"])
+    assert parsed.path == "/api/slack/files/F123456789/download"
+    assert urllib.parse.parse_qs(parsed.query) == {"channel_id": ["C123456789"]}
+
+
+def test_file_proxy_methods_validate_inputs() -> None:
+    client, _ = _make_client()
+
+    with pytest.raises(ValueError, match="filename"):
+        client.upload_file_proxy(
+            channel_id="C123456789",
+            content_base64=base64.b64encode(b"hello").decode(),
+            filename=" ",
+        )
+    with pytest.raises(ValueError, match="valid base64"):
+        client.upload_file_proxy(
+            channel_id="C123456789",
+            content_base64="not base64",
+            filename="hello.txt",
+        )
+    with pytest.raises(ValueError, match="file_id"):
+        client.download_file_proxy(file_id="bad", channel_id="C123456789")
+
+
 def test_search_messages_with_channel_ids_scans_history_without_listing() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]
@@ -790,9 +969,12 @@ def test_upload_file_requires_a_content_source() -> None:
 class _FakeHTTPResponse:
     """Minimal stand-in for urllib's HTTPResponse context manager."""
 
-    def __init__(self, body: bytes, content_type: str) -> None:
+    def __init__(
+        self, body: bytes, content_type: str, headers: dict[str, str] | None = None
+    ) -> None:
         self._body = body
         self._content_type = content_type
+        self._headers = headers or {}
 
     def __enter__(self) -> "_FakeHTTPResponse":
         return self
@@ -807,6 +989,8 @@ class _FakeHTTPResponse:
     def headers(self) -> "email.message.Message":
         msg = email.message.Message()
         msg["Content-Type"] = self._content_type
+        for key, value in self._headers.items():
+            msg[key] = value
         return msg
 
 

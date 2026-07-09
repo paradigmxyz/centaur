@@ -128,7 +128,8 @@ mod tests {
                 "exp": 4_102_444_800i64,
                 "slack": {
                     "upload_channels": ["C123456789"],
-                    "download_channels": ["C987654321"]
+                    "download_channels": ["C987654321"],
+                    "history_channels": ["C111111111"]
                 }
             }),
             &EncodingKey::from_secret(b"test-secret"),
@@ -164,6 +165,11 @@ mod tests {
             body.pointer("/slack_client_jwt/claims/slack/download_channels/0")
                 .and_then(Value::as_str),
             Some("C987654321")
+        );
+        assert_eq!(
+            body.pointer("/slack_client_jwt/claims/slack/history_channels/0")
+                .and_then(Value::as_str),
+            Some("C111111111")
         );
     }
 
