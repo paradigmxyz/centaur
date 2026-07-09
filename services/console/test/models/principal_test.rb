@@ -107,14 +107,29 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({ "env" => "prod", "team" => "platform" }, principal.reload.labels)
   end
 
-  test "effective_config adds api server JWT for slack channel principals" do
+  test "effective_config adds api server JWT from Slack channel claim rows" do
     with_env(
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080",
       "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
     ) do
       principal = principals(:acme_channel)
-      principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
+      PrincipalSlackChannelClaim.create!(
+        principal: principal,
+        channel_id: "C0123456789",
+        channel_name: "general",
+        upload_enabled: true,
+        download_enabled: false,
+        history_enabled: true
+      )
+      PrincipalSlackChannelClaim.create!(
+        principal: principal,
+        channel_id: "G9876543210",
+        channel_name: "private",
+        upload_enabled: false,
+        download_enabled: true,
+        history_enabled: false
+      )
 
       config = principal.effective_config(redact_secrets: false)
       entry = config.fetch("secrets").find do |secret|
@@ -131,7 +146,7 @@ class PrincipalTest < ActiveSupport::TestCase
       assert_equal "centaur-api", claims.fetch("aud")
       assert_equal principal.oid, claims.fetch("sub")
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
-      assert_equal [ "C0123456789" ], claims.dig("slack", "download_channels")
+      assert_equal [ "G9876543210" ], claims.dig("slack", "download_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
       assert_equal 1.hour.to_i, claims.fetch("exp") - claims.fetch("iat")
       assert_equal ApiServer::Jwt.rotation_offset(principal),
@@ -139,12 +154,29 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
+  test "effective_config falls back to slack channel label for legacy principals" do
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+      principal = principals(:acme_channel)
+      principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
+
+      token = ApiServer::Jwt.encode_for_principal(principal)
+      claims = jwt_payload(token)
+      assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
+      assert_equal [ "C0123456789" ], claims.dig("slack", "download_channels")
+      assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
+    end
+  end
+
   test "effective_config omits api server JWT when sandbox api access is disabled" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
       principal.update!(
-        labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" },
         sandbox_api_server_enabled: false
+      )
+      PrincipalSlackChannelClaim.create!(
+        principal: principal,
+        channel_id: "C0123456789",
+        upload_enabled: true
       )
 
       config = principal.effective_config(redact_secrets: false)
@@ -160,7 +192,11 @@ class PrincipalTest < ActiveSupport::TestCase
   test "api server JWT is deterministic inside the rotation window" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
-      principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
+      PrincipalSlackChannelClaim.create!(
+        principal: principal,
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
 
       window = ApiServer::Jwt::DEFAULT_WINDOW_SECONDS
       boundary = 1_700_000_100 + ApiServer::Jwt.rotation_offset(principal)

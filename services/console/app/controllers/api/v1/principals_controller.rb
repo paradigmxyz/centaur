@@ -24,8 +24,11 @@ module Api
       def create
         principal = Principal.new(namespace: upsert_namespace, foreign_id: data_params[:foreign_id],
                                   created_by: current_user)
-        principal.assign_attributes(principal_params)
-        principal.save!
+        ActiveRecord::Base.transaction do
+          principal.assign_attributes(principal_params)
+          principal.save!
+          replace_slack_channel_claims!(principal) if data_params.key?(:slack_channel_claims)
+        end
         render status: :created, json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -37,8 +40,11 @@ module Api
       def update
         principal = resolve_for_upsert(Principal)
         was_new = principal.new_record?
-        principal.assign_attributes(principal_params)
-        principal.save!
+        ActiveRecord::Base.transaction do
+          principal.assign_attributes(principal_params)
+          principal.save!
+          replace_slack_channel_claims!(principal) if data_params.key?(:slack_channel_claims)
+        end
         render status: (was_new ? :created : :ok), json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -74,6 +80,7 @@ module Api
           foreign_id: principal.foreign_id,
           name: principal.name,
           labels: principal.labels,
+          slack_channel_claims: principal.slack_channel_claims,
           sandbox_repo_cache: principal.sandbox_repo_cache,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
           sandbox_api_server_enabled: principal.sandbox_api_server_enabled,
@@ -89,6 +96,13 @@ module Api
           :sandbox_observability_enabled,
           :sandbox_api_server_enabled,
           labels: {}
+        )
+      end
+
+      def replace_slack_channel_claims!(principal)
+        PrincipalSlackChannelClaim.replace_for_principal!(
+          principal,
+          data_params[:slack_channel_claims]
         )
       end
     end

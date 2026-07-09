@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_09_160000) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_09_174916) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -292,6 +292,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_09_160000) do
     t.index ["role_id"], name: "index_principal_roles_on_role_id"
   end
 
+  create_table "principal_slack_channel_claims", force: :cascade do |t|
+    t.string "channel_id", null: false
+    t.string "channel_name"
+    t.datetime "created_at", null: false
+    t.boolean "download_enabled", default: false, null: false
+    t.boolean "history_enabled", default: false, null: false
+    t.bigint "principal_id", null: false
+    t.datetime "updated_at", null: false
+    t.boolean "upload_enabled", default: false, null: false
+    t.index ["principal_id", "channel_id"], name: "idx_on_principal_id_channel_id_53e63fc3fb", unique: true
+    t.index ["principal_id"], name: "index_principal_slack_channel_claims_on_principal_id"
+  end
+
   create_table "principal_sync_config_snapshots", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.text "payload", null: false
@@ -468,6 +481,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_09_160000) do
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
+  add_foreign_key "principal_slack_channel_claims", "principals"
   add_foreign_key "principal_sync_config_snapshots", "principals"
   add_foreign_key "principals", "users", column: "created_by_id"
   add_foreign_key "proxies", "principals", on_delete: :nullify

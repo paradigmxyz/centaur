@@ -65,7 +65,16 @@ module Api
           data: {
             namespace: "acme",
             foreign_id: "U-new-id",
-            labels: { "kind" => "user", "team" => "platform" }
+            labels: { "kind" => "user", "team" => "platform" },
+            slack_channel_claims: [
+              {
+                channel_id: "C0123456789",
+                channel_name: "general",
+                upload_enabled: true,
+                download_enabled: false,
+                history_enabled: true
+              }
+            ]
           }
         }
 
@@ -79,6 +88,18 @@ module Api
         assert_equal "acme", data["namespace"]
         assert_equal "U-new-id", data["foreign_id"]
         assert_equal({ "kind" => "user", "team" => "platform" }, data["labels"])
+        assert_equal(
+          [
+            {
+              "channel_id" => "C0123456789",
+              "channel_name" => "general",
+              "upload_enabled" => true,
+              "download_enabled" => false,
+              "history_enabled" => true
+            }
+          ],
+          data["slack_channel_claims"]
+        )
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal true, data["sandbox_observability_enabled"]
@@ -173,6 +194,56 @@ module Api
 
         principal.reload
         assert_equal({ "kind" => "slack_channel", "team" => "ops" }, principal.labels)
+      end
+
+      test "PUT replaces Slack channel claim rows" do
+        principal = principals(:acme_channel)
+        PrincipalSlackChannelClaim.create!(
+          principal: principal,
+          channel_id: "C1111111111",
+          upload_enabled: true
+        )
+        body = {
+          data: {
+            slack_channel_claims: [
+              {
+                channel_id: "C0123456789",
+                upload_enabled: true,
+                download_enabled: true,
+                history_enabled: false
+              },
+              {
+                channel_id: "G9876543210",
+                upload_enabled: false,
+                download_enabled: false,
+                history_enabled: true
+              }
+            ]
+          }
+        }
+
+        put api_v1_principal_url(id: principal.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        assert_equal(
+          [
+            {
+              "channel_id" => "C0123456789",
+              "channel_name" => nil,
+              "upload_enabled" => true,
+              "download_enabled" => true,
+              "history_enabled" => false
+            },
+            {
+              "channel_id" => "G9876543210",
+              "channel_name" => nil,
+              "upload_enabled" => false,
+              "download_enabled" => false,
+              "history_enabled" => true
+            }
+          ],
+          principal.reload.slack_channel_claims
+        )
       end
 
       test "PUT ignores attempts to change immutable namespace and foreign_id" do

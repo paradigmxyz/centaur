@@ -49,7 +49,11 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
 
   test "fetch_for rebuilds api server JWT snapshots when the jwt window advances" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
-      @principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
+      PrincipalSlackChannelClaim.create!(
+        principal: @principal,
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
       boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
       current_time = Time.zone.at(boundary + 60)
       previous_window_time = Time.zone.at(boundary - 60)
@@ -79,8 +83,12 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   test "fetch_for does not rebuild api server JWT snapshots when sandbox api access is disabled" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       @principal.update!(
-        labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" },
         sandbox_api_server_enabled: false
+      )
+      PrincipalSlackChannelClaim.create!(
+        principal: @principal,
+        channel_id: "C0123456789",
+        upload_enabled: true
       )
       boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
       current_time = Time.zone.at(boundary + 60)

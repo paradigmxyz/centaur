@@ -10,8 +10,10 @@ module ApiServer
     module_function
 
     def encode_for_principal(principal, now: Time.current)
-      channel_id = principal.labels.to_h[Principal::SLACK_CHANNEL_ID_LABEL].to_s.strip
-      return nil if channel_id.blank?
+      upload_channels = principal.slack_upload_channel_ids
+      download_channels = principal.slack_download_channel_ids
+      history_channels = principal.slack_history_channel_ids
+      return nil if upload_channels.empty? && download_channels.empty? && history_channels.empty?
 
       signing_secret = ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s
       return nil if signing_secret.blank?
@@ -26,9 +28,9 @@ module ApiServer
           "iat" => issued_at,
           "exp" => expires_at,
           "slack" => {
-            "upload_channels" => [ channel_id ],
-            "download_channels" => [ channel_id ],
-            "history_channels" => [ channel_id ]
+            "upload_channels" => upload_channels,
+            "download_channels" => download_channels,
+            "history_channels" => history_channels
           }
         },
         signing_secret: signing_secret
