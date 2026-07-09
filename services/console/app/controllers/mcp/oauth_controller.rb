@@ -457,7 +457,7 @@ module Mcp
           "kind" => "console_user",
           "console-user-id" => current_user.oid,
           "email" => current_user.email
-        )
+        ).merge(slack_identity_labels_for(current_user))
         principal.save!
         assign_user_mcp_role(principal) if newly_created
         principal
@@ -482,6 +482,22 @@ module Mcp
           foreign_id: USER_MCP_ROLE_FOREIGN_ID
         )
       principal.principal_roles.find_or_create_by!(role: role)
+    end
+
+    # Slack's OIDC id_token is the authenticated source of the user's native
+    # Slack identity. Refuse an ambiguous account rather than guessing which
+    # workspace should determine company-context RLS.
+    def slack_identity_labels_for(user)
+      identities = user.user_identities.where(provider: UserIdentity::SLACK_PROVIDER).order(:id)
+      identities = identities.filter_map do |identity|
+        next if identity.subject.blank? || identity.team_id.blank?
+
+        [ identity.subject, identity.team_id ]
+      end.uniq
+      return {} unless identities.one?
+
+      slack_user_id, slack_team_id = identities.first
+      { "slack_user_id" => slack_user_id, "slack_team_id" => slack_team_id }
     end
 
     def principal_foreign_id(email)

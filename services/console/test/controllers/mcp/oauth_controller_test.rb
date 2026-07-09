@@ -170,6 +170,35 @@ module Mcp
       assert_includes principal.roles, role
     end
 
+    test "authorization approval labels a principal from one Slack SSO identity" do
+      @operator.user_identities.create!(
+        provider: "slack", subject: "U123", team_id: "T123", email: @operator.email, email_verified: true
+      )
+      client = create_client
+
+      code = authorize_code(client)
+
+      principal = McpOauthAuthorizationCode.find_usable(code).principal
+      assert_equal "U123", principal.labels["slack_user_id"]
+      assert_equal "T123", principal.labels["slack_team_id"]
+    end
+
+    test "authorization approval leaves Slack labels unset for ambiguous Slack SSO identities" do
+      @operator.user_identities.create!(
+        provider: "slack", subject: "U123", team_id: "T123", email: @operator.email, email_verified: true
+      )
+      @operator.user_identities.create!(
+        provider: "slack", subject: "U456", team_id: "T456", email: @operator.email, email_verified: true
+      )
+      client = create_client
+
+      code = authorize_code(client)
+
+      principal = McpOauthAuthorizationCode.find_usable(code).principal
+      assert_nil principal.labels["slack_user_id"]
+      assert_nil principal.labels["slack_team_id"]
+    end
+
     test "authorization approval reuses an existing user-mcp role" do
       existing = Role.create!(
         namespace: "default",
