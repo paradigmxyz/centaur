@@ -20,11 +20,6 @@ set to onepassword-connect in the Helm values):
                                creates Secret centaur-onepassword-connect-credentials
   OP_CONNECT_TOKEN             Connect API token; added to centaur-infra-env
 
-Optional local-dev admin key:
-  LOCAL_DEV_API_KEY            seeded as the admin bearer for the API service
-                               (envFrom centaur-infra-env). Re-run with --force
-                               or kubectl patch to rotate.
-
 Optional repo-cache GitHub token:
   GITHUB_TOKEN                 added to centaur-infra-env when present; the
                                repo-cache DaemonSet reads it (repoCache.githubToken
@@ -199,15 +194,6 @@ if secret_exists centaur-infra-env; then
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     patch_data+=("\"OP_CONNECT_TOKEN\":\"$(printf '%s' "$OP_CONNECT_TOKEN" | base64 | tr -d '\n')\"")
   fi
-  # Top-up IRON_BROKER_TOKEN for clusters bootstrapped before iron-token-broker
-  # support landed. Only generated when absent so we don't rotate it out from
-  # under cached iron-proxy access tokens on every script run.
-  if ! secret_key_present IRON_BROKER_TOKEN; then
-    patch_data+=("\"IRON_BROKER_TOKEN\":\"$(rand_hex | base64 | tr -d '\n')\"")
-  fi
-  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
-    patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
-  fi
   # GITHUB_TOKEN for the repo-cache DaemonSet. Set whenever present so it can be
   # rotated; harmless when repoCache is disabled.
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -315,8 +301,6 @@ else
   secret_args=(
     -n "$NAMESPACE" create secret generic centaur-infra-env
     --from-literal=IRON_MANAGEMENT_API_KEY="$(rand_hex)"
-    --from-literal=IRON_BROKER_TOKEN="$(rand_hex)"
-    --from-literal=SANDBOX_SIGNING_KEY="$(rand_hex)"
     --from-literal=OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN"
     --from-literal=OP_VAULT="$OP_VAULT"
     --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN"
@@ -352,9 +336,6 @@ else
   fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
-  fi
-  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
-    secret_args+=(--from-literal=LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY")
   fi
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=GITHUB_TOKEN="$GITHUB_TOKEN")
