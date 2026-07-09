@@ -31,11 +31,15 @@ module Oauth
         result = result_with(
           claims: valid_claims,
           id_token: nil,
-          response: { "authed_user" => { "id" => "U12345" } }
+          response: {
+            "team" => { "id" => "T12345" },
+            "authed_user" => { "id" => "U12345" }
+          }
         )
 
         identity = strategy.identity_from(result, client_id: CLIENT_ID)
         assert_equal "U12345", identity[:subject]
+        assert_equal "T12345", identity[:team_id]
         assert_nil identity[:email]
         assert_nil identity[:name]
       end
