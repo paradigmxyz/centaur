@@ -22,6 +22,8 @@ class _FakeWebClient:
         self.history_pages: list[dict] = []
         self.reply_calls: list[dict] = []
         self.reply_pages: list[dict] = []
+        self.member_calls: list[dict] = []
+        self.member_pages: list[dict] = []
         self.open_calls: list[dict] = []
         self.open_response: dict = {"channel": {"id": "D123"}}
         self.users_calls: list[dict] = []
@@ -55,6 +57,10 @@ class _FakeWebClient:
     def conversations_replies(self, **kwargs):
         self.reply_calls.append(kwargs)
         return self.reply_pages.pop(0)
+
+    def conversations_members(self, **kwargs):
+        self.member_calls.append(kwargs)
+        return self.member_pages.pop(0)
 
     def conversations_open(self, **kwargs):
         self.open_calls.append(kwargs)
@@ -544,6 +550,39 @@ def test_get_thread_replies_page_uses_bounded_default() -> None:
     assert fake_web_client.reply_calls[0]["limit"] == 50
     assert result["effective_limit"] == 50
     assert result["continuation_available"] is False
+
+
+def test_get_channel_member_emails_uses_member_profiles() -> None:
+    client, fake_web_client = _make_client()
+    fake_web_client.member_pages = [
+        {
+            "members": ["U1", "U2"],
+            "response_metadata": {"next_cursor": ""},
+        }
+    ]
+    fake_web_client.users_pages = [
+        {
+            "members": [
+                {
+                    "id": "U1",
+                    "name": "alice",
+                    "real_name": "Alice Example",
+                    "profile": {"email": "alice@example.com"},
+                },
+                {
+                    "id": "U2",
+                    "name": "bob",
+                    "real_name": "Bob Example",
+                    "profile": {},
+                },
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    ]
+
+    assert client.get_channel_member_emails("paradigm-pulse") == ["alice@example.com"]
+    assert fake_web_client.member_calls == [{"channel": "C123", "limit": 200}]
+    assert fake_web_client.users_calls == [{"limit": 200}]
 
 
 def test_dump_channel_with_threads_limits_thread_expansion() -> None:

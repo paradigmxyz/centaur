@@ -1261,6 +1261,49 @@ class SlackClient:
 
         return sorted(users[:limit], key=lambda x: x["name"])
 
+    def _users_by_id(self, user_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch Slack user profiles for a known set of user IDs."""
+        wanted = {user_id for user_id in user_ids if user_id}
+        users: dict[str, dict[str, Any]] = {}
+        cursor = None
+
+        while wanted:
+            try:
+                kwargs: dict[str, Any] = {"limit": self._MAX_PAGE_SIZE}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                response = self._retry_on_ratelimit(
+                    self._client.users_list,
+                    method_key="users.list",
+                    **kwargs,
+                )
+            except (SlackApiError, SlackRateLimitError):
+                return users
+
+            for user in response.get("members", []):
+                user_id = user.get("id", "")
+                if user_id not in wanted:
+                    continue
+                profile = user.get("profile", {}) or {}
+                users[user_id] = {
+                    "id": user_id,
+                    "name": user.get("name", ""),
+                    "real_name": user.get("real_name", ""),
+                    "display_name": profile.get("display_name", ""),
+                    "email": profile.get("email", ""),
+                    "title": profile.get("title", ""),
+                    "is_bot": user.get("is_bot", False),
+                    "is_deleted": user.get("deleted", False),
+                    "team_id": user.get("team_id", "") or user.get("team", ""),
+                }
+                wanted.remove(user_id)
+
+            cursor = response.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+        return users
+
     def get_channel_members(self, channel: str) -> list[dict]:
         """Get all members of a Slack channel with their user info.
 
@@ -1297,19 +1340,15 @@ class SlackClient:
             if not cursor:
                 break
 
-        # Use bulk user cache instead of fresh API call
-        user_cache = self._get_user_cache()
+        users_by_id = self._users_by_id(member_ids)
 
         members = []
         for member_id in member_ids:
-            name = user_cache.get(member_id)
-            if name:
-                members.append(
-                    {
-                        "id": member_id,
-                        "name": name,
-                    }
-                )
+            member = users_by_id.get(member_id)
+            if member:
+                members.append(member)
+            else:
+                members.append({"id": member_id, "name": member_id})
 
         return members
 
