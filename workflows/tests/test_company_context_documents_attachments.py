@@ -299,3 +299,43 @@ def test_slack_attachment_document_indexes_metadata_without_private_url():
     assert "files-pri" not in document["body"]
     assert "url_private" not in document["metadata"]
     assert document["metadata"]["message_permalink"].endswith("p1770000000000100")
+
+
+def test_attio_meeting_document_indexes_description_and_transcript():
+    row = {
+        "meeting_id": "mtg_123",
+        "title": "Acme renewal call",
+        "description": "Customer renewal discussion.",
+        "url": "https://app.attio.com/meetings/mtg_123",
+        "linked_records": [{"target_object": "companies", "target_record_id": "rec_1"}],
+        "participants": [{"name": "Dana"}, {"email": "buyer@example.com"}],
+        "organizer_id": "mem_1",
+        "organizer_name": "Eli",
+        "organizer_email": "eli@example.com",
+        "call_recording_ids": ["rec_1"],
+        "transcript_text": "Dana: Budget approved\nEli: Next step is legal",
+        "transcript_payload": [{"text": "Budget approved"}],
+        "content_text": "",
+        "content_hash": "",
+        "started_at": dt.datetime(2026, 6, 21, 16, 0, tzinfo=dt.UTC),
+        "ended_at": dt.datetime(2026, 6, 21, 16, 30, tzinfo=dt.UTC),
+        "source_created_at": dt.datetime(2026, 6, 21, 15, 59, tzinfo=dt.UTC),
+        "source_updated_at": dt.datetime(2026, 6, 21, 16, 31, tzinfo=dt.UTC),
+        "raw_payload": {"id": {"meeting_id": "mtg_123"}},
+        "updated_at": dt.datetime(2026, 6, 21, 16, 32, tzinfo=dt.UTC),
+    }
+
+    document = projection._attio_meeting_document(row)
+
+    assert document is not None
+    assert document["document_id"] == "attio:meeting:mtg_123"
+    assert document["source"] == "attio"
+    assert document["source_type"] == "attio_meeting"
+    assert document["title"] == "Acme renewal call"
+    assert "- Organizer: Eli" in document["body"]
+    assert "- Participants: Dana, buyer@example.com" in document["body"]
+    assert "Customer renewal discussion." in document["body"]
+    assert "Dana: Budget approved" in document["body"]
+    assert document["author_id"] == "mem_1"
+    assert document["metadata"]["has_transcript"] is True
+    assert document["metadata"]["meeting_id"] == "mtg_123"
