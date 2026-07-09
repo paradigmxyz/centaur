@@ -44,10 +44,7 @@ module Console
     end
 
     def update_slack_channel_permissions
-      SlackChannelPermission.replace_for_principal!(
-        @principal,
-        slack_channel_permission_rows
-      )
+      @principal.update!(slack_channel_permission_params)
       redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
@@ -108,37 +105,18 @@ module Console
       params.fetch(:principal, ActionController::Parameters.new)
     end
 
-    def slack_channel_names_by_id
-      SlackChannelCatalog.fetch.channels.to_h { |channel| [ channel.id, channel.name ] }
-    end
-
-    def slack_channel_permission_rows
-      boolean = ActiveModel::Type::Boolean.new
-      channel_names_by_id = slack_channel_names_by_id
-      slack_channel_permission_params.filter_map do |row|
-        next if boolean.cast(row["remove"])
-
-        channel_id = row["channel_id"].to_s.strip.upcase
-        next if channel_id.blank?
-
-        attrs = {
-          channel_id: channel_id,
-          channel_name: channel_names_by_id[channel_id].presence || row["channel_name"].to_s.strip.presence,
-          upload_enabled: !!boolean.cast(row["upload_enabled"]),
-          download_enabled: !!boolean.cast(row["download_enabled"]),
-          history_enabled: !!boolean.cast(row["history_enabled"])
-        }
-        next unless attrs[:upload_enabled] || attrs[:download_enabled] || attrs[:history_enabled]
-
-        attrs
-      end
-    end
-
     def slack_channel_permission_params
-      rows = params.permit(
-        slack_channel_permissions: %i[channel_id channel_name upload_enabled download_enabled history_enabled remove]
-      ).fetch(:slack_channel_permissions, [])
-      rows.respond_to?(:values) ? rows.values : rows
+      params.require(:principal).permit(
+        slack_channel_permissions_attributes: %i[
+          id
+          channel_id
+          channel_name
+          upload_enabled
+          download_enabled
+          history_enabled
+          _destroy
+        ]
+      )
     end
 
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.

@@ -87,20 +87,24 @@ module Console
       principal = principals(:acme_user_bob)
 
       patch console_principal_slack_channel_permissions_url(principal.oid),
-            params: Rack::Utils.build_nested_query(
-              slack_channel_permissions: [
-                {
-                  channel_id: "C0123456789",
-                  upload_enabled: "1",
-                  history_enabled: "1"
-                },
-                {
-                  channel_id: "G9876543210",
-                  download_enabled: "1"
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    channel_id: "C0123456789",
+                    upload_enabled: "1",
+                    download_enabled: "0",
+                    history_enabled: "1"
+                  },
+                  "1" => {
+                    channel_id: "G9876543210",
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  }
                 }
-              ]
-            ),
-            headers: { "CONTENT_TYPE" => "application/x-www-form-urlencoded" }
+              }
+            }
 
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal(

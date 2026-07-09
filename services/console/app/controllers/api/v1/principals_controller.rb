@@ -106,41 +106,31 @@ module Api
       def replace_slack_channel_permissions!(principal)
         SlackChannelPermission.replace_for_principal!(
           principal,
-          slack_channel_permission_rows
+          slack_channel_permission_params
         )
       end
 
-      def slack_channel_permission_rows
+      def slack_channel_permission_params
         raw = data_params[:slack_channel_permissions]
-        rows = case raw
-        when nil
-          []
-        when ActionController::Parameters
-          [ raw ]
-        when Array
-          raw
-        else
-          raise InvalidSlackChannelPermissions, "slack_channel_permissions must be an array or object"
+        unless raw.nil? || raw.is_a?(Array)
+          raise InvalidSlackChannelPermissions, "slack_channel_permissions must be an array"
         end
 
-        boolean = ActiveModel::Type::Boolean.new
-        rows.filter_map do |row|
-          unless row.respond_to?(:permit)
-            raise InvalidSlackChannelPermissions, "slack_channel_permissions rows must be objects"
-          end
+        rows = data_params.permit(
+          slack_channel_permissions: %i[
+            channel_id
+            channel_name
+            upload_enabled
+            download_enabled
+            history_enabled
+          ]
+        ).fetch(:slack_channel_permissions, [])
 
-          attrs = row.permit(
-            :channel_id,
-            :channel_name,
-            :upload_enabled,
-            :download_enabled,
-            :history_enabled,
-            :remove
-          ).to_h
-          next if boolean.cast(attrs.delete("remove"))
-
-          attrs
+        if raw.present? && rows.length != raw.length
+          raise InvalidSlackChannelPermissions, "slack_channel_permissions rows must be objects"
         end
+
+        rows
       end
 
       def render_slack_channel_permissions_error(error)

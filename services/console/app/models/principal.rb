@@ -19,6 +19,10 @@ class Principal < ApplicationRecord
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"
 
+  accepts_nested_attributes_for :slack_channel_permissions,
+                                allow_destroy: true,
+                                reject_if: :reject_slack_channel_permission_attributes?
+
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_validation :apply_sandbox_repo_cache_setting
   after_create :create_slack_channel_permission_from_label
@@ -224,6 +228,10 @@ class Principal < ApplicationRecord
 
   def clear_sandbox_repo_cache_setting
     @sandbox_repo_cache_setting = nil
+  end
+
+  def reject_slack_channel_permission_attributes?(attributes)
+    attributes["channel_id"].blank?
   end
 
   def create_slack_channel_permission_from_label
