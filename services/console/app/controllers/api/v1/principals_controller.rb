@@ -2,7 +2,7 @@ module Api
   module V1
     class PrincipalsController < Api::BaseController
       def index
-        records, meta = paginated_label_search(Principal.all)
+        records, meta = paginated_label_search(Principal.includes(:slack_channel_permissions))
         render json: { data: records.map { |p| record_payload(p) }, meta: meta }
       end
 
@@ -102,8 +102,14 @@ module Api
       def replace_slack_channel_permissions!(principal)
         SlackChannelPermission.replace_for_principal!(
           principal,
-          data_params[:slack_channel_permissions]
+          slack_channel_permission_rows
         )
+      end
+
+      def slack_channel_permission_rows
+        Array(data_params[:slack_channel_permissions]).map do |row|
+          row.respond_to?(:to_unsafe_h) ? row.to_unsafe_h : row
+        end
       end
     end
   end

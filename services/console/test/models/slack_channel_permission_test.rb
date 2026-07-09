@@ -31,10 +31,10 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
 
     SlackChannelPermission.replace_for_principal!(
       principal,
-      {
-        "0" => { "channel_id" => "c0123456789", "upload_enabled" => "1", "download_enabled" => "0", "history_enabled" => "0" },
-        "1" => { "channel_id" => "C0123456789", "upload_enabled" => "0", "download_enabled" => "1", "history_enabled" => "1" }
-      },
+      [
+        { "channel_id" => "c0123456789", "upload_enabled" => "1", "download_enabled" => "0", "history_enabled" => "0" },
+        { "channel_id" => "C0123456789", "upload_enabled" => "0", "download_enabled" => "1", "history_enabled" => "1" }
+      ],
       channel_names_by_id: { "C0123456789" => "general" }
     )
 
@@ -44,6 +44,31 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     assert_equal true, permission.upload_enabled
     assert_equal true, permission.download_enabled
     assert_equal true, permission.history_enabled
+  end
+
+  test "replace_for_principal bumps principal sync cache version once" do
+    principal = principals(:acme_channel)
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "C1111111111",
+      upload_enabled: true
+    )
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "C2222222222",
+      upload_enabled: true
+    )
+    before_version = principal.reload.sync_config_cache_version
+
+    SlackChannelPermission.replace_for_principal!(
+      principal,
+      [
+        { channel_id: "C3333333333", upload_enabled: true },
+        { channel_id: "C4444444444", download_enabled: true }
+      ]
+    )
+
+    assert_equal before_version + 1, principal.reload.sync_config_cache_version
   end
 
   test "label backfill migration creates all slack permissions" do

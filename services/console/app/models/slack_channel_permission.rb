@@ -1,4 +1,6 @@
 class SlackChannelPermission < ApplicationRecord
+  CACHE_BUMP_SUPPRESSED_KEY = :slack_channel_permission_cache_bump_suppressed
+
   belongs_to :principal
 
   before_validation :normalize_channel_fields
@@ -14,34 +16,23 @@ class SlackChannelPermission < ApplicationRecord
 
   scope :ordered, -> { order(:channel_id, :id) }
 
-  def self.replace_for_principal!(principal, raw_permissions, channel_names_by_id: {})
-    rows = normalize_rows(raw_permissions, channel_names_by_id: channel_names_by_id)
-    transaction do
-      principal.slack_channel_permissions.destroy_all
-      rows.each do |attrs|
-        principal.slack_channel_permissions.create!(attrs)
+  def self.replace_for_principal!(principal, permission_rows, channel_names_by_id: {})
+    rows = normalize_rows(permission_rows, channel_names_by_id: channel_names_by_id)
+    suppress_principal_sync_config_cache_bump do
+      transaction do
+        principal.slack_channel_permissions.destroy_all
+        rows.each do |attrs|
+          principal.slack_channel_permissions.create!(attrs)
+        end
       end
     end
+    Principal.bump_sync_config_cache_versions(principal.id)
   end
 
-  def self.normalize_rows(raw_permissions, channel_names_by_id: {})
-    rows = case raw_permissions
-    when ActionController::Parameters
-      normalize_rows(raw_permissions.to_unsafe_h, channel_names_by_id: channel_names_by_id)
-    when Hash
-      if raw_permissions.keys.all? { |key| key.to_s.match?(/\A\d+\z/) }
-        raw_permissions.sort_by { |key, _row| key.to_i }.map(&:last)
-      else
-        [ raw_permissions ]
-      end
-    else
-      Array(raw_permissions)
-    end
-
+  def self.normalize_rows(permission_rows, channel_names_by_id: {})
     boolean = ActiveModel::Type::Boolean.new
     seen = {}
-    rows.each do |row|
-      row = row.to_unsafe_h if row.respond_to?(:to_unsafe_h)
+    Array(permission_rows).each do |row|
       next unless row.is_a?(Hash)
       next if boolean.cast(param(row, :remove))
 
@@ -53,19 +44,31 @@ class SlackChannelPermission < ApplicationRecord
       history_enabled = boolean.cast(param(row, :history_enabled))
       next unless upload_enabled || download_enabled || history_enabled
 
-      attrs = seen[channel_id] ||= {
-        channel_id: channel_id,
-        channel_name: channel_names_by_id[channel_id].presence || param(row, :channel_name).to_s.strip.presence,
-        upload_enabled: false,
-        download_enabled: false,
-        history_enabled: false
-      }
-      attrs[:channel_name] ||= channel_names_by_id[channel_id].presence || param(row, :channel_name).to_s.strip.presence
-      attrs[:upload_enabled] ||= upload_enabled
-      attrs[:download_enabled] ||= download_enabled
-      attrs[:history_enabled] ||= history_enabled
+      channel_name = channel_names_by_id[channel_id].presence || param(row, :channel_name).to_s.strip.presence
+      attrs = seen[channel_id]
+      unless attrs
+        attrs = seen[channel_id] = {
+          channel_id: channel_id,
+          channel_name: channel_name,
+          upload_enabled: false,
+          download_enabled: false,
+          history_enabled: false
+        }
+      end
+      attrs[:channel_name] ||= channel_name
+      attrs[:upload_enabled] = true if upload_enabled
+      attrs[:download_enabled] = true if download_enabled
+      attrs[:history_enabled] = true if history_enabled
     end
     seen.values
+  end
+
+  def self.suppress_principal_sync_config_cache_bump
+    previous = Thread.current[CACHE_BUMP_SUPPRESSED_KEY]
+    Thread.current[CACHE_BUMP_SUPPRESSED_KEY] = true
+    yield
+  ensure
+    Thread.current[CACHE_BUMP_SUPPRESSED_KEY] = previous
   end
 
   def as_permission_json
@@ -98,6 +101,8 @@ class SlackChannelPermission < ApplicationRecord
   end
 
   def bump_principal_sync_config_cache_version
+    return if Thread.current[self.class::CACHE_BUMP_SUPPRESSED_KEY]
+
     Principal.bump_sync_config_cache_versions(principal_id)
   end
 end

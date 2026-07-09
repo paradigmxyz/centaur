@@ -246,6 +246,25 @@ module Api
         )
       end
 
+      test "PUT can clear Slack channel permission rows" do
+        principal = principals(:acme_channel)
+        principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
+        SlackChannelPermission.create!(
+          principal: principal,
+          channel_id: "C0123456789",
+          upload_enabled: true,
+          download_enabled: true,
+          history_enabled: true
+        )
+        body = { data: { slack_channel_permissions: [] } }
+
+        put api_v1_principal_url(id: principal.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        assert_empty principal.reload.slack_channel_permissions
+        assert_equal [], json_body.dig("data", "slack_channel_permissions")
+      end
+
       test "PUT ignores attempts to change immutable namespace and foreign_id" do
         principal = principals(:acme_channel)
         original_namespace = principal.namespace

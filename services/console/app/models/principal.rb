@@ -155,7 +155,12 @@ class Principal < ApplicationRecord
   end
 
   def slack_channel_permissions_payload
-    slack_channel_permissions.ordered.map(&:as_permission_json)
+    permissions = if association(:slack_channel_permissions).loaded?
+      slack_channel_permissions.sort_by { |permission| [ permission.channel_id, permission.id ] }
+    else
+      slack_channel_permissions.ordered
+    end
+    permissions.map(&:as_permission_json)
   end
 
   def slack_upload_channel_ids
@@ -285,16 +290,7 @@ class Principal < ApplicationRecord
   end
 
   def slack_channel_ids_for(permission)
-    if slack_channel_permissions.exists?
-      slack_channel_permissions.where(permission => true).ordered.pluck(:channel_id)
-    else
-      legacy_slack_channel_ids
-    end
-  end
-
-  def legacy_slack_channel_ids
-    channel_id = legacy_slack_channel_id
-    channel_id ? [ channel_id ] : []
+    slack_channel_permissions.where(permission => true).ordered.pluck(:channel_id)
   end
 
   def legacy_slack_channel_id

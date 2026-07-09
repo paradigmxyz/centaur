@@ -182,16 +182,30 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "effective_config falls back to slack channel label for legacy principals" do
+  test "effective_config does not fall back to slack channel label" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
       principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
 
-      token = ApiServer::Jwt.encode_for_principal(principal)
-      claims = jwt_payload(token)
-      assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
-      assert_equal [ "C0123456789" ], claims.dig("slack", "download_channels")
-      assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
+      assert_nil ApiServer::Jwt.encode_for_principal(principal)
+    end
+  end
+
+  test "clearing slack channel permissions revokes label-derived slack access" do
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+      principal = Principal.create!(
+        default_attrs(
+          namespace: "acme",
+          foreign_id: "C-clear-slack-permissions",
+          labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" }
+        )
+      )
+      assert_not_nil ApiServer::Jwt.encode_for_principal(principal)
+
+      SlackChannelPermission.replace_for_principal!(principal, [])
+
+      assert_empty principal.slack_channel_permissions.reload
+      assert_nil ApiServer::Jwt.encode_for_principal(principal)
     end
   end
 

@@ -46,7 +46,7 @@ module Console
     def update_slack_channel_permissions
       SlackChannelPermission.replace_for_principal!(
         @principal,
-        params[:slack_channel_permissions],
+        slack_channel_permission_rows,
         channel_names_by_id: slack_channel_names_by_id
       )
       redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
@@ -111,6 +111,10 @@ module Console
 
     def slack_channel_names_by_id
       SlackChannelCatalog.fetch.channels.to_h { |channel| [ channel.id, channel.name ] }
+    end
+
+    def slack_channel_permission_rows
+      params.fetch(:slack_channel_permissions, ActionController::Parameters.new).to_unsafe_h.values
     end
 
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.

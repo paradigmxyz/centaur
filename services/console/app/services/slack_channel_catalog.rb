@@ -1,3 +1,4 @@
+require "digest"
 require "json"
 require "net/http"
 require "uri"
@@ -12,12 +13,49 @@ class SlackChannelCatalog
 
   DEFAULT_API_URL = "https://slack.com/api".freeze
   DEFAULT_TYPES = "public_channel,private_channel".freeze
+  CACHE_TTL = 5.minutes
+  OPEN_TIMEOUT_SECONDS = 2
+  READ_TIMEOUT_SECONDS = 5
+  WRITE_TIMEOUT_SECONDS = 2
 
   def self.fetch
     token = ENV["CENTAUR_CONSOLE_SLACK_BOT_TOKEN"].presence || ENV["SLACK_BOT_TOKEN"].presence
     return Result.new(channels: [], error: "SLACK_BOT_TOKEN is not configured.", configured: false) if token.blank?
 
-    new(token: token, api_url: ENV["SLACK_API_URL"].presence || DEFAULT_API_URL).fetch
+    api_url = ENV["SLACK_API_URL"].presence || DEFAULT_API_URL
+    cached = Rails.cache.fetch(cache_key(token: token, api_url: api_url), expires_in: CACHE_TTL) do
+      serialize_result(new(token: token, api_url: api_url).fetch)
+    end
+    deserialize_result(cached)
+  end
+
+  def self.cache_key(token:, api_url:)
+    token_digest = Digest::SHA256.hexdigest(token)
+    api_url_digest = Digest::SHA256.hexdigest(api_url)
+    "slack_channel_catalog/v1/#{api_url_digest}/#{token_digest}"
+  end
+
+  def self.serialize_result(result)
+    {
+      "channels" => result.channels.map do |channel|
+        { "id" => channel.id, "name" => channel.name, "private" => channel.private }
+      end,
+      "error" => result.error,
+      "configured" => result.configured
+    }
+  end
+
+  def self.deserialize_result(payload)
+    return payload if payload.is_a?(Result)
+
+    channels = Array(payload["channels"]).map do |channel|
+      Channel.new(
+        id: channel.fetch("id"),
+        name: channel.fetch("name"),
+        private: channel.fetch("private")
+      )
+    end
+    Result.new(channels: channels, error: payload["error"], configured: payload["configured"])
   end
 
   def initialize(token:, api_url:)
@@ -64,7 +102,14 @@ class SlackChannelCatalog
     request["Authorization"] = "Bearer #{@token}"
     request["Accept"] = "application/json"
 
-    response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
+    response = Net::HTTP.start(
+      uri.host,
+      uri.port,
+      use_ssl: uri.scheme == "https",
+      open_timeout: OPEN_TIMEOUT_SECONDS,
+      read_timeout: READ_TIMEOUT_SECONDS,
+      write_timeout: WRITE_TIMEOUT_SECONDS
+    ) do |http|
       http.request(request)
     end
     return { "ok" => false, "error" => "HTTP #{response.code}" } unless response.code.to_i.between?(200, 299)
