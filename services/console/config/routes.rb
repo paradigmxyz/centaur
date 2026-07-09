@@ -96,10 +96,6 @@ Rails.application.routes.draw do
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
-  # Local file workbench. Browses/edits files on the operator's machine via the
-  # File System Access API, entirely client-side. Also the manifest
-  # file_handlers target: files opened with the installed PWA land here.
-  get "console/files", to: "console/local_files#index", as: :console_local_files
   get "console/etls", to: "console/etls#index", as: :console_etls
   namespace :console do
     post "etls/slack_archive_imports",

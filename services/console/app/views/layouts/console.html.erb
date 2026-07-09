@@ -1294,7 +1294,6 @@
     ] %>
   <% end %>
   <% nav_items << { label: "Integrations", icon: "link", path: console_integrations_path, matches: [ "/console/integrations" ] } %>
-  <% nav_items << { label: "Files", icon: "folder", path: console_local_files_path, matches: [ "/console/files" ] } %>
 
   <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased <%= "console-descoped" if descoped? %>">
     <% if descoped? %>
@@ -1375,6 +1374,22 @@
               <% end %>
             </div>
           </div>
+        </div>
+
+        <%# PWA install entry point. Hidden unless the browser reports the
+            console is installable (beforeinstallprompt); installing keeps the
+            standalone window plus the manifest's file_handlers registration. %>
+        <div data-controller="pwa-install"
+             data-pwa-install-target="banner"
+             hidden
+             style="padding: 0.25rem 0.75rem;">
+          <button type="button"
+                  class="console-nav-link w-full cursor-pointer"
+                  data-action="pwa-install#install"
+                  title="Install Centaur Console as a standalone app">
+            <span class="console-nav-icon"><%= console_icon("computer", classes: "size-4") %></span>
+            <span class="console-nav-label">Install app</span>
+          </button>
         </div>
 
         <% if current_user %>
