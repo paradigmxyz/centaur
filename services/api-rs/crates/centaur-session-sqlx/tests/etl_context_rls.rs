@@ -732,47 +732,11 @@ fn public_visible_rows() -> VisibleRows {
 }
 
 fn public_and_private_visible_rows() -> VisibleRows {
-    VisibleRows {
-        slack_channels: vec![
-            "C_ADMIN".to_owned(),
-            "C_ALPHA".to_owned(),
-            "C_BETA".to_owned(),
-            "G_PRIVATE".to_owned(),
-        ],
-        slack_users: vec![
-            "U_ALPHA".to_owned(),
-            "U_BETA".to_owned(),
-            "U_PRIVATE".to_owned(),
-        ],
-        slack_messages: vec![
-            "C_ALPHA:1000.000001".to_owned(),
-            "C_BETA:1000.000002".to_owned(),
-            "G_PRIVATE:1000.000003".to_owned(),
-        ],
-        slack_attachments: vec![
-            "C_ALPHA:1000.000001:F_ALPHA".to_owned(),
-            "C_BETA:1000.000002:F_BETA".to_owned(),
-            "G_PRIVATE:1000.000003:F_PRIVATE".to_owned(),
-        ],
-        context_docs: vec![
-            "doc_gcal".to_owned(),
-            "doc_gdrive".to_owned(),
-            "doc_linear".to_owned(),
-            "doc_slack_alpha".to_owned(),
-            "doc_slack_beta".to_owned(),
-            "doc_slack_private".to_owned(),
-        ],
-        google_drive_runs: 1,
-        google_drive_files: 1,
-        google_drive_checkpoints: 1,
-        google_calendar_runs: 1,
-        google_calendar_calendars: 1,
-        google_calendar_events: 1,
-        google_calendar_checkpoints: 1,
-        linear_runs: 1,
-        linear_projects: 1,
-        linear_issues: 1,
-        linear_comments: 1,
-        linear_checkpoints: 1,
-    }
+    let mut rows = public_visible_rows();
+    rows.slack_channels.push("G_PRIVATE".to_owned());
+    rows.slack_messages.push("G_PRIVATE:1000.000003".to_owned());
+    rows.slack_attachments
+        .push("G_PRIVATE:1000.000003:F_PRIVATE".to_owned());
+    rows.context_docs.push("doc_slack_private".to_owned());
+    rows
 }
