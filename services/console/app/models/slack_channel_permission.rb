@@ -26,17 +26,17 @@ class SlackChannelPermission < ApplicationRecord
 
   def self.normalize_rows(raw_permissions, channel_names_by_id: {})
     rows = case raw_permissions
-           when ActionController::Parameters
-             normalize_rows(raw_permissions.to_unsafe_h, channel_names_by_id: channel_names_by_id)
-           when Hash
-             if raw_permissions.keys.all? { |key| key.to_s.match?(/\A\d+\z/) }
-               raw_permissions.sort_by { |key, _row| key.to_i }.map(&:last)
-             else
-               [ raw_permissions ]
-             end
-           else
-             Array(raw_permissions)
-           end
+    when ActionController::Parameters
+      normalize_rows(raw_permissions.to_unsafe_h, channel_names_by_id: channel_names_by_id)
+    when Hash
+      if raw_permissions.keys.all? { |key| key.to_s.match?(/\A\d+\z/) }
+        raw_permissions.sort_by { |key, _row| key.to_i }.map(&:last)
+      else
+        [ raw_permissions ]
+      end
+    else
+      Array(raw_permissions)
+    end
 
     boolean = ActiveModel::Type::Boolean.new
     seen = {}
