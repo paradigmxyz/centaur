@@ -1180,6 +1180,48 @@ class SlackClient:
             params,
         )
 
+    def get_thread_replies_proxy(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        cursor: str | None = None,
+        inclusive: bool | None = None,
+        latest: str | int | float | None = None,
+        limit: int | None = None,
+        oldest: str | int | float | None = None,
+    ) -> dict[str, Any]:
+        """Fetch Slack thread replies through the Centaur API server."""
+        if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+            raise RuntimeError(
+                "Slack thread replies require the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        normalized_thread_ts = self._normalize_ts(thread_ts)
+        if normalized_thread_ts is None:
+            raise ValueError("thread_ts is required")
+
+        params: dict[str, Any] = {
+            "cursor": cursor,
+            "inclusive": inclusive,
+            "latest": self._normalize_ts(latest),
+            "limit": None,
+            "oldest": self._normalize_ts(oldest),
+        }
+        if limit is not None:
+            requested_limit = int(limit)
+            if not 1 <= requested_limit <= self._MAX_SLACK_HISTORY_PROXY_PAGE_SIZE:
+                raise ValueError("limit must be between 1 and 999")
+            params["limit"] = requested_limit
+
+        channel_path = urllib.parse.quote(normalized_channel_id, safe="")
+        thread_path = urllib.parse.quote(normalized_thread_ts, safe="")
+        return self._centaur_api_get_json(
+            f"/api/slack/channels/{channel_path}/threads/{thread_path}/replies",
+            params,
+        )
+
     def get_channel_history(
         self,
         channel: str,
@@ -2336,6 +2378,10 @@ def get_channel_history_page(*args, **kwargs):
 
 def get_channel_history_proxy(*args, **kwargs):
     return _client().get_channel_history_proxy(*args, **kwargs)
+
+
+def get_thread_replies_proxy(*args, **kwargs):
+    return _client().get_thread_replies_proxy(*args, **kwargs)
 
 
 def get_channel_history(*args, **kwargs):

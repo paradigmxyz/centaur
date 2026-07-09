@@ -314,7 +314,25 @@ def channel_proxy(
         console.print(f"[green]{user}[/]{thread_info}: {text}")
 
 
-@app.command()
+def _parse_thread_ref(permalink: str) -> tuple[str, str]:
+    import re
+
+    if permalink.startswith("https://"):
+        match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)
+        if not match:
+            console.print("[red]Invalid permalink format[/]")
+            raise typer.Exit(1)
+        channel_id = match.group(1)
+        ts_raw = match.group(2)
+        return channel_id, f"{ts_raw[:10]}.{ts_raw[10:]}"
+    if ":" in permalink:
+        channel_id, thread_ts = permalink.split(":", 1)
+        return channel_id, thread_ts
+    console.print("[red]Provide a Slack permalink or 'channel_id:timestamp'[/]")
+    raise typer.Exit(1)
+
+
+@app.command("thread")
 def thread(
     permalink: str = typer.Argument(..., help="Slack permalink or 'channel_id:timestamp'"),
     limit: int = typer.Option(100, "--limit", "-n", help="Max messages to return from the thread"),
@@ -341,24 +359,84 @@ def thread(
         slack thread "C01234567:1234567890.123456"
         slack thread "https://..." --json
     """
-    import re
+    import sys
+
+    from .client import get_thread_replies_proxy
+
+    channel_id, thread_ts = _parse_thread_ref(permalink)
+
+    try:
+        page = get_thread_replies_proxy(
+            channel_id,
+            thread_ts,
+            limit=limit,
+            cursor=cursor,
+            oldest=oldest,
+            latest=latest,
+            inclusive=inclusive,
+        )
+    except (RuntimeError, ValueError) as e:
+        stderr_console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+    messages = page.get("messages", [])
+
+    if not messages:
+        console.print("[yellow]No messages found in thread.[/]")
+        raise typer.Exit()
+
+    if json_output:
+        print(json.dumps(page, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    header = f"\n[bold]Thread ({len(messages)} messages)[/]"
+    if page.get("has_more"):
+        header += " [dim](more available)[/]"
+    console.print(f"{header}\n")
+
+    next_cursor = page.get("response_metadata", {}).get("next_cursor")
+    if next_cursor:
+        console.print(f"[dim]next_cursor={next_cursor}[/]\n")
+
+    for i, msg in enumerate(messages):
+        prefix = "[bold]>[/]" if i == 0 else "  "
+        user = msg.get("user") or msg.get("bot_id") or msg.get("username") or "unknown"
+        text = str(msg.get("text") or "").replace("\n", "\n     ")
+        console.print(f"{prefix} [cyan]@{user}[/]: {text}\n")
+
+
+@app.command("thread-direct")
+def thread_direct(
+    permalink: str = typer.Argument(..., help="Slack permalink or 'channel_id:timestamp'"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max messages to return from the thread"),
+    cursor: str = typer.Option(None, "--cursor", help="Slack pagination cursor for the next page"),
+    oldest: str = typer.Option(
+        None,
+        "--oldest",
+        help="Oldest timestamp boundary: Slack ts, epoch, ISO datetime, or YYYY-MM-DD",
+    ),
+    latest: str = typer.Option(
+        None,
+        "--latest",
+        help="Latest timestamp boundary: Slack ts, epoch, ISO datetime, or YYYY-MM-DD",
+    ),
+    inclusive: bool = typer.Option(
+        True, "--inclusive/--exclusive", help="Include the boundary timestamps"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Get all replies in a thread directly with the Slack SDK.
+
+    Examples:
+        slack thread-direct "https://slack.com/archives/C01234567/p1234567890123456"
+        slack thread-direct "C01234567:1234567890.123456"
+        slack thread-direct "https://..." --json
+    """
     import sys
 
     from .client import get_thread_replies_page
 
-    if permalink.startswith("https://"):
-        match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)
-        if not match:
-            console.print("[red]Invalid permalink format[/]")
-            raise typer.Exit(1)
-        channel_id = match.group(1)
-        ts_raw = match.group(2)
-        thread_ts = f"{ts_raw[:10]}.{ts_raw[10:]}"
-    elif ":" in permalink:
-        channel_id, thread_ts = permalink.split(":", 1)
-    else:
-        console.print("[red]Provide a Slack permalink or 'channel_id:timestamp'[/]")
-        raise typer.Exit(1)
+    channel_id, thread_ts = _parse_thread_ref(permalink)
 
     try:
         page = get_thread_replies_page(
@@ -372,7 +450,7 @@ def thread(
         )
     except (RuntimeError, ValueError) as e:
         stderr_console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     messages = page["messages"]
 
@@ -586,8 +664,8 @@ def users(
     console.print(table)
 
 
-@app.command()
-def upload(
+@app.command("upload-direct")
+def upload_direct(
     channel: str = typer.Argument(
         ..., help="Slack channel/conversation ID to upload into, e.g. C123 or D123"
     ),
@@ -595,11 +673,11 @@ def upload(
     comment: str = typer.Option(None, "--comment", "-c", help="Comment to post with files"),
     thread: str = typer.Option(..., "--thread", "-t", help="Slack thread timestamp to reply to"),
 ):
-    """Upload file(s) to Slack.
+    """Upload file(s) directly with the Slack SDK.
 
     Examples:
-        slack upload C123 screenshot.png --thread 1234567890.123456
-        slack upload C123 file1.png file2.jpg --thread 1234567890.123456 -c "Here are the files"
+        slack upload-direct C123 screenshot.png --thread 1234567890.123456
+        slack upload-direct C123 file1.png file2.jpg --thread 1234567890.123456 -c "Here are the files"
     """
     import base64
     from pathlib import Path
@@ -608,7 +686,7 @@ def upload(
 
     if not _channel_arg_is_id(channel):
         console.print(
-            "[red]Error: upload channel must be a Slack conversation ID like C123 or D123[/]"
+            "[red]Error: upload-direct channel must be a Slack conversation ID like C123 or D123[/]"
         )
         raise typer.Exit(1)
 
@@ -637,11 +715,12 @@ def upload(
             console.print(f"[dim]{result['permalink']}[/]")
         except (RuntimeError, ValueError) as e:
             console.print(f"[red]Error uploading {path.name}: {e}[/]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
 
 @app.command("upload-proxy")
-def upload_proxy(
+@app.command("upload")
+def upload(
     channel_id: str = typer.Argument(
         ..., help="Slack channel/conversation ID to upload into, e.g. C123 or D123"
     ),
@@ -663,7 +742,7 @@ def upload_proxy(
 
     if not _channel_arg_is_id(channel_id):
         console.print(
-            "[red]Error: upload-proxy channel must be a Slack conversation ID like C123 or D123[/]"
+            "[red]Error: upload channel must be a Slack conversation ID like C123 or D123[/]"
         )
         raise typer.Exit(1)
 
@@ -966,27 +1045,16 @@ def files(
         slack files "https://..." -d -o /tmp/slack-files
     """
     import re
-    from pathlib import Path
     from urllib.parse import urlparse
 
-    from .client import _fetch_slack_file, get_message_files
+    from .client import get_message_files
 
     parsed = urlparse(permalink)
     if parsed.scheme == "https" and (parsed.hostname or "").lower() == "files.slack.com":
         if not download:
             console.print("[red]Pass --download to download a direct Slack file URL[/]")
             raise typer.Exit(1)
-        output_dir = Path(output)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            filename, _mime_type, body = _fetch_slack_file(permalink)
-            out_path = output_dir / filename
-            out_path.write_bytes(body)
-            console.print(f"[green]✓ Downloaded {filename}[/] ({len(body)} bytes)")
-            console.print(f"[dim]{out_path.absolute()}[/]")
-        except Exception as e:
-            console.print(f"[red]Error downloading Slack file: {e}[/]")
-            raise typer.Exit(1)
+        _download_direct_url(permalink, output)
         return
 
     if permalink.startswith("https://"):
@@ -1010,22 +1078,12 @@ def files(
         raise typer.Exit()
 
     if download:
-        output_dir = Path(output)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         for f in files_list:
             if not f["url_private"]:
                 console.print(f"[yellow]⚠ No download URL for {f['name']}[/]")
                 continue
 
-            out_path = output_dir / f["name"]
-            try:
-                _filename, _mime_type, body = _fetch_slack_file(f["url_private"])
-                out_path.write_bytes(body)
-                console.print(f"[green]✓ Downloaded {f['name']}[/] ({len(body)} bytes)")
-                console.print(f"[dim]{out_path.absolute()}[/]")
-            except Exception as e:
-                console.print(f"[red]Error downloading {f['name']}: {e}[/]")
+            _download_direct_url(f["url_private"], output, display_name=f["name"])
     else:
         console.print(f"[bold]Files ({len(files_list)})[/]\n")
         for f in files_list:
@@ -1034,8 +1092,75 @@ def files(
             console.print(f"  [dim]{f['url_private']}[/]")
 
 
+def _download_direct_url(url: str, output: str, display_name: str | None = None) -> None:
+    from pathlib import Path
+
+    from .client import _fetch_slack_file
+
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        filename, _mime_type, body = _fetch_slack_file(url)
+        out_path = output_dir / (display_name or filename)
+        out_path.write_bytes(body)
+        console.print(f"[green]✓ Downloaded {out_path.name}[/] ({len(body)} bytes)")
+        console.print(f"[dim]{out_path.absolute()}[/]")
+    except Exception as e:
+        console.print(f"[red]Error downloading Slack file: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@app.command("download-direct")
+def download_direct(
+    permalink: str = typer.Argument(
+        ..., help="Slack message permalink, channel:timestamp, or url_private"
+    ),
+    output: str = typer.Option(".", "--output", "-o", help="Output directory for downloads"),
+):
+    """Download Slack files directly with the Slack bot token."""
+    _download_direct(permalink, output)
+
+
+def _download_direct(permalink: str, output: str) -> None:
+    import re
+    from urllib.parse import urlparse
+
+    from .client import get_message_files
+
+    parsed = urlparse(permalink)
+    if parsed.scheme == "https" and (parsed.hostname or "").lower() == "files.slack.com":
+        _download_direct_url(permalink, output)
+        return
+
+    if permalink.startswith("https://"):
+        match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)
+        if not match:
+            console.print("[red]Invalid permalink format[/]")
+            raise typer.Exit(1)
+        channel_id = match.group(1)
+        ts_raw = match.group(2)
+        message_ts = f"{ts_raw[:10]}.{ts_raw[10:]}"
+    elif ":" in permalink:
+        channel_id, message_ts = permalink.split(":", 1)
+    else:
+        console.print("[red]Provide a Slack permalink, 'channel_id:timestamp', or url_private[/]")
+        raise typer.Exit(1)
+
+    files_list = get_message_files(channel_id, message_ts)
+    if not files_list:
+        console.print("[yellow]No files attached to this message.[/]")
+        raise typer.Exit()
+
+    for f in files_list:
+        if not f["url_private"]:
+            console.print(f"[yellow]⚠ No download URL for {f['name']}[/]")
+            continue
+        _download_direct_url(f["url_private"], output, display_name=f["name"])
+
+
 @app.command("download-proxy")
-def download_proxy(
+@app.command("download")
+def download(
     file_id: str = typer.Argument(..., help="Slack file ID, e.g. F1234567890"),
     channel_id: str = typer.Argument(
         ..., help="Slack channel/conversation ID that the file is shared in"

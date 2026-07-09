@@ -47,6 +47,10 @@ pub(crate) fn slack_proxy_router() -> Router<AppState> {
             "/api/slack/channels/{channel_id}/history",
             get(get_slack_channel_history),
         )
+        .route(
+            "/api/slack/channels/{channel_id}/threads/{thread_ts}/replies",
+            get(get_slack_thread_replies),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,6 +261,23 @@ async fn get_slack_channel_history(
     Ok(Json(value))
 }
 
+async fn get_slack_thread_replies(
+    headers: HeaderMap,
+    Path((channel_id, thread_ts)): Path<(String, String)>,
+    Query(query): Query<SlackChannelHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_slack_file_proxy(&headers)?;
+    ensure_history_channel_allowed(&claims, &channel_id)?;
+    validate_slack_channel_id(&channel_id)?;
+    validate_slack_thread_ts(&thread_ts)?;
+    validate_slack_channel_history_query(&query)?;
+
+    let config = slack_proxy_config()?;
+    let value =
+        slack_thread_replies(http_client(), config, &channel_id, &thread_ts, &query).await?;
+    Ok(Json(value))
+}
+
 fn upstream_body_is_unexpected_html(
     upstream_content_type: Option<&str>,
     file_mimetype: Option<&str>,
@@ -425,6 +446,17 @@ async fn slack_channel_history(
     slack_api_post_form(client, config, "conversations.history", &form).await
 }
 
+async fn slack_thread_replies(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+    thread_ts: &str,
+    query: &SlackChannelHistoryQuery,
+) -> Result<Value, ApiError> {
+    let form = slack_thread_replies_form(channel_id, thread_ts, query);
+    slack_api_post_form(client, config, "conversations.replies", &form).await
+}
+
 fn slack_channel_history_form(
     channel_id: &str,
     query: &SlackChannelHistoryQuery,
@@ -457,6 +489,16 @@ fn slack_channel_history_form(
         ("cursor", query.cursor.clone().unwrap_or_default()),
     ];
     form.retain(|(_, value)| !value.is_empty());
+    form
+}
+
+fn slack_thread_replies_form(
+    channel_id: &str,
+    thread_ts: &str,
+    query: &SlackChannelHistoryQuery,
+) -> Vec<(&'static str, String)> {
+    let mut form = slack_channel_history_form(channel_id, query);
+    form.push(("ts", thread_ts.to_owned()));
     form
 }
 
@@ -1084,6 +1126,33 @@ mod tests {
                 ("inclusive", "false".to_owned()),
                 ("include_all_metadata", "true".to_owned()),
                 ("limit", "15".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn thread_replies_form_includes_thread_ts() {
+        let form = slack_thread_replies_form(
+            "C123456789",
+            "1700000000.000001",
+            &SlackChannelHistoryQuery {
+                latest: None,
+                oldest: Some("0".to_owned()),
+                inclusive: Some(true),
+                include_all_metadata: None,
+                limit: Some(25),
+                cursor: Some("next".to_owned()),
+            },
+        );
+        assert_eq!(
+            form,
+            vec![
+                ("channel", "C123456789".to_owned()),
+                ("oldest", "0".to_owned()),
+                ("inclusive", "true".to_owned()),
+                ("limit", "25".to_owned()),
+                ("cursor", "next".to_owned()),
+                ("ts", "1700000000.000001".to_owned()),
             ]
         );
     }

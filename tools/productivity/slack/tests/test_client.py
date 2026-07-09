@@ -473,6 +473,70 @@ def test_get_channel_history_proxy_validates_inputs() -> None:
         client.get_channel_history_proxy("C123456789", limit=1000)
 
 
+def test_get_thread_replies_proxy_calls_centaur_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.parse
+    import urllib.request
+
+    client, _ = _make_client()
+    request_info: dict[str, str | None] = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        request_info["url"] = req.full_url
+        request_info["authorization"] = req.get_header("Authorization")
+        body = json.dumps(
+            {
+                "ok": True,
+                "messages": [{"type": "message", "ts": "1700000000.000001"}],
+                "has_more": False,
+            }
+        ).encode()
+        return _FakeHTTPResponse(body, "application/json")
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080")
+    monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "test-jwt")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.get_thread_replies_proxy(
+        "<#C123456789|general>",
+        "1700000000.000001",
+        cursor="next",
+        inclusive=False,
+        latest="1700000000.000002",
+        limit=999,
+        oldest=0,
+    )
+
+    assert result["ok"] is True
+    assert request_info["authorization"] == "Bearer test-jwt"
+    parsed = urllib.parse.urlparse(request_info["url"])
+    assert parsed.scheme == "http"
+    assert parsed.netloc == "api.internal:8080"
+    assert parsed.path == "/api/slack/channels/C123456789/threads/1700000000.000001/replies"
+    query = urllib.parse.parse_qs(parsed.query)
+    assert query == {
+        "cursor": ["next"],
+        "inclusive": ["false"],
+        "latest": ["1700000000.000002"],
+        "limit": ["999"],
+        "oldest": ["0.000000"],
+    }
+
+
+def test_get_thread_replies_proxy_validates_inputs() -> None:
+    client, _ = _make_client()
+
+    with pytest.raises(ValueError, match="channel_id"):
+        client.get_thread_replies_proxy("general", "1700000000.000001")
+
+    with pytest.raises(ValueError, match="thread_ts"):
+        client.get_thread_replies_proxy("C123456789", "")
+
+    with pytest.raises(ValueError, match="between 1 and 999"):
+        client.get_thread_replies_proxy("C123456789", "1700000000.000001", limit=1000)
+
+
 def test_upload_file_proxy_posts_file_bytes_to_centaur_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

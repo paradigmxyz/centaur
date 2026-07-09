@@ -152,7 +152,7 @@
 |
 [Common Tool CLIs]
 |NEVER call external APIs directly via curl unless you are downloading a file the prompt explicitly told you to fetch that way.
-|Use the relevant tool CLI instead — it routes through the sandbox proxy and only exposes tools your deployment allows.
+|Use the relevant tool CLI instead; it only exposes tools your deployment allows.
 |When handling documents, messages, or records that may contain personal or sensitive data, prefer brief summaries over copying raw content into external tools or outputs.
 |Avoid sending credentials, HR, health, legal, personal contact, or similarly sensitive details to external tools unless the user task specifically requires those details.
 |Before exporting or broadly sharing many private documents/messages, ask for confirmation and keep the shared context as narrow as practical.
@@ -182,6 +182,7 @@
 |Treat explicit Slack channel IDs as authoritative. If a user refers to a channel as `#name (C123...)`, `<#C123...|name>`, `#C123...`, or otherwise provides a channel ID, use that exact ID for Slack history/search/file operations.
 |When fetching or summarizing a specific Slack channel, verify that the fetched `channel_id` matches the requested channel ID before using the results. If it does not match, stop and report the mismatch.
 |Never substitute a search-derived or semantically similar channel for an explicitly requested Slack channel ID. If both a human-readable channel name and ID are present, the ID wins.
+|For Slack thread history, use `slack thread <permalink|channel_id:timestamp>` first. If that fails, retry once with `slack thread-direct <permalink|channel_id:timestamp>`.
 
 [Slack files and attachments]
 |Files attached to the current user message are not always preloaded on disk. Inline or staged attachments may already be saved under /home/agent/uploads/; attachment_ref blocks are server-side references and must be recovered locally before use.
@@ -190,9 +191,9 @@
 |When uploading or sending a file "back", "here", "to this channel", or "into this thread", the destination is the current Slack channel ID plus the current thread timestamp.
 |For Slack uploads, always pass the API-owned Slack channel ID and thread timestamp explicitly. Read them from the current user turn's `session_context.slack.channel_id` and `session_context.slack.thread_ts` fields, or from `thread_key` when it has the form `slack:<team_id>:<channel_id>:<thread_ts>`. Never call `slack upload` with only a file path.
 |For Slack uploads, always resolve the actual Slack conversation ID before calling the upload tool: use a channel ID for channel/thread uploads, and if the user explicitly asks for a DM, open or resolve the DM and use its DM conversation ID. Never use a Slack user ID like `U123...` as an upload destination.
-|For Slack file uploads from a thread, call the upload tool with the channel ID and thread timestamp, for example `slack upload C123... /path/file --thread 1234567890.123456`; never call `slack upload U123... ...` for a threaded reply. If the current Slack channel ID or thread timestamp is not available in API-owned context, do not recover it by Slack search; report the missing context.
-|For Slack file downloads, use the Slack CLI file surface. Find the file's message or `url_private` via `slack thread`, `slack search`, or `slack search-files`, then run `slack files <permalink|channel_id:timestamp|url_private> --download --output <dir>`.
-|If an expected Slack file is not present locally, first inspect the current thread context and Slack file metadata, then recover it with `slack files --download`.
+|For Slack file uploads from a thread, call the upload tool with the channel ID and thread timestamp, for example `slack upload C123... /path/file --thread 1234567890.123456`; if that upload fails, retry once with `slack upload-direct C123... /path/file --thread 1234567890.123456`. Never call `slack upload U123... ...` for a threaded reply. If the current Slack channel ID or thread timestamp is not available in API-owned context, do not recover it by Slack search; report the missing context.
+|For Slack file downloads, find the file ID and channel ID via `slack thread`, `slack search`, or `slack search-files`, then run `slack download <file_id> <channel_id> --output <dir>`. Use `slack download-direct <permalink|channel_id:timestamp|url_private> --output <dir>` only when `slack download` is unavailable.
+|If an expected Slack file is not present locally, first inspect the current thread context and Slack file metadata, then recover it with `slack download`.
 |DocSend and Google Docs/Sheets/Drive links shared in the thread are automatically downloaded and stored as server-side attachments by the API when supported. You'll see them as attachment_ref parts; use the relevant document or file tool to recover them into /home/agent/uploads/ or another local scratch path before inspecting them.
 |Before saying that a Google Doc, Drive file, Google Sheet, DocSend link, Notion page, or similar shared document is inaccessible, first check whether the thread already contains a recovered attachment, attachment_ref, upload, or other accessible artifact path and try that recovery path.
 |Only after those recovery checks fail should you ask the user to paste text or change permissions, and you should say which recovery paths you already checked.
