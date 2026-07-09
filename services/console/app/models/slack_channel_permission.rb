@@ -1,6 +1,4 @@
 class SlackChannelPermission < ApplicationRecord
-  CACHE_BUMP_SUPPRESSED_KEY = :slack_channel_permission_cache_bump_suppressed
-
   belongs_to :principal
 
   before_validation :normalize_channel_fields
@@ -17,23 +15,12 @@ class SlackChannelPermission < ApplicationRecord
   scope :ordered, -> { order(:channel_id, :id) }
 
   def self.replace_for_principal!(principal, permission_rows)
-    suppress_principal_sync_config_cache_bump do
-      transaction do
-        principal.slack_channel_permissions.destroy_all
-        permission_rows.each do |attrs|
-          principal.slack_channel_permissions.create!(attrs)
-        end
+    transaction do
+      principal.slack_channel_permissions.destroy_all
+      permission_rows.each do |attrs|
+        principal.slack_channel_permissions.create!(attrs)
       end
     end
-    Principal.bump_sync_config_cache_versions(principal.id)
-  end
-
-  def self.suppress_principal_sync_config_cache_bump
-    previous = Thread.current[CACHE_BUMP_SUPPRESSED_KEY]
-    Thread.current[CACHE_BUMP_SUPPRESSED_KEY] = true
-    yield
-  ensure
-    Thread.current[CACHE_BUMP_SUPPRESSED_KEY] = previous
   end
 
   def as_permission_json
@@ -59,8 +46,6 @@ class SlackChannelPermission < ApplicationRecord
   end
 
   def bump_principal_sync_config_cache_version
-    return if Thread.current[self.class::CACHE_BUMP_SUPPRESSED_KEY]
-
     Principal.bump_sync_config_cache_versions(principal_id)
   end
 end
