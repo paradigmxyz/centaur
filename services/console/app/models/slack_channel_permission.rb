@@ -1,4 +1,4 @@
-class PrincipalSlackChannelClaim < ApplicationRecord
+class SlackChannelPermission < ApplicationRecord
   belongs_to :principal
 
   before_validation :normalize_channel_fields
@@ -14,28 +14,28 @@ class PrincipalSlackChannelClaim < ApplicationRecord
 
   scope :ordered, -> { order(:channel_id, :id) }
 
-  def self.replace_for_principal!(principal, raw_claims, channel_names_by_id: {})
-    rows = normalize_rows(raw_claims, channel_names_by_id: channel_names_by_id)
+  def self.replace_for_principal!(principal, raw_permissions, channel_names_by_id: {})
+    rows = normalize_rows(raw_permissions, channel_names_by_id: channel_names_by_id)
     transaction do
-      principal.principal_slack_channel_claims.destroy_all
+      principal.slack_channel_permissions.destroy_all
       rows.each do |attrs|
-        principal.principal_slack_channel_claims.create!(attrs)
+        principal.slack_channel_permissions.create!(attrs)
       end
     end
   end
 
-  def self.normalize_rows(raw_claims, channel_names_by_id: {})
-    rows = case raw_claims
+  def self.normalize_rows(raw_permissions, channel_names_by_id: {})
+    rows = case raw_permissions
            when ActionController::Parameters
-             normalize_rows(raw_claims.to_unsafe_h, channel_names_by_id: channel_names_by_id)
+             normalize_rows(raw_permissions.to_unsafe_h, channel_names_by_id: channel_names_by_id)
            when Hash
-             if raw_claims.keys.all? { |key| key.to_s.match?(/\A\d+\z/) }
-               raw_claims.sort_by { |key, _row| key.to_i }.map(&:last)
+             if raw_permissions.keys.all? { |key| key.to_s.match?(/\A\d+\z/) }
+               raw_permissions.sort_by { |key, _row| key.to_i }.map(&:last)
              else
-               [ raw_claims ]
+               [ raw_permissions ]
              end
            else
-             Array(raw_claims)
+             Array(raw_permissions)
            end
 
     boolean = ActiveModel::Type::Boolean.new
@@ -68,7 +68,7 @@ class PrincipalSlackChannelClaim < ApplicationRecord
     seen.values
   end
 
-  def as_claim_json
+  def as_permission_json
     {
       "channel_id" => channel_id,
       "channel_name" => channel_name,

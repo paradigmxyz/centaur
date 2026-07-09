@@ -27,7 +27,7 @@ module Api
         ActiveRecord::Base.transaction do
           principal.assign_attributes(principal_params)
           principal.save!
-          replace_slack_channel_claims!(principal) if data_params.key?(:slack_channel_claims)
+          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
         end
         render status: :created, json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
@@ -43,7 +43,7 @@ module Api
         ActiveRecord::Base.transaction do
           principal.assign_attributes(principal_params)
           principal.save!
-          replace_slack_channel_claims!(principal) if data_params.key?(:slack_channel_claims)
+          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
         end
         render status: (was_new ? :created : :ok), json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
@@ -80,7 +80,7 @@ module Api
           foreign_id: principal.foreign_id,
           name: principal.name,
           labels: principal.labels,
-          slack_channel_claims: principal.slack_channel_claims,
+          slack_channel_permissions: principal.slack_channel_permissions_payload,
           sandbox_repo_cache: principal.sandbox_repo_cache,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
           sandbox_api_server_enabled: principal.sandbox_api_server_enabled,
@@ -99,10 +99,10 @@ module Api
         )
       end
 
-      def replace_slack_channel_claims!(principal)
-        PrincipalSlackChannelClaim.replace_for_principal!(
+      def replace_slack_channel_permissions!(principal)
+        SlackChannelPermission.replace_for_principal!(
           principal,
-          data_params[:slack_channel_claims]
+          data_params[:slack_channel_permissions]
         )
       end
     end

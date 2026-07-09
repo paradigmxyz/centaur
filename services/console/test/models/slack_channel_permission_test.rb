@@ -1,8 +1,8 @@
 require "test_helper"
 
-class PrincipalSlackChannelClaimTest < ActiveSupport::TestCase
+class SlackChannelPermissionTest < ActiveSupport::TestCase
   test "normalizes channel id and requires at least one permission" do
-    claim = PrincipalSlackChannelClaim.new(
+    permission = SlackChannelPermission.new(
       principal: principals(:acme_channel),
       channel_id: " c0123456789 ",
       channel_name: " general ",
@@ -11,12 +11,12 @@ class PrincipalSlackChannelClaimTest < ActiveSupport::TestCase
       history_enabled: false
     )
 
-    assert_predicate claim, :valid?
-    claim.save!
-    assert_equal "C0123456789", claim.channel_id
-    assert_equal "general", claim.channel_name
+    assert_predicate permission, :valid?
+    permission.save!
+    assert_equal "C0123456789", permission.channel_id
+    assert_equal "general", permission.channel_name
 
-    empty = PrincipalSlackChannelClaim.new(
+    empty = SlackChannelPermission.new(
       principal: principals(:acme_channel),
       channel_id: "C9999999999"
     )
@@ -27,7 +27,7 @@ class PrincipalSlackChannelClaimTest < ActiveSupport::TestCase
   test "replace_for_principal merges duplicate channel rows" do
     principal = principals(:acme_channel)
 
-    PrincipalSlackChannelClaim.replace_for_principal!(
+    SlackChannelPermission.replace_for_principal!(
       principal,
       {
         "0" => { "channel_id" => "c0123456789", "upload_enabled" => "1", "download_enabled" => "0", "history_enabled" => "0" },
@@ -36,11 +36,11 @@ class PrincipalSlackChannelClaimTest < ActiveSupport::TestCase
       channel_names_by_id: { "C0123456789" => "general" }
     )
 
-    claim = principal.principal_slack_channel_claims.reload.sole
-    assert_equal "C0123456789", claim.channel_id
-    assert_equal "general", claim.channel_name
-    assert_equal true, claim.upload_enabled
-    assert_equal true, claim.download_enabled
-    assert_equal true, claim.history_enabled
+    permission = principal.slack_channel_permissions.reload.sole
+    assert_equal "C0123456789", permission.channel_id
+    assert_equal "general", permission.channel_name
+    assert_equal true, permission.upload_enabled
+    assert_equal true, permission.download_enabled
+    assert_equal true, permission.history_enabled
   end
 end

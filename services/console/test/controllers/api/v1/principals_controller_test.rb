@@ -66,7 +66,7 @@ module Api
             namespace: "acme",
             foreign_id: "U-new-id",
             labels: { "kind" => "user", "team" => "platform" },
-            slack_channel_claims: [
+            slack_channel_permissions: [
               {
                 channel_id: "C0123456789",
                 channel_name: "general",
@@ -98,7 +98,7 @@ module Api
               "history_enabled" => true
             }
           ],
-          data["slack_channel_claims"]
+          data["slack_channel_permissions"]
         )
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
@@ -196,16 +196,16 @@ module Api
         assert_equal({ "kind" => "slack_channel", "team" => "ops" }, principal.labels)
       end
 
-      test "PUT replaces Slack channel claim rows" do
+      test "PUT replaces Slack channel permission rows" do
         principal = principals(:acme_channel)
-        PrincipalSlackChannelClaim.create!(
+        SlackChannelPermission.create!(
           principal: principal,
           channel_id: "C1111111111",
           upload_enabled: true
         )
         body = {
           data: {
-            slack_channel_claims: [
+            slack_channel_permissions: [
               {
                 channel_id: "C0123456789",
                 upload_enabled: true,
@@ -242,7 +242,7 @@ module Api
               "history_enabled" => true
             }
           ],
-          principal.reload.slack_channel_claims
+          principal.reload.slack_channel_permissions_payload
         )
       end
 

@@ -49,7 +49,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
 
   test "fetch_for rebuilds api server JWT snapshots when the jwt window advances" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
-      PrincipalSlackChannelClaim.create!(
+      SlackChannelPermission.create!(
         principal: @principal,
         channel_id: "C0123456789",
         upload_enabled: true
@@ -85,7 +85,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       @principal.update!(
         sandbox_api_server_enabled: false
       )
-      PrincipalSlackChannelClaim.create!(
+      SlackChannelPermission.create!(
         principal: @principal,
         channel_id: "C0123456789",
         upload_enabled: true

@@ -107,14 +107,14 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({ "env" => "prod", "team" => "platform" }, principal.reload.labels)
   end
 
-  test "effective_config adds api server JWT from Slack channel claim rows" do
+  test "effective_config adds api server JWT from Slack channel permission rows" do
     with_env(
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080",
       "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
     ) do
       principal = principals(:acme_channel)
-      PrincipalSlackChannelClaim.create!(
+      SlackChannelPermission.create!(
         principal: principal,
         channel_id: "C0123456789",
         channel_name: "general",
@@ -122,7 +122,7 @@ class PrincipalTest < ActiveSupport::TestCase
         download_enabled: false,
         history_enabled: true
       )
-      PrincipalSlackChannelClaim.create!(
+      SlackChannelPermission.create!(
         principal: principal,
         channel_id: "G9876543210",
         channel_name: "private",
@@ -173,7 +173,7 @@ class PrincipalTest < ActiveSupport::TestCase
       principal.update!(
         sandbox_api_server_enabled: false
       )
-      PrincipalSlackChannelClaim.create!(
+      SlackChannelPermission.create!(
         principal: principal,
         channel_id: "C0123456789",
         upload_enabled: true
@@ -192,7 +192,7 @@ class PrincipalTest < ActiveSupport::TestCase
   test "api server JWT is deterministic inside the rotation window" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
-      PrincipalSlackChannelClaim.create!(
+      SlackChannelPermission.create!(
         principal: principal,
         channel_id: "C0123456789",
         upload_enabled: true

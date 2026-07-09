@@ -13,7 +13,7 @@ class Principal < ApplicationRecord
   has_many :proxies, dependent: :nullify
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
-  has_many :principal_slack_channel_claims, dependent: :destroy
+  has_many :slack_channel_permissions, dependent: :destroy
   has_many :sync_config_snapshots, class_name: "PrincipalSyncConfigSnapshot", dependent: :destroy
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
@@ -153,8 +153,8 @@ class Principal < ApplicationRecord
     self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => (enabled ? "all" : "none"))
   end
 
-  def slack_channel_claims
-    principal_slack_channel_claims.ordered.map(&:as_claim_json)
+  def slack_channel_permissions_payload
+    slack_channel_permissions.ordered.map(&:as_permission_json)
   end
 
   def slack_upload_channel_ids
@@ -273,8 +273,8 @@ class Principal < ApplicationRecord
   end
 
   def slack_channel_ids_for(permission)
-    if principal_slack_channel_claims.exists?
-      principal_slack_channel_claims.where(permission => true).ordered.pluck(:channel_id)
+    if slack_channel_permissions.exists?
+      slack_channel_permissions.where(permission => true).ordered.pluck(:channel_id)
     else
       legacy_slack_channel_ids
     end

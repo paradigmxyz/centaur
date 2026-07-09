@@ -292,7 +292,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_09_174916) do
     t.index ["role_id"], name: "index_principal_roles_on_role_id"
   end
 
-  create_table "principal_slack_channel_claims", force: :cascade do |t|
+  create_table "slack_channel_permissions", force: :cascade do |t|
     t.string "channel_id", null: false
     t.string "channel_name"
     t.datetime "created_at", null: false
@@ -302,7 +302,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_09_174916) do
     t.datetime "updated_at", null: false
     t.boolean "upload_enabled", default: false, null: false
     t.index ["principal_id", "channel_id"], name: "idx_on_principal_id_channel_id_53e63fc3fb", unique: true
-    t.index ["principal_id"], name: "index_principal_slack_channel_claims_on_principal_id"
+    t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
   end
 
   create_table "principal_sync_config_snapshots", force: :cascade do |t|
@@ -481,7 +481,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_09_174916) do
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
-  add_foreign_key "principal_slack_channel_claims", "principals"
+  add_foreign_key "slack_channel_permissions", "principals"
   add_foreign_key "principal_sync_config_snapshots", "principals"
   add_foreign_key "principals", "users", column: "created_by_id"
   add_foreign_key "proxies", "principals", on_delete: :nullify

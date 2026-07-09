@@ -43,13 +43,13 @@ module Console
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
     end
 
-    def update_slack_claims
-      PrincipalSlackChannelClaim.replace_for_principal!(
+    def update_slack_channel_permissions
+      SlackChannelPermission.replace_for_principal!(
         @principal,
-        params[:slack_channel_claims],
+        params[:slack_channel_permissions],
         channel_names_by_id: slack_channel_names_by_id
       )
-      redirect_to console_principal_path(@principal.oid), notice: "Updated Slack claims."
+      redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
     end

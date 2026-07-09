@@ -83,12 +83,12 @@ module Console
       assert_equal false, principal.sandbox_api_server_enabled
     end
 
-    test "update_slack_claims stores selected Slack channel permissions" do
+    test "update_slack_channel_permissions stores selected Slack channel permissions" do
       principal = principals(:acme_user_bob)
 
-      patch console_principal_slack_claims_url(principal.oid),
+      patch console_principal_slack_channel_permissions_url(principal.oid),
             params: {
-              slack_channel_claims: {
+              slack_channel_permissions: {
                 "0" => {
                   channel_id: "C0123456789",
                   upload_enabled: "1",
@@ -105,7 +105,7 @@ module Console
             }
 
       assert_redirected_to console_principal_path(principal.oid)
-      assert_equal "Updated Slack claims.", flash[:notice]
+      assert_equal "Updated Slack channel permissions.", flash[:notice]
       assert_equal(
         [
           {
@@ -123,7 +123,7 @@ module Console
             "history_enabled" => false
           }
         ],
-        principal.reload.slack_channel_claims
+        principal.reload.slack_channel_permissions_payload
       )
     end
 

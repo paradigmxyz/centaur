@@ -65,7 +65,7 @@ Rails.application.routes.draw do
   namespace :console do
     delete "principals/:id",                  to: "principals#destroy", as: :delete_principal
     patch  "principals/:id/sandbox_access",   to: "principals#update_sandbox_access", as: :principal_sandbox_access
-    patch  "principals/:id/slack_claims",     to: "principals#update_slack_claims", as: :principal_slack_claims
+    patch  "principals/:id/slack_channel_permissions", to: "principals#update_slack_channel_permissions", as: :principal_slack_channel_permissions
     post   "principals/:id/roles",            to: "principals#assign_role",   as: :principal_assign_role
     delete "principals/:id/roles/:role_id",   to: "principals#unassign_role", as: :principal_unassign_role
     post   "principals/:id/grants",           to: "principals#grant_secret",  as: :principal_grant_secret
