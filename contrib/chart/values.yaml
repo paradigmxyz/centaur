@@ -371,6 +371,7 @@ apiRs:
       syncIntervalSeconds: 3600
       syncBackfillLookbackDays: 30
       syncThreadLookbackDays: 3
+      indexPrivateChannels: false
       excludedChannelPatterns: ""
       attachments:
         enabled: true

@@ -75,6 +75,7 @@
   (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
   (dict "name" "SLACK_SYNC_BACKFILL_LOOKBACK_DAYS" "value" (dig "slack" "syncBackfillLookbackDays" 30 $apiRsEtl))
   (dict "name" "SLACK_SYNC_THREAD_LOOKBACK_DAYS" "value" (dig "slack" "syncThreadLookbackDays" 3 $apiRsEtl))
+  (dict "name" "SLACK_SYNC_INDEX_PRIVATE_CHANNELS" "value" (dig "slack" "indexPrivateChannels" false $apiRsEtl))
   (dict "name" "SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS" "value" (dig "slack" "excludedChannelPatterns" "" $apiRsEtl))
   (dict "name" "SLACK_ETL_ATTACHMENTS_ENABLED" "value" (dig "slack" "attachments" "enabled" true $apiRsEtl))
   (dict "name" "SLACK_ETL_ATTACHMENT_MAX_BYTES" "value" (dig "slack" "attachments" "maxBytes" 10485760 $apiRsEtl))

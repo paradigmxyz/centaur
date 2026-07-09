@@ -233,6 +233,7 @@ Slack ETL workflows:
 | `SLACK_ETL_ENABLED` | `apiRs.etl.slack.enabled`. | Master switch for Slack sync/backfill/context schedules. |
 | `SLACK_SYNC_INTERVAL_SECONDS`, `SLACK_BACKFILL_INTERVAL_SECONDS`, `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `apiRs.etl.slack.syncIntervalSeconds`, `apiRs.etl.slack.backfill.intervalSeconds`, `apiRs.etl.companyContextDocuments.intervalSeconds`. | Slack ETL schedule intervals. |
 | `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS`, `SLACK_SYNC_THREAD_LOOKBACK_DAYS` | `apiRs.etl.slack.syncBackfillLookbackDays`, `apiRs.etl.slack.syncThreadLookbackDays`. | Slack history/thread lookback windows. |
+| `SLACK_SYNC_INDEX_PRIVATE_CHANNELS` | `apiRs.etl.slack.indexPrivateChannels`. | Includes private channels visible to the ETL token. |
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `apiRs.etl.slack.excludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
 | `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `apiRs.etl.slack.backfill.*`. | Backfill enablement and batch sizing. |
 | `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`. | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |

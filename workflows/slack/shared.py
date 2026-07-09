@@ -80,7 +80,10 @@ class SlackSyncClient(Protocol):
     def _etl_access_mode(self) -> str: ...
 
     def _list_etl_channels(
-        self, limit: int = 200, force_refresh: bool = False
+        self,
+        limit: int = 200,
+        force_refresh: bool = False,
+        include_private_channels: bool = False,
     ) -> list[dict]: ...
 
     def _list_etl_users(self, limit: int = 200) -> list[dict]: ...
@@ -1169,16 +1172,25 @@ class SlackEtlClient:
         self,
         limit: int = 500,
         force_refresh: bool = False,
+        include_private_channels: bool | None = None,
     ) -> list[dict]:
         channels = []
         cursor = None
+        include_private = (
+            env_flag_enabled("SLACK_SYNC_INDEX_PRIVATE_CHANNELS", default=False)
+            if include_private_channels is None
+            else include_private_channels
+        )
+        conversation_types = (
+            "public_channel,private_channel" if include_private else "public_channel"
+        )
 
         while len(channels) < limit:
             try:
                 response = self._retry_on_ratelimit(
                     self._client.conversations_list,
                     method_key="etl.conversations.list",
-                    types="public_channel",
+                    types=conversation_types,
                     limit=min(limit - len(channels), self._MAX_PAGE_SIZE),
                     cursor=cursor,
                     exclude_archived=True,
@@ -1192,7 +1204,8 @@ class SlackEtlClient:
                 )
 
             for channel in response.get("channels", []):
-                if channel.get("is_private", False):
+                is_private = bool(channel.get("is_private", False))
+                if is_private and not include_private:
                     continue
                 channels.append(
                     {
@@ -1203,7 +1216,7 @@ class SlackEtlClient:
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
                         "is_archived": channel.get("is_archived", False),
-                        "is_private": channel.get("is_private", False),
+                        "is_private": is_private,
                         "is_member": channel.get("is_member", False),
                     }
                 )

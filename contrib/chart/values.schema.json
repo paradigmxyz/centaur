@@ -277,6 +277,7 @@
                 "syncIntervalSeconds": { "type": "integer" },
                 "syncBackfillLookbackDays": { "type": "integer" },
                 "syncThreadLookbackDays": { "type": "integer" },
+                "indexPrivateChannels": { "type": "boolean" },
                 "excludedChannelPatterns": { "type": "string" },
                 "attachments": {
                   "type": "object",
