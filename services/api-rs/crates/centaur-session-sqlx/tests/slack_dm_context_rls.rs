@@ -12,6 +12,8 @@ const SLACK_DM_CONTEXT_DOCUMENTS_SQL: &str =
     include_str!("../migrations/0028_slack_dm_context_documents.sql");
 const SLACK_DM_CONVERSATION_CONTEXT_DOCUMENTS_SQL: &str =
     include_str!("../migrations/0029_slack_dm_conversation_context_documents.sql");
+const READONLY_DM_RLS_SQL: &str =
+    include_str!("../migrations/0042_centaur_readonly_slack_dm_rls.sql");
 
 const RLS_TABLES: &[&str] = &[
     "slack_dm_sync_conversations",
@@ -58,6 +60,7 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
     execute_migration(conn, SLACK_DM_SYNC_SQL).await?;
     execute_slack_dm_context_documents_migration(conn).await?;
     execute_slack_dm_conversation_context_documents_migration(conn).await?;
+    execute_migration(conn, READONLY_DM_RLS_SQL).await?;
     grant_schema_usage(conn, schema).await?;
 
     assert_rls_enabled(conn).await?;
@@ -178,7 +181,11 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         Some("U_A"),
     )
     .await?;
-    assert_eq!(readonly, empty_visible_dm_rows());
+    assert_eq!(readonly, user_a);
+
+    let readonly_missing_user =
+        visible_rows(conn, schema, "centaur_readonly", Some("T_HOME"), None).await?;
+    assert_eq!(readonly_missing_user, empty_visible_dm_rows());
 
     Ok(())
 }
