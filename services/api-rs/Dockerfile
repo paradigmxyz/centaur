@@ -16,7 +16,6 @@ COPY services/api-rs/ ./
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
       release) cargo build --release -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
       debug|dev) cargo build -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
