@@ -122,6 +122,11 @@ spec:
                   key: {{ printf "%sDATABASE_URL" $prefix }}
             - name: CENTAUR_CONSOLE_SLACKBOTV2_USER_NAME
               value: {{ .Values.slackbotv2.userName | quote }}
+            - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
 {{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
 {{- if hasKey $.Values.sandbox.extraEnv $name }}
             # Mirror the deployer's harness default-model override
