@@ -364,6 +364,8 @@ pub struct ToolHostCallInput {
 
 #[derive(Debug)]
 pub struct ToolHostCallOutput {
+    pub request_id: String,
+    pub execution_id: String,
     pub sandbox_id: String,
     pub stdout: String,
     pub stderr: String,
@@ -1014,7 +1016,7 @@ impl SessionRuntime {
                     idempotency_key: Some(request_id.clone()),
                     metadata: Some(json!({
                         "mcp_tool_host_call": true,
-                        "request_id": request_id,
+                        "request_id": request_id.clone(),
                         "tool": tool_name,
                         "method": method,
                         "timeout_ms": duration_millis_u64(timeout),
@@ -1025,8 +1027,13 @@ impl SessionRuntime {
                 },
             )
             .await?;
-        self.wait_for_tool_host_call(thread_key, &execution.execution_id, response_timeout)
-            .await
+        self.wait_for_tool_host_call(
+            thread_key,
+            &execution.execution_id,
+            &request_id,
+            response_timeout,
+        )
+        .await
     }
 
     async fn create_or_get_tool_host_session(
@@ -1058,6 +1065,7 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         execution_id: &str,
+        request_id: &str,
         response_timeout: Duration,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let events = self
@@ -1069,10 +1077,19 @@ impl SessionRuntime {
                 let event = event?;
                 match event.event_type.as_str() {
                     "session.execution_completed" => {
-                        return self.tool_host_completed_output(thread_key, &event).await;
+                        return self
+                            .tool_host_completed_output(
+                                thread_key,
+                                &event,
+                                execution_id,
+                                request_id,
+                            )
+                            .await;
                     }
                     "session.execution_failed" => {
-                        return self.tool_host_failed_output(thread_key, &event).await;
+                        return self
+                            .tool_host_failed_output(thread_key, &event, execution_id, request_id)
+                            .await;
                     }
                     _ => {}
                 }
@@ -1087,6 +1104,8 @@ impl SessionRuntime {
             // Best-effort sandbox id: a store error must not replace the
             // timeout result with an internal error.
             Err(_) => Ok(ToolHostCallOutput {
+                request_id: request_id.to_owned(),
+                execution_id: execution_id.to_owned(),
                 sandbox_id: self
                     .current_sandbox_id(thread_key)
                     .await
@@ -1106,10 +1125,14 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         event: &SessionEvent,
+        execution_id: &str,
+        request_id: &str,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let sandbox_id = self.current_sandbox_id(thread_key).await?;
         let Some(result_text) = event.payload.get("result_text").and_then(Value::as_str) else {
             return Ok(ToolHostCallOutput {
+                request_id: request_id.to_owned(),
+                execution_id: execution_id.to_owned(),
                 sandbox_id,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -1124,6 +1147,8 @@ impl SessionRuntime {
             ))
         })?;
         Ok(ToolHostCallOutput {
+            request_id: request_id.to_owned(),
+            execution_id: execution_id.to_owned(),
             sandbox_id,
             stdout: response.stdout,
             stderr: response.stderr,
@@ -1136,6 +1161,8 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         event: &SessionEvent,
+        execution_id: &str,
+        request_id: &str,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let error = event
             .payload
@@ -1149,6 +1176,8 @@ impl SessionRuntime {
             .and_then(Value::as_str)
             .is_some_and(|reason| reason == "max_duration_exceeded");
         Ok(ToolHostCallOutput {
+            request_id: request_id.to_owned(),
+            execution_id: execution_id.to_owned(),
             sandbox_id: self.current_sandbox_id(thread_key).await?,
             stdout: String::new(),
             stderr: error,
