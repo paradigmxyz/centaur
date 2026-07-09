@@ -62,6 +62,7 @@ module Oauth
         ok: true, access_token: "xoxe.xoxb-1-bot", refresh_token: "xoxe-1-bot-refresh",
         expires_in: 43_200, token_type: "bot", scope: "commands",
         id_token: id_token_value,
+        team: { id: "TACME", name: "Acme" },
         authed_user: {
           id: sub,
           user: "grace",
@@ -295,6 +296,7 @@ module Oauth
       assert_equal %w[chat:write], cred.scopes
       assert_equal "xoxe.xoxp-1-user", cred.access_token
       assert_equal "xoxe-1-refresh", cred.refresh_token
+      assert_equal "TACME", cred.labels["slack_team_id"]
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Slack – grace token", cred.static_secret.name
     end

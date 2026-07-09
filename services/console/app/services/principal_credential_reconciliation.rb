@@ -108,9 +108,10 @@ class PrincipalCredentialReconciliation
   end
 
   def sync_principal_provider_labels(principal, credentials)
-    # Console-user principals never match by label, so stamping provider
-    # identity labels on them would only create stale, unused inputs.
-    return if console_user_principal?(principal)
+    if console_user_principal?(principal)
+      sync_console_user_slack_labels(principal, credentials)
+      return
+    end
 
     google_credentials = credentials.select do |credential|
       credential.oauth_app&.provider == GOOGLE_PROVIDER
@@ -277,9 +278,35 @@ class PrincipalCredentialReconciliation
     principal_team = normalize_key(principal.labels&.[](SLACK_TEAM_LABEL))
     credential_team = normalize_key(credential.labels&.[](SLACK_TEAM_LABEL)) ||
                       normalize_key(credential.oauth_app&.labels&.[](SLACK_TEAM_LABEL))
+    return true if console_user_principal?(principal) && principal_team.blank?
     return true if principal_team.blank? && credential_team.blank?
 
     principal_team.present? && principal_team == credential_team
+  end
+
+  def sync_console_user_slack_labels(principal, credentials)
+    slack_credentials = credentials.select do |credential|
+      credential.oauth_app&.provider == SLACK_PROVIDER
+    end
+    return if slack_credentials.empty?
+
+    slack_user_id = unique_present_value(slack_credentials.map(&:provider_subject))
+    slack_team_id = unique_present_value(slack_credentials.map { |credential| slack_team_for(credential) })
+    return unless slack_user_id && slack_team_id
+
+    labels = principal.labels || {}
+    updates = {
+      "slack_user_id" => slack_user_id,
+      SLACK_TEAM_LABEL => slack_team_id
+    }
+    return if updates.all? { |key, value| labels[key] == value }
+
+    principal.update!(labels: labels.merge(updates))
+  end
+
+  def slack_team_for(credential)
+    credential.labels&.[](SLACK_TEAM_LABEL).presence ||
+      credential.oauth_app&.labels&.[](SLACK_TEAM_LABEL).presence
   end
 
   def console_user_principal?(principal)

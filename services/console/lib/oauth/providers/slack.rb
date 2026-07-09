@@ -36,7 +36,8 @@ module Oauth
           return {
             subject: user_id,
             email: result.response.dig("authed_user", "email"),
-            name: slack_user_name(result.response)
+            name: slack_user_name(result.response),
+            team_id: slack_team_id(result.response)
           }
         end
 
@@ -50,6 +51,11 @@ module Oauth
       def slack_user_name(response)
         response.dig("authed_user", "name").presence ||
           response.dig("authed_user", "user").presence
+      end
+
+      def slack_team_id(response)
+        response.dig("team", "id").presence ||
+          response.dig("authed_user", "team_id").presence
       end
     end
   end
