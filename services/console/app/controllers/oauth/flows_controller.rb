@@ -183,6 +183,7 @@ module Oauth
           provider_email: identity[:email],
           # Store exactly what the IdP granted, so the refresh POST re-requests it.
           scopes: granted_scopes(result, state),
+          labels: credential_labels(credential, identity),
           refresh_token: result.refresh_token,
           access_token: result.access_token,
           expires_at: now + expires_in,
@@ -199,6 +200,14 @@ module Oauth
     def granted_scopes(result, state)
       return Array(state["scopes"]) if result.scope.blank?
       @provider.parse_granted_scopes(result.scope)
+    end
+
+    def credential_labels(credential, identity)
+      labels = credential.labels || {}
+      return labels unless @app.provider == Oauth::Providers::Slack::KEY
+      return labels if identity[:team_id].blank?
+
+      labels.merge("slack_team_id" => identity[:team_id])
     end
 
     def identity_display_name(identity)
