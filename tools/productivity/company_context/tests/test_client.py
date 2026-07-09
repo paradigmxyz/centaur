@@ -252,6 +252,7 @@ def test_search_emits_grouped_lookup_metrics(monkeypatch):
     pushed_lines = []
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
     monkeypatch.setattr(company_context_client, "_include_google_docs_source", lambda *_args: False)
+    monkeypatch.setattr(company_context_client, "_include_granola_source", lambda *_args: False)
     monkeypatch.setattr(
         company_context_client,
         "_push_company_context_lookup_metric_lines",
@@ -571,6 +572,78 @@ def test_search_drive_source_is_not_docs_alias(monkeypatch):
     assert "FROM company_context_documents" in query
     assert "FROM google_docs_context_documents" not in query
     assert args == ("roadmap", "roadmap", "drive", None, None, None, 10)
+    assert fake.closed is True
+
+
+def test_search_granola_source_queries_private_note_projection(monkeypatch):
+    occurred_at = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.UTC)
+    source_updated_at = dt.datetime(2026, 7, 1, 10, 30, tzinfo=dt.UTC)
+    fake = _FakeConnection(
+        fetch_rows=[
+            [],
+            [
+                {
+                    "document_id": "granola:note:not_123",
+                    "note_id": "not_123",
+                    "title": "Launch review",
+                    "body": "We agreed to ship.",
+                    "url": "https://app.granola.ai/notes/not_123",
+                    "owner_id": "usr_1",
+                    "owner_email": "alice@example.com",
+                    "owner_name": "Alice",
+                    "access_emails": ["alice@example.com", "bob@example.com"],
+                    "attendee_labels": ["Bob <bob@example.com>"],
+                    "occurred_at": occurred_at,
+                    "source_updated_at": source_updated_at,
+                    "metadata": {"note_id": "not_123"},
+                    "score": 3.0,
+                }
+            ],
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search(
+        "launch review",
+        source="granola",
+        occurred_after="2026-07-01",
+        occurred_before="2026-07-02",
+    )
+
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    assert result["results"][0]["source"] == "granola"
+    assert result["results"][0]["source_type"] == "granola_note"
+    assert result["results"][0]["source_document_id"] == "not_123"
+    assert result["results"][0]["author_name"] == "Alice"
+    legacy_query, legacy_args = fake.fetch_calls[0]
+    granola_query, granola_args = fake.fetch_calls[1]
+    assert "FROM company_context_documents" in legacy_query
+    assert legacy_args == (
+        "launch review",
+        "launch",
+        "review",
+        "granola",
+        None,
+        dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
+        dt.datetime(2026, 7, 2, tzinfo=dt.UTC),
+        10,
+    )
+    assert "FROM granola_context_documents" in granola_query
+    assert "occurred_at >= $4" in granola_query
+    assert "occurred_at < $5" in granola_query
+    assert granola_args == (
+        "launch review",
+        "launch",
+        "review",
+        dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
+        dt.datetime(2026, 7, 2, tzinfo=dt.UTC),
+        10,
+    )
     assert fake.closed is True
 
 
@@ -1153,6 +1226,54 @@ def test_read_document_falls_back_to_oauth_google_docs_index(monkeypatch):
     assert result["total_chars"] == len(body)
     assert result["truncated"] is True
     assert len(fake.fetchrow_calls) == 2
+    assert fake.closed is True
+
+
+def test_read_document_falls_back_to_granola_note_projection(monkeypatch):
+    body = "Granola note content"
+    fake = _FakeConnection(
+        fetchrow_rows=[
+            None,
+            None,
+            {
+                "document_id": "granola:note:not_123",
+                "note_id": "not_123",
+                "title": "Launch review",
+                "body": body,
+                "url": "https://app.granola.ai/notes/not_123",
+                "owner_id": "usr_1",
+                "owner_email": "alice@example.com",
+                "owner_name": "Alice",
+                "access_emails": ["alice@example.com", "bob@example.com"],
+                "attendee_labels": ["Bob <bob@example.com>"],
+                "occurred_at": dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.UTC),
+                "source_updated_at": dt.datetime(2026, 7, 1, 10, 30, tzinfo=dt.UTC),
+                "metadata": {"note_id": "not_123"},
+            },
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").read_document(
+        "granola:note:not_123",
+        max_chars=7,
+    )
+
+    assert result["status"] == "ok"
+    assert result["source"] == "granola"
+    assert result["source_type"] == "granola_note"
+    assert result["source_document_id"] == "not_123"
+    assert result["author_name"] == "Alice"
+    assert result["content"] == "Granola"
+    assert result["chars"] == 7
+    assert result["total_chars"] == len(body)
+    assert result["truncated"] is True
+    assert len(fake.fetchrow_calls) == 3
+    assert "FROM granola_context_documents" in fake.fetchrow_calls[2][0]
     assert fake.closed is True
 
 
