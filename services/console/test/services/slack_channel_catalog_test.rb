@@ -29,6 +29,37 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     end
   end
 
+  test "fetch does not cache slack channel catalog errors" do
+    cache = ActiveSupport::Cache::MemoryStore.new
+    calls = 0
+    error = SlackChannelCatalog::Result.new(channels: [], error: "Slack API request failed.", configured: true)
+    success = SlackChannelCatalog::Result.new(
+      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false) ],
+      error: nil,
+      configured: true
+    )
+    catalog = Object.new
+    catalog.define_singleton_method(:fetch) do
+      calls += 1
+      calls == 1 ? error : success
+    end
+
+    with_env("CENTAUR_CONSOLE_SLACK_BOT_TOKEN" => "xoxb-test-token", "SLACK_API_URL" => "https://slack.test/api") do
+      with_singleton_method(Rails, :cache, -> { cache }) do
+        with_singleton_method(SlackChannelCatalog, :new, ->(token:, api_url:) { catalog }) do
+          first = SlackChannelCatalog.fetch
+          second = SlackChannelCatalog.fetch
+          third = SlackChannelCatalog.fetch
+
+          assert_equal "Slack API request failed.", first.error
+          assert_nil second.error
+          assert_nil third.error
+          assert_equal 2, calls
+        end
+      end
+    end
+  end
+
   test "fetch configures short slack api timeouts" do
     response = Struct.new(:code, :body).new(
       "200",

@@ -23,10 +23,13 @@ class SlackChannelCatalog
     return Result.new(channels: [], error: "SLACK_BOT_TOKEN is not configured.", configured: false) if token.blank?
 
     api_url = ENV["SLACK_API_URL"].presence || DEFAULT_API_URL
-    cached = Rails.cache.fetch(cache_key(token: token, api_url: api_url), expires_in: CACHE_TTL) do
-      serialize_result(new(token: token, api_url: api_url).fetch)
-    end
-    deserialize_result(cached)
+    key = cache_key(token: token, api_url: api_url)
+    cached = Rails.cache.read(key)
+    return deserialize_result(cached) if cached
+
+    result = new(token: token, api_url: api_url).fetch
+    Rails.cache.write(key, serialize_result(result), expires_in: CACHE_TTL) if result.ok?
+    result
   end
 
   def self.cache_key(token:, api_url:)

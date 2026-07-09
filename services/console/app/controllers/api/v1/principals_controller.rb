@@ -1,6 +1,10 @@
 module Api
   module V1
     class PrincipalsController < Api::BaseController
+      InvalidSlackChannelPermissions = Class.new(StandardError)
+
+      rescue_from InvalidSlackChannelPermissions, with: :render_slack_channel_permissions_error
+
       def index
         records, meta = paginated_label_search(Principal.includes(:slack_channel_permissions))
         render json: { data: records.map { |p| record_payload(p) }, meta: meta }
@@ -107,9 +111,40 @@ module Api
       end
 
       def slack_channel_permission_rows
-        data_params.permit(
-          slack_channel_permissions: %i[channel_id channel_name upload_enabled download_enabled history_enabled]
-        ).fetch(:slack_channel_permissions, [])
+        raw = data_params[:slack_channel_permissions]
+        rows = case raw
+        when nil
+          []
+        when ActionController::Parameters
+          [ raw ]
+        when Array
+          raw
+        else
+          raise InvalidSlackChannelPermissions, "slack_channel_permissions must be an array or object"
+        end
+
+        boolean = ActiveModel::Type::Boolean.new
+        rows.filter_map do |row|
+          unless row.respond_to?(:permit)
+            raise InvalidSlackChannelPermissions, "slack_channel_permissions rows must be objects"
+          end
+
+          attrs = row.permit(
+            :channel_id,
+            :channel_name,
+            :upload_enabled,
+            :download_enabled,
+            :history_enabled,
+            :remove
+          ).to_h
+          next if boolean.cast(attrs.delete("remove"))
+
+          attrs
+        end
+      end
+
+      def render_slack_channel_permissions_error(error)
+        render_error(status: :unprocessable_entity, message: error.message)
       end
     end
   end
