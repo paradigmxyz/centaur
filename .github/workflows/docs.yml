@@ -45,6 +45,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # The build regenerates public/md on the fly, so the deployed site never
+      # drifts — only the committed copies agents curl from the repo do.
+      - name: Check committed md mirrors are in sync
+        run: |
+          bash scripts/build-md.sh
+          if ! git diff --exit-code --stat -- public/md; then
+            echo "docs/public/md is out of sync with docs/pages;" \
+              "run 'bash docs/scripts/build-md.sh' and commit the result." >&2
+            exit 1
+          fi
+
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

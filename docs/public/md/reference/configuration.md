@@ -179,6 +179,7 @@ Kubernetes backend:
 | `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
 | `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
+| `SESSION_SANDBOX_RUNNING_LIMIT`, `SESSION_SANDBOX_HOT_IDLE_GRACE_SECS` | `apiRs.sandboxRunningLimit`, `apiRs.sandboxHotIdleGraceSecs`. | Capacity admission for running-like sandboxes; discards ready warm sandboxes first, then pauses least-recently-active idle sessions outside the grace window. |
 | `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and restart recovery for idle pauses. Persisted `idle_timeout_ms` is honored after restart; the backstop is the fallback for older execution rows without that metadata. |
 | `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |
 | `KUBERNETES_WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`) using the sandbox repo-cache mount prefix. | Workflow-host sandbox discovery paths. |
@@ -199,8 +200,6 @@ Sandbox entrypoint and wrappers:
 | --- | --- | --- |
 | `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
-| `CENTAUR_TOOLS_AUTO_RELOAD` | `repoCache.autoReload` via api-rs tools config; defaults to `true`. | Enables repo-cache-backed auto-refresh of local tool shims and copied skills in running sandboxes. Runtime catalog only; secret grants/proxy credentials reconcile separately. |
-| `CENTAUR_TOOLS_RELOAD_INTERVAL_SECONDS` | `sandbox.extraEnv`. | Poll interval for the repo-cache checkout watchdog. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
@@ -208,8 +207,6 @@ Sandbox entrypoint and wrappers:
 | `META_AI_API_KEY` | Secret mounted into api-rs. | Meta AI direct credential for Codex provider `responses` and Slack or Linear `--meta` selection. |
 | `CODEX_MODEL_REASONING_SUMMARY` | `sandbox.extraEnv`. | Sets `model_reasoning_summary` in the Codex config (`auto`, `concise`, `detailed`, `none`). Codex >= 0.139 emits no reasoning summaries unless this is set, so renderers show no thinking trace. |
 | `CODEX_MODEL_REASONING_EFFORT` | `sandbox.extraEnv`. | Overrides the codex `model_reasoning_effort` (baked into `harness/codex/config.toml`) by patching the per-sandbox `~/.codex/config.toml` at boot, without forking the image. One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; an unknown value is ignored (the config default stands). |
-| `CODEX_BEDROCK_REGION` | `sandbox.extraEnv`. | Opt-in switch and single source of truth for the Bedrock region. When set, the control plane registers the AWS SigV4 re-signing credential (scoped to the `bedrock` service and this region, upstream `bedrock-mantle.<region>.api.aws`), injects the placeholder `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env so codex can sign requests iron-proxy re-signs with the real IAM keys, and pins codex's `amazon-bedrock` provider to this region at sandbox boot (so the in-sandbox client and the proxy agree). Unset disables Bedrock; defaults to `us-east-1`. See [Codex with Amazon Bedrock](/deploying-in-production#codex-with-amazon-bedrock). |
-| `CODEX_BEDROCK_SESSION_TOKEN` | `sandbox.extraEnv`. | Set truthy when the Bedrock IAM credentials are temporary (STS) and carry a session token, so the `AWS_SESSION_TOKEN` placeholder is declared and injected. Omit for long-term IAM user keys. |
 | `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
 | `CLAUDE_CODE_AUTH_MODE` | `sandbox.extraEnv`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
