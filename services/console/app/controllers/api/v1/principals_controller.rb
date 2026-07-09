@@ -107,9 +107,9 @@ module Api
       end
 
       def slack_channel_permission_rows
-        Array(data_params[:slack_channel_permissions]).map do |row|
-          row.respond_to?(:to_unsafe_h) ? row.to_unsafe_h : row
-        end
+        data_params.permit(
+          slack_channel_permissions: %i[channel_id channel_name upload_enabled download_enabled history_enabled]
+        ).fetch(:slack_channel_permissions, [])
       end
     end
   end

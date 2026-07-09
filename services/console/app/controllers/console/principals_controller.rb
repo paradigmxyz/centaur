@@ -46,8 +46,7 @@ module Console
     def update_slack_channel_permissions
       SlackChannelPermission.replace_for_principal!(
         @principal,
-        slack_channel_permission_rows,
-        channel_names_by_id: slack_channel_names_by_id
+        slack_channel_permission_rows
       )
       redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
@@ -114,7 +113,25 @@ module Console
     end
 
     def slack_channel_permission_rows
-      params.fetch(:slack_channel_permissions, ActionController::Parameters.new).to_unsafe_h.values
+      boolean = ActiveModel::Type::Boolean.new
+      channel_names_by_id = slack_channel_names_by_id
+      params.fetch(:slack_channel_permissions, ActionController::Parameters.new).to_unsafe_h.values.filter_map do |row|
+        next if boolean.cast(row["remove"])
+
+        channel_id = row["channel_id"].to_s.strip.upcase
+        next if channel_id.blank?
+
+        attrs = {
+          channel_id: channel_id,
+          channel_name: channel_names_by_id[channel_id].presence || row["channel_name"].to_s.strip.presence,
+          upload_enabled: boolean.cast(row["upload_enabled"]),
+          download_enabled: boolean.cast(row["download_enabled"]),
+          history_enabled: boolean.cast(row["history_enabled"])
+        }
+        next unless attrs[:upload_enabled] || attrs[:download_enabled] || attrs[:history_enabled]
+
+        attrs
+      end
     end
 
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.
