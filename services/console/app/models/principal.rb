@@ -21,6 +21,7 @@ class Principal < ApplicationRecord
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_validation :apply_sandbox_repo_cache_setting
+  after_create :create_slack_channel_permission_from_label
   after_save :clear_sandbox_repo_cache_setting
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
@@ -220,6 +221,17 @@ class Principal < ApplicationRecord
     @sandbox_repo_cache_setting = nil
   end
 
+  def create_slack_channel_permission_from_label
+    channel_id = legacy_slack_channel_id
+    return if channel_id.blank?
+
+    slack_channel_permissions.find_or_create_by!(channel_id: channel_id) do |permission|
+      permission.upload_enabled = true
+      permission.download_enabled = true
+      permission.history_enabled = true
+    end
+  end
+
   # The credentials actually delivered to the proxy, grouped by type, after
   # cross-type conflict resolution. Static secrets without a deliverable source
   # are dropped first (the proxy can't resolve a value for them) so a
@@ -281,8 +293,13 @@ class Principal < ApplicationRecord
   end
 
   def legacy_slack_channel_ids
+    channel_id = legacy_slack_channel_id
+    channel_id ? [ channel_id ] : []
+  end
+
+  def legacy_slack_channel_id
     channel_id = labels.to_h[SLACK_CHANNEL_ID_LABEL].to_s.strip.upcase
-    channel_id.match?(SLACK_CHANNEL_ID_FORMAT) ? [ channel_id ] : []
+    channel_id.match?(SLACK_CHANNEL_ID_FORMAT) ? channel_id : nil
   end
 
   def api_server_hosts

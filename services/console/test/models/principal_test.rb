@@ -50,6 +50,34 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({}, principal.reload.labels)
   end
 
+  test "creates slack channel permission from slack channel label on create" do
+    principal = Principal.create!(
+      default_attrs(
+        namespace: "acme",
+        foreign_id: "C-auto-slack-label",
+        labels: { Principal::SLACK_CHANNEL_ID_LABEL => " c0123456789 " }
+      )
+    )
+
+    permission = principal.slack_channel_permissions.reload.sole
+    assert_equal "C0123456789", permission.channel_id
+    assert_predicate permission, :upload_enabled
+    assert_predicate permission, :download_enabled
+    assert_predicate permission, :history_enabled
+  end
+
+  test "does not create slack channel permission from invalid slack channel label" do
+    principal = Principal.create!(
+      default_attrs(
+        namespace: "acme",
+        foreign_id: "C-invalid-slack-label",
+        labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C999" }
+      )
+    )
+
+    assert_empty principal.slack_channel_permissions.reload
+  end
+
   test "sandbox access defaults to enabled" do
     principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-sandbox-access"))
     principal.reload
