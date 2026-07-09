@@ -18,11 +18,6 @@ module ApiServer
 
       issued_at = window_start_for(principal, now.to_i)
       expires_at = issued_at + DEFAULT_TTL_SECONDS
-      slack_claims = {
-        "upload_channels" => [ channel_id ],
-        "download_channels" => [ channel_id ],
-        "search_channels" => [ channel_id ]
-      }
       CentaurJwt::Hs256.encode(
         {
           "iss" => issuer,
@@ -30,7 +25,10 @@ module ApiServer
           "aud" => audience,
           "iat" => issued_at,
           "exp" => expires_at,
-          "slack" => slack_claims
+          "slack" => {
+            "upload_channels" => [ channel_id ],
+            "download_channels" => [ channel_id ]
+          }
         },
         signing_secret: signing_secret
       )

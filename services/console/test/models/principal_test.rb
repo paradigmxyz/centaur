@@ -114,11 +114,7 @@ class PrincipalTest < ActiveSupport::TestCase
       "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
     ) do
       principal = principals(:acme_channel)
-      principal.update!(
-        labels: {
-          Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789"
-        }
-      )
+      principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
 
       config = principal.effective_config(redact_secrets: false)
       entry = config.fetch("secrets").find do |secret|
@@ -136,7 +132,6 @@ class PrincipalTest < ActiveSupport::TestCase
       assert_equal principal.oid, claims.fetch("sub")
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "download_channels")
-      assert_equal [ "C0123456789" ], claims.dig("slack", "search_channels")
       assert_equal 1.hour.to_i, claims.fetch("exp") - claims.fetch("iat")
       assert_equal ApiServer::Jwt.rotation_offset(principal),
                    claims.fetch("iat") % ApiServer::Jwt::DEFAULT_WINDOW_SECONDS

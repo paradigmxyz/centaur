@@ -6,14 +6,13 @@ import mimetypes
 import os
 import re
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 import structlog
 from slack_sdk import WebClient
@@ -700,11 +699,6 @@ class SlackClient:
         local_query, local_channels, local_from_user = self._extract_local_search_filters(
             query, channels, from_user
         )
-        search_query = query
-        if from_user:
-            search_query += f" {self._slack_search_from_filter(from_user)}"
-        search_query = " ".join(search_query.split())
-
         if local_channels:
             return self._search_messages_local(
                 local_query,
@@ -714,6 +708,11 @@ class SlackClient:
                 messages_per_channel,
             )
 
+        # Build the search query with modifiers
+        search_query = query
+        if from_user:
+            search_query += f" from:@{from_user.lstrip('@')}"
+
         try:
             return self._search_messages_native(search_query, max_results)
         except (SlackApiError, RuntimeError, SlackRateLimitError):
@@ -721,28 +720,6 @@ class SlackClient:
             return self._search_messages_local(
                 local_query, max_results, local_channels, local_from_user, messages_per_channel
             )
-
-    def search_messages_proxy(
-        self,
-        query: str,
-        max_results: int = 20,
-        from_user: str | None = None,
-    ) -> list[dict]:
-        """Search messages through the Centaur Slack search proxy.
-
-        Defaults to the current Slack thread's channel. Unlike ``search_messages``,
-        this method does not fall back to Slack native search or local history
-        scanning.
-        """
-        search_query = query
-        if from_user:
-            search_query += f" {self._slack_search_from_filter(from_user)}"
-        search_query = " ".join(search_query.split())
-        return self._search_messages_proxy(
-            search_query,
-            max_results,
-            self._current_slack_channel(),
-        )
 
     def _search_messages_native(
         self,
@@ -760,65 +737,6 @@ class SlackClient:
         if not response.get("ok"):
             raise RuntimeError(response.get("error", "search.messages failed"))
 
-        return self._search_results_from_response(response)
-
-    def _slack_search_from_filter(self, from_user: str) -> str:
-        user = self._clean_user_ref(from_user)
-        if self._looks_like_user_id(user):
-            return f"from:<@{user.upper()}>"
-        return f"from:{user.lstrip('@')}"
-
-    def _search_messages_proxy(
-        self,
-        query: str,
-        max_results: int,
-        channel_id: str,
-    ) -> list[dict]:
-        """Search through the Centaur API Slack proxy with channel-scoped JWT auth."""
-        base_url = self._search_proxy_base_url()
-        if not base_url:
-            raise RuntimeError("CENTAUR_API_URL is not configured")
-        params = urlencode(
-            {
-                "query": query,
-                "channels": channel_id,
-                "count": max_results,
-            }
-        )
-        request = urllib.request.Request(
-            f"{base_url}/api/slack/search?{params}",
-            headers={"Accept": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
-                payload = response.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace").strip()
-            message = f"Slack search proxy failed with status {exc.code}"
-            if detail:
-                message = f"{message}: {detail}"
-            raise RuntimeError(message) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Slack search proxy request failed: {exc}") from exc
-
-        data = json.loads(payload.decode("utf-8"))
-        if not data.get("ok"):
-            raise RuntimeError(data.get("error", "Slack search proxy failed"))
-        return self._search_results_from_response(data)
-
-    def _search_proxy_base_url(self) -> str | None:
-        value = str(secret("CENTAUR_API_URL", default="") or "").strip()
-        return value.rstrip("/") or None
-
-    def _current_slack_channel(self) -> str:
-        from centaur_sdk.tool_sdk import current_slack_thread
-
-        channel_id = current_slack_thread().get("channel_id")
-        if not channel_id:
-            raise RuntimeError("Slack search proxy requires a current Slack channel")
-        return channel_id
-
-    def _search_results_from_response(self, response: dict) -> list[dict]:
         matches = response.get("messages", {}).get("matches", [])
         user_cache = self._get_user_cache()
 
@@ -879,13 +797,9 @@ class SlackClient:
             query,
         )
 
-        deduped_channels = self._dedupe_channel_refs(local_channels)
-        return " ".join(query.split()), deduped_channels or None, local_from_user
-
-    def _dedupe_channel_refs(self, channels: list[str]) -> list[str]:
         deduped_channels = []
         seen = set()
-        for channel in channels:
+        for channel in local_channels:
             normalized = self._clean_channel_ref(channel)
             if not normalized:
                 continue
@@ -894,7 +808,8 @@ class SlackClient:
                 continue
             seen.add(key)
             deduped_channels.append(normalized)
-        return deduped_channels
+
+        return " ".join(query.split()), deduped_channels or None, local_from_user
 
     def _channel_refs_for_search(self, channels: list[str]) -> list[dict]:
         """Resolve channel filters without listing channels when IDs are provided."""
@@ -2138,10 +2053,6 @@ def resolve_mentions(
 
 def search_messages(*args, **kwargs):
     return _client().search_messages(*args, **kwargs)
-
-
-def search_messages_proxy(*args, **kwargs):
-    return _client().search_messages_proxy(*args, **kwargs)
 
 
 def get_channel_history_page(*args, **kwargs):

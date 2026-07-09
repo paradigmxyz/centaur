@@ -48,34 +48,6 @@ def _channel_arg_is_id(channel: str) -> bool:
     return bool(_SLACK_CHANNEL_ID_RE.fullmatch(value.upper()))
 
 
-def _print_search_results(query: str, results: list[dict], full: bool) -> None:
-    if not results:
-        console.print("[yellow]No messages found.[/]")
-        raise typer.Exit()
-
-    if full:
-        for i, msg in enumerate(results, 1):
-            console.print(f"\n[bold cyan]#{msg['channel']}[/] | [green]{msg['user']}[/]")
-            console.print(msg["text"])
-            console.print(f"[dim]{msg['permalink']}[/]")
-            if i < len(results):
-                console.print("---")
-        return
-
-    table = Table(title=f"Slack: '{query}' ({len(results)} results)")
-    table.add_column("Channel", style="cyan", max_width=15)
-    table.add_column("User", style="green", max_width=15)
-    table.add_column("Message", style="white", max_width=80)
-
-    for msg in results:
-        text = msg["text"][:80].replace("\n", " ")
-        if len(msg["text"]) > 80:
-            text += "..."
-        table.add_row(f"#{msg['channel']}", msg["user"], text)
-
-    console.print(table)
-
-
 @app.command()
 def send(
     channel: str = typer.Argument(..., help="Channel name, channel ID, or Slack user ID"),
@@ -165,29 +137,31 @@ def search(
         from_user=from_user,
         messages_per_channel=depth,
     )
-    _print_search_results(query, results, full)
 
+    if not results:
+        console.print("[yellow]No messages found.[/]")
+        raise typer.Exit()
 
-@app.command("search-proxy")
-def search_proxy(
-    query: str = typer.Argument(..., help="Text to search for"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
-    full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
-    from_user: str = typer.Option(None, "--from", help="Filter by username"),
-):
-    """Search messages through the Centaur Slack search proxy."""
-    from .client import search_messages_proxy
+    if full:
+        for i, msg in enumerate(results, 1):
+            console.print(f"\n[bold cyan]#{msg['channel']}[/] | [green]{msg['user']}[/]")
+            console.print(msg["text"])
+            console.print(f"[dim]{msg['permalink']}[/]")
+            if i < len(results):
+                console.print("---")
+    else:
+        table = Table(title=f"Slack: '{query}' ({len(results)} results)")
+        table.add_column("Channel", style="cyan", max_width=15)
+        table.add_column("User", style="green", max_width=15)
+        table.add_column("Message", style="white", max_width=80)
 
-    try:
-        results = search_messages_proxy(
-            query,
-            max_results=limit,
-            from_user=from_user,
-        )
-    except (RuntimeError, ValueError) as e:
-        stderr_console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1) from e
-    _print_search_results(query, results, full)
+        for msg in results:
+            text = msg["text"][:80].replace("\n", " ")
+            if len(msg["text"]) > 80:
+                text += "..."
+            table.add_row(f"#{msg['channel']}", msg["user"], text)
+
+        console.print(table)
 
 
 @app.command()

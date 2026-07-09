@@ -2,8 +2,9 @@ import sys
 import types
 from pathlib import Path
 
-from slack.cli import _channel_arg_is_id, app
 from typer.testing import CliRunner
+
+from slack.cli import _channel_arg_is_id, app
 
 
 def test_channel_arg_is_id_accepts_channel_id_forms() -> None:
@@ -77,38 +78,3 @@ def test_upload_rejects_channel_name(monkeypatch, tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "must be a Slack conversation ID" in result.output
-
-
-def test_search_proxy_command_calls_proxy_search(monkeypatch) -> None:
-    calls = []
-
-    def fake_search_messages_proxy(*args, **kwargs):
-        calls.append((args, kwargs))
-        return [
-            {
-                "channel": "eng-oncall",
-                "user": "alice",
-                "text": "deploy complete",
-                "permalink": "https://slack.example/archives/C123/p1",
-            }
-        ]
-
-    fake_client = types.SimpleNamespace(search_messages_proxy=fake_search_messages_proxy)
-    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
-
-    result = CliRunner().invoke(
-        app,
-        ["search-proxy", "deploy", "--limit", "3", "--from", "alice"],
-    )
-
-    assert result.exit_code == 0
-    assert calls == [
-        (
-            ("deploy",),
-            {
-                "max_results": 3,
-                "from_user": "alice",
-            },
-        )
-    ]
-    assert "deploy complete" in result.output
