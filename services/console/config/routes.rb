@@ -11,6 +11,9 @@ Rails.application.routes.draw do
   # link the manifest and register the worker.
   get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
   get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
+  # Target of the manifest's web+centaur:// protocol handler: maps the
+  # custom-scheme URL in ?target= onto an in-app path and redirects.
+  get "launch", to: "launch#show", as: :launch
 
   # Operator console session login (cookie-based, separate from the API key auth).
   get "login", to: "sessions#new", as: :login

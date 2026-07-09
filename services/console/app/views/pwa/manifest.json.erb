@@ -34,6 +34,29 @@
   "launch_handler": {
     "client_mode": "navigate-existing"
   },
+  "shortcuts": [
+    {
+      "name": "Chats",
+      "url": "/console/threads",
+      "icons": [{ "src": "/pwa-icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Workflows",
+      "url": "/console/workflows",
+      "icons": [{ "src": "/pwa-icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Integrations",
+      "url": "/console/integrations",
+      "icons": [{ "src": "/pwa-icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
+  "protocol_handlers": [
+    {
+      "protocol": "web+centaur",
+      "url": "/launch?target=%s"
+    }
+  ],
   "file_handlers": [
     {
       "action": "/",

@@ -24,6 +24,27 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Web Push: show whatever the server sent ({ title, options }); options.data.path
+// tells notificationclick where to focus. The backend send path (VAPID keys,
+// subscription storage) ships separately -- until then these never fire.
+self.addEventListener("push", (event) => {
+  if (!event.data) return
+  const { title, options } = event.data.json()
+  event.waitUntil(self.registration.showNotification(title || "Centaur Console", options))
+})
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close()
+  const path = event.notification.data?.path || "/"
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      const existing = clientList.find((client) => new URL(client.url).pathname === path && "focus" in client)
+      if (existing) return existing.focus()
+      return clients.openWindow ? clients.openWindow(path) : undefined
+    })
+  )
+})
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
