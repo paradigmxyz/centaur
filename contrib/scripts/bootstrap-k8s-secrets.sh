@@ -82,6 +82,12 @@ Optional iron-control bootstrap (consumed when ironControl.enabled=true):
                                initial admin email (default admin@centaur.local)
   The initial password, API key, the three ActiveRecord encryption keys, and
   SECRET_KEY_BASE are auto-generated when absent (never rotated in place).
+
+Note: harness access-token modes (sandbox.codexAuthMode / claudeCodeAuthMode
+set to access_token) also need a console broker credential (openai-codex /
+anthropic-claude) created out of band with `centaur-perms broker create`;
+without it api-rs fails registration at startup. This script cannot seed it —
+see the Codex/Claude Auth Modes sections in docs/pages/deploying-in-production.mdx.
 EOF
 }
 
