@@ -579,7 +579,7 @@ async def _sync_meetings(
             limit=page_size,
             cursor=cursor,
             ends_from=ends_from,
-            sort="end_time",
+            sort="start_asc",
         )
         meetings = [meeting for meeting in _page_items(page) if _meeting_id(meeting)]
         if max_meetings is not None:

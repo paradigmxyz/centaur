@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -66,3 +67,31 @@ def test_attio_transcript_text_uses_speaker_or_participant():
     )
 
     assert text == "Dana: Budget approved\nEli: Sending next steps\nFran: Thanks"
+
+
+def test_attio_sync_uses_supported_meeting_sort():
+    attio = _load("workflows.attio_sync")
+
+    class FakeAttioClient:
+        def __init__(self) -> None:
+            self.sort = None
+
+        async def list_meetings(self, **kwargs):
+            self.sort = kwargs.get("sort")
+            return {"data": []}
+
+    client = FakeAttioClient()
+
+    asyncio.run(
+        attio._sync_meetings(
+            client=client,
+            pool=None,
+            page_size=50,
+            updated_after=None,
+            max_meetings=None,
+            include_transcripts=False,
+            run_id="run_1",
+        )
+    )
+
+    assert client.sort == "start_asc"
