@@ -39,13 +39,6 @@
     <% checkbox_class = "mt-1 h-4 w-4 rounded border-ink-500 bg-ink-800 text-centaur-500 focus:ring-centaur-500" %>
     <% channel_options = @slack_channel_options || [] %>
     <% permissions = @principal.slack_channel_permissions.ordered %>
-    <% select_options_for_permission = lambda do |permission|
-         current_id = permission.channel_id.to_s
-         current_label = permission.channel_name.present? ? "##{permission.channel_name} (#{current_id})" : current_id
-         options = channel_options.dup
-         options.unshift([ current_label, current_id ]) if current_id.present? && !options.any? { |_label, value| value == current_id }
-         options
-       end %>
     <%= form_with model: @principal,
                   url: console_principal_slack_channel_permissions_path(@principal.oid),
                   method: :patch,
@@ -78,7 +71,7 @@
                       <%= permission_fields.hidden_field :channel_name, value: nil %>
                       <% if channel_options.any? %>
                         <%= permission_fields.select :channel_id,
-                                                     options_for_select(select_options_for_permission.call(permission), permission.channel_id),
+                                                     options_for_select(slack_channel_options_for_permission(permission, channel_options), permission.channel_id),
                                                      {},
                                                      class: "form-input" %>
                       <% else %>
