@@ -115,7 +115,7 @@ module Console
     def slack_channel_permission_rows
       boolean = ActiveModel::Type::Boolean.new
       channel_names_by_id = slack_channel_names_by_id
-      params.fetch(:slack_channel_permissions, ActionController::Parameters.new).to_unsafe_h.values.filter_map do |row|
+      slack_channel_permission_params.filter_map do |row|
         next if boolean.cast(row["remove"])
 
         channel_id = row["channel_id"].to_s.strip.upcase
@@ -124,14 +124,21 @@ module Console
         attrs = {
           channel_id: channel_id,
           channel_name: channel_names_by_id[channel_id].presence || row["channel_name"].to_s.strip.presence,
-          upload_enabled: boolean.cast(row["upload_enabled"]),
-          download_enabled: boolean.cast(row["download_enabled"]),
-          history_enabled: boolean.cast(row["history_enabled"])
+          upload_enabled: !!boolean.cast(row["upload_enabled"]),
+          download_enabled: !!boolean.cast(row["download_enabled"]),
+          history_enabled: !!boolean.cast(row["history_enabled"])
         }
         next unless attrs[:upload_enabled] || attrs[:download_enabled] || attrs[:history_enabled]
 
         attrs
       end
+    end
+
+    def slack_channel_permission_params
+      rows = params.permit(
+        slack_channel_permissions: %i[channel_id channel_name upload_enabled download_enabled history_enabled remove]
+      ).fetch(:slack_channel_permissions, [])
+      rows.respond_to?(:values) ? rows.values : rows
     end
 
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.

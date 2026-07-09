@@ -69,33 +69,29 @@
               </tr>
             </thead>
             <tbody class="divide-y divide-ink-700">
-              <% permissions.each_with_index do |permission, index| %>
+              <% permissions.each do |permission| %>
                 <tr>
                   <td class="console-td min-w-80">
-                    <%= hidden_field_tag "slack_channel_permissions[#{index}][channel_name]", permission.channel_name %>
+                    <%= hidden_field_tag "slack_channel_permissions[][channel_name]", permission.channel_name %>
                     <% if channel_options.any? %>
-                      <%= select_tag "slack_channel_permissions[#{index}][channel_id]",
+                      <%= select_tag "slack_channel_permissions[][channel_id]",
                                      options_for_select(select_options_for_permission.call(permission), permission.channel_id),
                                      class: "form-input" %>
                     <% else %>
-                      <%= text_field_tag "slack_channel_permissions[#{index}][channel_id]", permission.channel_id, class: "form-input", placeholder: "C0123456789" %>
+                      <%= text_field_tag "slack_channel_permissions[][channel_id]", permission.channel_id, class: "form-input", placeholder: "C0123456789" %>
                     <% end %>
                   </td>
                   <td class="console-td">
-                    <%= hidden_field_tag "slack_channel_permissions[#{index}][upload_enabled]", "0" %>
-                    <%= check_box_tag "slack_channel_permissions[#{index}][upload_enabled]", "1", permission.upload_enabled, class: checkbox_class, aria: { label: "Upload for #{permission.channel_id}" } %>
+                    <%= check_box_tag "slack_channel_permissions[][upload_enabled]", "1", permission.upload_enabled, class: checkbox_class, aria: { label: "Upload for #{permission.channel_id}" } %>
                   </td>
                   <td class="console-td">
-                    <%= hidden_field_tag "slack_channel_permissions[#{index}][download_enabled]", "0" %>
-                    <%= check_box_tag "slack_channel_permissions[#{index}][download_enabled]", "1", permission.download_enabled, class: checkbox_class, aria: { label: "Download for #{permission.channel_id}" } %>
+                    <%= check_box_tag "slack_channel_permissions[][download_enabled]", "1", permission.download_enabled, class: checkbox_class, aria: { label: "Download for #{permission.channel_id}" } %>
                   </td>
                   <td class="console-td">
-                    <%= hidden_field_tag "slack_channel_permissions[#{index}][history_enabled]", "0" %>
-                    <%= check_box_tag "slack_channel_permissions[#{index}][history_enabled]", "1", permission.history_enabled, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
+                    <%= check_box_tag "slack_channel_permissions[][history_enabled]", "1", permission.history_enabled, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
                   </td>
                   <td class="console-td">
-                    <%= hidden_field_tag "slack_channel_permissions[#{index}][remove]", "0" %>
-                    <%= check_box_tag "slack_channel_permissions[#{index}][remove]", "1", false, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
+                    <%= check_box_tag "slack_channel_permissions[][remove]", "1", false, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
                   </td>
                 </tr>
               <% end %>
@@ -106,31 +102,27 @@
         <div class="empty-state">No Slack channels selected.</div>
       <% end %>
 
-      <% new_index = permissions.size %>
       <div class="grid gap-4 border-t border-ink-700 pt-4 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
         <label class="block">
           <span class="form-label">Add Channel</span>
           <% if channel_options.any? %>
-            <%= select_tag "slack_channel_permissions[#{new_index}][channel_id]",
+            <%= select_tag "slack_channel_permissions[][channel_id]",
                            options_for_select([ [ "Select a Slack channel", "" ] ] + channel_options),
                            class: "form-input" %>
           <% else %>
-            <%= text_field_tag "slack_channel_permissions[#{new_index}][channel_id]", nil, class: "form-input", placeholder: "C0123456789" %>
+            <%= text_field_tag "slack_channel_permissions[][channel_id]", nil, class: "form-input", placeholder: "C0123456789" %>
           <% end %>
         </label>
         <label class="flex items-start gap-3 pt-6">
-          <%= hidden_field_tag "slack_channel_permissions[#{new_index}][upload_enabled]", "0" %>
-          <%= check_box_tag "slack_channel_permissions[#{new_index}][upload_enabled]", "1", true, class: checkbox_class %>
+          <%= check_box_tag "slack_channel_permissions[][upload_enabled]", "1", true, class: checkbox_class %>
           <span class="text-sm font-medium text-zinc-100">Upload</span>
         </label>
         <label class="flex items-start gap-3 pt-6">
-          <%= hidden_field_tag "slack_channel_permissions[#{new_index}][download_enabled]", "0" %>
-          <%= check_box_tag "slack_channel_permissions[#{new_index}][download_enabled]", "1", true, class: checkbox_class %>
+          <%= check_box_tag "slack_channel_permissions[][download_enabled]", "1", true, class: checkbox_class %>
           <span class="text-sm font-medium text-zinc-100">Download</span>
         </label>
         <label class="flex items-start gap-3 pt-6">
-          <%= hidden_field_tag "slack_channel_permissions[#{new_index}][history_enabled]", "0" %>
-          <%= check_box_tag "slack_channel_permissions[#{new_index}][history_enabled]", "1", true, class: checkbox_class %>
+          <%= check_box_tag "slack_channel_permissions[][history_enabled]", "1", true, class: checkbox_class %>
           <span class="text-sm font-medium text-zinc-100">History</span>
         </label>
       </div>
