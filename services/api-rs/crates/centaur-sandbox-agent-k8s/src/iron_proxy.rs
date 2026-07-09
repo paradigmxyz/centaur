@@ -1096,13 +1096,7 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
     // collector; routing them through iron-proxy fails (plain-HTTP forwards
     // are rejected), so the endpoint host always bypasses the proxy.
     no_proxy_extra.extend(otlp_endpoint_hosts(spec));
-    let api_host = env_value(spec, "CENTAUR_API_URL").and_then(host_from_url);
-    for (name, value) in proxy_env(
-        &resolved.proxy_host,
-        resolved.proxy_port,
-        api_host.as_deref(),
-        &no_proxy_extra,
-    ) {
+    for (name, value) in proxy_env(&resolved.proxy_host, resolved.proxy_port, &no_proxy_extra) {
         set_env(spec, &name, &value);
     }
     // Operator-granted replace placeholders: the sandbox sends the proxy_value
@@ -1530,11 +1524,10 @@ fn control_plane_egress_target(
 fn proxy_env(
     proxy_host: &str,
     proxy_port: u16,
-    api_host: Option<&str>,
     no_proxy_extra: &[String],
 ) -> BTreeMap<String, String> {
     let proxy_url = format!("http://{proxy_host}:{proxy_port}");
-    let no_proxy = no_proxy_value(proxy_host, api_host, no_proxy_extra);
+    let no_proxy = no_proxy_value(proxy_host, no_proxy_extra);
     BTreeMap::from([
         ("FIREWALL_HOST".to_owned(), proxy_host.to_owned()),
         ("FIREWALL_PROXY_PORT".to_owned(), proxy_port.to_string()),
@@ -1564,19 +1557,15 @@ fn proxy_env(
     ])
 }
 
-fn no_proxy_value(proxy_host: &str, api_host: Option<&str>, extra_values: &[String]) -> String {
+fn no_proxy_value(proxy_host: &str, extra_values: &[String]) -> String {
     let mut hosts = BTreeSet::<String>::from([
         "localhost".to_owned(),
         "127.0.0.1".to_owned(),
         "::1".to_owned(),
         proxy_host.to_owned(),
-        "api".to_owned(),
         "victoriametrics".to_owned(),
         "victorialogs".to_owned(),
     ]);
-    if let Some(api_host) = api_host.filter(|value| !value.is_empty()) {
-        hosts.insert(api_host.to_owned());
-    }
     for value in extra_values {
         hosts.extend(
             value
@@ -2547,6 +2536,32 @@ mod tests {
         .await;
 
         assert_eq!(ack, ProxyAck::ManagementUnavailable);
+    }
+
+    #[test]
+    fn apply_proxy_env_does_not_add_api_host_to_no_proxy() {
+        let mut spec = SandboxSpec::new("centaur-agent:latest")
+            .env("CENTAUR_API_URL", "http://api:8080")
+            .env("NO_PROXY", "custom.internal");
+
+        apply_proxy_env(&mut spec, &resolved());
+
+        for name in ["NO_PROXY", "no_proxy"] {
+            let value = spec
+                .env
+                .iter()
+                .find(|env| env.name == name)
+                .map(|env| env.value.clone())
+                .unwrap();
+            assert!(
+                !value.split(',').any(|host| host == "api"),
+                "{name} should not contain the API host: {value}"
+            );
+            assert!(
+                value.split(',').any(|host| host == "custom.internal"),
+                "{name} should preserve explicit NO_PROXY extras: {value}"
+            );
+        }
     }
 
     #[test]
