@@ -276,8 +276,16 @@ async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResp
     let client = http_client();
     let mut channels = Vec::with_capacity(channel_ids.len());
     for channel_id in channel_ids {
-        let channel = slack_channel_info(client, config, &channel_id).await?;
-        channels.push(slack_channel_item(&claims, &channel_id, &channel));
+        match slack_channel_info(client, config, &channel_id).await {
+            Ok(channel) => channels.push(slack_channel_item(&claims, &channel_id, &channel)),
+            Err(error) => {
+                tracing::warn!(
+                    channel_id,
+                    error = %error,
+                    "skipping Slack channel whose metadata could not be fetched"
+                );
+            }
+        }
     }
     channels.sort_by(|left, right| {
         left.name
@@ -492,12 +500,19 @@ async fn slack_channel_info(
         client,
         config,
         "conversations.info",
-        &[("channel", channel_id.to_owned())],
+        &slack_channel_info_form(channel_id),
     )
     .await?;
     value.get("channel").cloned().ok_or_else(|| {
         ApiError::BadRequest("Slack channel info response did not include channel".to_owned())
     })
+}
+
+fn slack_channel_info_form(channel_id: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("channel", channel_id.to_owned()),
+        ("include_num_members", "true".to_owned()),
+    ]
 }
 
 async fn slack_channel_history(
@@ -986,6 +1001,17 @@ mod tests {
         assert!(item.can_upload);
         assert!(!item.can_download);
         assert!(item.can_read_history);
+    }
+
+    #[test]
+    fn channel_info_form_requests_member_counts() {
+        assert_eq!(
+            slack_channel_info_form("C123456789"),
+            vec![
+                ("channel", "C123456789".to_owned()),
+                ("include_num_members", "true".to_owned()),
+            ]
+        );
     }
 
     #[test]
