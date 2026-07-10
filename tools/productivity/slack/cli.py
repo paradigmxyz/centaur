@@ -1013,6 +1013,52 @@ def _print_file_search_results(query: str, results: list[dict]) -> None:
     console.print(table)
 
 
+@app.command("file-info-proxy")
+@app.command("file-info")
+def file_info(
+    file_id: str = typer.Argument(..., help="Slack file ID, e.g. F1234567890"),
+    channel_id: str = typer.Argument(
+        ..., help="Slack channel/conversation ID that the file is shared in"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output raw metadata as JSON"),
+):
+    """Fetch Slack file metadata through the Centaur API server Slack proxy."""
+    import sys
+
+    from .client import file_info_proxy
+
+    try:
+        result = file_info_proxy(file_id=file_id, channel_id=channel_id)
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]Error fetching Slack file info: {e}[/]")
+        raise typer.Exit(1) from e
+
+    if json_output:
+        print(json.dumps(result, indent=2, ensure_ascii=False), file=sys.stdout)
+        raise typer.Exit()
+
+    file = result.get("file", {})
+    table = Table(title=f"Slack File {result.get('file_id') or file_id}")
+    table.add_column("Field", style="cyan", max_width=18)
+    table.add_column("Value", style="white", max_width=90)
+    for key in [
+        "id",
+        "name",
+        "title",
+        "mimetype",
+        "filetype",
+        "size",
+        "user",
+        "created",
+        "permalink",
+        "url_private",
+    ]:
+        value = file.get(key)
+        if value not in (None, "", []):
+            table.add_row(key, str(value))
+    console.print(table)
+
+
 @app.command("search-users")
 def search_users_cmd(
     query: str = typer.Argument(..., help="Search by name, email, or title"),

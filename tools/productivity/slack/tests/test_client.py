@@ -725,6 +725,41 @@ def test_download_file_proxy_returns_base64_file(
     assert urllib.parse.parse_qs(parsed.query) == {"channel_id": ["C123456789"]}
 
 
+def test_file_info_proxy_calls_centaur_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.parse
+    import urllib.request
+
+    client, _ = _make_client()
+    request_info: dict[str, str | None] = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        request_info["url"] = req.full_url
+        request_info["authorization"] = req.get_header("Authorization")
+        body = json.dumps(
+            {
+                "ok": True,
+                "file_id": "F123456789",
+                "channel_id": "C123456789",
+                "file": {"id": "F123456789", "name": "report.pdf"},
+            }
+        ).encode()
+        return _FakeHTTPResponse(body, "application/json")
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080")
+    monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "test-jwt")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.file_info_proxy(file_id="F123456789", channel_id="<#C123456789|general>")
+
+    assert result["file"] == {"id": "F123456789", "name": "report.pdf"}
+    assert request_info["authorization"] == "Bearer test-jwt"
+    parsed = urllib.parse.urlparse(request_info["url"])
+    assert parsed.path == "/api/slack/files/F123456789/info"
+    assert urllib.parse.parse_qs(parsed.query) == {"channel_id": ["C123456789"]}
+
+
 def test_file_proxy_methods_validate_inputs() -> None:
     client, _ = _make_client()
 
@@ -742,6 +777,8 @@ def test_file_proxy_methods_validate_inputs() -> None:
         )
     with pytest.raises(ValueError, match="file_id"):
         client.download_file_proxy(file_id="bad", channel_id="C123456789")
+    with pytest.raises(ValueError, match="file_id"):
+        client.file_info_proxy(file_id="bad", channel_id="C123456789")
 
 
 def test_search_files_uses_proxy_with_user_cache(

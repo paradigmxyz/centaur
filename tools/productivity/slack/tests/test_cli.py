@@ -381,6 +381,36 @@ def test_download_writes_file_with_proxy(monkeypatch, tmp_path: Path) -> None:
     assert (tmp_path / "report.pdf").read_bytes() == b"%PDF"
 
 
+def test_file_info_calls_proxy_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_file_info_proxy(**kwargs):
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "file_id": "F1234567890",
+            "channel_id": "C1234567890",
+            "file": {
+                "id": "F1234567890",
+                "name": "report.pdf",
+                "filetype": "pdf",
+                "size": 1234,
+            },
+        }
+
+    fake_client = types.SimpleNamespace(file_info_proxy=fake_file_info_proxy)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        ["file-info", "F1234567890", "C1234567890"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [{"file_id": "F1234567890", "channel_id": "C1234567890"}]
+    assert "report.pdf" in result.output
+
+
 def test_thread_calls_api_server_client(monkeypatch) -> None:
     calls = []
 

@@ -2063,6 +2063,20 @@ class SlackClient:
             "content_base64": base64.b64encode(body).decode(),
         }
 
+    def file_info_proxy(self, file_id: str, channel_id: str) -> dict[str, Any]:
+        """Fetch Slack file metadata through the Centaur API server proxy."""
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack file info proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+        normalized_file_id = self._normalize_file_id(file_id)
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        return self._centaur_api_get_json(
+            f"/api/slack/files/{urllib.parse.quote(normalized_file_id, safe='')}/info",
+            {"channel_id": normalized_channel_id},
+        )
+
     def list_usergroups(self) -> list[dict]:
         """List all user groups in the workspace."""
         try:
@@ -2565,6 +2579,10 @@ def upload_file_proxy(*args, **kwargs):
 
 def download_file_proxy(*args, **kwargs):
     return _client().download_file_proxy(*args, **kwargs)
+
+
+def file_info_proxy(*args, **kwargs):
+    return _client().file_info_proxy(*args, **kwargs)
 
 
 def list_usergroups(*args, **kwargs):
