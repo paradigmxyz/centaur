@@ -221,6 +221,11 @@ fn parse_slack_segments(thread_key: &str) -> (Option<&str>, Option<&str>) {
     (team, conversation)
 }
 
+/// The first Slack conversation id (``C``/``D``/``G``) in a thread key.
+pub(crate) fn slack_conversation_id(thread_key: &str) -> Option<&str> {
+    parse_slack_segments(thread_key).1
+}
+
 /// The guild and (optional) channel segments of a ``discord:<guild>:<channel>``
 /// thread key, or ``None`` when the key is not a Discord thread. The discordbot
 /// encodes session threads as ``discord:<guild_id>:<channel_id>[:<thread_id>]``,
@@ -273,10 +278,10 @@ fn parse_teams_adapter_segments(thread_key: &str) -> Option<(String, String, Opt
 }
 
 /// Slack direct-message conversation ids start with ``D``.
-fn is_direct_message(conversation_id: Option<&str>) -> bool {
+pub(crate) fn is_direct_message(conversation_id: Option<&str>) -> bool {
     conversation_id
         .and_then(|id| id.chars().next())
-        .is_some_and(|first| first.eq_ignore_ascii_case(&'d'))
+        .is_some_and(|first| first == 'D')
 }
 
 #[cfg(test)]

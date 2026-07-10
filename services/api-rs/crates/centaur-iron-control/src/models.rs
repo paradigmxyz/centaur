@@ -488,11 +488,8 @@ pub struct SlackChannelPermissionInput {
     pub channel_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_false")]
     pub upload_enabled: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_false")]
     pub download_enabled: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_false")]
     pub history_enabled: bool,
 }
 
@@ -713,7 +710,7 @@ pub struct Proxy {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_gcp_id_token_header;
+    use super::{SlackChannelPermissionInput, normalize_gcp_id_token_header};
 
     #[test]
     fn normalizes_supported_gcp_id_token_headers() {
@@ -726,5 +723,21 @@ mod tests {
             Some("x-serverless-authorization")
         );
         assert_eq!(normalize_gcp_id_token_header("x-other"), None);
+    }
+
+    #[test]
+    fn slack_channel_permission_serializes_false_values() {
+        let value = serde_json::to_value(SlackChannelPermissionInput {
+            channel_id: "C0123456789".to_owned(),
+            channel_name: None,
+            upload_enabled: false,
+            download_enabled: true,
+            history_enabled: false,
+        })
+        .unwrap();
+
+        assert_eq!(value["upload_enabled"], false);
+        assert_eq!(value["download_enabled"], true);
+        assert_eq!(value["history_enabled"], false);
     }
 }

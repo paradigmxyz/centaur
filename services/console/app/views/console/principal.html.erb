@@ -65,10 +65,28 @@
             <tbody class="divide-y divide-ink-700">
               <% permissions.each do |permission| %>
                 <tr>
-                  <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
+                  <% if permission.channel_id.to_s.start_with?("D") %>
+                    <td class="console-td min-w-80">
+                      <div class="text-sm text-zinc-100">DM <%= permission.channel_name.presence || permission.channel_id %></div>
+                      <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>
+                    </td>
+                    <td class="console-td">
+                      <%= check_box_tag nil, "1", permission.upload_enabled, disabled: true, class: checkbox_class, aria: { label: "Upload for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <%= check_box_tag nil, "1", permission.download_enabled, disabled: true, class: checkbox_class, aria: { label: "Download for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <%= check_box_tag nil, "1", permission.history_enabled, disabled: true, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <span class="text-xs text-zinc-500">API-managed</span>
+                    </td>
+                  <% else %>
+                    <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
                     <td class="console-td min-w-80">
                       <%= permission_fields.hidden_field :id %>
-                      <%= permission_fields.hidden_field :channel_name, value: permission.channel_name %>
+                      <%= permission_fields.hidden_field :channel_name, value: nil %>
                       <% if channel_options.any? %>
                         <%= permission_fields.select :channel_id,
                                                      options_for_select(slack_channel_options_for_permission(permission, channel_options), permission.channel_id),
@@ -90,6 +108,7 @@
                     <td class="console-td">
                       <%= permission_fields.check_box :_destroy, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
                     </td>
+                    <% end %>
                   <% end %>
                 </tr>
               <% end %>

@@ -26,7 +26,7 @@ class ConsoleController < ApplicationController
   def principal
     @principal = Principal.find_by_oid!(params[:id])
     @slack_channel_catalog = SlackChannelCatalog.fetch
-    @slack_channel_permissions = @principal.slack_channel_permissions.ordered.where.not("channel_id LIKE ?", "D%")
+    @slack_channel_permissions = @principal.slack_channel_permissions.ordered
     @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
       label = "#{channel.private ? "Private" : "Public"} ##{channel.name} (#{channel.id})"
       [ label, channel.id ]

@@ -35,7 +35,7 @@ class SlackChannelCatalog
   def self.cache_key(token:, api_url:)
     token_digest = Digest::SHA256.hexdigest(token)
     api_url_digest = Digest::SHA256.hexdigest(api_url)
-    "slack_channel_catalog/v2/#{api_url_digest}/#{token_digest}"
+    "slack_channel_catalog/v1/#{api_url_digest}/#{token_digest}"
   end
 
   def self.serialize_result(result)

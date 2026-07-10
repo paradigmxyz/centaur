@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
 use crate::models::{Principal, SlackChannelPermissionInput};
-use crate::principal::derive_principal_with_slack_team;
+use crate::principal::{
+    derive_principal_with_slack_team, is_direct_message, slack_conversation_id,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SessionPrincipalMetadata<'a> {
@@ -135,12 +137,14 @@ fn slack_permission_for_thread(
     labels: &BTreeMap<String, String>,
 ) -> Option<SlackChannelPermissionInput> {
     if let Some(channel_id) = labels.get("slack_channel_id") {
-        return (!is_slack_dm_id(channel_id)).then(|| slack_permission(channel_id.clone(), None));
+        let channel_id = channel_id.trim();
+        return (!is_direct_message(Some(channel_id)))
+            .then(|| slack_permission(channel_id.to_owned(), None));
     }
 
     let user_id = labels.get("slack_user_id")?;
     let conversation_id = slack_conversation_id(thread_key)?;
-    is_slack_dm_id(conversation_id).then(|| {
+    is_direct_message(Some(conversation_id)).then(|| {
         slack_permission(
             conversation_id.to_owned(),
             Some(user_id.trim().to_owned()).filter(|value| !value.is_empty()),
@@ -159,18 +163,6 @@ fn slack_permission(
         download_enabled: true,
         history_enabled: true,
     }
-}
-
-fn slack_conversation_id(thread_key: &str) -> Option<&str> {
-    thread_key
-        .split(':')
-        .skip(1)
-        .map(str::trim)
-        .find(|segment| matches!(segment.chars().next(), Some('C' | 'D' | 'G')))
-}
-
-fn is_slack_dm_id(value: &str) -> bool {
-    matches!(value.trim().chars().next(), Some('D'))
 }
 
 fn is_status(err: &IronControlError, code: u16) -> bool {

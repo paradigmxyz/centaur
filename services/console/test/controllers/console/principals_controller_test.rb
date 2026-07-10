@@ -128,6 +128,39 @@ module Console
       )
     end
 
+    test "update_slack_channel_permissions clears stale channel names when changing channels" do
+      principal = principals(:acme_user_bob)
+      permission = SlackChannelPermission.create!(
+        principal: principal,
+        channel_id: "C0123456789",
+        channel_name: "old-channel",
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true
+      )
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    channel_id: "G9876543210",
+                    channel_name: "",
+                    upload_enabled: "1",
+                    download_enabled: "1",
+                    history_enabled: "1"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      permission.reload
+      assert_equal "G9876543210", permission.channel_id
+      assert_nil permission.channel_name
+    end
+
     test "destroy deletes the principal and dependent access records" do
       principal = principals(:acme_channel)
       proxy = proxies(:acme_proxy)
