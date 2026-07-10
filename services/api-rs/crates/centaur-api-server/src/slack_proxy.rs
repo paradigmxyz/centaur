@@ -236,10 +236,9 @@ async fn download_slack_file(
     Path(file_id): Path<String>,
     Query(query): Query<SlackFileDownloadQuery>,
 ) -> Result<Response, ApiError> {
-    let config = slack_proxy_config()?;
     let client = http_client();
-    let file =
-        authorized_slack_file_info(&headers, client, config, &file_id, &query.channel_id).await?;
+    let (config, file) =
+        authorized_slack_file_info(&headers, client, &file_id, &query.channel_id).await?;
     let download_url = file
         .get("url_private_download")
         .or_else(|| file.get("url_private"))
@@ -350,10 +349,8 @@ async fn get_slack_file_info(
     Path(file_id): Path<String>,
     Query(query): Query<SlackFileInfoQuery>,
 ) -> Result<Json<SlackFileInfoResponse>, ApiError> {
-    let config = slack_proxy_config()?;
-    let file =
-        authorized_slack_file_info(&headers, http_client(), config, &file_id, &query.channel_id)
-            .await?;
+    let (_, file) =
+        authorized_slack_file_info(&headers, http_client(), &file_id, &query.channel_id).await?;
 
     Ok(Json(SlackFileInfoResponse {
         ok: true,
@@ -366,22 +363,22 @@ async fn get_slack_file_info(
 async fn authorized_slack_file_info(
     headers: &HeaderMap,
     client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
     file_id: &str,
     channel_id: &str,
-) -> Result<Value, ApiError> {
+) -> Result<(&'static SlackFileProxyConfig, Value), ApiError> {
     let claims = authorize_slack_file_proxy(headers)?;
     ensure_download_channel_allowed(&claims, channel_id)?;
     validate_slack_channel_id(channel_id)?;
     validate_slack_file_id(file_id)?;
 
+    let config = slack_proxy_config()?;
     let file = slack_file_info(client, config, file_id).await?;
     if !slack_file_in_channel(&file, channel_id) {
         return Err(ApiError::Forbidden(
             "file is not shared in an allowed Slack channel".to_owned(),
         ));
     }
-    Ok(file)
+    Ok((config, file))
 }
 
 async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResponse>, ApiError> {
@@ -1309,6 +1306,15 @@ mod tests {
             .unwrap_err(),
             ApiError::BadRequest(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn file_info_authorizes_before_reading_slack_config() {
+        let headers = HeaderMap::new();
+        let result =
+            authorized_slack_file_info(&headers, http_client(), "F123456789", "C123456789").await;
+
+        assert!(matches!(result, Err(ApiError::Unauthorized(_))));
     }
 
     #[test]
