@@ -91,7 +91,8 @@ const REASONING_EFFORTS: Record<string, string> = {
   hi: 'high',
   xhigh: 'xhigh',
   xhi: 'xhigh',
-  'x-high': 'xhigh'
+  'x-high': 'xhigh',
+  max: 'max'
 }
 
 export function extractMessageOverrides(text: string): MessageOverrides {

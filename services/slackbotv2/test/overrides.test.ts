@@ -180,6 +180,10 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('-rsn xhi fix it').reasoning).toBe('xhigh')
   })
 
+  test('-rsn accepts the GPT-5.6 max effort', () => {
+    expect(extractMessageOverrides('-rsn max fix it').reasoning).toBe('max')
+  })
+
   test('-rsn combines with a harness flag', () => {
     expect(extractMessageOverrides('-rsn high --codex audit this')).toEqual({
       cleanedText: 'audit this',

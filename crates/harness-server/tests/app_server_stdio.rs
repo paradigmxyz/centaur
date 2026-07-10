@@ -747,7 +747,7 @@ fn fake_codex_blocks_mode_forwards_reasoning_as_turn_start_effort() {
         json!({
             "type": "user",
             "thread_key": "slack:C123:123.456",
-            "reasoning": "high",
+            "reasoning": "max",
             "message": {
                 "role": "user",
                 "content": [{"type": "text", "text": "say codex blocks"}],
@@ -766,7 +766,7 @@ fn fake_codex_blocks_mode_forwards_reasoning_as_turn_start_effort() {
         .expect("blocks mode did not send turn/start");
     assert_eq!(
         turn_start.pointer("/params/effort").and_then(Value::as_str),
-        Some("high"),
+        Some("max"),
         "reasoning should be forwarded as turn/start effort; turn_start={turn_start}"
     );
 
