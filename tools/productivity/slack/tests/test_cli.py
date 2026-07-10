@@ -18,6 +18,155 @@ def test_channel_arg_is_id_rejects_names() -> None:
     assert not _channel_arg_is_id("#eng-centaur")
 
 
+def test_channel_calls_proxy_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_get_channel_history_proxy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {
+            "ok": True,
+            "messages": [{"user": "U123", "text": "root"}],
+            "has_more": False,
+            "response_metadata": {},
+        }
+
+    fake_client = types.SimpleNamespace(get_channel_history_proxy=fake_get_channel_history_proxy)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "channel",
+            "C1234567890",
+            "--limit",
+            "10",
+            "--cursor",
+            "next",
+            "--inclusive",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ("C1234567890",),
+            {
+                "cursor": "next",
+                "include_all_metadata": None,
+                "inclusive": True,
+                "latest": None,
+                "limit": 10,
+                "oldest": None,
+            },
+        )
+    ]
+
+
+def test_channel_direct_calls_direct_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_get_channel_history_page(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {
+            "channel": "C1234567890",
+            "messages": [{"user": "alice", "text": "root"}],
+            "has_more": False,
+            "window": {"oldest": None, "latest": None, "inclusive": False},
+        }
+
+    fake_client = types.SimpleNamespace(get_channel_history_page=fake_get_channel_history_page)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "channel-direct",
+            "C1234567890",
+            "--limit",
+            "10",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ("C1234567890",),
+            {
+                "limit": 10,
+                "cursor": None,
+                "oldest": None,
+                "latest": None,
+                "inclusive": False,
+            },
+        )
+    ]
+
+
+def test_channels_calls_proxy_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_list_channels_proxy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [
+            {
+                "id": "C1234567890",
+                "name": "general",
+                "purpose": "Company",
+                "topic": "",
+                "member_count": 10,
+                "is_private": False,
+                "can_read_history": True,
+                "can_upload": False,
+                "can_download": True,
+            }
+        ]
+
+    fake_client = types.SimpleNamespace(list_channels_proxy=fake_list_channels_proxy)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        ["channels", "--limit", "10", "--bot-member-only"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [((), {"limit": 10, "history_only": True})]
+    assert "general" in result.output
+
+
+def test_channels_direct_calls_direct_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_list_channels(*args, **kwargs):
+        calls.append(("list_channels", args, kwargs))
+        return [
+            {
+                "id": "C1234567890",
+                "name": "general",
+                "purpose": "Company",
+                "topic": "",
+                "member_count": 10,
+                "is_private": False,
+            }
+        ]
+
+    def fake_list_bot_channels(*args, **kwargs):
+        calls.append(("list_bot_channels", args, kwargs))
+        return []
+
+    fake_client = types.SimpleNamespace(
+        list_channels=fake_list_channels,
+        list_bot_channels=fake_list_bot_channels,
+    )
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(app, ["channels-direct", "--limit", "10"])
+
+    assert result.exit_code == 0
+    assert calls == [("list_channels", (), {"limit": 10})]
+    assert "general" in result.output
+
+
 def test_upload_direct_requires_explicit_channel_and_thread(
     monkeypatch, tmp_path: Path
 ) -> None:

@@ -116,8 +116,9 @@ def search(
 ):
     """Search messages in bot-accessible channels.
 
-    Searches across all channels the bot is a member of. Results are ranked by
-    relevance (exact phrase matches score higher). Use --channels to limit scope.
+    Searches across Slack native search first, then scans channel history through
+    the Centaur API server proxy. Results are ranked by relevance (exact phrase
+    matches score higher). Use --channels to limit scope.
 
     Note: Only searches channels where the bot is a member. To search more channels,
     invite the bot to those channels first.
@@ -164,8 +165,8 @@ def search(
         console.print(table)
 
 
-@app.command()
-def channel(
+@app.command("channel-direct")
+def channel_direct(
     name: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
     limit: int = typer.Option(50, "--limit", "-n", help="Max messages"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
@@ -192,14 +193,14 @@ def channel(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output full page metadata as JSON"),
 ):
-    """Get recent messages from a channel or a bounded history window."""
+    """Get recent messages from a channel directly with the Slack SDK."""
     import sys
 
     from .client import get_channel_history_page
 
     if not allow_name_resolution and not _channel_arg_is_id(name):
         stderr_console.print(
-            "[red]Error: slack channel requires an explicit Slack channel ID like C1234567890. "
+            "[red]Error: slack channel-direct requires an explicit Slack channel ID like C1234567890. "
             "Pass --allow-name-resolution to resolve a channel name intentionally.[/]"
         )
         raise typer.Exit(1)
@@ -246,8 +247,8 @@ def channel(
         console.print(f"[green]{msg['user']}[/]{thread_info}: {text}")
 
 
-@app.command("channel-proxy")
-def channel_proxy(
+@app.command("channel")
+def channel(
     channel_id: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
     limit: int = typer.Option(50, "--limit", "-n", help="Max messages"),
     cursor: str = typer.Option(None, "--cursor", help="Slack pagination cursor for the next page"),
@@ -545,8 +546,63 @@ def sync_history(
     console.print(f"[dim]sync_state={json.dumps(result['sync_state'], ensure_ascii=False)}[/]")
 
 
-@app.command()
+def _render_channels(results: list[dict], title: str, include_access: bool = False) -> None:
+    """Render a Slack channel list."""
+    if not results:
+        console.print("[yellow]No channels found.[/]")
+        raise typer.Exit()
+
+    table = Table(title=title)
+    table.add_column("Name", style="cyan", max_width=25)
+    table.add_column("Members", style="green", justify="right", max_width=8)
+    if include_access:
+        table.add_column("Access", style="magenta", max_width=12)
+    table.add_column("Purpose", style="white", max_width=50)
+
+    for ch in results:
+        priv = "[dim]🔒[/]" if ch["is_private"] else ""
+        purpose = (ch["purpose"] or ch["topic"] or "")[:50]
+        row = [f"#{ch['name']}{priv}", str(ch["member_count"])]
+        if include_access:
+            access = "".join(
+                label
+                for label, enabled in [
+                    ("h", ch.get("can_read_history")),
+                    ("u", ch.get("can_upload")),
+                    ("d", ch.get("can_download")),
+                ]
+                if enabled
+            )
+            row.append(access or "-")
+        row.append(purpose)
+        table.add_row(*row)
+
+    console.print(table)
+
+
+@app.command("channels")
 def channels(
+    limit: int = typer.Option(100, "--limit", "-n", help="Max channels"),
+    query: str = typer.Option(None, "--query", "-q", help="Filter by name"),
+    bot_member_only: bool = typer.Option(
+        False,
+        "--bot-member-only",
+        help="Only list JWT-authorized channels with history access",
+    ),
+):
+    """List Slack channels authorized by the Centaur API server proxy JWT."""
+    from .client import list_channels_proxy
+
+    results = list_channels_proxy(limit=limit, history_only=bot_member_only)
+
+    if query:
+        results = [c for c in results if query.lower() in c["name"].lower()]
+
+    _render_channels(results, f"Channels ({len(results)})", include_access=True)
+
+
+@app.command("channels-direct")
+def channels_direct(
     limit: int = typer.Option(100, "--limit", "-n", help="Max channels"),
     query: str = typer.Option(None, "--query", "-q", help="Filter by name"),
     bot_member_only: bool = typer.Option(
@@ -555,7 +611,7 @@ def channels(
         help="Only list channels the bot can actually read history from",
     ),
 ):
-    """List all Slack channels."""
+    """List Slack channels directly with the Slack SDK."""
     from .client import list_bot_channels, list_channels
 
     if bot_member_only:
@@ -566,21 +622,7 @@ def channels(
     if query:
         results = [c for c in results if query.lower() in c["name"].lower()]
 
-    if not results:
-        console.print("[yellow]No channels found.[/]")
-        raise typer.Exit()
-
-    table = Table(title=f"Channels ({len(results)})")
-    table.add_column("Name", style="cyan", max_width=25)
-    table.add_column("Members", style="green", justify="right", max_width=8)
-    table.add_column("Purpose", style="white", max_width=50)
-
-    for ch in results:
-        priv = "[dim]🔒[/]" if ch["is_private"] else ""
-        purpose = (ch["purpose"] or ch["topic"] or "")[:50]
-        table.add_row(f"#{ch['name']}{priv}", str(ch["member_count"]), purpose)
-
-    console.print(table)
+    _render_channels(results, f"Channels ({len(results)})")
 
 
 @app.command("channel-members")

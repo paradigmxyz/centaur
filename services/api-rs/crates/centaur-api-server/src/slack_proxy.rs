@@ -43,6 +43,7 @@ pub(crate) fn slack_proxy_router() -> Router<AppState> {
             "/api/slack/files/{file_id}/download",
             get(download_slack_file),
         )
+        .route("/api/slack/channels", get(get_slack_channels))
         .route(
             "/api/slack/channels/{channel_id}/history",
             get(get_slack_channel_history),
@@ -114,6 +115,27 @@ struct SlackFileUploadResponse {
     channel_id: String,
     thread_ts: Option<String>,
     file: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackChannelsResponse {
+    ok: bool,
+    channels: Vec<SlackChannelItem>,
+    count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackChannelItem {
+    id: String,
+    name: String,
+    purpose: String,
+    topic: String,
+    member_count: u64,
+    is_private: bool,
+    is_member: bool,
+    can_upload: bool,
+    can_download: bool,
+    can_read_history: bool,
 }
 
 async fn upload_slack_file(
@@ -244,6 +266,31 @@ async fn download_slack_file(
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
+}
+
+async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResponse>, ApiError> {
+    let claims = authorize_slack_file_proxy(&headers)?;
+    let channel_ids = slack_channel_ids_from_claims(&claims)?;
+
+    let config = slack_proxy_config()?;
+    let client = http_client();
+    let mut channels = Vec::with_capacity(channel_ids.len());
+    for channel_id in channel_ids {
+        let channel = slack_channel_info(client, config, &channel_id).await?;
+        channels.push(slack_channel_item(&claims, &channel_id, &channel));
+    }
+    channels.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(Json(SlackChannelsResponse {
+        ok: true,
+        count: channels.len(),
+        channels,
+    }))
 }
 
 async fn get_slack_channel_history(
@@ -436,6 +483,23 @@ async fn slack_file_info(
     })
 }
 
+async fn slack_channel_info(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+) -> Result<Value, ApiError> {
+    let value = slack_api_post_form(
+        client,
+        config,
+        "conversations.info",
+        &[("channel", channel_id.to_owned())],
+    )
+    .await?;
+    value.get("channel").cloned().ok_or_else(|| {
+        ApiError::BadRequest("Slack channel info response did not include channel".to_owned())
+    })
+}
+
 async fn slack_channel_history(
     client: &reqwest::Client,
     config: &SlackFileProxyConfig,
@@ -579,6 +643,75 @@ fn ensure_channel_allowed(
         return Ok(());
     }
     Err(ApiError::Forbidden(message.to_owned()))
+}
+
+fn slack_channel_ids_from_claims(claims: &SlackFileProxyClaims) -> Result<Vec<String>, ApiError> {
+    let mut channel_ids = BTreeSet::new();
+    for channel_id in claims
+        .slack
+        .upload_channels
+        .iter()
+        .chain(claims.slack.download_channels.iter())
+        .chain(claims.slack.history_channels.iter())
+    {
+        validate_slack_channel_id(channel_id)?;
+        channel_ids.insert(channel_id.to_owned());
+    }
+    Ok(channel_ids.into_iter().collect())
+}
+
+fn slack_channel_item(
+    claims: &SlackFileProxyClaims,
+    channel_id: &str,
+    channel: &Value,
+) -> SlackChannelItem {
+    SlackChannelItem {
+        id: channel_id.to_owned(),
+        name: channel
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(channel_id)
+            .to_owned(),
+        purpose: slack_channel_text_field(channel, "purpose"),
+        topic: slack_channel_text_field(channel, "topic"),
+        member_count: channel
+            .get("num_members")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        is_private: channel
+            .get("is_private")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| channel_id.starts_with('G')),
+        is_member: channel
+            .get("is_member")
+            .and_then(Value::as_bool)
+            .unwrap_or_default(),
+        can_upload: claims
+            .slack
+            .upload_channels
+            .iter()
+            .any(|allowed| allowed == channel_id),
+        can_download: claims
+            .slack
+            .download_channels
+            .iter()
+            .any(|allowed| allowed == channel_id),
+        can_read_history: claims
+            .slack
+            .history_channels
+            .iter()
+            .any(|allowed| allowed == channel_id),
+    }
+}
+
+fn slack_channel_text_field(channel: &Value, field: &str) -> String {
+    channel
+        .get(field)
+        .and_then(|value| value.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn slack_file_in_channel(file: &Value, channel_id: &str) -> bool {
@@ -800,6 +933,59 @@ mod tests {
             ensure_history_channel_allowed(&claims, "C123456789").unwrap_err(),
             ApiError::Forbidden(_)
         ));
+    }
+
+    #[test]
+    fn extracts_deduped_channel_ids_from_all_slack_claims() {
+        let claims = SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: vec!["C123456789".to_owned()],
+                download_channels: vec!["G123456789".to_owned(), "C123456789".to_owned()],
+                history_channels: vec!["D123456789".to_owned(), "G123456789".to_owned()],
+            },
+        };
+
+        assert_eq!(
+            slack_channel_ids_from_claims(&claims).unwrap(),
+            vec![
+                "C123456789".to_owned(),
+                "D123456789".to_owned(),
+                "G123456789".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn channel_item_enriches_slack_metadata_with_permissions() {
+        let claims = SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: vec!["C123456789".to_owned()],
+                download_channels: vec![],
+                history_channels: vec!["C123456789".to_owned()],
+            },
+        };
+        let channel = json!({
+            "id": "C123456789",
+            "name": "general",
+            "purpose": {"value": "Company updates"},
+            "topic": {"value": "Announcements"},
+            "num_members": 42,
+            "is_private": false,
+            "is_member": true
+        });
+
+        let item = slack_channel_item(&claims, "C123456789", &channel);
+
+        assert_eq!(item.id, "C123456789");
+        assert_eq!(item.name, "general");
+        assert_eq!(item.purpose, "Company updates");
+        assert_eq!(item.topic, "Announcements");
+        assert_eq!(item.member_count, 42);
+        assert!(!item.is_private);
+        assert!(item.is_member);
+        assert!(item.can_upload);
+        assert!(!item.can_download);
+        assert!(item.can_read_history);
     }
 
     #[test]

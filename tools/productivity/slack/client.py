@@ -737,23 +737,17 @@ class SlackClient:
         self._save_channel_cache(result)
         return result
 
-    def _fetch_channel_history(
+    def _fetch_channel_history_for_search(
         self,
-        client: WebClient,
         channel_id: str,
         channel_name: str,
         limit: int,
         user_cache: dict[str, str],
     ) -> list[dict]:
-        """Fetch history for a single channel (used by search)."""
+        """Fetch history for a single search fallback channel through the proxy."""
         try:
-            response = self._retry_on_ratelimit(
-                client.conversations_history,
-                method_key="conversations.history",
-                channel=channel_id,
-                limit=limit,
-            )
-        except (SlackApiError, SlackRateLimitError):
+            response = self.get_channel_history_proxy(channel_id, limit=limit)
+        except (RuntimeError, ValueError):
             return []
 
         messages = []
@@ -826,7 +820,7 @@ class SlackClient:
         Uses Slack's native search.messages API for fast, workspace-wide
         search. When ``SLACK_SEARCH_TOKEN`` is configured, the native call runs
         with that dedicated user token and its ``search:read`` scope. Falls
-        back to local channel scanning if the native API fails.
+        back to proxy-backed channel history scanning if the native API fails.
 
         Supports Slack search modifiers in the query string:
             in:#channel, from:@user, before:YYYY-MM-DD, after:YYYY-MM-DD,
@@ -862,7 +856,7 @@ class SlackClient:
         try:
             return self._search_messages_native(search_query, max_results)
         except (SlackApiError, RuntimeError, SlackRateLimitError):
-            # Fall back to local scanning if native search fails
+            # Fall back to proxy-backed channel history scanning if native search fails.
             return self._search_messages_local(
                 local_query, max_results, local_channels, local_from_user, messages_per_channel
             )
@@ -980,7 +974,7 @@ class SlackClient:
                 unresolved_names.add(normalized.lower())
 
         if unresolved_names:
-            for channel in self.list_bot_channels():
+            for channel in self.list_channels_proxy(history_only=True):
                 if channel["name"].lower() in unresolved_names:
                     resolved[channel["id"]] = channel
 
@@ -994,13 +988,13 @@ class SlackClient:
         from_user: str | None = None,
         messages_per_channel: int = 200,
     ) -> list[dict]:
-        """Search messages by scanning channel histories locally (fallback)."""
+        """Search messages by scanning channel histories through the proxy."""
         query_terms = [t.strip().lower() for t in query.split() if t.strip()]
 
         if channels:
             bot_channels = self._channel_refs_for_search(channels)
         else:
-            bot_channels = self.list_bot_channels()
+            bot_channels = self.list_channels_proxy(history_only=True)
             bot_channels = self._rank_channels_for_query(bot_channels, query_terms)
             bot_channels = bot_channels[: self._MAX_SEARCH_CHANNELS]
 
@@ -1016,8 +1010,7 @@ class SlackClient:
         with ThreadPoolExecutor(max_workers=min(6, len(bot_channels))) as executor:
             futures = {
                 executor.submit(
-                    self._fetch_channel_history,
-                    self._client,
+                    self._fetch_channel_history_for_search,
                     ch["id"],
                     ch["name"],
                     effective_limit,
@@ -1447,6 +1440,36 @@ class SlackClient:
                 break
 
         return sorted(channels, key=lambda x: x["name"])
+
+    def list_channels_proxy(self, limit: int = 200, history_only: bool = False) -> list[dict]:
+        """List Slack channels exposed by the Centaur API server proxy JWT."""
+        if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+            raise RuntimeError(
+                "Slack channel listing proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        response = self._centaur_api_get_json("/api/slack/channels", {})
+        channels = response.get("channels", []) or []
+        if history_only:
+            channels = [channel for channel in channels if channel.get("can_read_history")]
+        normalized_channels = [
+            {
+                "id": channel.get("id", ""),
+                "name": channel.get("name", "") or channel.get("id", ""),
+                "purpose": channel.get("purpose", ""),
+                "topic": channel.get("topic", ""),
+                "member_count": channel.get("member_count", 0),
+                "is_private": channel.get("is_private", False),
+                "is_member": channel.get("is_member", False),
+                "can_upload": channel.get("can_upload", False),
+                "can_download": channel.get("can_download", False),
+                "can_read_history": channel.get("can_read_history", False),
+            }
+            for channel in channels
+        ]
+        normalized_channels.sort(key=lambda channel: (channel["name"].lower(), channel["id"]))
+        return normalized_channels[:limit]
 
     def list_users(self, limit: int = 200) -> list[dict]:
         """List workspace users."""
@@ -2402,6 +2425,10 @@ def sync_channel_history(*args, **kwargs):
 
 def list_channels(*args, **kwargs):
     return _client().list_channels(*args, **kwargs)
+
+
+def list_channels_proxy(*args, **kwargs):
+    return _client().list_channels_proxy(*args, **kwargs)
 
 
 def list_users(*args, **kwargs):

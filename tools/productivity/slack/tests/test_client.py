@@ -473,6 +473,53 @@ def test_get_channel_history_proxy_validates_inputs() -> None:
         client.get_channel_history_proxy("C123456789", limit=1000)
 
 
+def test_list_channels_proxy_calls_centaur_api() -> None:
+    client, _ = _make_client()
+
+    def fake_get_json(path, params):
+        assert path == "/api/slack/channels"
+        assert params == {}
+        return {
+            "ok": True,
+            "channels": [
+                {
+                    "id": "C222222222",
+                    "name": "random",
+                    "purpose": "",
+                    "topic": "Chat",
+                    "member_count": 3,
+                    "is_private": False,
+                    "is_member": True,
+                    "can_upload": True,
+                    "can_download": False,
+                    "can_read_history": False,
+                },
+                {
+                    "id": "C111111111",
+                    "name": "general",
+                    "purpose": "Company",
+                    "topic": "",
+                    "member_count": 10,
+                    "is_private": False,
+                    "is_member": True,
+                    "can_upload": False,
+                    "can_download": True,
+                    "can_read_history": True,
+                },
+            ],
+        }
+
+    client._centaur_api_get_json = fake_get_json  # type: ignore[method-assign]
+
+    assert [channel["id"] for channel in client.list_channels_proxy()] == [
+        "C111111111",
+        "C222222222",
+    ]
+    assert [channel["id"] for channel in client.list_channels_proxy(history_only=True)] == [
+        "C111111111"
+    ]
+
+
 def test_get_thread_replies_proxy_calls_centaur_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -653,7 +700,7 @@ def test_file_proxy_methods_validate_inputs() -> None:
         client.download_file_proxy(file_id="bad", channel_id="C123456789")
 
 
-def test_search_messages_with_channel_ids_scans_history_without_listing() -> None:
+def test_search_messages_with_channel_ids_scans_proxy_history_without_listing() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]
     history_by_channel = {
@@ -670,12 +717,13 @@ def test_search_messages_with_channel_ids_scans_history_without_listing() -> Non
             "messages": [{"user": "UGZCSQTPE", "text": "nothing relevant", "ts": "100.000000"}]
         },
     }
+    proxy_calls: list[dict] = []
 
-    def history(**kwargs):
-        fake_web_client.history_calls.append(kwargs)
-        return history_by_channel[kwargs["channel"]]
+    def history_proxy(channel_id: str, **kwargs):
+        proxy_calls.append({"channel_id": channel_id, **kwargs})
+        return history_by_channel[channel_id]
 
-    fake_web_client.conversations_history = history  # type: ignore[method-assign]
+    client.get_channel_history_proxy = history_proxy  # type: ignore[method-assign]
 
     results = client.search_messages(
         "Matt",
@@ -686,28 +734,33 @@ def test_search_messages_with_channel_ids_scans_history_without_listing() -> Non
 
     assert fake_web_client.api_calls == []
     assert fake_web_client.list_calls == []
-    assert sorted(call["channel"] for call in fake_web_client.history_calls) == sorted(
+    assert fake_web_client.history_calls == []
+    assert sorted(call["channel_id"] for call in proxy_calls) == sorted(
         [
             "C05HUE4KLF2",
             "C042WDDP89Y",
             "C0A174PPJDS",
         ]
     )
-    assert sorted(call["limit"] for call in fake_web_client.history_calls) == [25, 25, 25]
+    assert sorted(call["limit"] for call in proxy_calls) == [25, 25, 25]
     assert sorted(item["channel_id"] for item in results) == ["C042WDDP89Y", "C05HUE4KLF2"]
 
 
 def test_search_messages_parses_channel_and_user_modifiers_locally() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]
-    fake_web_client.history_pages = [
-        {
+    proxy_calls: list[dict] = []
+
+    def history_proxy(channel_id: str, **kwargs):
+        proxy_calls.append({"channel_id": channel_id, **kwargs})
+        return {
             "messages": [
                 {"user": "UGZCSQTPE", "text": "Scott Wu on inference", "ts": "300.000000"},
                 {"user": "U1", "text": "also about inference", "ts": "301.000000"},
             ]
         }
-    ]
+
+    client.get_channel_history_proxy = history_proxy  # type: ignore[method-assign]
 
     results = client.search_messages(
         "from:<@UGZCSQTPE> in:<#C042WDDP89Y>",
@@ -717,7 +770,8 @@ def test_search_messages_parses_channel_and_user_modifiers_locally() -> None:
 
     assert fake_web_client.api_calls == []
     assert fake_web_client.list_calls == []
-    assert fake_web_client.history_calls == [{"channel": "C042WDDP89Y", "limit": 25}]
+    assert fake_web_client.history_calls == []
+    assert proxy_calls == [{"channel_id": "C042WDDP89Y", "limit": 25}]
     assert len(results) == 1
     assert results[0]["user_id"] == "UGZCSQTPE"
 
