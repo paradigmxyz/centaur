@@ -27,5 +27,19 @@ class SystemPromptTest(unittest.TestCase):
         self.assertNotIn("|  vlogs thread_logs", prompt)
         self.assertNotIn("|  vlogs thread_trace", prompt)
 
+    def test_model_and_harness_switching_answer_guidance_is_present(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("[Model and Harness Switching Answers]", prompt)
+        self.assertIn("`--codex`, `--claude` or `--claude-code`, and `--amp`", prompt)
+        self.assertIn("`--model <model-id-or-alias>`", prompt)
+        self.assertIn("`--model=<model-id-or-alias>`", prompt)
+        self.assertIn("`--fable`, `--opus`, `--sonnet`, and `--haiku`", prompt)
+        self.assertIn("`--claude --model=fable fix this`", prompt)
+        self.assertIn("`--codex --model=gpt-5.2 investigate this`", prompt)
+        self.assertIn("`--meta` selects Codex with the Meta provider", prompt)
+        self.assertIn("`--bedrock` selects Codex with the Bedrock provider", prompt)
+        self.assertIn("`-rsn <effort>` sets Codex reasoning effort", prompt)
+
 if __name__ == "__main__":
     unittest.main()
