@@ -167,6 +167,45 @@ def test_channels_direct_calls_direct_client(monkeypatch) -> None:
     assert "general" in result.output
 
 
+def test_channel_members_calls_proxy_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_get_channel_members_proxy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [{"id": "U123456789", "name": "alice"}]
+
+    fake_client = types.SimpleNamespace(
+        get_channel_members_proxy=fake_get_channel_members_proxy
+    )
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        ["channel-members", "C1234567890", "--limit", "25"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(("C1234567890",), {"limit": 25})]
+    assert "alice" in result.output
+
+
+def test_channel_members_direct_calls_direct_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_get_channel_members(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [{"id": "U123456789", "name": "alice"}]
+
+    fake_client = types.SimpleNamespace(get_channel_members=fake_get_channel_members)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(app, ["channel-members-direct", "eng-ai"])
+
+    assert result.exit_code == 0
+    assert calls == [(("eng-ai",), {})]
+    assert "alice" in result.output
+
+
 def test_search_files_calls_proxy_client(monkeypatch) -> None:
     calls = []
 

@@ -625,18 +625,66 @@ def channels_direct(
     _render_channels(results, f"Channels ({len(results)})")
 
 
+def _render_channel_members(channel: str, members: list[dict], emails_only: bool) -> None:
+    if not members:
+        console.print("[yellow]No members found.[/]")
+        raise typer.Exit()
+
+    if emails_only:
+        for m in members:
+            if m.get("email"):
+                console.print(m["email"])
+        return
+
+    table = Table(title=f"#{channel} Members ({len(members)})")
+    table.add_column("Name", style="cyan", max_width=20)
+    table.add_column("Real Name", style="white", max_width=25)
+    table.add_column("Email", style="green", max_width=35)
+
+    for m in members:
+        table.add_row(f"@{m['name']}", m.get("real_name", ""), m.get("email", ""))
+
+    console.print(table)
+
+
+@app.command("channel-members-proxy")
 @app.command("channel-members")
 def channel_members_cmd(
+    channel_id: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
+    limit: int = typer.Option(1000, "--limit", "-n", help="Max members"),
+    emails_only: bool = typer.Option(
+        False, "--emails", "-e", help="Output only email addresses (one per line)"
+    ),
+):
+    """List members of a Slack channel through the Centaur API server proxy.
+
+    Examples:
+        slack channel-members C1234567890
+        slack channel-members C1234567890 --emails
+    """
+    from .client import get_channel_members_proxy
+
+    try:
+        members = get_channel_members_proxy(channel_id, limit=limit)
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1)
+
+    _render_channel_members(channel_id, members, emails_only)
+
+
+@app.command("channel-members-direct")
+def channel_members_direct_cmd(
     channel: str = typer.Argument(..., help="Channel name (without #) or channel ID"),
     emails_only: bool = typer.Option(
         False, "--emails", "-e", help="Output only email addresses (one per line)"
     ),
 ):
-    """List all members of a Slack channel.
+    """List all members of a Slack channel directly with the Slack SDK.
 
     Examples:
-        slack channel-members eng-ai
-        slack channel-members eng-ai --emails
+        slack channel-members-direct eng-ai
+        slack channel-members-direct eng-ai --emails
     """
     from .client import get_channel_members
 
@@ -646,24 +694,7 @@ def channel_members_cmd(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
-    if not members:
-        console.print("[yellow]No members found.[/]")
-        raise typer.Exit()
-
-    if emails_only:
-        for m in members:
-            if m.get("email"):
-                console.print(m["email"])
-    else:
-        table = Table(title=f"#{channel} Members ({len(members)})")
-        table.add_column("Name", style="cyan", max_width=20)
-        table.add_column("Real Name", style="white", max_width=25)
-        table.add_column("Email", style="green", max_width=35)
-
-        for m in members:
-            table.add_row(f"@{m['name']}", m.get("real_name", ""), m.get("email", ""))
-
-        console.print(table)
+    _render_channel_members(channel, members, emails_only)
 
 
 @app.command()
