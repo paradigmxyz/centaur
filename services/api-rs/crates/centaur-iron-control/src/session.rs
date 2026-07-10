@@ -109,13 +109,18 @@ impl SessionRegistrar {
             labels.extend(input.labels);
             input.labels = labels;
         }
+        let slack_permission = slack_permission_for_thread(thread_key, &input.labels);
+        let should_upsert_slack_permission = !exists
+            || slack_permission
+                .as_ref()
+                .is_some_and(|permission| is_direct_message(Some(&permission.channel_id)));
         let record = self.client.upsert_principal(&input).await?;
+        if should_upsert_slack_permission && let Some(permission) = slack_permission {
+            self.client
+                .upsert_slack_channel_permission(&record.id, &permission)
+                .await?;
+        }
         if !exists {
-            if let Some(permission) = slack_permission_for_thread(thread_key, &input.labels) {
-                self.client
-                    .upsert_slack_channel_permission(&record.id, &permission)
-                    .await?;
-            }
             for role_id in &self.assign_role_ids {
                 match self.client.assign_role(&record.id, role_id).await {
                     Ok(()) => {}
@@ -328,6 +333,40 @@ mod tests {
         assert!(
             requests
                 .contains(&"POST /api/v1/principals/prn_user/slack_channel_permissions".to_owned())
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_session_upserts_slack_dm_permission_for_existing_user_principal() {
+        let (base_url, requests, server) = spawn_iron_control_stub(true).await;
+        let registrar = SessionRegistrar::new(
+            IronControlClient::new(base_url, "test-key"),
+            "default",
+            vec!["role_infra".to_owned()],
+        );
+        let metadata = json!({
+            "slack_user_id": "U123",
+            "slack_team_id": "T123",
+            "slack_conversation_name": "Ada Lovelace"
+        });
+
+        registrar
+            .register_session("slack:T123:D123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert!(requests.contains(&"PUT /api/v1/principals/slack-user-t123-u123".to_owned()));
+        assert!(
+            requests
+                .contains(&"POST /api/v1/principals/prn_user/slack_channel_permissions".to_owned())
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request == "POST /api/v1/principals/prn_user/roles"),
+            "existing DM principals must not have manually removed roles restored"
         );
         server.abort();
     }
