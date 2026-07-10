@@ -281,7 +281,7 @@ fn parse_teams_adapter_segments(thread_key: &str) -> Option<(String, String, Opt
 pub(crate) fn is_direct_message(conversation_id: Option<&str>) -> bool {
     conversation_id
         .and_then(|id| id.chars().next())
-        .is_some_and(|first| first == 'D')
+        .is_some_and(|first| first.eq_ignore_ascii_case(&'d'))
 }
 
 #[cfg(test)]
