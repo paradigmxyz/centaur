@@ -88,6 +88,7 @@ class SlackClient:
     _USER_CACHE_TTL = 600  # 10 minutes
     _MAX_PAGE_SIZE = 200
     _MAX_SLACK_HISTORY_PROXY_PAGE_SIZE = 999
+    _MAX_SLACK_FILES_PROXY_PAGE_SIZE = 200
     _DEFAULT_THREAD_REPLY_LIMIT = 50
     _DEFAULT_DUMP_MESSAGE_LIMIT = 100
     _DEFAULT_DUMP_THREAD_LIMIT = 25
@@ -1471,6 +1472,40 @@ class SlackClient:
         normalized_channels.sort(key=lambda channel: (channel["name"].lower(), channel["id"]))
         return normalized_channels[:limit]
 
+    def list_files_proxy(
+        self,
+        channel_id: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List Slack files through the Centaur API server proxy.
+
+        This maps to Slack's `files.list` for channels authorized by the
+        principal's `slack.download_channels` claim. When `channel_id` is
+        omitted, the API server scans the authorized download channels and
+        returns a deduplicated page.
+        """
+        if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+            raise RuntimeError(
+                "Slack file listing proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        requested_limit: int | None = None
+        if limit is not None:
+            requested_limit = int(limit)
+            if not 1 <= requested_limit <= self._MAX_SLACK_FILES_PROXY_PAGE_SIZE:
+                raise ValueError("limit must be between 1 and 200")
+
+        params: dict[str, Any] = {
+            "channel_id": (
+                self._normalize_explicit_channel_id(channel_id) if channel_id is not None else None
+            ),
+            "cursor": cursor,
+            "limit": requested_limit,
+        }
+        return self._centaur_api_get_json("/api/slack/files", params)
+
     def list_users(self, limit: int = 200) -> list[dict]:
         """List workspace users."""
         users = []
@@ -2187,21 +2222,29 @@ class SlackClient:
         Returns:
             List of file dicts with id, name, title, filetype, user, channels, permalink
         """
-        try:
-            response = self._retry_on_ratelimit(
-                self._client.files_list,
-                count=max_results,
+        requested_limit = max(1, int(max_results))
+        use_proxy = secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() != "false"
+        if use_proxy:
+            response = self.list_files_proxy(
+                limit=min(requested_limit, self._MAX_SLACK_FILES_PROXY_PAGE_SIZE)
             )
-        except SlackApiError as e:
-            self._raise_slack_api_error(
-                e,
-                slack_method="files.list",
-                access_path="bot_token",
-            )
+            user_cache = {}
+        else:
+            try:
+                response = self._retry_on_ratelimit(
+                    self._client.files_list,
+                    count=requested_limit,
+                )
+            except SlackApiError as e:
+                self._raise_slack_api_error(
+                    e,
+                    slack_method="files.list",
+                    access_path="bot_token",
+                )
+            user_cache = self._get_user_cache()
 
         files = response.get("files", [])
         query_lower = query.lower()
-        user_cache = self._get_user_cache()
 
         results = []
         for f in files:
@@ -2225,7 +2268,7 @@ class SlackClient:
                 }
             )
 
-        return results
+        return results[:requested_limit]
 
     def search_users(
         self,
@@ -2429,6 +2472,10 @@ def list_channels(*args, **kwargs):
 
 def list_channels_proxy(*args, **kwargs):
     return _client().list_channels_proxy(*args, **kwargs)
+
+
+def list_files_proxy(*args, **kwargs):
+    return _client().list_files_proxy(*args, **kwargs)
 
 
 def list_users(*args, **kwargs):

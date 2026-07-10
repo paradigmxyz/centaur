@@ -35,6 +35,7 @@ fn http_client() -> &'static reqwest::Client {
 
 pub(crate) fn slack_proxy_router() -> Router<AppState> {
     Router::new()
+        .route("/api/slack/files", get(get_slack_files))
         .route(
             "/api/slack/files/upload",
             post(upload_slack_file).layer(DefaultBodyLimit::disable()),
@@ -75,6 +76,16 @@ struct SlackFileUploadQuery {
 #[derive(Debug, Deserialize)]
 struct SlackFileDownloadQuery {
     channel_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackFilesListQuery {
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    limit: Option<u16>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +133,14 @@ struct SlackChannelsResponse {
     ok: bool,
     channels: Vec<SlackChannelItem>,
     count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackFilesListResponse {
+    ok: bool,
+    files: Vec<Value>,
+    count: usize,
+    next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,6 +285,70 @@ async fn download_slack_file(
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
+}
+
+async fn get_slack_files(
+    headers: HeaderMap,
+    Query(query): Query<SlackFilesListQuery>,
+) -> Result<Json<SlackFilesListResponse>, ApiError> {
+    let claims = authorize_slack_file_proxy(&headers)?;
+    validate_slack_files_list_query(&query)?;
+    let channel_ids = if let Some(channel_id) = query.channel_id.as_deref() {
+        ensure_download_channel_allowed(&claims, channel_id)?;
+        validate_slack_channel_id(channel_id)?;
+        vec![channel_id.to_owned()]
+    } else {
+        slack_download_channel_ids_from_claims(&claims)?
+    };
+
+    if channel_ids.is_empty() {
+        return Ok(Json(SlackFilesListResponse {
+            ok: true,
+            files: Vec::new(),
+            count: 0,
+            next_cursor: None,
+        }));
+    }
+
+    let config = slack_proxy_config()?;
+    let client = http_client();
+    let mut files = Vec::new();
+    let mut seen_file_ids = BTreeSet::new();
+    let mut next_cursor = None;
+    for channel_id in channel_ids {
+        let value = slack_files_list(client, config, &channel_id, &query).await?;
+        if query.channel_id.is_some() {
+            next_cursor = slack_next_cursor(&value);
+        }
+        for file in value
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(file_id) = file.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen_file_ids.insert(file_id.to_owned()) {
+                files.push(file.clone());
+            }
+        }
+    }
+    files.sort_by(|left, right| {
+        slack_file_created(right)
+            .cmp(&slack_file_created(left))
+            .then_with(|| slack_file_id(left).cmp(slack_file_id(right)))
+    });
+    if let Some(limit) = query.limit {
+        files.truncate(limit as usize);
+    }
+
+    Ok(Json(SlackFilesListResponse {
+        ok: true,
+        count: files.len(),
+        files,
+        next_cursor,
+    }))
 }
 
 async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResponse>, ApiError> {
@@ -536,6 +619,35 @@ async fn slack_thread_replies(
     slack_api_post_form(client, config, "conversations.replies", &form).await
 }
 
+async fn slack_files_list(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+    query: &SlackFilesListQuery,
+) -> Result<Value, ApiError> {
+    let form = slack_files_list_form(channel_id, query);
+    slack_api_post_form(client, config, "files.list", &form).await
+}
+
+fn slack_files_list_form(
+    channel_id: &str,
+    query: &SlackFilesListQuery,
+) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        ("channel", channel_id.to_owned()),
+        (
+            "count",
+            query
+                .limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        ("cursor", query.cursor.clone().unwrap_or_default()),
+    ];
+    form.retain(|(_, value)| !value.is_empty());
+    form
+}
+
 fn slack_channel_history_form(
     channel_id: &str,
     query: &SlackChannelHistoryQuery,
@@ -579,6 +691,15 @@ fn slack_thread_replies_form(
     let mut form = slack_channel_history_form(channel_id, query);
     form.push(("ts", thread_ts.to_owned()));
     form
+}
+
+fn slack_next_cursor(value: &Value) -> Option<String> {
+    value
+        .get("response_metadata")
+        .and_then(|metadata| metadata.get("next_cursor"))
+        .and_then(Value::as_str)
+        .filter(|cursor| !cursor.is_empty())
+        .map(str::to_owned)
 }
 
 async fn slack_api_post_form(
@@ -675,6 +796,17 @@ fn slack_channel_ids_from_claims(claims: &SlackFileProxyClaims) -> Result<Vec<St
     Ok(channel_ids.into_iter().collect())
 }
 
+fn slack_download_channel_ids_from_claims(
+    claims: &SlackFileProxyClaims,
+) -> Result<Vec<String>, ApiError> {
+    let mut channel_ids = BTreeSet::new();
+    for channel_id in &claims.slack.download_channels {
+        validate_slack_channel_id(channel_id)?;
+        channel_ids.insert(channel_id.to_owned());
+    }
+    Ok(channel_ids.into_iter().collect())
+}
+
 fn slack_channel_item(
     claims: &SlackFileProxyClaims,
     channel_id: &str,
@@ -754,6 +886,16 @@ fn slack_file_channel_ids(file: &Value) -> BTreeSet<String> {
     channels
 }
 
+fn slack_file_created(file: &Value) -> u64 {
+    file.get("created")
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+}
+
+fn slack_file_id(file: &Value) -> &str {
+    file.get("id").and_then(Value::as_str).unwrap_or_default()
+}
+
 fn required_slack_string(value: &Value, field: &str) -> Result<String, ApiError> {
     value
         .get(field)
@@ -820,6 +962,27 @@ fn validate_slack_channel_history_query(query: &SlackChannelHistoryQuery) -> Res
     {
         return Err(ApiError::BadRequest(
             "Slack history limit must be between 1 and 999".to_owned(),
+        ));
+    }
+    if let Some(cursor) = query.cursor.as_deref() {
+        validate_slack_cursor(cursor)?;
+    }
+    Ok(())
+}
+
+fn validate_slack_files_list_query(query: &SlackFilesListQuery) -> Result<(), ApiError> {
+    if let Some(limit) = query.limit
+        && !(1..=200).contains(&limit)
+    {
+        return Err(ApiError::BadRequest(
+            "Slack files.list limit must be between 1 and 200".to_owned(),
+        ));
+    }
+    if let Some(channel_id) = query.channel_id.as_deref() {
+        validate_slack_channel_id(channel_id)?;
+    } else if query.cursor.is_some() {
+        return Err(ApiError::BadRequest(
+            "Slack files.list cursor requires channel_id".to_owned(),
         ));
     }
     if let Some(cursor) = query.cursor.as_deref() {
@@ -1012,6 +1175,73 @@ mod tests {
                 ("include_num_members", "true".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn files_list_form_maps_proxy_query_to_slack_params() {
+        let query = SlackFilesListQuery {
+            channel_id: Some("C123456789".to_owned()),
+            limit: Some(20),
+            cursor: Some("next".to_owned()),
+        };
+
+        assert_eq!(
+            slack_files_list_form("C123456789", &query),
+            vec![
+                ("channel", "C123456789".to_owned()),
+                ("count", "20".to_owned()),
+                ("cursor", "next".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_download_channels_for_file_listing() {
+        let claims = SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: vec!["C999999999".to_owned()],
+                download_channels: vec![
+                    "G123456789".to_owned(),
+                    "C123456789".to_owned(),
+                    "G123456789".to_owned(),
+                ],
+                history_channels: vec!["D123456789".to_owned()],
+            },
+        };
+
+        assert_eq!(
+            slack_download_channel_ids_from_claims(&claims).unwrap(),
+            vec!["C123456789".to_owned(), "G123456789".to_owned()]
+        );
+    }
+
+    #[test]
+    fn validates_files_list_query() {
+        validate_slack_files_list_query(&SlackFilesListQuery {
+            channel_id: Some("C123456789".to_owned()),
+            limit: Some(200),
+            cursor: Some("next".to_owned()),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            validate_slack_files_list_query(&SlackFilesListQuery {
+                channel_id: None,
+                limit: Some(201),
+                cursor: None,
+            })
+            .unwrap_err(),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            validate_slack_files_list_query(&SlackFilesListQuery {
+                channel_id: None,
+                limit: Some(20),
+                cursor: Some("next".to_owned()),
+            })
+            .unwrap_err(),
+            ApiError::BadRequest(_)
+        ));
     }
 
     #[test]
