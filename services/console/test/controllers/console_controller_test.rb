@@ -159,6 +159,23 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "principal detail page omits DM permissions from the Slack channel picker" do
+    principal = principals(:acme_user_bob)
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "D0123456789",
+      channel_name: "U0123456789",
+      upload_enabled: true,
+      download_enabled: true,
+      history_enabled: true
+    )
+
+    get console_principal_url(principal.oid)
+    assert_response :ok
+
+    assert_no_match "D0123456789", response.body
+  end
+
   test "credentials table combines id, shows status, and links to detail" do
     credential = broker_credentials(:acme_managed_gmail)
     get console_credentials_url

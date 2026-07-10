@@ -48,8 +48,6 @@ module Console
       redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
-    rescue ActiveRecord::RecordNotDestroyed => e
-      redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
     end
 
     def assign_role

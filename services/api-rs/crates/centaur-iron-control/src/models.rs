@@ -482,6 +482,20 @@ pub struct Principal {
     pub sandbox_api_server_enabled: bool,
 }
 
+/// Request body for creating/updating one Slack permission row on a principal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SlackChannelPermissionInput {
+    pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_false")]
+    pub upload_enabled: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_false")]
+    pub download_enabled: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_false")]
+    pub history_enabled: bool,
+}
+
 /// A principal's effective config — the same secrets/postgres the principal's
 /// proxy syncs. api-rs reads it to wire a sandbox's env. Only the fields api-rs
 /// needs are captured; the proxy owns the rest (sources, rules, dsn, role).

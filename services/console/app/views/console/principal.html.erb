@@ -38,7 +38,7 @@
   <div class="console-panel">
     <% checkbox_class = "mt-1 h-4 w-4 rounded border-ink-500 bg-ink-800 text-centaur-500 focus:ring-centaur-500" %>
     <% channel_options = @slack_channel_options || [] %>
-    <% permissions = @principal.slack_channel_permissions.ordered %>
+    <% permissions = @slack_channel_permissions || [] %>
     <%= form_with model: @principal,
                   url: console_principal_slack_channel_permissions_path(@principal.oid),
                   method: :patch,
@@ -69,10 +69,7 @@
                     <td class="console-td min-w-80">
                       <%= permission_fields.hidden_field :id %>
                       <%= permission_fields.hidden_field :channel_name, value: permission.channel_name %>
-                      <% if permission.protected_slack_dm_permission? %>
-                        <%= permission_fields.hidden_field :channel_id, value: permission.channel_id %>
-                        <div class="text-sm text-zinc-100">DM <%= permission.channel_name %> (<%= permission.channel_id %>)</div>
-                      <% elsif channel_options.any? %>
+                      <% if channel_options.any? %>
                         <%= permission_fields.select :channel_id,
                                                      options_for_select(slack_channel_options_for_permission(permission, channel_options), permission.channel_id),
                                                      {},
@@ -91,11 +88,7 @@
                       <%= permission_fields.check_box :history_enabled, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
                     </td>
                     <td class="console-td">
-                      <% if permission.protected_slack_dm_permission? %>
-                        <span class="text-xs text-zinc-500">Required</span>
-                      <% else %>
-                        <%= permission_fields.check_box :_destroy, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
-                      <% end %>
+                      <%= permission_fields.check_box :_destroy, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
                     </td>
                   <% end %>
                 </tr>

@@ -178,6 +178,7 @@ Rails.application.routes.draw do
         end
         member do
           get "effective_config"
+          post "slack_channel_permissions", action: :upsert_slack_channel_permission
         end
         # Role assignments for a principal. :id is the role's oid.
         resources :roles, only: %i[index create destroy], controller: :principal_roles

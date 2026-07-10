@@ -128,40 +128,6 @@ module Console
       )
     end
 
-    test "update_slack_channel_permissions does not remove protected Slack DM permissions" do
-      principal = principals(:acme_user_bob)
-      principal.update!(labels: { Principal::SLACK_USER_ID_LABEL => "U0123456789" })
-      permission = SlackChannelPermission.create!(
-        principal: principal,
-        channel_id: "D0123456789",
-        channel_name: "U0123456789",
-        upload_enabled: true,
-        download_enabled: true,
-        history_enabled: true
-      )
-
-      patch console_principal_slack_channel_permissions_url(principal.oid),
-            params: {
-              principal: {
-                slack_channel_permissions_attributes: {
-                  "0" => {
-                    id: permission.id,
-                    channel_id: "D0123456789",
-                    channel_name: "U0123456789",
-                    upload_enabled: "1",
-                    download_enabled: "1",
-                    history_enabled: "1",
-                    _destroy: "1"
-                  }
-                }
-              }
-            }
-
-      assert_redirected_to console_principal_path(principal.oid)
-      assert SlackChannelPermission.exists?(permission.id)
-      assert_equal "Slack DM permissions created from slack_user_id labels cannot be removed", flash[:alert]
-    end
-
     test "destroy deletes the principal and dependent access records" do
       principal = principals(:acme_channel)
       proxy = proxies(:acme_proxy)

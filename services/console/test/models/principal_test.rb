@@ -50,7 +50,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({}, principal.reload.labels)
   end
 
-  test "creates slack channel permission from slack channel label on create" do
+  test "does not create slack channel permission from slack channel label on create" do
     principal = Principal.create!(
       default_attrs(
         namespace: "acme",
@@ -59,68 +59,19 @@ class PrincipalTest < ActiveSupport::TestCase
       )
     )
 
-    permission = principal.slack_channel_permissions.reload.sole
-    assert_equal "C0123456789", permission.channel_id
-    assert_predicate permission, :upload_enabled
-    assert_predicate permission, :download_enabled
-    assert_predicate permission, :history_enabled
+    assert_empty principal.slack_channel_permissions.reload
   end
 
-  test "does not create slack channel permission from invalid slack channel label" do
+  test "does not create slack DM permission from slack user label on create" do
     principal = Principal.create!(
       default_attrs(
         namespace: "acme",
-        foreign_id: "C-invalid-slack-label",
-        labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C999" }
+        foreign_id: "U-no-auto-slack-dm",
+        labels: { "slack_user_id" => "U0123456789" }
       )
     )
 
     assert_empty principal.slack_channel_permissions.reload
-  end
-
-  test "creates slack DM permission from slack user label when a DM channel exists" do
-    with_singleton_method(SlackChannelCatalog, :channel_id_for_user, lambda { |user_id|
-      user_id == "U0123456789" ? "D0123456789" : nil
-    }) do
-      principal = Principal.create!(
-        default_attrs(
-          namespace: "acme",
-          foreign_id: "U-auto-slack-dm",
-          labels: { Principal::SLACK_USER_ID_LABEL => " u0123456789 " }
-        )
-      )
-
-      permission = principal.slack_channel_permissions.reload.sole
-      assert_equal "D0123456789", permission.channel_id
-      assert_equal "U0123456789", permission.channel_name
-      assert_predicate permission, :upload_enabled
-      assert_predicate permission, :download_enabled
-      assert_predicate permission, :history_enabled
-    end
-  end
-
-  test "does not create slack DM permission when slack user label is added later" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "U-later-slack-dm"))
-
-    with_singleton_method(SlackChannelCatalog, :channel_id_for_user, ->(_user_id) { "D0123456789" }) do
-      principal.update!(labels: { Principal::SLACK_USER_ID_LABEL => "U0123456789" })
-    end
-
-    assert_empty principal.slack_channel_permissions.reload
-  end
-
-  test "does not create slack DM permission when slack user label has no matching DM channel" do
-    with_singleton_method(SlackChannelCatalog, :channel_id_for_user, ->(_user_id) { nil }) do
-      principal = Principal.create!(
-        default_attrs(
-          namespace: "acme",
-          foreign_id: "U-missing-slack-dm",
-          labels: { Principal::SLACK_USER_ID_LABEL => "U0123456789" }
-        )
-      )
-
-      assert_empty principal.slack_channel_permissions.reload
-    end
   end
 
   test "sandbox access defaults to enabled" do
@@ -236,14 +187,20 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "clearing slack channel permissions revokes label-derived slack access" do
+  test "clearing slack channel permissions revokes slack access" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = Principal.create!(
         default_attrs(
           namespace: "acme",
-          foreign_id: "C-clear-slack-permissions",
-          labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" }
+          foreign_id: "C-clear-slack-permissions"
         )
+      )
+      SlackChannelPermission.create!(
+        principal: principal,
+        channel_id: "C0123456789",
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true
       )
       assert_not_nil ApiServer::Jwt.encode_for_principal(principal)
 
@@ -721,14 +678,5 @@ class PrincipalTest < ActiveSupport::TestCase
     previous.each do |key, value|
       value.nil? ? ENV.delete(key) : ENV[key] = value
     end
-  end
-
-  def with_singleton_method(object, method_name, replacement)
-    singleton = object.singleton_class
-    original = singleton.instance_method(method_name)
-    singleton.define_method(method_name, replacement)
-    yield
-  ensure
-    singleton.define_method(method_name, original)
   end
 end

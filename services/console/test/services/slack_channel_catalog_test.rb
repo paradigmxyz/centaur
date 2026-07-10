@@ -5,7 +5,7 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     cache = ActiveSupport::Cache::MemoryStore.new
     calls = 0
     result = SlackChannelCatalog::Result.new(
-      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false, im: false) ],
+      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false) ],
       error: nil,
       configured: true
     )
@@ -34,7 +34,7 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     calls = 0
     error = SlackChannelCatalog::Result.new(channels: [], error: "Slack API request failed.", configured: true)
     success = SlackChannelCatalog::Result.new(
-      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false, im: false) ],
+      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false) ],
       error: nil,
       configured: true
     )
@@ -83,14 +83,13 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     assert_equal SlackChannelCatalog::WRITE_TIMEOUT_SECONDS, captured_options.fetch(:write_timeout)
   end
 
-  test "fetch includes one to one DMs in the channel catalog" do
+  test "fetch requests only public and private channels" do
     response = Struct.new(:code, :body).new(
       "200",
       {
         ok: true,
         channels: [
-          { id: "C0123456789", name: "general", is_private: false },
-          { id: "D9876543210", is_im: true, user: "U0123456789" }
+          { id: "C0123456789", name: "general", is_private: false }
         ]
       }.to_json
     )
@@ -107,29 +106,8 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
       result = SlackChannelCatalog.new(token: "xoxb-test-token", api_url: "https://slack.test/api").fetch
 
       assert_predicate result, :ok?
-      assert_includes captured_request.path, "types=public_channel%2Cprivate_channel%2Cim"
-      assert_equal [ "C0123456789", "D9876543210" ], result.channels.map(&:id)
-      dm = result.channels.find { |channel| channel.id == "D9876543210" }
-      assert_equal "U0123456789", dm.name
-      assert_equal true, dm.private
-      assert_equal true, dm.im
-    end
-  end
-
-  test "channel_id_for_user resolves a Slack user id to its DM channel id" do
-    result = SlackChannelCatalog::Result.new(
-      channels: [
-        SlackChannelCatalog::Channel.new(id: "D9876543210", name: "U0123456789", private: true, im: true),
-        SlackChannelCatalog::Channel.new(id: "D1111111111", name: "U1111111111", private: true, im: false)
-      ],
-      error: nil,
-      configured: true
-    )
-
-    with_singleton_method(SlackChannelCatalog, :fetch, -> { result }) do
-      assert_equal "D9876543210", SlackChannelCatalog.channel_id_for_user("u0123456789")
-      assert_nil SlackChannelCatalog.channel_id_for_user("U9999999999")
-      assert_nil SlackChannelCatalog.channel_id_for_user("U1111111111")
+      assert_includes captured_request.path, "types=public_channel%2Cprivate_channel"
+      assert_equal [ "C0123456789" ], result.channels.map(&:id)
     end
   end
 

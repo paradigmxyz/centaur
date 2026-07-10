@@ -8,10 +8,11 @@
 //! principal is derived from the thread key (see [`crate::derive_principal`]).
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
-use crate::models::Principal;
+use crate::models::{Principal, SlackChannelPermissionInput};
 use crate::principal::derive_principal_with_slack_team;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -108,6 +109,11 @@ impl SessionRegistrar {
         }
         let record = self.client.upsert_principal(&input).await?;
         if !exists {
+            if let Some(permission) = slack_permission_for_thread(thread_key, &input.labels) {
+                self.client
+                    .upsert_slack_channel_permission(&record.id, &permission)
+                    .await?;
+            }
             for role_id in &self.assign_role_ids {
                 match self.client.assign_role(&record.id, role_id).await {
                     Ok(()) => {}
@@ -122,6 +128,49 @@ impl SessionRegistrar {
     pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
         self.client.get_principal(&self.namespace, principal).await
     }
+}
+
+fn slack_permission_for_thread(
+    thread_key: &str,
+    labels: &BTreeMap<String, String>,
+) -> Option<SlackChannelPermissionInput> {
+    if let Some(channel_id) = labels.get("slack_channel_id") {
+        return (!is_slack_dm_id(channel_id)).then(|| slack_permission(channel_id.clone(), None));
+    }
+
+    let user_id = labels.get("slack_user_id")?;
+    let conversation_id = slack_conversation_id(thread_key)?;
+    is_slack_dm_id(conversation_id).then(|| {
+        slack_permission(
+            conversation_id.to_owned(),
+            Some(user_id.trim().to_owned()).filter(|value| !value.is_empty()),
+        )
+    })
+}
+
+fn slack_permission(
+    channel_id: String,
+    channel_name: Option<String>,
+) -> SlackChannelPermissionInput {
+    SlackChannelPermissionInput {
+        channel_id,
+        channel_name,
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true,
+    }
+}
+
+fn slack_conversation_id(thread_key: &str) -> Option<&str> {
+    thread_key
+        .split(':')
+        .skip(1)
+        .map(str::trim)
+        .find(|segment| matches!(segment.chars().next(), Some('C' | 'D' | 'G')))
+}
+
+fn is_slack_dm_id(value: &str) -> bool {
+    matches!(value.trim().chars().next(), Some('D'))
 }
 
 fn is_status(err: &IronControlError, code: u16) -> bool {
@@ -213,6 +262,11 @@ mod tests {
             )
         );
         assert!(requests.contains(&"PUT /api/v1/principals/slack-channel-t123-c123".to_owned()));
+        assert!(
+            requests.contains(
+                &"POST /api/v1/principals/prn_channel/slack_channel_permissions".to_owned()
+            )
+        );
         assert!(requests.contains(&"POST /api/v1/principals/prn_channel/roles".to_owned()));
         server.abort();
     }
@@ -246,10 +300,52 @@ mod tests {
         assert!(
             !requests
                 .iter()
+                .any(|request| request.ends_with("/slack_channel_permissions")),
+            "existing principals must not have Slack permissions reset"
+        );
+        assert!(
+            !requests
+                .iter()
                 .any(|request| request == "POST /api/v1/principals/prn_channel/roles"),
             "existing principals must not have manually removed roles restored"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_session_upserts_slack_dm_permission_for_new_user_principal() {
+        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(
+            IronControlClient::new(base_url, "test-key"),
+            "default",
+            vec![],
+        );
+        let metadata = json!({
+            "slack_user_id": "U123",
+            "slack_team_id": "T123",
+            "slack_conversation_name": "Ada Lovelace"
+        });
+
+        registrar
+            .register_session("slack:T123:D123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert!(requests.contains(&"PUT /api/v1/principals/slack-user-t123-u123".to_owned()));
+        assert!(
+            requests
+                .contains(&"POST /api/v1/principals/prn_user/slack_channel_permissions".to_owned())
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn slack_permission_for_thread_skips_dm_channel_fallback_without_user() {
+        let mut labels = BTreeMap::new();
+        labels.insert("slack_channel_id".to_owned(), "D123".to_owned());
+
+        assert_eq!(slack_permission_for_thread("slack:D123:ts", &labels), None);
     }
 
     async fn spawn_iron_control_stub(
@@ -283,14 +379,28 @@ mod tests {
                     ("GET", "/api/v1/principals/lookup/default/slack-channel-t123-c123")
                         if principal_exists =>
                     {
-                        ("200 OK", principal_body())
+                        ("200 OK", channel_principal_body())
                     }
-                    ("GET", "/api/v1/principals/lookup/default/slack-channel-t123-c123") => {
+                    ("GET", "/api/v1/principals/lookup/default/slack-user-t123-u123")
+                        if principal_exists =>
+                    {
+                        ("200 OK", user_principal_body())
+                    }
+                    ("GET", "/api/v1/principals/lookup/default/slack-channel-t123-c123")
+                    | ("GET", "/api/v1/principals/lookup/default/slack-user-t123-u123") => {
                         ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
                     }
                     ("PUT", "/api/v1/principals/slack-channel-t123-c123") => {
-                        ("200 OK", principal_body())
+                        ("200 OK", channel_principal_body())
                     }
+                    ("PUT", "/api/v1/principals/slack-user-t123-u123") => {
+                        ("200 OK", user_principal_body())
+                    }
+                    (
+                        "POST",
+                        "/api/v1/principals/prn_channel/slack_channel_permissions"
+                        | "/api/v1/principals/prn_user/slack_channel_permissions",
+                    ) => ("200 OK", r#"{"data":{"ok":true}}"#.to_owned()),
                     ("POST", "/api/v1/principals/prn_channel/roles") => {
                         ("200 OK", r#"{"data":{"ok":true}}"#.to_owned())
                     }
@@ -310,7 +420,11 @@ mod tests {
         (base_url, requests, handle)
     }
 
-    fn principal_body() -> String {
+    fn channel_principal_body() -> String {
         r#"{"data":{"id":"prn_channel","namespace":"default","foreign_id":"slack-channel-t123-c123","name":"Slack Channel #general","labels":{}}}"#.to_owned()
+    }
+
+    fn user_principal_body() -> String {
+        r#"{"data":{"id":"prn_user","namespace":"default","foreign_id":"slack-user-t123-u123","name":"Slack DM @Ada Lovelace","labels":{}}}"#.to_owned()
     }
 }

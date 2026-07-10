@@ -292,6 +292,93 @@ module Api
         assert_equal [], json_body.dig("data", "slack_channel_permissions")
       end
 
+      test "POST upserts one Slack channel permission without replacing other rows" do
+        principal = principals(:acme_channel)
+        SlackChannelPermission.create!(
+          principal: principal,
+          channel_id: "G9876543210",
+          upload_enabled: true,
+          download_enabled: false,
+          history_enabled: false
+        )
+        body = {
+          data: {
+            channel_id: "C0123456789",
+            channel_name: "general",
+            upload_enabled: true,
+            download_enabled: true,
+            history_enabled: true
+          }
+        }
+
+        post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+             params: body.to_json,
+             headers: auth_headers
+        assert_response :created
+
+        assert_equal(
+          [ "C0123456789", "G9876543210" ],
+          principal.reload.slack_channel_permissions.ordered.pluck(:channel_id)
+        )
+        assert_equal "general", json_body.dig("data", "channel_name")
+      end
+
+      test "POST updates an existing Slack channel permission with normalized channel id" do
+        principal = principals(:acme_channel)
+        SlackChannelPermission.create!(
+          principal: principal,
+          channel_id: "C0123456789",
+          channel_name: "general",
+          upload_enabled: true,
+          download_enabled: false,
+          history_enabled: false
+        )
+        body = {
+          data: {
+            channel_id: " c0123456789 ",
+            channel_name: "general",
+            upload_enabled: false,
+            download_enabled: true,
+            history_enabled: true
+          }
+        }
+
+        assert_no_difference -> { principal.slack_channel_permissions.count } do
+          post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+               params: body.to_json,
+               headers: auth_headers
+        end
+        assert_response :ok
+
+        permission = principal.reload.slack_channel_permissions.sole
+        assert_equal "C0123456789", permission.channel_id
+        assert_not permission.upload_enabled
+        assert_predicate permission, :download_enabled
+        assert_predicate permission, :history_enabled
+      end
+
+      test "POST upserts one Slack DM permission" do
+        principal = principals(:acme_user_bob)
+        body = {
+          data: {
+            channel_id: "D0123456789",
+            channel_name: "U0123456789"
+          }
+        }
+
+        post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+             params: body.to_json,
+             headers: auth_headers
+        assert_response :created
+
+        permission = principal.reload.slack_channel_permissions.sole
+        assert_equal "D0123456789", permission.channel_id
+        assert_equal "U0123456789", permission.channel_name
+        assert_predicate permission, :upload_enabled
+        assert_predicate permission, :download_enabled
+        assert_predicate permission, :history_enabled
+      end
+
       test "PUT ignores attempts to change immutable namespace and foreign_id" do
         principal = principals(:acme_channel)
         original_namespace = principal.namespace

@@ -75,6 +75,26 @@ module Api
         render json: body
       end
 
+      # POST /api/v1/principals/:id/slack_channel_permissions
+      #
+      # Upserts one Slack channel permission row without replacing the rest of
+      # the principal's operator-managed Slack permissions.
+      def upsert_slack_channel_permission
+        principal = Principal.find_by_oid!(params[:id])
+        attrs = upsert_slack_channel_permission_params
+        attrs[:channel_id] = attrs[:channel_id].to_s.strip.upcase
+        permission = principal.slack_channel_permissions.find_or_initialize_by(
+          channel_id: attrs[:channel_id]
+        )
+        was_new = permission.new_record?
+        permission.assign_attributes(attrs)
+        permission.save!
+
+        render status: (was_new ? :created : :ok), json: { data: permission.as_permission_json }
+      rescue ActiveRecord::RecordInvalid => e
+        render_validation_error(e.record)
+      end
+
       private
 
       def record_payload(principal)
@@ -131,6 +151,20 @@ module Api
         end
 
         rows
+      end
+
+      def upsert_slack_channel_permission_params
+        @upsert_slack_channel_permission_params ||= data_params.permit(
+          :channel_id,
+          :channel_name,
+          :upload_enabled,
+          :download_enabled,
+          :history_enabled
+        ).tap do |attrs|
+          attrs[:upload_enabled] = true unless attrs.key?(:upload_enabled)
+          attrs[:download_enabled] = true unless attrs.key?(:download_enabled)
+          attrs[:history_enabled] = true unless attrs.key?(:history_enabled)
+        end
       end
 
       def render_slack_channel_permissions_error(error)
