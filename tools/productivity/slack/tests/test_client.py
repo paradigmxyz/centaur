@@ -533,21 +533,22 @@ def test_list_files_proxy_calls_centaur_api() -> None:
         assert path == "/api/slack/files"
         assert params == {
             "channel_id": "C123456789",
-            "cursor": "next",
             "limit": 20,
+            "page": 3,
         }
         return {
             "ok": True,
             "files": [{"id": "F123456789", "name": "report.pdf"}],
-            "next_cursor": "later",
+            "page": 3,
+            "has_more": True,
         }
 
     client._centaur_api_get_json = fake_get_json  # type: ignore[method-assign]
 
-    result = client.list_files_proxy("<#C123456789|general>", cursor="next", limit=20)
+    result = client.list_files_proxy("<#C123456789|general>", page=3, limit=20)
 
     assert result["files"] == [{"id": "F123456789", "name": "report.pdf"}]
-    assert result["next_cursor"] == "later"
+    assert result["has_more"] is True
 
 
 def test_list_files_proxy_validates_inputs() -> None:
@@ -558,6 +559,9 @@ def test_list_files_proxy_validates_inputs() -> None:
 
     with pytest.raises(ValueError, match="between 1 and 200"):
         client.list_files_proxy("C123456789", limit=201)
+
+    with pytest.raises(ValueError, match="page"):
+        client.list_files_proxy("C123456789", page=0)
 
 
 def test_get_thread_replies_proxy_calls_centaur_api(
@@ -740,17 +744,18 @@ def test_file_proxy_methods_validate_inputs() -> None:
         client.download_file_proxy(file_id="bad", channel_id="C123456789")
 
 
-def test_search_files_uses_proxy_without_user_cache(
+def test_search_files_uses_proxy_with_user_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, _ = _make_client()
     monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true")
-    client._get_user_cache = pytest.fail  # type: ignore[method-assign]
+    client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
 
     def fake_list_files_proxy(**kwargs):
-        assert kwargs == {"limit": 20}
+        assert kwargs == {"limit": 20, "page": 1}
         return {
             "ok": True,
+            "has_more": False,
             "files": [
                 {
                     "id": "F123456789",
@@ -790,7 +795,7 @@ def test_search_files_uses_proxy_without_user_cache(
             "title": "Q4 Report",
             "filetype": "pdf",
             "size": 1234,
-            "user": "U123456789",
+            "user": "alice",
             "channels": ["C123456789"],
             "permalink": "https://slack.example/files/F123456789",
             "url_private": "https://files.example/F123456789",
@@ -799,14 +804,45 @@ def test_search_files_uses_proxy_without_user_cache(
     ]
 
 
-def test_search_files_uses_direct_files_list_when_api_proxy_disabled(
+def test_search_files_raises_when_api_proxy_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, fake_web_client = _make_client()
+    client, _ = _make_client()
     monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "false")
+
+    with pytest.raises(RuntimeError, match="proxy requires"):
+        client.search_files("report", max_results=10)
+
+
+def test_search_files_paginates_proxy_until_enough_matches() -> None:
+    client, _ = _make_client()
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
-    fake_web_client.files_list_pages = [
-        {
+    calls: list[dict] = []
+
+    def fake_list_files_proxy(**kwargs):
+        calls.append(kwargs)
+        if kwargs["page"] == 1:
+            return {
+                "ok": True,
+                "has_more": True,
+                "files": [
+                    {
+                        "id": "F000000001",
+                        "name": "diagram.png",
+                        "title": "Diagram",
+                        "filetype": "png",
+                        "size": 1234,
+                        "user": "U123456789",
+                        "channels": ["C123456789"],
+                        "permalink": "https://slack.example/files/F000000001",
+                        "url_private": "https://files.example/F000000001",
+                        "created": 1700000000,
+                    }
+                ],
+            }
+        return {
+            "ok": True,
+            "has_more": False,
             "files": [
                 {
                     "id": "F123456789",
@@ -818,16 +854,17 @@ def test_search_files_uses_direct_files_list_when_api_proxy_disabled(
                     "channels": ["C123456789"],
                     "permalink": "https://slack.example/files/F123456789",
                     "url_private": "https://files.example/F123456789",
-                    "created": 1700000000,
+                    "created": 1700000001,
                 }
-            ]
+            ],
         }
-    ]
+
+    client.list_files_proxy = fake_list_files_proxy  # type: ignore[method-assign]
 
     results = client.search_files("report", max_results=10)
 
-    assert fake_web_client.files_list_calls == [{"count": 10}]
-    assert results[0]["user"] == "alice"
+    assert calls == [{"limit": 10, "page": 1}, {"limit": 10, "page": 2}]
+    assert [result["id"] for result in results] == ["F123456789"]
 
 
 def test_search_files_direct_uses_direct_files_list_when_api_proxy_enabled(
@@ -839,6 +876,7 @@ def test_search_files_direct_uses_direct_files_list_when_api_proxy_enabled(
     client.list_files_proxy = pytest.fail  # type: ignore[method-assign]
     fake_web_client.files_list_pages = [
         {
+            "paging": {"page": 1, "pages": 1},
             "files": [
                 {
                     "id": "F123456789",
@@ -858,7 +896,7 @@ def test_search_files_direct_uses_direct_files_list_when_api_proxy_enabled(
 
     results = client.search_files_direct("report", max_results=10)
 
-    assert fake_web_client.files_list_calls == [{"count": 10}]
+    assert fake_web_client.files_list_calls == [{"count": 10, "page": 1}]
     assert results[0]["user"] == "alice"
 
 
