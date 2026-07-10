@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f32ccc951 100644
+index a7048fd884020cfd96a51c48b7071fa7293f3dc4..0c31d0499cb71be5653c7456bde468dbe9371f4b 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -31,6 +31,216 @@ import {
@@ -253,19 +253,40 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
    /**
     * Build the Slack API payload fields for a message.
     *
-@@ -2004,7 +2234,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -689,6 +919,10 @@ var TRAILING_SLASH_PATTERN = /\/$/;
+ var UNFURL_WAIT_MS = 2e3;
+ var UNFURL_POLL_MS = 150;
+ var SLACK_MESSAGE_URL_PATTERN = /^https?:\/\/[^/]+\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d+)(?:\?.*)?$/;
++function extractEventText(event) {
++  const attachmentText = Array.isArray(event.attachments) ? event.attachments.map((attachment) => typeof attachment?.text === "string" ? attachment.text : "").filter(Boolean).join("\n\n") : "";
++  return [typeof event.text === "string" ? event.text : "", attachmentText].filter(Boolean).join("\n\n");
++}
+ function normalizeBotTokenProvider(value) {
+   if (value === void 0) {
+     return void 0;
+@@ -2004,7 +2238,11 @@ var SlackAdapter = class _SlackAdapter {
        channel: event.channel,
        threadTs
      });
 -    const isMention = event.type === "app_mention";
++    const eventText = extractEventText(event);
 +    const botMentioned = Boolean(
-+      this._botUserId && typeof event.text === "string" && (event.text.includes(`<@${this._botUserId}>`) || event.text.includes(`<@${this._botUserId}|`))
++      this._botUserId && (eventText.includes(`<@${this._botUserId}>`) || eventText.includes(`<@${this._botUserId}|`))
 +    );
 +    const isMention = event.type === "app_mention" || botMentioned && (event.bot_id || event.subtype === "bot_message");
      const factory = async () => {
        const msg = await this.parseSlackMessage(event, threadId);
        if (isMention) {
-@@ -2520,10 +2753,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -2486,7 +2724,7 @@ var SlackAdapter = class _SlackAdapter {
+   async parseSlackMessage(event, threadId, options) {
+     const isMe = this.isMessageFromSelf(event);
+     const skipSelfMention = options?.skipSelfMention ?? true;
+-    const rawText = event.text || "";
++    const rawText = extractEventText(event);
+     let userName = event.username || "unknown";
+     let fullName = event.username || "unknown";
+     if (event.user && !event.username) {
+@@ -2520,10 +2758,10 @@ var SlackAdapter = class _SlackAdapter {
        formatted: this.formatConverter.toAst(text),
        raw: event,
        author: {
@@ -278,7 +299,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
          isMe
        },
        metadata: {
-@@ -3452,26 +3685,251 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3452,26 +3690,251 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -539,7 +560,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
      const sendStructuredChunk = async (chunk) => {
        if (!structuredChunksSupported) {
          return;
-@@ -3481,8 +3939,45 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3481,8 +3944,45 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
@@ -586,7 +607,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
          structuredChunksSupported = false;
          this.logger.warn(
            "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
-@@ -3497,31 +3992,91 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3497,31 +3997,91 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };
@@ -697,7 +718,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
      };
    }
    /**
-@@ -3798,10 +4353,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3798,10 +4358,10 @@ var SlackAdapter = class _SlackAdapter {
        formatted: this.formatConverter.toAst(text),
        raw: event,
        author: {

@@ -4275,6 +4275,48 @@ describe('slackbotv2', () => {
         recipient_user_id: 'UOTHERBOT'
       })
     )
+
+    bot = createTestBot({ triggerBotAllowlist: ['bot:BOTHERBOT'] })
+    codexApi.reset()
+    slackApi.reset()
+    const attachmentBotMessage = await postUserMessage('VictoriaMetrics alert')
+    const attachmentBotWaits: Promise<unknown>[] = []
+    const attachmentBotResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-attachment-bot-message-allowed',
+        event: {
+          type: 'message',
+          app_id: 'AOTHERBOT',
+          attachments: [
+            {
+              text: `State root mismatch\n\n<@${BOT_USER_ID}> investigate this alert`
+            }
+          ],
+          bot_id: 'BOTHERBOT',
+          bot_profile: {
+            app_id: 'AOTHERBOT',
+            id: 'BOTHERBOT',
+            user_id: 'UOTHERBOT'
+          },
+          channel: CHANNEL_ID,
+          subtype: 'bot_message',
+          team: TEAM_ID,
+          text: '',
+          ts: attachmentBotMessage.ts,
+          username: 'VictoriaMetrics'
+        }
+      }),
+      {},
+      waitUntilContext(attachmentBotWaits)
+    )
+    expect(attachmentBotResponse.status).toBe(200)
+    await Promise.all(attachmentBotWaits)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends[0]!.body.messages).join('\n')).toContain(
+      'State root mismatch'
+    )
   })
 })
 
