@@ -2213,15 +2213,17 @@ class SlackClient:
 
     def search_files(
         self,
+        channel_id: str,
         query: str,
         max_results: int = 20,
     ) -> list[dict]:
-        """Search files across the workspace using files.list with metadata filter.
+        """Search files in one Slack channel using files.list with metadata filter.
 
         Note: search.files requires a user token. This uses files.list as a
         bot-token-compatible alternative that filters by filename/type.
 
         Args:
+            channel_id: Slack channel ID to search
             query: Search query string (matches against filenames)
             max_results: Maximum results to return
 
@@ -2236,25 +2238,18 @@ class SlackClient:
             )
         results: list[dict] = []
         user_cache = self._get_user_cache()
-        channels = [
-            {"id": channel["id"], "page": 1}
-            for channel in self.list_channels_proxy(limit=10_000)
-            if channel.get("can_download")
-        ]
         page_limit = min(requested_limit, self._MAX_SLACK_FILES_PROXY_PAGE_SIZE)
-        while channels and len(results) < requested_limit:
-            next_channels = []
-            for channel in channels:
-                response = self.list_files_proxy(
-                    channel_id=channel["id"],
-                    limit=page_limit,
-                    page=channel["page"],
-                )
-                results.extend(self._filter_file_search_results(response, query, user_cache))
-                if response.get("has_more"):
-                    next_channels.append({"id": channel["id"], "page": channel["page"] + 1})
-            channels = next_channels
-        results.sort(key=lambda item: (item["created"], item["id"]), reverse=True)
+        page = 1
+        while len(results) < requested_limit:
+            response = self.list_files_proxy(
+                channel_id=channel_id,
+                limit=page_limit,
+                page=page,
+            )
+            results.extend(self._filter_file_search_results(response, query, user_cache))
+            if not response.get("has_more"):
+                break
+            page += 1
         return results[:requested_limit]
 
     def search_files_direct(

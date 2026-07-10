@@ -750,9 +750,6 @@ def test_search_files_uses_proxy_with_user_cache(
     client, _ = _make_client()
     monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true")
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
-    client.list_channels_proxy = lambda limit=200: [  # type: ignore[method-assign]
-        {"id": "C123456789", "can_download": True}
-    ]
 
     def fake_list_files_proxy(**kwargs):
         assert kwargs == {"channel_id": "C123456789", "limit": 20, "page": 1}
@@ -789,7 +786,7 @@ def test_search_files_uses_proxy_with_user_cache(
 
     client.list_files_proxy = fake_list_files_proxy  # type: ignore[method-assign]
 
-    results = client.search_files("report", max_results=20)
+    results = client.search_files("C123456789", "report", max_results=20)
 
     assert results == [
         {
@@ -814,21 +811,17 @@ def test_search_files_raises_when_api_proxy_disabled(
     monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "false")
 
     with pytest.raises(RuntimeError, match="proxy requires"):
-        client.search_files("report", max_results=10)
+        client.search_files("C123456789", "report", max_results=10)
 
 
 def test_search_files_paginates_proxy_until_enough_matches() -> None:
     client, _ = _make_client()
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
-    client.list_channels_proxy = lambda limit=200: [  # type: ignore[method-assign]
-        {"id": "C111111111", "can_download": True},
-        {"id": "C222222222", "can_download": True},
-    ]
     calls: list[dict] = []
 
     def fake_list_files_proxy(**kwargs):
         calls.append(kwargs)
-        if kwargs["channel_id"] == "C111111111" and kwargs["page"] == 1:
+        if kwargs["page"] == 1:
             return {
                 "ok": True,
                 "has_more": True,
@@ -844,25 +837,6 @@ def test_search_files_paginates_proxy_until_enough_matches() -> None:
                         "permalink": "https://slack.example/files/F000000001",
                         "url_private": "https://files.example/F000000001",
                         "created": 1700000000,
-                    }
-                ],
-            }
-        if kwargs["channel_id"] == "C222222222":
-            return {
-                "ok": True,
-                "has_more": False,
-                "files": [
-                    {
-                        "id": "F222222222",
-                        "name": "notes.txt",
-                        "title": "Notes",
-                        "filetype": "txt",
-                        "size": 100,
-                        "user": "U123456789",
-                        "channels": ["C222222222"],
-                        "permalink": "https://slack.example/files/F222222222",
-                        "url_private": "https://files.example/F222222222",
-                        "created": 1700000002,
                     }
                 ],
             }
@@ -887,11 +861,10 @@ def test_search_files_paginates_proxy_until_enough_matches() -> None:
 
     client.list_files_proxy = fake_list_files_proxy  # type: ignore[method-assign]
 
-    results = client.search_files("report", max_results=10)
+    results = client.search_files("C111111111", "report", max_results=10)
 
     assert calls == [
         {"channel_id": "C111111111", "limit": 10, "page": 1},
-        {"channel_id": "C222222222", "limit": 10, "page": 1},
         {"channel_id": "C111111111", "limit": 10, "page": 2},
     ]
     assert [result["id"] for result in results] == ["F123456789"]
