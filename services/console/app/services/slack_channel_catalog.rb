@@ -12,7 +12,7 @@ class SlackChannelCatalog
   end
 
   DEFAULT_API_URL = "https://slack.com/api".freeze
-  DEFAULT_TYPES = "public_channel,private_channel".freeze
+  DEFAULT_TYPES = "public_channel,private_channel,im".freeze
   CACHE_TTL = 5.minutes
   OPEN_TIMEOUT_SECONDS = 2
   READ_TIMEOUT_SECONDS = 5
@@ -35,7 +35,16 @@ class SlackChannelCatalog
   def self.cache_key(token:, api_url:)
     token_digest = Digest::SHA256.hexdigest(token)
     api_url_digest = Digest::SHA256.hexdigest(api_url)
-    "slack_channel_catalog/v1/#{api_url_digest}/#{token_digest}"
+    "slack_channel_catalog/v2/#{api_url_digest}/#{token_digest}"
+  end
+
+  def self.channel_id_for_user(user_id)
+    normalized = user_id.to_s.strip.upcase
+    return nil if normalized.blank?
+
+    fetch.channels.find do |channel|
+      channel.id.start_with?("D") && channel.name.to_s.upcase == normalized
+    end&.id
   end
 
   def self.serialize_result(result)
@@ -123,9 +132,10 @@ class SlackChannelCatalog
   def parse_channel(channel)
     return nil unless channel.is_a?(Hash)
     id = channel["id"].to_s
-    name = channel["name"].to_s
+    im = channel["is_im"] == true || id.start_with?("D")
+    name = im ? channel["user"].presence || channel["name"].presence : channel["name"].presence
     return nil if id.blank? || name.blank?
 
-    Channel.new(id: id, name: name, private: channel["is_private"] == true)
+    Channel.new(id: id, name: name, private: im || channel["is_private"] == true)
   end
 end

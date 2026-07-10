@@ -4,7 +4,11 @@ module Console
     def slack_channel_options_for_permission(permission, channel_options)
       current_id = permission.channel_id.to_s
       current_label = if permission.channel_name.present?
-        "##{permission.channel_name} (#{current_id})"
+        if current_id.start_with?("D")
+          "DM #{permission.channel_name} (#{current_id})"
+        else
+          "##{permission.channel_name} (#{current_id})"
+        end
       else
         current_id
       end

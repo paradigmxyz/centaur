@@ -21,5 +21,18 @@ module Console
 
       assert_equal options, slack_channel_options_for_permission(permission, options)
     end
+
+    test "slack_channel_options_for_permission labels missing DM channels by user id" do
+      permission = SlackChannelPermission.new(channel_id: "D0123456789", channel_name: "U0123456789")
+      options = [ [ "#general (C9999999999)", "C9999999999" ] ]
+
+      assert_equal(
+        [
+          [ "DM U0123456789 (D0123456789)", "D0123456789" ],
+          [ "#general (C9999999999)", "C9999999999" ]
+        ],
+        slack_channel_options_for_permission(permission, options)
+      )
+    end
   end
 end

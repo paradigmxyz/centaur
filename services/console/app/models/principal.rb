@@ -25,7 +25,7 @@ class Principal < ApplicationRecord
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_validation :apply_sandbox_repo_cache_setting
-  after_create :create_slack_channel_permission_from_label
+  after_create :create_slack_permissions_from_labels
   after_save :clear_sandbox_repo_cache_setting
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
@@ -41,9 +41,11 @@ class Principal < ApplicationRecord
   REDACTED = "[redacted]".freeze
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SLACK_CHANNEL_ID_LABEL = "slack_channel_id".freeze
+  SLACK_USER_ID_LABEL = "slack_user_id".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   SANDBOX_REPO_CACHE_ALIASES = { "pub" => "public" }.freeze
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
+  SLACK_USER_ID_FORMAT = /\A[UW][A-Z0-9]{2,}\z/
 
   # The config of a principal with no effective grants; also what an unassigned
   # proxy resolves to.
@@ -183,6 +185,11 @@ class Principal < ApplicationRecord
     (slack_upload_channel_ids + slack_download_channel_ids + slack_history_channel_ids).uniq
   end
 
+  def slack_user_id
+    user_id = labels.to_h[SLACK_USER_ID_LABEL].to_s.strip.upcase
+    user_id.match?(SLACK_USER_ID_FORMAT) ? user_id : nil
+  end
+
   def self.bump_sync_config_cache_versions(ids)
     ids = Array(ids).compact.uniq
     return if ids.empty?
@@ -234,15 +241,26 @@ class Principal < ApplicationRecord
     attributes["channel_id"].blank?
   end
 
+  def create_slack_permissions_from_labels
+    create_slack_channel_permission_from_label
+    create_slack_dm_permission_from_user_label
+  end
+
   def create_slack_channel_permission_from_label
     channel_id = legacy_slack_channel_id
     return if channel_id.blank?
 
-    slack_channel_permissions.find_or_create_by!(channel_id: channel_id) do |permission|
-      permission.upload_enabled = true
-      permission.download_enabled = true
-      permission.history_enabled = true
-    end
+    create_default_slack_channel_permission(channel_id)
+  end
+
+  def create_slack_dm_permission_from_user_label
+    user_id = slack_user_id
+    return if user_id.blank?
+
+    channel_id = SlackChannelCatalog.channel_id_for_user(user_id)
+    return if channel_id.blank?
+
+    create_default_slack_channel_permission(channel_id, channel_name: user_id)
   end
 
   # The credentials actually delivered to the proxy, grouped by type, after
@@ -304,6 +322,15 @@ class Principal < ApplicationRecord
   def legacy_slack_channel_id
     channel_id = labels.to_h[SLACK_CHANNEL_ID_LABEL].to_s.strip.upcase
     channel_id.match?(SLACK_CHANNEL_ID_FORMAT) ? channel_id : nil
+  end
+
+  def create_default_slack_channel_permission(channel_id, channel_name: nil)
+    slack_channel_permissions.find_or_create_by!(channel_id: channel_id) do |permission|
+      permission.channel_name = channel_name
+      permission.upload_enabled = true
+      permission.download_enabled = true
+      permission.history_enabled = true
+    end
   end
 
   def api_server_hosts

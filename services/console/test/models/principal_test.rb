@@ -78,6 +78,51 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_empty principal.slack_channel_permissions.reload
   end
 
+  test "creates slack DM permission from slack user label when a DM channel exists" do
+    with_singleton_method(SlackChannelCatalog, :channel_id_for_user, lambda { |user_id|
+      user_id == "U0123456789" ? "D0123456789" : nil
+    }) do
+      principal = Principal.create!(
+        default_attrs(
+          namespace: "acme",
+          foreign_id: "U-auto-slack-dm",
+          labels: { Principal::SLACK_USER_ID_LABEL => " u0123456789 " }
+        )
+      )
+
+      permission = principal.slack_channel_permissions.reload.sole
+      assert_equal "D0123456789", permission.channel_id
+      assert_equal "U0123456789", permission.channel_name
+      assert_predicate permission, :upload_enabled
+      assert_predicate permission, :download_enabled
+      assert_predicate permission, :history_enabled
+    end
+  end
+
+  test "does not create slack DM permission when slack user label is added later" do
+    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "U-later-slack-dm"))
+
+    with_singleton_method(SlackChannelCatalog, :channel_id_for_user, ->(_user_id) { "D0123456789" }) do
+      principal.update!(labels: { Principal::SLACK_USER_ID_LABEL => "U0123456789" })
+    end
+
+    assert_empty principal.slack_channel_permissions.reload
+  end
+
+  test "does not create slack DM permission when slack user label has no matching DM channel" do
+    with_singleton_method(SlackChannelCatalog, :channel_id_for_user, ->(_user_id) { nil }) do
+      principal = Principal.create!(
+        default_attrs(
+          namespace: "acme",
+          foreign_id: "U-missing-slack-dm",
+          labels: { Principal::SLACK_USER_ID_LABEL => "U0123456789" }
+        )
+      )
+
+      assert_empty principal.slack_channel_permissions.reload
+    end
+  end
+
   test "sandbox access defaults to enabled" do
     principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-sandbox-access"))
     principal.reload
@@ -676,5 +721,14 @@ class PrincipalTest < ActiveSupport::TestCase
     previous.each do |key, value|
       value.nil? ? ENV.delete(key) : ENV[key] = value
     end
+  end
+
+  def with_singleton_method(object, method_name, replacement)
+    singleton = object.singleton_class
+    original = singleton.instance_method(method_name)
+    singleton.define_method(method_name, replacement)
+    yield
+  ensure
+    singleton.define_method(method_name, original)
   end
 end
