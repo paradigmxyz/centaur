@@ -2230,19 +2230,40 @@ class SlackClient:
             )
             user_cache = {}
         else:
-            try:
-                response = self._retry_on_ratelimit(
-                    self._client.files_list,
-                    count=requested_limit,
-                )
-            except SlackApiError as e:
-                self._raise_slack_api_error(
-                    e,
-                    slack_method="files.list",
-                    access_path="bot_token",
-                )
-            user_cache = self._get_user_cache()
+            return self.search_files_direct(query, max_results=requested_limit)
 
+        return self._filter_file_search_results(response, query, requested_limit, user_cache)
+
+    def search_files_direct(
+        self,
+        query: str,
+        max_results: int = 20,
+    ) -> list[dict]:
+        """Search files directly through Slack's `files.list` API."""
+        requested_limit = max(1, int(max_results))
+        try:
+            response = self._retry_on_ratelimit(
+                self._client.files_list,
+                count=requested_limit,
+            )
+        except SlackApiError as e:
+            self._raise_slack_api_error(
+                e,
+                slack_method="files.list",
+                access_path="bot_token",
+            )
+        return self._filter_file_search_results(
+            response, query, requested_limit, self._get_user_cache()
+        )
+
+    def _filter_file_search_results(
+        self,
+        response: dict,
+        query: str,
+        requested_limit: int,
+        user_cache: dict[str, str],
+    ) -> list[dict]:
+        """Filter a files.list response by filename/title and normalize rows."""
         files = response.get("files", [])
         query_lower = query.lower()
 
@@ -2540,6 +2561,10 @@ def dump_channel_with_threads(*args, **kwargs):
 
 def search_files(*args, **kwargs):
     return _client().search_files(*args, **kwargs)
+
+
+def search_files_direct(*args, **kwargs):
+    return _client().search_files_direct(*args, **kwargs)
 
 
 def search_users(*args, **kwargs):

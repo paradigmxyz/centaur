@@ -830,6 +830,38 @@ def test_search_files_uses_direct_files_list_when_api_proxy_disabled(
     assert results[0]["user"] == "alice"
 
 
+def test_search_files_direct_uses_direct_files_list_when_api_proxy_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, fake_web_client = _make_client()
+    monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true")
+    client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
+    client.list_files_proxy = pytest.fail  # type: ignore[method-assign]
+    fake_web_client.files_list_pages = [
+        {
+            "files": [
+                {
+                    "id": "F123456789",
+                    "name": "quarterly-report.pdf",
+                    "title": "Q4 Report",
+                    "filetype": "pdf",
+                    "size": 1234,
+                    "user": "U123456789",
+                    "channels": ["C123456789"],
+                    "permalink": "https://slack.example/files/F123456789",
+                    "url_private": "https://files.example/F123456789",
+                    "created": 1700000000,
+                }
+            ]
+        }
+    ]
+
+    results = client.search_files_direct("report", max_results=10)
+
+    assert fake_web_client.files_list_calls == [{"count": 10}]
+    assert results[0]["user"] == "alice"
+
+
 def test_search_messages_with_channel_ids_scans_proxy_history_without_listing() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]

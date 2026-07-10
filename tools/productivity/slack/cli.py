@@ -963,6 +963,32 @@ def search_files_cmd(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
+    _print_file_search_results(query, results)
+
+
+@app.command("search-files-direct")
+def search_files_direct_cmd(
+    query: str = typer.Argument(..., help="Search query for files"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+):
+    """Search files by calling Slack files.list directly.
+
+    Examples:
+        slack search-files-direct "quarterly report"
+        slack search-files-direct "architecture diagram" -n 10
+    """
+    from .client import search_files_direct
+
+    try:
+        results = search_files_direct(query, max_results=limit)
+    except RuntimeError as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1)
+
+    _print_file_search_results(query, results)
+
+
+def _print_file_search_results(query: str, results: list[dict]) -> None:
     if not results:
         console.print("[yellow]No files found.[/]")
         raise typer.Exit()

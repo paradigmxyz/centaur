@@ -167,6 +167,39 @@ def test_channels_direct_calls_direct_client(monkeypatch) -> None:
     assert "general" in result.output
 
 
+def test_search_files_direct_calls_direct_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_search_files_direct(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [
+            {
+                "id": "F1234567890",
+                "name": "report.pdf",
+                "title": "Report",
+                "filetype": "pdf",
+                "size": 1234,
+                "user": "alice",
+                "channels": ["C1234567890"],
+                "permalink": "https://slack.example/files/F1234567890",
+                "url_private": "https://files.example/F1234567890",
+                "created": 1700000000,
+            }
+        ]
+
+    fake_client = types.SimpleNamespace(search_files_direct=fake_search_files_direct)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        ["search-files-direct", "report", "--limit", "10"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(("report",), {"max_results": 10})]
+    assert "report.pdf" in result.output
+
+
 def test_upload_direct_requires_explicit_channel_and_thread(
     monkeypatch, tmp_path: Path
 ) -> None:
