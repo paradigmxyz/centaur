@@ -5,8 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import os
+import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from api.runtime_control import canonical_json
 from workflows.etl_metrics import (
@@ -21,6 +22,8 @@ WORKFLOW_NAME = "attio_sync"
 DEFAULT_SYNC_INTERVAL_SECONDS = 4 * 60 * 60
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_WATERMARK_OVERLAP_SECONDS = 5 * 60
+DETAIL_REQUEST_MAX_ATTEMPTS = 3
+DETAIL_REQUEST_RETRY_SECONDS = 1
 MEETINGS_SCOPE = "meetings"
 
 
@@ -45,6 +48,16 @@ class Input:
     include_transcripts: bool = True
     watermark_overlap_seconds: int = DEFAULT_WATERMARK_OVERLAP_SECONDS
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SyncResult:
+    meetings_seen: int = 0
+    meetings_upserted: int = 0
+    call_recordings_seen: int = 0
+    transcripts_upserted: int = 0
+    watermark: dt.datetime | None = None
+    detail_failures: list[str] = field(default_factory=list)
 
 
 class AttioSyncClient(Protocol):
@@ -224,6 +237,20 @@ def _failure_reason(error: str) -> str:
     if "database" in lowered or "postgres" in lowered:
         return "write_error"
     return "api_error"
+
+
+async def _retry_detail_request(
+    request: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Retry transient Attio detail calls without replaying the whole scope."""
+    for attempt in range(DETAIL_REQUEST_MAX_ATTEMPTS):
+        try:
+            return await request()
+        except Exception:
+            if attempt == DETAIL_REQUEST_MAX_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(DETAIL_REQUEST_RETRY_SECONDS * (2**attempt))
+    raise RuntimeError("unreachable")
 
 
 def _attio_id(value: Any, *keys: str) -> str:
@@ -428,10 +455,12 @@ async def _load_call_recordings(
     recordings: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
-        page = await client.list_call_recordings(
-            meeting_id,
-            limit=page_size,
-            cursor=cursor,
+        page = await _retry_detail_request(
+            lambda: client.list_call_recordings(
+                meeting_id,
+                limit=page_size,
+                cursor=cursor,
+            )
         )
         items = _page_items(page)
         recordings.extend(items)
@@ -450,10 +479,12 @@ async def _load_transcript(
     transcript: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
-        page = await client.get_call_transcript(
-            meeting_id,
-            recording_id,
-            cursor=cursor,
+        page = await _retry_detail_request(
+            lambda: client.get_call_transcript(
+                meeting_id,
+                recording_id,
+                cursor=cursor,
+            )
         )
         transcript.extend(_page_items(page))
         cursor = _next_cursor(page)
@@ -565,12 +596,8 @@ async def _sync_meetings(
     max_meetings: int | None,
     include_transcripts: bool,
     run_id: str,
-) -> tuple[int, int, int, int, dt.datetime | None]:
-    seen = 0
-    upserted = 0
-    recordings_seen = 0
-    transcripts_upserted = 0
-    watermark: dt.datetime | None = None
+) -> SyncResult:
+    result = SyncResult()
     cursor: str | None = None
     ends_from = _rfc3339(updated_after) if updated_after else None
 
@@ -583,61 +610,78 @@ async def _sync_meetings(
         )
         meetings = [meeting for meeting in _page_items(page) if _meeting_id(meeting)]
         if max_meetings is not None:
-            meetings = meetings[: max(max_meetings - seen, 0)]
-        seen += len(meetings)
+            meetings = meetings[: max(max_meetings - result.meetings_seen, 0)]
+        result.meetings_seen += len(meetings)
         record_etl_items_seen("attio", MEETINGS_SCOPE, "meeting", len(meetings))
 
         for meeting_ref in meetings:
             meeting_id = _meeting_id(meeting_ref)
-            meeting = await client.get_meeting(meeting_id)
-            if not isinstance(meeting, dict) or not meeting:
-                meeting = meeting_ref
-            meeting.setdefault("id", {"meeting_id": meeting_id})
-            call_recordings: list[dict[str, Any]] = []
-            transcript_payload: list[dict[str, Any]] = []
-            if include_transcripts:
-                call_recordings = await _load_call_recordings(
-                    client,
-                    meeting_id=meeting_id,
-                    page_size=page_size,
+            try:
+                meeting = await _retry_detail_request(
+                    lambda: client.get_meeting(meeting_id)
                 )
-                recordings_seen += len(call_recordings)
-                for recording in call_recordings:
-                    recording_id = _recording_id(recording)
-                    if not recording_id:
-                        continue
-                    transcript_payload.extend(
-                        await _load_transcript(
-                            client,
-                            meeting_id=meeting_id,
-                            recording_id=recording_id,
-                        )
+                if not isinstance(meeting, dict) or not meeting:
+                    meeting = meeting_ref
+                meeting.setdefault("id", {"meeting_id": meeting_id})
+                call_recordings: list[dict[str, Any]] = []
+                transcript_payload: list[dict[str, Any]] = []
+                if include_transcripts:
+                    call_recordings = await _load_call_recordings(
+                        client,
+                        meeting_id=meeting_id,
+                        page_size=page_size,
                     )
-                if transcript_payload:
-                    transcripts_upserted += 1
-                    record_etl_items_upserted("attio", MEETINGS_SCOPE, "transcript", 1)
+                    result.call_recordings_seen += len(call_recordings)
+                    for recording in call_recordings:
+                        recording_id = _recording_id(recording)
+                        if not recording_id:
+                            continue
+                        transcript_payload.extend(
+                            await _load_transcript(
+                                client,
+                                meeting_id=meeting_id,
+                                recording_id=recording_id,
+                            )
+                        )
+                    if transcript_payload:
+                        result.transcripts_upserted += 1
+                        record_etl_items_upserted(
+                            "attio", MEETINGS_SCOPE, "transcript", 1
+                        )
 
-            source_updated_at = await _upsert_meeting(
-                pool,
-                meeting=meeting,
-                call_recordings=call_recordings,
-                transcript_payload=transcript_payload,
-                run_id=run_id,
-            )
-            upserted += 1
+                source_updated_at = await _upsert_meeting(
+                    pool,
+                    meeting=meeting,
+                    call_recordings=call_recordings,
+                    transcript_payload=transcript_payload,
+                    run_id=run_id,
+                )
+            except Exception as exc:
+                error = str(exc)
+                result.detail_failures.append(f"{meeting_id}: {error}")
+                record_etl_items_failed(
+                    "attio", MEETINGS_SCOPE, "meeting", _failure_reason(error)
+                )
+                continue
+
+            result.meetings_upserted += 1
             record_etl_items_upserted("attio", MEETINGS_SCOPE, "meeting", 1)
-            if source_updated_at and (
-                watermark is None or source_updated_at > watermark
+            # Keep the checkpoint before the first failed detail fetch so that
+            # subsequent runs retry the incomplete meeting and anything after it.
+            if (
+                not result.detail_failures
+                and source_updated_at
+                and (result.watermark is None or source_updated_at > result.watermark)
             ):
-                watermark = source_updated_at
+                result.watermark = source_updated_at
 
-        if max_meetings is not None and seen >= max_meetings:
+        if max_meetings is not None and result.meetings_seen >= max_meetings:
             break
         cursor = _next_cursor(page)
         if not cursor:
             break
 
-    return seen, upserted, recordings_seen, transcripts_upserted, watermark
+    return result
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
@@ -682,13 +726,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "transcripts_upserted": 0,
     }
     try:
-        (
-            counts["meetings_seen"],
-            counts["meetings_upserted"],
-            counts["call_recordings_seen"],
-            counts["transcripts_upserted"],
-            successful_watermark,
-        ) = await _sync_meetings(
+        sync_result = await _sync_meetings(
             client=client,
             pool=ctx._pool,
             page_size=page_size,
@@ -697,13 +735,33 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             include_transcripts=inp.include_transcripts,
             run_id=run_id,
         )
-        await _update_checkpoint_success(
-            ctx._pool,
-            scope_id=MEETINGS_SCOPE,
-            watermark_time=successful_watermark,
-            run_id=run_id,
+        counts.update(
+            meetings_seen=sync_result.meetings_seen,
+            meetings_upserted=sync_result.meetings_upserted,
+            call_recordings_seen=sync_result.call_recordings_seen,
+            transcripts_upserted=sync_result.transcripts_upserted,
         )
-        synced.append(_scope_ref(MEETINGS_SCOPE))
+        if sync_result.detail_failures:
+            error = f"{len(sync_result.detail_failures)} meeting detail fetches failed"
+            failed.append(_scope_ref(MEETINGS_SCOPE, error))
+            await _update_checkpoint_failure(
+                ctx._pool,
+                scope_id=MEETINGS_SCOPE,
+                run_id=run_id,
+                error=error,
+            )
+            ctx.log(
+                "attio_sync_meeting_details_failed",
+                failures=len(sync_result.detail_failures),
+            )
+        else:
+            await _update_checkpoint_success(
+                ctx._pool,
+                scope_id=MEETINGS_SCOPE,
+                watermark_time=sync_result.watermark,
+                run_id=run_id,
+            )
+            synced.append(_scope_ref(MEETINGS_SCOPE))
     except Exception as exc:
         error = str(exc)
         failed.append(_scope_ref(MEETINGS_SCOPE, error))

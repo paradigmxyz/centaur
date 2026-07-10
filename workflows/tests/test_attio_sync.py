@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import importlib
 import json
 import sys
@@ -95,3 +96,158 @@ def test_attio_sync_uses_supported_meeting_sort():
     )
 
     assert client.sort == "start_asc"
+
+
+def test_attio_sync_retries_transient_meeting_detail_failure(monkeypatch):
+    attio = _load("workflows.attio_sync")
+
+    class FakeAttioClient:
+        def __init__(self) -> None:
+            self.detail_attempts = 0
+
+        async def list_meetings(self, **_kwargs):
+            return {"data": [{"id": {"meeting_id": "mtg_1"}}]}
+
+        async def get_meeting(self, _meeting_id):
+            self.detail_attempts += 1
+            if self.detail_attempts < 3:
+                raise RuntimeError("Name or service not known")
+            return {"id": {"meeting_id": "mtg_1"}, "updated_at": "2026-07-10T12:00:00Z"}
+
+    async def fake_upsert(*_args, **_kwargs):
+        return dt.datetime(2026, 7, 10, 12, tzinfo=dt.UTC)
+
+    sleeps: list[int] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(attio, "_upsert_meeting", fake_upsert)
+    monkeypatch.setattr(attio.asyncio, "sleep", fake_sleep)
+    client = FakeAttioClient()
+
+    result = asyncio.run(
+        attio._sync_meetings(
+            client=client,
+            pool=None,
+            page_size=50,
+            updated_after=None,
+            max_meetings=None,
+            include_transcripts=False,
+            run_id="run_1",
+        )
+    )
+
+    assert client.detail_attempts == 3
+    assert sleeps == [1, 2]
+    assert result.meetings_seen == 1
+    assert result.meetings_upserted == 1
+    assert result.detail_failures == []
+
+
+def test_attio_sync_continues_after_exhausted_detail_failure(monkeypatch):
+    attio = _load("workflows.attio_sync")
+
+    class FakeAttioClient:
+        def __init__(self) -> None:
+            self.detail_attempts: dict[str, int] = {}
+
+        async def list_meetings(self, **_kwargs):
+            return {
+                "data": [
+                    {"id": {"meeting_id": "mtg_failed"}},
+                    {"id": {"meeting_id": "mtg_ok"}},
+                ]
+            }
+
+        async def get_meeting(self, meeting_id):
+            self.detail_attempts[meeting_id] = (
+                self.detail_attempts.get(meeting_id, 0) + 1
+            )
+            if meeting_id == "mtg_failed":
+                raise RuntimeError("Name or service not known")
+            return {
+                "id": {"meeting_id": meeting_id},
+                "updated_at": "2026-07-10T12:00:00Z",
+            }
+
+    async def fake_upsert(*_args, **_kwargs):
+        return dt.datetime(2026, 7, 10, 12, tzinfo=dt.UTC)
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(attio, "_upsert_meeting", fake_upsert)
+    monkeypatch.setattr(attio.asyncio, "sleep", no_sleep)
+    client = FakeAttioClient()
+
+    result = asyncio.run(
+        attio._sync_meetings(
+            client=client,
+            pool=None,
+            page_size=50,
+            updated_after=None,
+            max_meetings=None,
+            include_transcripts=False,
+            run_id="run_1",
+        )
+    )
+
+    assert client.detail_attempts == {"mtg_failed": 3, "mtg_ok": 1}
+    assert result.meetings_seen == 2
+    assert result.meetings_upserted == 1
+    assert len(result.detail_failures) == 1
+    assert result.watermark is None
+
+
+def test_attio_handler_records_partial_detail_progress(monkeypatch):
+    attio = _load("workflows.attio_sync")
+
+    class FakeContext:
+        run_id = "workflow-run-1"
+        _pool = object()
+
+        def __init__(self) -> None:
+            self.logs: list[tuple[str, dict]] = []
+
+        def log(self, message, **fields):
+            self.logs.append((message, fields))
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    async def fake_sync(**_kwargs):
+        return attio.SyncResult(
+            meetings_seen=3,
+            meetings_upserted=2,
+            call_recordings_seen=1,
+            transcripts_upserted=1,
+            detail_failures=["mtg_failed: Name or service not known"],
+        )
+
+    recorded: dict[str, object] = {}
+
+    async def record_finish(*_args, **kwargs):
+        recorded.update(kwargs)
+
+    monkeypatch.setattr(attio, "env_flag_enabled", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(attio, "_record_run_start", no_op)
+    monkeypatch.setattr(attio, "_load_checkpoint", no_op)
+    monkeypatch.setattr(attio, "_sync_meetings", fake_sync)
+    monkeypatch.setattr(attio, "_update_checkpoint_failure", no_op)
+    monkeypatch.setattr(attio, "_record_run_finish", record_finish)
+    ctx = FakeContext()
+
+    result = asyncio.run(attio.handler(attio.Input(), ctx))
+
+    assert result["status"] == "failed"
+    assert result["meetings_seen"] == 3
+    assert result["meetings_upserted"] == 2
+    assert recorded["status"] == "failed"
+    assert recorded["counts"] == {
+        "meetings_seen": 3,
+        "meetings_upserted": 2,
+        "call_recordings_seen": 1,
+        "transcripts_upserted": 1,
+    }
+    assert ctx.logs == [("attio_sync_meeting_details_failed", {"failures": 1})]
