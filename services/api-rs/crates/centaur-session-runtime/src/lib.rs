@@ -67,13 +67,10 @@ const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
 const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 const EXECUTION_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const EXECUTION_HANDOFF_DB_TIMEOUT: Duration = Duration::from_secs(5);
-/// Executions are queued only between `create_execution` and the
-/// running transition a few statements later in `execute_session`, so a
-/// healthy row spends milliseconds in that state. An adoption scan racing a
-/// live `execute_session` (another control plane mid-rollout, or this
-/// process's own request handler) must not fail a young queued row it
-/// happens to observe in that window.
-const QUEUED_ORPHAN_GRACE: Duration = Duration::from_secs(120);
+/// A live execution can briefly have no sandbox while it moves from queued
+/// through warm-sandbox assignment. A periodic adoption scan must not fail a
+/// young row it observes in that window.
+const PRE_SANDBOX_ORPHAN_GRACE: Duration = Duration::from_secs(120);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const PUBLIC_REPO_CACHE_SUBPATH: &str = "public";
@@ -2955,19 +2952,19 @@ impl SessionRuntime {
             loop {
                 ticker.tick().await;
                 runtime
-                    .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+                    .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
                     .await;
             }
         });
     }
 
-    /// One pass over all active executions. `queued_grace` is the minimum
-    /// age before a queued row is treated as orphaned; `None` fails queued
-    /// rows immediately and is only correct when no re-scan will follow.
+    /// One pass over all active executions. `pre_sandbox_grace` is the
+    /// minimum age before a row awaiting sandbox assignment is treated as
+    /// orphaned; `None` is only correct when no re-scan will follow.
     async fn run_orphan_adoption_scan(
         &self,
         state: &mut OrphanAdoptionState,
-        queued_grace: Option<Duration>,
+        pre_sandbox_grace: Option<Duration>,
     ) {
         let executions = match self.store.list_active_executions_with_ownership().await {
             Ok(executions) => executions,
@@ -3010,7 +3007,7 @@ impl SessionRuntime {
             }
             let record_deferral = !state.deferred.contains(&execution_id);
             match self
-                .adopt_orphaned_execution(&candidate.execution, record_deferral, queued_grace)
+                .adopt_orphaned_execution(&candidate.execution, record_deferral, pre_sandbox_grace)
                 .await
             {
                 Ok(OrphanAdoption::Adopted) => adopted += 1,
@@ -3085,7 +3082,7 @@ impl SessionRuntime {
         &self,
         execution: &SessionExecution,
         record_deferral: bool,
-        queued_grace: Option<Duration>,
+        pre_sandbox_grace: Option<Duration>,
     ) -> Result<OrphanAdoption, SessionRuntimeError> {
         let thread_key = &execution.thread_key;
         let execution_id = execution.execution_id.as_str();
@@ -3095,7 +3092,7 @@ impl SessionRuntime {
             // On a periodic scan, young queued rows are skipped instead of
             // failed: they are most likely a live execute_session observed
             // mid-transition, and a later tick revisits them.
-            if let Some(grace) = queued_grace {
+            if let Some(grace) = pre_sandbox_grace {
                 let age = SystemTime::now()
                     .duration_since(SystemTime::from(execution.created_at))
                     .unwrap_or_default();
@@ -3122,6 +3119,21 @@ impl SessionRuntime {
         }
         let session = self.store.get_session(thread_key).await?;
         let Some(sandbox_id) = session.sandbox_id.as_deref() else {
+            let running_since = execution.started_at.unwrap_or(execution.created_at);
+            let running_age = SystemTime::now()
+                .duration_since(SystemTime::from(running_since))
+                .unwrap_or_default();
+            if pre_sandbox_grace.is_some_and(|grace| running_age < grace) {
+                debug!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_skipped",
+                    thread_key = %thread_key,
+                    execution_id,
+                    age_ms = duration_millis_u64(running_age),
+                    "skipping young running execution awaiting sandbox assignment"
+                );
+                return Ok(OrphanAdoption::Skipped);
+            }
             self.fail_orphaned_execution(
                 thread_key,
                 execution_id,
@@ -8066,11 +8078,13 @@ mod adoption_tests {
         execution_id
     }
 
-    /// Ages an execution row past `QUEUED_ORPHAN_GRACE` so adoption treats it
+    /// Ages an execution row past `PRE_SANDBOX_ORPHAN_GRACE` so adoption treats it
     /// as a genuine orphan instead of a young row racing a live execute.
     async fn backdate_execution(store: &PgSessionStore, execution_id: &str, seconds: f64) {
         let result = sqlx::query(
-            "update session_executions set created_at = created_at - make_interval(secs => $2) \
+            "update session_executions \
+             set created_at = created_at - make_interval(secs => $2), \
+                 started_at = started_at - make_interval(secs => $2) \
              where execution_id = $1",
         )
         .bind(execution_id)
@@ -9238,7 +9252,7 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn periodic_scan_skips_young_queued_executions_until_grace_passes() {
+    async fn periodic_scan_skips_young_pre_sandbox_executions_until_grace_passes() {
         let Some(store) = test_store().await else {
             return;
         };
@@ -9251,7 +9265,7 @@ mod adoption_tests {
         let runtime = runtime_with(&store, backend.clone());
         let mut state = OrphanAdoptionState::default();
         runtime
-            .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
 
         // A queued row younger than the grace window may belong to a live
@@ -9277,9 +9291,32 @@ mod adoption_tests {
         // Once the row ages past the grace window, a later tick fails it.
         backdate_execution(&store, &execution_id, 300.0).await;
         runtime
-            .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         wait_for_event(&store, &thread_key, "session.execution_failed").await;
+
+        // A newly running execution can still be waiting for its warm
+        // sandbox assignment. It gets the same periodic grace, but is failed
+        // if it remains unassigned after the grace window.
+        let running_thread =
+            ThreadKey::parse(format!("test:adopt-young-running-{}", uuid::Uuid::new_v4())).unwrap();
+        let running_execution = orphaned_execution(&store, &running_thread, None, true).await;
+        runtime
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
+            .await;
+        assert!(
+            events(&store, &running_thread)
+                .await
+                .iter()
+                .all(|event| event.event_type != "session.execution_failed"),
+            "young running execution must survive sandbox assignment"
+        );
+
+        backdate_execution(&store, &running_execution, 300.0).await;
+        runtime
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
+            .await;
+        wait_for_event(&store, &running_thread, "session.execution_failed").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9356,10 +9393,10 @@ mod adoption_tests {
         // silently: no deferral event, no sandbox status probe.
         let mut state = OrphanAdoptionState::default();
         runtime
-            .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         runtime
-            .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
 
         let all = events(&store, &thread_key).await;
@@ -9432,10 +9469,10 @@ mod adoption_tests {
         // deferral event only once.
         let mut state = OrphanAdoptionState::default();
         runtime
-            .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         runtime
-            .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         let all = events(&store, &thread_key).await;
         let deferrals = all
@@ -9452,7 +9489,7 @@ mod adoption_tests {
             .await
             .expect("release lease");
         runtime
-            .run_orphan_adoption_scan(&mut state, Some(QUEUED_ORPHAN_GRACE))
+            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
     }
