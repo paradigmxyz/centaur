@@ -409,6 +409,7 @@ def test_file_info_calls_proxy_client(monkeypatch) -> None:
     assert result.exit_code == 0
     assert calls == [{"file_id": "F1234567890", "channel_id": "C1234567890"}]
     assert "report.pdf" in result.output
+    assert "1KB" in result.output
 
 
 def test_thread_calls_api_server_client(monkeypatch) -> None:

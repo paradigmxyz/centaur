@@ -989,6 +989,24 @@ def search_files_direct_cmd(
     _print_file_search_results(query, results)
 
 
+def _format_file_size(size: object) -> str:
+    try:
+        size_bytes = int(size or 0)
+    except (TypeError, ValueError):
+        return str(size)
+    if size_bytes >= 1_000_000:
+        return f"{size_bytes / 1_000_000:.1f}MB"
+    if size_bytes >= 1_000:
+        return f"{size_bytes / 1_000:.0f}KB"
+    return f"{size_bytes}B"
+
+
+def _format_file_info_value(key: str, value: object) -> str:
+    if key == "size":
+        return _format_file_size(value)
+    return str(value)
+
+
 def _print_file_search_results(query: str, results: list[dict]) -> None:
     if not results:
         console.print("[yellow]No files found.[/]")
@@ -1001,14 +1019,7 @@ def _print_file_search_results(query: str, results: list[dict]) -> None:
     table.add_column("Size", style="dim", justify="right", max_width=10)
 
     for f in results:
-        size = f["size"]
-        if size > 1_000_000:
-            size_str = f"{size / 1_000_000:.1f}MB"
-        elif size > 1000:
-            size_str = f"{size / 1000:.0f}KB"
-        else:
-            size_str = f"{size}B"
-        table.add_row(f["name"], f["filetype"], f["user"], size_str)
+        table.add_row(f["name"], f["filetype"], f["user"], _format_file_size(f["size"]))
 
     console.print(table)
 
@@ -1055,7 +1066,7 @@ def file_info(
     ]:
         value = file.get(key)
         if value not in (None, "", []):
-            table.add_row(key, str(value))
+            table.add_row(key, _format_file_info_value(key, value))
     console.print(table)
 
 
@@ -1202,8 +1213,9 @@ def files(
     else:
         console.print(f"[bold]Files ({len(files_list)})[/]\n")
         for f in files_list:
-            size_kb = f["size"] / 1024
-            console.print(f"[cyan]{f['name']}[/] ({f['filetype']}, {size_kb:.1f} KB)")
+            console.print(
+                f"[cyan]{f['name']}[/] ({f['filetype']}, {_format_file_size(f['size'])})"
+            )
             console.print(f"  [dim]{f['url_private']}[/]")
 
 
