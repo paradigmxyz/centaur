@@ -752,7 +752,7 @@ def test_search_files_uses_proxy_with_user_cache(
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
 
     def fake_list_files_proxy(**kwargs):
-        assert kwargs == {"channel_id": "C123456789", "limit": 20, "page": 1}
+        assert kwargs == {"channel_id": "C123456789", "limit": 200, "page": 1}
         return {
             "ok": True,
             "has_more": False,
@@ -864,8 +864,8 @@ def test_search_files_paginates_proxy_until_enough_matches() -> None:
     results = client.search_files("C111111111", "report", max_results=10)
 
     assert calls == [
-        {"channel_id": "C111111111", "limit": 10, "page": 1},
-        {"channel_id": "C111111111", "limit": 10, "page": 2},
+        {"channel_id": "C111111111", "limit": 200, "page": 1},
+        {"channel_id": "C111111111", "limit": 200, "page": 2},
     ]
     assert [result["id"] for result in results] == ["F123456789"]
 
@@ -899,7 +899,7 @@ def test_search_files_direct_uses_direct_files_list_when_api_proxy_enabled(
 
     results = client.search_files_direct("report", max_results=10)
 
-    assert fake_web_client.files_list_calls == [{"count": 10, "page": 1}]
+    assert fake_web_client.files_list_calls == [{"count": 200, "page": 1}]
     assert results[0]["user"] == "alice"
 
 

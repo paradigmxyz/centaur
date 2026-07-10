@@ -88,7 +88,7 @@ class SlackClient:
     _USER_CACHE_TTL = 600  # 10 minutes
     _MAX_PAGE_SIZE = 200
     _MAX_SLACK_HISTORY_PROXY_PAGE_SIZE = 999
-    _MAX_SLACK_FILES_PROXY_PAGE_SIZE = 200
+    _MAX_SLACK_FILES_LIST_PAGE_SIZE = 200
     _DEFAULT_THREAD_REPLY_LIMIT = 50
     _DEFAULT_DUMP_MESSAGE_LIMIT = 100
     _DEFAULT_DUMP_THREAD_LIMIT = 25
@@ -1496,7 +1496,7 @@ class SlackClient:
         requested_limit: int | None = None
         if limit is not None:
             requested_limit = int(limit)
-            if not 1 <= requested_limit <= self._MAX_SLACK_FILES_PROXY_PAGE_SIZE:
+            if not 1 <= requested_limit <= self._MAX_SLACK_FILES_LIST_PAGE_SIZE:
                 raise ValueError("limit must be between 1 and 200")
 
         requested_page: int | None = None
@@ -2238,7 +2238,7 @@ class SlackClient:
             )
         results: list[dict] = []
         user_cache = self._get_user_cache()
-        page_limit = min(requested_limit, self._MAX_SLACK_FILES_PROXY_PAGE_SIZE)
+        page_limit = self._MAX_SLACK_FILES_LIST_PAGE_SIZE
         page = 1
         while len(results) < requested_limit:
             response = self.list_files_proxy(
@@ -2266,7 +2266,7 @@ class SlackClient:
             try:
                 response = self._retry_on_ratelimit(
                     self._client.files_list,
-                    count=min(requested_limit, self._MAX_SLACK_FILES_PROXY_PAGE_SIZE),
+                    count=self._MAX_SLACK_FILES_LIST_PAGE_SIZE,
                     page=page,
                 )
             except SlackApiError as e:
