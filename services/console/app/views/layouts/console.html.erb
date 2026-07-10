@@ -707,6 +707,13 @@
         color: #f4f4f5;
       }
 
+      /* The install item is hidden until beforeinstallprompt fires; the
+         explicit rule is needed because display: flex above would otherwise
+         override the hidden attribute. */
+      .console-account-menu-button[hidden] {
+        display: none;
+      }
+
       .console-main {
         display: flex;
         height: 100%;
@@ -1376,22 +1383,6 @@
           </div>
         </div>
 
-        <%# PWA install entry point. Hidden unless the browser reports the
-            console is installable (beforeinstallprompt); installing keeps the
-            standalone window plus the manifest's file_handlers registration. %>
-        <div data-controller="pwa-install"
-             data-pwa-install-target="banner"
-             hidden
-             style="padding: 0.25rem 0.75rem;">
-          <button type="button"
-                  class="console-nav-link w-full cursor-pointer"
-                  data-action="pwa-install#install"
-                  title="Install Centaur Console as a standalone app">
-            <span class="console-nav-icon"><%= console_icon("computer", classes: "size-4") %></span>
-            <span class="console-nav-label">Install app</span>
-          </button>
-        </div>
-
         <% if current_user %>
           <div class="console-sidebar-account" data-account-menu>
             <button type="button"
@@ -1411,6 +1402,22 @@
               <div class="console-account-menu-line" title="<%= current_user.email %>"><%= current_user.email %></div>
               <div class="console-account-menu-line console-account-menu-muted">Centaur Console</div>
               <div class="console-account-menu-separator"></div>
+              <%# PWA install entry point. Hidden unless the browser reports
+                  the console is installable (beforeinstallprompt); installing
+                  keeps the standalone window plus the manifest's file_handlers
+                  registration. %>
+              <button type="button"
+                      class="console-account-menu-button"
+                      data-controller="pwa-install"
+                      data-pwa-install-target="banner"
+                      data-action="pwa-install#install"
+                      hidden
+                      role="menuitem"
+                      title="Install Centaur Console as a standalone app"
+                      aria-label="Install app">
+                <%= console_icon("computer", classes: "size-4") %>
+                <span>Install app</span>
+              </button>
               <button type="button"
                       class="console-account-menu-button"
                       data-console-theme-toggle

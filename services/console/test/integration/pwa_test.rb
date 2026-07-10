@@ -54,6 +54,7 @@ class PwaTest < ActionDispatch::IntegrationTest
 
     get console_integrations_url
     assert_response :ok
-    assert_select "[data-controller=pwa-install]"
+    # Lives in the account menu, above the theme toggle.
+    assert_select "#console-account-menu [data-controller=pwa-install][hidden]"
   end
 end
