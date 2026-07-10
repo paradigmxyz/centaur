@@ -1478,16 +1478,14 @@ class SlackClient:
 
     def list_files_proxy(
         self,
-        channel_id: str | None = None,
+        channel_id: str,
         limit: int | None = None,
         page: int | None = None,
     ) -> dict[str, Any]:
         """List Slack files through the Centaur API server proxy.
 
         This maps to Slack's `files.list` for channels authorized by the
-        principal's `slack.download_channels` claim. When `channel_id` is
-        omitted, the API server scans the authorized download channels and
-        returns a deduplicated page.
+        principal's `slack.download_channels` claim.
         """
         if not self._api_server_proxy_enabled():
             raise RuntimeError(
@@ -1508,9 +1506,7 @@ class SlackClient:
                 raise ValueError("page must be greater than 0")
 
         params: dict[str, Any] = {
-            "channel_id": (
-                self._normalize_explicit_channel_id(channel_id) if channel_id is not None else None
-            ),
+            "channel_id": self._normalize_explicit_channel_id(channel_id),
             "limit": requested_limit,
             "page": requested_page,
         }
@@ -2240,16 +2236,25 @@ class SlackClient:
             )
         results: list[dict] = []
         user_cache = self._get_user_cache()
-        page = 1
-        while len(results) < requested_limit:
-            response = self.list_files_proxy(
-                limit=min(requested_limit, self._MAX_SLACK_FILES_PROXY_PAGE_SIZE),
-                page=page,
-            )
-            results.extend(self._filter_file_search_results(response, query, user_cache))
-            if not response.get("has_more"):
-                break
-            page += 1
+        channels = [
+            {"id": channel["id"], "page": 1}
+            for channel in self.list_channels_proxy(limit=10_000)
+            if channel.get("can_download")
+        ]
+        page_limit = min(requested_limit, self._MAX_SLACK_FILES_PROXY_PAGE_SIZE)
+        while channels and len(results) < requested_limit:
+            next_channels = []
+            for channel in channels:
+                response = self.list_files_proxy(
+                    channel_id=channel["id"],
+                    limit=page_limit,
+                    page=channel["page"],
+                )
+                results.extend(self._filter_file_search_results(response, query, user_cache))
+                if response.get("has_more"):
+                    next_channels.append({"id": channel["id"], "page": channel["page"] + 1})
+            channels = next_channels
+        results.sort(key=lambda item: (item["created"], item["id"]), reverse=True)
         return results[:requested_limit]
 
     def search_files_direct(
