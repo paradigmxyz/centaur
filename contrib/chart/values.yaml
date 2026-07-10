@@ -242,7 +242,7 @@ sandbox:
   #                  subscription token (proxy injects the brokered credential).
   codexAuthMode: api_key
   claudeCodeAuthMode: api_key
-  # The deployment's default harness: codex | amp | claudecode. Decides what
+  # The deployment's default harness: codex | amp | claudecode | hermes. Decides what
   # warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
   # fragment is required at startup (the other harnesses' fragments are
   # registered too when available, so per-session --claude/--amp/--codex

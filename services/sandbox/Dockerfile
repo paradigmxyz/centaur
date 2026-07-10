@@ -144,6 +144,7 @@ ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin
 
 ARG FOUNDRY_VERSION=v1.7.0
 ARG AMP_CLI_VERSION=0.0.1774529752-g94f44d
+ARG HERMES_AGENT_VERSION=0.17.0
 ARG MANIM_VERSION=0.20.1
 ARG BUN_VERSION=bun-v1.3.13
 
@@ -168,6 +169,9 @@ RUN curl -fsSL https://bun.sh/install | bash -s "${BUN_VERSION}"
 RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1001,gid=1001,sharing=locked \
     uv tool install "manim==${MANIM_VERSION}" \
     && manim --version
+RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1001,gid=1001,sharing=locked \
+    uv tool install "hermes-agent[acp]==${HERMES_AGENT_VERSION}" \
+    && hermes-acp --check
 RUN curl -L https://foundry.paradigm.xyz | bash \
     && /home/agent/.foundry/bin/foundryup --install ${FOUNDRY_VERSION} \
     && for bin in forge cast anvil chisel; do \

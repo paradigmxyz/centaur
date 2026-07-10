@@ -1924,6 +1924,9 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
+        // Hermes ACP uses the same OpenRouter API-key transport that is
+        // already provisioned for the sandbox image.
+        HarnessType::Hermes => "openrouter",
     }
 }
 
@@ -1941,6 +1944,7 @@ fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
         HarnessType::Codex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
+        HarnessType::Hermes => None,
     }
 }
 

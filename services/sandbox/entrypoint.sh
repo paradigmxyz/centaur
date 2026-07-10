@@ -50,16 +50,17 @@ if [ -n "${TOOL_DIRS:-}" ]; then
 fi
 
 if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
-    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude"
-    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/uploads" "$HOME_DIR/branches"
+    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude" "$STATE_DIR/hermes"
+    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/.hermes" "$HOME_DIR/uploads" "$HOME_DIR/branches"
     ln -s "$STATE_DIR/codex" "$HOME_DIR/.codex"
     ln -s "$STATE_DIR/claude" "$HOME_DIR/.claude"
+    ln -s "$STATE_DIR/hermes" "$HOME_DIR/.hermes"
     ln -s "$STATE_DIR/uploads" "$HOME_DIR/uploads"
     ln -s "$STATE_DIR/branches" "$HOME_DIR/branches"
     export CENTAUR_PERSISTENT_STATE=1
 fi
 
-mkdir -p "$HOME_DIR/.config/amp"
+mkdir -p "$HOME_DIR/.config/amp" "$HOME_DIR/.hermes"
 
 # ── Write harness configs (no MCP — adds ~10s startup overhead) ───────────────
 cat > "$HOME_DIR/.config/amp/settings.json" <<EOF

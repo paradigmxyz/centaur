@@ -84,6 +84,7 @@ Store one secret per enabled harness credential:
 | Codex with Meta AI direct | `codex` | `--meta` | `META_AI_API_KEY` | `api.ai.meta.com` |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+| Hermes Agent | `hermes` | default harness or API request | `OPENROUTER_API_KEY` | `openrouter.ai` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 
 In normal sandbox mode, containers receive placeholder values such as
@@ -99,6 +100,11 @@ model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
 alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
 slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
 provider even when `OPENROUTER_MODEL` is unset.
+
+Hermes runs through its ACP stdio server inside the sandbox. The baked sandbox
+installs `hermes-acp`; set `sandbox.harnessEngine=hermes` or request
+`harness_type=hermes` for a session, then provide `OPENROUTER_API_KEY` and
+optionally `HERMES_MODEL`.
 
 To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
 provider with `--meta`. Pair it with `--model <model-id>` when choosing a

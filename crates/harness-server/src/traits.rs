@@ -15,6 +15,7 @@ pub enum HarnessKind {
     Codex,
     ClaudeCode,
     Amp,
+    Hermes,
 }
 
 pub struct ThreadState {
@@ -62,11 +63,35 @@ pub trait HarnessServer {
     fn default_model(&self) -> String;
     fn default_model_provider(&self) -> &'static str;
     fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand;
+    /// Perform any protocol handshake required after the child process starts.
+    /// Most CLI harnesses are ready for a turn immediately; session-oriented
+    /// protocols can use this hook to establish their native session first.
+    fn prepare_process(&self, _process: &mut HarnessChild, _state: &mut ThreadState) -> Result<()> {
+        Ok(())
+    }
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>>;
+    fn stdin_for_thread_turn(&self, _state: &ThreadState, input: &[UserInput]) -> Result<Vec<u8>> {
+        self.stdin_for_turn(input)
+    }
     fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         self.stdin_for_turn(input)
     }
+    fn stdin_for_steer_with_session(
+        &self,
+        _session_id: Option<&str>,
+        input: &[UserInput],
+    ) -> Result<Vec<u8>> {
+        self.stdin_for_steer(input)
+    }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
+    /// Respond to child-initiated protocol requests before normalizing events.
+    fn handle_process_event(
+        &self,
+        _process: &mut HarnessChild,
+        _event: &Self::Event,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn normalize_events(
         &self,
         normalizer: &mut Self::EventNormalizer,

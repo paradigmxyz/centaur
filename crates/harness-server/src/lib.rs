@@ -3,6 +3,7 @@ pub mod anthropic;
 pub mod claude;
 pub mod codex;
 mod error;
+pub mod hermes;
 mod otel;
 mod server;
 mod traits;

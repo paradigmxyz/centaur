@@ -70,7 +70,7 @@ Optional required-by-mode variables:
 | `SLACKBOT_URL` | Chart-rendered Slackbot service URL. | API callback target for Slack delivery. |
 | `FINAL_DELIVERY_MAX_ATTEMPTS`, `FINAL_DELIVERY_READY_GRACE_S` | `api.extraEnv`. | Final-delivery retry and claim timing. |
 | `CENTAUR_ENABLE_GCLOUD_BOOTSTRAP`, `GCP_GCLOUD_CREDENTIAL`, `GCLOUD_PROJECT` | `api.extraEnv` or Secret. | Optional gcloud ADC bootstrap in the API container. |
-| `CLAUDE_MODEL`, `CODEX_MODEL` | `api.extraEnv` or request model override. | Harness model selection defaults. When set via `sandbox.extraEnv`, the chart also mirrors them into slackbotv2 and the Console so their model displays track the deployment. |
+| `CLAUDE_MODEL`, `CODEX_MODEL`, `HERMES_MODEL` | `api.extraEnv` or request model override. | Harness model selection defaults. When set via `sandbox.extraEnv`, the chart also mirrors Claude and Codex into slackbotv2 and the Console so their model displays track what sandboxes actually run. |
 
 ## API-RS
 
@@ -209,6 +209,7 @@ Sandbox entrypoint and wrappers:
 | `CODEX_MODEL_REASONING_EFFORT` | `sandbox.extraEnv`. | Overrides the codex `model_reasoning_effort` (baked into `harness/codex/config.toml`) by patching the per-sandbox `~/.codex/config.toml` at boot, without forking the image. One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; an unknown value is ignored (the config default stands). |
 | `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
 | `CLAUDE_CODE_AUTH_MODE` | `sandbox.extraEnv`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
+| `HERMES_MODEL`, `HERMES_BIN`, `HERMES_PERMISSION_OUTCOME` | `sandbox.extraEnv` or runtime harness process. | Hermes ACP model default, executable override, and permission response policy. `HERMES_PERMISSION_OUTCOME` accepts `allow_session`, `allow_once`, or `deny`. |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
 | `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |

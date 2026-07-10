@@ -124,6 +124,7 @@ pub enum HarnessType {
     Codex,
     Amp,
     ClaudeCode,
+    Hermes,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]
@@ -338,6 +339,7 @@ mod tests {
             HarnessType::from_str("claudecode").unwrap(),
             HarnessType::ClaudeCode
         );
+        assert!(HarnessType::from_str("hermes").is_ok());
     }
 
     #[test]
@@ -350,6 +352,7 @@ mod tests {
             serde_json::from_value::<HarnessType>(serde_json::json!("codex")).unwrap(),
             HarnessType::Codex
         );
+        assert!(serde_json::from_value::<HarnessType>(serde_json::json!("hermes")).is_ok());
     }
 
     #[test]

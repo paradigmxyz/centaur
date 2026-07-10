@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
+use crate::hermes::HermesHarness;
 use crate::otel::{self, HarnessUsageSpan, TraceContext};
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
@@ -42,6 +43,7 @@ pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
         HarnessKind::Codex => Box::new(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
+        HarnessKind::Hermes => Box::new(AppServerNormalizer::new(HermesHarness)),
     }
 }
 
@@ -54,6 +56,7 @@ pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
         HarnessKind::Codex => crate::codex::run_codex_blocks_server(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
+        HarnessKind::Hermes => run_blocks_app_server(&HermesHarness),
     }
 }
 
@@ -1013,6 +1016,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     process: &mut HarnessChild,
     normalizer: &mut CodexTurnNormalizer,
     request: ActiveTurnRequest,
+    session_id: Option<&str>,
     stdout: &mut W,
 ) -> Result<bool> {
     let ActiveTurnRequest::JsonRpc(request) = request else {
@@ -1047,7 +1051,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             }
             process
                 .stdin
-                .write_all(&harness.stdin_for_steer(&params.input)?)?;
+                .write_all(&harness.stdin_for_steer_with_session(session_id, &params.input)?)?;
             process.stdin.flush()?;
             write_client_response(
                 stdout,
@@ -1207,6 +1211,7 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     let mut usage_span_output = UsageSpanOutput::default();
     ensure_harness_process(harness, state)?;
     {
+        let stdin = harness.stdin_for_thread_turn(state, input)?;
         let process = state
             .process
             .as_mut()
@@ -1216,7 +1221,7 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         // late `result` (and trailing rate-limit noise) behind, which would
         // otherwise read as this turn's instant terminal.
         while process.stdout.try_recv().is_ok() {}
-        process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
+        process.stdin.write_all(&stdin)?;
         process.stdin.flush()?;
     }
 
@@ -1232,11 +1237,19 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     let mut latest_usage = None;
     loop {
         while let Ok(request) = request_rx.try_recv() {
+            let session_id = state.harness_session_id.clone();
             let process = state
                 .process
                 .as_mut()
                 .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
+            if handle_active_turn_request(
+                harness,
+                process,
+                normalizer,
+                request,
+                session_id.as_deref(),
+                stdout,
+            )? {
                 state.process = None;
                 return Err(HarnessServerError::TurnInterrupted {
                     kind: harness.kind(),
@@ -1264,6 +1277,13 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                     continue;
                 }
                 let event = harness.parse_stdout_line(trimmed)?;
+                harness.handle_process_event(
+                    state
+                        .process
+                        .as_mut()
+                        .ok_or(HarnessServerError::HarnessStdoutUnavailable)?,
+                    &event,
+                )?;
                 let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
                 let mut terminal_stop = false;
                 for normalized in normalized_events {
@@ -1523,11 +1543,13 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         }
     });
 
-    state.process = Some(HarnessChild {
+    let mut process = HarnessChild {
         child,
         stdin,
         stdout: stdout_rx,
-    });
+    };
+    harness.prepare_process(&mut process, state)?;
+    state.process = Some(process);
     Ok(())
 }
 

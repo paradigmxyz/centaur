@@ -121,7 +121,7 @@ export type SlackbotV2Options = {
   consolePublicUrl?: string
   /**
    * Harness for new threads when no --claude/--amp/--codex flag is given
-   * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
+   * (HarnessType wire value: codex | amp | claudecode | hermes). Defaults to codex.
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
