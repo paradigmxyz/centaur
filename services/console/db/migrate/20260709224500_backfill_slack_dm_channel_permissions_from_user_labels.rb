@@ -4,7 +4,7 @@ class BackfillSlackDmChannelPermissionsFromUserLabels < ActiveRecord::Migration[
     return unless catalog.ok?
 
     dm_channel_ids_by_user_id = catalog.channels.each_with_object({}) do |channel, acc|
-      next unless channel.id.start_with?("D")
+      next unless channel.im && channel.id.start_with?("D")
 
       user_id = channel.name.to_s.strip.upcase
       acc[user_id] = channel.id if user_id.match?(/\A[UW][A-Z0-9]{2,}\z/)

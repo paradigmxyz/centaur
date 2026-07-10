@@ -12,33 +12,15 @@ class SlackChannelPermission < ApplicationRecord
   validates :download_enabled, inclusion: { in: [ true, false ] }
   validates :history_enabled, inclusion: { in: [ true, false ] }
   validate :at_least_one_permission
+  validate :dm_permission_must_belong_to_principal_slack_user
 
   scope :ordered, -> { order(:channel_id, :id) }
 
   def self.replace_for_principal!(principal, permission_rows)
     transaction do
-      existing = principal.slack_channel_permissions.index_by(&:channel_id)
-      replacement_channel_ids = []
-
+      principal.slack_channel_permissions.destroy_all
       permission_rows.each do |attrs|
-        attrs = attrs.to_h.with_indifferent_access
-        channel_id = attrs.fetch(:channel_id, attrs["channel_id"]).to_s.strip.upcase
-        replacement_channel_ids << channel_id
-
-        permission = existing[channel_id] || principal.slack_channel_permissions.build
-        if permission.protected_slack_dm_permission?
-          attrs[:channel_id] = permission.channel_id
-          attrs[:channel_name] = permission.channel_name
-        end
-        permission.assign_attributes(attrs)
-        permission.save!
-      end
-
-      principal.slack_channel_permissions.reload.each do |permission|
-        next if replacement_channel_ids.include?(permission.channel_id)
-        next if permission.protected_slack_dm_permission?
-
-        permission.destroy!
+        principal.slack_channel_permissions.create!(attrs)
       end
     end
   end
@@ -70,6 +52,13 @@ class SlackChannelPermission < ApplicationRecord
   def at_least_one_permission
     return if upload_enabled || download_enabled || history_enabled
     errors.add(:base, "Select at least one Slack permission")
+  end
+
+  def dm_permission_must_belong_to_principal_slack_user
+    return unless channel_id.to_s.start_with?("D")
+    return if protected_slack_dm_permission?
+
+    errors.add(:channel_id, "must be the 1:1 DM for this principal's slack_user_id")
   end
 
   def prevent_protected_slack_dm_destroy

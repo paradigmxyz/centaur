@@ -27,6 +27,20 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     assert_includes empty.errors[:base], "Select at least one Slack permission"
   end
 
+  test "rejects manually assigned slack DM permissions" do
+    permission = SlackChannelPermission.new(
+      principal: principals(:acme_channel),
+      channel_id: "D0123456789",
+      channel_name: "U0123456789",
+      upload_enabled: true,
+      download_enabled: true,
+      history_enabled: true
+    )
+
+    assert_not permission.valid?
+    assert_includes permission.errors[:channel_id], "must be the 1:1 DM for this principal's slack_user_id"
+  end
+
   test "replace_for_principal replaces permission rows" do
     principal = principals(:acme_channel)
 
@@ -68,7 +82,7 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     assert SlackChannelPermission.exists?(permission.id)
   end
 
-  test "replace_for_principal preserves protected slack DM permissions" do
+  test "replace_for_principal rejects removing protected slack DM permissions" do
     principal = principals(:acme_user_bob)
     principal.update!(labels: { Principal::SLACK_USER_ID_LABEL => "U0123456789" })
     protected_permission = SlackChannelPermission.create!(
@@ -85,9 +99,11 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
       upload_enabled: true
     )
 
-    SlackChannelPermission.replace_for_principal!(principal, [])
+    assert_raises(ActiveRecord::RecordNotDestroyed) do
+      SlackChannelPermission.replace_for_principal!(principal, [])
+    end
 
-    assert_equal [ protected_permission.id ], principal.slack_channel_permissions.reload.map(&:id)
+    assert_includes principal.slack_channel_permissions.reload.map(&:id), protected_permission.id
   end
 
   test "label backfill migration creates all slack permissions" do
@@ -126,7 +142,7 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     with_slack_channel_catalog(
       SlackChannelCatalog::Result.new(
         channels: [
-          SlackChannelCatalog::Channel.new(id: "D0123456789", name: "U0123456789", private: true)
+          SlackChannelCatalog::Channel.new(id: "D0123456789", name: "U0123456789", private: true, im: true)
         ],
         error: nil,
         configured: true
@@ -148,6 +164,7 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     SlackChannelPermission.create!(
       principal: principal,
       channel_id: "D0123456789",
+      channel_name: "U0123456789",
       upload_enabled: true,
       download_enabled: false,
       history_enabled: false
@@ -156,7 +173,7 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     with_slack_channel_catalog(
       SlackChannelCatalog::Result.new(
         channels: [
-          SlackChannelCatalog::Channel.new(id: "D0123456789", name: "U0123456789", private: true)
+          SlackChannelCatalog::Channel.new(id: "D0123456789", name: "U0123456789", private: true, im: true)
         ],
         error: nil,
         configured: true

@@ -5,7 +5,7 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     cache = ActiveSupport::Cache::MemoryStore.new
     calls = 0
     result = SlackChannelCatalog::Result.new(
-      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false) ],
+      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false, im: false) ],
       error: nil,
       configured: true
     )
@@ -34,7 +34,7 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     calls = 0
     error = SlackChannelCatalog::Result.new(channels: [], error: "Slack API request failed.", configured: true)
     success = SlackChannelCatalog::Result.new(
-      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false) ],
+      channels: [ SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false, im: false) ],
       error: nil,
       configured: true
     )
@@ -112,13 +112,15 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
       dm = result.channels.find { |channel| channel.id == "D9876543210" }
       assert_equal "U0123456789", dm.name
       assert_equal true, dm.private
+      assert_equal true, dm.im
     end
   end
 
   test "channel_id_for_user resolves a Slack user id to its DM channel id" do
     result = SlackChannelCatalog::Result.new(
       channels: [
-        SlackChannelCatalog::Channel.new(id: "D9876543210", name: "U0123456789", private: true)
+        SlackChannelCatalog::Channel.new(id: "D9876543210", name: "U0123456789", private: true, im: true),
+        SlackChannelCatalog::Channel.new(id: "D1111111111", name: "U1111111111", private: true, im: false)
       ],
       error: nil,
       configured: true
@@ -127,6 +129,7 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     with_singleton_method(SlackChannelCatalog, :fetch, -> { result }) do
       assert_equal "D9876543210", SlackChannelCatalog.channel_id_for_user("u0123456789")
       assert_nil SlackChannelCatalog.channel_id_for_user("U9999999999")
+      assert_nil SlackChannelCatalog.channel_id_for_user("U1111111111")
     end
   end
 

@@ -4,7 +4,7 @@ require "net/http"
 require "uri"
 
 class SlackChannelCatalog
-  Channel = Data.define(:id, :name, :private)
+  Channel = Data.define(:id, :name, :private, :im)
   Result = Data.define(:channels, :error, :configured) do
     def ok?
       error.blank?
@@ -35,7 +35,7 @@ class SlackChannelCatalog
   def self.cache_key(token:, api_url:)
     token_digest = Digest::SHA256.hexdigest(token)
     api_url_digest = Digest::SHA256.hexdigest(api_url)
-    "slack_channel_catalog/v2/#{api_url_digest}/#{token_digest}"
+    "slack_channel_catalog/v3/#{api_url_digest}/#{token_digest}"
   end
 
   def self.channel_id_for_user(user_id)
@@ -43,14 +43,14 @@ class SlackChannelCatalog
     return nil if normalized.blank?
 
     fetch.channels.find do |channel|
-      channel.id.start_with?("D") && channel.name.to_s.upcase == normalized
+      channel.im && channel.id.start_with?("D") && channel.name.to_s.upcase == normalized
     end&.id
   end
 
   def self.serialize_result(result)
     {
       "channels" => result.channels.map do |channel|
-        { "id" => channel.id, "name" => channel.name, "private" => channel.private }
+        { "id" => channel.id, "name" => channel.name, "private" => channel.private, "im" => channel.im }
       end,
       "error" => result.error,
       "configured" => result.configured
@@ -64,7 +64,8 @@ class SlackChannelCatalog
       Channel.new(
         id: channel.fetch("id"),
         name: channel.fetch("name"),
-        private: channel.fetch("private")
+        private: channel.fetch("private"),
+        im: channel["im"] == true
       )
     end
     Result.new(channels: channels, error: payload["error"], configured: payload["configured"])
@@ -132,10 +133,10 @@ class SlackChannelCatalog
   def parse_channel(channel)
     return nil unless channel.is_a?(Hash)
     id = channel["id"].to_s
-    im = channel["is_im"] == true || id.start_with?("D")
+    im = channel["is_im"] == true
     name = im ? channel["user"].presence || channel["name"].presence : channel["name"].presence
     return nil if id.blank? || name.blank?
 
-    Channel.new(id: id, name: name, private: im || channel["is_private"] == true)
+    Channel.new(id: id, name: name, private: im || channel["is_private"] == true, im: im)
   end
 end

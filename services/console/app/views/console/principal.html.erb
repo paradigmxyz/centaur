@@ -105,7 +105,7 @@
         </div>
       <% else %>
         <div class="p-4">
-          <div class="empty-state">No Slack channels or DMs selected.</div>
+          <div class="empty-state">No Slack channels selected.</div>
         </div>
       <% end %>
 
@@ -113,10 +113,10 @@
       <%= form.fields_for :slack_channel_permissions, new_permission do |permission_fields| %>
         <div class="grid gap-4 border-t border-ink-700 p-5 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
           <label class="block">
-            <span class="form-label">Add Channel or DM</span>
+            <span class="form-label">Add Channel</span>
             <% if channel_options.any? %>
               <%= permission_fields.select :channel_id,
-                                           options_for_select([ [ "Select a Slack channel or DM", "" ] ] + channel_options),
+                                           options_for_select([ [ "Select a Slack channel", "" ] ] + channel_options),
                                            {},
                                            class: "form-input" %>
             <% else %>

@@ -48,6 +48,8 @@ module Console
       redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
+    rescue ActiveRecord::RecordNotDestroyed => e
+      redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
     end
 
     def assign_role
@@ -106,7 +108,7 @@ module Console
     end
 
     def slack_channel_permission_params
-      permitted = params.require(:principal).permit(
+      params.require(:principal).permit(
         slack_channel_permissions_attributes: %i[
           id
           channel_id
@@ -117,23 +119,6 @@ module Console
           _destroy
         ]
       )
-      preserve_protected_slack_dm_permissions(permitted)
-      permitted
-    end
-
-    def preserve_protected_slack_dm_permissions(permitted)
-      rows = permitted[:slack_channel_permissions_attributes]
-      return unless rows.respond_to?(:each_value)
-
-      protected_ids = @principal.slack_channel_permissions.select(&:protected_slack_dm_permission?).map { |row| row.id.to_s }
-      return if protected_ids.empty?
-
-      rows.each_value do |attrs|
-        next unless protected_ids.include?(attrs[:id].to_s)
-        next unless ActiveModel::Type::Boolean.new.cast(attrs[:_destroy])
-
-        attrs[:_destroy] = "0"
-      end
     end
 
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.

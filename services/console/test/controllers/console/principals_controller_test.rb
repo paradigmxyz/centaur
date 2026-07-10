@@ -159,7 +159,7 @@ module Console
 
       assert_redirected_to console_principal_path(principal.oid)
       assert SlackChannelPermission.exists?(permission.id)
-      assert_equal "Updated Slack channel permissions.", flash[:notice]
+      assert_equal "Slack DM permissions created from slack_user_id labels cannot be removed", flash[:alert]
     end
 
     test "destroy deletes the principal and dependent access records" do
