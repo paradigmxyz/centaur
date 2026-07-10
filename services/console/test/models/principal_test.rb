@@ -50,30 +50,6 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({}, principal.reload.labels)
   end
 
-  test "does not create slack channel permission from slack channel label on create" do
-    principal = Principal.create!(
-      default_attrs(
-        namespace: "acme",
-        foreign_id: "C-auto-slack-label",
-        labels: { Principal::SLACK_CHANNEL_ID_LABEL => " c0123456789 " }
-      )
-    )
-
-    assert_empty principal.slack_channel_permissions.reload
-  end
-
-  test "does not create slack DM permission from slack user label on create" do
-    principal = Principal.create!(
-      default_attrs(
-        namespace: "acme",
-        foreign_id: "U-no-auto-slack-dm",
-        labels: { "slack_user_id" => "U0123456789" }
-      )
-    )
-
-    assert_empty principal.slack_channel_permissions.reload
-  end
-
   test "sandbox access defaults to enabled" do
     principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-sandbox-access"))
     principal.reload

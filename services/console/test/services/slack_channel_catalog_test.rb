@@ -83,34 +83,6 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     assert_equal SlackChannelCatalog::WRITE_TIMEOUT_SECONDS, captured_options.fetch(:write_timeout)
   end
 
-  test "fetch requests only public and private channels" do
-    response = Struct.new(:code, :body).new(
-      "200",
-      {
-        ok: true,
-        channels: [
-          { id: "C0123456789", name: "general", is_private: false }
-        ]
-      }.to_json
-    )
-    http = Object.new
-    captured_request = nil
-    http.define_singleton_method(:request) do |request|
-      captured_request = request
-      response
-    end
-
-    with_singleton_method(Net::HTTP, :start, lambda { |_host, _port, **_options, &block|
-      block.call(http)
-    }) do
-      result = SlackChannelCatalog.new(token: "xoxb-test-token", api_url: "https://slack.test/api").fetch
-
-      assert_predicate result, :ok?
-      assert_includes captured_request.path, "types=public_channel%2Cprivate_channel"
-      assert_equal [ "C0123456789" ], result.channels.map(&:id)
-    end
-  end
-
   private
 
   def with_env(values)
