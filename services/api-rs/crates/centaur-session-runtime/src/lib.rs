@@ -5480,7 +5480,7 @@ fn sandbox_repo_cache_access_from_principal(
         Some(value) if value == "all" => SessionRepoCacheAccess::All,
         Some(value) if value == "public" => SessionRepoCacheAccess::Public,
         Some(_) => SessionRepoCacheAccess::None,
-        None => SessionRepoCacheAccess::from_legacy_enabled(principal.sandbox_repo_cache_enabled),
+        None => SessionRepoCacheAccess::None,
     }
 }
 
@@ -6594,17 +6594,9 @@ mod tests {
     use time::OffsetDateTime;
 
     #[test]
-    fn sandbox_repo_cache_label_overrides_legacy_boolean() {
+    fn sandbox_repo_cache_label_controls_access() {
         assert_eq!(
             sandbox_repo_cache_access_from_principal(&test_principal(
-                true,
-                std::collections::BTreeMap::new()
-            )),
-            SessionRepoCacheAccess::All
-        );
-        assert_eq!(
-            sandbox_repo_cache_access_from_principal(&test_principal(
-                false,
                 std::collections::BTreeMap::new()
             )),
             SessionRepoCacheAccess::None
@@ -6612,7 +6604,6 @@ mod tests {
         for value in ["none", "private", "bogus"] {
             assert_eq!(
                 sandbox_repo_cache_access_from_principal(&test_principal(
-                    true,
                     std::collections::BTreeMap::from([(
                         SANDBOX_REPO_CACHE_LABEL.to_owned(),
                         value.to_owned(),
@@ -6623,7 +6614,6 @@ mod tests {
         }
         assert_eq!(
             sandbox_repo_cache_access_from_principal(&test_principal(
-                true,
                 std::collections::BTreeMap::from([(
                     SANDBOX_REPO_CACHE_LABEL.to_owned(),
                     "public".to_owned(),
@@ -6633,7 +6623,6 @@ mod tests {
         );
         assert_eq!(
             sandbox_repo_cache_access_from_principal(&test_principal(
-                false,
                 std::collections::BTreeMap::from([(
                     SANDBOX_REPO_CACHE_LABEL.to_owned(),
                     "all".to_owned(),
@@ -6755,7 +6744,6 @@ mod tests {
     }
 
     fn test_principal(
-        sandbox_repo_cache_enabled: bool,
         labels: std::collections::BTreeMap<String, String>,
     ) -> centaur_iron_control::Principal {
         centaur_iron_control::Principal {
@@ -6764,7 +6752,6 @@ mod tests {
             foreign_id: Some("slack-channel-t-c".to_owned()),
             name: "Test".to_owned(),
             labels,
-            sandbox_repo_cache_enabled,
             sandbox_observability_enabled: true,
             sandbox_api_server_enabled: true,
         }

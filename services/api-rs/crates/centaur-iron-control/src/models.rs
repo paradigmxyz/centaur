@@ -475,8 +475,6 @@ pub struct Principal {
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default = "default_true")]
-    pub sandbox_repo_cache_enabled: bool,
-    #[serde(default = "default_true")]
     pub sandbox_observability_enabled: bool,
     #[serde(default = "default_true")]
     pub sandbox_api_server_enabled: bool,
