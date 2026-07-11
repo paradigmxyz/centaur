@@ -46,7 +46,7 @@ module Api
         principal = resolve_for_upsert(Principal)
         was_new = principal.new_record?
         ActiveRecord::Base.transaction do
-          principal.apply_default_sandbox_capabilities! if was_new
+          principal.apply_default_sandbox_capabilities!
           principal.assign_attributes(principal_params)
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
