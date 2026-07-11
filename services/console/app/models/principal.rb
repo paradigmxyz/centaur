@@ -24,7 +24,6 @@ class Principal < ApplicationRecord
                                 reject_if: :reject_slack_channel_permission_attributes?
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
-  before_validation :extract_sandbox_repo_cache_label
   before_validation :apply_sandbox_repo_cache_label
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
@@ -141,7 +140,7 @@ class Principal < ApplicationRecord
     return unless new_record?
 
     defaults = SystemSetting.current.principal_defaults
-    unless supplied_key?(supplied, :sandbox_repo_cache) || labels.to_h.key?(SANDBOX_REPO_CACHE_LABEL)
+    unless supplied_key?(supplied, :sandbox_repo_cache)
       self.sandbox_repo_cache = defaults[:sandbox_repo_cache]
     end
     unless supplied_key?(supplied, :sandbox_observability_enabled)
@@ -216,16 +215,6 @@ class Principal < ApplicationRecord
 
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)
-  end
-
-  def extract_sandbox_repo_cache_label
-    return unless new_record? || will_save_change_to_labels?
-
-    current_labels = labels.to_h
-    return unless current_labels.key?(SANDBOX_REPO_CACHE_LABEL)
-
-    self.sandbox_repo_cache = current_labels.delete(SANDBOX_REPO_CACHE_LABEL).to_s.strip.downcase
-    self.labels = current_labels
   end
 
   def apply_sandbox_repo_cache_label

@@ -59,15 +59,15 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_predicate principal, :sandbox_api_server_enabled
   end
 
-  test "default sandbox repo-cache does not clobber explicit label assignment" do
+  test "default sandbox repo-cache overwrites explicit label assignment" do
     principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-explicit-repo-cache-label"))
 
     principal.apply_default_sandbox_capabilities!
     principal.assign_attributes(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" })
     principal.save!
 
-    assert_equal "none", principal.reload.sandbox_repo_cache
-    assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "none" }, principal.labels)
+    assert_equal "all", principal.reload.sandbox_repo_cache
+    assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, principal.labels)
   end
 
   test "sandbox repo-cache stores canonical enum value" do
@@ -91,10 +91,23 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
   end
 
-  test "sandbox repo-cache extracts legacy label into canonical value" do
+  test "sandbox repo-cache overwrites label with canonical value" do
     principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-label"))
 
     principal.update!(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "public" })
+    principal.reload
+
+    assert_equal "all", principal.sandbox_repo_cache
+    assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, principal.labels)
+  end
+
+  test "sandbox repo-cache param takes precedence over conflicting label" do
+    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-param-wins"))
+
+    principal.update!(
+      sandbox_repo_cache: "public",
+      labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" }
+    )
     principal.reload
 
     assert_equal "public", principal.sandbox_repo_cache

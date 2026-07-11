@@ -167,7 +167,7 @@ module Api
         assert_equal true, data["sandbox_api_server_enabled"]
       end
 
-      test "POST keeps explicit repo-cache label over system default" do
+      test "POST ignores explicit repo-cache label in favor of system default" do
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
@@ -181,8 +181,27 @@ module Api
         assert_response :created
 
         data = json_body.fetch("data")
-        assert_equal "none", data["sandbox_repo_cache"]
-        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "none" }, data["labels"])
+        assert_equal "all", data["sandbox_repo_cache"]
+        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, data["labels"])
+      end
+
+      test "POST uses repo-cache param over conflicting label" do
+        system_settings(:default).update!(default_sandbox_repo_cache: "all")
+        body = {
+          data: {
+            namespace: "acme",
+            foreign_id: "U-repo-cache-param-wins",
+            sandbox_repo_cache: "public",
+            labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" }
+          }
+        }
+
+        post api_v1_principals_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        data = json_body.fetch("data")
+        assert_equal "public", data["sandbox_repo_cache"]
+        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "public" }, data["labels"])
       end
 
       test "POST creates a Principal with only a human-readable name" do
