@@ -105,7 +105,7 @@ module Api
           namespace: principal.namespace,
           foreign_id: principal.foreign_id,
           name: principal.name,
-          labels: principal.labels,
+          labels: principal.labels_with_sandbox_capabilities,
           slack_channel_permissions: principal.slack_channel_permissions_payload,
           sandbox_repo_cache: principal.sandbox_repo_cache,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,

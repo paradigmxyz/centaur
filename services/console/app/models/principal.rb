@@ -24,24 +24,24 @@ class Principal < ApplicationRecord
                                 reject_if: :reject_slack_channel_permission_attributes?
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
-  before_validation :apply_sandbox_repo_cache_setting
-  after_save :clear_sandbox_repo_cache_setting
+  before_validation :extract_sandbox_repo_cache_label
+  before_validation :apply_sandbox_repo_cache_label
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
+  SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
+  SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
+  validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
 
   # Stand-in for an inline secret value in redacted config: effective_config
   # reports that a control_plane source carries a value without revealing it.
   REDACTED = "[redacted]".freeze
-  SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SLACK_CHANNEL_ID_LABEL = "slack_channel_id".freeze
-  SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
-  SANDBOX_REPO_CACHE_ALIASES = { "pub" => "public" }.freeze
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
 
   # The config of a principal with no effective grants; also what an unassigned
@@ -137,27 +137,12 @@ class Principal < ApplicationRecord
     redact_secrets ? self.class.redact_live_secrets(config) : config
   end
 
-  def sandbox_repo_cache
-    raw = labels.to_h[SANDBOX_REPO_CACHE_LABEL].to_s.strip.downcase
-    raw = SANDBOX_REPO_CACHE_ALIASES.fetch(raw, raw)
-    SANDBOX_REPO_CACHE_VALUES.include?(raw) ? raw : (sandbox_repo_cache_enabled? ? "all" : "none")
-  end
-
-  def sandbox_repo_cache=(value)
-    normalized = value.to_s.strip.downcase
-    normalized = SANDBOX_REPO_CACHE_ALIASES.fetch(normalized, normalized)
-    normalized = "none" unless SANDBOX_REPO_CACHE_VALUES.include?(normalized)
-    @sandbox_repo_cache_setting = normalized
-    apply_sandbox_repo_cache_setting
-  end
-
   def apply_default_sandbox_capabilities!(supplied = {})
     return unless new_record?
 
     defaults = SystemSetting.current.principal_defaults
     unless supplied_key?(supplied, :sandbox_repo_cache) || labels.to_h.key?(SANDBOX_REPO_CACHE_LABEL)
-      self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => defaults[:sandbox_repo_cache])
-      self[:sandbox_repo_cache_enabled] = defaults[:sandbox_repo_cache] == "all"
+      self.sandbox_repo_cache = defaults[:sandbox_repo_cache]
     end
     unless supplied_key?(supplied, :sandbox_observability_enabled)
       self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
@@ -167,10 +152,8 @@ class Principal < ApplicationRecord
     end
   end
 
-  def sandbox_repo_cache_enabled=(value)
-    enabled = ActiveModel::Type::Boolean.new.cast(value)
-    super(enabled)
-    self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => (enabled ? "all" : "none"))
+  def labels_with_sandbox_capabilities
+    labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
   end
 
   def slack_channel_permissions_payload
@@ -235,14 +218,18 @@ class Principal < ApplicationRecord
     PrincipalCredentialReconciliation.new.apply_for_principal(self)
   end
 
-  def apply_sandbox_repo_cache_setting
-    return if @sandbox_repo_cache_setting.blank?
-    self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => @sandbox_repo_cache_setting)
-    self[:sandbox_repo_cache_enabled] = @sandbox_repo_cache_setting == "all"
+  def extract_sandbox_repo_cache_label
+    return unless new_record? || will_save_change_to_labels?
+
+    current_labels = labels.to_h
+    return unless current_labels.key?(SANDBOX_REPO_CACHE_LABEL)
+
+    self.sandbox_repo_cache = current_labels.delete(SANDBOX_REPO_CACHE_LABEL).to_s.strip.downcase
+    self.labels = current_labels
   end
 
-  def clear_sandbox_repo_cache_setting
-    @sandbox_repo_cache_setting = nil
+  def apply_sandbox_repo_cache_label
+    self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
   end
 
   def supplied_key?(attributes, key)

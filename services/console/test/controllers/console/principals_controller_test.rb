@@ -94,7 +94,7 @@ module Console
       assert_equal "Updated sandbox access.", flash[:notice]
       principal.reload
       assert_equal "public", principal.sandbox_repo_cache
-      assert_equal false, principal.sandbox_repo_cache_enabled
+      assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
       assert_equal false, principal.sandbox_observability_enabled
       assert_equal false, principal.sandbox_api_server_enabled
     end

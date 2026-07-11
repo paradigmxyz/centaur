@@ -41,7 +41,14 @@ module Api
         assert_equal principal.oid, data["id"]
         assert_equal "acme", data["namespace"]
         assert_equal "C0123456789", data["foreign_id"]
-        assert_equal({ "kind" => "slack_channel", "team" => "platform" }, data["labels"])
+        assert_equal(
+          {
+            "kind" => "slack_channel",
+            "team" => "platform",
+            Principal::SANDBOX_REPO_CACHE_LABEL => "all"
+          },
+          data["labels"]
+        )
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal true, data["sandbox_observability_enabled"]
@@ -207,7 +214,6 @@ module Api
         principal.reload
         assert_equal "Acme Slack channel", principal.name
         assert_equal "none", principal.sandbox_repo_cache
-        assert_equal false, principal.sandbox_repo_cache_enabled
         assert_equal false, principal.sandbox_observability_enabled
         assert_equal false, principal.sandbox_api_server_enabled
       end
@@ -227,7 +233,6 @@ module Api
 
         principal.reload
         assert_equal "public", principal.sandbox_repo_cache
-        assert_equal false, principal.sandbox_repo_cache_enabled
         assert_equal false, principal.sandbox_observability_enabled
         assert_equal false, principal.sandbox_api_server_enabled
 
@@ -265,7 +270,14 @@ module Api
         assert_response :ok
 
         principal.reload
-        assert_equal({ "kind" => "slack_channel", "team" => "ops" }, principal.labels)
+        assert_equal(
+          {
+            "kind" => "slack_channel",
+            "team" => "ops",
+            Principal::SANDBOX_REPO_CACHE_LABEL => "all"
+          },
+          principal.labels
+        )
       end
 
       test "PUT replaces Slack channel permission rows" do
@@ -590,6 +602,16 @@ module Api
 
         foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
         assert_equal %w[U-alice U-bob].sort, foreign_ids.sort
+      end
+
+      test "GET index filters by sandbox repo-cache label" do
+        get api_v1_principals_url,
+            params: { namespace: "acme", labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" } },
+            headers: auth_headers
+        assert_response :ok
+
+        foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
+        assert_equal %w[C0123456789 U-alice U-bob].sort, foreign_ids.sort
       end
 
       test "GET index ANDs multiple label filters" do
