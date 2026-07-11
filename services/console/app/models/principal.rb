@@ -151,13 +151,20 @@ class Principal < ApplicationRecord
     apply_sandbox_repo_cache_setting
   end
 
-  def apply_default_sandbox_capabilities!
+  def apply_default_sandbox_capabilities!(supplied = {})
     return unless new_record?
 
     defaults = SystemSetting.current.principal_defaults
-    self.sandbox_repo_cache = defaults[:sandbox_repo_cache]
-    self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
-    self.sandbox_api_server_enabled = defaults[:sandbox_api_server_enabled]
+    unless supplied_key?(supplied, :sandbox_repo_cache) || labels.to_h.key?(SANDBOX_REPO_CACHE_LABEL)
+      self.labels = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => defaults[:sandbox_repo_cache])
+      self[:sandbox_repo_cache_enabled] = defaults[:sandbox_repo_cache] == "all"
+    end
+    unless supplied_key?(supplied, :sandbox_observability_enabled)
+      self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
+    end
+    unless supplied_key?(supplied, :sandbox_api_server_enabled)
+      self.sandbox_api_server_enabled = defaults[:sandbox_api_server_enabled]
+    end
   end
 
   def sandbox_repo_cache_enabled=(value)
@@ -236,6 +243,10 @@ class Principal < ApplicationRecord
 
   def clear_sandbox_repo_cache_setting
     @sandbox_repo_cache_setting = nil
+  end
+
+  def supplied_key?(attributes, key)
+    attributes.key?(key) || attributes.key?(key.to_s)
   end
 
   def reject_slack_channel_permission_attributes?(attributes)

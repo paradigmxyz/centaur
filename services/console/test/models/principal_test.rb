@@ -60,6 +60,16 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_predicate principal, :sandbox_api_server_enabled
   end
 
+  test "default sandbox repo-cache does not clobber explicit label assignment" do
+    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-explicit-repo-cache-label"))
+
+    principal.apply_default_sandbox_capabilities!
+    principal.assign_attributes(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" })
+    principal.save!
+
+    assert_equal "none", principal.reload.sandbox_repo_cache
+  end
+
   test "sandbox repo-cache enum syncs compatibility boolean" do
     principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-setting"))
 
