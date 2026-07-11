@@ -87,7 +87,14 @@ module Api
         assert_match(/\Aprn_/, data["id"])
         assert_equal "acme", data["namespace"]
         assert_equal "U-new-id", data["foreign_id"]
-        assert_equal({ "kind" => "user", "team" => "platform" }, data["labels"])
+        assert_equal(
+          {
+            "kind" => "user",
+            "team" => "platform",
+            Principal::SANDBOX_REPO_CACHE_LABEL => "all"
+          },
+          data["labels"]
+        )
         assert_equal(
           [
             {
@@ -102,6 +109,53 @@ module Api
         )
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
+        assert_equal true, data["sandbox_observability_enabled"]
+        assert_equal true, data["sandbox_api_server_enabled"]
+      end
+
+      test "POST applies system sandbox defaults when omitted" do
+        system_settings(:default).update!(
+          default_sandbox_repo_cache: "public",
+          default_sandbox_observability_enabled: false,
+          default_sandbox_api_server_enabled: false
+        )
+        body = {
+          data: {
+            namespace: "acme",
+            foreign_id: "U-defaulted"
+          }
+        }
+
+        post api_v1_principals_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        data = json_body.fetch("data")
+        assert_equal "public", data["sandbox_repo_cache"]
+        assert_equal false, data["sandbox_observability_enabled"]
+        assert_equal false, data["sandbox_api_server_enabled"]
+      end
+
+      test "POST keeps explicit sandbox capabilities over system defaults" do
+        system_settings(:default).update!(
+          default_sandbox_repo_cache: "none",
+          default_sandbox_observability_enabled: false,
+          default_sandbox_api_server_enabled: false
+        )
+        body = {
+          data: {
+            namespace: "acme",
+            foreign_id: "U-explicit-capabilities",
+            sandbox_repo_cache: "all",
+            sandbox_observability_enabled: true,
+            sandbox_api_server_enabled: true
+          }
+        }
+
+        post api_v1_principals_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        data = json_body.fetch("data")
+        assert_equal "all", data["sandbox_repo_cache"]
         assert_equal true, data["sandbox_observability_enabled"]
         assert_equal true, data["sandbox_api_server_enabled"]
       end
@@ -458,6 +512,11 @@ module Api
       end
 
       test "PUT upserts a new principal by foreign_id" do
+        system_settings(:default).update!(
+          default_sandbox_repo_cache: "public",
+          default_sandbox_observability_enabled: false,
+          default_sandbox_api_server_enabled: false
+        )
         body = { data: { namespace: "acme", name: "Upserted" } }
         assert_difference -> { Principal.count } => 1 do
           put api_v1_principal_url(id: "U-upsert"), params: body.to_json, headers: auth_headers
@@ -468,6 +527,9 @@ module Api
         assert_equal "acme", data["namespace"]
         assert_equal "U-upsert", data["foreign_id"]
         assert_equal "Upserted", data["name"]
+        assert_equal "public", data["sandbox_repo_cache"]
+        assert_equal false, data["sandbox_observability_enabled"]
+        assert_equal false, data["sandbox_api_server_enabled"]
       end
 
       test "PUT by foreign_id updates an existing principal without creating" do

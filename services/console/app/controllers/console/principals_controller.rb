@@ -19,6 +19,7 @@ module Console
     def create
       @principal = Principal.new(created_by: current_user)
       assign_form(@principal)
+      @principal.apply_default_sandbox_capabilities!(ActionController::Parameters.new)
       if @principal.save
         redirect_to console_principal_path(@principal.oid), notice: "Principal created."
       else

@@ -133,6 +133,7 @@ Rails.application.routes.draw do
         post :promote
       end
     end
+    resource :system_settings, only: %i[edit update], path: "settings"
     # Admin self-descope ("view as operator"): pause (admin-only) and restore
     # admin permissions. A singular resource because it's a per-session flag.
     resource :descope, only: %i[create destroy]

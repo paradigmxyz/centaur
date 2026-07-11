@@ -30,6 +30,7 @@ module Api
                                   created_by: current_user)
         ActiveRecord::Base.transaction do
           principal.assign_attributes(principal_params)
+          principal.apply_default_sandbox_capabilities!(principal_params)
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
         end
@@ -46,6 +47,7 @@ module Api
         was_new = principal.new_record?
         ActiveRecord::Base.transaction do
           principal.assign_attributes(principal_params)
+          principal.apply_default_sandbox_capabilities!(principal_params) if was_new
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
         end

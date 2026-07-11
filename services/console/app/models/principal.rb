@@ -151,6 +151,19 @@ class Principal < ApplicationRecord
     apply_sandbox_repo_cache_setting
   end
 
+  def apply_default_sandbox_capabilities!(supplied = {})
+    return unless new_record?
+
+    defaults = SystemSetting.current.principal_defaults
+    self.sandbox_repo_cache = defaults[:sandbox_repo_cache] unless supplied_key?(supplied, :sandbox_repo_cache)
+    unless supplied_key?(supplied, :sandbox_observability_enabled)
+      self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
+    end
+    unless supplied_key?(supplied, :sandbox_api_server_enabled)
+      self.sandbox_api_server_enabled = defaults[:sandbox_api_server_enabled]
+    end
+  end
+
   def sandbox_repo_cache_enabled=(value)
     enabled = ActiveModel::Type::Boolean.new.cast(value)
     super(enabled)
@@ -227,6 +240,10 @@ class Principal < ApplicationRecord
 
   def clear_sandbox_repo_cache_setting
     @sandbox_repo_cache_setting = nil
+  end
+
+  def supplied_key?(attributes, key)
+    attributes.key?(key) || attributes.key?(key.to_s)
   end
 
   def reject_slack_channel_permission_attributes?(attributes)

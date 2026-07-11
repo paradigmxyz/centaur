@@ -44,9 +44,6 @@ impl PrincipalRef {
             foreign_id: self.foreign_id.clone(),
             name: self.name.clone(),
             labels,
-            sandbox_repo_cache: None,
-            sandbox_observability_enabled: None,
-            sandbox_api_server_enabled: None,
         }
     }
 }
