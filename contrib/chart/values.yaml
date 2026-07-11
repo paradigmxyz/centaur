@@ -352,6 +352,13 @@ apiRs:
   # then pausing least-recently-active idle session sandboxes. 0 disables.
   sandboxRunningLimit: 0
   sandboxHotIdleGraceSecs: 300
+  # Sandbox capabilities seeded onto new iron-control principals created by
+  # api-rs. Existing principals keep their current console-managed settings.
+  defaultSandboxCapabilities:
+    # Repo-cache access for new sandboxes: none | public | all.
+    repoCache: all
+    observability: true
+    apiServer: true
   # When true, api-rs upserts the shared iron-control infra role and its
   # backing secrets at startup and on tool-secret reconciliation intervals.
   # Set false when multiple Centaur instances share one console/1Password

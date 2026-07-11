@@ -120,6 +120,9 @@ pub async fn register_role(
             foreign_id: role.foreign_id.clone(),
             name: role.name.clone(),
             labels: managed_labels(),
+            sandbox_repo_cache: None,
+            sandbox_observability_enabled: None,
+            sandbox_api_server_enabled: None,
         })
         .await?;
     grant_inputs_to_role(client, &role_record.id, inputs).await?;

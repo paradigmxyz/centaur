@@ -27,6 +27,9 @@ pub fn resolve_principal(
             foreign_id: principal.to_owned(),
             name: principal.to_owned(),
             labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+            sandbox_repo_cache: None,
+            sandbox_observability_enabled: None,
+            sandbox_api_server_enabled: None,
         }
     }
 }

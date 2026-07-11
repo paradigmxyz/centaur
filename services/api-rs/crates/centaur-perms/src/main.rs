@@ -963,6 +963,9 @@ fn role_identity(role: &RoleSpec, namespace: &str) -> IdentityInput {
         foreign_id: role.foreign_id.clone(),
         name: role.name.clone(),
         labels: managed_labels(),
+        sandbox_repo_cache: None,
+        sandbox_observability_enabled: None,
+        sandbox_api_server_enabled: None,
     }
 }
 
