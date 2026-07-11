@@ -167,7 +167,25 @@ module Api
         assert_equal true, data["sandbox_api_server_enabled"]
       end
 
-      test "POST rejects explicit repo-cache label" do
+      test "POST accepts matching explicit repo-cache label" do
+        system_settings(:default).update!(default_sandbox_repo_cache: "all")
+        body = {
+          data: {
+            namespace: "acme",
+            foreign_id: "U-matching-repo-cache-label",
+            labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" }
+          }
+        }
+
+        post api_v1_principals_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        data = json_body.fetch("data")
+        assert_equal "all", data["sandbox_repo_cache"]
+        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, data["labels"])
+      end
+
+      test "POST rejects mismatched explicit repo-cache label" do
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
@@ -179,7 +197,7 @@ module Api
 
         post api_v1_principals_url, params: body.to_json, headers: auth_headers
         assert_response :unprocessable_content
-        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} is reserved/, response.body)
+        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} must match sandbox_repo_cache/, response.body)
       end
 
       test "POST rejects repo-cache param with conflicting label" do
@@ -195,7 +213,7 @@ module Api
 
         post api_v1_principals_url, params: body.to_json, headers: auth_headers
         assert_response :unprocessable_content
-        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} is reserved/, response.body)
+        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} must match sandbox_repo_cache/, response.body)
       end
 
       test "POST creates a Principal with only a human-readable name" do
@@ -293,7 +311,23 @@ module Api
         )
       end
 
-      test "PUT rejects explicit repo-cache label" do
+      test "PUT accepts matching explicit repo-cache label" do
+        principal = principals(:acme_channel)
+        body = {
+          data: {
+            labels: {
+              "kind" => "slack_channel",
+              Principal::SANDBOX_REPO_CACHE_LABEL => "all"
+            }
+          }
+        }
+
+        put api_v1_principal_url(id: principal.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+        assert_equal "all", principal.reload.sandbox_repo_cache
+      end
+
+      test "PUT rejects mismatched explicit repo-cache label" do
         principal = principals(:acme_channel)
         body = {
           data: {
@@ -306,7 +340,7 @@ module Api
 
         put api_v1_principal_url(id: principal.oid), params: body.to_json, headers: auth_headers
         assert_response :unprocessable_content
-        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} is reserved/, response.body)
+        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} must match sandbox_repo_cache/, response.body)
         assert_equal "all", principal.reload.sandbox_repo_cache
       end
 

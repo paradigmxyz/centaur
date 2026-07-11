@@ -59,7 +59,18 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_predicate principal, :sandbox_api_server_enabled
   end
 
-  test "sandbox repo-cache label assignment is rejected" do
+  test "matching sandbox repo-cache label assignment is accepted" do
+    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-matching-repo-cache-label"))
+
+    principal.apply_default_sandbox_capabilities!
+    principal.assign_attributes(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" })
+    principal.save!
+
+    assert_equal "all", principal.reload.sandbox_repo_cache
+    assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, principal.labels)
+  end
+
+  test "mismatched sandbox repo-cache label assignment is rejected" do
     principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-explicit-repo-cache-label"))
 
     principal.apply_default_sandbox_capabilities!
@@ -67,7 +78,7 @@ class PrincipalTest < ActiveSupport::TestCase
 
     assert_not principal.valid?
     assert_includes principal.errors[:labels],
-                    "#{Principal::SANDBOX_REPO_CACHE_LABEL} is reserved; use sandbox_repo_cache instead"
+                    "#{Principal::SANDBOX_REPO_CACHE_LABEL} must match sandbox_repo_cache"
   end
 
   test "sandbox repo-cache stores canonical enum value" do
@@ -91,7 +102,16 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
   end
 
-  test "sandbox repo-cache rejects updates through label" do
+  test "sandbox repo-cache accepts matching label on update" do
+    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-matching-label"))
+
+    principal.update!(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" })
+
+    assert_equal "all", principal.reload.sandbox_repo_cache
+    assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, principal.labels)
+  end
+
+  test "sandbox repo-cache rejects mismatched updates through label" do
     principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-label"))
 
     assert_raises(ActiveRecord::RecordInvalid) do

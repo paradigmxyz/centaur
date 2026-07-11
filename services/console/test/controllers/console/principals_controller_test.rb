@@ -80,7 +80,7 @@ module Console
       assert_select ".field-error", text: /has already been taken/
     end
 
-    test "create rejects sandbox repo-cache label rows" do
+    test "create rejects mismatched sandbox repo-cache label rows" do
       assert_no_difference -> { Principal.count } do
         post console_create_principal_url,
              params: {
@@ -93,7 +93,7 @@ module Console
 
       assert_response :unprocessable_entity
       assert_select ".alert-error", text: /Principal could not be saved/
-      assert_select ".field-error", text: /#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} is reserved/
+      assert_select ".field-error", text: /#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} must match sandbox_repo_cache/
     end
 
     test "update_sandbox_access toggles sandbox capabilities" do
