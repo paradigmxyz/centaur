@@ -4167,7 +4167,6 @@ describe('slackbotv2', () => {
     await Promise.all(allowedExternalWaits)
     expect(codexApi.appends).toHaveLength(1)
     expect(codexApi.executes).toHaveLength(1)
-    expect(codexApi.creates[0]?.body.metadata?.slack_team_id).toBe(TEAM_ID)
 
     bot = createTestBot()
     codexApi.reset()

@@ -19,7 +19,6 @@ import type {
   SlackbotV2SessionMessage
 } from './types'
 import { observeSeconds, slackbotMetrics } from './metrics'
-import { requestContext } from './request-context'
 import { rawSlackUserId } from './slack-user'
 import {
   elapsedMs,
@@ -248,10 +247,7 @@ export async function serializeMessage(
     raw: message.raw,
     rawSlackAttachmentCount: displayText.rawAttachmentCount,
     rawSlackBlockCount: displayText.rawBlockCount,
-    // The Events API envelope team is the workspace where the app is installed.
-    // In Slack Connect channels, event.team/user_team can identify the external
-    // requester instead and must not be used to select the channel principal.
-    teamId: requestContext.getStore()?.slackTeamId ?? (slackTeamId(message.raw) as string),
+    teamId: slackTeamId(message.raw) as string,
     text: message.text,
     threadId: message.threadId,
     timestamp: message.metadata.dateSent.toISOString()

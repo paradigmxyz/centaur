@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
@@ -24,7 +25,6 @@ import {
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
 import { observeSeconds, slackbotMetrics } from './metrics'
-import { requestContext, type SlackbotV2RequestContext } from './request-context'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import { slackUserIdForMessage } from './slack-user'
 import {
@@ -105,6 +105,11 @@ type SlackAssistantAdapter = {
 
 const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 
+type SlackbotV2RequestContext = {
+  waitUntil(promise: Promise<unknown>): void
+}
+
+const requestContext = new AsyncLocalStorage<SlackbotV2RequestContext>()
 const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -248,7 +253,6 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       const webhookFields = slackWebhookLogFields(rawBody)
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
-        slackTeamId: slackWebhookTeamId(rawBody),
         waitUntil: promise => waitUntil(c, promise)
       }
       const response = await requestContext.run(context, () => {
@@ -481,15 +485,6 @@ function slackWebhookEventType(rawBody: string): string {
     return stringValue(payload.type) ?? 'unknown'
   } catch {
     return 'invalid_json'
-  }
-}
-
-function slackWebhookTeamId(rawBody: string): string | undefined {
-  try {
-    const payload = JSON.parse(rawBody) as Record<string, unknown>
-    return stringField(payload.team_id)
-  } catch {
-    return undefined
   }
 }
 
