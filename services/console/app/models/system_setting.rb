@@ -1,8 +1,4 @@
 class SystemSetting < ApplicationRecord
-  DEFAULT_SANDBOX_REPO_CACHE = "all".freeze
-  DEFAULT_SANDBOX_OBSERVABILITY_ENABLED = true
-  DEFAULT_SANDBOX_API_SERVER_ENABLED = true
-
   attr_readonly :singleton
 
   before_validation :force_singleton, on: :create
