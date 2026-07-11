@@ -15,15 +15,12 @@ class SystemSettingTest < ActiveSupport::TestCase
     assert_equal true, settings.default_sandbox_api_server_enabled
   end
 
-  test "repo-cache setting is normalized and validated" do
+  test "repo-cache setting is validated" do
     settings = system_settings(:default)
 
-    settings.update!(default_sandbox_repo_cache: "pub")
-    assert_equal "public", settings.default_sandbox_repo_cache
-
     settings.default_sandbox_repo_cache = "invalid"
-    assert_predicate settings, :valid?
-    assert_equal "all", settings.default_sandbox_repo_cache
+    assert_not settings.valid?
+    assert_includes settings.errors[:default_sandbox_repo_cache], "is not included in the list"
   end
 
   test "only one settings row can exist" do

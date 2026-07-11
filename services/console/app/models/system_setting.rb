@@ -6,7 +6,6 @@ class SystemSetting < ApplicationRecord
   attr_readonly :singleton
 
   before_validation :force_singleton, on: :create
-  before_validation :normalize_default_sandbox_repo_cache
 
   validates :singleton, inclusion: { in: [ true ] }, uniqueness: true
   validates :default_sandbox_repo_cache, inclusion: { in: Principal::SANDBOX_REPO_CACHE_VALUES }
@@ -17,14 +16,6 @@ class SystemSetting < ApplicationRecord
     first || create!(singleton: true)
   rescue ActiveRecord::RecordNotUnique
     first
-  end
-
-  def self.normalize_repo_cache(value)
-    normalized = value.to_s.strip.downcase
-    normalized = Principal::SANDBOX_REPO_CACHE_ALIASES.fetch(normalized, normalized)
-    return normalized if Principal::SANDBOX_REPO_CACHE_VALUES.include?(normalized)
-
-    DEFAULT_SANDBOX_REPO_CACHE
   end
 
   def principal_defaults
@@ -39,9 +30,5 @@ class SystemSetting < ApplicationRecord
 
   def force_singleton
     self.singleton = true
-  end
-
-  def normalize_default_sandbox_repo_cache
-    self.default_sandbox_repo_cache = self.class.normalize_repo_cache(default_sandbox_repo_cache)
   end
 end
