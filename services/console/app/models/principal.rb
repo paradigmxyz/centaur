@@ -36,7 +36,6 @@ class Principal < ApplicationRecord
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
-  validate :sandbox_repo_cache_label_matches_column
 
   # Stand-in for an inline secret value in redacted config: effective_config
   # reports that a control_plane source carries a value without revealing it.
@@ -137,12 +136,6 @@ class Principal < ApplicationRecord
     redact_secrets ? self.class.redact_live_secrets(config) : config
   end
 
-  def labels=(value)
-    supplied_labels = label_hash(value)
-    @user_supplied_sandbox_repo_cache_label = supplied_labels[SANDBOX_REPO_CACHE_LABEL]
-    super
-  end
-
   def apply_default_sandbox_capabilities!(supplied = {})
     return unless new_record?
 
@@ -226,21 +219,6 @@ class Principal < ApplicationRecord
 
   def apply_sandbox_repo_cache_label
     self[:labels] = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
-  end
-
-  def sandbox_repo_cache_label_matches_column
-    return if @user_supplied_sandbox_repo_cache_label.nil?
-    return if @user_supplied_sandbox_repo_cache_label.to_s.strip.downcase == sandbox_repo_cache
-
-    errors.add(:labels, "#{SANDBOX_REPO_CACHE_LABEL} must match sandbox_repo_cache")
-  end
-
-  def label_hash(value)
-    return {} if value.blank?
-    return value.to_unsafe_h if value.respond_to?(:to_unsafe_h)
-    return value.to_h if value.respond_to?(:to_h)
-
-    {}
   end
 
   def supplied_key?(attributes, key)
