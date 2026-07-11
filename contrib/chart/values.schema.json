@@ -267,17 +267,6 @@
         "mcpPublicUrl": { "type": "string" },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
-        "defaultSandboxCapabilities": {
-          "type": "object",
-          "properties": {
-            "repoCache": {
-              "type": "string",
-              "enum": ["none", "public", "all"]
-            },
-            "observability": { "type": "boolean" },
-            "apiServer": { "type": "boolean" }
-          }
-        },
         "etl": {
           "type": "object",
           "properties": {

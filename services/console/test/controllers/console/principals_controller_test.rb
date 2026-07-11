@@ -30,6 +30,12 @@ module Console
     end
 
     test "create persists a principal and redirects to its detail page" do
+      system_settings(:default).update!(
+        default_sandbox_repo_cache: "public",
+        default_sandbox_observability_enabled: false,
+        default_sandbox_api_server_enabled: false
+      )
+
       assert_difference -> { Principal.count }, 1 do
         post console_create_principal_url,
              params: {
@@ -45,7 +51,17 @@ module Console
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Principal created.", flash[:notice]
       assert_equal "New console principal", principal.name
-      assert_equal({ "kind" => "slack_channel", "team" => "platform" }, principal.labels)
+      assert_equal(
+        {
+          "kind" => "slack_channel",
+          "team" => "platform",
+          Principal::SANDBOX_REPO_CACHE_LABEL => "public"
+        },
+        principal.labels
+      )
+      assert_equal "public", principal.sandbox_repo_cache
+      assert_equal false, principal.sandbox_observability_enabled
+      assert_equal false, principal.sandbox_api_server_enabled
       assert_equal @operator, principal.created_by
     end
 

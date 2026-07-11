@@ -462,12 +462,6 @@ pub struct IdentityInput {
     pub name: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox_repo_cache: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox_observability_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox_api_server_enabled: Option<bool>,
 }
 
 /// A principal as returned by iron-control. Unknown fields are ignored, so this
@@ -716,9 +710,7 @@ pub struct Proxy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use super::{IdentityInput, SlackChannelPermissionInput, normalize_gcp_id_token_header};
+    use super::{SlackChannelPermissionInput, normalize_gcp_id_token_header};
 
     #[test]
     fn normalizes_supported_gcp_id_token_headers() {
@@ -747,23 +739,5 @@ mod tests {
         assert_eq!(value["upload_enabled"], false);
         assert_eq!(value["download_enabled"], true);
         assert_eq!(value["history_enabled"], false);
-    }
-
-    #[test]
-    fn identity_input_serializes_sandbox_capability_defaults_when_present() {
-        let value = serde_json::to_value(IdentityInput {
-            namespace: "default".to_owned(),
-            foreign_id: "slack-channel-t123-c123".to_owned(),
-            name: "Slack Channel #general".to_owned(),
-            labels: BTreeMap::new(),
-            sandbox_repo_cache: Some("public".to_owned()),
-            sandbox_observability_enabled: Some(false),
-            sandbox_api_server_enabled: Some(false),
-        })
-        .unwrap();
-
-        assert_eq!(value["sandbox_repo_cache"], "public");
-        assert_eq!(value["sandbox_observability_enabled"], false);
-        assert_eq!(value["sandbox_api_server_enabled"], false);
     }
 }

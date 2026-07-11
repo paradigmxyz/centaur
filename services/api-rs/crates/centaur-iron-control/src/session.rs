@@ -17,31 +17,6 @@ use crate::principal::{
     derive_principal_with_slack_team, is_direct_message, slack_conversation_id,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DefaultSandboxCapabilities {
-    pub repo_cache: String,
-    pub observability_enabled: bool,
-    pub api_server_enabled: bool,
-}
-
-impl Default for DefaultSandboxCapabilities {
-    fn default() -> Self {
-        Self {
-            repo_cache: "all".to_owned(),
-            observability_enabled: true,
-            api_server_enabled: true,
-        }
-    }
-}
-
-impl DefaultSandboxCapabilities {
-    fn apply_to_new_principal(&self, input: &mut crate::models::IdentityInput) {
-        input.sandbox_repo_cache = Some(self.repo_cache.clone());
-        input.sandbox_observability_enabled = Some(self.observability_enabled);
-        input.sandbox_api_server_enabled = Some(self.api_server_enabled);
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SessionPrincipalMetadata<'a> {
     actor_user_id: Option<&'a str>,
@@ -80,7 +55,6 @@ pub struct SessionRegistrar {
     client: IronControlClient,
     namespace: String,
     assign_role_ids: Vec<String>,
-    default_sandbox_capabilities: DefaultSandboxCapabilities,
 }
 
 impl SessionRegistrar {
@@ -95,19 +69,7 @@ impl SessionRegistrar {
             client,
             namespace: namespace.into(),
             assign_role_ids,
-            default_sandbox_capabilities: DefaultSandboxCapabilities::default(),
         }
-    }
-
-    /// Configure the sandbox capabilities seeded onto principals the API
-    /// creates. Existing principals are intentionally left as-is so operator
-    /// changes in console remain sticky.
-    pub fn with_default_sandbox_capabilities(
-        mut self,
-        capabilities: DefaultSandboxCapabilities,
-    ) -> Self {
-        self.default_sandbox_capabilities = capabilities;
-        self
     }
 
     /// Upsert the principal for ``thread_key`` using the session metadata the
@@ -146,9 +108,6 @@ impl SessionRegistrar {
             let mut labels = existing.labels;
             labels.extend(input.labels);
             input.labels = labels;
-        } else {
-            self.default_sandbox_capabilities
-                .apply_to_new_principal(&mut input);
         }
         let slack_permission = slack_permission_for_thread(thread_key, &input.labels);
         let should_upsert_slack_permission = !exists
@@ -272,30 +231,6 @@ mod tests {
             .slack_team_id,
             Some("T123")
         );
-    }
-
-    #[test]
-    fn default_sandbox_capabilities_seed_new_principal_input() {
-        let mut input = crate::models::IdentityInput {
-            namespace: "default".to_owned(),
-            foreign_id: "slack-channel-t123-c123".to_owned(),
-            name: "Slack Channel #general".to_owned(),
-            labels: BTreeMap::new(),
-            sandbox_repo_cache: None,
-            sandbox_observability_enabled: None,
-            sandbox_api_server_enabled: None,
-        };
-
-        DefaultSandboxCapabilities {
-            repo_cache: "public".to_owned(),
-            observability_enabled: false,
-            api_server_enabled: false,
-        }
-        .apply_to_new_principal(&mut input);
-
-        assert_eq!(input.sandbox_repo_cache.as_deref(), Some("public"));
-        assert_eq!(input.sandbox_observability_enabled, Some(false));
-        assert_eq!(input.sandbox_api_server_enabled, Some(false));
     }
 
     #[tokio::test]

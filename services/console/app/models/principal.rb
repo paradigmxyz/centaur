@@ -151,6 +151,15 @@ class Principal < ApplicationRecord
     apply_sandbox_repo_cache_setting
   end
 
+  def apply_default_sandbox_capabilities!
+    return unless new_record?
+
+    defaults = SystemSetting.current.principal_defaults
+    self.sandbox_repo_cache = defaults[:sandbox_repo_cache]
+    self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
+    self.sandbox_api_server_enabled = defaults[:sandbox_api_server_enabled]
+  end
+
   def sandbox_repo_cache_enabled=(value)
     enabled = ActiveModel::Type::Boolean.new.cast(value)
     super(enabled)

@@ -16,8 +16,8 @@ use centaur_api_server::{
     discover_tool_proxy_fragment,
 };
 use centaur_iron_control::{
-    DefaultSandboxCapabilities, IdentityInput, IronControlClient, IronControlError, RegisterError,
-    RoleSpec, SessionRegistrar, register_role,
+    IdentityInput, IronControlClient, IronControlError, RegisterError, RoleSpec, SessionRegistrar,
+    register_role,
 };
 use centaur_iron_proxy::{
     ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, harness_auth_fragment, infra_fragment,
@@ -29,7 +29,7 @@ use centaur_sandbox_agent_k8s::{
 use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
-use centaur_session_core::{HarnessType, SandboxRepoCacheAccess};
+use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
 };
@@ -650,27 +650,6 @@ struct SandboxArgs {
     )]
     iron_control_sync_infra_secrets: bool,
     #[arg(
-        long = "session-default-sandbox-repo-cache-access",
-        env = "SESSION_DEFAULT_SANDBOX_REPO_CACHE_ACCESS",
-        default_value = "all",
-        value_parser = ["none", "public", "all"]
-    )]
-    default_sandbox_repo_cache_access: String,
-    #[arg(
-        long = "session-default-sandbox-observability-enabled",
-        env = "SESSION_DEFAULT_SANDBOX_OBSERVABILITY_ENABLED",
-        default_value_t = true,
-        action = clap::ArgAction::Set
-    )]
-    default_sandbox_observability_enabled: bool,
-    #[arg(
-        long = "session-default-sandbox-api-server-enabled",
-        env = "SESSION_DEFAULT_SANDBOX_API_SERVER_ENABLED",
-        default_value_t = true,
-        action = clap::ArgAction::Set
-    )]
-    default_sandbox_api_server_enabled: bool,
-    #[arg(
         long = "workflow-host-sandbox",
         env = "WORKFLOW_HOST_SANDBOX",
         default_value_t = true
@@ -713,9 +692,6 @@ impl SandboxArgs {
                         foreign_id: spec.foreign_id,
                         name: spec.name,
                         labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
-                        sandbox_repo_cache: None,
-                        sandbox_observability_enabled: None,
-                        sandbox_api_server_enabled: None,
                     })
                     .await?
                     .id,
@@ -730,9 +706,6 @@ impl SandboxArgs {
                     ("managed-by".to_owned(), "centaur".to_owned()),
                     ("purpose".to_owned(), "warm-pool-bootstrap".to_owned()),
                 ]),
-                sandbox_repo_cache: None,
-                sandbox_observability_enabled: None,
-                sandbox_api_server_enabled: None,
             })
             .await?;
         let workflow_host = client
@@ -744,30 +717,16 @@ impl SandboxArgs {
                     ("managed-by".to_owned(), "centaur".to_owned()),
                     ("purpose".to_owned(), "workflow-host".to_owned()),
                 ]),
-                sandbox_repo_cache: None,
-                sandbox_observability_enabled: None,
-                sandbox_api_server_enabled: None,
             })
             .await?;
         for role_id in &role_ids {
             client.assign_role(&workflow_host.id, role_id).await?;
         }
         Ok(Some(IronControlRuntime {
-            registrar: SessionRegistrar::new(client, namespace, role_ids)
-                .with_default_sandbox_capabilities(self.default_sandbox_capabilities()),
+            registrar: SessionRegistrar::new(client, namespace, role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
         }))
-    }
-
-    fn default_sandbox_capabilities(&self) -> DefaultSandboxCapabilities {
-        let repo_cache = SandboxRepoCacheAccess::parse(&self.default_sandbox_repo_cache_access)
-            .unwrap_or(SandboxRepoCacheAccess::All);
-        DefaultSandboxCapabilities {
-            repo_cache: repo_cache.as_str().to_owned(),
-            observability_enabled: self.default_sandbox_observability_enabled,
-            api_server_enabled: self.default_sandbox_api_server_enabled,
-        }
     }
 
     fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
@@ -2112,31 +2071,6 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
-    }
-
-    #[test]
-    fn parses_default_sandbox_capabilities() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-default-sandbox-repo-cache-access",
-            "public",
-            "--session-default-sandbox-observability-enabled",
-            "false",
-            "--session-default-sandbox-api-server-enabled",
-            "false",
-        ])
-        .unwrap();
-
-        assert_eq!(
-            args.sandbox.default_sandbox_capabilities(),
-            DefaultSandboxCapabilities {
-                repo_cache: "public".to_owned(),
-                observability_enabled: false,
-                api_server_enabled: false,
-            }
-        );
     }
 
     #[test]

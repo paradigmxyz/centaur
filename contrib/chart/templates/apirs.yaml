@@ -288,12 +288,6 @@ spec:
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
             - name: SESSION_SANDBOX_HOT_IDLE_GRACE_SECS
               value: {{ .Values.apiRs.sandboxHotIdleGraceSecs | quote }}
-            - name: SESSION_DEFAULT_SANDBOX_REPO_CACHE_ACCESS
-              value: {{ .Values.apiRs.defaultSandboxCapabilities.repoCache | quote }}
-            - name: SESSION_DEFAULT_SANDBOX_OBSERVABILITY_ENABLED
-              value: {{ .Values.apiRs.defaultSandboxCapabilities.observability | quote }}
-            - name: SESSION_DEFAULT_SANDBOX_API_SERVER_ENABLED
-              value: {{ .Values.apiRs.defaultSandboxCapabilities.apiServer | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
