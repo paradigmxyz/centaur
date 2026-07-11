@@ -275,6 +275,32 @@ spec:
 {{- end }}
 ---
 {{- end }}
+{{- if .Values.networkPolicy.otlpEgress.enabled }}
+# Pods with observability enabled may call the configured in-cluster OTLP
+# collector. Without the centaur.ai/observability-enabled=true label, default
+# deny blocks access to Laminar or other OTLP endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-otlp-egress
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/observability-enabled: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "networkPolicy.otlpEgress.namespace is required when networkPolicy.otlpEgress.enabled" .Values.networkPolicy.otlpEgress.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.otlpEgress.port }}
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -318,18 +344,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
-{{- end }}
-{{- if .Values.networkPolicy.otlpEgress.enabled }}
-    # OTLP trace export (e.g. Laminar). The collector lives in another
-    # namespace; without this rule api-rs's own spans die with
-    # BatchSpanProcessor "network error" export failures.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ required "networkPolicy.otlpEgress.namespace is required when networkPolicy.otlpEgress.enabled" .Values.networkPolicy.otlpEgress.namespace | quote }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.otlpEgress.port }}
 {{- end }}
     - ports:
         - protocol: TCP

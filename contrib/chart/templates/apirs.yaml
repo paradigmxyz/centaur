@@ -190,6 +190,9 @@ spec:
 {{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 8 }}
+{{- if eq (include "centaur.apiOtlpExportEnabled" .) "true" }}
+        centaur.ai/observability-enabled: "true"
+{{- end }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.apiRs.terminationGracePeriodSeconds }}
       automountServiceAccountToken: true

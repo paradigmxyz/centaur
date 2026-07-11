@@ -626,10 +626,12 @@ networkPolicy:
   # on clusters whose API server endpoint already listens on 443.
   apiServerPort: 6443
   # Egress to an in-cluster OTLP trace collector (e.g. Laminar) in another
-  # namespace. api-rs needs this to export its own spans; sandboxes get their
-  # equivalent per-sandbox rule from api-rs, derived from the OTLP endpoint in
-  # sandbox.extraEnv. The collector's own namespace must also admit ingress
-  # from this namespace's pods.
+  # namespace. The policy selects only pods labeled
+  # centaur.ai/observability-enabled=true, matching observabilityEgress. api-rs
+  # receives that label only when API OTLP export is enabled by apiRs.extraEnv
+  # (OTEL_TRACES_EXPORTER=otlp or an OTLP endpoint without an explicit off
+  # value). The collector's own namespace must also admit ingress from this
+  # namespace's pods.
   otlpEgress:
     enabled: false
     # kubernetes.io/metadata.name of the collector's namespace, e.g. "laminar".
