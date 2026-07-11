@@ -177,16 +177,6 @@ namespace as this release, so a short DNS name is enough.
 {{- printf "http://%s:%v" (include "centaur.onepasswordConnectHost" .) (include "centaur.onepasswordConnectPort" .) -}}
 {{- end -}}
 
-{{- define "centaur.apiOtlpExportEnabled" -}}
-{{- $extraEnv := .Values.apiRs.extraEnv | default dict -}}
-{{- $exporter := lower (trim (toString (default "" (get $extraEnv "OTEL_TRACES_EXPORTER")))) -}}
-{{- $tracesEndpoint := trim (toString (default "" (get $extraEnv "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))) -}}
-{{- $endpoint := trim (toString (default "" (get $extraEnv "OTEL_EXPORTER_OTLP_ENDPOINT"))) -}}
-{{- $explicitOff := has $exporter (list "none" "false" "0" "off") -}}
-{{- $hasEndpoint := or (ne $tracesEndpoint "") (ne $endpoint "") -}}
-{{- if and (not $explicitOff) (or (eq $exporter "otlp") $hasEndpoint) -}}true{{- else -}}false{{- end -}}
-{{- end -}}
-
 {{- /*
 console — Rails control plane (formerly "iron-control") for authenticated API
 access and encrypted secret storage. Flag-gated (console.enabled), in-cluster

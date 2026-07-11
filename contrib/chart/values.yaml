@@ -628,10 +628,9 @@ networkPolicy:
   # Egress to an in-cluster OTLP trace collector (e.g. Laminar) in another
   # namespace. The policy selects only pods labeled
   # centaur.ai/observability-enabled=true, matching observabilityEgress. api-rs
-  # receives that label only when API OTLP export is enabled by apiRs.extraEnv
-  # (OTEL_TRACES_EXPORTER=otlp or an OTLP endpoint without an explicit off
-  # value). The collector's own namespace must also admit ingress from this
-  # namespace's pods.
+  # always receives that label; sandboxes and proxy pods receive it only when
+  # their principal has observability enabled. The collector's own namespace
+  # must also admit ingress from this namespace's pods.
   otlpEgress:
     enabled: false
     # kubernetes.io/metadata.name of the collector's namespace, e.g. "laminar".
