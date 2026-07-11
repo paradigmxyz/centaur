@@ -167,7 +167,7 @@ module Api
         assert_equal true, data["sandbox_api_server_enabled"]
       end
 
-      test "POST ignores explicit repo-cache label in favor of system default" do
+      test "POST rejects explicit repo-cache label" do
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
@@ -178,14 +178,11 @@ module Api
         }
 
         post api_v1_principals_url, params: body.to_json, headers: auth_headers
-        assert_response :created
-
-        data = json_body.fetch("data")
-        assert_equal "all", data["sandbox_repo_cache"]
-        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, data["labels"])
+        assert_response :unprocessable_content
+        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} is reserved/, response.body)
       end
 
-      test "POST uses repo-cache param over conflicting label" do
+      test "POST rejects repo-cache param with conflicting label" do
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
@@ -197,11 +194,8 @@ module Api
         }
 
         post api_v1_principals_url, params: body.to_json, headers: auth_headers
-        assert_response :created
-
-        data = json_body.fetch("data")
-        assert_equal "public", data["sandbox_repo_cache"]
-        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "public" }, data["labels"])
+        assert_response :unprocessable_content
+        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} is reserved/, response.body)
       end
 
       test "POST creates a Principal with only a human-readable name" do
@@ -297,6 +291,23 @@ module Api
           },
           principal.labels
         )
+      end
+
+      test "PUT rejects explicit repo-cache label" do
+        principal = principals(:acme_channel)
+        body = {
+          data: {
+            labels: {
+              "kind" => "slack_channel",
+              Principal::SANDBOX_REPO_CACHE_LABEL => "none"
+            }
+          }
+        }
+
+        put api_v1_principal_url(id: principal.oid), params: body.to_json, headers: auth_headers
+        assert_response :unprocessable_content
+        assert_match(/#{Regexp.escape(Principal::SANDBOX_REPO_CACHE_LABEL)} is reserved/, response.body)
+        assert_equal "all", principal.reload.sandbox_repo_cache
       end
 
       test "PUT replaces Slack channel permission rows" do
