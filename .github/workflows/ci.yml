@@ -97,6 +97,7 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output telegrambot_checks \
             '^services/telegrambot/' \
+            '^packages/' \
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
@@ -385,6 +386,23 @@ jobs:
     runs-on: depot-ubuntu-24.04-16
     needs: ci_changes
     if: needs.ci_changes.outputs.telegrambot_checks == 'true'
+    # The durability core (inbox receipt/claims, fenced ownership, migrations,
+    # poller recovery, and the end-to-end emulate suite) is DB-gated on
+    # TELEGRAMBOT_TEST_DATABASE_URL and would silently skip without Postgres,
+    # so provision one (mirrors the rust-api job's service container).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -412,6 +430,8 @@ jobs:
 
       - name: Telegrambot tests
         working-directory: services/telegrambot
+        env:
+          TELEGRAMBOT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: bun run test
 
   ci-success:
