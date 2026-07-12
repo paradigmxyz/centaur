@@ -63,8 +63,8 @@ Ownership by tree:
 - `services/api-rs/`: Rust control plane, durable sessions, sandbox backends,
   workflows, auth integration, and telemetry.
 - `services/slackbotv2/`, `discordbot/`, `githubbot/`, `linearbot/`,
-  `teamsbot/`: platform transport, policy gates, session forwarding, and
-  platform rendering.
+  `teamsbot/`, `telegrambot/`: platform transport, policy gates, session
+  forwarding, and platform rendering.
 - `services/sandbox/`: agent image, startup composition, tool installation,
   repo-cache helpers, and runtime prompt. Harness protocol normalization lives
   in `crates/harness-server/`, which is built into the image.

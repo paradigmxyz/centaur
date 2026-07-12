@@ -28,6 +28,12 @@ teamsbot:
   image:
     pullPolicy: IfNotPresent
 
+telegrambot:
+  # Enable once TELEGRAM_BOT_TOKEN and the chat/user allowlists are configured.
+  enabled: false
+  image:
+    pullPolicy: IfNotPresent
+
 apiRs:
   image:
     pullPolicy: IfNotPresent
