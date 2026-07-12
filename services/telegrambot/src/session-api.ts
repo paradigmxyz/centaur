@@ -1,5 +1,6 @@
 import type { RustSessionStreamEvent } from "@centaur/harness-events";
 import type { TelegramApi } from "./telegram-api";
+import { deriveClientMessageId } from "./telegram-threading";
 import type {
   JsonObject,
   JsonValue,
@@ -142,12 +143,14 @@ type ForwardSessionApiCallbacks = {
 };
 
 /**
- * Stable append/execute idempotency key for a Telegram message. Must stay in
- * lockstep with the inbox `client_message_id` contract in types.ts
- * (`telegram:{chatId}:{messageId}`).
+ * Stable append/execute idempotency key for a Telegram message. Delegates to
+ * telegram-threading's deriveClientMessageId so there is exactly ONE canonical
+ * derivation of the `telegram:{chatId}:{messageId}` key — the inbox
+ * `client_message_id`, the session append `client_message_id`, and the execute
+ * `idempotency_key` must never be able to drift apart.
  */
 export function telegramClientMessageId(message: TelegramMessage): string {
-  return `telegram:${message.chat.id}:${message.message_id}`;
+  return deriveClientMessageId(message);
 }
 
 // Telegram analog of discordbot's isContentlessApiMessage: sticker-only,

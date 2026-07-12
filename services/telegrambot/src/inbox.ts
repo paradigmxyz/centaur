@@ -365,6 +365,41 @@ export async function pruneTerminal(
 }
 
 /**
+ * Per-thread worker feed: the oldest nonterminal rows for ONE stamped
+ * thread_key, oldest first, skipping update ids already owned by in-process
+ * work (a detached render or steering wait). claimNextPerThread only exposes
+ * one row per thread, which is right for cross-thread scheduling but starves
+ * live steering — a follow-up must be appendable while the thread's oldest row
+ * is still rendering in the background — so the thread worker drains its own
+ * backlog through this query instead.
+ *
+ * Plain SELECT for the same reason as claimNextPerThread: the fence protects
+ * transitions, not reads.
+ */
+export async function claimThreadBacklog(
+  pool: Pool,
+  botUserId: string,
+  threadKey: string,
+  excludeUpdateIds: readonly number[],
+  limit: number,
+): Promise<TelegramInboxRecord[]> {
+  if (limit <= 0) return [];
+  const result = await pool.query<InboxDbRow>(
+    `
+    SELECT * FROM telegram_update_inbox
+    WHERE bot_user_id = $1
+      AND thread_key = $2
+      AND NOT (status = ANY($3::text[]))
+      AND NOT (update_id = ANY($4::bigint[]))
+    ORDER BY update_id ASC
+    LIMIT $5
+    `,
+    [botUserId, threadKey, TERMINAL_STATUS_ARRAY, [...excludeUpdateIds], limit],
+  );
+  return result.rows.map(mapRow);
+}
+
+/**
  * Startup render recovery: rows whose execution was accepted and whose render
  * obligation is durable but whose terminal delivery was never confirmed.
  * Long-polling has no platform redelivery, so these are the only record that
