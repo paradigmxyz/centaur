@@ -308,6 +308,37 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
 
+  services/telegrambot:
+    dependencies:
+      '@centaur/harness-events':
+        specifier: workspace:*
+        version: link:../../packages/harness-events
+      '@centaur/rendering':
+        specifier: workspace:*
+        version: link:../../packages/rendering
+      hono:
+        specifier: ^4.12.18
+        version: 4.12.25
+      pg:
+        specifier: ^8.21.0
+        version: 8.21.0
+    devDependencies:
+      '@types/bun':
+        specifier: ^1.3.13
+        version: 1.3.14
+      '@types/node':
+        specifier: ^25.7.0
+        version: 25.9.3
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.20.0
+      '@typescript/native-preview':
+        specifier: ^7.0.0-dev.20260512.1
+        version: 7.0.0-dev.20260616.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
 packages:
 
   '@azure/msal-common@16.10.0':
