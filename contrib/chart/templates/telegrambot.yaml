@@ -1,0 +1,118 @@
+{{- if .Values.telegrambot.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+spec:
+  # Exactly one replica: getUpdates allows a single consumer per bot token, so a second pod polling
+  # concurrently gets 409s and messages bounce between pods. Recreate tears the old pod down before
+  # the new one starts polling. Correctness is still guarded by the fenced Postgres lease inside the
+  # service; this is rollout hygiene. Do NOT add an HPA.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      # Let the in-flight long poll and lease release finish on SIGTERM so the replacement pod can
+      # acquire ownership without waiting out the lease TTL.
+      terminationGracePeriodSeconds: 35
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: telegrambot
+          image: {{ printf "%s:%s" .Values.telegrambot.image.repository .Values.telegrambot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.telegrambot.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "3001"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # Shared with the tools/comms/telegram tool: one bot token secret key for the deployment.
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTELEGRAM_BOT_TOKEN" .Values.secretManager.envPrefix }}
+            - name: TELEGRAMBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTELEGRAMBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: TELEGRAMBOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: TELEGRAMBOT_USER_NAME
+              value: {{ .Values.telegrambot.userName | quote }}
+            - name: TELEGRAMBOT_CHAT_ALLOWLIST
+              value: {{ .Values.telegrambot.chatAllowlist | quote }}
+            - name: TELEGRAMBOT_USER_ALLOWLIST
+              value: {{ .Values.telegrambot.userAllowlist | quote }}
+{{- range $name, $value := .Values.telegrambot.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: 3001
+              name: http
+          # /live reports only local process liveness; /ready additionally requires database
+          # initialization, fenced ownership, webhook reconciliation, and fresh poll progress.
+          # A Telegram outage or stale polling must only fail readiness — never liveness — so the
+          # pod is never restarted into a probe-induced crash loop it cannot poll its way out of.
+          # Startup gets a generous window (24 * 5s = 120s) because first boot runs migrations,
+          # acquires the ownership lease, and reconciles webhook state before serving.
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 3001
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3001
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 3001
+            periodSeconds: 15
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            # The oven/bun runtime image ships the `bun` user (uid/gid 1000); the Dockerfile drops
+            # to it, so enforce non-root here too.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+{{ toYaml .Values.telegrambot.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+{{- end }}

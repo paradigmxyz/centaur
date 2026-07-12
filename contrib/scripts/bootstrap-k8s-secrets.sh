@@ -63,6 +63,14 @@ Optional Discord ingress bootstrap (consumed when discordbot.enabled=true):
   DISCORDBOT_API_KEY           bearer the bot sends to api-rs; auto-generated
                                once when absent (never rotated in place)
 
+Optional Telegram bootstrap (consumed when telegrambot.enabled=true, and by
+the tools/comms/telegram tool):
+  TELEGRAM_BOT_TOKEN           bot token from @BotFather. Overwritten on every
+                               run so it rotates. Shared by the telegrambot
+                               ingress and the outbound telegram tool.
+  TELEGRAMBOT_API_KEY          bearer the bot sends to api-rs; auto-generated
+                               once when absent (never rotated in place)
+
 Optional Teams ingress bootstrap (consumed when teamsbot.enabled=true):
   TEAMS_BOT_APP_ID             when set, seeds the teamsbot keys; requires
                                TEAMS_BOT_APP_PASSWORD and
@@ -223,6 +231,15 @@ if secret_exists centaur-infra-env; then
       patch_data+=("\"DISCORDBOT_API_KEY\":\"$(printf '%s' "${DISCORDBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
     fi
   fi
+  # Telegram keys: added when TELEGRAM_BOT_TOKEN is in the env. The token is shared by the
+  # telegrambot ingress and the outbound telegram tool, and is overwritten on each run (so
+  # rotation works); TELEGRAMBOT_API_KEY is generated once if absent.
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    patch_data+=("\"TELEGRAM_BOT_TOKEN\":\"$(printf '%s' "$TELEGRAM_BOT_TOKEN" | base64 | tr -d '\n')\"")
+    if ! secret_key_present TELEGRAMBOT_API_KEY; then
+      patch_data+=("\"TELEGRAMBOT_API_KEY\":\"$(printf '%s' "${TELEGRAMBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
+    fi
+  fi
   # Teams ingress (teamsbot) keys: added when TEAMS_BOT_APP_ID is in the env.
   # TEAMS_BOT_* are overwritten on each run; TEAMSBOT_API_KEY is generated once
   # if absent.
@@ -340,6 +357,12 @@ else
       --from-literal=DISCORD_PUBLIC_KEY="$DISCORD_PUBLIC_KEY"
       --from-literal=DISCORD_APPLICATION_ID="$DISCORD_APPLICATION_ID"
       --from-literal=DISCORDBOT_API_KEY="${DISCORDBOT_API_KEY:-$(rand_hex)}"
+    )
+  fi
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    secret_args+=(
+      --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
+      --from-literal=TELEGRAMBOT_API_KEY="${TELEGRAMBOT_API_KEY:-$(rand_hex)}"
     )
   fi
   if [[ -n "${TEAMS_BOT_APP_ID:-}" ]]; then

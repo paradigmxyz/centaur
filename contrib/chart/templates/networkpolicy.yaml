@@ -86,6 +86,11 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
+{{- if .Values.telegrambot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 14 }}
+{{- end }}
 {{- if $console.enabled }}
         - podSelector:
             matchLabels:
@@ -181,6 +186,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
+{{- end }}
+{{- if .Values.telegrambot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 14 }}
 {{- end }}
 {{- if $console.enabled }}
         # Console pages call api-rs for admin-backed views such as ETLs.
@@ -598,6 +608,59 @@ spec:
           port: 5432
 {{- end }}
     # Teams Bot Framework, Graph, SharePoint, and proactive activity delivery use direct HTTPS.
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
+{{- if .Values.telegrambot.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only health probes reach telegrambot; nothing routes traffic to it (long-polling is outbound).
+    - from:
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- end }}
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    # Telegram Bot API (api.telegram.org) long-polling and sends use direct HTTPS. Portable
+    # NetworkPolicy cannot select destinations by FQDN, so this allows any TCP/443 egress;
+    # deployments needing strict destination control must add an egress proxy / service mesh
+    # or a CNI-specific FQDN policy (e.g. Cilium CiliumNetworkPolicy toFQDNs).
     - ports:
         - protocol: TCP
           port: 443
