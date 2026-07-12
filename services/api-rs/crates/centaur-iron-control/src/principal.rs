@@ -4,7 +4,9 @@
 //! the principal is the conversation: a Discord **channel** (every thread in it
 //! shares one principal), a Linear **issue** (every agent session on it shares
 //! one principal), a Microsoft Teams **channel/conversation** (or **user** for
-//! a personal/user-scoped run when the acting user is known), or — for Slack —
+//! a personal/user-scoped run when the acting user is known), a Telegram
+//! **chat** for a group/supergroup (or **user** for a private chat — the key's
+//! discriminator decides, never metadata), or — for Slack —
 //! a **user** for a 1:1 DM and a **channel** for a multi-party channel/group
 //! thread. The Slack thread key is
 //! ``<source>:[<team_id>:]<conversation_id>[:<thread_ts>]`` — segments are
@@ -155,6 +157,42 @@ pub fn derive_principal_with_slack_team(
         };
     }
 
+    // Telegram sessions key on the chat id with the kind encoded in the key:
+    // ``telegram:chat:<chat_id>[:<message_thread_id>]`` for groups/supergroups
+    // and ``telegram:private:<chat_id>[:<message_thread_id>]`` for DMs. The
+    // discriminator — never metadata — decides whether the principal is a chat
+    // or a user, and forum-topic sessions collapse onto the same chat/user
+    // principal (the topic id is a label, not part of the key, mirroring the
+    // Slack ``thread_ts`` model). A Telegram ``chat.id`` is globally unique, so
+    // no workspace/team scoping is needed (see #1032: scope principals only
+    // where the conversation id could collide). The validated id is used
+    // verbatim rather than slugged: group ids are negative and ``slugify``
+    // would drop the sign, colliding ``-N`` with ``N``.
+    if let Some((is_private, chat_id, message_thread_id)) = parse_telegram_segments(thread_key) {
+        let mut labels = BTreeMap::new();
+        if let Some(thread) = message_thread_id {
+            labels.insert("telegram_thread_id".to_owned(), thread.to_owned());
+        }
+        if is_private {
+            labels.insert("telegram_user_id".to_owned(), chat_id.to_owned());
+            return PrincipalRef {
+                foreign_id: format!("telegram-user-{chat_id}"),
+                name: display_name
+                    .map(|name| format!("Telegram DM @{name}"))
+                    .unwrap_or_else(|| format!("Telegram User {chat_id}")),
+                labels,
+            };
+        }
+        labels.insert("telegram_chat_id".to_owned(), chat_id.to_owned());
+        return PrincipalRef {
+            foreign_id: format!("telegram-chat-{chat_id}"),
+            name: display_name
+                .map(|name| format!("Telegram Chat {name}"))
+                .unwrap_or_else(|| format!("Telegram Chat {chat_id}")),
+            labels,
+        };
+    }
+
     let (thread_team_id, conversation_id) = parse_slack_segments(thread_key);
     let metadata_team_id = slack_team_id.map(str::trim).filter(|team| !team.is_empty());
     // Channel principals must never be scoped by the message-derived metadata
@@ -286,6 +324,40 @@ fn parse_teams_adapter_segments(thread_key: &str) -> Option<(String, String, Opt
         })
         .unwrap_or((conversation_id, None));
     Some((conversation_id, service_url, thread_id))
+}
+
+/// The kind (``true`` for a private chat), chat id, and optional forum-topic
+/// id from a ``telegram:chat:<chat_id>[:<message_thread_id>]`` or
+/// ``telegram:private:<chat_id>[:<message_thread_id>]`` thread key, or
+/// ``None`` when the key is not a well-formed Telegram thread. Group and
+/// supergroup chat ids are negative numbers, so every id segment is validated
+/// as an optionally minus-prefixed integer; a malformed key falls through to
+/// the generic fallback like every other platform.
+fn parse_telegram_segments(thread_key: &str) -> Option<(bool, &str, Option<&str>)> {
+    let rest = thread_key.strip_prefix("telegram:")?;
+    let mut segments = rest.split(':').map(str::trim);
+    let is_private = match segments.next()? {
+        "chat" => false,
+        "private" => true,
+        _ => return None,
+    };
+    let chat_id = segments.next().filter(|id| is_telegram_id(id))?;
+    let message_thread_id = match segments.next() {
+        Some(thread) if is_telegram_id(thread) => Some(thread),
+        Some(_) => return None,
+        None => None,
+    };
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((is_private, chat_id, message_thread_id))
+}
+
+/// A Telegram id segment: a non-empty run of ASCII digits with an optional
+/// leading minus (group/supergroup chat ids are negative).
+fn is_telegram_id(segment: &str) -> bool {
+    let digits = segment.strip_prefix('-').unwrap_or(segment);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Slack direct-message conversation ids start with ``D``.
@@ -565,6 +637,105 @@ mod tests {
             principal.labels.get("teams_user_id").map(String::as_str),
             Some("aad-user-1")
         );
+    }
+
+    #[test]
+    fn telegram_group_sessions_key_on_the_chat() {
+        let principal = derive_principal("telegram:chat:-1001234567890", None, None);
+        assert_eq!(principal.foreign_id, "telegram-chat--1001234567890");
+        assert_eq!(principal.name, "Telegram Chat -1001234567890");
+        assert_eq!(
+            principal.labels.get("telegram_chat_id").map(String::as_str),
+            Some("-1001234567890")
+        );
+        assert_eq!(principal.labels.get("telegram_thread_id"), None);
+    }
+
+    #[test]
+    fn telegram_private_sessions_key_on_the_user() {
+        let principal = derive_principal("telegram:private:5551234", None, None);
+        assert_eq!(principal.foreign_id, "telegram-user-5551234");
+        assert_eq!(principal.name, "Telegram User 5551234");
+        assert_eq!(
+            principal.labels.get("telegram_user_id").map(String::as_str),
+            Some("5551234")
+        );
+    }
+
+    #[test]
+    fn telegram_topic_sessions_collapse_onto_the_chat_principal() {
+        // A forum-topic session resolves to the same principal as the plain
+        // chat; the topic id survives only as a label.
+        let topic = derive_principal("telegram:chat:-1001234567890:42", None, None);
+        let plain = derive_principal("telegram:chat:-1001234567890", None, None);
+        assert_eq!(topic.foreign_id, "telegram-chat--1001234567890");
+        assert_eq!(topic.foreign_id, plain.foreign_id);
+        assert_eq!(
+            topic.labels.get("telegram_thread_id").map(String::as_str),
+            Some("42")
+        );
+    }
+
+    #[test]
+    fn telegram_private_topic_sessions_collapse_onto_the_user_principal() {
+        let topic = derive_principal("telegram:private:5551234:7", None, None);
+        let plain = derive_principal("telegram:private:5551234", None, None);
+        assert_eq!(topic.foreign_id, "telegram-user-5551234");
+        assert_eq!(topic.foreign_id, plain.foreign_id);
+        assert_eq!(
+            topic.labels.get("telegram_thread_id").map(String::as_str),
+            Some("7")
+        );
+    }
+
+    #[test]
+    fn telegram_conversation_name_overrides_the_chat_display_name_but_not_the_key() {
+        let principal = derive_principal("telegram:chat:-100987", None, Some("eng-oncall"));
+        // Key stays derived from the chat id so a title change never splits it.
+        assert_eq!(principal.foreign_id, "telegram-chat--100987");
+        assert_eq!(principal.name, "Telegram Chat eng-oncall");
+    }
+
+    #[test]
+    fn telegram_conversation_name_overrides_the_dm_display_name() {
+        let principal = derive_principal("telegram:private:5551234", None, Some("Ada Lovelace"));
+        assert_eq!(principal.foreign_id, "telegram-user-5551234");
+        assert_eq!(principal.name, "Telegram DM @Ada Lovelace");
+    }
+
+    #[test]
+    fn telegram_metadata_never_selects_the_principal_foreign_id() {
+        // The private principal derives from the validated key segment; a
+        // metadata-supplied actor user id must never pick a different one.
+        let principal = derive_principal("telegram:private:5551234", Some("999"), None);
+        assert_eq!(principal.foreign_id, "telegram-user-5551234");
+        assert_eq!(
+            principal.labels.get("telegram_user_id").map(String::as_str),
+            Some("5551234")
+        );
+    }
+
+    #[test]
+    fn malformed_telegram_keys_fall_through_to_the_generic_fallback() {
+        for thread_key in [
+            "telegram:chat:abc",
+            "telegram:chat:",
+            "telegram:chat:-",
+            "telegram:chat:12x",
+            "telegram:private:",
+            "telegram:private:1.5",
+            "telegram:group:123",
+            "telegram:123",
+            "telegram:chat:123:topic",
+            "telegram:chat:123:42:extra",
+        ] {
+            let principal = derive_principal(thread_key, None, None);
+            assert!(
+                principal.foreign_id.starts_with("thread-"),
+                "{thread_key} must fall through, got {}",
+                principal.foreign_id
+            );
+        }
     }
 
     #[test]

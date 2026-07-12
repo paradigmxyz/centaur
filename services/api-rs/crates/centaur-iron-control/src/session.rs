@@ -41,6 +41,7 @@ impl<'a> SessionPrincipalMetadata<'a> {
                 .or_else(|| metadata.get("discord_conversation_name"))
                 .or_else(|| metadata.get("linear_conversation_name"))
                 .or_else(|| metadata.get("teams_conversation_name"))
+                .or_else(|| metadata.get("telegram_conversation_name"))
                 .and_then(Value::as_str),
         }
     }
@@ -220,6 +221,32 @@ mod tests {
             .conversation_name,
             Some("Casey Harper")
         );
+    }
+
+    #[test]
+    fn session_principal_metadata_accepts_telegram_name() {
+        assert_eq!(
+            SessionPrincipalMetadata::from_session_metadata(Some(&json!({
+                "telegram_conversation_name": "Engineering"
+            })))
+            .conversation_name,
+            Some("Engineering")
+        );
+    }
+
+    #[test]
+    fn session_principal_metadata_reads_generic_user_id_for_telegram_sessions() {
+        // The telegrambot sends the acting user under the generic ``user_id``
+        // key; it stays descriptive actor metadata (no parallel Telegram
+        // parser) and must keep mapping to ``actor_user_id``.
+        let metadata = json!({
+            "platform": "telegram",
+            "user_id": "5551234",
+            "telegram_conversation_name": "Ada Lovelace"
+        });
+        let parsed = SessionPrincipalMetadata::from_session_metadata(Some(&metadata));
+        assert_eq!(parsed.actor_user_id, Some("5551234"));
+        assert_eq!(parsed.conversation_name, Some("Ada Lovelace"));
     }
 
     #[test]
