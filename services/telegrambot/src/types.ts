@@ -84,6 +84,8 @@ export type TelegramMessage = {
   document?: TelegramDocument;
   reply_to_message?: TelegramMessage;
   is_topic_message?: boolean;
+  /** True for linked-channel posts auto-forwarded into a discussion group. */
+  is_automatic_forward?: boolean;
   via_bot?: TelegramUser;
 };
 
@@ -114,6 +116,8 @@ export type TelegrambotFetch = (
 export type TelegrambotOptions = {
   /** Edit cadence for the in-progress answer message (default ~1.5s). */
   answerEditIntervalMs?: number;
+  /** Max Telegram messages per answer before honest truncation (default 8). */
+  answerMaxMessages?: number;
   apiKey?: string;
   apiUrl: string;
   botToken: string;

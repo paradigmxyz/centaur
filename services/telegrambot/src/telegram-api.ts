@@ -82,7 +82,12 @@ export type SendMessageParams = {
   text: string;
   parse_mode?: "HTML";
   message_thread_id?: number;
-  reply_parameters?: { message_id: number };
+  reply_parameters?: {
+    message_id: number;
+    /** Send anyway when the replied-to message no longer exists — Telegram
+     * otherwise rejects the whole send, wedging retried deliveries. */
+    allow_sending_without_reply?: boolean;
+  };
   link_preview_options?: { is_disabled?: boolean };
 };
 

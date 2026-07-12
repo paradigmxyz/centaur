@@ -442,10 +442,11 @@ describe.skipIf(!databaseUrl)("telegram end-to-end emulation", () => {
       expect(sends[0]?.params["text"]).toBe("<b>hi</b> <i>there</i>");
       expect(sends[0]?.params["parse_mode"]).toBe("HTML");
       expect(sends[0]?.params["reply_parameters"]).toEqual({
+        allow_sending_without_reply: true,
         message_id: update.message?.message_id,
       });
-      // 👀 while working, ✅ on settle (setMessageReaction replaces the set).
-      expect(reactionEmojis(server, userId)).toEqual(["👀", "✅"]);
+      // 👀 while working, 👍 on settle (setMessageReaction replaces the set).
+      expect(reactionEmojis(server, userId)).toEqual(["👀", "👍"]);
     },
     20_000,
   );

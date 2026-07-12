@@ -30,6 +30,7 @@ if (!postgresUrl) {
 
 const options: TelegrambotOptions = {
   answerEditIntervalMs: optionalNumberEnv("TELEGRAMBOT_ANSWER_EDIT_INTERVAL_MS"),
+  answerMaxMessages: optionalNumberEnv("TELEGRAMBOT_ANSWER_MAX_MESSAGES"),
   apiKey: optionalEnv("TELEGRAMBOT_API_KEY"),
   apiUrl,
   botToken,

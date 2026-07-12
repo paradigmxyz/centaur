@@ -58,9 +58,28 @@ pnpm --filter telegrambot test
 
 The unit suite uses fakes (including a fake Bot API HTTP server) and needs no Telegram
 credential; inbox/ownership suites run against Postgres when `TELEGRAMBOT_TEST_DATABASE_URL`
-is set and are skipped otherwise. Add focused coverage for allowlist, threading, poller
+is set and are skipped otherwise (CI provisions a Postgres service container and sets it). Add focused coverage for allowlist, threading, poller
 receipt/recovery, narration, rendering, and session API changes.
 
 Plain textual `@botname` mention delivery under privacy mode is **not** covered by CI: it
 requires a live acceptance test with an ordinary, non-admin, privacy-enabled bot. Until that
 test passes, replies + addressed commands + DMs are the supported trigger contract.
+
+### Manual acceptance: plain-mention delivery
+
+Run this live check before any release that would rely on plain `@botname` mentions as a
+group trigger (spec task 8). It needs a throwaway test bot and group — no Centaur deployment.
+
+1. Create a fresh test bot via @BotFather; confirm privacy mode is **enabled**
+   (`/mybots` → Bot Settings → Group Privacy shows "disabled" only when turned off — leave
+   it on) and add the bot to a test group as an **ordinary member, not admin**.
+2. Call `deleteWebhook`, then have a non-bot user send a plain textual mention with no
+   command and no reply, e.g. `hey @<botname> ping`.
+3. Poll `getUpdates` (no offset) and check whether that message update was delivered.
+4. Record the outcome (date, Bot API version, delivered yes/no) here and set the trigger
+   contract accordingly: **delivered** → plain mentions may be promoted to a supported
+   trigger (still behind the local trigger + allowlist gates); **not delivered** → the
+   privacy-on contract stays replies + addressed commands + DMs, and plain mentions require
+   privacy-off/admin delivery plus the same local gating.
+
+Outcome log: none recorded yet — plain mentions remain unsupported until a pass is logged.

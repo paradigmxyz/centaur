@@ -68,6 +68,7 @@ type FakeApiHooks = {
   onEditMessageText?: (
     params: Record<string, unknown>,
   ) => Promise<void> | void;
+  onGetFile?: (fileId: string) => void;
   onSendMessage?: (
     params: Record<string, unknown>,
   ) => Promise<TelegramMessage> | TelegramMessage;
@@ -128,6 +129,7 @@ function createFakeApi(hooks: FakeApiHooks = {}): {
     },
     getFile: async (fileId) => {
       record("getFile", { file_id: fileId });
+      hooks.onGetFile?.(fileId);
       return { file_id: fileId, file_unique_id: "u" };
     },
     downloadFile: async (filePath) => {
@@ -249,6 +251,46 @@ describe("createRateLimitedTelegramApi", () => {
 
     for (let i = 0; i < 6; i += 1) await clock.advance(121_000);
     await blocked;
+  });
+
+  it("honors 429 retry_after on getFile even though it bypasses the queue", async () => {
+    let attempts = 0;
+    const { limited, calls, clock, events } = harness({
+      hooks: {
+        onGetFile: () => {
+          attempts += 1;
+          if (attempts === 1) throw rateLimitError("getFile", 2);
+        },
+      },
+    });
+
+    const fetching = limited.getFile("f1");
+    await tick();
+    expect(calls.filter((call) => call.method === "getFile")).toHaveLength(1);
+
+    await clock.advance(2_000);
+    const file = await fetching;
+    expect(file.file_id).toBe("f1");
+    expect(calls.filter((call) => call.method === "getFile")).toHaveLength(2);
+    expect(
+      events.filter((entry) => entry.event === "telegrambot_rate_limited"),
+    ).toHaveLength(1);
+  });
+
+  it("rethrows non-429 getFile errors without retrying", async () => {
+    let attempts = 0;
+    const { limited, calls } = harness({
+      hooks: {
+        onGetFile: () => {
+          attempts += 1;
+          throw new TelegramApiError({ method: "getFile", status: 400 });
+        },
+      },
+    });
+
+    await expect(limited.getFile("f1")).rejects.toMatchObject({ status: 400 });
+    expect(attempts).toBe(1);
+    expect(calls.filter((call) => call.method === "getFile")).toHaveLength(1);
   });
 
   it("paces sendMessage to one per interval per chat", async () => {

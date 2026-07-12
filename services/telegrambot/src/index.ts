@@ -51,8 +51,10 @@ import {
 } from "./telegram-api";
 import { TelegramNarrator } from "./telegram-narrator";
 import {
+  TELEGRAM_MAX_MESSAGE_CHARS,
   chunkTelegramHtml,
   escapeTelegramHtml,
+  parsedTextLength,
   renderMarkdownToTelegramHtml,
 } from "./telegram-render";
 import {
@@ -85,6 +87,11 @@ export type { Telegrambot, TelegrambotOptions } from "./types";
 
 const DEFAULT_MAX_CONCURRENT_THREADS = 4;
 const DEFAULT_ANSWER_EDIT_INTERVAL_MS = 1_500;
+// Spec §6: collapse honestly past a max-messages cap — a runaway answer stops
+// opening new messages and says so instead of flooding the chat.
+const DEFAULT_ANSWER_MAX_MESSAGES = 8;
+const ANSWER_TRUNCATION_NOTICE =
+  "<i>… answer truncated: it exceeded the Telegram message cap.</i>";
 const DEFAULT_RETENTION_HOURS = 72;
 // Periodic recovery sweep: restarts resume mid-flight work, missed nudges and
 // steering fallbacks self-heal. Failed renders additionally schedule their own
@@ -94,9 +101,13 @@ const PRUNE_INTERVAL_MS = 15 * 60 * 1000;
 // A steering_pending row with no in-process active execution (recovery, or an
 // execute-conflict against an execution another/previous process started)
 // re-tries the idempotent execute on this cadence until api-rs accepts it.
-const STEERING_RETRY_DELAY_MS = 1_000;
+const STEERING_RETRY_BASE_DELAY_MS = 1_000;
+const STEERING_RETRY_MAX_DELAY_MS = 30_000;
 const RENDER_RETRY_BASE_DELAY_MS = 1_000;
 const RENDER_RETRY_MAX_DELAY_MS = 30_000;
+// Consecutive no-progress re-claims of the same oldest row before the thread
+// worker yields to the sweep (hot-loop guard that never reorders the thread).
+const MAX_BLOCKED_ROW_RECLAIMS = 3;
 // Typing keepalive starts only when execution is noticeably slow: no answer
 // text within this window after the render stream opens.
 const SLOW_TYPING_AFTER_MS = 5_000;
@@ -233,8 +244,17 @@ type ActiveExecution = {
   wait(updateId: number, serverMessageIds: readonly string[]): Promise<SteeringOutcome>;
 };
 
-function createActiveExecution(executionId: string): ActiveExecution {
+/** Exported for the settled-wait regression test only. */
+export function createActiveExecution(executionId: string): ActiveExecution {
   const waiters = new Set<SteeringWaiter>();
+  // Once settled, late waiters resolve immediately as execution-terminal: a
+  // follow-up worker can capture this instance, await a fenced transition,
+  // and only then register its wait — racing the render's finally(), which
+  // settles existing waiters and removes the instance from activeExecutions.
+  // Without this flag that late wait() would never resolve, permanently
+  // wedging the follow-up row (its update id stays owned) and hanging
+  // shutdown on the tracked promise.
+  let settled = false;
   const resolve = (waiter: SteeringWaiter, outcome: SteeringOutcome) => {
     waiters.delete(waiter);
     waiter.resolve(outcome);
@@ -242,6 +262,7 @@ function createActiveExecution(executionId: string): ActiveExecution {
   return {
     executionId,
     wait(updateId, serverMessageIds) {
+      if (settled) return Promise.resolve("terminal");
       return new Promise<SteeringOutcome>((res) => {
         waiters.add({ resolve: res, serverMessageIds, updateId });
       });
@@ -262,6 +283,7 @@ function createActiveExecution(executionId: string): ActiveExecution {
       for (const waiter of [...waiters]) resolve(waiter, "failed");
     },
     settle() {
+      settled = true;
       for (const waiter of [...waiters]) resolve(waiter, "terminal");
     },
   };
@@ -281,6 +303,8 @@ export function createTelegramDispatcher(
     options.maxConcurrentThreads ?? DEFAULT_MAX_CONCURRENT_THREADS;
   const answerEditIntervalMs =
     options.answerEditIntervalMs ?? DEFAULT_ANSWER_EDIT_INTERVAL_MS;
+  const answerMaxMessages =
+    options.answerMaxMessages ?? DEFAULT_ANSWER_MAX_MESSAGES;
   const retentionHours = options.retentionHours ?? DEFAULT_RETENTION_HOURS;
 
   let stopped = false;
@@ -308,6 +332,7 @@ export function createTelegramDispatcher(
   const pendingThreads = new Set<string>();
   const detached = new Set<Promise<unknown>>();
   const renderAttempts = new Map<number, number>();
+  const steeringAttempts = new Map<number, number>();
   let runningWorkers = 0;
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
   let pruneTimer: ReturnType<typeof setInterval> | undefined;
@@ -322,22 +347,13 @@ export function createTelegramDispatcher(
     return wrapped;
   }
 
-  function abortableSleep(ms: number): Promise<void> {
-    return new Promise((resolve) => {
-      if (stopController.signal.aborted || ms <= 0) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(() => {
-        stopController.signal.removeEventListener("abort", onAbort);
-        resolve();
-      }, ms);
-      const onAbort = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      stopController.signal.addEventListener("abort", onAbort, { once: true });
-    });
+  /** Per-row in-memory bookkeeping is dropped on every terminal disposition —
+   * failed/ignored/rejected rows would otherwise leak their entries for the
+   * process's lifetime. */
+  function dropRowState(updateId: number): void {
+    appendedServerIds.delete(updateId);
+    renderAttempts.delete(updateId);
+    steeringAttempts.delete(updateId);
   }
 
   // -------------------------------------------------------------------------
@@ -511,24 +527,40 @@ export function createTelegramDispatcher(
   }
 
   async function runThreadWorker(threadKey: string): Promise<void> {
-    // Rows that failed to make progress this run (fenced-out CAS, transient
-    // session API failure): skipped so the loop cannot spin hot on them; a
-    // later sweep starts a fresh worker that retries them.
-    const skip = new Set<number>();
+    // FIFO invariant: a blocked/deferred OLDER row must end this worker run —
+    // never let a newer sibling in the same thread append or execute first
+    // (the sweep retries the whole thread from its oldest row later). Only
+    // update ids owned by detached work (post-append renders/steering waits)
+    // are excluded from the claim: bypassing those is safe because their turn
+    // already reached the durable session in order. A bounded number of
+    // no-progress re-claims of the same oldest row guards against a CAS-race
+    // hot loop without ever reordering.
+    let blockedUpdateId: number | null = null;
+    let blockedReclaims = 0;
     while (!stopped) {
       const own = deps.ownership();
       if (!own) return;
-      const exclude = [...ownedUpdateIds, ...skip];
       const rows = await store.claimThreadBacklog(
         own.botUserId,
         threadKey,
-        exclude,
+        [...ownedUpdateIds],
         1,
       );
       const row = rows[0];
       if (!row) return;
-      const progressed = await processRow(row, threadKey);
-      if (!progressed) skip.add(row.updateId);
+      const outcome = await processRow(row, threadKey);
+      if (outcome === "defer_thread") return;
+      if (outcome === "advanced") {
+        blockedUpdateId = null;
+        blockedReclaims = 0;
+        continue;
+      }
+      blockedReclaims = row.updateId === blockedUpdateId ? blockedReclaims + 1 : 1;
+      blockedUpdateId = row.updateId;
+      if (blockedReclaims >= MAX_BLOCKED_ROW_RECLAIMS) {
+        scheduleRetrySweep(RENDER_RETRY_BASE_DELAY_MS);
+        return;
+      }
     }
   }
 
@@ -536,11 +568,17 @@ export function createTelegramDispatcher(
    * Advance one row through the stage machine until it is terminal, detached
    * (background render / steering wait), or blocked. Every transition is
    * fenced with the poller's CURRENT lease, re-read at each step.
+   *
+   * Outcomes: "advanced" — the row moved (or this process cannot act on it);
+   * "blocked" — a fenced CAS lost a race and the same row should be re-read;
+   * "defer_thread" — a transient failure or backoff means the WHOLE thread
+   * must wait for the retry sweep (processing a newer sibling first would
+   * break same-thread FIFO).
    */
   async function processRow(
     record: TelegramInboxRecord,
     threadKey: string,
-  ): Promise<boolean> {
+  ): Promise<"advanced" | "blocked" | "defer_thread"> {
     let status = record.status;
     let executionId = record.executionId;
     let obligation = record.renderObligation;
@@ -554,34 +592,42 @@ export function createTelegramDispatcher(
 
     if (status === "received") {
       const own = deps.ownership();
-      if (!own) return true;
+      if (!own) return "advanced";
       if (!message) {
-        return store.markIgnored(
+        return (await store.markIgnored(
           own.lease,
           record.updateId,
           `unsupported_update_type:${updateKind(record.payload)}`,
-        );
+        ))
+          ? "advanced"
+          : "blocked";
       }
       // Re-run the gate even though acceptance stamped the row: allowlists
       // may have changed across a restart, and the append inputs (trigger
       // classification, command stripping) are derived from it.
       const gate = await evaluateGate(message);
       if (gate.kind === "rejected") {
-        return store.markRejected(own.lease, record.updateId, gate.reason);
+        return (await store.markRejected(own.lease, record.updateId, gate.reason))
+          ? "advanced"
+          : "blocked";
       }
       if (gate.kind === "ignored") {
-        if (gate.reason === "ownership_lost") return true;
-        return store.markIgnored(own.lease, record.updateId, gate.reason);
+        if (gate.reason === "ownership_lost") return "advanced";
+        return (await store.markIgnored(own.lease, record.updateId, gate.reason))
+          ? "advanced"
+          : "blocked";
       }
       const built = await getApiMessage();
       if (isContentlessApiMessage(built)) {
         // Sticker/location/poll-style messages serialize to nothing;
         // executing them would fabricate a synthetic "continue" turn.
-        return store.markIgnored(
+        return (await store.markIgnored(
           own.lease,
           record.updateId,
           "contentless_message",
-        );
+        ))
+          ? "advanced"
+          : "blocked";
       }
       // Create-if-missing (metadata re-upserted on every create by design)
       // plus the idempotent append keyed by the stable client_message_id. The
@@ -610,7 +656,7 @@ export function createTelegramDispatcher(
       }
       appendedServerIds.set(record.updateId, serverIds);
       const current = deps.ownership();
-      if (!current) return true;
+      if (!current) return "advanced";
       if (
         !(await store.transition(
           current.lease,
@@ -619,15 +665,15 @@ export function createTelegramDispatcher(
           "message_appended",
         ))
       ) {
-        return false;
+        return "blocked";
       }
       status = "message_appended";
     }
 
     while (status === "message_appended" || status === "steering_pending") {
-      if (stopped) return true;
+      if (stopped) return "advanced";
       const own = deps.ownership();
-      if (!own) return true;
+      if (!own) return "advanced";
 
       if (status === "message_appended") {
         const active = activeExecutions.get(threadKey);
@@ -640,10 +686,15 @@ export function createTelegramDispatcher(
               "steering_pending",
             ))
           ) {
-            return false;
+            return "blocked";
           }
-          detachSteeringWait(record, threadKey, active);
-          return true;
+          // The render's finally() may have settled `active` and removed it
+          // during the fenced transition above. The settled flag makes a late
+          // wait() resolve as execution-terminal, but when a FRESH instance
+          // already replaced it the wait belongs on that one instead.
+          const freshest = activeExecutions.get(threadKey) ?? active;
+          detachSteeringWait(record, threadKey, freshest);
+          return "advanced";
         }
         try {
           const execution = await executeSessionTurn(sessionOptions, {
@@ -655,13 +706,20 @@ export function createTelegramDispatcher(
             openStream: false,
             threadKey,
           });
-          if (!execution) return true;
+          if (!execution) return "advanced";
           executionId = execution.execution_id;
         } catch (error) {
           if (isExecuteConflict(error)) {
             // An execution this process does not know about (recovery, or a
             // race) is running: keep the row nonterminal as steering_pending
-            // and let the loop below re-resolve it. Never a second execution.
+            // and let the steering branch below decide between a live wait
+            // and a backed-off execute retry. Never a second execution. The
+            // attempt bump makes the branch defer rather than immediately
+            // re-issuing the execute that just conflicted.
+            steeringAttempts.set(
+              record.updateId,
+              (steeringAttempts.get(record.updateId) ?? 0) + 1,
+            );
             if (
               !(await store.transition(
                 own.lease,
@@ -670,13 +728,14 @@ export function createTelegramDispatcher(
                 "steering_pending",
               ))
             ) {
-              return false;
+              return "blocked";
             }
             status = "steering_pending";
             continue;
           }
           return failOrDefer(record.updateId, "execute", error);
         }
+        steeringAttempts.delete(record.updateId);
         if (
           !(await store.transition(
             own.lease,
@@ -686,7 +745,7 @@ export function createTelegramDispatcher(
             { executionId },
           ))
         ) {
-          return false;
+          return "blocked";
         }
         status = "execution_accepted";
         break;
@@ -696,32 +755,39 @@ export function createTelegramDispatcher(
       const active = activeExecutions.get(threadKey);
       if (active) {
         detachSteeringWait(record, threadKey, active);
-        return true;
+        return "advanced";
       }
       // No live execution in this process: after a restart the appended
       // message ids are gone, so steering resolution falls back to
-      // execution-terminal detection — retry the idempotent execute until it
-      // is accepted (prior execution terminal) or conflicts again.
-      await abortableSleep(STEERING_RETRY_DELAY_MS);
-      if (stopped) return true;
-      const current = deps.ownership();
-      if (!current) return true;
+      // execution-terminal detection — the idempotent execute either lands
+      // (prior execution terminal) or conflicts again. Retries back off
+      // exponentially and yield this worker's slot to the retry sweep instead
+      // of spinning fenced writes + execute conflicts inside it for the life
+      // of a foreign execution.
+      const attempt = steeringAttempts.get(record.updateId) ?? 0;
       if (
         !(await store.transition(
-          current.lease,
+          own.lease,
           record.updateId,
           ["steering_pending"],
           "message_appended",
         ))
       ) {
-        return false;
+        return "blocked";
       }
-      status = "message_appended";
+      if (attempt === 0) {
+        // Restart recovery: no conflict has been observed this process-life,
+        // so the prior execution is most likely gone — execute immediately.
+        status = "message_appended";
+        continue;
+      }
+      scheduleRetrySweep(steeringRetryDelayMs(attempt));
+      return "defer_thread";
     }
 
     if (status === "execution_accepted") {
       const own = deps.ownership();
-      if (!own) return true;
+      if (!own) return "advanced";
       obligation ??= buildObligation(
         assertMessage(message),
         threadKey,
@@ -736,26 +802,27 @@ export function createTelegramDispatcher(
           { renderObligation: obligation },
         ))
       ) {
-        return false;
+        return "blocked";
       }
       status = "render_obligation_persisted";
     }
 
     if (status === "render_obligation_persisted") {
       detachRender(record, obligation ?? record.renderObligation, threadKey);
-      return true;
+      return "advanced";
     }
 
-    return true;
+    return "advanced";
   }
 
-  /** Retryable session API failures leave the row at its stage for the sweep;
+  /** Retryable session API failures defer the WHOLE thread to the retry
+   * sweep (skipping to a newer sibling would break same-thread FIFO);
    * permanent validation failures record a durable terminal reason. */
   async function failOrDefer(
     updateId: number,
     action: string,
     error: unknown,
-  ): Promise<boolean> {
+  ): Promise<"advanced" | "defer_thread"> {
     if (isRetryableSessionApiError(error)) {
       logger.warn("telegrambot_dispatch_deferred", {
         action,
@@ -763,7 +830,7 @@ export function createTelegramDispatcher(
         update_id: updateId,
       });
       scheduleRetrySweep(RENDER_RETRY_BASE_DELAY_MS);
-      return false;
+      return "defer_thread";
     }
     logger.warn("telegrambot_dispatch_failed", {
       action,
@@ -771,7 +838,7 @@ export function createTelegramDispatcher(
       update_id: updateId,
     });
     const own = deps.ownership();
-    if (!own) return true;
+    if (!own) return "advanced";
     await store.transition(
       own.lease,
       updateId,
@@ -779,7 +846,8 @@ export function createTelegramDispatcher(
       "failed",
       { statusReason: `${action}: ${errorMessage(error)}` },
     );
-    return true;
+    dropRowState(updateId);
+    return "advanced";
   }
 
   // -------------------------------------------------------------------------
@@ -806,7 +874,7 @@ export function createTelegramDispatcher(
             ["steering_pending"],
             "steered",
           );
-          appendedServerIds.delete(record.updateId);
+          dropRowState(record.updateId);
           return;
         }
         // steering_failed or execution terminal without delivery: back to
@@ -874,8 +942,7 @@ export function createTelegramDispatcher(
     const promise = runRender(record, obligation, active)
       .then((result) => {
         if (result === "completed") {
-          renderAttempts.delete(record.updateId);
-          appendedServerIds.delete(record.updateId);
+          dropRowState(record.updateId);
           release();
           return;
         }
@@ -932,6 +999,7 @@ export function createTelegramDispatcher(
       let sawAnswerText = false;
       const delivery = new AnswerDelivery({
         answerEditIntervalMs,
+        answerMaxMessages,
         api,
         logger,
         obligation,
@@ -1164,6 +1232,7 @@ export function createTelegramDispatcher(
 
 type AnswerDeliveryDeps = {
   answerEditIntervalMs: number;
+  answerMaxMessages: number;
   api: RateLimitedTelegramApi;
   logger: Logger;
   obligation: TelegramRenderObligation;
@@ -1189,6 +1258,7 @@ class AnswerDelivery {
   private eventIdForAccumulated: number;
   private readonly posted: number[];
   private plainMode = false;
+  private truncated = false;
   private currentContent: string | null = null;
   private lastEditAtMs = 0;
 
@@ -1205,7 +1275,12 @@ class AnswerDelivery {
   }
 
   /** Rendered chunks of the full answer so far, each ≤4096 parsed chars with
-   * balanced tags (fences close at a boundary and re-open in the next chunk). */
+   * balanced tags (fences close at a boundary and re-open in the next chunk).
+   * Past the max-messages cap the chunk list is collapsed honestly: the final
+   * message ends with an explicit truncation notice instead of the overflow
+   * silently continuing into further sends (spec §6). Chunk boundaries are
+   * prefix-stable as the markdown grows, so capped earlier messages never
+   * churn. */
   private renderChunks(): string[] {
     // Plain mode: Telegram rejected the rendered HTML with a parse/entity
     // error, so the fallback is the escaped tag-free markdown — the same body
@@ -1213,7 +1288,26 @@ class AnswerDelivery {
     const html = this.plainMode
       ? escapeTelegramHtml(this.markdown)
       : renderMarkdownToTelegramHtml(this.markdown);
-    return chunkTelegramHtml(html);
+    const chunks = chunkTelegramHtml(html);
+    const max = Math.max(1, this.deps.answerMaxMessages);
+    if (chunks.length <= max) return chunks;
+    if (!this.truncated) {
+      this.truncated = true;
+      this.deps.logger.warn("telegrambot_answer_truncated", {
+        chat_id: this.deps.obligation.chatId,
+        chunks: chunks.length,
+        max_messages: max,
+      });
+    }
+    // Re-chunk the capped tail to leave parsed-length budget for the notice;
+    // the sub-chunker closes any open tags, so appending the notice is valid.
+    const kept = chunks.slice(0, max);
+    const tail = kept[max - 1] ?? "";
+    const budget =
+      TELEGRAM_MAX_MESSAGE_CHARS - parsedTextLength(ANSWER_TRUNCATION_NOTICE) - 1;
+    const trimmedTail = chunkTelegramHtml(tail, budget)[0] ?? "";
+    kept[max - 1] = `${trimmedTail}\n${ANSWER_TRUNCATION_NOTICE}`;
+    return kept;
   }
 
   async flush(final: boolean): Promise<void> {
@@ -1256,9 +1350,17 @@ class AnswerDelivery {
           ? {}
           : { message_thread_id: obligation.messageThreadId }),
         // Only the first answer message replies to the trigger; overflow
-        // chunks follow it in the timeline.
+        // chunks follow it in the timeline. allow_sending_without_reply:
+        // Telegram otherwise rejects the send outright when the trigger
+        // message was deleted, which would wedge the render obligation in an
+        // infinite retry loop — a reply-less answer beats no answer.
         ...(this.posted.length === 0
-          ? { reply_parameters: { message_id: obligation.triggerMessageId } }
+          ? {
+              reply_parameters: {
+                allow_sending_without_reply: true,
+                message_id: obligation.triggerMessageId,
+              },
+            }
           : {}),
       });
       this.posted.push(message.message_id);
@@ -1477,6 +1579,13 @@ function renderRetryDelayMs(attempt: number): number {
   return Math.min(
     RENDER_RETRY_MAX_DELAY_MS,
     RENDER_RETRY_BASE_DELAY_MS * 2 ** Math.min(attempt, 10),
+  );
+}
+
+function steeringRetryDelayMs(attempt: number): number {
+  return Math.min(
+    STEERING_RETRY_MAX_DELAY_MS,
+    STEERING_RETRY_BASE_DELAY_MS * 2 ** Math.min(attempt, 10),
   );
 }
 

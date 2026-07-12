@@ -9,10 +9,11 @@ import {
 
 /**
  * Migration runner + schema version gate tests against real Postgres.
- * Skipped cleanly when TELEGRAMBOT_TEST_DATABASE_URL is unset (CI has no
- * Postgres). The tests in this file are ordered: they walk a database from
- * clean, through migrated, through simulated version-skew states, and leave
- * the schema fully migrated for the other DB-backed test files.
+ * Skipped cleanly when TELEGRAMBOT_TEST_DATABASE_URL is unset (CI provisions
+ * a Postgres service container and sets it; local runs without one skip).
+ * The tests in this file are ordered: they walk a database from clean,
+ * through migrated, through simulated version-skew states, and leave the
+ * schema fully migrated for the other DB-backed test files.
  */
 
 const databaseUrl = process.env.TELEGRAMBOT_TEST_DATABASE_URL;
@@ -169,5 +170,68 @@ describe.skipIf(!databaseUrl)("migrations (requires Postgres)", () => {
       "SELECT count(*)::int AS count FROM telegram_poll_state WHERE bot_user_id = 'migration-concurrency-bot'",
     );
     expect(count.rows[0]?.count).toBe(1);
+  });
+
+  it("fails closed when the runtime role lacks DDL privileges: runMigrations rejects and the schema stays pending", async () => {
+    // The runtime role is deliberately the migration runner (see
+    // src/migrations.ts): a locked-down deployment role without CREATE on the
+    // schema must surface as a hard migration failure with the version gate
+    // still pending, so startup stays unready and retries instead of
+    // half-migrating (spec §2a "insufficient DDL privileges").
+    if (!databaseUrl) {
+      throw new Error("unreachable: suite skipped without databaseUrl");
+    }
+    await dropTelegramTables();
+
+    const role = "telegrambot_test_lowpriv";
+    // Test-only fixture credential for the throwaway role below.
+    const password = "telegrambot-test-lowpriv";
+    await pool.query(`DROP ROLE IF EXISTS ${role}`);
+    await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'`);
+    // Postgres 15+ already denies CREATE on the public schema to non-owners;
+    // revoke the legacy PUBLIC grant too so the test is deterministic on
+    // older servers.
+    await pool.query("REVOKE CREATE ON SCHEMA public FROM PUBLIC");
+    await pool.query(`REVOKE CREATE ON SCHEMA public FROM ${role}`);
+
+    const lowPrivUrl = new URL(databaseUrl);
+    lowPrivUrl.username = role;
+    lowPrivUrl.password = password;
+    const lowPrivPool: Pool = new pg.Pool({
+      connectionString: lowPrivUrl.toString(),
+      max: 2,
+      connectionTimeoutMillis: 10_000,
+    });
+
+    try {
+      // insufficient_privilege (42501) on the ledger CREATE — before any
+      // version row could possibly be recorded.
+      await expect(runMigrations(lowPrivPool)).rejects.toMatchObject({
+        code: "42501",
+      });
+
+      // The readiness gate, as seen by the low-privilege runtime role
+      // itself, still reports pending: /ready would stay false and the
+      // startup loop would retry.
+      const check = await checkSchemaVersion(lowPrivPool);
+      expect(check).toEqual({
+        ok: false,
+        state: "pending",
+        dbVersion: 0,
+        supportedVersion: SUPPORTED_SCHEMA_VERSION,
+      });
+
+      // Nothing partial landed: no ledger, no telegram tables.
+      for (const table of TELEGRAM_TABLES) {
+        expect(await tableExists(table)).toBe(false);
+      }
+    } finally {
+      await lowPrivPool.end();
+      await pool.query(`DROP ROLE IF EXISTS ${role}`);
+      // Leave the schema fully migrated for the other DB-backed test files.
+      await runMigrations(pool);
+    }
+
+    expect((await checkSchemaVersion(pool)).ok).toBe(true);
   });
 });

@@ -99,6 +99,22 @@ describe("isAllowedTelegramMessage", () => {
     expect(isAllowedTelegramMessage(message, options(), noopLogger)).toBe(true);
   });
 
+  test("rejects group messages sent under a channel/anonymous-admin identity (sender_chat)", () => {
+    const message = groupMessage({
+      sender_chat: { id: -100999, type: "channel", title: "Linked" },
+    });
+    expect(isAllowedTelegramMessage(message, options(), noopLogger)).toBe(
+      false,
+    );
+  });
+
+  test("rejects linked-channel auto-forwards in an allowlisted group", () => {
+    const message = groupMessage({ is_automatic_forward: true });
+    expect(isAllowedTelegramMessage(message, options(), noopLogger)).toBe(
+      false,
+    );
+  });
+
   test("is fail-closed: empty user allowlist denies every DM", () => {
     expect(
       isAllowedTelegramMessage(

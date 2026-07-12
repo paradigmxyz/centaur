@@ -17,8 +17,13 @@ import type { Logger, TelegramMessage } from "./types";
  * own 429s. The 20/min quota applies to *messages*; edits, reactions, and
  * chat actions ride the same FIFO (ordering) but are never charged against it.
  *
- * Reads (getMe/getUpdates/deleteWebhook/getFile/downloadFile) pass through
- * untouched: they have no per-chat quota and must not sit behind a paced send.
+ * Reads (getMe/getUpdates/deleteWebhook/getFile/downloadFile) are never
+ * queued: they have no per-chat quota and must not sit behind a paced send.
+ * getFile/downloadFile still honor their own 429 retry_after (same retry cap
+ * as mutations) — a transient rate limit on an attachment fetch would
+ * otherwise degrade silently into a permanent per-attachment fetch error
+ * downstream (getUpdates has its own poller-side retry_after handling, and
+ * getMe/deleteWebhook run inside the startup retry loop).
  */
 
 const MESSAGE_INTERVAL_MS = 1_000;
@@ -53,6 +58,9 @@ export type TelegramMutationMethod =
   | "sendChatAction";
 
 export type TelegramSendPriority = "normal" | "high";
+
+/** Pass-through reads that skip the queue but still honor 429 retry_after. */
+export type TelegramPassThroughMethod = "getFile" | "downloadFile";
 
 export type TelegramSendQueueTask<T> = {
   chatId: number | string;
@@ -280,6 +288,40 @@ export class TelegramSendQueue {
     }
   }
 
+  /**
+   * 429 retry_after policy for pass-through reads. Telegram delta: reads have
+   * no per-chat quota, so they bypass the FIFO/pacing entirely — but a 429
+   * still names exactly how long to wait, and ignoring it turns a transient
+   * rate limit into a hard failure (e.g. an attachment the agent never sees).
+   * Non-429 errors rethrow untouched; retries share the mutation retry cap.
+   */
+  async retryPassThrough<T>(
+    method: TelegramPassThroughMethod,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    let retries = 0;
+    for (;;) {
+      try {
+        return await run();
+      } catch (error) {
+        if (!isTelegramRateLimitError(error)) throw error;
+        const retryAfterSeconds =
+          error.retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS;
+        // Method-specific telemetry; never the URL (it embeds the token).
+        this.logger.warn("telegrambot_rate_limited", {
+          attempt: retries + 1,
+          method,
+          retry_after: retryAfterSeconds,
+        });
+        if (retries >= this.maxRetries) throw error;
+        retries += 1;
+        await this.clock.sleep(
+          retryAfterSeconds * 1_000 + Math.max(0, this.jitterMs()),
+        );
+      }
+    }
+  }
+
   /** Blocks until this chat may send a new message (pacing + group budget). */
   private async awaitSendBudget(
     chat: ChatState,
@@ -375,8 +417,14 @@ export function createRateLimitedTelegramApi(
     getMe: () => api.getMe(),
     getUpdates: (params, signal) => api.getUpdates(params, signal),
     deleteWebhook: (params) => api.deleteWebhook(params),
-    getFile: (fileId) => api.getFile(fileId),
-    downloadFile: (filePath, signal) => api.downloadFile(filePath, signal),
+    // Attachment reads stay un-queued but must not shrug off a 429 — the
+    // downstream downloader converts any error into a permanent fetch_error.
+    getFile: (fileId) =>
+      queue.retryPassThrough("getFile", () => api.getFile(fileId)),
+    downloadFile: (filePath, signal) =>
+      queue.retryPassThrough("downloadFile", () =>
+        api.downloadFile(filePath, signal),
+      ),
 
     sendMessage: (params) => sendMessage(params, "normal"),
     sendMessageUrgent: (params) => sendMessage(params, "high"),

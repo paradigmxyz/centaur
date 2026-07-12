@@ -5,7 +5,10 @@ import type {
   TelegramInboxStore,
   TelegramOwnership,
 } from "../src/index";
-import { createTelegramDispatcher } from "../src/index";
+import {
+  createActiveExecution,
+  createTelegramDispatcher,
+} from "../src/index";
 import { createRateLimitedTelegramApi } from "../src/rate-limit";
 import type { TelegramApi } from "../src/telegram-api";
 import { TelegramApiError } from "../src/telegram-api";
@@ -372,6 +375,7 @@ const dispatchers: TelegramDispatcher[] = [];
 
 function createHarness(input: {
   answer?: string;
+  answerMaxMessages?: number;
   chatAllowlist?: string[];
   userAllowlist?: string[];
 }): Harness {
@@ -380,6 +384,9 @@ function createHarness(input: {
   const session = createFakeSessionApi(input.answer ?? "answer text");
   const options: TelegrambotOptions = {
     answerEditIntervalMs: 10,
+    ...(input.answerMaxMessages === undefined
+      ? {}
+      : { answerMaxMessages: input.answerMaxMessages }),
     apiUrl: "http://fake-api-rs.invalid",
     botToken: "fake-token",
     chatAllowlist: input.chatAllowlist ?? [],
@@ -452,9 +459,14 @@ describe("telegram dispatcher stage machine", () => {
     expect(sends.length).toBe(1);
     expect(sends[0]?.params.text).toBe("<b>hi</b> there");
     expect(sends[0]?.params.parse_mode).toBe("HTML");
-    expect(sends[0]?.params.reply_parameters).toEqual({ message_id: 1 });
-    // 👀 while working, replaced by ✅ on settle.
-    expect(reactionEmojis(api)).toEqual(["👀", "✅"]);
+    // allow_sending_without_reply: a deleted trigger message must degrade to
+    // a reply-less answer, never a wedged infinite render retry.
+    expect(sends[0]?.params.reply_parameters).toEqual({
+      allow_sending_without_reply: true,
+      message_id: 1,
+    });
+    // 👀 while working, replaced by 👍 on settle.
+    expect(reactionEmojis(api)).toEqual(["👀", "👍"]);
   });
 
   it("rejects an unauthorized DM with a durable reason", async () => {
@@ -530,7 +542,7 @@ describe("telegram dispatcher stage machine", () => {
     expect(session.executes).toBe(1);
     expect(store.row(6).status).toBe("render_obligation_persisted");
     expect(store.row(6).renderObligation?.executionId).toBe("exe-1");
-    // "retrying" leaves 👀 in place: no ✅/❌ may be posted, and no answer.
+    // "retrying" leaves 👀 in place: no 👍/👎 may be posted, and no answer.
     const emojis = reactionEmojis(api);
     expect(emojis.length).toBeGreaterThan(0);
     expect(emojis.every((emoji) => emoji === "👀")).toBe(true);
@@ -560,6 +572,341 @@ describe("telegram dispatcher stage machine", () => {
     // ...the fallback is the escaped tag-free markdown, still parse_mode HTML.
     expect(sends[1]?.params.text).toBe("**bold** answer");
     expect(sends[1]?.params.parse_mode).toBe("HTML");
-    expect(reactionEmojis(api)).toEqual(["👀", "✅"]);
+    expect(reactionEmojis(api)).toEqual(["👀", "👍"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Steering follow-ups (spec §2 recovery cases) and FIFO regressions. These use
+// a push-style fake api-rs whose SSE stream stays open until the test emits
+// events, so a follow-up can arrive while a render is genuinely live.
+// ---------------------------------------------------------------------------
+
+type LiveSessionApi = {
+  appendedClientIds: string[];
+  appends: number;
+  conflictsRemaining: number;
+  creates: number;
+  emit(event: string, data: unknown): void;
+  emitAnswer(answer: string): void;
+  executes: number;
+  failNextAppend: boolean;
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  streams: number;
+};
+
+function createLiveSessionApi(): LiveSessionApi {
+  const encoder = new TextEncoder();
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let eventId = 0;
+  const frame = (event: string, data: string): Uint8Array =>
+    encoder.encode(`id: ${++eventId}\nevent: ${event}\ndata: ${data}\n\n`);
+  const api: LiveSessionApi = {
+    appendedClientIds: [],
+    appends: 0,
+    conflictsRemaining: 0,
+    creates: 0,
+    executes: 0,
+    failNextAppend: false,
+    streams: 0,
+    emit(event, data) {
+      controller?.enqueue(frame(event, JSON.stringify(data)));
+    },
+    emitAnswer(answer) {
+      for (const line of answerOutputLines(answer)) {
+        controller?.enqueue(frame("session.output.line", line));
+      }
+    },
+    async fetch(input, init) {
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url,
+      );
+      const match =
+        /^\/api\/session\/([^/]+)(?:\/(messages|execute|events))?$/.exec(
+          url.pathname,
+        );
+      if (!match) return new Response("not found", { status: 404 });
+      const endpoint = match[2];
+      if (endpoint === "events") {
+        api.streams += 1;
+        const body = new ReadableStream<Uint8Array>({
+          start(streamController) {
+            controller = streamController;
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      if (endpoint === "messages") {
+        if (api.failNextAppend) {
+          api.failNextAppend = false;
+          return new Response("unavailable", {
+            status: 503,
+            statusText: "Service Unavailable",
+          });
+        }
+        api.appends += 1;
+        const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+          messages?: Array<{ client_message_id?: string }>;
+        };
+        api.appendedClientIds.push(
+          parsed.messages?.[0]?.client_message_id ?? "",
+        );
+        return Response.json({ ok: true, message_ids: [`msg-${api.appends}`] });
+      }
+      if (endpoint === "execute") {
+        if (api.conflictsRemaining > 0) {
+          api.conflictsRemaining -= 1;
+          return new Response("execution already active", {
+            status: 409,
+            statusText: "Conflict",
+          });
+        }
+        api.executes += 1;
+        return Response.json({
+          ok: true,
+          execution_id: `exe-${api.executes}`,
+          thread_key: decodeURIComponent(match[1] ?? ""),
+          status: "accepted",
+        });
+      }
+      api.creates += 1;
+      return Response.json({ ok: true });
+    },
+  };
+  return api;
+}
+
+type LiveHarness = {
+  api: FakeTelegramApi;
+  dispatcher: TelegramDispatcher;
+  session: LiveSessionApi;
+  store: FakeStore;
+};
+
+function createLiveHarness(): LiveHarness {
+  const store = createFakeStore();
+  const api = createFakeTelegramApi();
+  const session = createLiveSessionApi();
+  const options: TelegrambotOptions = {
+    answerEditIntervalMs: 10,
+    apiUrl: "http://fake-api-rs.invalid",
+    botToken: "fake-token",
+    chatAllowlist: [],
+    fetch: (request, init) => session.fetch(request, init),
+    userAllowlist: ["42"],
+  };
+  const dispatcher = createTelegramDispatcher({
+    api: createRateLimitedTelegramApi(api, noopLogger, {
+      jitterMs: () => 0,
+      messageIntervalMs: 0,
+    }),
+    botUsername: async () => BOT_USERNAME,
+    logger: noopLogger,
+    options,
+    ownership,
+    store,
+  });
+  dispatchers.push(dispatcher);
+  return { api, dispatcher, session, store };
+}
+
+describe("steering follow-ups", () => {
+  it("steers a follow-up into the live execution on steering_delivered", async () => {
+    const { dispatcher, session, store } = createLiveHarness();
+    store.seed(dmUpdate(1, 42, "first question"));
+    await dispatcher.nudge();
+    await waitFor(() => session.streams === 1, "render stream open");
+
+    store.seed(dmUpdate(2, 42, "follow-up"));
+    await dispatcher.nudge();
+    await waitFor(
+      () => store.row(2).status === "steering_pending",
+      "follow-up steering_pending",
+    );
+    // The follow-up's turn already reached the durable session, in order.
+    expect(session.appendedClientIds).toEqual([
+      "telegram:42:1",
+      "telegram:42:2",
+    ]);
+
+    // api-rs confirms delivery by the SERVER-assigned append id.
+    session.emit("session.steering_delivered", {
+      execution_id: "exe-1",
+      message_ids: ["msg-2"],
+      thread_key: "telegram:private:42",
+    });
+    await waitFor(() => store.row(2).status === "steered", "row steered");
+
+    session.emitAnswer("done");
+    await waitFor(() => store.row(1).status === "completed", "row completed");
+    expect(session.executes).toBe(1);
+  });
+
+  it("re-executes idempotently when steering fails", async () => {
+    const { dispatcher, session, store } = createLiveHarness();
+    store.seed(dmUpdate(1, 42, "first question"));
+    await dispatcher.nudge();
+    await waitFor(() => session.streams === 1, "render stream open");
+
+    store.seed(dmUpdate(2, 42, "follow-up"));
+    await dispatcher.nudge();
+    await waitFor(
+      () => store.row(2).status === "steering_pending",
+      "follow-up steering_pending",
+    );
+
+    session.emit("session.steering_failed", {
+      execution_id: "exe-1",
+      error: "execution not accepting input",
+      thread_key: "telegram:private:42",
+    });
+    // The failed steer bounces back and waits on the still-live execution;
+    // its terminal settle releases the idempotent execute, whose own render
+    // opens a second stream this test must feed.
+    session.emitAnswer("first answer");
+    await waitFor(() => store.row(1).status === "completed", "row 1 completed");
+    await waitFor(() => session.streams === 2, "second render stream open");
+    session.emitAnswer("second answer");
+    await waitFor(() => store.row(2).status === "completed", "row 2 completed");
+    // The message was never dropped and never ran concurrently.
+    expect(session.executes).toBe(2);
+    expect(session.appends).toBe(2);
+  });
+
+  it("falls back to exactly one idempotent execute when the execution ends without delivering", async () => {
+    const { dispatcher, session, store } = createLiveHarness();
+    store.seed(dmUpdate(1, 42, "first question"));
+    await dispatcher.nudge();
+    await waitFor(() => session.streams === 1, "render stream open");
+
+    store.seed(dmUpdate(2, 42, "follow-up"));
+    await dispatcher.nudge();
+    await waitFor(
+      () => store.row(2).status === "steering_pending",
+      "follow-up steering_pending",
+    );
+
+    // Execution terminates without ever acknowledging the steer; the
+    // fallback execute runs its own render on a second stream.
+    session.emitAnswer("first answer");
+    await waitFor(() => store.row(1).status === "completed", "row 1 completed");
+    await waitFor(() => session.streams === 2, "second render stream open");
+    session.emitAnswer("second answer");
+    await waitFor(() => store.row(2).status === "completed", "row 2 completed");
+    expect(session.executes).toBe(2);
+  });
+
+  it("recovers a crash after append: resumes at message_appended without re-appending", async () => {
+    const { dispatcher, session, store } = createLiveHarness();
+    // Durable state left by a process that crashed after the append landed
+    // but before any execute/steering disposition.
+    store.seed(dmUpdate(1, 42, "recovered question"));
+    const row = store.row(1);
+    row.status = "message_appended";
+    row.threadKey = "telegram:private:42";
+    row.clientMessageId = "telegram:42:1";
+
+    await dispatcher.nudge();
+    await waitFor(() => session.streams === 1, "render stream open");
+    session.emitAnswer("recovered answer");
+    await waitFor(() => store.row(1).status === "completed", "row completed");
+    expect(session.appends).toBe(0);
+    expect(session.executes).toBe(1);
+  });
+
+  it("retries a foreign-execution conflict with backoff and executes exactly once after it ends", async () => {
+    const { dispatcher, session, store } = createLiveHarness();
+    // api-rs knows an execution this process does not (e.g. pre-crash);
+    // the first execute conflicts, the retry after backoff is accepted.
+    session.conflictsRemaining = 1;
+    store.seed(dmUpdate(1, 42, "conflicted question"));
+    await dispatcher.nudge();
+    // The conflicted row parks as steering_pending, reverts, and retries the
+    // execute after backoff — observable only by the eventual stream open
+    // (the intermediate states last microseconds in-process).
+    await waitFor(() => session.streams === 1, "render stream open", 10_000);
+    session.emitAnswer("late answer");
+    await waitFor(() => store.row(1).status === "completed", "row completed");
+    expect(session.executes).toBe(1);
+    expect(session.appends).toBe(1);
+  });
+});
+
+describe("same-thread FIFO under transient failures", () => {
+  it("defers the whole thread when the oldest row's append fails, preserving order", async () => {
+    const { dispatcher, session, store } = createLiveHarness();
+    session.failNextAppend = true;
+    store.seed(dmUpdate(1, 42, "first"));
+    store.seed(dmUpdate(2, 42, "second"));
+    await dispatcher.nudge();
+
+    // Regression: the old skip-set would append "second" past the transiently
+    // failed "first", inverting the session transcript order.
+    await waitFor(() => session.appends >= 1, "first append retried", 10_000);
+    expect(session.appendedClientIds[0]).toBe("telegram:42:1");
+
+    await waitFor(() => session.streams === 1, "render stream open");
+    await waitFor(
+      () => store.row(2).status === "steering_pending",
+      "second row steered into live execution",
+    );
+    expect(session.appendedClientIds).toEqual([
+      "telegram:42:1",
+      "telegram:42:2",
+    ]);
+
+    session.emit("session.steering_delivered", {
+      execution_id: "exe-1",
+      message_ids: ["msg-2"],
+      thread_key: "telegram:private:42",
+    });
+    await waitFor(() => store.row(2).status === "steered", "row 2 steered");
+    session.emitAnswer("answer");
+    await waitFor(() => store.row(1).status === "completed", "row 1 completed");
+  });
+});
+
+describe("active execution settling", () => {
+  it("resolves a wait registered after settle as terminal instead of wedging", async () => {
+    // Regression: a follow-up worker can capture the ActiveExecution, await a
+    // fenced transition, and register its wait after the render's finally()
+    // settled existing waiters — that wait must resolve, not hang forever.
+    const active = createActiveExecution("exe-1");
+    active.settle();
+    expect(await active.wait(7, ["msg-9"])).toBe("terminal");
+  });
+});
+
+describe("answer max-messages cap", () => {
+  it("collapses honestly past the cap with a truncation notice", async () => {
+    const paragraph = "lorem ipsum dolor sit amet ".repeat(40).trim();
+    const longAnswer = Array.from({ length: 12 }, () => paragraph).join("\n\n");
+    const { api, dispatcher, store } = createHarness({
+      answer: longAnswer,
+      answerMaxMessages: 2,
+      userAllowlist: ["42"],
+    });
+    store.seed(dmUpdate(1, 42, "long question"));
+    await dispatcher.nudge();
+    await waitFor(() => store.row(1).status === "completed", "row completed");
+
+    const texts = [
+      ...api.callsFor("sendMessage").map((call) => String(call.params.text)),
+    ];
+    const edits = api.callsFor("editMessageText");
+    const finalTail = edits.length
+      ? String(edits[edits.length - 1]?.params.text)
+      : texts[texts.length - 1];
+    // Never more messages than the cap, and the final one says so honestly.
+    expect(texts.length).toBe(2);
+    expect(finalTail).toContain("answer truncated");
+    expect(store.row(1).renderObligation?.postedMessageIds.length).toBe(2);
   });
 });

@@ -9,9 +9,13 @@ export type TelegramNarratorChunk = Exclude<
   { type: "markdown_text" }
 >;
 
+// Telegram delta: setMessageReaction accepts only the Bot API's fixed
+// ReactionTypeEmoji whitelist — the Discord-inherited ✅/❌ are NOT in it and
+// the real API rejects them with 400 REACTION_INVALID on every settle, so
+// done/failed map to the whitelisted 👍/👎 (👀 is whitelisted and stays).
 const REACTION_WORKING = "👀";
-const REACTION_DONE = "✅";
-const REACTION_FAILED = "❌";
+const REACTION_DONE = "👍";
+const REACTION_FAILED = "👎";
 
 // Telegram delta: sendMessage allows 4096 chars *after entity parsing*, so the
 // budget below is measured on the visible (unescaped) text and the HTML
@@ -27,9 +31,11 @@ const NARRATOR_MIN_POST_GAP_MS = 1_500;
 const NARRATOR_MAX_POSTS = 12;
 // Fragments shorter than this aren't worth a message of their own.
 const NARRATOR_MIN_BLURB_CHARS = 12;
-// sendChatAction("typing") shows for ~5s, so the keepalive re-sends on that
-// cadence while execution is noticeably slow.
-const TYPING_KEEPALIVE_INTERVAL_MS = 5_000;
+// sendChatAction("typing") lights the indicator for ~5s, so the keepalive
+// re-sends every 4s measured from the START of each send: the send itself can
+// ride the per-chat FIFO behind paced messages for a second or more, and a
+// full 5s sleep after it completes would let the indicator lapse and flicker.
+const TYPING_KEEPALIVE_INTERVAL_MS = 4_000;
 
 /** Injectable time source so tests drive the typing cadence deterministically
  * (same seam as rate-limit's RateLimitClock, declared locally because the
@@ -64,7 +70,7 @@ export type TelegramNarratorOptions = {
  * The Telegram-side chain-of-thought surface, fully append-only: the
  * triggering message gets an instant 👀 reaction while the agent works, the
  * agent's reasoning blurbs post as their own italic messages as each thought
- * completes, and on settle the reaction becomes ✅ (or ❌). No bot message is
+ * completes, and on settle the reaction becomes 👍 (or 👎). No bot message is
  * ever edited or deleted. Commands, tools, and plan updates are not rendered;
  * they just mark where a thought ends.
  *
@@ -170,7 +176,8 @@ export class TelegramNarrator {
   }
 
   /**
-   * Keeps the chat's "typing…" indicator alive on a ~5s cadence. Callers
+   * Keeps the chat's "typing…" indicator alive on a ~4s cadence (below the
+   * indicator's ~5s lifetime so it never lapses between refreshes). Callers
    * start it only once execution is noticeably slow (an instant answer should
    * not flash a typing bubble) and it stops automatically on finish. Purely
    * cosmetic: sendChatAction failures are logged and the loop keeps going.
@@ -192,7 +199,7 @@ export class TelegramNarrator {
 
   /**
    * Posts any remaining thought, stops the typing keepalive, then settles the
-   * reaction: ✅ on success, ❌ on failure, and 👀 stays put for "retrying"
+   * reaction: 👍 on success, 👎 on failure, and 👀 stays put for "retrying"
    * (the retry attempt re-adds it; the set-reaction call is idempotent).
    * Never throws — narration is cosmetic. A "done" outcome downgrades to
    * "failed" when an error task was seen (the renderer surfaces in-stream
@@ -230,6 +237,11 @@ export class TelegramNarrator {
       stopRequested = true;
     });
     while (!stopRequested && !this.finished) {
+      // Cadence is measured from the start of each send: the send may sit
+      // behind paced queue work, and sleeping the full interval after it
+      // completes would stretch the effective period past the indicator's
+      // ~5s lifetime.
+      const sendStartedAtMs = this.clock.now();
       try {
         await this.api.sendChatAction({
           chat_id: this.chatId,
@@ -245,7 +257,11 @@ export class TelegramNarrator {
         });
       }
       if (stopRequested || this.finished) return;
-      await Promise.race([this.clock.sleep(this.typingIntervalMs), stopped]);
+      const elapsedMs = this.clock.now() - sendStartedAtMs;
+      await Promise.race([
+        this.clock.sleep(Math.max(0, this.typingIntervalMs - elapsedMs)),
+        stopped,
+      ]);
     }
   }
 

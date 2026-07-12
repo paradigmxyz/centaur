@@ -52,6 +52,7 @@ There is no public ingress — only health endpoints: `GET /live` (process liven
 | `TELEGRAMBOT_LEASE_TTL_MS` | – | Fenced-ownership lease TTL (default 30000). |
 | `TELEGRAMBOT_MAX_CONCURRENT_THREADS` | – | Cross-thread worker concurrency (default 4); updates within one thread stay FIFO. |
 | `TELEGRAMBOT_ANSWER_EDIT_INTERVAL_MS` | – | Edit cadence for the streamed answer message (default 1500 ms). |
+| `TELEGRAMBOT_ANSWER_MAX_MESSAGES` | – | Max Telegram messages per answer; longer answers end with an honest truncation notice (default 8). |
 | `TELEGRAMBOT_RETENTION_HOURS` | – | Terminal inbox rows below the receipt cursor are pruned after this age (default 72). |
 | `TELEGRAM_API_URL` | – | Override the Bot API base (default `https://api.telegram.org`), used by tests/emulation. |
 | `PORT` | – | Health server port (default 3001). |

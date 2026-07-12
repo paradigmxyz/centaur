@@ -88,6 +88,27 @@ export function isAllowedTelegramMessage(
   }
 
   if (chat.type === "group" || chat.type === "supergroup") {
+    // Telegram delta: allowlisting a discussion group does not vouch for its
+    // linked channel. Channel posts surface in the group as auto-forwards
+    // (is_automatic_forward) and anonymous-admin/channel-identity messages
+    // carry sender_chat — both bypass per-user identity, so a reply chain off
+    // them could otherwise reach execution without any allowlisted human
+    // sender. Reject both shapes fail-closed.
+    if (message.sender_chat) {
+      logger.warn("telegrambot_message_ignored_sender_chat", {
+        chat_id: String(chat.id),
+        message_id: message.message_id,
+        sender_chat_id: String(message.sender_chat.id),
+      });
+      return false;
+    }
+    if (message.is_automatic_forward) {
+      logger.warn("telegrambot_message_ignored_automatic_forward", {
+        chat_id: String(chat.id),
+        message_id: message.message_id,
+      });
+      return false;
+    }
     const allowlist = resolveChatAllowlist(options);
     if (allowlist.length === 0) {
       logger.warn("telegrambot_message_ignored_allowlist_empty", {

@@ -6,8 +6,8 @@ import type { TelegramApi } from "../src/telegram-api";
 import type { Logger, TelegramMessage } from "../src/types";
 
 const EYES = "👀";
-const CHECK = "✅";
-const CROSS = "❌";
+const CHECK = "👍";
+const CROSS = "👎";
 
 const CHAT_ID = -1001234;
 const TRIGGER_MESSAGE_ID = 41;
@@ -197,7 +197,7 @@ describe("TelegramNarrator reactions", () => {
     });
   });
 
-  it("settles done with a single replacing ✅ call (no delete step)", async () => {
+  it("settles done with a single replacing 👍 call (no delete step)", async () => {
     const h = harness();
     const narrator = startNarrator(h);
     await narrator.finish("done");
@@ -209,7 +209,7 @@ describe("TelegramNarrator reactions", () => {
     }
   });
 
-  it("settles as ❌ when an error task was seen", async () => {
+  it("settles as 👎 when an error task was seen", async () => {
     const h = harness();
     const narrator = startNarrator(h);
     narrator.update(
@@ -220,7 +220,7 @@ describe("TelegramNarrator reactions", () => {
     expect(h.reactions().map(emojiOf)).toEqual([EYES, CROSS]);
   });
 
-  it("settles as ❌ for a failed outcome", async () => {
+  it("settles as 👎 for a failed outcome", async () => {
     const h = harness();
     const narrator = startNarrator(h);
     await narrator.finish("failed");
@@ -587,7 +587,7 @@ describe("TelegramNarrator status", () => {
 });
 
 describe("TelegramNarrator typing keepalive", () => {
-  it("sends typing immediately and then on the interval", async () => {
+  it("sends typing immediately and then on a sub-5s interval so the indicator never lapses", async () => {
     const clock = new FakeClock();
     const h = harness();
     const narrator = startNarrator(h, { clock });
@@ -596,9 +596,13 @@ describe("TelegramNarrator typing keepalive", () => {
     expect(h.typing()).toHaveLength(1);
     expect(h.typing()[0]?.params).toEqual({ chat_id: CHAT_ID, action: "typing" });
 
-    await clock.advance(5_000);
+    // The indicator lives ~5s; the keepalive must refresh strictly before
+    // that, measured from the start of the previous send.
+    await clock.advance(3_999);
+    expect(h.typing()).toHaveLength(1);
+    await clock.advance(1);
     expect(h.typing()).toHaveLength(2);
-    await clock.advance(5_000);
+    await clock.advance(4_000);
     expect(h.typing()).toHaveLength(3);
 
     narrator.stopTypingKeepalive();
