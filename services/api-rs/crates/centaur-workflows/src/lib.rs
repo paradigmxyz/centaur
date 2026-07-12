@@ -2296,6 +2296,10 @@ fn next_schedule_time(
     }
 }
 
+/// Prepends a seconds field so five-field crontab-style expressions parse with the
+/// `cron` crate. Note the crate's day-of-week numbering is Quartz-style (1 = Sunday,
+/// 7 = Saturday; 0 rejected), NOT Unix crontab — schedules should use day names
+/// (`MON-FRI`) to avoid firing on the wrong days.
 fn normalize_cron_expression(expr: &str) -> String {
     let fields = expr.split_whitespace().collect::<Vec<_>>();
     if fields.len() == 5 {
