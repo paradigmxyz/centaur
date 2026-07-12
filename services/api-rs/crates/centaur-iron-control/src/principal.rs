@@ -193,6 +193,24 @@ pub fn derive_principal_with_slack_team(
         };
     }
 
+    // Telegram delta: a ``telegram:``-prefixed key that failed validation must
+    // never reach the Slack segment parser below — a Slack-shaped segment like
+    // ``C123`` or ``D0420`` in a malformed key would otherwise be mistaken for
+    // a Slack conversation id and mint (and later grant Slack channel
+    // permissions to) the real Slack principal for that id. Short-circuit to
+    // the same generic thread- fallback an unrecognized key gets, keeping the
+    // fail-closed contract: an invalid key of one platform can never resolve
+    // onto another platform's principal.
+    if thread_key.starts_with("telegram:") {
+        return PrincipalRef {
+            foreign_id: format!("thread-{}", slugify(thread_key)),
+            name: display_name
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| thread_key.to_owned()),
+            labels: BTreeMap::new(),
+        };
+    }
+
     let (thread_team_id, conversation_id) = parse_slack_segments(thread_key);
     let metadata_team_id = slack_team_id.map(str::trim).filter(|team| !team.is_empty());
     // Channel principals must never be scoped by the message-derived metadata
@@ -331,8 +349,10 @@ fn parse_teams_adapter_segments(thread_key: &str) -> Option<(String, String, Opt
 /// ``telegram:private:<chat_id>[:<message_thread_id>]`` thread key, or
 /// ``None`` when the key is not a well-formed Telegram thread. Group and
 /// supergroup chat ids are negative numbers, so every id segment is validated
-/// as an optionally minus-prefixed integer; a malformed key falls through to
-/// the generic fallback like every other platform.
+/// as an optionally minus-prefixed integer. A malformed ``telegram:`` key is
+/// short-circuited by the caller to the generic thread- fallback — it must
+/// never reach the Slack segment parser, where a Slack-shaped segment could
+/// mint another platform's principal.
 fn parse_telegram_segments(thread_key: &str) -> Option<(bool, &str, Option<&str>)> {
     let rest = thread_key.strip_prefix("telegram:")?;
     let mut segments = rest.split(':').map(str::trim);
@@ -728,6 +748,14 @@ mod tests {
             "telegram:123",
             "telegram:chat:123:topic",
             "telegram:chat:123:42:extra",
+            // Slack-shaped segments must not escape into the Slack parser and
+            // mint (or grant permissions to) a real Slack principal.
+            "telegram:chat:C123ABC",
+            "telegram:chat:C123",
+            "telegram:chat:D0420",
+            "telegram:private:U999:extra",
+            "telegram:T123:C456",
+            "telegram:garbage",
         ] {
             let principal = derive_principal(thread_key, None, None);
             assert!(
@@ -735,7 +763,26 @@ mod tests {
                 "{thread_key} must fall through, got {}",
                 principal.foreign_id
             );
+            for label in ["slack_team_id", "slack_channel_id", "slack_user_id"] {
+                assert_eq!(
+                    principal.labels.get(label),
+                    None,
+                    "{thread_key} must not carry {label}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn malformed_telegram_key_never_collides_with_a_real_slack_principal() {
+        // "telegram:chat:D0420" once parsed as the Slack DM conversation D0420
+        // (compare dm_without_user_falls_back_to_the_conversation) — the two
+        // keys must resolve to different principals.
+        let telegram = derive_principal("telegram:chat:D0420", None, None);
+        let slack = derive_principal("slack:D0420:1780000000.0001", None, None);
+        assert_eq!(telegram.foreign_id, "thread-telegram-chat-d0420");
+        assert_eq!(slack.foreign_id, "slack-channel-d0420");
+        assert_ne!(telegram.foreign_id, slack.foreign_id);
     }
 
     #[test]
