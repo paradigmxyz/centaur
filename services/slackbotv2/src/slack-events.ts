@@ -138,6 +138,15 @@ async function isAllowedTriggerBotMessage(
     stringValue(event.user),
     stringValue(event.bot_profile?.user_id)
   )
+  const allowedBotIds = new Set(
+    allowlist
+      .map(entry => entry.trim())
+      .filter(entry => entry.startsWith('bot:'))
+      .map(entry => entry.slice('bot:'.length))
+      .filter(isSlackBotId)
+  )
+  if ([...botIds].some(botId => allowedBotIds.has(botId))) return true
+
   const allowedUserIds = new Set(allowlist.map(entry => entry.trim()).filter(isSlackMemberId))
   if (!allowedUserIds.size) return false
   if ([...botUserIds].some(userId => allowedUserIds.has(userId))) return true
@@ -156,6 +165,10 @@ async function isAllowedTriggerBotMessage(
 
 function isSlackMemberId(value: string): boolean {
   return /^[UW][A-Z0-9]+$/i.test(value)
+}
+
+function isSlackBotId(value: string): boolean {
+  return /^B[A-Z0-9]+$/i.test(value)
 }
 
 async function resolveTriggerBotIdentity(

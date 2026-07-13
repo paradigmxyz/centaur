@@ -87,6 +87,20 @@ describe('Slack trigger bot allowlist', () => {
     expect(await isAllowedSlackMessage(botMessage('BOTHER'), config, logger)).toBe(false)
   })
 
+  it('allows an explicitly scoped bot identifier without an identity lookup', async () => {
+    let requests = 0
+    const config = {
+      ...options(async () => {
+        requests += 1
+        return Response.json({ ok: true })
+      }),
+      triggerBotAllowlist: ['bot:BCHANNELBOT']
+    }
+
+    expect(await isAllowedSlackMessage(botMessage('BCHANNELBOT'), config, logger)).toBe(true)
+    expect(requests).toBe(0)
+  })
+
   it('does not treat bot or app identifiers as public allowlist entries', async () => {
     let requests = 0
     const config = {
