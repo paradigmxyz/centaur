@@ -48,6 +48,7 @@ Rails.application.configure do
   # request. The Raw formatter emits a hash that JsonLogFormatter merges into
   # the JSON log entry.
   config.lograge.enabled = true
+  config.lograge.base_controller_class = %w[ActionController::Base ActionController::API]
   config.lograge.formatter = Lograge::Formatters::Raw.new
   config.lograge.custom_payload do |controller|
     { request_id: controller.request.request_id }
