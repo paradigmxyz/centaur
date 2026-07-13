@@ -749,11 +749,16 @@ class SlackClient:
         limit: int,
         user_cache: dict[str, str],
     ) -> list[dict]:
-        """Fetch history for a single search fallback channel through the proxy."""
+        """Fetch history for a single search fallback channel."""
         try:
             response = self.get_channel_history_proxy(channel_id, limit=limit)
         except (RuntimeError, ValueError):
-            return []
+            return self._fetch_direct_channel_history_for_search(
+                channel_id,
+                channel_name,
+                limit,
+                user_cache,
+            )
 
         messages = []
         for msg in response.get("messages", []):
@@ -765,6 +770,54 @@ class SlackClient:
                     channel_name=channel_name,
                 )
             )
+
+        return messages
+
+    _MAX_SEARCH_DIRECT_THREADS = 10
+
+    def _fetch_direct_channel_history_for_search(
+        self,
+        channel_id: str,
+        channel_name: str,
+        limit: int,
+        user_cache: dict[str, str],
+    ) -> list[dict]:
+        """Fetch direct Slack history and expand a bounded number of threads."""
+        try:
+            page = self.get_channel_history_page(channel_id, limit=limit)
+        except (RuntimeError, ValueError):
+            return []
+
+        messages = [{**msg, "channel": channel_name} for msg in page.get("messages", [])]
+        seen_timestamps = {message.get("timestamp") for message in messages}
+        expanded_threads = 0
+
+        for message in list(messages):
+            if expanded_threads >= self._MAX_SEARCH_DIRECT_THREADS:
+                break
+            if int(message.get("reply_count") or 0) <= 0:
+                continue
+
+            thread_ts = message.get("thread_ts") or message.get("timestamp")
+            if not thread_ts:
+                continue
+
+            try:
+                thread_page = self.get_thread_replies_page(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    limit=min(limit, self._DEFAULT_THREAD_REPLY_LIMIT),
+                )
+            except (RuntimeError, ValueError):
+                continue
+
+            expanded_threads += 1
+            for reply in thread_page.get("messages", []):
+                timestamp = reply.get("timestamp")
+                if not timestamp or timestamp in seen_timestamps:
+                    continue
+                seen_timestamps.add(timestamp)
+                messages.append({**reply, "channel": channel_name})
 
         return messages
 

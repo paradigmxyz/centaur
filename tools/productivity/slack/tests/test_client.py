@@ -1051,6 +1051,69 @@ def test_search_messages_parses_channel_and_user_modifiers_locally() -> None:
     assert results[0]["user_id"] == "UGZCSQTPE"
 
 
+def test_search_messages_falls_back_to_direct_history_and_threads_when_proxy_fails() -> None:
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda: {"U1": "alice", "U2": "bob"}  # type: ignore[method-assign]
+    client._resolve_channel = lambda channel: channel  # type: ignore[method-assign]
+
+    def fail_proxy(*args, **kwargs):
+        raise RuntimeError("proxy unavailable")
+
+    client.get_channel_history_proxy = fail_proxy  # type: ignore[method-assign]
+    fake_web_client.history_pages = [
+        {
+            "messages": [
+                {
+                    "user": "U1",
+                    "text": "root without the query",
+                    "ts": "100.000000",
+                    "thread_ts": "100.000000",
+                    "reply_count": 1,
+                }
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    ]
+    fake_web_client.reply_pages = [
+        {
+            "messages": [
+                {
+                    "user": "U1",
+                    "text": "root without the query",
+                    "ts": "100.000000",
+                    "thread_ts": "100.000000",
+                },
+                {
+                    "user": "U2",
+                    "text": "needle is in the direct thread reply",
+                    "ts": "100.000001",
+                    "thread_ts": "100.000000",
+                },
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    ]
+
+    results = client.search_messages(
+        "needle",
+        channels=["C123456789"],
+        messages_per_channel=25,
+    )
+
+    assert fake_web_client.history_calls == [{"channel": "C123456789", "limit": 25}]
+    assert fake_web_client.reply_calls == [
+        {
+            "channel": "C123456789",
+            "ts": "100.000000",
+            "limit": 25,
+            "inclusive": True,
+        }
+    ]
+    assert len(results) == 1
+    assert results[0]["text"] == "needle is in the direct thread reply"
+    assert results[0]["channel"] == "C123456789"
+
+
 def test_list_channels_returns_cache_when_slack_rate_limited() -> None:
     client, fake_web_client = _make_client()
     cached_channels = [{"id": "C123", "name": "cached", "is_private": False}]
