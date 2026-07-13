@@ -1,6 +1,6 @@
 [project]
 name = "company_context"
-description = "Search indexed company history, user-visible Slack DMs, and Google Docs. Prefer this over direct Slack or Drive search for historical queries. Current sources: Slack, Slack DMs, Google Docs, Google Calendar, Linear."
+description = "Search indexed company history, user-visible Slack DMs, Google Docs, and Granola notes. Prefer this over direct Slack, Drive, or Granola search for historical queries. Current sources: Slack, Slack DMs, Google Docs, Google Calendar, Linear, Granola."
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [

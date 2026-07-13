@@ -17,7 +17,7 @@ load_dotenv()
 
 app = typer.Typer(
     name="company_context",
-    help="Search indexed company history, Slack DMs, and Google Docs.",
+    help="Search indexed company history, Slack DMs, Google Docs, and Granola notes.",
 )
 
 
@@ -75,7 +75,7 @@ def search(
     source: str | None = typer.Option(
         None,
         "--source",
-        help="Filter by source. Use 'docs' for Google Docs.",
+        help="Filter by source. Use 'docs' for Google Docs or 'granola' for Granola notes.",
     ),
     source_type: str | None = typer.Option(None, "--source-type", help="Filter by source type."),
     occurred_after: str | None = typer.Option(
@@ -86,7 +86,7 @@ def search(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
-    """Search indexed company context documents, including Google Docs with --source docs."""
+    """Search indexed company context, including Google Docs and Granola notes."""
     result = CompanyContextClient().search(
         query=query,
         limit=limit,
@@ -211,7 +211,7 @@ def list_documents(
     source: str | None = typer.Option(
         None,
         "--source",
-        help="Filter by source. Use 'docs' for Google Docs.",
+        help="Filter by source. Use 'docs' for Google Docs or 'granola' for Granola notes.",
     ),
     source_type: str | None = typer.Option(None, "--source-type", help="Filter by source type."),
     occurred_after: str | None = typer.Option(
@@ -222,7 +222,7 @@ def list_documents(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
-    """List indexed company context documents, including Google Docs with --source docs."""
+    """List indexed company context documents, including Google Docs and Granola notes."""
     result = CompanyContextClient().list_documents(
         limit=limit,
         source=source,
@@ -263,7 +263,7 @@ def read_document(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
-    """Read a company context document returned by search, including Google Docs chunks."""
+    """Read a company context document returned by search, including Granola notes."""
     result = CompanyContextClient().read_document(
         document_id=document_id,
         max_chars=max_chars,
@@ -291,7 +291,7 @@ def latest_date(
     source: str | None = typer.Option(
         None,
         "--source",
-        help="Filter by source. Use 'docs' for Google Docs.",
+        help="Filter by source. Use 'docs' for Google Docs or 'granola' for Granola notes.",
     ),
     source_type: str | None = typer.Option(None, "--source-type", help="Filter by source type."),
 ) -> None:
