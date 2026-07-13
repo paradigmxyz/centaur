@@ -718,7 +718,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     identity = SlackRequesterIdentity::Result.new(
       handle: "@ada", source: 'Slack profile custom field "GitHub"', reason: nil
     )
-    SlackRequesterIdentity.stub(:resolve, ->(user_ids:) {
+    with_singleton_method(SlackRequesterIdentity, :resolve, ->(user_ids:) {
       assert_includes user_ids, "UADA"
       identity
     }) do
@@ -1591,5 +1591,14 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         now() + interval '1 day'
       )
     SQL
+  end
+
+  def with_singleton_method(object, method_name, replacement)
+    singleton = object.singleton_class
+    original = singleton.instance_method(method_name)
+    singleton.define_method(method_name, replacement)
+    yield
+  ensure
+    singleton.define_method(method_name, original)
   end
 end
