@@ -609,6 +609,10 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       assert_select "[data-console-model-option][data-value=?]", "amp"
       assert_select "select", count: 0
     end
+    # Submitting replaces the centered empty state with a full-height,
+    # bottom-aligned optimistic transcript while the request is in flight.
+    assert_includes response.body, 'container.classList.add("console-new-chat--optimistic")'
+    assert_includes response.body, ".console-new-chat--optimistic"
   end
 
   test "shows the new chat screen when nothing is selected" do
@@ -702,6 +706,9 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       # Follow-ups stay on the chat's existing harness/model: no picker.
       assert_select "[data-console-model-picker]", count: 0
     end
+    # Optimistic rendering must not clear the textarea until Turbo has copied
+    # its value into FormData, or the controller receives a blank prompt.
+    assert_includes response.body, 'form.addEventListener("formdata"'
   end
 
   test "starting a chat creates a session, appends the prompt, and executes it" do

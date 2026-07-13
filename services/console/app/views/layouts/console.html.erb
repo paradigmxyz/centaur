@@ -990,9 +990,11 @@
         background: #3ace79;
       }
 
-      /* Full-page New-chat composer. Sits a bit above vertical center (the
-         claude.ai-style resting height) and matches the transcript column
-         width so it reads as an empty chat, not a separate page. */
+      /* Full-page New-chat composer. Its resting state sits a bit above
+         vertical center (the claude.ai-style resting height) and matches the
+         transcript column width so it reads as an empty chat, not a separate
+         page. Once submitted, it fills the available transcript height and
+         bottom-aligns the optimistic turn like an opened conversation. */
       .console-new-chat {
         width: 100%;
         max-width: 48rem;
@@ -1000,6 +1002,14 @@
         display: flex;
         flex-direction: column;
         gap: 1rem;
+      }
+
+      .console-new-chat--optimistic {
+        align-self: stretch;
+        max-width: 52rem;
+        margin-top: 0;
+        padding: 1.5rem 0;
+        justify-content: flex-end;
       }
 
       .console-new-chat-title {
